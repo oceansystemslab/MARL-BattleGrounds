@@ -10,14 +10,14 @@ concurrency:
 
 jobs:
   python-test-gates:
-    name: Python tests (${{ matrix.shard }}/3)
+    name: Python tests (${{ matrix.shard }}/10)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     strategy:
       fail-fast: true
-      max-parallel: 3
+      max-parallel: 10
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
     steps:
       - name: Check out repository
@@ -39,13 +39,13 @@ jobs:
         run: >-
           uv run pytest
           -p scripts.dev.pytest_shard
-          --ci-shard=${{ matrix.shard }}/3
+          --ci-shard=${{ matrix.shard }}/10
           --maxfail=1
 
   python-static-gates:
     name: Python static gates
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
 
     steps:
       - name: Check out repository
@@ -92,33 +92,10 @@ jobs:
             exit 1
           fi
 
-  frontend-style-gates:
-    name: Frontend style and type gates
+  frontend-static-gates:
+    name: Frontend static gates
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: .node-version
-          cache: npm
-          cache-dependency-path: web/visual_debugger/package-lock.json
-
-      - name: Install frontend dependencies
-        working-directory: web/visual_debugger
-        run: npm ci
-
-      - name: Run frontend style and type gates
-        run: scripts/dev/check_frontend.sh --style-only
-
-  frontend-unit-gates:
-    name: Frontend unit gates
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
 
     steps:
       - name: Check out repository
@@ -147,33 +124,13 @@ jobs:
         working-directory: web/visual_debugger
         run: npm ci
 
-      - name: Run frontend unit gates
-        run: scripts/dev/check_frontend.sh --unit-only
-
-  frontend-static-gates:
-    name: Frontend static gates
-    if: always()
-    needs:
-      - frontend-style-gates
-      - frontend-unit-gates
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-
-    steps:
-      - name: Confirm frontend static gates passed
-        env:
-          STYLE_RESULT: ${{ needs.frontend-style-gates.result }}
-          UNIT_RESULT: ${{ needs.frontend-unit-gates.result }}
-        run: |
-          if [[ "${STYLE_RESULT}" != "success" || "${UNIT_RESULT}" != "success" ]]; then
-            echo "Frontend style/type or unit gates failed."
-            exit 1
-          fi
+      - name: Run frontend static gates
+        run: scripts/dev/check_frontend.sh --static-only
 
   frontend-browser-gates:
     name: Browser gates (${{ matrix.shard }}/8)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 5
     strategy:
       fail-fast: true
       max-parallel: 8
@@ -212,7 +169,6 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run browser shard
-        timeout-minutes: 12
         run: >-
           scripts/dev/check_frontend.sh
           --e2e-shard ${{ matrix.shard }}/8

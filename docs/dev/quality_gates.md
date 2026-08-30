@@ -45,10 +45,35 @@ unbounded serialized test time are process defects, not signs of rigor.
 
 ## Evidence economics and CI runtime budget
 
-The required push/PR pipeline has a 10–15 minute normal critical-path budget.
-Sharding is explicitly permitted—and expected—when it preserves an exact,
-non-overlapping test inventory. Aggregate jobs retain the stable required-check
-names; the implementation jobs may run in parallel underneath them.
+The required push/PR pipeline has a five-minute repository-controlled critical-
+path budget, measured from the first hosted job's `started_at` timestamp through
+the later stable aggregate's `completed_at` timestamp. GitHub queue delay before
+runner start is external and reported separately. Sharding is explicitly
+permitted—and expected—when it preserves an exact, non-overlapping test
+inventory. Aggregate jobs retain the stable required-check names; twenty
+implementation jobs may run in parallel underneath them.
+
+The five-minute `timeout-minutes` value on each substantive job is a safety
+ceiling, not proof of the end-to-end budget: downstream aggregates necessarily
+run after their dependencies. Every publication candidate must therefore be
+checked against the hosted job timestamps after push. A result over five
+minutes requires shard rebalancing and a CI-only follow-up; it cannot be waived
+by noting that each individual job stayed under its timeout.
+
+## Authoritative Replay and Debugger integration baseline
+
+Commit `82077d275caef8bc3d08322e6c9f55c8d5242aec` is the accepted Replay Viewer
+and Combat Debugger product baseline. A later integration into `main` must keep
+this commit as an ancestor and run the Replay/Debugger presentation, control,
+Oracle/Agent parity, privacy, and real-browser gates against the integrated
+tree. Conflict resolution must not replace these product bytes wholesale or
+silently restore older behavior from another branch.
+
+This is a regression guard, not a permanent feature freeze. Changes explicitly
+requested by the user, or deliberate additions required by later `main`
+features, remain allowed. Any intentional departure from the baseline behavior
+must be identified, reviewed, tested, and approved; ancestry alone is not
+evidence that the accepted behavior survived the merge.
 
 Put each assertion at the cheapest layer that can genuinely disprove the risk:
 
@@ -158,6 +183,15 @@ uv run pyright
 `scripts/dev/check.sh` runs the four Python review commands after the
 environment is prepared.
 
+CI performs ordinary pytest collection in every Python shard, then groups the
+collected items by test-family identity: the test path, pytest's exact parent
+collector node ID, and the item's unparameterized `originalname` when pytest
+provides it. Every parameterized instance of one test function therefore
+remains atomic, while independent functions from one module may use different
+workers. Parameterized class collectors remain distinct families because their
+parameter identity is part of pytest's parent node ID. Ten nonempty workers use
+deterministic longest-processing-time packing by collected item count.
+
 After frontend changes have stopped, install the locked contributor toolchain
 and pinned Chromium, then run the complete frontend/browser gate once:
 
@@ -168,16 +202,19 @@ scripts/dev/check_frontend.sh
 ```
 
 With no arguments, the frontend script runs format check, lint, typecheck, unit
-tests, and the required Playwright E2E/visual inventory. CI runs a Node-only
-style/type job and a separate unit job with the minimal Python environment its
-fixture exporters require, then distributes the exact browser inventory across
-eight validated, nonempty file groups. Each browser group retains one worker
-and file-local ordering. Required CI does not retry deterministic failures,
-stops a red shard after its first failure, and targets a 15-minute job ceiling.
-The script does not install dependencies or update snapshots. Run it from the
-exact frozen commit candidate. When a changed helper spawns a package manager,
-interpreter, generated-artifact exporter, or browser, also exercise that path
-once from a clean worktree with cold local environment state; a warm developer
+tests, and the required Playwright E2E/visual inventory. CI runs one combined
+frontend format/lint/type/unit job with the minimal Python fixture-export
+environment, then distributes the exact browser inventory across eight
+validated, nonempty profiles. The long serial authorized-presentation install
+suite is split by exact collected test title without changing its serial mode;
+an executable list-only proof requires the eight profiles to be a disjoint,
+complete cover. Each profile retains one worker and file-local ordering.
+Required CI does not retry deterministic failures, stops a red shard after its
+first failure, and enforces a five-minute job ceiling. The script does not
+install dependencies or update snapshots. Run it from the exact frozen commit
+candidate. When a changed helper spawns a package manager, interpreter,
+generated-artifact exporter, or browser, also exercise that path once from a
+clean worktree with cold local environment state; a warm developer
 environment can suppress first-run output and setup behavior that CI will
 encounter.
 
@@ -211,11 +248,11 @@ changes. CI uploads Playwright failure artifacts.
 
 GitHub Actions runs:
 
-- three deterministic, whole-file Python test shards plus a parallel Ruff and
-  Pyright job with locked `dev` and `viz` extras;
-- a Node-only style/type job, a Python-backed frontend unit job, and eight
-  isolated browser groups with pinned Playwright Chromium and shard-qualified
-  failure artifacts; and
+- ten deterministic test-family Python shards plus one parallel Ruff/Pyright
+  job with locked `dev` and `viz` extras;
+- one combined frontend format/lint/type/unit job and eight isolated browser
+  profiles with pinned Playwright Chromium and shard-qualified failure
+  artifacts; and
 - focused self-hosted GPU sanity for the CUDA backend and compiled environment
   contracts, with the complete GPU regression scheduled or manually requested.
 
