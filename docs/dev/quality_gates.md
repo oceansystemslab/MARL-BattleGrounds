@@ -55,21 +55,21 @@ implementation jobs may run concurrently under the current GitHub-hosted
 account limit. Local validation may use the developer workstation's additional
 CPU concurrency.
 
-The seven-minute Python and six-minute browser matrix-job timeouts provide
+The eight-minute Python and six-minute browser matrix-job timeouts provide
 small setup and teardown headroom; they are not the end-to-end target because
-downstream aggregates necessarily run after their dependencies. The Python
-ceiling was raised by exactly one minute after the slowest rebalanced pytest
-command measured 5:34.46, leaving insufficient room for hosted checkout,
-toolchain setup, and environment sync under the former six-minute whole-job
-ceiling. Every publication candidate must still be checked against hosted
-timestamps. A material regression beyond the approximately five-minute target
-requires profiling and a CI-only follow-up, while ordinary single-digit timing
-variance does not. Rebalance intact work units within the current twelve-
-Python/eight-browser, twenty-job ceiling before increasing a timeout. If the
-slowest indivisible work unit cannot fit the current ceiling, raise the
-applicable timeout by exactly one minute at a time and stop at the first
-measured sufficient value. Never omit tests or weaken assertions to satisfy
-the timing target.
+downstream aggregates necessarily run after their dependencies. Local timing
+first moved Python from six to seven minutes. Hosted run `33329934258` then
+proved seven insufficient by cancelling eight still-running Python shards at
+the whole-job boundary without a test failure, so the ceiling moved by the next
+single increment to eight minutes. Every publication candidate must still be
+checked against hosted timestamps. A material regression beyond the
+approximately five-minute target requires profiling and a CI-only follow-up,
+while ordinary single-digit timing variance does not. Rebalance intact work
+units within the current twelve-Python/eight-browser, twenty-job ceiling before
+increasing a timeout. If the slowest indivisible work unit cannot fit the
+current ceiling, raise the applicable timeout by exactly one minute at a time
+and stop at the first measured sufficient value. Never omit tests or weaken
+assertions to satisfy the timing target.
 
 ## Authoritative Replay and Debugger integration baseline
 
@@ -254,7 +254,7 @@ profiles and use the same setup-isolation flag. An executable list-only proof
 requires the eight profiles to be a disjoint, complete cover. Each profile
 retains one worker and file-local ordering.
 Required CI does not retry deterministic failures, stops a red shard after its
-first failure, and enforces the seven-minute Python and six-minute browser
+first failure, and enforces the eight-minute Python and six-minute browser
 matrix-job ceilings. Apply the one-minute escalation rule above only after
 measured rebalancing cannot make an indivisible unit fit. The script does not
 install dependencies or update snapshots. Run it from the exact frozen commit
