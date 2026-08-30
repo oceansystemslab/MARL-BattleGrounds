@@ -10,8 +10,6 @@ const GAME_KEYS = new Set([
   "0",
   "1",
   "2",
-  "[",
-  "]",
   "w",
   "a",
   "s",
@@ -21,11 +19,8 @@ const GAME_KEYS = new Set([
   "z",
   "c",
   "x",
-  "n",
   "r",
   "g",
-  "v",
-  "p",
   "?",
 ]);
 
@@ -38,7 +33,7 @@ const RECORDING_LIFECYCLE_COMMANDS = new Set([
   "exit",
 ]);
 
-const RECORDING_PRESENTATION_KEYS = new Set(["g", "v", "p", "?"]);
+const RECORDING_PRESENTATION_KEYS = new Set(["g", "?"]);
 
 const RECORDING_SAVE_AS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\.marlbg-replay\.json$/u;
 
@@ -95,26 +90,38 @@ export function keyboardCommand(
 }
 
 /**
- * Convert the target select's audience-specific option value into the one
- * command authorized for that audience. Actor POV values deliberately carry
- * only the recipient-relative target-action axis; this boundary must never
- * manufacture or transmit a researcher global slot.
+ * Decide whether Submit must synchronously settle local presentation before
+ * entering the normal request fence. The readable submission gate may already
+ * be open while animations are still active, and paused animations remain
+ * active regardless of that gate.
+ *
+ * @param {unknown} rawPresentation
+ */
+export function presentationRequiresSubmissionSettle(rawPresentation) {
+  if (
+    typeof rawPresentation !== "object" ||
+    rawPresentation === null ||
+    Array.isArray(rawPresentation)
+  ) {
+    return false;
+  }
+  const presentation = /** @type {Record<string, unknown>} */ (rawPresentation);
+  return (
+    presentation.submissionBlocked === true ||
+    presentation.paused === true ||
+    (Number.isInteger(presentation.animationCount) &&
+      Number(presentation.animationCount) > 0)
+  );
+}
+
+/**
+ * Convert the researcher-space target select's validated command-slot value
+ * into the one target-selection command shared by both live audiences.
  *
  * @param {string} value
- * @param {{actorPov?: boolean}} options
  * @returns {Record<string, unknown> | null}
  */
-export function targetSelectionCommand(value, { actorPov = false } = {}) {
-  if (actorPov) {
-    const match = /^pov-target-action:(0|[1-9]|10)$/u.exec(value);
-    if (!match) {
-      return null;
-    }
-    return {
-      command_type: "actor_pov_target_action",
-      target_action: Number(match[1]),
-    };
-  }
+export function targetSelectionCommand(value) {
   if (value === "") {
     return keyboardCommand("Escape");
   }
@@ -158,26 +165,6 @@ export function recordingReplacementCommand(frame, command) {
       scenario_name: scenarioName,
     });
   }
-  if (command.command_type === "set_movement_scale") {
-    const requested = command.movement_scale;
-    const scenario = frame.scenario;
-    const current = scenario?.ordinary_movement_distance_scale;
-    const fallback = scenario?.scenario_default_movement_scale;
-    const effective = requested === null ? fallback : requested;
-    if (
-      typeof effective !== "number" ||
-      !Number.isFinite(effective) ||
-      typeof current !== "number" ||
-      !Number.isFinite(current) ||
-      effective === current
-    ) {
-      return null;
-    }
-    return Object.freeze({
-      command_type: "set_movement_scale",
-      movement_scale: requested,
-    });
-  }
   if (
     command.command_type !== "keyboard" ||
     typeof command.key !== "string" ||
@@ -191,26 +178,7 @@ export function recordingReplacementCommand(frame, command) {
   if (key === "r" && command.shift_key !== true) {
     return Object.freeze({ command_type: "reset" });
   }
-  if (key !== "[" && key !== "]") {
-    return null;
-  }
-  const names = Array.isArray(frame.available_scenarios)
-    ? frame.available_scenarios.flatMap((entry) => {
-        const name = typeof entry === "string" ? entry : entry?.name;
-        return typeof name === "string" ? [name] : [];
-      })
-    : [];
-  const currentName = frame.scenario?.name;
-  const currentIndex = names.indexOf(currentName);
-  if (currentIndex < 0 || names.length < 2) {
-    return null;
-  }
-  const direction = key === "[" ? -1 : 1;
-  const nextIndex = (currentIndex + direction + names.length) % names.length;
-  return Object.freeze({
-    command_type: "scenario_switch",
-    scenario_name: names[nextIndex],
-  });
+  return null;
 }
 
 /**
@@ -340,16 +308,6 @@ export function isDebuggerKey(event) {
 }
 
 /**
- * Presentation pause is local and edge-triggered. Key repeat must never
- * oscillate the controller or leave a future submission gate paused.
- *
- * @param {{key?: string, repeat?: boolean}} event
- */
-export function isPresentationPauseEvent(event) {
-  return event.key?.toLowerCase() === "p" && !event.repeat;
-}
-
-/**
  * @param {SVGSVGElement} svg
  * @param {PointerEvent} event
  * @returns {{x: number, y: number} | null}
@@ -374,38 +332,45 @@ function pointInSvg(svg, event) {
  *   toWorldPoint: (point: {x: number, y: number}) =>
  *     {world_x: number, world_y: number} | null,
  *   onCommand: (command: Record<string, unknown>) => void | Promise<void>,
+ *   onPointerCommand?: (
+ *     target: EventTarget | null,
+ *     command: Readonly<Record<string, unknown>>,
+ *   ) => void,
  *   onHelp: () => void,
- *   onPresentationKey?: (key: "toggle-pause") => void,
  *   onReleaseFocus: () => void,
  *   isInteractive?: () => boolean,
+ *   onFencedCommand?: (command: Record<string, unknown>) => boolean,
+ *   ownsFencedSpaceDefault?: () => boolean,
  * }} bindings
  */
 export function bindBattlefieldControls({
   battlefield,
   toWorldPoint,
   onCommand,
+  onPointerCommand = () => {},
   onHelp,
-  onPresentationKey = () => {},
   onReleaseFocus,
   isInteractive = () => true,
+  onFencedCommand = () => false,
+  ownsFencedSpaceDefault = () => true,
 }) {
   battlefield.addEventListener("keydown", async (event) => {
-    if (!isInteractive()) {
+    if (event.target !== battlefield || !isDebuggerKey(event)) {
       return;
     }
-    if (!isDebuggerKey(event)) {
+    if (!isInteractive()) {
+      if (onFencedCommand(keyboardCommandFromEvent(event))) {
+        event.preventDefault();
+        event.stopPropagation();
+      } else if (event.key === " " && ownsFencedSpaceDefault()) {
+        event.preventDefault();
+      }
       return;
     }
     event.preventDefault();
     event.stopPropagation();
     if (event.key === "?") {
       onHelp();
-      return;
-    }
-    if (event.key.toLowerCase() === "p") {
-      if (isPresentationPauseEvent(event)) {
-        onPresentationKey("toggle-pause");
-      }
       return;
     }
     if (event.key === "Escape") {
@@ -423,7 +388,7 @@ export function bindBattlefieldControls({
     if (!isInteractive()) {
       return;
     }
-    if (event.button !== 0 && event.button !== 2) {
+    if (event.button !== 0) {
       return;
     }
     event.preventDefault();
@@ -440,18 +405,14 @@ export function bindBattlefieldControls({
     ) {
       return;
     }
-    onCommand({
+    const command = {
       command_type: "battlefield_pointer",
       world_x: worldPoint.world_x,
       world_y: worldPoint.world_y,
-      button: event.button === 0 ? "primary" : "secondary",
+      button: "primary",
       ...modifierFields(event),
-    });
-  });
-
-  battlefield.addEventListener("contextmenu", (event) => {
-    if (isInteractive()) {
-      event.preventDefault();
-    }
+    };
+    onPointerCommand(event.target, command);
+    onCommand(command);
   });
 }

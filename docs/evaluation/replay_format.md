@@ -35,11 +35,13 @@ Milestone 7 makes one approved in-place expansion of the unreleased pre-alpha
 V1 evaluation/replay models. Resolved configuration now carries numeric task
 mode and Team Deathmatch score threshold, analysis frames carry authoritative
 team scores, and transition facts carry the task outcome. The discriminated V1
-event union has exactly 23 variants: `TeamDeathmatchScoreChangedEventV1` at rank
-130 records each positive score edge, and `TeamDeathmatchCompletedEventV1` at
-rank 140 records the result and one of `score_threshold`, `horizon`, or
-`score_threshold_at_horizon`. Existing development artifacts and fixtures are
-disposable and must be regenerated. There is no legacy loader, optional
+event union has exactly 24 variants. It retains
+`AgentLeftCombatEventV1` at rank 50 and adds
+`TeamDeathmatchScoreChangedEventV1` at rank 130 for each positive score edge
+plus `TeamDeathmatchCompletedEventV1` at rank 140 for the result and one of
+`score_threshold`, `horizon`, or `score_threshold_at_horizon`. Existing
+development artifacts and fixtures are disposable and must be regenerated.
+There is no legacy loader, optional
 fallback, compatibility shim, or parallel V2 model family for that approved
 in-place expansion. After the alpha schema freeze, any incompatible wire
 change requires a schema-version bump.

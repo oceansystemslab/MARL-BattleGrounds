@@ -90,7 +90,22 @@ const KIND_PRIORITY = Object.freeze({
  */
 /**
  * @typedef {{
- *   descriptor: TooltipDescriptor,
+ *   kind: string,
+ *   id: string,
+ *   title: string,
+ *   tone: "neutral" | "information" | "positive" | "warning" | "danger",
+ *   accent: "none" | "mage" | "warrior" | "hunter" | "rogue" | "priest",
+ *   summary: null,
+ *   rows: ReadonlyArray<SemanticRow>,
+ *   sections: ReadonlyArray<SemanticSection>,
+ *   metadata: Readonly<SemanticMetadata>,
+ *   anchor: TooltipAnchor,
+ * }} RowOnlyTooltipDescriptor
+ */
+/** @typedef {TooltipDescriptor | RowOnlyTooltipDescriptor} AnyTooltipDescriptor */
+/**
+ * @typedef {{
+ *   descriptor: AnyTooltipDescriptor,
  *   paintOrder?: number,
  *   element?: Element,
  *   trigger?: Element,
@@ -129,7 +144,7 @@ const KIND_PRIORITY = Object.freeze({
  *   tooltip: HTMLElement,
  *   title: HTMLElement,
  *   details: HTMLElement,
- *   onInspect?: (descriptor: TooltipDescriptor, context: Readonly<{owner: Element, trigger: Element | null}>) => void,
+ *   onInspect?: (descriptor: AnyTooltipDescriptor, context: Readonly<{owner: Element, trigger: Element | null}>) => void,
  * }} TooltipControllerOptions
  */
 /**
@@ -146,15 +161,25 @@ const KIND_PRIORITY = Object.freeze({
  * leaves the browser fact layer. Payload prose remains text; it cannot select
  * a tag name, class name, data attribute, or tone outside the fixed allowlist.
  *
+ * @overload
+ * @param {{summary: null} & Record<string, unknown>} rawDescriptor
+ * @returns {RowOnlyTooltipDescriptor}
+ */
+/**
+ * @overload
  * @param {unknown} rawDescriptor
  * @returns {TooltipDescriptor}
+ */
+/**
+ * @param {unknown} rawDescriptor
+ * @returns {AnyTooltipDescriptor}
  */
 export function createSemanticDescriptor(rawDescriptor) {
   if (!isRecord(rawDescriptor)) {
     throw new TypeError("semantic descriptor must be an object.");
   }
   if (semanticDescriptors.has(rawDescriptor)) {
-    return /** @type {TooltipDescriptor} */ (rawDescriptor);
+    return /** @type {AnyTooltipDescriptor} */ (rawDescriptor);
   }
   assertExactKeys(
     rawDescriptor,
@@ -175,7 +200,10 @@ export function createSemanticDescriptor(rawDescriptor) {
   const kind = nonEmptyString(rawDescriptor.kind, "descriptor.kind");
   const id = nonEmptyString(rawDescriptor.id, "descriptor.id");
   const title = nonEmptyString(rawDescriptor.title, "descriptor.title");
-  const summary = nonEmptyString(rawDescriptor.summary, "descriptor.summary");
+  const summary =
+    rawDescriptor.summary === null
+      ? null
+      : nonEmptyString(rawDescriptor.summary, "descriptor.summary");
   const tone =
     typeof rawDescriptor.tone === "string" && SEMANTIC_TONE_SET.has(rawDescriptor.tone)
       ? /** @type {TooltipDescriptor["tone"]} */ (rawDescriptor.tone)
@@ -201,6 +229,16 @@ export function createSemanticDescriptor(rawDescriptor) {
         normalizeSemanticSection(section, `descriptor.sections[${index}]`),
     ),
   );
+  if (
+    summary === null &&
+    !["compact", "full"].some((surface) =>
+      hasVisibleSemanticRow(rows, sections, /** @type {SemanticSurface} */ (surface)),
+    )
+  ) {
+    throw new TypeError(
+      "descriptor.summary may be null only when at least one semantic row is visible.",
+    );
+  }
   const descriptor = Object.freeze({
     kind,
     id,
@@ -239,6 +277,11 @@ export function projectSemanticDescriptor(rawDescriptor, surface) {
         }),
       ),
   );
+  if (descriptor.summary === null && !hasVisibleSemanticRow(rows, sections, surface)) {
+    throw new TypeError(
+      `descriptor.summary may be null only when the ${surface} projection contains at least one semantic row.`,
+    );
+  }
   return Object.freeze({
     kind: descriptor.kind,
     id: descriptor.id,
@@ -288,10 +331,12 @@ export function renderSemanticDescriptor(options) {
   }
 
   const nodes = [];
-  const summary = ownerDocument.createElement("p");
-  summary.className = "semantic-explanation__summary";
-  summary.textContent = projection.summary;
-  nodes.push(summary);
+  if (projection.summary !== null) {
+    const summary = ownerDocument.createElement("p");
+    summary.className = "semantic-explanation__summary";
+    summary.textContent = projection.summary;
+    nodes.push(summary);
+  }
   if (projection.rows.length > 0) {
     nodes.push(renderRows(ownerDocument, projection.rows));
   }
@@ -325,7 +370,7 @@ export function renderSemanticDescriptor(options) {
  * @returns {string[]}
  */
 export function semanticDescriptorText(projection) {
-  const text = [projection.summary];
+  const text = projection.summary === null ? [projection.title] : [projection.summary];
   for (const row of projection.rows) {
     text.push(`${row.label}: ${row.value}`);
   }
@@ -372,7 +417,13 @@ export function registerTooltipOwner(element, descriptor, options = {}) {
     (element.getAttribute("tabindex") !== null &&
       element.getAttribute("tabindex") !== "-1")
   ) {
-    element.setAttribute("aria-description", normalized.summary);
+    const ariaDescription =
+      normalized.summary === null
+        ? semanticDescriptorText(projectSemanticDescriptor(normalized, "compact")).join(
+            " · ",
+          )
+        : normalized.summary;
+    element.setAttribute("aria-description", ariaDescription);
   }
   if (options.surface !== undefined) {
     if (!isTooltipOwner(options.surface)) {
@@ -738,7 +789,7 @@ export function createTooltipController(options) {
   }
 
   /**
-   * @param {{element: Element, descriptor: TooltipDescriptor, trigger?: Element}} candidate
+   * @param {{element: Element, descriptor: AnyTooltipDescriptor, trigger?: Element}} candidate
    * @param {TooltipPoint | null} pointer
    * @param {boolean} fromFocus
    */
@@ -804,11 +855,11 @@ export function createTooltipController(options) {
 
   /**
    * @param {TooltipPoint} pointer
-   * @returns {{element: Element, descriptor: TooltipDescriptor} | null}
+   * @returns {{element: Element, descriptor: AnyTooltipDescriptor} | null}
    */
   function candidateAtPointer(pointer) {
     const elements = elementsFromPoint(root, pointer.x, pointer.y);
-    /** @type {Array<{element: Element, descriptor: TooltipDescriptor, paintOrder: number}>} */
+    /** @type {Array<{element: Element, descriptor: AnyTooltipDescriptor, paintOrder: number}>} */
     const candidates = [];
     const visited = new Set();
 
@@ -830,7 +881,7 @@ export function createTooltipController(options) {
 
   /**
    * @param {unknown} target
-   * @returns {{element: Element, descriptor: TooltipDescriptor, trigger: Element} | null}
+   * @returns {{element: Element, descriptor: AnyTooltipDescriptor, trigger: Element} | null}
    */
   function candidateForTarget(target) {
     if (!isElementNode(target)) {
@@ -1043,16 +1094,34 @@ export function createTooltipController(options) {
 
 /**
  * @param {unknown} descriptor
- * @returns {TooltipDescriptor}
+ * @returns {AnyTooltipDescriptor}
  */
 function normalizeDescriptor(descriptor) {
   if (!isRecord(descriptor)) {
     throw new TypeError("tooltip descriptor must be an object.");
   }
   if (semanticDescriptors.has(descriptor)) {
-    return /** @type {TooltipDescriptor} */ (descriptor);
+    return /** @type {AnyTooltipDescriptor} */ (descriptor);
   }
-  return createSemanticDescriptor(descriptor);
+  return /** @type {AnyTooltipDescriptor} */ (createSemanticDescriptor(descriptor));
+}
+
+/**
+ * A nullable-summary card stays meaningful only when the requested surface
+ * retains at least one label/value fact after metadata filtering.
+ *
+ * @param {ReadonlyArray<SemanticRow>} rows
+ * @param {ReadonlyArray<SemanticSection>} sections
+ * @param {SemanticSurface} surface
+ */
+function hasVisibleSemanticRow(rows, sections, surface) {
+  return (
+    rows.some((row) => row.metadata[surface]) ||
+    sections.some(
+      (section) =>
+        section.metadata[surface] && section.rows.some((row) => row.metadata[surface]),
+    )
+  );
 }
 
 /**

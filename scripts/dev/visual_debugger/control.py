@@ -5,8 +5,8 @@ from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
+from marl_battlegrounds.core.config import validate_product_env_config
 from marl_battlegrounds.core.env import initialize_scenario_state, step
 from marl_battlegrounds.core.types import (
     MAGE_CLASS_ID,
@@ -41,8 +41,6 @@ from scripts.dev.visual_debugger.evaluation_bridge import (
     build_debugger_evaluation_launch_specification_v1,
 )
 from scripts.dev.visual_debugger.model import (
-    MOVEMENT_SCALE_MAXIMUM,
-    MOVEMENT_SCALE_MINIMUM,
     DebuggerScenario,
     DebuggerSession,
     Lane,
@@ -326,20 +324,12 @@ def build_scripted_joint_action(
 def _fresh_snapshot(
     scenario: DebuggerScenario,
     seed: int,
-    *,
-    movement_scale: float | None = None,
 ) -> tuple[float, EnvConfig, EnvState, Observation, ActionMask]:
     """Validate and expose an authored scenario without replacing its state."""
     authored_config, authored_state = scenario.build_scenario()
+    validate_product_env_config(authored_config)
     scenario_default_movement_scale = authored_config.ordinary_movement_distance_scale
-    effective_movement_scale = (
-        scenario_default_movement_scale if movement_scale is None else movement_scale
-    )
     config = authored_config
-    if effective_movement_scale != scenario_default_movement_scale:
-        config = authored_config._replace(
-            ordinary_movement_distance_scale=effective_movement_scale
-        )
     del seed
     state, observation, action_mask, _info = initialize_scenario_state(
         authored_state,
@@ -444,7 +434,7 @@ def create_session(
         ),
         next_script_frame_index=0,
         show_ranges=show_ranges,
-        verbose_logging=verbose_logging,
+        verbose_logging=False,
     )
     return session
 
@@ -811,14 +801,11 @@ def submit_next_script_frame(
 def reset_session(
     session: DebuggerSession,
 ) -> DebuggerSession:
-    """Recreate the deterministic initial epoch at the current effective scale."""
+    """Recreate the deterministic initial epoch at the product scale."""
     scenario = get_scenario(session.scenario_name)
     return _restart_session(
         session,
         scenario,
-        movement_scale=(
-            session.evaluation_context.resolved_env_config.ordinary_movement_distance_scale
-        ),
         preserve_controlled_slot=True,
     )
 
@@ -827,7 +814,6 @@ def _restart_session(
     session: DebuggerSession,
     scenario: DebuggerScenario,
     *,
-    movement_scale: float | None,
     preserve_controlled_slot: bool,
 ) -> DebuggerSession:
     """Build one coherent fresh epoch without entering the simulator step seam."""
@@ -837,11 +823,7 @@ def _restart_session(
         state,
         observation,
         action_mask,
-    ) = _fresh_snapshot(
-        scenario,
-        session.seed,
-        movement_scale=movement_scale,
-    )
+    ) = _fresh_snapshot(scenario, session.seed)
     run_generation = session.run_generation + 1
     launch_specification = build_debugger_evaluation_launch_specification_v1(
         root_seed=session.evaluation_context.seed_protocol.root_seed,
@@ -912,49 +894,13 @@ def _restart_session(
     return restarted
 
 
-def set_movement_scale(
-    session: DebuggerSession,
-    movement_scale: float | None,
-) -> DebuggerSession:
-    """Reset at one exact scale, or at the active scenario's authored default."""
-    if movement_scale is not None:
-        if type(movement_scale) is not float:
-            msg = "movement_scale must be a Python float or None."
-            raise TypeError(msg)
-        if not np.isfinite(movement_scale) or not (
-            MOVEMENT_SCALE_MINIMUM <= movement_scale <= MOVEMENT_SCALE_MAXIMUM
-        ):
-            msg = (
-                "movement_scale must be finite and in "
-                f"[{MOVEMENT_SCALE_MINIMUM}, {MOVEMENT_SCALE_MAXIMUM}]."
-            )
-            raise ValueError(msg)
-    effective_scale = (
-        session.scenario_default_movement_scale
-        if movement_scale is None
-        else movement_scale
-    )
-    recorded_scale = (
-        session.evaluation_context.resolved_env_config
-    ).ordinary_movement_distance_scale
-    if effective_scale == recorded_scale:
-        return session
-    return _restart_session(
-        session,
-        get_scenario(session.scenario_name),
-        movement_scale=effective_scale,
-        preserve_controlled_slot=True,
-    )
-
-
 def switch_scenario(
     session: DebuggerSession,
     scenario: DebuggerScenario,
 ) -> DebuggerSession:
-    """Start another scenario at its authored movement-scale default."""
+    """Start another scenario at the canonical product movement scale."""
     return _restart_session(
         session,
         scenario,
-        movement_scale=None,
         preserve_controlled_slot=False,
     )

@@ -1,38 +1,45 @@
 """Immutable host-side contracts for the comprehensive visual debugger."""
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from math import isfinite
-from typing import Final, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
-from jax import Array
+from marl_battlegrounds.evaluation.wire_shapes import (
+    MAX_AGENT_SLOTS_V1 as MAX_AGENT_SLOTS,
+)
+from marl_battlegrounds.evaluation.wire_shapes import (
+    NUM_MOVE_ACTIONS_V1 as NUM_MOVE_ACTIONS,
+)
+from marl_battlegrounds.evaluation.wire_shapes import (
+    NUM_TARGET_ACTIONS_V1 as NUM_TARGET_ACTIONS,
+)
 
-from marl_battlegrounds.core.types import (
-    MAX_AGENT_SLOTS,
-    MOVE_STAY,
-    NUM_MOVE_ACTIONS,
-    NUM_TARGET_ACTIONS,
-    ActionMask,
-    EnvConfig,
-    EnvState,
-    Observation,
-)
-from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
-from marl_battlegrounds.evaluation.models import (
-    EvaluationEpisodeContextV1,
-    EvaluationFrameV1,
-)
-from marl_battlegrounds.rendering.scene import StatusSourceEvidenceStateV2
+if TYPE_CHECKING:
+    from jax import Array
+
+    from marl_battlegrounds.core.types import (
+        ActionMask,
+        EnvConfig,
+        EnvState,
+        Observation,
+    )
+    from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
+    from marl_battlegrounds.evaluation.models import (
+        EvaluationEpisodeContextV1,
+        EvaluationFrameV1,
+    )
+    from marl_battlegrounds.rendering.scene import StatusSourceEvidenceStateV2
+
+_MOVE_STAY_V1 = 0
 
 type Lane = Literal[0, 1]
 type ArmOrigin = Literal["automatic", "explicit"]
 type ScenarioMode = Literal["interactive", "scripted"]
 type ScenarioAudience = Literal["researcher", "stress"]
 type SubmissionKind = Literal["interactive", "scripted"]
-
-MOVEMENT_SCALE_MINIMUM: Final = 0.01
-MOVEMENT_SCALE_MAXIMUM: Final = 1.0
-MOVEMENT_SCALE_STEP: Final = 0.01
 
 
 def _validate_slot(global_slot: int, *, name: str) -> None:
@@ -43,7 +50,7 @@ def _validate_slot(global_slot: int, *, name: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class PendingAction:
-    move_action: int = MOVE_STAY
+    move_action: int = _MOVE_STAY_V1
     selected_global_target_slot: int | None = None
     armed_lane: Lane | None = 0
     arm_origin: ArmOrigin | None = "automatic"
@@ -101,7 +108,7 @@ class LaneAvailability:
 @dataclass(frozen=True, slots=True)
 class ActorCommand:
     actor_global_slot: int
-    move_action: int = MOVE_STAY
+    move_action: int = _MOVE_STAY_V1
     target_global_slot: int | None = None
     use_ultimate: int = 0
 
@@ -208,6 +215,13 @@ class DebuggerSession:
     raw_continuation_identity: RawContinuationIdentity | None = None
 
     def __post_init__(self) -> None:
+        from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
+        from marl_battlegrounds.evaluation.models import (
+            EvaluationEpisodeContextV1,
+            EvaluationFrameV1,
+        )
+        from marl_battlegrounds.rendering.scene import StatusSourceEvidenceStateV2
+
         continuation = self.raw_continuation_identity
         if continuation is None:
             continuation = RawContinuationIdentity(

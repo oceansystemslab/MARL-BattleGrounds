@@ -1,18 +1,108 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import {
-  loadRendererFixture,
-  syntheticDebuggerWireFrame,
-} from "../e2e/support/renderer-fixture.js";
 import {
   DebuggerApiError,
   extractFrame,
+  extractJoinedFrame,
   extractNotice,
   getCurrentFrame,
+  getCurrentFrameAndPresentation,
+  getCurrentPresentation,
+  getReplayMetricReport,
   getReplayTimeline,
   postCommand,
   postReplayCommand,
 } from "../src/api.js";
+
+const presentationFixture = JSON.parse(
+  readFileSync(
+    new URL("./fixtures/authorized-presentations-v1.json", import.meta.url),
+    "utf8",
+  ),
+);
+
+const presentationKinds = [
+  "live_oracle",
+  "live_no_shared_obs_agent_pov",
+  "replay_oracle",
+  "replay_no_shared_obs_agent_pov",
+  "replay_shared_obs_agent_pov",
+];
+
+/**
+ * @template T
+ * @param {T} value
+ * @returns {T}
+ */
+function clone(value) {
+  return structuredClone(value);
+}
+
+/** @param {Record<string, any>} source */
+function withEndpointReadTripwire(source) {
+  const presentation = clone(source);
+  const endpoint = presentation.current_endpoint;
+  const nestedKey = Object.hasOwn(endpoint, "scene") ? "scene" : "parts";
+  let reads = 0;
+  Object.defineProperty(endpoint, nestedKey, {
+    configurable: true,
+    enumerable: true,
+    get() {
+      reads += 1;
+      throw new Error("must not read presentation endpoint after envelope mismatch");
+    },
+  });
+  return { presentation, readCount: () => reads };
+}
+
+/**
+ * @param {unknown} payload
+ * @param {{ok?: boolean, status?: number, contentType?: string}} options
+ * @returns {Response}
+ */
+function jsonResponse(
+  payload,
+  { ok = true, status = 200, contentType = "application/json" } = {},
+) {
+  return /** @type {Response} */ (
+    /** @type {unknown} */ ({
+      headers: { get: () => contentType },
+      json: async () => payload,
+      ok,
+      status,
+      text: async () => "",
+    })
+  );
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {Record<string, string>} [overrides]
+ * @param {number} [status]
+ */
+function metricResponse(bytes, overrides = {}, status = 200) {
+  const headers = new Map(
+    Object.entries({
+      "cache-control": "no-store",
+      "content-disposition": 'attachment; filename="episode.marlbg-metrics.json"',
+      "content-length": String(bytes.byteLength),
+      "content-type": "application/json; charset=utf-8",
+      ...overrides,
+    }),
+  );
+  return /** @type {Response} */ (
+    /** @type {unknown} */ ({
+      arrayBuffer: async () => bytes.slice().buffer,
+      headers: {
+        get: (/** @type {string} */ name) =>
+          headers.get(String(name).toLowerCase()) ?? null,
+      },
+      ok: status >= 200 && status < 300,
+      status,
+    })
+  );
+}
 
 test("extractFrame rejects stale and unknown frame schemas at every envelope", () => {
   const stale = { schema_version: 1, revision: 3, scene: {} };
@@ -58,6 +148,55 @@ test("schema-one replay responses cannot fall through the live-frame boundary", 
   );
 });
 
+test("diagnostic and unjoined private Shared replay frames reject before live fallback", () => {
+  for (const frameKind of [
+    "shared_obs_source_material_replay_viewer",
+    "shared_obs_agent_pov_replay_viewer",
+  ]) {
+    let nestedReads = 0;
+    const frame = {
+      schema_version: 1,
+      frame_kind: frameKind,
+      revision: 0,
+    };
+    Object.defineProperty(frame, "projection", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        nestedReads += 1;
+        throw new Error("Shared nested source material must remain unread");
+      },
+    });
+
+    assert.throws(
+      () => extractFrame(frame),
+      /without an authorized presentation join/u,
+    );
+    assert.throws(
+      () =>
+        extractFrame({
+          schema_version: 1,
+          result: "no_op",
+          frame,
+          notice: null,
+          animate_incoming: false,
+        }),
+      /without an authorized presentation join/u,
+    );
+    assert.throws(
+      () =>
+        extractFrame({
+          schema_version: 1,
+          error_code: "stale_revision",
+          message: "stale replay cursor",
+          latest_frame: frame,
+        }),
+      /without an authorized presentation join/u,
+    );
+    assert.equal(nestedReads, 0);
+  }
+});
+
 test("extractFrame enforces the exact replay error envelope even without a latest frame", () => {
   assert.equal(
     extractFrame({
@@ -81,10 +220,8 @@ test("extractFrame enforces the exact replay error envelope even without a lates
   );
 });
 
-test("live V2 and replay V1 error envelopes retain separate frame boundaries", async () => {
-  const liveFrame = syntheticDebuggerWireFrame(
-    await loadRendererFixture("canonical_event_vocabulary"),
-  );
+test("live V2 and replay V1 error envelopes retain separate frame boundaries", () => {
+  const liveFrame = clone(presentationFixture.pairs.live_oracle.transport);
   const liveLatest = extractFrame({
     schema_version: 2,
     error_code: "stale_revision",
@@ -110,6 +247,275 @@ test("extractNotice accepts only non-empty protocol notices", () => {
   assert.equal(extractNotice({ notice: { message: "Stale." } }), null);
   assert.equal(extractNotice({ notice: "  " }), null);
   assert.equal(extractNotice({}), null);
+});
+
+test("extractJoinedFrame accepts all five direct Python pairs", async () => {
+  for (const kind of presentationKinds) {
+    const pair = presentationFixture.pairs[kind];
+    const joined = await extractJoinedFrame(pair.transport, pair.presentation);
+    assert.ok(joined);
+    assert.equal(joined.transport.frame_kind, pair.transport.frame_kind);
+    assert.equal(joined.presentation.presentation_kind, kind);
+    assert.equal(Object.isFrozen(joined), true);
+  }
+});
+
+test("extractJoinedFrame accepts exact success and 409 envelopes only", async () => {
+  const livePair = presentationFixture.pairs.live_oracle;
+  const liveSuccess = await extractJoinedFrame(
+    {
+      schema_version: 2,
+      result: "no_op",
+      frame: livePair.transport,
+      notice: null,
+    },
+    livePair.presentation,
+  );
+  assert.ok(liveSuccess);
+  assert.equal(liveSuccess.presentation.presentation_kind, "live_oracle");
+
+  const sharedPair = presentationFixture.pairs.replay_shared_obs_agent_pov;
+  const replaySuccess = await extractJoinedFrame(
+    {
+      schema_version: 1,
+      result: "no_op",
+      frame: sharedPair.transport,
+      notice: "Replay cursor unchanged.",
+      animate_incoming: false,
+    },
+    sharedPair.presentation,
+  );
+  assert.ok(replaySuccess);
+  assert.equal(
+    replaySuccess.presentation.presentation_kind,
+    "replay_shared_obs_agent_pov",
+  );
+
+  for (const errorCode of ["stale_revision", "command_id_conflict"]) {
+    const joined = await extractJoinedFrame(
+      {
+        schema_version: 1,
+        error_code: errorCode,
+        message: "The client raced the current replay epoch.",
+        latest_frame: sharedPair.transport,
+      },
+      sharedPair.presentation,
+    );
+    assert.ok(joined);
+    assert.equal(joined.transport.frame_kind, sharedPair.transport.frame_kind);
+  }
+
+  const liveStale = await extractJoinedFrame(
+    {
+      schema_version: 2,
+      error_code: "stale_revision",
+      message: "The client raced the current live epoch.",
+      latest_frame: livePair.transport,
+    },
+    livePair.presentation,
+  );
+  assert.ok(liveStale);
+  assert.equal(liveStale.transport.frame_kind, livePair.transport.frame_kind);
+
+  const crossFamilyCases = [
+    {
+      label: "live pair in replay success envelope",
+      envelope: {
+        schema_version: 1,
+        result: "no_op",
+        frame: livePair.transport,
+        notice: null,
+        animate_incoming: false,
+      },
+      pair: livePair,
+    },
+    {
+      label: "replay pair in live success envelope",
+      envelope: {
+        schema_version: 2,
+        result: "no_op",
+        frame: sharedPair.transport,
+        notice: null,
+      },
+      pair: sharedPair,
+    },
+    {
+      label: "live pair in replay stale-error envelope",
+      envelope: {
+        schema_version: 1,
+        error_code: "stale_revision",
+        message: "Cross-family candidate.",
+        latest_frame: livePair.transport,
+      },
+      pair: livePair,
+    },
+    {
+      label: "replay pair in live stale-error envelope",
+      envelope: {
+        schema_version: 2,
+        error_code: "stale_revision",
+        message: "Cross-family candidate.",
+        latest_frame: sharedPair.transport,
+      },
+      pair: sharedPair,
+    },
+  ];
+  for (const { label, envelope, pair } of crossFamilyCases) {
+    const { presentation, readCount } = withEndpointReadTripwire(pair.presentation);
+    await assert.rejects(extractJoinedFrame(envelope, presentation), TypeError);
+    assert.equal(readCount(), 0, label);
+  }
+
+  assert.equal(
+    await extractJoinedFrame(
+      {
+        schema_version: 1,
+        error_code: "stale_revision",
+        message: "No latest candidate.",
+        latest_frame: null,
+      },
+      sharedPair.presentation,
+    ),
+    null,
+  );
+
+  for (const errorCode of ["internal_error", "invalid_request", "unauthorized"]) {
+    await assert.rejects(
+      extractJoinedFrame(
+        {
+          schema_version: 1,
+          error_code: errorCode,
+          message: "Must never install.",
+          latest_frame: sharedPair.transport,
+        },
+        sharedPair.presentation,
+      ),
+      TypeError,
+    );
+  }
+});
+
+test("extractJoinedFrame enforces replay notice and animation scalars", async () => {
+  const pair = presentationFixture.pairs.replay_shared_obs_agent_pov;
+  for (const notice of ["", "x".repeat(2049)]) {
+    await assert.rejects(
+      extractJoinedFrame(
+        {
+          schema_version: 1,
+          result: "no_op",
+          frame: pair.transport,
+          notice,
+          animate_incoming: false,
+        },
+        pair.presentation,
+      ),
+      TypeError,
+    );
+  }
+  await assert.rejects(
+    extractJoinedFrame(
+      {
+        schema_version: 1,
+        result: "no_op",
+        frame: pair.transport,
+        notice: null,
+        animate_incoming: true,
+      },
+      pair.presentation,
+    ),
+    TypeError,
+  );
+
+  const animatedTransport = clone(pair.transport);
+  animatedTransport.cursor.cursor_generation = 1;
+  animatedTransport.cursor.choreography_generation = 1;
+  const animated = await extractJoinedFrame(
+    {
+      schema_version: 1,
+      result: "applied",
+      frame: animatedTransport,
+      notice: "Applied.",
+      animate_incoming: true,
+    },
+    pair.presentation,
+  );
+  assert.ok(animated);
+  assert.equal(animated.transport.animate_incoming, true);
+});
+
+test("presentation GET is exact, atomic with frame GET, and never installs errors", async () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const pair = presentationFixture.pairs.replay_oracle;
+  /** @type {Map<string, unknown>} */
+  const payloads = new Map([
+    ["/api/frame", pair.transport],
+    ["/api/presentation/frame", pair.presentation],
+  ]);
+  /** @type {string[]} */
+  const calls = [];
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      clearTimeout: globalThis.clearTimeout,
+      /** @param {string} path */
+      fetch: async (path) => {
+        calls.push(String(path));
+        return jsonResponse(payloads.get(String(path)));
+      },
+      setTimeout: globalThis.setTimeout,
+    },
+  });
+
+  try {
+    assert.equal(await getCurrentPresentation("capability"), pair.presentation);
+    const joined = await getCurrentFrameAndPresentation("capability");
+    assert.ok(joined);
+    assert.equal(joined.presentation.presentation_kind, "replay_oracle");
+    assert.deepEqual(calls, [
+      "/api/presentation/frame",
+      "/api/frame",
+      "/api/presentation/frame",
+    ]);
+
+    const unavailable = {
+      schema_version: 1,
+      error_code: "audience_unavailable",
+      message: "Authorized presentation is unavailable for the active audience.",
+    };
+    globalThis.window.fetch = async () =>
+      jsonResponse(unavailable, { ok: false, status: 422 });
+    await assert.rejects(getCurrentPresentation("capability"), (error) => {
+      assert.ok(error instanceof DebuggerApiError);
+      assert.equal(error.status, 422);
+      assert.deepEqual(error.payload, unavailable);
+      assert.equal(Object.isFrozen(error.payload), true);
+      return true;
+    });
+
+    globalThis.window.fetch = async () =>
+      jsonResponse({ ...unavailable, extra: true }, { ok: false, status: 422 });
+    await assert.rejects(getCurrentPresentation("capability"), (error) => {
+      assert.ok(error instanceof DebuggerApiError);
+      assert.equal(error.status, 422);
+      assert.equal(error.payload, null);
+      assert.match(error.message, /invalid error envelope/u);
+      return true;
+    });
+
+    globalThis.window.fetch = async () =>
+      jsonResponse(unavailable, { ok: false, status: 500 });
+    await assert.rejects(getCurrentPresentation("capability"), (error) => {
+      assert.ok(error instanceof DebuggerApiError);
+      assert.equal(error.status, 500);
+      return true;
+    });
+  } finally {
+    if (originalWindow) {
+      Object.defineProperty(globalThis, "window", originalWindow);
+    } else {
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  }
 });
 
 test("postCommand reports an unknown outcome and never retries", async () => {
@@ -196,6 +602,218 @@ test("replay timeline and command use separate exact routes and send once", asyn
     assert.equal(calls[1].path, "/api/replay/command");
     assert.equal(calls[1].options.method, "POST");
     assert.equal(calls[1].options.body, JSON.stringify(request));
+  } finally {
+    if (originalWindow) {
+      Object.defineProperty(globalThis, "window", originalWindow);
+    } else {
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  }
+});
+
+test("metric report GET preserves exact bytes and validates its attachment", async () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const expected = new TextEncoder().encode('{"canonical":"bytes"}');
+  /** @type {Array<{path: string, options: RequestInit}>} */
+  const calls = [];
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      clearTimeout: globalThis.clearTimeout,
+      /** @param {string} path @param {RequestInit} options */
+      fetch: async (path, options) => {
+        calls.push({ path: String(path), options });
+        return metricResponse(expected);
+      },
+      setTimeout: globalThis.setTimeout,
+    },
+  });
+
+  try {
+    const result = await getReplayMetricReport("capability");
+    assert.equal(Object.isFrozen(result), true);
+    assert.equal(result.filename, "episode.marlbg-metrics.json");
+    assert.deepEqual(new Uint8Array(result.bytes), expected);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].path, "/api/replay/metric-report");
+    assert.deepEqual(calls[0].options, {
+      method: "GET",
+      headers: { "X-MARL-Debugger-Token": "capability" },
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+      signal: calls[0].options.signal,
+    });
+    assert.ok(calls[0].options.signal instanceof AbortSignal);
+  } finally {
+    if (originalWindow) {
+      Object.defineProperty(globalThis, "window", originalWindow);
+    } else {
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  }
+});
+
+test("metric report rejects malformed success headers and lengths without retry", async () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const expected = new TextEncoder().encode("{}");
+  /** @type {Array<Record<string, string>>} */
+  const cases = [
+    { "content-type": "application/json" },
+    { "cache-control": "private" },
+    { "content-disposition": 'inline; filename="episode.marlbg-metrics.json"' },
+    {
+      "content-disposition":
+        'attachment; filename="episode.marlbg-metrics.json.marlbg-metrics.json"',
+    },
+    { "content-disposition": 'attachment; filename="../x.marlbg-metrics.json"' },
+    { "content-length": "02" },
+    { "content-length": "3" },
+  ];
+  let fetchCalls = 0;
+  let responseIndex = 0;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      clearTimeout: globalThis.clearTimeout,
+      fetch: async () => {
+        fetchCalls += 1;
+        return metricResponse(expected, cases[responseIndex++]);
+      },
+      setTimeout: globalThis.setTimeout,
+    },
+  });
+
+  try {
+    for (const _ of cases) {
+      await assert.rejects(
+        getReplayMetricReport("capability"),
+        (error) => error instanceof DebuggerApiError && error.status === 200,
+      );
+    }
+    assert.equal(fetchCalls, cases.length);
+  } finally {
+    if (originalWindow) {
+      Object.defineProperty(globalThis, "window", originalWindow);
+    } else {
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  }
+});
+
+test("metric report rejects non-200 success statuses without retry", async () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const expected = new TextEncoder().encode("{}");
+  const statuses = [201, 204, 206];
+  let fetchCalls = 0;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      clearTimeout: globalThis.clearTimeout,
+      fetch: async () => metricResponse(expected, {}, statuses[fetchCalls++]),
+      setTimeout: globalThis.setTimeout,
+    },
+  });
+
+  try {
+    for (const expectedStatus of statuses) {
+      await assert.rejects(getReplayMetricReport("capability"), (error) => {
+        assert.ok(error instanceof DebuggerApiError);
+        assert.equal(error.status, expectedStatus);
+        return true;
+      });
+    }
+    assert.equal(fetchCalls, statuses.length);
+  } finally {
+    if (originalWindow) {
+      Object.defineProperty(globalThis, "window", originalWindow);
+    } else {
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  }
+});
+
+test("metric report preserves strict 403 and 404 replay errors and never retries", async () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const responses = [
+    {
+      status: 403,
+      payload: {
+        schema_version: 1,
+        error_code: "audience_unavailable",
+        message: "Metric reports are available only in Oracle View.",
+        latest_frame: null,
+      },
+    },
+    {
+      status: 404,
+      payload: {
+        schema_version: 1,
+        error_code: "not_found",
+        message: "No metric report is available for this replay.",
+        latest_frame: null,
+      },
+    },
+  ];
+  let fetchCalls = 0;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      clearTimeout: globalThis.clearTimeout,
+      fetch: async () => {
+        const response = responses[fetchCalls++];
+        return jsonResponse(response.payload, {
+          ok: false,
+          status: response.status,
+        });
+      },
+      setTimeout: globalThis.setTimeout,
+    },
+  });
+
+  try {
+    for (const expected of responses) {
+      await assert.rejects(getReplayMetricReport("capability"), (error) => {
+        assert.ok(error instanceof DebuggerApiError);
+        assert.equal(error.status, expected.status);
+        assert.deepEqual(error.payload, expected.payload);
+        return true;
+      });
+    }
+    assert.equal(fetchCalls, 2);
+  } finally {
+    if (originalWindow) {
+      Object.defineProperty(globalThis, "window", originalWindow);
+    } else {
+      Reflect.deleteProperty(globalThis, "window");
+    }
+  }
+});
+
+test("metric report connection failure has no retry path", async () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  let fetchCalls = 0;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      clearTimeout: globalThis.clearTimeout,
+      fetch: async () => {
+        fetchCalls += 1;
+        throw new Error("synthetic disconnect");
+      },
+      setTimeout: globalThis.setTimeout,
+    },
+  });
+
+  try {
+    await assert.rejects(
+      getReplayMetricReport("capability"),
+      (error) =>
+        error instanceof DebuggerApiError &&
+        error.status === 0 &&
+        error.message.includes("Could not download"),
+    );
+    assert.equal(fetchCalls, 1);
   } finally {
     if (originalWindow) {
       Object.defineProperty(globalThis, "window", originalWindow);

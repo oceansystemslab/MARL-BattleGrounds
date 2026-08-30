@@ -22,7 +22,6 @@ from scripts.dev.visual_debugger.control import (
     select_clicked_target,
     select_controlled_actor,
     select_no_combat,
-    set_movement_scale,
     set_pending_movement,
     submit_interactive,
     submit_joint_action,
@@ -229,17 +228,16 @@ def test_retaining_capture_profile_survives_every_session_replacement() -> None:
         capture_profile="evaluation_metric_complete",
     )
     reset = reset_session(initial)
-    scaled = set_movement_scale(reset, 0.25)
-    switched = switch_scenario(scaled, get_scenario("arena_5v5"))
+    switched = switch_scenario(reset, get_scenario("arena_5v5"))
 
-    sessions = (initial, reset, scaled, switched)
+    sessions = (initial, reset, switched)
     assert {candidate.evaluation_context.capture_profile for candidate in sessions} == {
         "evaluation_metric_complete"
     }
     assert {candidate.evaluation_context.identity.run_id for candidate in sessions} == {
         initial.evaluation_context.identity.run_id
     }
-    assert tuple(candidate.run_generation for candidate in sessions) == (0, 1, 2, 3)
+    assert tuple(candidate.run_generation for candidate in sessions) == (0, 1, 2)
     assert all(
         candidate.current_evaluation_frame.frame_index == 0
         and candidate.incoming_evaluation_view is None
@@ -251,7 +249,7 @@ def test_retaining_capture_profile_survives_every_session_replacement() -> None:
             for row in candidate.evaluation_context.aggregation_keys
         )["action_source"]
         for candidate in sessions
-    ) == ("scripted", "scripted", "scripted", "manual")
+    ) == ("scripted", "scripted", "manual")
 
 
 def test_session_rejects_invalid_fixed_slot_pending_rows() -> None:
@@ -853,81 +851,20 @@ def test_reset_replays_identical_initial_session_and_clears_history() -> None:
     assert reset_result.run_generation == initial.run_generation + 1
 
 
-def test_movement_scale_reset_rebuilds_full_epoch_without_stepping(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    initial = _session("basic_support", controlled_slot=2, verbose=True)
-    advanced = submit_next_script_frame(initial)
-    advanced = replace(advanced, show_ranges=False)
-
-    def forbidden_step(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("movement-scale reset must not call step")
-
-    monkeypatch.setattr(control, "step", forbidden_step)
-    scaled = set_movement_scale(advanced, 0.25)
-
-    assert scaled is not advanced
-    assert scaled.run_generation == advanced.run_generation + 1
-    assert scaled.scenario_default_movement_scale == 1.0
-    assert scaled.config.ordinary_movement_distance_scale == 0.25
-    assert int(scaled.state.step_count) == 0
-    assert scaled.state is not advanced.state
-    assert scaled.observation is not advanced.observation
-    assert scaled.action_mask is not advanced.action_mask
-    assert scaled.current_evaluation_frame is not advanced.current_evaluation_frame
-    assert scaled.current_evaluation_frame.frame_index == 0
-    assert scaled.current_evaluation_frame.simulator_step_count == 0
-    assert scaled.incoming_evaluation_view is None
-    assert scaled.last_submission_kind is None
-    assert scaled.last_report_actor_slots == ()
-    assert scaled.next_script_frame_index == 0
-    assert not scaled.terminated
-    assert not scaled.truncated
-    assert scaled.controlled_global_slot == 2
-    assert scaled.show_ranges is False
-    assert scaled.verbose_logging is True
-    assert scaled.pending_actions == initial.pending_actions
-
-
-def test_movement_scale_no_op_reset_and_switch_ownership() -> None:
+def test_reset_and_switch_always_rebuild_at_the_product_movement_scale() -> None:
     session = _session("arena_5v5", controlled_slot=3)
-
-    assert set_movement_scale(session, 1.0) is session
-    assert set_movement_scale(session, None) is session
-
-    overridden = set_movement_scale(session, 0.1)
-    ordinary_reset = reset_session(overridden)
+    ordinary_reset = reset_session(session)
     switched = switch_scenario(
         ordinary_reset,
         get_scenario("status_stack"),
     )
-    restored = set_movement_scale(overridden, None)
 
-    assert ordinary_reset.config.ordinary_movement_distance_scale == 0.1
+    assert ordinary_reset.config.ordinary_movement_distance_scale == 1.0
     assert ordinary_reset.scenario_default_movement_scale == 1.0
     assert ordinary_reset.controlled_global_slot == 3
     assert switched.config.ordinary_movement_distance_scale == 1.0
     assert switched.scenario_default_movement_scale == 1.0
     assert switched.controlled_global_slot == 5
-    assert restored.config.ordinary_movement_distance_scale == 1.0
-    assert restored.scenario_default_movement_scale == 1.0
-    assert restored.run_generation == overridden.run_generation + 1
-
-
-@pytest.mark.parametrize(
-    "movement_scale",
-    (0.0, 0.009, 1.001, float("nan"), float("inf")),
-)
-def test_movement_scale_rejects_invalid_direct_values(
-    movement_scale: float,
-) -> None:
-    with pytest.raises(ValueError, match=r"\[0\.01, 1\.0\]"):
-        set_movement_scale(_session(), movement_scale)
-
-
-def test_movement_scale_rejects_non_float_direct_values() -> None:
-    with pytest.raises(TypeError, match="Python float"):
-        set_movement_scale(_session(), 1)  # type: ignore[arg-type]
 
 
 def test_switch_scenario_preserves_seed_and_toggles_but_clears_live_state() -> None:
@@ -939,7 +876,7 @@ def test_switch_scenario_preserves_seed_and_toggles_but_clears_live_state() -> N
     assert switched.scenario_name == "status_stack"
     assert switched.seed == 7
     assert switched.show_ranges is False
-    assert switched.verbose_logging is True
+    assert switched.verbose_logging is False
     assert switched.controlled_global_slot == 5
     assert int(switched.state.step_count) == 0
     assert switched.incoming_evaluation_view is None

@@ -36,11 +36,9 @@ from scripts.dev.visual_debugger.control import (
     select_clicked_target,
     select_controlled_actor,
     select_no_combat,
-    set_movement_scale,
     set_pending_movement,
     submit_interactive,
     submit_next_script_frame,
-    switch_scenario,
 )
 from scripts.dev.visual_debugger.model import DebuggerSession, RawContinuationIdentity
 from scripts.dev.visual_debugger.protocol import (
@@ -53,16 +51,11 @@ from scripts.dev.visual_debugger.protocol import (
     ResetCommandV1,
     RosterSelectionCommandV1,
     ScenarioSwitchCommandV1,
-    SetMovementScaleCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
     ViewMode,
 )
-from scripts.dev.visual_debugger.scenarios import (
-    cycle_scenario_name,
-    get_scenario,
-    list_scenarios,
-)
+from scripts.dev.visual_debugger.scenarios import get_scenario
 
 _MOVEMENT_KEYS = {
     "w": MOVE_NORTH,
@@ -80,11 +73,7 @@ _MOVEMENT_KEYS = {
     "arrowleft": MOVE_WEST,
 }
 
-type RecordingRestartIntentV1 = Literal[
-    "reset",
-    "scenario_switch",
-    "movement_scale",
-]
+type RecordingRestartIntentV1 = Literal["reset"]
 
 
 def recording_restart_intent_v1(
@@ -94,44 +83,41 @@ def recording_restart_intent_v1(
     view_mode: ViewMode,
     include_stress: bool,
 ) -> RecordingRestartIntentV1 | None:
-    """Classify an effective episode replacement before dispatch constructs it."""
+    """Classify the sole public episode replacement before dispatch constructs it."""
+    del session, view_mode, include_stress
     if isinstance(command, KeyboardCommandV1):
         if command.ctrl_key or command.alt_key or command.meta_key:
             return None
         key = normalize_key(command.key, shift_key=command.shift_key)
         if key == "r":
             return "reset"
-        if key in ("[", "]"):
-            return "scenario_switch"
         return None
     if isinstance(command, ResetCommandV1):
         return "reset"
-    if isinstance(command, ScenarioSwitchCommandV1):
-        allowed_names = {
-            scenario.name for scenario in list_scenarios(include_stress=include_stress)
-        }
-        if (
-            command.scenario_name in allowed_names
-            and command.scenario_name != session.scenario_name
-        ):
-            return "scenario_switch"
-        return None
-    if isinstance(command, SetMovementScaleCommandV1):
-        if view_mode != "researcher":
-            return None
-        effective_scale = (
-            session.scenario_default_movement_scale
-            if command.movement_scale is None
-            else command.movement_scale
-        )
-        recorded_scale = (
-            session.evaluation_context.resolved_env_config
-        ).ordinary_movement_distance_scale
-        return "movement_scale" if effective_scale != recorded_scale else None
     return None
 
 
 _SUBMISSION_KEYS = frozenset(("space", "enter", "n"))
+
+_SCRIPTED_INSPECTION_NOTICE = (
+    "Scripted playback is inspection-only; press N without modifiers to advance "
+    "the registered frame."
+)
+
+
+def _scripted_inspection_command_is_allowed(command: DebuggerCommandV1) -> bool:
+    """Keep scripted playback to its closed advance and presentation surface."""
+    if isinstance(command, KeyboardCommandV1):
+        if (
+            command.shift_key
+            or command.ctrl_key
+            or command.alt_key
+            or command.meta_key
+            or command.repeat
+        ):
+            return False
+        return normalize_key(command.key, shift_key=False) in ("n", "g")
+    return isinstance(command, (SetViewCommandV1, ExitCommandV1))
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,35 +252,6 @@ def hit_test_scene_agents(
     )
 
 
-def sanitize_pov_pending_target(session: DebuggerSession) -> DebuggerSession:
-    """Clear a pending target absent from the controlled actor's safe POV."""
-    target = session.pending_action.selected_global_target_slot
-    if target is None:
-        return session
-    slice_ = build_actor_pov_current_slice_v1(
-        session.evaluation_context,
-        session.current_evaluation_frame,
-        global_slot=session.controlled_global_slot,
-        incoming_transition_view=session.incoming_evaluation_view,
-    )
-    projection = build_actor_pov_analyzer_projection_v1(slice_)
-    authorized_public_ids = {
-        projection.scene.self_actor.public_agent_id,
-        *(body.public_agent_id for body in projection.scene.visible_bodies),
-    }
-    authorized_slots = {
-        row.global_slot
-        for row in session.evaluation_context.roster
-        if row.public_agent_id in authorized_public_ids
-    }
-    if target in authorized_slots:
-        return session
-    sanitized = clear_pending_target(session)
-    if sanitized.pending_action == session.pending_action:
-        return session
-    return sanitized
-
-
 def _result(
     session: DebuggerSession,
     *,
@@ -330,20 +287,16 @@ def _applied_transition_result(
     *,
     view_mode: ViewMode,
     preset: Preset,
-    sanitize_pov: bool = False,
 ) -> InputDispatchResult:
     """Package one captured transition behind the typed validation boundary."""
     try:
-        packaged_session = (
-            sanitize_pov_pending_target(session) if sanitize_pov else session
-        )
         return _result(
-            packaged_session,
+            session,
             view_mode=view_mode,
             preset=preset,
             handled=True,
             changed=True,
-            transition_applied=packaged_session.incoming_evaluation_view,
+            transition_applied=session.incoming_evaluation_view,
         )
     except DebuggerTransitionFailureV1:
         raise
@@ -503,8 +456,6 @@ def _dispatch_keyboard(
         current_index = active_slots.index(session.controlled_global_slot)
         controlled_slot = active_slots[(current_index + direction) % len(active_slots)]
         edited = select_controlled_actor(session, controlled_slot)
-        if view_mode == "pov":
-            edited = sanitize_pov_pending_target(edited)
         return _pending_edit_result(
             session,
             edited,
@@ -665,22 +616,14 @@ def _dispatch_keyboard(
             notice=notice,
         )
     if key in ("space", "enter"):
-        edited = submit_interactive(
-            session,
-            actor_global_slots=(
-                (session.controlled_global_slot,) if view_mode == "pov" else None
-            ),
-        )
+        edited = submit_interactive(session, actor_global_slots=None)
         transition_applied = edited is not session
         if transition_applied:
             return _applied_transition_result(
                 edited,
                 view_mode=view_mode,
                 preset=preset,
-                sanitize_pov=view_mode == "pov",
             )
-        if view_mode == "pov":
-            edited = sanitize_pov_pending_target(edited)
         changed = edited is not session
         notice = (
             _terminal_notice(session)
@@ -715,30 +658,26 @@ def _dispatch_keyboard(
             changed=True,
         )
     if key == "v":
-        return _result(
-            replace(session, verbose_logging=not session.verbose_logging),
-            view_mode=view_mode,
-            preset=preset,
-            handled=True,
-            changed=True,
+        edited = (
+            replace(session, verbose_logging=False)
+            if session.verbose_logging
+            else session
         )
-    if key in ("[", "]"):
-        direction = -1 if key == "[" else 1
-        next_name = cycle_scenario_name(
-            session.scenario_name,
-            direction,
-            include_stress=include_stress,
-        )
-        edited = switch_scenario(session, get_scenario(next_name))
-        if view_mode == "pov":
-            edited = sanitize_pov_pending_target(edited)
         return _result(
             edited,
             view_mode=view_mode,
             preset=preset,
             handled=True,
-            changed=True,
-            episode_restarted=True,
+            changed=edited is not session,
+        )
+    if key in ("[", "]"):
+        return _result(
+            session,
+            view_mode=view_mode,
+            preset=preset,
+            handled=True,
+            changed=False,
+            notice=("Scenario navigation moved to the read-only Replay Viewer."),
         )
     return _result(
         session,
@@ -785,12 +724,10 @@ def _dispatch_pointer(
             changed=False,
         )
     edited = (
-        select_controlled_actor(session, target)
+        select_clicked_target(session, target)
         if command.shift_key
-        else select_clicked_target(session, target)
+        else select_controlled_actor(session, target)
     )
-    if view_mode == "pov" and command.shift_key:
-        edited = sanitize_pov_pending_target(edited)
     return _pending_edit_result(
         session,
         edited,
@@ -807,7 +744,9 @@ def _dispatch_roster_selection(
     preset: Preset,
 ) -> InputDispatchResult:
     authorized_slots = {
-        row[0] for row in _authorized_pointer_rows(session, view_mode=view_mode)
+        row.global_slot
+        for row in session.evaluation_context.roster
+        if row.configured_active
     }
     if command.global_slot not in authorized_slots:
         return _result(
@@ -823,8 +762,6 @@ def _dispatch_roster_selection(
         if command.role == "control"
         else select_clicked_target(session, command.global_slot)
     )
-    if view_mode == "pov" and command.role == "control":
-        edited = sanitize_pov_pending_target(edited)
     return _pending_edit_result(
         session,
         edited,
@@ -864,7 +801,9 @@ def _dispatch_actor_pov_target_action(
     ]
     target_global_slot = recipients[command.target_action]
     authorized_slots = {
-        row[0] for row in _authorized_pointer_rows(session, view_mode="pov")
+        row.global_slot
+        for row in session.evaluation_context.roster
+        if row.configured_active
     }
     if target_global_slot not in authorized_slots:
         return _result(
@@ -895,6 +834,16 @@ def dispatch_command(
     include_stress: bool,
 ) -> InputDispatchResult:
     """Apply one validated input without owning RNG or simulator semantics."""
+    scripted_inspection = get_scenario(session.scenario_name).mode == "scripted"
+    if scripted_inspection and not _scripted_inspection_command_is_allowed(command):
+        return _result(
+            session,
+            view_mode=view_mode,
+            preset=preset,
+            handled=True,
+            changed=False,
+            notice=_SCRIPTED_INSPECTION_NOTICE,
+        )
     if isinstance(command, KeyboardCommandV1):
         return _dispatch_keyboard(
             session,
@@ -925,41 +874,16 @@ def dispatch_command(
             preset=preset,
         )
     if isinstance(command, ScenarioSwitchCommandV1):
-        allowed_names = {
-            scenario.name for scenario in list_scenarios(include_stress=include_stress)
-        }
-        if command.scenario_name not in allowed_names:
-            return _result(
-                session,
-                view_mode=view_mode,
-                preset=preset,
-                handled=True,
-                changed=False,
-                notice=f"Scenario {command.scenario_name!r} is unavailable.",
-            )
-        if command.scenario_name == session.scenario_name:
-            return _result(
-                session,
-                view_mode=view_mode,
-                preset=preset,
-                handled=True,
-                changed=False,
-            )
-        edited = switch_scenario(session, get_scenario(command.scenario_name))
-        if view_mode == "pov":
-            edited = sanitize_pov_pending_target(edited)
         return _result(
-            edited,
+            session,
             view_mode=view_mode,
             preset=preset,
             handled=True,
-            changed=True,
-            episode_restarted=True,
+            changed=False,
+            notice=("Scenario switching moved to the read-only Replay Viewer."),
         )
     if isinstance(command, ResetCommandV1):
         edited = reset_session(session)
-        if view_mode == "pov":
-            edited = sanitize_pov_pending_target(edited)
         return _result(
             edited,
             view_mode=view_mode,
@@ -968,37 +892,9 @@ def dispatch_command(
             changed=True,
             episode_restarted=True,
         )
-    if isinstance(command, SetMovementScaleCommandV1):
-        if view_mode != "researcher":
-            return _result(
-                session,
-                view_mode=view_mode,
-                preset=preset,
-                handled=True,
-                changed=False,
-                notice="Movement scale can be changed only in researcher view.",
-            )
-        edited = set_movement_scale(session, command.movement_scale)
-        return _result(
-            edited,
-            view_mode=view_mode,
-            preset=preset,
-            handled=True,
-            changed=edited is not session,
-            episode_restarted=edited is not session,
-            notice=(
-                "Movement scale is already at the requested effective value."
-                if edited is session
-                else None
-            ),
-        )
     if isinstance(command, SetViewCommandV1):
-        edited = (
-            sanitize_pov_pending_target(session)
-            if command.view_mode == "pov"
-            else session
-        )
-        changed = command.view_mode != view_mode or edited is not session
+        edited = session
+        changed = command.view_mode != view_mode
         return _result(
             edited,
             view_mode=command.view_mode,

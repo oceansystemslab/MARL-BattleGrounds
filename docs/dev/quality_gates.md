@@ -45,10 +45,38 @@ unbounded serialized test time are process defects, not signs of rigor.
 
 ## Evidence economics and CI runtime budget
 
-The required push/PR pipeline has a 10–15 minute normal critical-path budget.
-Sharding is explicitly permitted—and expected—when it preserves an exact,
-non-overlapping test inventory. Aggregate jobs retain the stable required-check
-names; the implementation jobs may run in parallel underneath them.
+The required push/PR pipeline targets an approximately five-minute repository-
+controlled critical path, measured from the first hosted job's `started_at`
+timestamp through the later stable aggregate's `completed_at` timestamp. GitHub
+queue delay before runner start is external and reported separately. Sharding is
+explicitly permitted—and expected—when it preserves an exact, non-overlapping
+test inventory. Aggregate jobs retain the stable required-check names; twenty
+implementation jobs may run concurrently under the current GitHub-hosted
+account limit. Local validation may use the developer workstation's additional
+CPU concurrency.
+
+The six-minute `timeout-minutes` value on each substantive matrix job provides
+small scheduling and teardown headroom; it is not the end-to-end target because
+downstream aggregates necessarily run after their dependencies. Every
+publication candidate must still be checked against hosted timestamps. A
+material regression beyond the approximately five-minute target requires
+profiling and a CI-only follow-up, while ordinary single-digit timing variance
+does not.
+
+## Authoritative Replay and Debugger integration baseline
+
+Commit `82077d275caef8bc3d08322e6c9f55c8d5242aec` is the accepted Replay Viewer
+and Combat Debugger product baseline. A later integration into `main` must keep
+this commit as an ancestor and run the Replay/Debugger presentation, control,
+Oracle/Agent parity, privacy, and real-browser gates against the integrated
+tree. Conflict resolution must not replace these product bytes wholesale or
+silently restore older behavior from another branch.
+
+This is a regression guard, not a permanent feature freeze. Changes explicitly
+requested by the user, or deliberate additions required by later `main`
+features, remain allowed. Any intentional departure from the baseline behavior
+must be identified, reviewed, tested, and approved; ancestry alone is not
+evidence that the accepted behavior survived the merge.
 
 Put each assertion at the cheapest layer that can genuinely disprove the risk:
 
@@ -80,6 +108,8 @@ test inventory executed on a passing candidate.
 | Change | Smallest justified proof |
 | --- | --- |
 | Core or Python semantics | Nearest Python unit/integration tests, then targeted Ruff/Pyright |
+| Team Deathmatch task semantics | Configuration/state validation, score/termination/reward transition tests, evaluation capture/replay/event tests, rollout tests, and scripted NoSharedObs policy integration |
+| Actor projection version change | Projection/capture tests, explicit older-version rejection, exact actor-input export tests for the new version, and Oracle/Agent privacy parity before enabling that version in Replay Agent POV |
 | Debugger scene/event schema | Scene/Event V2, live-frame, audience-boundary, and choreography tests |
 | Command/service/server behavior | Protocol, input, service, server, and affected real-browser case |
 | Scenario trajectory | Scenario preflight/reference tests |
@@ -158,15 +188,37 @@ uv run pyright
 `scripts/dev/check.sh` runs the four Python review commands after the
 environment is prepared.
 
-CI performs ordinary pytest collection in every Python shard, then groups the
-collected items by test-family identity: the test path plus node ID with the
-terminal parameter suffix removed from each test/class component. Every
-function- or class-parameterized instance of one test therefore remains
-atomic. Twelve nonempty workers use deterministic
-longest-processing-time packing by collected item count; sharding reduces test
-execution time, not collection or module-import cost. Families from one module
-may occupy different workers, so module-scoped fixtures or shared compilation
-can repeat; use hosted shard timings before changing the initial width of 12.
+CI performs ordinary pytest collection in every Python shard and identifies
+each atomic test family by test path, exact parent collector node ID, and
+pytest's unparameterized `originalname`. Ordinary files remain single affinity
+units so file-local fixtures and compiled execution paths are not repeated
+across workers. A small, explicit runtime profile may extract a measured slow
+family from a declared hotspot file while keeping that parameterized family
+indivisible and all residual families together. All consumers of an expensive
+module-scoped fixture remain in one residual affinity unit; a separately
+measured family that does not consume that fixture may be extracted without
+repeating fixture setup. Collection resolves statically declared transitive
+fixture dependencies and fails closed if a split would share a module-scoped
+fixture across workers. Pytest's dynamic `request` fixture API is prohibited
+inside profiled split files; collection rejects a split if a test or any
+non-pytest fixture in its resolved chain declares `request`.
+The hosted semantic-inventory and service-preflight
+families, plus the sample-replay fixture residual, have deliberately dominant
+scheduling weights so each intact proof receives a dedicated worker. Twelve
+nonempty workers use deterministic weighted longest-processing-time packing,
+including reserved capacity for a static gate. Collection fails closed if a
+configured file or family disappears, moves, or would be assigned twice. The
+profile changes CI scheduling only; it never selects a smaller test inventory.
+
+The checked-in weights were measured against the authoritative Replay/Debugger
+tree before Milestone 7 integration. They remain the safe initial profile for
+the integrated collection, but their relative costs are provisional until the
+merged tree has completed all twelve local shard inventories and one hosted
+run. Reprofiling must use per-work-unit and hosted job timings, with particular
+attention to the new Team Deathmatch semantics, rollout, and scripted-policy
+files. A timing change may adjust only affinity weights or extract an intact
+measured family; it must not omit a test, split a parameterized family, repeat a
+module-scoped fixture, exceed twelve Python workers, or displace a static gate.
 
 After frontend changes have stopped, install the locked contributor toolchain
 and pinned Chromium, then run the complete frontend/browser gate once:
@@ -178,16 +230,23 @@ scripts/dev/check_frontend.sh
 ```
 
 With no arguments, the frontend script runs format check, lint, typecheck, unit
-tests, and the required Playwright E2E/visual inventory. CI runs a Node-only
-style/type job and a separate unit job with the minimal Python environment its
-fixture exporters require, then distributes the exact browser inventory across
-eight validated, nonempty file groups. Each browser group retains one worker
-and file-local ordering. Required CI does not retry deterministic failures,
-stops a red shard after its first failure, and targets a 15-minute job ceiling.
-The script does not install dependencies or update snapshots. Run it from the
-exact frozen commit candidate. When a changed helper spawns a package manager,
-interpreter, generated-artifact exporter, or browser, also exercise that path
-once from a clean worktree with cold local environment state; a warm developer
+tests, and the required Playwright E2E/visual inventory. CI runs the combined
+frontend format/lint/type/unit gate inside one short browser profile, then
+distributes the exact browser inventory across eight validated, nonempty
+profiles. The long serial authorized-presentation install suite is split by
+exact collected test title without changing its serial mode. Its causal/privacy
+proof is divided only at existing scenario boundaries into three collected
+tests; every original assertion remains, and each slice independently guards
+the checked sample bytes. The three slices are distributed across existing
+profiles and use the same setup-isolation flag. An executable list-only proof
+requires the eight profiles to be a disjoint, complete cover. Each profile
+retains one worker and file-local ordering.
+Required CI does not retry deterministic failures, stops a red shard after its
+first failure, and enforces a six-minute matrix-job ceiling. The script does not
+install dependencies or update snapshots. Run it from the exact frozen commit
+candidate. When a changed helper spawns a package manager, interpreter,
+generated-artifact exporter, or browser, also exercise that path once from a
+clean worktree with cold local environment state; a warm developer
 environment can suppress first-run output and setup behavior that CI will
 encounter.
 
@@ -221,12 +280,13 @@ changes. CI uploads Playwright failure artifacts.
 
 GitHub Actions runs:
 
-- twelve deterministic test-family Python shards that keep parameterized test
-  instances together, plus a parallel Ruff and Pyright job with locked `dev`
-  and `viz` extras;
-- a Node-only style/type job, a Python-backed frontend unit job, and eight
-  isolated browser groups with pinned Playwright Chromium and shard-qualified
-  failure artifacts; and
+- twelve deterministic weighted-affinity Python shards with atomic
+  parameterized families, fail-closed runtime-profile validation, and Ruff
+  formatting, Ruff lint, and Pyright distributed across the matrix using
+  locked `dev` and `viz` extras;
+- eight isolated browser profiles with pinned Playwright Chromium,
+  shard-qualified failure artifacts, and the combined frontend
+  format/lint/type/unit gate folded into a short profile; and
 - focused self-hosted GPU sanity for the CUDA backend and compiled environment
   contracts, with the complete GPU regression scheduled or manually requested.
 

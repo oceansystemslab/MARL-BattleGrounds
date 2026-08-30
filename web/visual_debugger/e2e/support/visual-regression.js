@@ -3,23 +3,19 @@ import { fileURLToPath } from "node:url";
 import { expect } from "@playwright/test";
 
 import {
+  CHOREOGRAPHY_CONNECTOR_ROOT,
   CHOREOGRAPHY_ROOT,
   CHOREOGRAPHY_ROUTE_ROOT,
-  choreographySnapshot,
   installWaapiAutopause,
-  pauseAtLogicalTime,
+  pauseInsideEventWindow,
 } from "./choreography.js";
 
 export const DESKTOP_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
 export const MINIMUM_VIEWPORT = Object.freeze({ width: 960, height: 600 });
-export const ABILITY_PHASE_MS = 120;
-export const HEALTH_RESOLUTION_PHASE_MS = 210;
-export const CHARGE_PHASE_MS = 400;
-export const STATUS_PHASE_MS = 680;
-// Both recipient-safe successor deltas begin together at 520 ms. Sample just
-// inside that shared, explicitly non-causal observation phase so both are
-// visibly painted without inventing an order between them.
-export const POV_SUCCESSOR_OBSERVATION_PHASE_MS = 600;
+export const ABILITY_EVENT_TYPE = "ability_activated";
+export const HEALTH_RESOLUTION_EVENT_TYPE = "recipient_health_resolution";
+export const STATUS_EVENT_TYPE = "status_applied";
+export const POV_HEALTH_EVENT_TYPE = "own_health_changed";
 
 // Reported hosted-Linux retries held these two dense, semantically asserted
 // proofs at stable 0.1013% and 0.1005% diffs. Keep the normal 0.1% policy for
@@ -31,7 +27,9 @@ export const DENSE_BASELINE_MAX_DIFF_PIXEL_RATIO = 0.00105;
  * in the delegated semantic-help registry. Hidden mode/dialog controls are
  * intentionally audited only when their owning surface becomes visible. A
  * registered local ancestor may own an SVG focus child; battlefield/timeline
- * composites never excuse an otherwise unregistered descendant control.
+ * composites never excuse an otherwise unregistered descendant control. A
+ * focusable surface may instead use `aria-describedby` when at least one
+ * referenced element exists and contains nonempty text.
  *
  * @param {import("@playwright/test").Page} page
  */
@@ -56,6 +54,20 @@ export async function expectVisibleInteractiveHelpInventory(page) {
         }
         return owner;
       };
+      /** @param {Element} element */
+      const describedByTarget = (element) => {
+        const ids = (element.getAttribute("aria-describedby") ?? "")
+          .trim()
+          .split(/\s+/u)
+          .filter(Boolean);
+        for (const id of ids) {
+          const target = element.ownerDocument.getElementById(id);
+          if (target !== null && (target.textContent ?? "").trim().length > 0) {
+            return target;
+          }
+        }
+        return null;
+      };
       const visible = elements.filter((element) => {
         if (!(element instanceof Element)) return false;
         const style = getComputedStyle(element);
@@ -66,42 +78,75 @@ export async function expectVisibleInteractiveHelpInventory(page) {
           element.getClientRects().length > 0
         );
       });
+      const nativeDisclosures = visible.filter(
+        (element) => element instanceof HTMLElement && element.localName === "summary",
+      );
+      const operational = visible.filter(
+        (element) =>
+          !(element instanceof HTMLElement && element.localName === "summary"),
+      );
       return {
-        disabled: visible
+        disabled: operational
           .filter(
             (element) =>
               "disabled" in element &&
               /** @type {{disabled?: unknown}} */ (element).disabled === true,
           )
           .map(label),
-        missing: visible
-          .filter((element) => localHelpOwner(element) === null)
+        missing: operational
+          .filter(
+            (element) =>
+              localHelpOwner(element) === null && describedByTarget(element) === null,
+          )
           .map(label),
-        missingDescriptions: visible
+        missingDescriptions: operational
           .filter((element) => {
             const owner = localHelpOwner(element);
             return owner !== null && !owner.hasAttribute("aria-description");
           })
           .map(label),
-        unregisteredDescriptions: visible
+        unregisteredDescriptions: operational
           .filter(
             (element) =>
               element.hasAttribute("aria-description") &&
               localHelpOwner(element) === null,
           )
           .map(label),
-        nativeTitles: visible
+        nativeTitles: operational
           .filter((element) => element.hasAttribute("title"))
           .map(label),
-        registered: visible
+        registered: operational
           .filter((element) => localHelpOwner(element) !== null)
           .map(label),
+        describedBy: operational
+          .filter(
+            (element) =>
+              localHelpOwner(element) === null && describedByTarget(element) !== null,
+          )
+          .map((element) => ({
+            label: label(element),
+            targetId: describedByTarget(element)?.id ?? "",
+          })),
+        nativeDisclosures: nativeDisclosures.map((element) => ({
+          detailsId:
+            element.parentElement instanceof HTMLDetailsElement
+              ? element.parentElement.id
+              : "",
+          label: element.textContent?.trim() ?? "",
+          ownsNativeDetails: element.parentElement instanceof HTMLDetailsElement,
+        })),
       };
     });
   expect(inventory.missing).toEqual([]);
   expect(inventory.missingDescriptions).toEqual([]);
   expect(inventory.unregisteredDescriptions).toEqual([]);
   expect(inventory.nativeTitles).toEqual([]);
+  expect(
+    inventory.nativeDisclosures.filter(
+      ({ detailsId, label, ownsNativeDetails }) =>
+        !ownsNativeDetails || detailsId.length === 0 || label.length === 0,
+    ),
+  ).toEqual([]);
   expect(inventory.registered.length).toBeGreaterThan(0);
   return inventory;
 }
@@ -132,19 +177,28 @@ export function trackCommandPosts(page) {
 
 /**
  * @param {import("@playwright/test").Page} page
+ * @param {() => Promise<unknown>} activate
  */
-async function currentRevision(page) {
-  return Number(await page.locator("#revision-value").textContent());
-}
-
-/**
- * @param {import("@playwright/test").Page} page
- * @param {number} previous
- */
-async function expectRevisionAdvance(page, previous) {
-  await expect
-    .poll(() => currentRevision(page), { timeout: 120_000 })
-    .toBeGreaterThan(previous);
+async function activateAndWaitForJoinedLiveAuthority(page, activate) {
+  const commandResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/command",
+    { timeout: 120_000 },
+  );
+  const presentationResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" &&
+      new URL(response.url()).pathname === "/api/presentation/frame",
+    { timeout: 120_000 },
+  );
+  await activate();
+  expect((await commandResponse).status()).toBe(200);
+  expect((await presentationResponse).status()).toBe(200);
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-presentation-authority",
+    "installed",
+  );
   await expect(page.locator("#connection-status")).toHaveText("Online");
 }
 
@@ -158,9 +212,7 @@ async function selectAuthoritativeValue(page, selector, value) {
   if ((await control.inputValue()) === value) {
     return;
   }
-  const revisionBefore = await currentRevision(page);
-  await control.selectOption(value);
-  await expectRevisionAdvance(page, revisionBefore);
+  await activateAndWaitForJoinedLiveAuthority(page, () => control.selectOption(value));
   await expect(control).toHaveValue(value);
 }
 
@@ -189,17 +241,18 @@ export async function loadLiveVisualCase(
   await page.goto(debuggerUrl);
   await expect(page.locator("#connection-status")).toHaveText("Online");
 
-  const revisionBefore = await currentRevision(page);
-  if ((await page.locator("#scenario-select").inputValue()) === scenario) {
-    await page.getByRole("button", { name: "Reset" }).click();
-  } else {
-    await page.locator("#scenario-select").selectOption(scenario);
-  }
-  await expectRevisionAdvance(page, revisionBefore);
+  await activateAndWaitForJoinedLiveAuthority(page, async () => {
+    if ((await page.locator("#scenario-select").inputValue()) === scenario) {
+      await page.getByRole("button", { name: "Reset" }).click();
+    } else {
+      await page.locator("#scenario-select").selectOption(scenario);
+    }
+  });
   await expect(page.locator("#scenario-select")).toHaveValue(scenario);
   await expect(page.locator("#step-value")).toHaveText("0");
   await expect(page.locator("#transition-value")).toHaveText("—");
   await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(0);
+  await expect(page.locator(CHOREOGRAPHY_CONNECTOR_ROOT)).toHaveCount(0);
   await expect(page.locator(CHOREOGRAPHY_ROUTE_ROOT)).toHaveCount(0);
 
   await selectAuthoritativeValue(page, "#view-select", view);
@@ -228,6 +281,7 @@ export async function advanceScriptTo(page, targetTransition) {
     );
     await expect(page.locator("#step-value")).toHaveText(String(transition));
     await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(1);
+    await expect(page.locator(CHOREOGRAPHY_CONNECTOR_ROOT)).toHaveCount(1);
     await expect(page.locator(CHOREOGRAPHY_ROUTE_ROOT)).toHaveCount(1);
     if (transition === targetTransition) {
       return;
@@ -309,8 +363,6 @@ export async function assertFrameIdentity(page, expected) {
     expected.view === "pov" ? "agent_pov" : "researcher",
   );
   await expect(page.locator("html")).toHaveAttribute("data-preset", expected.preset);
-  const revision = await currentRevision(page);
-  expect(Number.isInteger(revision) && revision >= 0).toBe(true);
 }
 
 /**
@@ -391,55 +443,6 @@ export async function expectActivationPairs(page, expected) {
 }
 
 /**
- * Prove the event feed and every rendered effect use unique IDs from the
- * current authoritative batch.
- *
- * @param {import("@playwright/test").Page} page
- * @param {number} expectedCount
- */
-export async function assertCurrentEventIds(page, expectedCount) {
-  await expect(page.locator("#event-count")).toHaveText(String(expectedCount));
-  const feedIds = await page
-    .locator("#event-feed [data-event-id]")
-    .evaluateAll((items) => items.map((item) => item.getAttribute("data-event-id")));
-  expect(feedIds).not.toContain(null);
-  expect(feedIds).toHaveLength(expectedCount);
-  expect(new Set(feedIds).size).toBe(feedIds.length);
-
-  const feedIdSet = new Set(feedIds);
-  const renderedIds =
-    (await page.locator(CHOREOGRAPHY_ROOT).count()) === 0
-      ? []
-      : [
-          ...(await choreographySnapshot(page)).effectIds,
-          ...(await choreographySnapshot(page)).routeEffectIds,
-        ];
-  expect(renderedIds).not.toContain(null);
-  for (const eventId of renderedIds) {
-    expect(feedIdSet.has(eventId)).toBe(true);
-  }
-}
-
-/**
- * @param {import("@playwright/test").Page} page
- * @param {{pending: string, accepted: string}} expected
- */
-export async function assertHudStoryLabels(page, expected) {
-  await expect(page.locator("#pending-card .action-card__label")).toHaveText(
-    expected.pending,
-  );
-  if (expected.accepted === "No transition yet.") {
-    await expect(page.locator("#accepted-card .empty-copy")).toHaveText(
-      expected.accepted,
-    );
-  } else {
-    await expect(page.locator("#accepted-card .action-card__label")).toHaveText(
-      expected.accepted,
-    );
-  }
-}
-
-/**
  * Every durable dock that survived the deterministic suppression policy must
  * explicitly report collision-free placement.
  *
@@ -479,7 +482,10 @@ export async function waitForStablePresentation(page) {
       hud.scrollTop = 0;
       hud.scrollLeft = 0;
     }
-    if (document.activeElement instanceof HTMLElement) {
+    if (
+      document.activeElement instanceof HTMLElement ||
+      document.activeElement instanceof SVGElement
+    ) {
       document.activeElement.blur();
     }
 
@@ -817,12 +823,19 @@ export async function assertTransientNumberLayout(page, expectedCount) {
         }
       }
 
-      const effectGroup = battlefield.querySelector(
-        `.combat-effect--net-health[data-event-id="${CSS.escape(record.eventId)}"]`,
+      const connectorGroup = battlefield.querySelector(
+        `.combat-connector-effect--net-health[data-event-id="${CSS.escape(record.eventId)}"]`,
       );
-      const leader = effectGroup?.querySelector(".combat-cue__leader");
-      if (leader && getComputedStyle(leader).visibility !== "hidden") {
-        if (leader.closest(".combat-effect--net-health") !== effectGroup) {
+      const leader = connectorGroup?.querySelector(".combat-cue__leader");
+      if (!leader || getComputedStyle(leader).visibility === "hidden") {
+        violations.push({
+          eventId: record.eventId,
+          recipientSlot: record.recipientSlot,
+          protectedSelector: ".combat-cue__leader",
+          reason: "NET text has no visible event-owned connector",
+        });
+      } else {
+        if (leader.closest(".combat-connector-effect--net-health") !== connectorGroup) {
           violations.push({
             eventId: record.eventId,
             recipientSlot: record.recipientSlot,
@@ -843,6 +856,15 @@ export async function assertTransientNumberLayout(page, expectedCount) {
             recipientSlot: record.recipientSlot,
             protectedSelector: ".combat-cue__leader",
             reason: "Visible NET leader has non-finite endpoints",
+          });
+        }
+        const points = JSON.parse(leader.getAttribute("data-leader-points") ?? "[]");
+        if (leader.localName !== "line" || points.length !== 2) {
+          violations.push({
+            eventId: record.eventId,
+            recipientSlot: record.recipientSlot,
+            protectedSelector: ".combat-cue__leader",
+            reason: "NET connector is not one straight two-point line",
           });
         }
       }
@@ -945,7 +967,7 @@ export async function assertVisibleDecimalPrecision(page) {
  *   expectedTransientCount: number,
  *   expectedSuppressedLifecycleCount?: number,
  *   expectedSuppressedLifecycleIds?: string[] | null,
- *   logicalMs?: number,
+ *   eventWindow?: {eventType: string, part?: "auto" | "group" | "route", progress?: number},
  *   settle?: boolean,
  *   afterSettle?: () => Promise<void>,
  * }} options
@@ -958,15 +980,16 @@ export async function assertStablePresentationFrame(
     expectedTransientCount,
     expectedSuppressedLifecycleCount = 0,
     expectedSuppressedLifecycleIds = null,
-    logicalMs,
+    eventWindow,
     settle = false,
     afterSettle,
   },
 ) {
   const commandCountBeforePresentation = commandPosts.count();
-  if (logicalMs !== undefined) {
+  if (eventWindow !== undefined) {
     await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(1);
-    await pauseAtLogicalTime(page, logicalMs);
+    await expect(page.locator(CHOREOGRAPHY_CONNECTOR_ROOT)).toHaveCount(1);
+    await pauseInsideEventWindow(page, eventWindow.eventType, eventWindow);
   } else if (settle) {
     const skip = page.locator("#motion-skip-button");
     await expect(skip).toBeEnabled();
@@ -994,8 +1017,6 @@ export async function assertStablePresentationFrame(
     lifecycleIds: expectedSuppressedLifecycleIds,
   });
   await assertVisibleDecimalPrecision(page);
-  const revision = await currentRevision(page);
-  expect(Number.isInteger(revision) && revision >= 0).toBe(true);
   return commandCountBeforePresentation;
 }
 

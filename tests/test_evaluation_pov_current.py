@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 from pydantic import ValidationError
 from tests.evaluation_fixtures import (
@@ -16,7 +18,9 @@ from marl_battlegrounds.evaluation.actor_projection import (
 )
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.pov import (
+    ActorPovAdjacentTransitionSliceV1,
     ActorPovCurrentSliceV1,
+    build_actor_pov_adjacent_transition_slice_v1,
     build_actor_pov_current_slice_v1,
     slice_actor_pov_current_frame_v1,
     slice_actor_pov_current_transition_v1,
@@ -34,6 +38,18 @@ def _view(trajectory: CapturedEvaluationTrajectory) -> EvaluationTransitionViewV
         start_frame=trajectory.frames[0],
         transition=trajectory.transitions[0],
         successor_frame=trajectory.frames[1],
+    )
+
+
+def _view_at(
+    trajectory: CapturedEvaluationTrajectory,
+    transition_index: int,
+) -> EvaluationTransitionViewV1:
+    return EvaluationTransitionViewV1(
+        context=trajectory.context,
+        start_frame=trajectory.frames[transition_index],
+        transition=trajectory.transitions[transition_index],
+        successor_frame=trajectory.frames[transition_index + 1],
     )
 
 
@@ -181,18 +197,29 @@ def test_current_slice_fails_closed_for_shared_obs_and_inactive_actor() -> None:
         )
 
 
-def test_current_slice_v1_rejects_actor_projection_v2(
+def test_live_pov_v1_factories_reject_actor_projection_v2(
     trajectory: CapturedEvaluationTrajectory,
 ) -> None:
     """POV V1 must not claim exact materialization of the newer actor input."""
     projection_v2_context = trajectory.context.model_copy(
         update={"actor_projection": NO_SHARED_OBS_ACTOR_PROJECTION_V2}
     )
+    projection_v2_view = EvaluationTransitionViewV1(
+        context=projection_v2_context,
+        start_frame=trajectory.frames[0],
+        transition=trajectory.transitions[0],
+        successor_frame=trajectory.frames[1],
+    )
 
     with pytest.raises(ValueError, match="projection version 1"):
         build_actor_pov_current_slice_v1(
             projection_v2_context,
             trajectory.frames[0],
+            global_slot=0,
+        )
+    with pytest.raises(ValueError, match="projection version 1"):
+        build_actor_pov_adjacent_transition_slice_v1(
+            projection_v2_view,
             global_slot=0,
         )
 
@@ -252,3 +279,183 @@ def test_current_slice_root_is_strict_and_versioned(
     }
     with pytest.raises(ValidationError):
         ActorPovCurrentSliceV1.model_validate(listed)
+
+
+def test_adjacent_slice_round_trips_one_nonzero_coherent_transition() -> None:
+    trajectory = captured_evaluation_trajectory(transition_count=2)
+    view = _view_at(trajectory, 1)
+    source_before = (
+        view.context.model_dump_json(),
+        view.start_frame.model_dump_json(),
+        view.transition.model_dump_json(),
+        view.successor_frame.model_dump_json(),
+    )
+    carrier = build_actor_pov_adjacent_transition_slice_v1(view, global_slot=0)
+
+    assert carrier.start_frame.frame_index == 1
+    assert carrier.transition.transition_index == 1
+    assert carrier.successor_frame.frame_index == 2
+    assert carrier.successor_frame.simulator_step_count == (
+        carrier.start_frame.simulator_step_count + 1
+    )
+    assert (
+        carrier.start_frame.self_features
+        == (trajectory.frames[1].base_observation.self_features[0])
+    )
+    assert (
+        carrier.successor_frame.self_features
+        == (trajectory.frames[2].base_observation.self_features[0])
+    )
+    assert (
+        ActorPovAdjacentTransitionSliceV1.model_validate_json(carrier.model_dump_json())
+        == carrier
+    )
+    assert set(type(carrier).model_fields).isdisjoint(
+        {"events", "status_source_evidence", "source_transition"}
+    )
+    assert source_before == (
+        view.context.model_dump_json(),
+        view.start_frame.model_dump_json(),
+        view.transition.model_dump_json(),
+        view.successor_frame.model_dump_json(),
+    )
+
+
+def test_adjacent_factory_requires_exact_no_shared_coherent_view() -> None:
+    trajectory = captured_evaluation_trajectory(transition_count=1)
+    view = _view(trajectory)
+    with pytest.raises(TypeError, match="exact EvaluationTransitionViewV1"):
+        build_actor_pov_adjacent_transition_slice_v1(
+            cast(EvaluationTransitionViewV1, object()),
+            global_slot=0,
+        )
+    for invalid_slot in (-1, 3, 10, True):
+        with pytest.raises(ValueError):
+            build_actor_pov_adjacent_transition_slice_v1(
+                view,
+                global_slot=invalid_slot,  # type: ignore[arg-type]
+            )
+
+    shared = captured_evaluation_trajectory(
+        transition_count=1,
+        execution_information_mode="shared_obs",
+    )
+    with pytest.raises(ValueError, match="unavailable for shared_obs"):
+        build_actor_pov_adjacent_transition_slice_v1(
+            _view(shared),
+            global_slot=0,
+        )
+
+    other = captured_evaluation_trajectory(
+        transition_count=1,
+        episode_id="other-episode",
+    )
+    mismatched = object.__new__(EvaluationTransitionViewV1)
+    object.__setattr__(mismatched, "context", other.context)
+    object.__setattr__(mismatched, "start_frame", view.start_frame)
+    object.__setattr__(mismatched, "transition", view.transition)
+    object.__setattr__(mismatched, "successor_frame", view.successor_frame)
+    with pytest.raises(ValueError):
+        build_actor_pov_adjacent_transition_slice_v1(
+            mismatched,
+            global_slot=0,
+        )
+
+
+def test_adjacent_slice_rejects_identity_epoch_tick_axis_and_topology_poison() -> None:
+    trajectory = captured_evaluation_trajectory(transition_count=2)
+    carrier = build_actor_pov_adjacent_transition_slice_v1(
+        _view_at(trajectory, 1),
+        global_slot=0,
+    )
+
+    poisons: list[dict[str, object]] = []
+
+    recipient = carrier.model_dump(mode="python")
+    recipient["public_agent_id"] = "different-recipient"
+    poisons.append(recipient)
+
+    local_slot = carrier.model_dump(mode="python")
+    local_slot["selected_team_local_slot"] = 1
+    poisons.append(local_slot)
+
+    wrong_index = carrier.model_dump(mode="python")
+    transition = dict(wrong_index["transition"])  # type: ignore[arg-type]
+    transition["transition_index"] = 0
+    wrong_index["transition"] = transition
+    poisons.append(wrong_index)
+
+    wrong_id = carrier.model_dump(mode="python")
+    start = dict(wrong_id["start_frame"])  # type: ignore[arg-type]
+    start["pov_frame_id"] = "episode-001:actor-pov:agent-slot-0:frame:0"
+    wrong_id["start_frame"] = start
+    poisons.append(wrong_id)
+
+    wrong_tick = carrier.model_dump(mode="python")
+    successor = dict(wrong_tick["successor_frame"])  # type: ignore[arg-type]
+    successor["simulator_step_count"] = carrier.start_frame.simulator_step_count + 2
+    wrong_tick["successor_frame"] = successor
+    poisons.append(wrong_tick)
+
+    wrong_axis = carrier.model_dump(mode="python")
+    axis = dict(wrong_axis["axis_mapping"])  # type: ignore[arg-type]
+    allies = list(axis["ally_observation_row_public_agent_id_by_id"])  # type: ignore[arg-type]
+    allies[0], allies[1] = allies[1], allies[0]
+    axis["ally_observation_row_public_agent_id_by_id"] = tuple(allies)
+    axis["target_action_recipient_public_agent_id_by_id"] = (
+        None,
+        *allies,
+        *axis["enemy_observation_row_public_agent_id_by_id"],  # type: ignore[misc]
+    )
+    wrong_axis["axis_mapping"] = axis
+    poisons.append(wrong_axis)
+
+    wrong_lifecycle = carrier.model_dump(mode="python")
+    successor = dict(wrong_lifecycle["successor_frame"])  # type: ignore[arg-type]
+    lifecycle = dict(successor["spawn_lifecycle"])  # type: ignore[arg-type]
+    alive = [list(row) for row in lifecycle["alive_mask_by_team"]]  # type: ignore[arg-type]
+    alive[0][0] = not alive[0][0]
+    lifecycle["alive_mask_by_team"] = tuple(tuple(row) for row in alive)
+    successor["spawn_lifecycle"] = lifecycle
+    wrong_lifecycle["successor_frame"] = successor
+    poisons.append(wrong_lifecycle)
+
+    wrong_visible_self = carrier.model_dump(mode="python")
+    start = dict(wrong_visible_self["start_frame"])  # type: ignore[arg-type]
+    ally_rows = list(start["ally_unit_features"])  # type: ignore[arg-type]
+    visible_self = list(ally_rows[0])  # type: ignore[arg-type]
+    visible_self[0] = visible_self[0] + 0.25
+    ally_rows[0] = tuple(visible_self)
+    start["ally_unit_features"] = tuple(ally_rows)
+    wrong_visible_self["start_frame"] = start
+    poisons.append(wrong_visible_self)
+
+    wrong_cues = carrier.model_dump(mode="python")
+    transition = dict(wrong_cues["transition"])  # type: ignore[arg-type]
+    cues = list(transition["cues"])  # type: ignore[arg-type]
+    outcome = dict(cues[0])  # type: ignore[arg-type]
+    outcome["outcome"] = "rejected" if outcome["outcome"] == "accepted" else "accepted"
+    cues[0] = outcome
+    transition["cues"] = tuple(cues)
+    wrong_cues["transition"] = transition
+    poisons.append(wrong_cues)
+
+    for poisoned in poisons:
+        with pytest.raises(ValidationError):
+            ActorPovAdjacentTransitionSliceV1.model_validate(poisoned)
+
+
+def test_adjacent_rendering_seam_revalidates_model_constructed_roots() -> None:
+    trajectory = captured_evaluation_trajectory(transition_count=1)
+    carrier = build_actor_pov_adjacent_transition_slice_v1(
+        _view(trajectory),
+        global_slot=0,
+    )
+    forged = carrier.model_copy(
+        update={"selected_team_local_slot": 1},
+    )
+    assert forged.selected_team_local_slot == 1
+    with pytest.raises(ValidationError):
+        ActorPovAdjacentTransitionSliceV1.model_validate(
+            forged.model_dump(mode="python")
+        )

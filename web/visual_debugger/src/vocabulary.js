@@ -114,9 +114,18 @@ const TEAM_TOKENS = Object.freeze({
 });
 
 const STATUS_TOKENS = Object.freeze({
+  in_combat: token({
+    tokenId: "in_combat",
+    label: "In Combat",
+    shortLabel: "COMBAT",
+    accessibleName: "In Combat",
+    glyphKey: "combat-in-progress",
+    cssKey: "in-combat",
+    fallback: "C",
+  }),
   stun_warrior_charge: token({
     tokenId: "stun_warrior_charge",
-    label: "Charge stun",
+    label: "Charge Stun",
     shortLabel: "C-STN",
     accessibleName: "Warrior Charge stun",
     glyphKey: "status-stun",
@@ -125,25 +134,25 @@ const STATUS_TOKENS = Object.freeze({
   }),
   stun_hunter_trap: token({
     tokenId: "stun_hunter_trap",
-    label: "Trap",
-    shortLabel: "TRAP",
-    accessibleName: "Hunter Trap stun",
+    label: "Freezing Trap",
+    shortLabel: "FREEZE",
+    accessibleName: "Hunter Freezing Trap stun",
     glyphKey: "status-stun",
     cssKey: "stun-hunter-trap",
     fallback: "T",
   }),
   stun_rogue_poison: token({
     tokenId: "stun_rogue_poison",
-    label: "Poison stun",
+    label: "Crippling Poison Stun",
     shortLabel: "P-STN",
-    accessibleName: "Rogue Poison stun",
+    accessibleName: "Rogue Crippling Poison stun",
     glyphKey: "status-stun",
     cssKey: "stun-rogue-poison",
     fallback: "PS",
   }),
   slow_warrior_charge: token({
     tokenId: "slow_warrior_charge",
-    label: "Charge slow",
+    label: "Charge Slow",
     shortLabel: "C-SLW",
     accessibleName: "Warrior Charge slow",
     glyphKey: "status-slow",
@@ -152,7 +161,7 @@ const STATUS_TOKENS = Object.freeze({
   }),
   slow_hunter_basic: token({
     tokenId: "slow_hunter_basic",
-    label: "Hunter slow",
+    label: "Hunter Slow",
     shortLabel: "H-SLW",
     accessibleName: "Hunter Basic slow",
     glyphKey: "status-slow",
@@ -161,9 +170,9 @@ const STATUS_TOKENS = Object.freeze({
   }),
   slow_rogue_poison: token({
     tokenId: "slow_rogue_poison",
-    label: "Poison slow",
+    label: "Crippling Poison Slow",
     shortLabel: "P-SLW",
-    accessibleName: "Rogue Poison slow",
+    accessibleName: "Rogue Crippling Poison slow",
     glyphKey: "status-slow",
     cssKey: "slow-rogue-poison",
     fallback: "PS",
@@ -172,7 +181,7 @@ const STATUS_TOKENS = Object.freeze({
     tokenId: "anti_heal_rogue_poison",
     label: "Anti-Heal",
     shortLabel: "ANTI",
-    accessibleName: "Rogue Poison Anti-Heal",
+    accessibleName: "Rogue Crippling Poison Anti-Heal",
     glyphKey: "status-anti-heal",
     cssKey: "anti-heal-rogue-poison",
     fallback: "AH",
@@ -200,34 +209,34 @@ const STATUS_TOKENS = Object.freeze({
 const ACTIVATION_TOKENS = Object.freeze({
   basic_damage: token({
     tokenId: "basic_damage",
-    label: "Basic damage",
+    label: "Basic Damage",
     shortLabel: "Basic",
-    accessibleName: "Accepted Basic damage activation",
+    accessibleName: "Accepted Basic Damage activation",
     glyphKey: "activation-basic-damage",
     cssKey: "basic-damage",
     fallback: "B",
   }),
   basic_heal: token({
     tokenId: "basic_heal",
-    label: "Basic healing",
+    label: "Basic Healing",
     shortLabel: "Basic",
-    accessibleName: "Accepted Priest Basic healing activation",
+    accessibleName: "Accepted Priest Basic Healing activation",
     glyphKey: "activation-basic-heal",
     cssKey: "basic-heal",
     fallback: "B",
   }),
   holy_word: token({
     tokenId: "holy_word",
-    label: "Holy Word",
-    shortLabel: "Holy",
-    accessibleName: "Accepted Priest Holy Word activation",
+    label: "Holy Word: Salvation",
+    shortLabel: "Salvation",
+    accessibleName: "Accepted Priest Holy Word: Salvation activation",
     glyphKey: "activation-holy-word",
     cssKey: "holy-word",
     fallback: "U",
   }),
   mage_burst: token({
     tokenId: "mage_burst",
-    label: "Burst activation",
+    label: "Burst",
     shortLabel: "Burst",
     accessibleName: "Accepted Mage Burst activation",
     glyphKey: "activation-burst",
@@ -245,18 +254,18 @@ const ACTIVATION_TOKENS = Object.freeze({
   }),
   hunter_trap: token({
     tokenId: "hunter_trap",
-    label: "Trap activation",
-    shortLabel: "Trap",
-    accessibleName: "Accepted Hunter Trap activation",
+    label: "Freezing Trap",
+    shortLabel: "Freezing Trap",
+    accessibleName: "Accepted Hunter Freezing Trap activation",
     glyphKey: "activation-trap",
     cssKey: "hunter-trap",
     fallback: "U",
   }),
   rogue_poison: token({
     tokenId: "rogue_poison",
-    label: "Poison",
-    shortLabel: "Poison",
-    accessibleName: "Accepted Rogue Poison activation",
+    label: "Crippling Poison",
+    shortLabel: "Crippling Poison",
+    accessibleName: "Accepted Rogue Crippling Poison activation",
     glyphKey: "activation-poison",
     cssKey: "rogue-poison",
     fallback: "U",
@@ -266,34 +275,34 @@ const ACTIVATION_TOKENS = Object.freeze({
 const MODIFIER_TOKENS = Object.freeze({
   mage_amplification: token({
     tokenId: "mage_amplification",
-    label: "Mage aura amplification",
+    label: "Sorcerer’s Empowerment",
     shortLabel: "AMP",
-    accessibleName: "Effective Mage damage amplification aura modifier",
+    accessibleName: "Sorcerer’s Empowerment damage amplification modifier",
     glyphKey: "modifier-amplification",
     cssKey: "mage-amplification",
     fallback: "AMP",
   }),
   warrior_mitigation: token({
     tokenId: "warrior_mitigation",
-    label: "Warrior aura mitigation",
+    label: "Guardian’s Barrier",
     shortLabel: "MIT",
-    accessibleName: "Effective Warrior damage mitigation aura modifier",
+    accessibleName: "Guardian’s Barrier damage mitigation modifier",
     glyphKey: "modifier-mitigation",
     cssKey: "warrior-mitigation",
     fallback: "MIT",
   }),
   rogue_anti_heal: token({
     tokenId: "rogue_anti_heal",
-    label: "Anti-Heal modifier",
+    label: "Crippling Poison Anti-Heal",
     shortLabel: "ANTI",
-    accessibleName: "Effective Rogue Poison Anti-Heal modifier",
+    accessibleName: "Effective Rogue Crippling Poison Anti-Heal modifier",
     glyphKey: "status-anti-heal",
     cssKey: "rogue-anti-heal",
     fallback: "AH",
   }),
   priest_freedom: token({
     tokenId: "priest_freedom",
-    label: "Freedom speed floor",
+    label: "Freedom Speed Floor",
     shortLabel: "FREE",
     accessibleName: "Effective Priest Freedom movement-speed floor",
     glyphKey: "status-freedom",
@@ -302,7 +311,7 @@ const MODIFIER_TOKENS = Object.freeze({
   }),
   mage_burst: token({
     tokenId: "mage_burst",
-    label: "Burst amplification",
+    label: "Burst Amplification",
     shortLabel: "BURST",
     accessibleName: "Effective Mage Burst damage amplification modifier",
     glyphKey: "status-burst",
@@ -315,7 +324,7 @@ const LIFECYCLE_TOKENS = Object.freeze({
   applied: token({
     tokenId: "applied",
     label: "Applied",
-    shortLabel: "Apply",
+    shortLabel: "Applied",
     accessibleName: "Status applied",
     glyphKey: "lifecycle-applied",
     cssKey: "applied",
@@ -324,8 +333,8 @@ const LIFECYCLE_TOKENS = Object.freeze({
   refreshed: token({
     tokenId: "refreshed",
     label: "Refreshed",
-    shortLabel: "Refresh",
-    accessibleName: "Status refreshed or reapplied",
+    shortLabel: "Refreshed",
+    accessibleName: "Status refreshed or extended",
     glyphKey: "lifecycle-refreshed",
     cssKey: "refreshed",
     fallback: "R",
@@ -342,7 +351,7 @@ const LIFECYCLE_TOKENS = Object.freeze({
   expired: token({
     tokenId: "expired",
     label: "Expired",
-    shortLabel: "Expire",
+    shortLabel: "Expired",
     accessibleName: "Status expired naturally",
     glyphKey: "lifecycle-expired",
     cssKey: "expired",
@@ -350,17 +359,17 @@ const LIFECYCLE_TOKENS = Object.freeze({
   }),
   trap_broken: token({
     tokenId: "trap_broken",
-    label: "Trap broken",
+    label: "Broken",
     shortLabel: "Break",
-    accessibleName: "Hunter Trap ended by accepted damage",
+    accessibleName: "Freezing Trap ended by accepted damage",
     glyphKey: "lifecycle-trap-broken",
     cssKey: "trap-broken",
     fallback: "X",
   }),
   cleared_by_death: token({
     tokenId: "cleared_by_death",
-    label: "Cleared by death",
-    shortLabel: "Death clear",
+    label: "Cleared On Death",
+    shortLabel: "Death Clear",
     accessibleName: "Status cleared by the recipient's recorded new death",
     glyphKey: "lifecycle-death-clear",
     cssKey: "cleared-by-death",
@@ -368,7 +377,7 @@ const LIFECYCLE_TOKENS = Object.freeze({
   }),
   cleared_unclassified: token({
     tokenId: "cleared_unclassified",
-    label: "Status ended",
+    label: "Status Ended",
     shortLabel: "End",
     accessibleName: "Status ended for an unclassified or ambiguous reason",
     glyphKey: "lifecycle-ended",
@@ -377,12 +386,21 @@ const LIFECYCLE_TOKENS = Object.freeze({
   }),
   trap_broken_and_reapplied: token({
     tokenId: "trap_broken_and_reapplied",
-    label: "Trap broken and reapplied",
+    label: "Broken, Then Reapplied",
     shortLabel: "Break+",
-    accessibleName: "Hunter Trap was broken and exactly reapplied",
+    accessibleName: "Freezing Trap was broken, then reapplied",
     glyphKey: "lifecycle-trap-broken-reapplied",
     cssKey: "trap-broken-and-reapplied",
     fallback: "X+",
+  }),
+  reapplied: token({
+    tokenId: "reapplied",
+    label: "Reapplied",
+    shortLabel: "Reapplied",
+    accessibleName: "Status reapplied",
+    glyphKey: "lifecycle-applied",
+    cssKey: "reapplied",
+    fallback: "+",
   }),
 });
 
@@ -402,6 +420,16 @@ const STATUS_TOKEN_BY_CATALOG_ID = Object.freeze({
   rogue_poison_anti_heal: "anti_heal_rogue_poison",
   mage_burst_damage_amplification: "mage_burst",
   priest_blessing_of_freedom_movement_floor: "priest_freedom",
+});
+
+/**
+ * Authorized aura IDs retain their catalog identity on the wire. Translate
+ * only at the display-vocabulary boundary, just like catalog status IDs.
+ */
+/** @type {Readonly<Record<string, string>>} */
+const MODIFIER_TOKEN_BY_CATALOG_AURA_ID = Object.freeze({
+  mage_damage_amplification: "mage_amplification",
+  warrior_damage_mitigation: "warrior_mitigation",
 });
 
 export const CLASS_TOKEN_IDS = Object.freeze([
@@ -453,6 +481,7 @@ export const LIFECYCLE_TOKEN_IDS = Object.freeze([
   "cleared_by_death",
   "cleared_unclassified",
   "trap_broken_and_reapplied",
+  "reapplied",
 ]);
 
 export const CATALOG_STATUS_IDS = Object.freeze(
@@ -599,7 +628,9 @@ export function resolveVisualToken(kind, tokenId, payload) {
   const normalized =
     kind === "status" && Object.hasOwn(STATUS_TOKEN_BY_CATALOG_ID, wireId)
       ? STATUS_TOKEN_BY_CATALOG_ID[wireId]
-      : wireId;
+      : kind === "modifier" && Object.hasOwn(MODIFIER_TOKEN_BY_CATALOG_AURA_ID, wireId)
+        ? MODIFIER_TOKEN_BY_CATALOG_AURA_ID[wireId]
+        : wireId;
   const registry = TOKEN_REGISTRIES[kind];
   const definition = Object.hasOwn(registry, normalized)
     ? registry[normalized]

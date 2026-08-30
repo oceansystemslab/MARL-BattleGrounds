@@ -2,6 +2,8 @@ import { expect } from "@playwright/test";
 
 export const CHOREOGRAPHY_ROOT =
   '#battlefield [data-layer="transient-events"] > .combat-choreography';
+export const CHOREOGRAPHY_CONNECTOR_ROOT =
+  '#battlefield [data-layer="transient-route"] > .combat-choreography-connectors';
 export const CHOREOGRAPHY_ROUTE_ROOT =
   '#battlefield [data-layer="transient-route"] > .combat-choreography-routes';
 
@@ -16,7 +18,11 @@ export async function installWaapiAutopause(page) {
     const nativeAnimate = Element.prototype.animate;
     Element.prototype.animate = function animateAndPause(keyframes, options) {
       const animation = nativeAnimate.call(this, keyframes, options);
-      if (this.closest(".combat-choreography, .combat-choreography-routes")) {
+      if (
+        this.closest(
+          ".combat-choreography, .combat-choreography-connectors, .combat-choreography-routes",
+        )
+      ) {
         animation.pause();
       }
       return animation;
@@ -33,9 +39,11 @@ export async function installWaapiAutopause(page) {
  */
 export async function pauseAtLogicalTime(page, logicalMs) {
   const root = page.locator(CHOREOGRAPHY_ROOT);
+  const connectorRoot = page.locator(CHOREOGRAPHY_CONNECTOR_ROOT);
   const routeRoot = page.locator(CHOREOGRAPHY_ROUTE_ROOT);
   await Promise.all([
     root.waitFor({ state: "attached" }),
+    connectorRoot.waitFor({ state: "attached" }),
     routeRoot.waitFor({ state: "attached" }),
   ]);
   if ((await page.locator("html").getAttribute("data-motion-paused")) !== "true") {
@@ -65,6 +73,122 @@ export async function pauseAtLogicalTime(page, logicalMs) {
       }
     }
   }, logicalMs);
+}
+
+/**
+ * Resolve one readable event-owned animation window. Some event rows are
+ * intentionally durable-only and therefore own no transient animation. Walk
+ * the rendered rows in DOM order and select the first row with the requested
+ * animation part instead of assuming the first row is animated.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {{eventType?: string, part: "auto" | "group" | "route", progress: number}} request
+ */
+async function resolveReadableEventWindow(page, request) {
+  const root = page.locator(CHOREOGRAPHY_ROOT);
+  await root.waitFor({ state: "attached" });
+  return root.evaluate((element, requested) => {
+    const battlefield = element.closest("svg");
+    const epochKey = element.getAttribute("data-epoch-key");
+    if (!battlefield || !epochKey) {
+      throw new Error("Event animation authority is unavailable.");
+    }
+
+    const parts = requested.part === "auto" ? ["group", "route"] : [requested.part];
+    const animations = battlefield.getAnimations({ subtree: true });
+    const effects = [
+      ...element.querySelectorAll(".combat-effect[data-event-type][data-event-id]"),
+    ].filter(
+      (effect) =>
+        requested.eventType === undefined ||
+        effect.getAttribute("data-event-type") === requested.eventType,
+    );
+
+    for (const effect of effects) {
+      const eventId = effect.getAttribute("data-event-id");
+      const eventType = effect.getAttribute("data-event-type");
+      if (!eventId || !eventType) {
+        continue;
+      }
+      for (const part of parts) {
+        const expectedId = `mbg:${epochKey}:${eventId}:${part}`;
+        const animation = animations.find(({ id }) => id === expectedId);
+        const timing = animation?.effect?.getTiming();
+        const delay = Number(timing?.delay);
+        const duration = Number(timing?.duration);
+        if (Number.isFinite(delay) && duration > 0) {
+          return {
+            eventId,
+            eventType,
+            logicalMs: delay + duration * requested.progress,
+            part,
+          };
+        }
+      }
+    }
+
+    const eventDescription =
+      requested.eventType === undefined
+        ? "any rendered event"
+        : `event type ${requested.eventType}`;
+    throw new Error(
+      `Missing readable ${parts.join(" or ")} animation window for ${eventDescription}.`,
+    );
+  }, request);
+}
+
+/**
+ * Seek inside the installed animation for one exact event family. Dynamic
+ * choreography omits absent families, so browser proofs derive their sample
+ * point from the authored WAAPI window instead of duplicating one static
+ * transition schedule.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {string} eventType
+ * @param {{part?: "auto" | "group" | "route", progress?: number}} [options]
+ */
+export async function pauseInsideEventWindow(
+  page,
+  eventType,
+  { part = "auto", progress = 0.5 } = {},
+) {
+  if (typeof eventType !== "string" || eventType.length === 0) {
+    throw new TypeError("eventType must be a non-empty string.");
+  }
+  if (!new Set(["auto", "group", "route"]).has(part)) {
+    throw new TypeError("part must be auto, group, or route.");
+  }
+  if (!(typeof progress === "number" && progress > 0 && progress < 1)) {
+    throw new RangeError("progress must lie strictly between zero and one.");
+  }
+  const resolved = await resolveReadableEventWindow(page, {
+    eventType,
+    part,
+    progress,
+  });
+  await pauseAtLogicalTime(page, resolved.logicalMs);
+  return resolved.logicalMs;
+}
+
+/**
+ * Seek the first rendered event that owns a readable animation window.
+ *
+ * @param {import("@playwright/test").Page} page
+ * @param {{part?: "auto" | "group" | "route", progress?: number}} [options]
+ */
+export async function pauseInsideFirstEventWindow(
+  page,
+  { part = "auto", progress = 0.5 } = {},
+) {
+  if (!new Set(["auto", "group", "route"]).has(part)) {
+    throw new TypeError("part must be auto, group, or route.");
+  }
+  if (!(typeof progress === "number" && progress > 0 && progress < 1)) {
+    throw new RangeError("progress must lie strictly between zero and one.");
+  }
+  const resolved = await resolveReadableEventWindow(page, { part, progress });
+  await pauseAtLogicalTime(page, resolved.logicalMs);
+  return resolved.logicalMs;
 }
 
 /**
@@ -104,6 +228,13 @@ export async function choreographySnapshot(page) {
     effectIds: [...root.querySelectorAll(".combat-effect")].map((effect) =>
       effect.getAttribute("data-event-id"),
     ),
+    connectorEffectIds: [
+      ...(root
+        .closest("svg")
+        ?.querySelectorAll(
+          '[data-layer="transient-route"] > .combat-choreography-connectors > .combat-connector-effect',
+        ) ?? []),
+    ].map((effect) => effect.getAttribute("data-event-id")),
     routeEffectIds: [
       ...(root
         .closest("svg")
@@ -126,14 +257,21 @@ export async function choreographySnapshot(page) {
  */
 export async function assertBoundedChoreography(page) {
   const roots = page.locator(CHOREOGRAPHY_ROOT);
+  const connectorRoots = page.locator(CHOREOGRAPHY_CONNECTOR_ROOT);
   const routeRoots = page.locator(CHOREOGRAPHY_ROUTE_ROOT);
   await expect(roots).toHaveCount(1);
+  await expect(connectorRoots).toHaveCount(1);
   await expect(routeRoots).toHaveCount(1);
-  const eventCount = Number(await page.locator("#event-count").textContent());
   const snapshot = await choreographySnapshot(page);
   const effectIds = snapshot.effectIds.filter((eventId) => eventId !== null);
   expect(new Set(effectIds).size).toBe(effectIds.length);
-  expect(effectIds.length).toBeLessThanOrEqual(eventCount);
+  expect(snapshot.connectorEffectIds).not.toContain(null);
+  expect(new Set(snapshot.connectorEffectIds).size).toBe(
+    snapshot.connectorEffectIds.length,
+  );
+  for (const connectorEffectId of snapshot.connectorEffectIds) {
+    expect(effectIds).toContain(connectorEffectId);
+  }
   expect(snapshot.routeEffectIds).not.toContain(null);
   expect(new Set(snapshot.routeEffectIds).size).toBe(snapshot.routeEffectIds.length);
   for (const routeEffectId of snapshot.routeEffectIds) {
@@ -146,13 +284,20 @@ export async function assertBoundedChoreography(page) {
       1 +
       (root
         .closest("svg")
+        ?.querySelector(
+          '[data-layer="transient-route"] > .combat-choreography-connectors',
+        )
+        ?.querySelectorAll("*").length ?? 0) +
+      1 +
+      (root
+        .closest("svg")
         ?.querySelector('[data-layer="transient-route"] > .combat-choreography-routes')
         ?.querySelectorAll("*").length ?? 0) +
       1,
   );
-  expect(nodeCount).toBeLessThanOrEqual(Math.min(eventCount * 28 + 2, 512));
+  expect(nodeCount).toBeLessThanOrEqual(Math.min(effectIds.length * 30 + 3, 512));
   expect(snapshot.animationIds.length).toBeLessThanOrEqual(
-    Math.min(effectIds.length * 3 + 2, 512),
+    Math.min(effectIds.length * 4 + 3, 512),
   );
   expect(new Set(snapshot.animationIds.map(({ id }) => id)).size).toBe(
     snapshot.animationIds.length,
@@ -178,7 +323,7 @@ export async function assertTransientSlotsAuthorized(page) {
     const values = [];
     const battlefield = root.closest("svg");
     const elements = battlefield?.querySelectorAll(
-      ".combat-effect, .combat-route-effect",
+      ".combat-effect, .combat-connector-effect, .combat-route-effect",
     );
     for (const element of elements ?? []) {
       for (const name of element.getAttributeNames()) {

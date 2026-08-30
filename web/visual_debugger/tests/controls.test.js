@@ -2,20 +2,52 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  loadRendererFixture,
-  syntheticDebuggerPresentationFrame,
-} from "../e2e/support/renderer-fixture.js";
-import {
+  bindBattlefieldControls,
   commandResponseSchedulesShutdown,
   isDebuggerKey,
-  isPresentationPauseEvent,
   keyboardCommand,
+  presentationRequiresSubmissionSettle,
   recordingCommandDecision,
   recordingReplacementCommand,
   recordingReviewHandoffRequired,
   recordingSaveAsCommand,
   targetSelectionCommand,
 } from "../src/controls.js";
+
+/**
+ * @param {string} key
+ * @param {{repeat?: boolean, ctrlKey?: boolean}} [options]
+ */
+function cancelableKeydown(key, { repeat = false, ctrlKey = false } = {}) {
+  const event = new Event("keydown", { bubbles: true, cancelable: true });
+  Object.defineProperties(event, {
+    key: { value: key },
+    repeat: { value: repeat },
+    shiftKey: { value: false },
+    ctrlKey: { value: ctrlKey },
+    altKey: { value: false },
+    metaKey: { value: false },
+  });
+  return event;
+}
+
+/**
+ * @param {"pointerdown" | "contextmenu"} type
+ * @param {number} [button]
+ */
+function cancelablePointerEvent(type, button = 2) {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperties(event, {
+    button: { value: button },
+    clientX: { value: 10 },
+    clientY: { value: 20 },
+    shiftKey: { value: false },
+    ctrlKey: { value: false },
+    altKey: { value: false },
+    metaKey: { value: false },
+  });
+  return event;
+}
 
 test("keyboardCommand forwards raw key and modifier state without semantics", () => {
   assert.deepEqual(
@@ -35,10 +67,45 @@ test("keyboardCommand forwards raw key and modifier state without semantics", ()
   );
 });
 
+test("Submit settlement covers gated, post-gate active, and paused explanations", () => {
+  assert.equal(
+    presentationRequiresSubmissionSettle({
+      submissionBlocked: true,
+      animationCount: 3,
+      paused: false,
+    }),
+    true,
+  );
+  assert.equal(
+    presentationRequiresSubmissionSettle({
+      submissionBlocked: false,
+      animationCount: 2,
+      paused: false,
+    }),
+    true,
+  );
+  assert.equal(
+    presentationRequiresSubmissionSettle({
+      submissionBlocked: false,
+      animationCount: 2,
+      paused: true,
+    }),
+    true,
+  );
+  assert.equal(
+    presentationRequiresSubmissionSettle({
+      submissionBlocked: false,
+      animationCount: 0,
+      paused: false,
+    }),
+    false,
+  );
+  assert.equal(presentationRequiresSubmissionSettle(null), false);
+});
+
 test("debugger key capture leaves modified browser shortcuts native", () => {
   assert.equal(isDebuggerKey({ key: "r" }), true);
-  assert.equal(isDebuggerKey({ key: "p" }), true);
-  assert.equal(isDebuggerKey({ key: "P", shiftKey: true }), true);
+  assert.equal(isDebuggerKey({ key: "v" }), false);
   assert.equal(isDebuggerKey({ key: "x" }), true);
   assert.equal(isDebuggerKey({ key: "X" }), true);
   assert.equal(isDebuggerKey({ key: "0" }), true);
@@ -48,36 +115,148 @@ test("debugger key capture leaves modified browser shortcuts native", () => {
   assert.equal(isDebuggerKey({ key: "w", metaKey: true }), false);
   assert.equal(isDebuggerKey({ key: "ArrowLeft", altKey: true }), false);
   assert.equal(isDebuggerKey({ key: "F5" }), false);
+  for (const retiredKey of ["n", "N", "[", "]", "p", "P"]) {
+    assert.equal(isDebuggerKey({ key: retiredKey }), false);
+  }
 });
 
-test("presentation pause is edge-triggered and ignores key repeat", () => {
-  assert.equal(isPresentationPauseEvent({ key: "p" }), true);
-  assert.equal(isPresentationPauseEvent({ key: "P", repeat: false }), true);
-  assert.equal(isPresentationPauseEvent({ key: "p", repeat: true }), false);
-  assert.equal(isPresentationPauseEvent({ key: "Enter" }), false);
+test("battlefield-owned commands and accepted fenced input never become browser defaults", () => {
+  const battlefield = new EventTarget();
+  let interactive = false;
+  let ownFencedCommand = true;
+  let ownFencedSpaceDefault = true;
+  /** @type {Record<string, unknown>[]} */
+  const commands = [];
+  /** @type {Record<string, unknown>[]} */
+  const fencedCommands = [];
+  bindBattlefieldControls({
+    battlefield: /** @type {any} */ (battlefield),
+    toWorldPoint: () => null,
+    onCommand: (command) => {
+      commands.push(command);
+    },
+    onHelp: () => {},
+    onReleaseFocus: () => {},
+    isInteractive: () => interactive,
+    onFencedCommand: (command) => {
+      fencedCommands.push(command);
+      return ownFencedCommand;
+    },
+    ownsFencedSpaceDefault: () => ownFencedSpaceDefault,
+  });
+
+  const fencedSpace = cancelableKeydown(" ", { repeat: true });
+  battlefield.dispatchEvent(fencedSpace);
+  assert.equal(fencedSpace.defaultPrevented, true);
+  assert.deepEqual(fencedCommands, [keyboardCommand(" ", { repeat: true })]);
+  assert.deepEqual(commands, []);
+
+  const fencedMovement = cancelableKeydown("w");
+  battlefield.dispatchEvent(fencedMovement);
+  assert.equal(fencedMovement.defaultPrevented, true);
+  assert.deepEqual(fencedCommands, [
+    keyboardCommand(" ", { repeat: true }),
+    keyboardCommand("w"),
+  ]);
+  assert.deepEqual(commands, []);
+
+  const fencedEnter = cancelableKeydown("Enter");
+  battlefield.dispatchEvent(fencedEnter);
+  assert.equal(fencedEnter.defaultPrevented, true);
+  assert.deepEqual(fencedCommands, [
+    keyboardCommand(" ", { repeat: true }),
+    keyboardCommand("w"),
+    keyboardCommand("Enter"),
+  ]);
+  assert.deepEqual(commands, []);
+
+  const fencedRepeatEnter = cancelableKeydown("Enter", { repeat: true });
+  battlefield.dispatchEvent(fencedRepeatEnter);
+  assert.equal(fencedRepeatEnter.defaultPrevented, true);
+  assert.deepEqual(fencedCommands, [
+    keyboardCommand(" ", { repeat: true }),
+    keyboardCommand("w"),
+    keyboardCommand("Enter"),
+    keyboardCommand("Enter", { repeat: true }),
+  ]);
+  assert.deepEqual(commands, []);
+
+  ownFencedCommand = false;
+  const nativeFencedEnter = cancelableKeydown("Enter");
+  battlefield.dispatchEvent(nativeFencedEnter);
+  assert.equal(nativeFencedEnter.defaultPrevented, false);
+  assert.deepEqual(commands, []);
+
+  const ownedFencedSpace = cancelableKeydown(" ");
+  battlefield.dispatchEvent(ownedFencedSpace);
+  assert.equal(ownedFencedSpace.defaultPrevented, true);
+  ownFencedSpaceDefault = false;
+  const nativeFencedSpace = cancelableKeydown(" ");
+  battlefield.dispatchEvent(nativeFencedSpace);
+  assert.equal(nativeFencedSpace.defaultPrevented, false);
+
+  interactive = true;
+  const ownedSpace = cancelableKeydown(" ");
+  battlefield.dispatchEvent(ownedSpace);
+  assert.equal(ownedSpace.defaultPrevented, true);
+  assert.deepEqual(commands, [keyboardCommand(" ")]);
+
+  const modifiedSpace = cancelableKeydown(" ", { ctrlKey: true });
+  battlefield.dispatchEvent(modifiedSpace);
+  assert.equal(modifiedSpace.defaultPrevented, false);
+  assert.deepEqual(commands, [keyboardCommand(" ")]);
 });
 
-test("target selection keeps researcher and actor-POV identity domains separate", () => {
+test("secondary pointer and context-menu events remain native and command-silent", () => {
+  const battlefield = new EventTarget();
+  let projectionCalls = 0;
+  let pointerCalls = 0;
+  /** @type {Record<string, unknown>[]} */
+  const commands = [];
+  bindBattlefieldControls({
+    battlefield: /** @type {any} */ (battlefield),
+    toWorldPoint: () => {
+      projectionCalls += 1;
+      return { world_x: 1, world_y: 2 };
+    },
+    onCommand: (command) => {
+      commands.push(command);
+    },
+    onPointerCommand: () => {
+      pointerCalls += 1;
+    },
+    onHelp: () => {},
+    onReleaseFocus: () => {},
+  });
+
+  const pointerdown = cancelablePointerEvent("pointerdown");
+  const contextmenu = cancelablePointerEvent("contextmenu");
+  assert.equal(battlefield.dispatchEvent(pointerdown), true);
+  assert.equal(battlefield.dispatchEvent(contextmenu), true);
+  assert.equal(pointerdown.defaultPrevented, false);
+  assert.equal(contextmenu.defaultPrevented, false);
+  assert.equal(projectionCalls, 0);
+  assert.equal(pointerCalls, 0);
+  assert.deepEqual(commands, []);
+});
+
+test("target selection uses the same researcher-space command in both live audiences", () => {
   assert.deepEqual(targetSelectionCommand("7"), {
     command_type: "roster_selection",
     role: "target",
     global_slot: 7,
   });
-  assert.deepEqual(targetSelectionCommand("pov-target-action:7", { actorPov: true }), {
-    command_type: "actor_pov_target_action",
-    target_action: 7,
+  assert.deepEqual(targetSelectionCommand(""), {
+    command_type: "keyboard",
+    key: "Escape",
+    shift_key: false,
+    ctrl_key: false,
+    alt_key: false,
+    meta_key: false,
+    repeat: false,
   });
-  const povCommand = targetSelectionCommand("pov-target-action:7", {
-    actorPov: true,
-  });
-  assert.ok(povCommand);
-  assert.equal(Object.hasOwn(povCommand, "global_slot"), false);
-  assert.deepEqual(targetSelectionCommand("pov-target-action:0", { actorPov: true }), {
-    command_type: "actor_pov_target_action",
-    target_action: 0,
-  });
-  assert.equal(targetSelectionCommand("7", { actorPov: true }), null);
   assert.equal(targetSelectionCommand("pov-target-action:7"), null);
+  assert.equal(targetSelectionCommand("10"), null);
 });
 
 function recordingFrame({ lifecycle = "recording", captured = 1 } = {}) {
@@ -93,7 +272,6 @@ function recordingFrame({ lifecycle = "recording", captured = 1 } = {}) {
     scenario: {
       name: "alpha",
       ordinary_movement_distance_scale: 0.5,
-      scenario_default_movement_scale: 1,
     },
     available_scenarios: [{ name: "alpha" }, { name: "bravo" }, { name: "charlie" }],
     recording: {
@@ -114,70 +292,37 @@ function recordingFrame({ lifecycle = "recording", captured = 1 } = {}) {
   };
 }
 
-test("recording restart resolution canonicalizes direct and keyboard replacements", () => {
+test("recording restart resolution retains direct compatibility without scenario keys", () => {
   const frame = recordingFrame();
   assert.deepEqual(recordingReplacementCommand(frame, { command_type: "reset" }), {
     command_type: "reset",
   });
-  assert.deepEqual(recordingReplacementCommand(frame, keyboardCommand("[")), {
-    command_type: "scenario_switch",
-    scenario_name: "charlie",
-  });
-  assert.deepEqual(recordingReplacementCommand(frame, keyboardCommand("]")), {
-    command_type: "scenario_switch",
-    scenario_name: "bravo",
-  });
   assert.deepEqual(
     recordingReplacementCommand(frame, {
-      command_type: "set_movement_scale",
-      movement_scale: null,
+      command_type: "scenario_switch",
+      scenario_name: "bravo",
     }),
-    { command_type: "set_movement_scale", movement_scale: null },
+    {
+      command_type: "scenario_switch",
+      scenario_name: "bravo",
+    },
   );
-  assert.deepEqual(
-    recordingReplacementCommand(frame, {
-      command_type: "set_movement_scale",
-      movement_scale: 0.5,
-    }),
-    null,
-  );
+  assert.equal(recordingReplacementCommand(frame, keyboardCommand("[")), null);
+  assert.equal(recordingReplacementCommand(frame, keyboardCommand("]")), null);
+  assert.equal(recordingReplacementCommand(frame, keyboardCommand("n")), null);
+  assert.deepEqual(recordingReplacementCommand(frame, keyboardCommand("r")), {
+    command_type: "reset",
+  });
   assert.equal(
     recordingReplacementCommand(frame, keyboardCommand("R", { shiftKey: true })),
     null,
   );
-});
-
-test("movement-scale replacement reads exact normalized ScenarioMetadataV1 fields", async () => {
-  const frame = syntheticDebuggerPresentationFrame(
-    await loadRendererFixture("canonical_event_vocabulary"),
-  );
-  const current = frame.scenario.ordinary_movement_distance_scale;
-  const authored = frame.scenario.scenario_default_movement_scale;
-  assert.equal(typeof current, "number");
-  assert.equal(typeof authored, "number");
   assert.equal(
     recordingReplacementCommand(frame, {
-      command_type: "set_movement_scale",
-      movement_scale: current,
+      command_type: "scenario_switch",
+      scenario_name: "missing",
     }),
     null,
-  );
-  assert.equal(
-    recordingReplacementCommand(frame, {
-      command_type: "set_movement_scale",
-      movement_scale: null,
-    }),
-    current === authored
-      ? null
-      : { command_type: "set_movement_scale", movement_scale: null },
-  );
-  const changed = current === 0.1 ? 0.2 : 0.1;
-  assert.deepEqual(
-    recordingReplacementCommand(frame, {
-      command_type: "set_movement_scale",
-      movement_scale: changed,
-    }),
-    { command_type: "set_movement_scale", movement_scale: changed },
   );
 });
 

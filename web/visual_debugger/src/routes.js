@@ -15,6 +15,7 @@ const DEFAULT_ROUTE_MARKER_PADDING = 14;
  *   localArcPadding?: number,
  *   viewportBounds?: RouteViewportBounds,
  *   routeMarkerPadding?: number,
+ *   markerProgress?: number,
  * }} RouteLayoutOptions
  * @typedef {{
  *   eventId: string,
@@ -38,6 +39,7 @@ const DEFAULT_ROUTE_MARKER_PADDING = 14;
  *   offset: number,
  *   close: boolean,
  *   path: string,
+ *   markerProgress: number,
  * } | {
  *   kind: "local_arc",
  *   start: RoutePoint,
@@ -50,6 +52,18 @@ const DEFAULT_ROUTE_MARKER_PADDING = 14;
  *   close: boolean,
  *   sweep: 0 | 1,
  *   path: string,
+ *   markerProgress: number,
+ * } | {
+ *   kind: "polyline",
+ *   start: RoutePoint,
+ *   end: RoutePoint,
+ *   points: ReadonlyArray<RoutePoint>,
+ *   sourcePortAngle: number,
+ *   targetPortAngle: number,
+ *   offset: number,
+ *   close: boolean,
+ *   path: string,
+ *   markerProgress: number,
  * }} RouteGeometry
  */
 
@@ -172,6 +186,10 @@ export function createRouteGeometry(input, options = {}) {
     options.routeMarkerPadding ?? DEFAULT_ROUTE_MARKER_PADDING,
     "routeMarkerPadding",
   );
+  const requestedMarkerProgress =
+    options.markerProgress === undefined
+      ? null
+      : unitInterval(options.markerProgress, "markerProgress");
   const clipped = clipRouteEndpoints(
     source,
     target,
@@ -188,12 +206,14 @@ export function createRouteGeometry(input, options = {}) {
       center: frozenPoint((source.x + target.x) / 2, (source.y + target.y) / 2),
       radius: Math.max(sourceRadius, targetRadius, 1) + localArcPadding,
       offset,
+      markerProgress: requestedMarkerProgress ?? 0.5,
     });
   }
 
   const requestedExtent =
     sourceRadius + sourceEndpointGap + targetRadius + targetEndpointGap;
   const close = clipped.distance <= requestedExtent;
+  const markerProgress = requestedMarkerProgress ?? (close ? 0.5 : 0.76);
   const closeClearance = 2 * (Math.max(sourceRadius, targetRadius) + localArcPadding);
   const preferredOffset =
     close && Math.abs(offset) < closeClearance
@@ -215,6 +235,7 @@ export function createRouteGeometry(input, options = {}) {
         close,
         viewportBounds,
         routeMarkerPadding,
+        markerProgress,
       })
     : preferredOffset;
   const control = frozenPoint(
@@ -232,7 +253,69 @@ export function createRouteGeometry(input, options = {}) {
     targetPortAngle,
     offset: effectiveOffset,
     close,
+    markerProgress,
     path: `M ${number(clipped.start.x)} ${number(clipped.start.y)} Q ${number(control.x)} ${number(control.y)} ${number(clipped.end.x)} ${number(clipped.end.y)}`,
+  });
+}
+
+/**
+ * Construct one immutable directed polyline from allocator-owned waypoints.
+ *
+ * @param {{
+ *   points: ReadonlyArray<RoutePoint | ReadonlyArray<number>>,
+ *   offset?: number,
+ *   close?: boolean,
+ *   markerProgress?: number,
+ * }} input
+ * @returns {Readonly<RouteGeometry>}
+ */
+export function createPolylineRouteGeometry(input) {
+  if (!input || typeof input !== "object" || !Array.isArray(input.points)) {
+    throw new TypeError("polyline geometry input must contain a points array.");
+  }
+  const points = input.points.map((candidate, index) =>
+    point(candidate, `points[${index}]`),
+  );
+  if (points.length < 2) {
+    throw new RangeError("polyline geometry must contain at least two points.");
+  }
+  for (let index = 1; index < points.length; index += 1) {
+    if (
+      points[index - 1].x === points[index].x &&
+      points[index - 1].y === points[index].y
+    ) {
+      throw new RangeError("polyline geometry may not contain repeated neighbors.");
+    }
+  }
+  const offset = finite(input.offset ?? 0, "offset");
+  const close = input.close === undefined ? false : boolean(input.close, "close");
+  const markerProgress = unitInterval(
+    input.markerProgress ?? (close ? 0.5 : 0.76),
+    "markerProgress",
+  );
+  const start = points[0];
+  const end = points.at(-1);
+  if (!end) {
+    throw new Error("polyline geometry lost its final point.");
+  }
+  const firstDirection = subtractPoints(points[1], start);
+  const lastDirection = subtractPoints(end, points.at(-2) ?? start);
+  return Object.freeze({
+    kind: "polyline",
+    start,
+    end,
+    points: Object.freeze(points),
+    sourcePortAngle: Math.atan2(firstDirection.y, firstDirection.x),
+    targetPortAngle: normalizeAngle(Math.atan2(-lastDirection.y, -lastDirection.x)),
+    offset,
+    close,
+    markerProgress,
+    path: points
+      .map(
+        (candidate, index) =>
+          `${index === 0 ? "M" : "L"} ${number(candidate.x)} ${number(candidate.y)}`,
+      )
+      .join(" "),
   });
 }
 
@@ -250,15 +333,16 @@ export function routeMarkerPose(route, progress) {
   if (
     !route ||
     typeof route !== "object" ||
-    (route.kind !== "curve" && route.kind !== "local_arc")
+    (route.kind !== "curve" && route.kind !== "local_arc" && route.kind !== "polyline")
   ) {
-    throw new TypeError("route must be curve or local_arc geometry.");
+    throw new TypeError("route must be curve, local_arc, or polyline geometry.");
   }
   const fraction =
     progress === undefined
-      ? route.close === true
-        ? 0.5
-        : 0.76
+      ? unitInterval(
+          route.markerProgress ?? (route.close === true ? 0.5 : 0.76),
+          "route.markerProgress",
+        )
       : finite(progress, "progress");
   if (fraction < 0 || fraction > 1) {
     throw new RangeError("progress must be between 0 and 1.");
@@ -282,6 +366,48 @@ export function routeMarkerPose(route, progress) {
     const tangentY =
       2 * remainder * (control.y - start.y) + 2 * fraction * (end.y - control.y);
     return frozenPose(x, y, tangentX, tangentY);
+  }
+
+  if (route.kind === "polyline") {
+    const points = route.points.map((candidate, index) =>
+      point(candidate, `route.points[${index}]`),
+    );
+    if (points.length < 2) {
+      throw new RangeError("polyline route must contain at least two points.");
+    }
+    const lengths = points
+      .slice(1)
+      .map((candidate, index) =>
+        Math.hypot(candidate.x - points[index].x, candidate.y - points[index].y),
+      );
+    const totalLength = lengths.reduce((total, length) => total + length, 0);
+    if (totalLength <= 0) {
+      throw new RangeError("polyline route must have positive length.");
+    }
+    const requestedDistance = fraction * totalLength;
+    let traversed = 0;
+    for (const [index, length] of lengths.entries()) {
+      if (length <= 0) {
+        continue;
+      }
+      const isFinal = index === lengths.length - 1;
+      if (requestedDistance <= traversed + length || isFinal) {
+        const localProgress = Math.min(
+          1,
+          Math.max(0, (requestedDistance - traversed) / length),
+        );
+        const start = points[index];
+        const end = points[index + 1];
+        return frozenPose(
+          start.x + (end.x - start.x) * localProgress,
+          start.y + (end.y - start.y) * localProgress,
+          end.x - start.x,
+          end.y - start.y,
+        );
+      }
+      traversed += length;
+    }
+    throw new Error("polyline route marker could not resolve a segment.");
   }
 
   const start = point(route.start, "route.start");
@@ -459,6 +585,7 @@ function centeredOffsets(count, spacing) {
  *   close: boolean,
  *   viewportBounds: RouteViewportBounds,
  *   routeMarkerPadding: number,
+ *   markerProgress: number,
  * }} input
  */
 function containedCurveOffset(input) {
@@ -467,7 +594,7 @@ function containedCurveOffset(input) {
     input.normal,
     input.viewportBounds,
   );
-  const markerProgress = input.close ? 0.5 : 0.76;
+  const markerProgress = input.markerProgress;
   const markerBase = frozenPoint(
     input.start.x + (input.end.x - input.start.x) * markerProgress,
     input.start.y + (input.end.y - input.start.y) * markerProgress,
@@ -567,6 +694,7 @@ function insetViewportBounds(bounds, requestedPadding) {
  *   center: RoutePoint,
  *   radius: number,
  *   offset: number,
+ *   markerProgress: number,
  * }} input
  * @returns {Readonly<RouteGeometry>}
  */
@@ -595,6 +723,7 @@ function localArc(input) {
     targetPortAngle: endAngle,
     offset: input.offset,
     close: true,
+    markerProgress: input.markerProgress,
     sweep,
     path: `M ${number(start.x)} ${number(start.y)} A ${number(arcRadius)} ${number(arcRadius)} 0 0 ${sweep} ${number(end.x)} ${number(end.y)}`,
   });
@@ -708,6 +837,18 @@ function nonNegative(value, name) {
  * @param {unknown} value
  * @param {string} name
  */
+function unitInterval(value, name) {
+  const result = finite(value, name);
+  if (result < 0 || result > 1) {
+    throw new RangeError(`${name} must be between 0 and 1.`);
+  }
+  return result;
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} name
+ */
 function positive(value, name) {
   const result = finite(value, name);
   if (result <= 0) {
@@ -739,6 +880,14 @@ function normalizeAngle(angle) {
  */
 function positiveAngularDistance(from, to) {
   return normalizeAngle(to - from);
+}
+
+/**
+ * @param {RoutePoint} end
+ * @param {RoutePoint} start
+ */
+function subtractPoints(end, start) {
+  return frozenPoint(end.x - start.x, end.y - start.y);
 }
 
 /**

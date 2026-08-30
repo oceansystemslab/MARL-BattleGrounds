@@ -25,6 +25,7 @@ from marl_battlegrounds.evaluation.models import (
     AbilityActivatedEventV1,
     ActionRejectedEventV1,
     AgentDiedEventV1,
+    AgentLeftCombatEventV1,
     AgentRespawnedEventV1,
     ChargePhaseDisplacementEventV1,
     CombatCountdownResetEventV1,
@@ -59,6 +60,7 @@ from marl_battlegrounds.rendering.evaluation_adapter import (
 from marl_battlegrounds.rendering.scene import (
     EVENT_V2_SCHEMA_VERSION,
     ActionRejectedEventV2,
+    AgentLeftCombatEventV2,
     OrdinaryMovementPhaseDisplacementEventV2,
     TeamDeathmatchCompletedEventV2,
     TeamDeathmatchScoreChangedEventV2,
@@ -75,6 +77,7 @@ _ALL_EVENT_TYPES = (
     "source_healing_output",
     "recipient_health_resolution",
     "combat_countdown_reset",
+    "agent_left_combat",
     "health_regenerated",
     "cooldown_started",
     "cooldown_ready",
@@ -226,6 +229,7 @@ def _all_canonical_events() -> tuple[EvaluationEventV1, ...]:
             },
         ),
         (CombatCountdownResetEventV1, {"agent_global_slot": 1}),
+        (AgentLeftCombatEventV1, {"agent_global_slot": 2}),
         (
             HealthRegeneratedEventV1,
             {"agent_global_slot": 2, "actual_health_regenerated": 1.25},
@@ -394,14 +398,14 @@ def _all_event_batch() -> tuple[VisualEventBatchV2, tuple[EvaluationEventV1, ...
     )
 
 
-def test_all_23_canonical_events_project_independently_with_direct_payloads() -> None:
+def test_all_24_canonical_events_project_independently_with_direct_payloads() -> None:
     batch, source_events = _all_event_batch()
 
     assert tuple(event.event_type for event in batch.events) == _ALL_EVENT_TYPES
     assert tuple(event.event_id for event in batch.events) == tuple(
         event.event_id for event in source_events
     )
-    assert len({type(event) for event in batch.events}) == 23
+    assert len({type(event) for event in batch.events}) == 24
     for source, projected in zip(source_events, batch.events, strict=True):
         for field_name in type(source).model_fields:
             if field_name in {"schema_id", "schema_version"}:
@@ -413,6 +417,14 @@ def test_all_23_canonical_events_project_independently_with_direct_payloads() ->
     assert inactive_rejection.actor_public_agent_id == "agent-slot-3"
     assert not inactive_rejection.actor_configured_active
     assert inactive_rejection.actor_anchor is None
+
+    expiration = cast(AgentLeftCombatEventV2, batch.events[6])
+    assert expiration.agent_anchor is batch.agent_phase_trajectories[2].successor
+    with pytest.raises(ValueError, match="successor"):
+        replace(
+            expiration,
+            agent_anchor=replace(expiration.agent_anchor, phase="transition_start"),
+        )
 
     score_change = cast(TeamDeathmatchScoreChangedEventV2, batch.events[-2])
     assert score_change.team_anchor.phase == "successor"

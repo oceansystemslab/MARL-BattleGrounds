@@ -27,9 +27,12 @@ from marl_battlegrounds.rendering.scene import (
     to_jsonable,
 )
 from marl_battlegrounds.rendering.vocabulary import (
+    ACTIVATION_TOKENS,
     CANONICAL_STATUS_ORDER,
     CATALOG_STATUS_ID_BY_CHANNEL,
     CATALOG_STATUS_TOKEN_ID_BY_STATUS_ID,
+    LIFECYCLE_TOKENS,
+    MODIFIER_TOKENS,
     STATUS_TOKENS,
     class_token_from_id,
     lookup_status_token,
@@ -149,6 +152,118 @@ def test_canonical_status_registry_is_complete_ordered_and_stable() -> None:
     assert lookup_status_token("future_status").family == "unknown"
     assert lookup_status_token("future_status").token_id == "future_status"
     assert class_token_from_id(999).family == "unknown"
+
+
+def test_product_vocabulary_uses_locked_ability_aura_and_lifecycle_names() -> None:
+    statuses = {definition.token_id: definition for definition in STATUS_TOKENS}
+    assert (
+        statuses["stun_hunter_trap"].label,
+        statuses["stun_hunter_trap"].short_label,
+        statuses["stun_hunter_trap"].accessible_name,
+    ) == ("Freezing Trap", "FREEZE", "Hunter Freezing Trap stun")
+    assert (
+        statuses["stun_rogue_poison"].label,
+        statuses["stun_rogue_poison"].short_label,
+        statuses["stun_rogue_poison"].accessible_name,
+    ) == ("Crippling Poison stun", "P-STN", "Rogue Crippling Poison stun")
+    assert (
+        statuses["slow_rogue_poison"].label,
+        statuses["slow_rogue_poison"].short_label,
+        statuses["slow_rogue_poison"].accessible_name,
+    ) == ("Crippling Poison slow", "P-SLW", "Rogue Crippling Poison slow")
+    assert (
+        statuses["anti_heal_rogue_poison"].label,
+        statuses["anti_heal_rogue_poison"].short_label,
+        statuses["anti_heal_rogue_poison"].accessible_name,
+    ) == (
+        "Anti-Heal",
+        "ANTI",
+        "Rogue Crippling Poison Anti-Heal",
+    )
+
+    activations = {definition.token_id: definition for definition in ACTIVATION_TOKENS}
+    assert {
+        token_id: activations[token_id].label
+        for token_id in (
+            "mage_burst",
+            "warrior_charge",
+            "hunter_trap",
+            "rogue_poison",
+            "holy_word",
+        )
+    } == {
+        "mage_burst": "Burst",
+        "warrior_charge": "Charge",
+        "hunter_trap": "Freezing Trap",
+        "rogue_poison": "Crippling Poison",
+        "holy_word": "Holy Word: Salvation",
+    }
+    assert (
+        activations["hunter_trap"].short_label,
+        activations["hunter_trap"].accessible_name,
+    ) == ("Freezing Trap", "Accepted Hunter Freezing Trap activation")
+    assert (
+        activations["rogue_poison"].short_label,
+        activations["rogue_poison"].accessible_name,
+    ) == ("Crippling Poison", "Accepted Rogue Crippling Poison activation")
+    assert (
+        activations["holy_word"].short_label,
+        activations["holy_word"].accessible_name,
+    ) == ("Salvation", "Accepted Priest Holy Word: Salvation activation")
+
+    modifiers = {definition.token_id: definition for definition in MODIFIER_TOKENS}
+    assert (
+        modifiers["mage_amplification"].label,
+        modifiers["mage_amplification"].short_label,
+        modifiers["mage_amplification"].accessible_name,
+    ) == (
+        "Sorcerer\u2019s Empowerment",
+        "AMP",
+        "Sorcerer\u2019s Empowerment damage amplification modifier",
+    )
+    assert (
+        modifiers["warrior_mitigation"].label,
+        modifiers["warrior_mitigation"].short_label,
+        modifiers["warrior_mitigation"].accessible_name,
+    ) == (
+        "Guardian\u2019s Barrier",
+        "MIT",
+        "Guardian\u2019s Barrier damage mitigation modifier",
+    )
+    assert (
+        modifiers["rogue_anti_heal"].label,
+        modifiers["rogue_anti_heal"].short_label,
+        modifiers["rogue_anti_heal"].accessible_name,
+    ) == (
+        "Crippling Poison Anti-Heal",
+        "ANTI",
+        "Effective Rogue Crippling Poison Anti-Heal modifier",
+    )
+
+    lifecycle = {definition.token_id: definition for definition in LIFECYCLE_TOKENS}
+    assert {
+        token_id: lifecycle[token_id].label
+        for token_id in (
+            "applied",
+            "refreshed",
+            "expired",
+            "trap_broken",
+            "trap_broken_and_reapplied",
+        )
+    } == {
+        "applied": "Apply",
+        "refreshed": "Refresh/extend",
+        "expired": "Expire",
+        "trap_broken": "Broken",
+        "trap_broken_and_reapplied": "Broken, then reapplied",
+    }
+    assert lifecycle["trap_broken"].accessible_name == (
+        "Freezing Trap ended by accepted damage"
+    )
+    assert lifecycle["refreshed"].accessible_name == "Status refreshed or extended"
+    assert lifecycle["trap_broken_and_reapplied"].accessible_name == (
+        "Freezing Trap was broken, then reapplied"
+    )
 
 
 def test_scene_records_are_frozen_slotted_and_scalar_only() -> None:

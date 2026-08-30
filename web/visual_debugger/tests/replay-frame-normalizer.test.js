@@ -2,13 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  authorizationContextKey,
-  transitionEpochKey,
-} from "../src/choreography-plan.js";
-import {
   isReplayViewerFrame,
   joinReplayFrameAndTimeline,
   normalizeReplayApiErrorV1,
+  normalizeReplayArtifactFactsV1,
   normalizeReplayCommandResponseV1,
   normalizeReplayTimelineV1,
   normalizeReplayViewerFrameV1,
@@ -93,6 +90,15 @@ function processing() {
     failure_stage: null,
     failure_code: null,
     attempted_transition_index: null,
+  };
+}
+
+function artifactFacts(metricReportAvailability = "missing") {
+  return {
+    schema_version: 1,
+    artifact_summary: summary(metricReportAvailability),
+    completion: researcherCompletion(),
+    processing: processing(),
   };
 }
 
@@ -407,6 +413,7 @@ function researcherFrame(frameIndex = 0, choreographyGeneration = 0) {
     completion: researcherCompletion(),
     processing: processing(),
     show_ranges: true,
+    recorded_ordinary_movement_distance_scale: 1.0,
     projection: researcherProjection(frameIndex),
   };
 }
@@ -463,6 +470,7 @@ function povFrame() {
     frame_kind: "actor_pov_replay_viewer",
     viewer_session_id: "viewer-session",
     revision: 3,
+    artifact_facts: artifactFacts(),
     artifact_summary: summary("not_available_in_actor_pov"),
     timeline_id: `${artifactId}:timeline:actor-pov:agent-0`,
     cursor: cursor(),
@@ -517,6 +525,10 @@ function finalPovFrame({ ended = false, terminal = false } = {}) {
     frame.completion.terminated = true;
     frame.completion.completion_bases = ["task_terminal"];
     frame.completion.public_end_or_failure_reason = "task complete";
+    frame.artifact_facts.completion.completion_state = "complete";
+    frame.artifact_facts.completion.terminated = true;
+    frame.artifact_facts.completion.completion_bases = ["task_terminal"];
+    frame.artifact_facts.completion.end_or_failure_reason = "task complete";
   }
   return frame;
 }
@@ -935,14 +947,8 @@ test("every replay frame and timeline record family rejects an unknown key", () 
   const cases = [
     ["researcher frame", () => researcherFrame(), normalizeReplayViewerFrameV1],
     ["Actor POV frame", () => povFrame(), normalizeReplayViewerFrameV1],
-    ["SharedObs source frame", () => sourceFrame(), normalizeReplayViewerFrameV1],
     ["researcher timeline", () => timeline("researcher"), normalizeReplayTimelineV1],
     ["Actor POV timeline", () => timeline("actor_pov"), normalizeReplayTimelineV1],
-    [
-      "SharedObs source timeline",
-      () => timeline("shared_obs_source_material"),
-      normalizeReplayTimelineV1,
-    ],
   ];
 
   for (const [label, factory, normalize] of cases) {
@@ -960,19 +966,13 @@ test("every replay frame and timeline record family rejects an unknown key", () 
   }
 });
 
-test("all replay audiences and timelines are recursively frozen, unaliased, and raw-mutation independent", () => {
+test("supported replay audiences and timelines are recursively frozen, unaliased, and raw-mutation independent", () => {
   /** @type {Array<readonly [string, () => Record<string, any>, (value: unknown) => Readonly<Record<string, any>>]>} */
   const cases = [
     ["researcher frame", () => researcherFrame(), normalizeReplayViewerFrameV1],
     ["Actor POV frame", () => povFrame(), normalizeReplayViewerFrameV1],
-    ["SharedObs source frame", () => sourceFrame(), normalizeReplayViewerFrameV1],
     ["researcher timeline", () => timeline("researcher"), normalizeReplayTimelineV1],
     ["Actor POV timeline", () => timeline("actor_pov"), normalizeReplayTimelineV1],
-    [
-      "SharedObs source timeline",
-      () => timeline("shared_obs_source_material"),
-      normalizeReplayTimelineV1,
-    ],
   ];
 
   for (const [label, factory, normalize] of cases) {
@@ -989,36 +989,91 @@ test("all replay audiences and timelines are recursively frozen, unaliased, and 
   }
 });
 
-test("three replay frame roots normalize through separate audience boundaries", () => {
+test("researcher and Actor POV replay roots normalize through separate audience boundaries", () => {
   const researcher = normalizeReplayViewerFrameV1(researcherFrame());
   const pov = normalizeReplayViewerFrameV1(povFrame());
-  const source = normalizeReplayViewerFrameV1(sourceFrame());
 
   assert.equal(researcher.replay_audience, "researcher");
   assert.equal(researcher.scene.audience, "researcher");
   assert.equal(researcher.session_id, "viewer-session");
   assert.equal(researcher.timeline_id, `${artifactId}:timeline:researcher`);
   assert.equal(researcher.animate_incoming, false);
+  assert.equal(researcher.preset, "analysis");
   assert.equal(researcher.show_ranges, true);
   assert.equal(researcher.verbose, false);
+  assert.equal(researcher.recorded_ordinary_movement_distance_scale, 1);
   assert.equal(Object.hasOwn(researcher, "scenario"), false);
   assert.equal(Object.hasOwn(researcher, "available_scenarios"), false);
   assert.equal(Object.hasOwn(researcher, "recording"), false);
   assert.equal(pov.replay_audience, "actor_pov");
   assert.equal(pov.scene.audience, "agent_pov");
   assert.equal(pov.verbose, false);
+  assert.equal(pov.preset, "analysis");
   assert.equal(Object.hasOwn(pov, "show_ranges"), false);
   assert.equal(Object.hasOwn(pov, "scenario"), false);
+  assert.equal(Object.hasOwn(pov, "recorded_ordinary_movement_distance_scale"), false);
   assert.deepEqual(pov.processing, {
     schema_version: 1,
     disclosure: "not_available_in_actor_pov",
   });
+  assert.deepEqual(pov.artifact_facts, {
+    schema_version: 1,
+    artifact_summary: researcher.artifact_summary,
+    completion: researcher.completion,
+    processing: researcher.processing,
+  });
+  assert.equal(
+    pov.artifact_facts.artifact_summary.metric_report_availability,
+    "missing",
+  );
+  assert.equal(Object.isFrozen(pov.artifact_facts), true);
   assert.equal(Object.hasOwn(pov, "processing"), true);
   assert.equal(Object.hasOwn(povFrame(), "processing"), false);
-  assert.equal(source.replay_audience, "shared_obs_source_material");
-  assert.equal(source.scene.audience, "agent_pov");
-  assert.match(source.scene.audience_badge, /SOURCE MATERIAL ONLY/u);
-  assert.equal(source.event_batch, null);
+
+  for (const raw of [researcherFrame(), povFrame()]) {
+    raw.verbose = true;
+    assert.throws(() => normalizeReplayViewerFrameV1(raw), /scalar contract/u);
+  }
+  for (const raw of [researcherFrame(), povFrame()]) {
+    raw.preset = "debug";
+    assert.throws(() => normalizeReplayViewerFrameV1(raw), /scalar contract/u);
+  }
+  for (const legacy of [researcherFrame(), povFrame()]) {
+    legacy.preset = "presentation";
+    assert.equal(normalizeReplayViewerFrameV1(legacy).preset, "analysis");
+  }
+});
+
+test("researcher replay preserves one recorded experimental movement scale", () => {
+  const raw = researcherFrame();
+  raw.recorded_ordinary_movement_distance_scale = 0.375;
+
+  const normalized = normalizeReplayViewerFrameV1(raw);
+
+  assert.equal(normalized.recorded_ordinary_movement_distance_scale, 0.375);
+
+  for (const invalid of [0, -0.1, 1.01, Number.POSITIVE_INFINITY, Number.NaN]) {
+    const candidate = researcherFrame();
+    candidate.recorded_ordinary_movement_distance_scale = invalid;
+    assert.throws(
+      () => normalizeReplayViewerFrameV1(candidate),
+      /recorded_ordinary_movement_distance_scale/u,
+    );
+  }
+
+  const missing = /** @type {any} */ (researcherFrame());
+  delete missing.recorded_ordinary_movement_distance_scale;
+  assert.throws(
+    () => normalizeReplayViewerFrameV1(missing),
+    /unknown or missing fields/u,
+  );
+
+  const hiddenAudience = /** @type {Record<string, any>} */ (povFrame());
+  hiddenAudience.recorded_ordinary_movement_distance_scale = 0.375;
+  assert.throws(
+    () => normalizeReplayViewerFrameV1(hiddenAudience),
+    /unknown or missing fields/u,
+  );
 });
 
 test("researcher replay installs the rebuilt frozen projection boundary", () => {
@@ -1048,73 +1103,125 @@ test("actor POV replay processing disclosure is sanitized, frozen, and unaliased
   assert.equal(JSON.stringify(normalized).includes("HOST SECRET"), false);
 });
 
-test("source-material boundary is exact, derived, and closed to nested identity leaks", () => {
-  const normalized = normalizeReplayViewerFrameV1(sourceFrame());
-  assert.equal(normalized.projection.base_sensor_frame.self_features.length, 58);
-  assert.equal(normalized.projection.sensor_source_availability.length, 10);
-  /** @type {ReadonlyArray<Record<string, any>>} */
-  const observedBodies = normalized.scene.observed_bodies;
-  assert.deepEqual(
-    observedBodies.map((body) => body.observation_key),
-    ["ally:1", "enemy:0"],
-  );
-  assert.equal(
-    Object.hasOwn(
-      normalized.projection.base_sensor_scene.visible_bodies[0],
-      "global_slot",
-    ),
-    false,
-  );
+test("artifact-wide replay facts are canonical, exact, frozen, and unaliased", () => {
+  const raw = artifactFacts("available");
+  const normalized = normalizeReplayArtifactFactsV1(raw);
 
-  const nestedExtra = /** @type {any} */ (structuredClone(sourceFrame()));
-  nestedExtra.projection.base_sensor_frame.snapshot = { hidden_global_slots: [0] };
-  assert.throws(() => normalizeReplayViewerFrameV1(nestedExtra), /unknown or missing/u);
+  assert.notEqual(normalized, raw);
+  assert.notEqual(normalized.artifact_summary, raw.artifact_summary);
+  assert.notEqual(normalized.completion, raw.completion);
+  assert.notEqual(normalized.processing, raw.processing);
+  assert.equal(normalized.artifact_summary.metric_report_availability, "available");
+  assertRecursivelyFrozenAndUnaliased(raw, normalized, "artifact facts");
 
-  const bodyIdentityLeak = /** @type {any} */ (structuredClone(sourceFrame()));
-  bodyIdentityLeak.projection.base_sensor_scene.visible_bodies[0].global_slot = 1;
+  raw.artifact_summary.metric_report_availability = "missing";
+  raw.completion.end_or_failure_reason = "mutated";
+  assert.equal(normalized.artifact_summary.metric_report_availability, "available");
+  assert.equal(normalized.completion.end_or_failure_reason, "captured prefix");
+
   assert.throws(
-    () => normalizeReplayViewerFrameV1(bodyIdentityLeak),
-    /unknown or missing/u,
+    () =>
+      normalizeReplayArtifactFactsV1({
+        ...artifactFacts(),
+        unknown: true,
+      }),
+    /unknown or missing fields/u,
   );
-
-  const underfilledFrame = /** @type {any} */ (structuredClone(sourceFrame()));
-  underfilledFrame.projection.base_sensor_frame.self_features.pop();
   assert.throws(
-    () => normalizeReplayViewerFrameV1(underfilledFrame),
-    /exact shape 58/u,
+    () => normalizeReplayArtifactFactsV1(artifactFacts("not_available_in_actor_pov")),
+    /canonical metric-report availability/u,
   );
-
-  const underfilledAvailability = /** @type {any} */ (structuredClone(sourceFrame()));
-  underfilledAvailability.projection.sensor_source_availability.pop();
+  const mismatchedProcessing = artifactFacts();
+  mismatchedProcessing.processing.processed_transition_count = 0;
   assert.throws(
-    () => normalizeReplayViewerFrameV1(underfilledAvailability),
-    /all ten rows/u,
+    () => normalizeReplayArtifactFactsV1(mismatchedProcessing),
+    /do not join/u,
   );
+});
 
-  const axisDrift = /** @type {any} */ (structuredClone(sourceFrame()));
-  axisDrift.projection.enemy_observation_row_global_slot_by_id[0] = 4;
-  assert.throws(() => normalizeReplayViewerFrameV1(axisDrift), /partition all ten/u);
+test("Shared diagnostic replay roots reject at the discriminator without reading nested source material", () => {
+  const diagnosticFrame = sourceFrame();
+  let projectionReads = 0;
+  Object.defineProperty(diagnosticFrame, "projection", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      projectionReads += 1;
+      throw new Error("diagnostic projection must remain unread");
+    },
+  });
 
-  const targetAxisDrift = /** @type {any} */ (structuredClone(sourceFrame()));
-  targetAxisDrift.projection.axis_mapping.target_action_recipient_public_agent_id_by_id[1] =
-    "agent-9";
+  assert.equal(isReplayViewerFrame(diagnosticFrame), false);
   assert.throws(
-    () => normalizeReplayViewerFrameV1(targetAxisDrift),
-    /categorical axes/u,
+    () => normalizeReplayViewerFrameV1(diagnosticFrame),
+    /Unknown replay viewer frame kind/u,
   );
-
-  const availabilityDrift = /** @type {any} */ (structuredClone(sourceFrame()));
-  availabilityDrift.projection.sensor_source_availability[1].base_sensor_observation_row = 2;
   assert.throws(
-    () => normalizeReplayViewerFrameV1(availabilityDrift),
-    /recipient-relative axes/u,
+    () =>
+      normalizeReplayCommandResponseV1({
+        schema_version: 1,
+        result: "no_op",
+        frame: diagnosticFrame,
+        notice: null,
+        animate_incoming: false,
+      }),
+    /Unknown replay viewer frame kind/u,
   );
-
-  const sceneDerivationDrift = /** @type {any} */ (structuredClone(sourceFrame()));
-  sceneDerivationDrift.projection.base_sensor_scene.visible_bodies[0].current_health = 9;
   assert.throws(
-    () => normalizeReplayViewerFrameV1(sceneDerivationDrift),
-    /does not derive/u,
+    () =>
+      normalizeReplayApiErrorV1({
+        schema_version: 1,
+        error_code: "stale_revision",
+        message: "stale replay cursor",
+        latest_frame: diagnosticFrame,
+      }),
+    /Unknown replay viewer frame kind/u,
+  );
+  assert.equal(projectionReads, 0);
+
+  const diagnosticTimeline = timeline("shared_obs_source_material");
+  let rowReads = 0;
+  Object.defineProperty(diagnosticTimeline, "rows", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      rowReads += 1;
+      throw new Error("diagnostic timeline rows must remain unread");
+    },
+  });
+  assert.throws(
+    () => normalizeReplayTimelineV1(diagnosticTimeline),
+    /Unknown replay timeline kind/u,
+  );
+  assert.equal(rowReads, 0);
+
+  const privateTimeline = {
+    schema_version: 1,
+    timeline_kind: "shared_obs_agent_pov",
+  };
+  let privateRowReads = 0;
+  Object.defineProperty(privateTimeline, "rows", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      privateRowReads += 1;
+      throw new Error("private Shared timeline rows must remain unread");
+    },
+  });
+  assert.throws(
+    () => normalizeReplayTimelineV1(privateTimeline),
+    /Unknown replay timeline kind/u,
+  );
+  assert.equal(privateRowReads, 0);
+
+  const privateSharedRoot = {
+    schema_version: 1,
+    frame_kind: "shared_obs_agent_pov_replay_viewer",
+  };
+  assert.equal(isReplayViewerFrame(privateSharedRoot), false);
+  assert.throws(
+    () => normalizeReplayViewerFrameV1(privateSharedRoot),
+    /Unknown replay viewer frame kind/u,
   );
 });
 
@@ -1187,6 +1294,11 @@ test("actor POV replay ending cues join physical completion at the final cursor"
   declaredHorizonOnly.completion.completion_state = "complete";
   declaredHorizonOnly.completion.completion_bases = ["declared_horizon"];
   declaredHorizonOnly.completion.public_end_or_failure_reason = null;
+  declaredHorizonOnly.artifact_facts.artifact_summary.expected_transition_count = 1;
+  declaredHorizonOnly.artifact_facts.completion.expected_transition_count = 1;
+  declaredHorizonOnly.artifact_facts.completion.completion_state = "complete";
+  declaredHorizonOnly.artifact_facts.completion.completion_bases = ["declared_horizon"];
+  declaredHorizonOnly.artifact_facts.completion.end_or_failure_reason = null;
   assert.equal(
     normalizeReplayViewerFrameV1(declaredHorizonOnly).projection.incoming_cues.length,
     0,
@@ -1205,8 +1317,9 @@ test("viewer launch identity isolates equal replay epochs across sessions", () =
   assert.equal(first.timeline_id, second.timeline_id);
   assert.equal(first.transition_id, second.transition_id);
   assert.equal(first.run_generation, second.run_generation);
-  assert.notEqual(transitionEpochKey(first), transitionEpochKey(second));
-  assert.notEqual(authorizationContextKey(first), authorizationContextKey(second));
+  assert.notEqual(first.viewer_session_id, second.viewer_session_id);
+  assert.equal(first.viewer_session_id, "viewer-session");
+  assert.equal(second.viewer_session_id, "viewer-session-restarted");
 });
 
 test("replay frames reject cross-audience and response-only fields", () => {
@@ -1220,21 +1333,6 @@ test("replay frames reject cross-audience and response-only fields", () => {
   );
   assert.throws(
     () => normalizeReplayViewerFrameV1({ ...povFrame(), processing: processing() }),
-    /unknown or missing/u,
-  );
-  assert.throws(
-    () => normalizeReplayViewerFrameV1({ ...sourceFrame(), incoming_events: [] }),
-    /unknown or missing/u,
-  );
-  assert.throws(
-    () =>
-      normalizeReplayViewerFrameV1({
-        ...sourceFrame(),
-        projection: {
-          ...sourceProjection(),
-          materialized_shared_observation: {},
-        },
-      }),
     /unknown or missing/u,
   );
   assert.throws(
@@ -1265,6 +1363,26 @@ test("replay frames reject cross-audience and response-only fields", () => {
         artifact_summary: summary("not_available_in_actor_pov"),
       }),
     /metric disclosure/u,
+  );
+  const missingArtifactFacts = povFrame();
+  Reflect.deleteProperty(missingArtifactFacts, "artifact_facts");
+  assert.throws(
+    () => normalizeReplayViewerFrameV1(missingArtifactFacts),
+    /unknown or missing/u,
+  );
+  const mismatchedArtifactFacts = povFrame();
+  mismatchedArtifactFacts.artifact_facts.artifact_summary.replay_reference.canonical_digest_sha256 =
+    "b".repeat(64);
+  assert.throws(
+    () => normalizeReplayViewerFrameV1(mismatchedArtifactFacts),
+    /do not join/u,
+  );
+  const mismatchedArtifactCompletion = povFrame();
+  mismatchedArtifactCompletion.artifact_facts.completion.completion_state =
+    "interrupted";
+  assert.throws(
+    () => normalizeReplayViewerFrameV1(mismatchedArtifactCompletion),
+    /do not join/u,
   );
   const staleCursor = researcherFrame();
   Reflect.deleteProperty(staleCursor.cursor, "schema_version");
@@ -1401,7 +1519,7 @@ function timeline(kind) {
 }
 
 test("timeline roots preserve their audience-specific identities and counts", () => {
-  for (const kind of ["researcher", "actor_pov", "shared_obs_source_material"]) {
+  for (const kind of ["researcher", "actor_pov"]) {
     const normalized = normalizeReplayTimelineV1(timeline(kind));
     assert.equal(normalized.timeline_kind, kind);
     assert.equal(normalized.rows.length, 2);
@@ -1464,17 +1582,6 @@ test("independently fetched timelines reject audience races and artifact drift",
       ),
     /current audience frame/u,
   );
-
-  const sourceSlotDrift = timeline("shared_obs_source_material");
-  sourceSlotDrift.selected_global_slot = 1;
-  assert.throws(
-    () =>
-      joinReplayFrameAndTimeline(
-        normalizeReplayViewerFrameV1(sourceFrame()),
-        normalizeReplayTimelineV1(sourceSlotDrift),
-      ),
-    /current audience frame/u,
-  );
 });
 
 test("command candidates pin launch, artifact, final bound, and revision before install", () => {
@@ -1500,6 +1607,23 @@ test("command candidates pin launch, artifact, final bound, and revision before 
   assert.equal(
     validateReplayFrameContinuity(previous, normalizedPovAudienceCandidate, "applied"),
     normalizedPovAudienceCandidate,
+  );
+
+  const artifactFactsDrift = povFrame();
+  artifactFactsDrift.revision = previous.revision + 1;
+  artifactFactsDrift.artifact_facts.artifact_summary.metric_report_availability =
+    "available";
+  const normalizedArtifactFactsDrift = normalizeReplayCommandResponseV1({
+    schema_version: 1,
+    result: "applied",
+    frame: artifactFactsDrift,
+    notice: null,
+    animate_incoming: false,
+  }).frame;
+  assert.throws(
+    () =>
+      validateReplayFrameContinuity(previous, normalizedArtifactFactsDrift, "applied"),
+    /continuity/u,
   );
 
   const interleavedDuplicateCandidate = povFrame();
@@ -1530,64 +1654,6 @@ test("command candidates pin launch, artifact, final bound, and revision before 
         previous,
         normalizeReplayViewerFrameV1(regressedStaleGeneration),
         "stale_resync",
-      ),
-    /continuity/u,
-  );
-
-  const sourceAudienceCandidate = sourceFrame();
-  sourceAudienceCandidate.revision = previous.revision + 1;
-  const normalizedSourceAudienceCandidate = normalizeReplayCommandResponseV1({
-    schema_version: 1,
-    result: "applied",
-    frame: sourceAudienceCandidate,
-    notice: null,
-    animate_incoming: false,
-  }).frame;
-  assert.equal(
-    validateReplayFrameContinuity(
-      previous,
-      normalizedSourceAudienceCandidate,
-      "applied",
-    ),
-    normalizedSourceAudienceCandidate,
-  );
-
-  const sourceSidecarDrift = sourceFrame();
-  sourceSidecarDrift.revision = previous.revision + 1;
-  sourceSidecarDrift.artifact_summary.metric_report_availability = "available";
-  assert.throws(
-    () =>
-      validateReplayFrameContinuity(
-        previous,
-        normalizeReplayCommandResponseV1({
-          schema_version: 1,
-          result: "applied",
-          frame: sourceSidecarDrift,
-          notice: null,
-          animate_incoming: false,
-        }).frame,
-        "applied",
-      ),
-    /continuity/u,
-  );
-
-  const previousSource = sourceFrame();
-  previousSource.artifact_summary.metric_report_availability = "available";
-  const normalizedPreviousSource = normalizeReplayViewerFrameV1(previousSource);
-  const researcherSidecarDrift = researcherFrame();
-  researcherSidecarDrift.revision = normalizedPreviousSource.revision + 1;
-  assert.throws(
-    () =>
-      validateReplayFrameContinuity(
-        normalizedPreviousSource,
-        normalizeReplayCommandResponseV1({
-          schema_version: 1,
-          result: "applied",
-          frame: researcherSidecarDrift,
-          notice: null,
-          animate_incoming: false,
-        }).frame,
-        "applied",
       ),
     /continuity/u,
   );
@@ -1635,64 +1701,6 @@ test("command candidates pin launch, artifact, final bound, and revision before 
   );
   assert.throws(
     () => validateReplayFrameContinuity(previous, normalizedProcessingDrift, "applied"),
-    /continuity/u,
-  );
-
-  const sourceCompletionDrift = sourceFrame();
-  sourceCompletionDrift.revision = previous.revision + 1;
-  sourceCompletionDrift.completion.end_or_failure_reason = "different captured prefix";
-  const normalizedSourceCompletionDrift = normalizeReplayCommandResponseV1({
-    schema_version: 1,
-    result: "applied",
-    frame: sourceCompletionDrift,
-    notice: null,
-    animate_incoming: false,
-  }).frame;
-  const matchingSourceCompletionTimeline = timeline("shared_obs_source_material");
-  matchingSourceCompletionTimeline.completion.end_or_failure_reason =
-    "different captured prefix";
-  joinReplayFrameAndTimeline(
-    normalizedSourceCompletionDrift,
-    normalizeReplayTimelineV1(matchingSourceCompletionTimeline),
-  );
-  assert.throws(
-    () =>
-      validateReplayFrameContinuity(
-        previous,
-        normalizedSourceCompletionDrift,
-        "applied",
-      ),
-    /continuity/u,
-  );
-
-  const sourceProcessingDrift = /** @type {any} */ (sourceFrame());
-  sourceProcessingDrift.revision = previous.revision + 1;
-  sourceProcessingDrift.processing = {
-    schema_version: 1,
-    status: "failed",
-    processed_transition_count: 0,
-    failure_stage: "initial_validation",
-    failure_code: "different-processing-result",
-    attempted_transition_index: null,
-  };
-  const normalizedSourceProcessingDrift = normalizeReplayCommandResponseV1({
-    schema_version: 1,
-    result: "applied",
-    frame: sourceProcessingDrift,
-    notice: null,
-    animate_incoming: false,
-  }).frame;
-  joinReplayFrameAndTimeline(
-    normalizedSourceProcessingDrift,
-    normalizeReplayTimelineV1(timeline("shared_obs_source_material")),
-  );
-  assert.throws(
-    () =>
-      validateReplayFrameContinuity(
-        previous,
-        normalizedSourceProcessingDrift,
-        "applied",
-      ),
     /continuity/u,
   );
 

@@ -81,6 +81,7 @@ include = [
   "tests",
   "scripts/dev/visual_debugger",
   "scripts/dev/debug_renderer.py",
+  "scripts/dev/replay_viewer.py",
 ]
 exclude = [
   "**/__pycache__",

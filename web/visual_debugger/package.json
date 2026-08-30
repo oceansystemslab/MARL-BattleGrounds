@@ -12,8 +12,8 @@
     "test:effects": "node --test tests/effects.test.js tests/animation.test.js",
     "install:browser": "playwright install chromium",
     "test:e2e": "playwright test --config playwright.config.js",
-    "test:visual": "playwright test e2e/visual-regression.spec.js --config playwright.config.js",
-    "test:visual:update": "playwright test e2e/visual-regression.spec.js --config playwright.config.js --update-snapshots=all"
+    "test:visual": "playwright test e2e/replay-viewer.spec.js --config playwright.config.js",
+    "test:visual:update": "playwright test e2e/replay-viewer.spec.js --config playwright.config.js --update-snapshots=all"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.5",

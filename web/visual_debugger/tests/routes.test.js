@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   clipRouteEndpoints,
+  createPolylineRouteGeometry,
   createRouteGeometry,
   layoutRouteSet,
   routeMarkerPose,
@@ -492,4 +493,27 @@ test("local-arc marker poses follow their declared sweep", () => {
   }
   assert.equal(clockwise.sweep, 1);
   assert.equal(counterclockwise.sweep, 0);
+});
+
+test("polyline marker pose follows finite arc-length progress through bends", () => {
+  const route = createPolylineRouteGeometry({
+    points: [
+      [0, 0],
+      [10, 0],
+      [10, 30],
+      [40, 30],
+    ],
+  });
+
+  assert.equal(route.kind, "polyline");
+  assert.match(route.path, /^M 0 0 L 10 0 L 10 30 L 40 30$/);
+  assert.deepEqual(routeMarkerPose(route, 0), { x: 0, y: 0, degrees: 0 });
+  assert.deepEqual(routeMarkerPose(route, 1), { x: 40, y: 30, degrees: 0 });
+  const marker = routeMarkerPose(route);
+  assert.ok(Number.isFinite(marker.x));
+  assert.ok(Number.isFinite(marker.y));
+  assert.ok(Number.isFinite(marker.degrees));
+  assert.ok(marker.x > 10 && marker.x < 40);
+  assert.equal(marker.y, 30);
+  assert.equal(marker.degrees, 0);
 });

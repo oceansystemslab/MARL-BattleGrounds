@@ -886,8 +886,11 @@ the context, transition-start frame, transition, and successor frame. It
 checks adjacency, identity, lossless core-recipient `-1`/JSON `null`
 normalization with `has_recipient` agreement, padding, catalog joins, and exact
 equality with a newly decoded canonical event tuple. The discriminated V1 event
-union has exactly 23 atomic variants. At rank 90, `AgentDiedEventV1` records the
-newly dead recipient before one `LethalDamageContributionEventV1` per ordered
+union has exactly 24 atomic variants. At rank 50,
+`AgentLeftCombatEventV1` follows countdown reset and precedes regeneration for
+the canonical alive-recipient countdown edge from one to zero. At rank 90,
+`AgentDiedEventV1` records the newly dead recipient before one
+`LethalDamageContributionEventV1` per ordered
 authoritative positive source; contributor records are not killer, last-hit,
 or complete historical credit. Aura attachments identify direct
 transition-start covering emitters rather than asserting causal credit.

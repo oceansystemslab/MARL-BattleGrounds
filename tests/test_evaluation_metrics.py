@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -1289,14 +1290,15 @@ def test_initial_frame_validator_revalidates_unchecked_nested_payloads() -> None
     )
     unchecked_frame = initial_frame.model_copy(update={"snapshot": unchecked_snapshot})
 
-    with (
-        pytest.warns(UserWarning, match="Pydantic serializer warnings"),
-        pytest.raises(ValueError, match="fails structural revalidation"),
-    ):
-        validate_initial_evaluation_frame_v1(
-            trajectory.context,
-            unchecked_frame,
-        )
+    with warnings.catch_warnings(record=True) as emitted:
+        warnings.simplefilter("always")
+        with pytest.raises(ValueError, match="fails structural revalidation"):
+            validate_initial_evaluation_frame_v1(
+                trajectory.context,
+                unchecked_frame,
+            )
+
+    assert emitted == []
 
 
 @pytest.mark.parametrize(

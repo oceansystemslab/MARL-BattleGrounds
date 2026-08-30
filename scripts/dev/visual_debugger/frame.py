@@ -88,13 +88,10 @@ def _scenario_metadata(session: DebuggerSession) -> ScenarioMetadataV1:
     effective_scale = (
         session.evaluation_context.resolved_env_config.ordinary_movement_distance_scale
     )
-    overridden = effective_scale != session.scenario_default_movement_scale
     if scenario.mode == "interactive":
         return ScenarioMetadataV1(
             **_scenario_option(scenario.name).model_dump(),
             ordinary_movement_distance_scale=effective_scale,
-            scenario_default_movement_scale=session.scenario_default_movement_scale,
-            movement_scale_overridden=overridden,
             completed_frame_count=0,
             frame_count=0,
             next_frame_index=None,
@@ -109,8 +106,6 @@ def _scenario_metadata(session: DebuggerSession) -> ScenarioMetadataV1:
     return ScenarioMetadataV1(
         **_scenario_option(scenario.name).model_dump(),
         ordinary_movement_distance_scale=effective_scale,
-        scenario_default_movement_scale=session.scenario_default_movement_scale,
-        movement_scale_overridden=overridden,
         completed_frame_count=completed,
         frame_count=len(scenario.frames),
         next_frame_index=None if next_frame is None else completed,
@@ -631,7 +626,7 @@ def _build_pov_hud(
         use_ultimate_action=0 if pending.armed_lane is None else pending.armed_lane,
     )
     scenario = get_scenario(session.scenario_name)
-    scope = "scripted_playback" if scenario.mode == "scripted" else "controlled_actor"
+    scope = "scripted_playback" if scenario.mode == "scripted" else "joint_turn"
     return ActorPovHudFrameV1(
         controlled_public_agent_id=slice_.public_agent_id,
         pending_submission_scope=scope,
@@ -722,7 +717,7 @@ def build_debugger_frame(
                 None if incoming is None else incoming.transition.transition_id
             ),
             preset=preset,
-            verbose=session.verbose_logging,
+            verbose=False,
             show_ranges=session.show_ranges,
             terminal=terminal,
             recording=recording_status,
@@ -753,7 +748,7 @@ def build_debugger_frame(
         frame_id=frame.frame_id,
         simulator_step_count=frame.simulator_step_count,
         preset=preset,
-        verbose=session.verbose_logging,
+        verbose=False,
         terminal=terminal,
         recording=_actor_pov_recording_status(recording_status),
         incoming_pov_transition_id=pov_projection.incoming_transition_id,

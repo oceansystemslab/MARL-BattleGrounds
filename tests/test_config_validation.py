@@ -422,16 +422,16 @@ def test_movement_scale_accepts_positive_finite_float32_execution_values(
 
 def test_product_config_requires_the_canonical_movement_scale() -> None:
     canonical = _valid_config()
-    noncanonical_experiment = _replace_config(
+    experimental = _replace_config(
         canonical,
         ordinary_movement_distance_scale=0.375,
     )
 
     assert CANONICAL_PRODUCT_MOVEMENT_SCALE == 1.0
     assert validate_product_env_config(canonical) is None
-    assert validate_env_config(noncanonical_experiment) is None
-    with pytest.raises(ValueError, match=r"must equal 1\.0"):
-        validate_product_env_config(noncanonical_experiment)
+    assert validate_env_config(experimental) is None
+    with pytest.raises(ValueError, match=r"must equal 1\.00"):
+        validate_product_env_config(experimental)
 
 
 @pytest.mark.parametrize(

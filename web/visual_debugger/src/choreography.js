@@ -3,9 +3,14 @@ import { buildChoreographyPlan } from "./choreography-plan.js";
 const DEFAULT_LEDGER_KEY = "marl-battlegrounds.visual-debugger.consumed-transitions.v1";
 const DEFAULT_LEDGER_LIMIT = 256;
 const MAX_ACTIVE_ANIMATIONS = 512;
+const REPLAY_TERMINAL_HOLD_MS = 600;
+const SUPPORTED_PLAYBACK_RATES = Object.freeze([
+  0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2,
+]);
 
 /**
  * @typedef {"normal" | "reduced" | "off"} MotionMode
+ * @typedef {"live_once" | "replay_animated" | "replay_static"} RenderPolicy
  * @typedef {{
  *   element: Element,
  *   keyframes: Keyframe[] | PropertyIndexedKeyframes,
@@ -182,8 +187,10 @@ export class CombatChoreographer {
    *       surface: ChoreographySurface,
    *       options: {
    *         motionMode: MotionMode,
+   *         renderPolicy: RenderPolicy,
    *         settled: boolean,
    *         persistentOnly: boolean,
+   *         retainTransientOnSettle?: boolean,
    *       },
    *     ) => ChoreographyInstallation,
    *     clear: (installation: any, reason: string) => void,
@@ -197,6 +204,8 @@ export class CombatChoreographer {
    *   planBuilder?: (
    *     frame: unknown,
    *     surface: ChoreographySurface | null,
+   *     visualFilters?: Record<string, boolean>,
+   *     renderPolicy?: RenderPolicy,
    *   ) => Record<string, any> | null,
    *   animationFactory?: AnimationFactory,
    *   ledger?: ConsumedTransitionLedger,
@@ -215,13 +224,15 @@ export class CombatChoreographer {
     this.ledger = options.ledger ?? new ConsumedTransitionLedger();
     this.onStateChange = options.onStateChange ?? (() => {});
     this.motionMode = normalizeMotionMode(options.motionMode ?? "normal");
-    this.playbackRate = boundedPlaybackRate(options.playbackRate ?? 1);
+    this.playbackRate = normalizePlaybackRate(options.playbackRate ?? 1);
     this.paused = false;
     this.submissionBlocked = false;
     this.logicalTime = 0;
     this.generation = 0;
     /** @type {Record<string, any> | null} */
     this.plan = null;
+    /** @type {RenderPolicy | null} */
+    this.renderPolicy = null;
     /** @type {ChoreographySurface | null} */
     this.surface = null;
     /** @type {ChoreographyInstallation | null} */
@@ -243,6 +254,8 @@ export class CombatChoreographer {
       epochKey: this.plan?.epochKey ?? null,
       authorizationKey: this.plan?.authorizationKey ?? null,
       fingerprint: this.plan?.fingerprint ?? null,
+      paintKey: this.plan?.paintKey ?? null,
+      renderPolicy: this.renderPolicy,
       logicalTime: this.logicalTime,
       motionMode: this.motionMode,
       paused: this.paused,
@@ -270,9 +283,25 @@ export class CombatChoreographer {
    *
    * @param {unknown} frame
    * @param {ChoreographySurface | null} surface
+   * @param {{
+   *   renderPolicy?: RenderPolicy,
+   *   visualFilters?: Record<string, boolean>,
+   *   restartAnimated?: boolean,
+   * }} [presentationControl]
    */
-  presentFrame(frame, surface) {
-    const nextPlan = surface ? this.planBuilder(frame, surface) : null;
+  presentFrame(frame, surface, presentationControl = {}) {
+    const requestedPolicy = normalizeRenderPolicy(
+      presentationControl.renderPolicy ?? "live_once",
+    );
+    const initialPolicy = requestedPolicy;
+    let nextPlan = surface
+      ? this.planBuilder(
+          frame,
+          surface,
+          presentationControl.visualFilters,
+          initialPolicy,
+        )
+      : null;
     if (!nextPlan || !surface) {
       this.clear("absent_scene_or_event_batch");
       return this.snapshot();
@@ -283,20 +312,68 @@ export class CombatChoreographer {
     const sameAuthorization =
       currentPlan?.authorizationKey === nextPlan.authorizationKey;
     const sameFingerprint = currentPlan?.fingerprint === nextPlan.fingerprint;
-    const replayMustSettle =
-      isRecord(frame) &&
-      frame.viewer_mode === "replay" &&
-      frame.animate_incoming !== true;
+    const samePaint = currentPlan?.paintKey === nextPlan.paintKey;
+    const replayPaintChange =
+      sameEpoch &&
+      sameAuthorization &&
+      sameFingerprint &&
+      !samePaint &&
+      isReplayPolicy(initialPolicy);
+    const explicitSamePlanReplayRestart =
+      presentationControl.restartAnimated === true &&
+      sameEpoch &&
+      sameAuthorization &&
+      sameFingerprint &&
+      samePaint &&
+      this.renderPolicy === "replay_static" &&
+      requestedPolicy === "replay_animated";
+    const stickyStatic =
+      sameEpoch &&
+      this.renderPolicy === "replay_static" &&
+      requestedPolicy === "replay_animated" &&
+      !explicitSamePlanReplayRestart;
+    const nextPolicy =
+      replayPaintChange || stickyStatic ? "replay_static" : initialPolicy;
+    if (nextPolicy !== initialPolicy) {
+      const policyPlan = this.planBuilder(
+        frame,
+        surface,
+        presentationControl.visualFilters,
+        nextPolicy,
+      );
+      if (!samePlanIdentity(nextPlan, policyPlan)) {
+        throw new Error("render policy changed the authorized plan identity.");
+      }
+      nextPlan = policyPlan;
+    }
+    const samePolicy = this.renderPolicy === nextPolicy;
 
-    if (sameEpoch && sameAuthorization && sameFingerprint) {
+    if (sameEpoch && sameAuthorization && sameFingerprint && samePaint && samePolicy) {
       if (this.surface?.viewportKey !== surface.viewportKey && this.installation) {
         this.painter.reproject(this.installation, nextPlan, surface);
       }
       this.plan = nextPlan;
       this.surface = surface;
-      if (replayMustSettle && !this.#isSettled()) {
-        return this.skip();
-      }
+      this.#publish();
+      return this.snapshot();
+    }
+
+    if (sameEpoch && sameAuthorization && sameFingerprint && !samePaint) {
+      this.#clearOwned("visual_filters_changed");
+      this.plan = nextPlan;
+      this.surface = surface;
+      this.#installForPolicy(nextPlan, surface, nextPolicy, {
+        liveSafeRebuild: true,
+      });
+      this.#publish();
+      return this.snapshot();
+    }
+
+    if (sameEpoch && sameAuthorization && sameFingerprint && !samePolicy) {
+      this.#clearOwned("render_policy_changed");
+      this.plan = nextPlan;
+      this.surface = surface;
+      this.#installForPolicy(nextPlan, surface, nextPolicy);
       this.#publish();
       return this.snapshot();
     }
@@ -306,25 +383,26 @@ export class CombatChoreographer {
       this.#clearOwned("authorization_or_disclosure_changed");
       this.plan = nextPlan;
       this.surface = surface;
-      this.#install(nextPlan, surface, {
-        settled: true,
-        persistentOnly: true,
+      this.#installForPolicy(nextPlan, surface, nextPolicy, {
+        liveSafeRebuild: true,
       });
-      this.ledger.record(nextPlan.epochKey, nextPlan.fingerprint);
+      if (nextPolicy === "live_once") {
+        this.ledger.record(nextPlan.epochKey, nextPlan.fingerprint);
+      }
       this.#publish();
       return this.snapshot();
     }
 
-    const consumedFingerprint = this.ledger.fingerprintFor(nextPlan.epochKey);
+    const consumedFingerprint =
+      nextPolicy === "live_once" ? this.ledger.fingerprintFor(nextPlan.epochKey) : null;
     const alreadyConsumed = consumedFingerprint !== null;
     this.#clearOwned("new_transition");
     this.plan = nextPlan;
     this.surface = surface;
-    this.#install(nextPlan, surface, {
-      settled: alreadyConsumed || replayMustSettle,
-      persistentOnly: alreadyConsumed || replayMustSettle,
+    this.#installForPolicy(nextPlan, surface, nextPolicy, {
+      liveSafeRebuild: alreadyConsumed,
     });
-    if (consumedFingerprint !== nextPlan.fingerprint) {
+    if (nextPolicy === "live_once" && consumedFingerprint !== nextPlan.fingerprint) {
       this.ledger.record(nextPlan.epochKey, nextPlan.fingerprint);
     }
     this.#publish();
@@ -336,19 +414,53 @@ export class CombatChoreographer {
    *
    * @param {unknown} frame
    * @param {ChoreographySurface | null} surface
+   * @param {{
+   *   renderPolicy?: RenderPolicy,
+   *   visualFilters?: Record<string, boolean>,
+   * }} [presentationControl]
    */
-  reproject(frame, surface) {
+  reproject(frame, surface, presentationControl = {}) {
     if (!surface || !this.installation || !this.plan) {
-      return this.presentFrame(frame, surface);
+      return this.presentFrame(frame, surface, presentationControl);
     }
-    const nextPlan = this.planBuilder(frame, surface);
+    const requestedPolicy = normalizeRenderPolicy(
+      presentationControl.renderPolicy ?? "live_once",
+    );
+    let nextPlan = this.planBuilder(
+      frame,
+      surface,
+      presentationControl.visualFilters,
+      requestedPolicy,
+    );
     if (
       !nextPlan ||
       nextPlan.epochKey !== this.plan.epochKey ||
       nextPlan.authorizationKey !== this.plan.authorizationKey ||
-      nextPlan.fingerprint !== this.plan.fingerprint
+      nextPlan.fingerprint !== this.plan.fingerprint ||
+      nextPlan.paintKey !== this.plan.paintKey
     ) {
-      return this.presentFrame(frame, surface);
+      return this.presentFrame(frame, surface, presentationControl);
+    }
+    const nextPolicy =
+      this.renderPolicy === "replay_static" && requestedPolicy === "replay_animated"
+        ? "replay_static"
+        : requestedPolicy;
+    if (nextPolicy !== this.renderPolicy) {
+      return this.presentFrame(frame, surface, {
+        ...presentationControl,
+        renderPolicy: nextPolicy,
+      });
+    }
+    if (nextPolicy !== requestedPolicy) {
+      nextPlan = this.planBuilder(
+        frame,
+        surface,
+        presentationControl.visualFilters,
+        nextPolicy,
+      );
+      if (!samePlanIdentity(this.plan, nextPlan)) {
+        return this.presentFrame(frame, surface, presentationControl);
+      }
     }
     this.painter.reproject(this.installation, nextPlan, surface);
     this.plan = nextPlan;
@@ -378,13 +490,14 @@ export class CombatChoreographer {
    * @param {number} rate
    */
   setPlaybackRate(rate) {
-    this.playbackRate = boundedPlaybackRate(rate);
+    const nextRate = normalizePlaybackRate(rate);
+    if (nextRate === this.playbackRate) {
+      return this.snapshot();
+    }
+    this.#captureLogicalTime();
+    this.playbackRate = nextRate;
     for (const animation of this.#allAnimations()) {
-      if (typeof animation.updatePlaybackRate === "function") {
-        animation.updatePlaybackRate(this.playbackRate);
-      } else {
-        animation.playbackRate = this.playbackRate;
-      }
+      applyPlaybackRate(animation, nextRate);
     }
     this.#publish();
     return this.snapshot();
@@ -412,6 +525,7 @@ export class CombatChoreographer {
       this.paused = false;
       this.#clearOwned("motion_disabled_static_reinstall");
       this.#install(plan, surface, {
+        renderPolicy: this.renderPolicy ?? "live_once",
         settled: false,
         persistentOnly: false,
       });
@@ -449,6 +563,7 @@ export class CombatChoreographer {
   clear(reason = "explicit_clear") {
     this.#clearOwned(reason);
     this.plan = null;
+    this.renderPolicy = null;
     this.surface = null;
     this.logicalTime = 0;
     this.#publish();
@@ -462,16 +577,60 @@ export class CombatChoreographer {
   /**
    * @param {Record<string, any>} plan
    * @param {ChoreographySurface} surface
-   * @param {{settled: boolean, persistentOnly: boolean}} options
+   * @param {RenderPolicy} renderPolicy
+   * @param {{liveSafeRebuild?: boolean}} [options]
+   */
+  #installForPolicy(plan, surface, renderPolicy, options = {}) {
+    if (renderPolicy === "replay_static") {
+      this.paused = true;
+      this.#install(plan, surface, {
+        renderPolicy,
+        settled: true,
+        persistentOnly: false,
+        retainTransientOnSettle: true,
+      });
+      return;
+    }
+    this.paused = false;
+    const liveSafeRebuild =
+      renderPolicy === "live_once" && options.liveSafeRebuild === true;
+    this.#install(plan, surface, {
+      renderPolicy,
+      settled: liveSafeRebuild,
+      persistentOnly: liveSafeRebuild,
+    });
+  }
+
+  /**
+   * @param {Record<string, any>} plan
+   * @param {ChoreographySurface} surface
+   * @param {{
+   *   renderPolicy: RenderPolicy,
+   *   settled: boolean,
+   *   persistentOnly: boolean,
+   *   retainTransientOnSettle?: boolean,
+   * }} options
    */
   #install(plan, surface, options) {
     const persistentOnly = Boolean(options.persistentOnly);
     const settled = Boolean(options.settled);
-    const installation = this.painter.install(plan, surface, {
+    /** @type {{
+     *   motionMode: MotionMode,
+     *   renderPolicy: RenderPolicy,
+     *   settled: boolean,
+     *   persistentOnly: boolean,
+     *   retainTransientOnSettle?: boolean,
+     * }} */
+    const painterOptions = {
       motionMode: this.motionMode,
+      renderPolicy: options.renderPolicy,
       settled,
       persistentOnly,
-    });
+    };
+    if (options.retainTransientOnSettle === true) {
+      painterOptions.retainTransientOnSettle = true;
+    }
+    const installation = this.painter.install(plan, surface, painterOptions);
     const nodeCount = nonNegativeInteger(installation.nodeCount ?? 0, "nodeCount");
     const animationSpecs = Array.isArray(installation.animationSpecs)
       ? installation.animationSpecs
@@ -490,10 +649,15 @@ export class CombatChoreographer {
     }
     const staticOff =
       this.motionMode === "off" && !settled && !persistentOnly && nodeCount > 1;
+    const eventlessReplayAnimated =
+      options.renderPolicy === "replay_animated" &&
+      animationSpecs.length === 0 &&
+      !settled &&
+      !persistentOnly;
     const clockBudget =
       settled || persistentOnly
         ? 0
-        : staticOff
+        : eventlessReplayAnimated || staticOff
           ? 1
           : animationSpecs.length === 0
             ? 0
@@ -513,23 +677,32 @@ export class CombatChoreographer {
       throw new RangeError("choreography painter exceeded the animation bound.");
     }
     this.installation = installation;
-    this.logicalTime = settled ? Number(plan.phases?.total ?? 0) : 0;
+    this.renderPolicy = options.renderPolicy;
+    this.logicalTime =
+      options.renderPolicy === "replay_static"
+        ? 0
+        : settled
+          ? Number(plan.phases?.total ?? 0)
+          : 0;
     if (settled || persistentOnly) {
       this.painter.settle(installation);
       this.submissionBlocked = false;
       return;
     }
-    if (animationSpecs.length === 0 && !staticOff) {
+    if (animationSpecs.length === 0 && !staticOff && !eventlessReplayAnimated) {
       this.logicalTime = Number(plan.phases?.total ?? 0);
       this.painter.settle(installation);
       this.submissionBlocked = false;
       return;
     }
 
-    const duration =
+    const authoredDuration =
       this.motionMode === "reduced"
         ? Number(plan.phases?.reducedTotal ?? 0)
         : Number(plan.phases?.total ?? 0);
+    const duration =
+      authoredDuration +
+      (options.renderPolicy === "replay_animated" ? REPLAY_TERMINAL_HOLD_MS : 0);
     /** @type {AnimationHandle[]} */
     const createdAnimations = [];
     /** @type {AnimationHandle | null} */
@@ -548,7 +721,7 @@ export class CombatChoreographer {
         `mbg:${plan.epochKey}:cleanup`,
       );
       ignoreCancellation(cleanupClock.finished);
-      if (this.motionMode === "normal") {
+      if (this.motionMode === "normal" && !eventlessReplayAnimated) {
         gateClock = this.animationFactory.createClock(
           installation.root,
           Number(plan.phases?.submissionRelease ?? 0),
@@ -571,13 +744,9 @@ export class CombatChoreographer {
     this.animations = createdAnimations;
     this.cleanupClock = cleanupClock;
     this.gateClock = gateClock;
-    this.submissionBlocked = this.motionMode === "normal";
+    this.submissionBlocked = this.motionMode === "normal" && !eventlessReplayAnimated;
     for (const animation of this.#allAnimations()) {
-      if (typeof animation.updatePlaybackRate === "function") {
-        animation.updatePlaybackRate(this.playbackRate);
-      } else {
-        animation.playbackRate = this.playbackRate;
-      }
+      applyPlaybackRate(animation, this.playbackRate);
       if (this.paused) {
         animation.pause();
       }
@@ -629,7 +798,10 @@ export class CombatChoreographer {
     const candidate =
       this.cleanupClock?.currentTime ?? this.gateClock?.currentTime ?? this.logicalTime;
     if (typeof candidate === "number" && Number.isFinite(candidate)) {
-      this.logicalTime = candidate;
+      const authoredTotal = Number(this.plan?.phases?.total ?? candidate);
+      this.logicalTime = Number.isFinite(authoredTotal)
+        ? Math.min(Math.max(candidate, 0), Math.max(authoredTotal, 0))
+        : candidate;
     }
   }
 
@@ -676,6 +848,41 @@ function isRecord(value) {
 }
 
 /**
+ * @param {unknown} value
+ * @returns {RenderPolicy}
+ */
+function normalizeRenderPolicy(value) {
+  if (
+    value === "live_once" ||
+    value === "replay_animated" ||
+    value === "replay_static"
+  ) {
+    return value;
+  }
+  throw new RangeError(`unknown render policy ${String(value)}.`);
+}
+
+/** @param {RenderPolicy} policy */
+function isReplayPolicy(policy) {
+  return policy === "replay_animated" || policy === "replay_static";
+}
+
+/**
+ * @param {Record<string, any>} first
+ * @param {unknown} second
+ * @returns {second is Record<string, any>}
+ */
+function samePlanIdentity(first, second) {
+  return (
+    isRecord(second) &&
+    second.epochKey === first.epochKey &&
+    second.authorizationKey === first.authorizationKey &&
+    second.fingerprint === first.fingerprint &&
+    second.paintKey === first.paintKey
+  );
+}
+
+/**
  * @param {Promise<unknown>} promise
  */
 function ignoreCancellation(promise) {
@@ -715,15 +922,27 @@ function normalizeMotionMode(value) {
   throw new RangeError(`unknown motion mode ${String(value)}.`);
 }
 
-/**
- * @param {unknown} value
- */
-function boundedPlaybackRate(value) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric) || numeric < 0.01 || numeric > 2) {
-    throw new RangeError("playback rate must be finite and between 0.01 and 2.");
+/** @param {unknown} value */
+function normalizePlaybackRate(value) {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    !SUPPORTED_PLAYBACK_RATES.includes(value)
+  ) {
+    throw new RangeError(
+      "playback rate must be one of 0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, or 2.00.",
+    );
   }
-  return numeric;
+  return value;
+}
+
+/** @param {AnimationHandle} animation @param {number} rate */
+function applyPlaybackRate(animation, rate) {
+  if (typeof animation.updatePlaybackRate === "function") {
+    animation.updatePlaybackRate(rate);
+  } else {
+    animation.playbackRate = rate;
+  }
 }
 
 /**
