@@ -136,10 +136,11 @@ boundary:
 - A core recipient sentinel of `-1` normalizes to JSON `null`, agrees with the
   corresponding `has_recipient` flag in both directions, and reverses
   losslessly.
-- Sparse events form an exactly 23-variant discriminated V1 union derived from
-  facts and adjacent frames. The one-time Milestone 7 pre-alpha expansion adds
-  authoritative Team Deathmatch score-change and completion variants at phase
-  ranks 130 and 140. `AgentDiedEventV1` records the newly dead recipient;
+- Sparse events form an exactly 24-variant discriminated V1 union derived from
+  facts and adjacent frames. The Replay/Debugger baseline contributes the
+  rank-50 `AgentLeftCombatEventV1`; the one-time Milestone 7 pre-alpha
+  expansion adds authoritative Team Deathmatch score-change and completion
+  variants at phase ranks 130 and 140. `AgentDiedEventV1` records the newly dead recipient;
   one `LethalDamageContributionEventV1` separately records each authoritative
   positive source contribution on that lethal transition. Rank 90 orders the
   death event before its contribution events. Neither record claims a killer,
@@ -558,8 +559,11 @@ Milestone 7 performs one approved in-place expansion of the unreleased V1
 evaluation and replay models. Resolved configuration records add numeric task
 mode and Team Deathmatch threshold, analysis snapshots add the two
 authoritative team scores, and transition facts add the task outcome. The
-event union expands from 21 to exactly 23 variants:
+integrated event union expands from A2's original 21 to exactly 24 variants:
 
+- `agent_left_combat`, phase rank 50, retained from the authoritative
+  Replay/Debugger baseline, records an alive recipient's countdown edge from
+  one to zero after countdown reset and before regeneration;
 - `team_deathmatch_score_changed`, phase rank 130, records the zero-based team
   index, public team ID, positive score increment, previous score, and
   successor score; and
@@ -1057,3 +1061,73 @@ configuration digest, explicit fixed-slot roster and role template, matched
 seed schedule and realized coordinate, horizon, and scenario identity. M10
 must later subsume or explicitly version this precedent when it defines the
 permanent shared contracts and promotion adapters.
+## A17. SharedObs recorded visual-union presentation
+
+**Classification:** harmless clarification of the rendering and learner-input
+boundary established by A1 and A10.
+**Clarifies:** A1 and A10; the Milestone 6 presentation contract; and the
+conceptual name `shared_obs_recorded_visual_union`.
+
+`shared_obs_recorded_visual_union` names a rendering-only authorized view. Its
+frozen V1 wire literals are `shared_obs_visual_union` for the observation mode
+and `authorized_same_epoch_sensor_source_visual_union` for the construction
+basis. These names describe the same presentation contract; existing V1 wire
+literals are unchanged.
+
+The view keeps the selected recipient's own recorded base-sensor row separate
+and may add only recorded, same-decision-epoch sensor rows from same-team,
+configured-active sources for which the recipient's recorded source
+availability is true. It is an authorized visual union, not a recomputed
+observation: presentation code must not recreate geometry, visibility, line of
+sight, masks, mechanics, or simulator state.
+
+The visual union excludes teammate action masks, prior-action or other history,
+rewards, recurrent or policy state, transition facts, critic input, and hidden
+Oracle state. The diagnostic `source_material_only` view described by A10 is
+not a product Agent-POV presentation root and must not be installed or labelled
+as one.
+
+One separate presentation-only exception is the
+`local_oracle_corpse_overlay`. Dead bodies are not actor-input observations, so
+the trusted Python presentation producer may project configured-active corpses
+from the same authoritative epoch when at least one authorized living sensor
+places the corpse within its recorded observation radius and static line of
+sight. NoSharedObs uses only the selected recipient; SharedObs uses the
+deduplicated union of authorized living allied sensors. This exception may add
+only Oracle-matching public corpse facts, the public sensor identities that
+authorized them, and same-epoch join fields already present in or derivable
+from the Agent source. It is consumed for corpse painting and inspection, plus
+one narrowly bound lifecycle presentation: paired prior/current projections
+may admit only an `agent_died` or `agent_respawned` cue and the phase endpoint
+owned by that cue. An overlay-only endpoint must not move an ability route or
+admit any other event. The overlay must not enter actor observations, masks,
+targeting, legality, accepted actions, simulator or recorded transition
+semantics, or hidden-geometry reconstruction in the browser. Dead sensors
+authorize no additional visibility.
+
+That exclusion governs the durable Agent scene and learner-facing material; it
+does not make visible battlefield actions disappear from replay or debugger
+playback.  The presentation layer may carry a separate, ephemeral visual-event
+projection derived from the canonical incoming transition.  Every agent and
+phase anchor in an emitted ordinary row must already be authorized by the
+recipient's fog-filtered start or successor scene. The only exception is the
+death/respawn cue-owned corpse endpoint defined above. A payload fact that
+describes or derives from an endpoint requires that endpoint to be authorized
+even when its canonical coordinate anchor belongs to an earlier phase; for
+example, hidden successor health, regeneration, and cooldown outcomes cannot be
+disclosed through a transition-start anchor. Hidden sources, targets, aura
+emitters, inactive identities, and global-only pulses are omitted server-side.
+Surviving event rows use a dense recipient-local identity axis, so canonical
+event IDs, hidden counts, ordering gaps, slots, and Oracle transition identities
+never cross the Agent presentation boundary. The corpse-only exception may
+carry the canonical Oracle frame ID because it is exactly derivable from the
+already-disclosed episode and frame index; it carries no additional frame fact.
+The event projection exists only to render the same visible action semantics as
+Oracle View under fog; it is not stored in or derived from the learner's
+actor-input artifact.
+
+Neither representation is a materialized SharedObs learner input. Exact
+SharedObs actor-input export remains unavailable until the Milestone 12
+compositor is implemented, performance-tested, and accepted. Presentation and
+replay support therefore do not activate SharedObs training or authorize any
+claim that the composed learner tensor is available.

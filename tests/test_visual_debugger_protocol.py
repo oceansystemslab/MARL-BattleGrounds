@@ -28,7 +28,6 @@ from scripts.dev.visual_debugger.protocol import (
     SaveAsCommandV1,
     ScenarioMetadataV1,
     ScenarioSwitchCommandV1,
-    SetMovementScaleCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
     TargetReferenceV1,
@@ -63,7 +62,7 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
         roster_global_slots=(0,),
         controlled_global_slot=0,
         selected_global_slot=None,
-        pending_submission_scope="controlled_actor",
+        pending_submission_scope="joint_turn",
         pending_actions=(pending,),
         pending_action=pending,
         latest_transition=None,
@@ -73,6 +72,10 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
     assert tuple(row.move_action for row in hud.movement_legalities) == tuple(
         range(NUM_MOVE_ACTIONS)
     )
+    retired_scope = hud.model_dump(mode="python")
+    retired_scope["pending_submission_scope"] = "controlled_actor"
+    with pytest.raises(ValidationError, match=r"joint_turn.*scripted_playback"):
+        HudFrameV1.model_validate(retired_scope)
     for invalid_rows in (
         legalities[:-1],
         tuple(reversed(legalities)),
@@ -83,7 +86,7 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
                 roster_global_slots=(0,),
                 controlled_global_slot=0,
                 selected_global_slot=None,
-                pending_submission_scope="controlled_actor",
+                pending_submission_scope="joint_turn",
                 pending_actions=(pending,),
                 pending_action=pending,
                 latest_transition=None,
@@ -114,8 +117,6 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
         ActorPovTargetActionCommandV1(target_action=6),
         ScenarioSwitchCommandV1(scenario_name="basic_support"),
         ResetCommandV1(),
-        SetMovementScaleCommandV1(movement_scale=0.1),
-        SetMovementScaleCommandV1(movement_scale=None),
         SetViewCommandV1(view_mode="pov"),
         SetPresetCommandV1(preset="analysis"),
         FinishAndReviewCommandV1(),
@@ -125,9 +126,6 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
         ConfirmDiscardAndReplaceCommandV1(replacement=ResetCommandV1()),
         ConfirmDiscardAndReplaceCommandV1(
             replacement=ScenarioSwitchCommandV1(scenario_name="basic_support")
-        ),
-        ConfirmDiscardAndReplaceCommandV1(
-            replacement=SetMovementScaleCommandV1(movement_scale=0.2)
         ),
         ExitCommandV1(),
     ),
@@ -353,16 +351,7 @@ def test_pointer_command_rejects_nonfinite_world_coordinates(
         )
 
 
-@pytest.mark.parametrize("movement_scale", (0.01, 0.1, 1.0, None))
-def test_movement_scale_command_accepts_exact_range_and_default(
-    movement_scale: float | None,
-) -> None:
-    command = SetMovementScaleCommandV1(movement_scale=movement_scale)
-
-    assert command.movement_scale == movement_scale
-
-
-def test_movement_scale_json_boundary_accepts_browser_integer_maximum() -> None:
+def test_removed_movement_scale_command_is_rejected_at_the_wire_boundary() -> None:
     payload = json.dumps(
         {
             "schema_version": 1,
@@ -376,48 +365,42 @@ def test_movement_scale_json_boundary_accepts_browser_integer_maximum() -> None:
         }
     )
 
-    request = CommandRequestV1.model_validate_json(payload)
-
-    assert isinstance(request.command, SetMovementScaleCommandV1)
-    assert request.command.movement_scale == 1.0
-    assert type(request.command.movement_scale) is float
+    with pytest.raises(ValidationError):
+        CommandRequestV1.model_validate_json(payload)
 
 
 @pytest.mark.parametrize(
-    "movement_scale",
-    (
-        0.009,
-        1.001,
-        float("nan"),
-        float("inf"),
-        -float("inf"),
-        1,
-        True,
-        "0.1",
-    ),
+    "legacy_preset",
+    ("presentation", "analysis", "technical", "debug"),
 )
-def test_movement_scale_command_rejects_range_type_and_nonfinite_values(
-    movement_scale: object,
-) -> None:
-    with pytest.raises(ValidationError):
-        SetMovementScaleCommandV1(
-            movement_scale=movement_scale,  # type: ignore[arg-type]
+def test_legacy_preset_canonicalizes_to_analysis(legacy_preset: str) -> None:
+    request = CommandRequestV1.model_validate_json(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "client_id": "client-1",
+                "command_id": "legacy-technical",
+                "base_revision": 0,
+                "command": {
+                    "command_type": "set_preset",
+                    "preset": legacy_preset,
+                },
+            }
         )
+    )
+
+    assert isinstance(request.command, SetPresetCommandV1)
+    assert request.command.preset == "analysis"
 
 
-def test_scenario_movement_scale_metadata_enforces_advertised_coherence() -> None:
+def test_scenario_exposes_movement_scale_as_read_only_recorded_truth() -> None:
     payload = {
         "name": "arena_5v5",
         "title": "Arena",
         "description": "Interactive arena.",
         "mode": "interactive",
         "audience": "researcher",
-        "movement_scale_minimum": 0.01,
-        "movement_scale_maximum": 1.0,
-        "movement_scale_step": 0.01,
-        "ordinary_movement_distance_scale": 0.1,
-        "scenario_default_movement_scale": 1.0,
-        "movement_scale_overridden": True,
+        "ordinary_movement_distance_scale": 1.0,
         "completed_frame_count": 0,
         "frame_count": 0,
         "next_frame_index": None,
@@ -428,16 +411,20 @@ def test_scenario_movement_scale_metadata_enforces_advertised_coherence() -> Non
 
     metadata = ScenarioMetadataV1.model_validate(payload)
 
-    assert metadata.movement_scale_minimum == 0.01
-    assert metadata.movement_scale_maximum == 1.0
-    assert metadata.movement_scale_step == 0.01
-    for update in (
-        {"movement_scale_minimum": 0.02},
-        {"ordinary_movement_distance_scale": 0.005},
-        {"movement_scale_overridden": False},
+    assert metadata.ordinary_movement_distance_scale == 1.0
+    with pytest.raises(ValidationError, match=r"exactly 1\.0"):
+        ScenarioMetadataV1.model_validate(
+            payload | {"ordinary_movement_distance_scale": 0.5}
+        )
+    for obsolete_field in (
+        "movement_scale_minimum",
+        "movement_scale_maximum",
+        "movement_scale_step",
+        "scenario_default_movement_scale",
+        "movement_scale_overridden",
     ):
         with pytest.raises(ValidationError):
-            ScenarioMetadataV1.model_validate(payload | update)
+            ScenarioMetadataV1.model_validate(payload | {obsolete_field: 1.0})
 
 
 def test_scenario_metadata_json_accepts_integer_and_rejects_coercion() -> None:
@@ -447,12 +434,7 @@ def test_scenario_metadata_json_accepts_integer_and_rejects_coercion() -> None:
         "description": "Interactive arena.",
         "mode": "interactive",
         "audience": "researcher",
-        "movement_scale_minimum": 0.01,
-        "movement_scale_maximum": 1,
-        "movement_scale_step": 0.01,
         "ordinary_movement_distance_scale": 1,
-        "scenario_default_movement_scale": 1,
-        "movement_scale_overridden": False,
         "completed_frame_count": 0,
         "frame_count": 0,
         "next_frame_index": None,
@@ -546,7 +528,7 @@ def test_hud_candidate_legality_requires_target_none_and_exact_roster() -> None:
         roster_global_slots=(0,),
         controlled_global_slot=0,
         selected_global_slot=None,
-        pending_submission_scope="controlled_actor",
+        pending_submission_scope="joint_turn",
         pending_actions=(pending,),
         pending_action=pending,
         latest_transition=None,
@@ -569,7 +551,7 @@ def test_hud_candidate_legality_requires_target_none_and_exact_roster() -> None:
             roster_global_slots=(0,),
             controlled_global_slot=0,
             selected_global_slot=None,
-            pending_submission_scope="controlled_actor",
+            pending_submission_scope="joint_turn",
             pending_actions=(pending,),
             pending_action=pending,
             latest_transition=None,
@@ -581,8 +563,11 @@ def test_hud_candidate_legality_requires_target_none_and_exact_roster() -> None:
             roster_global_slots=(0, 1),
             controlled_global_slot=0,
             selected_global_slot=None,
-            pending_submission_scope="controlled_actor",
-            pending_actions=(pending,),
+            pending_submission_scope="joint_turn",
+            pending_actions=(
+                pending,
+                pending.model_copy(update={"actor_global_slot": 1}),
+            ),
             pending_action=pending,
             latest_transition=None,
             movement_legalities=_movement_legalities(),
@@ -593,7 +578,7 @@ def test_hud_candidate_legality_requires_target_none_and_exact_roster() -> None:
             roster_global_slots=(0,),
             controlled_global_slot=0,
             selected_global_slot=None,
-            pending_submission_scope="controlled_actor",
+            pending_submission_scope="joint_turn",
             pending_actions=(pending,),
             pending_action=pending,
             latest_transition=None,
@@ -605,7 +590,7 @@ def test_hud_candidate_legality_requires_target_none_and_exact_roster() -> None:
             roster_global_slots=(0,),
             controlled_global_slot=0,
             selected_global_slot=None,
-            pending_submission_scope="controlled_actor",
+            pending_submission_scope="joint_turn",
             pending_actions=(pending,),
             pending_action=pending,
             latest_transition=None,
@@ -647,8 +632,8 @@ def test_hud_candidate_legality_requires_target_none_and_exact_roster() -> None:
         roster_global_slots=(0, 5),
         controlled_global_slot=5,
         selected_global_slot=None,
-        pending_submission_scope="controlled_actor",
-        pending_actions=(team_b_pending,),
+        pending_submission_scope="joint_turn",
+        pending_actions=(pending, team_b_pending),
         pending_action=team_b_pending,
         latest_transition=None,
         movement_legalities=_movement_legalities(),
@@ -809,7 +794,7 @@ def test_hud_rejects_public_action_endpoints_absent_from_authorized_roster() -> 
             roster_global_slots=(0,),
             controlled_global_slot=0,
             selected_global_slot=None,
-            pending_submission_scope="controlled_actor",
+            pending_submission_scope="joint_turn",
             pending_actions=(pending,),
             pending_action=pending,
             latest_transition=latest,

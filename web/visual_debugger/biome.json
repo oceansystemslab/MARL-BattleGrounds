@@ -28,6 +28,15 @@
   },
   "overrides": [
     {
+      "includes": [
+        "src/authorized-presentation-schema.js",
+        "tests/fixtures/authorized-presentations-v1.json"
+      ],
+      "formatter": {
+        "enabled": false
+      }
+    },
+    {
       "includes": ["index.html"],
       "linter": {
         "rules": {

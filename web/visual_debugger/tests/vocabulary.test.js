@@ -3,6 +3,10 @@ import test from "node:test";
 
 import { iconDefinition, KNOWN_GLYPH_KEYS } from "../src/icons.js";
 import {
+  statusLifecyclePresentation,
+  statusPresentation,
+} from "../src/semantic-vocabulary.js";
+import {
   ACTIVATION_TOKEN_IDS,
   activationImpactSemantic,
   CANONICAL_STATUS_ORDER,
@@ -56,6 +60,7 @@ const EXPECTED_LIFECYCLE = [
   "cleared_by_death",
   "cleared_unclassified",
   "trap_broken_and_reapplied",
+  "reapplied",
 ];
 const EXPECTED_CATALOG_STATUS_MAP = Object.freeze({
   warrior_charge_slow: "slow_warrior_charge",
@@ -67,6 +72,10 @@ const EXPECTED_CATALOG_STATUS_MAP = Object.freeze({
   rogue_poison_anti_heal: "anti_heal_rogue_poison",
   mage_burst_damage_amplification: "mage_burst",
   priest_blessing_of_freedom_movement_floor: "priest_freedom",
+});
+const EXPECTED_CATALOG_AURA_MODIFIER_MAP = Object.freeze({
+  mage_damage_amplification: "mage_amplification",
+  warrior_damage_mitigation: "warrior_mitigation",
 });
 
 test("display registries cover every current stable semantic token", () => {
@@ -101,17 +110,126 @@ test("display registries cover every current stable semantic token", () => {
   }
 });
 
+test("durable in-combat status keeps the existing white crossed-swords identity", () => {
+  const definition = resolveVisualToken("status", "in_combat");
+  const presentation = statusPresentation("in_combat");
+  assert.equal(definition.tokenId, "in_combat");
+  assert.equal(definition.label, "In Combat");
+  assert.equal(definition.accessibleName, "In Combat");
+  assert.equal(definition.glyphKey, "combat-in-progress");
+  assert.equal(definition.cssKey, "in-combat");
+  assert.equal(iconDefinition(definition.glyphKey).glyphKey, "combat-in-progress");
+  assert.equal(presentation.title, "In Combat");
+  assert.match(
+    presentation.effect,
+    /transitions remain before this agent leaves combat/u,
+  );
+  assert.equal(presentation.accent, "none");
+  assert.equal(presentation.magnitudeKind, "none");
+});
+
+test("status lifecycle copy identifies the exact durable status and applies lifecycle-specific summaries", () => {
+  const lifecyclePrefixes = new Map([
+    ["applied", "Applied"],
+    ["refreshed", "Refreshed"],
+    ["decremented", "Aged"],
+    ["expired", "Expired"],
+    ["trap_broken", "Broken"],
+    ["cleared_by_death", "Cleared On Death"],
+    ["cleared_unclassified", "Ended"],
+    ["trap_broken_and_reapplied", "Broken, Then Reapplied"],
+    ["reapplied", "Reapplied"],
+  ]);
+  for (const statusTokenId of [...EXPECTED_STATUSES, "in_combat", "spawn_shield"]) {
+    const status = statusPresentation(statusTokenId);
+    const subject = status.title.replace("): ", ") ");
+    for (const [lifecycleTokenId, prefix] of lifecyclePrefixes) {
+      const lifecycle = statusLifecyclePresentation(statusTokenId, lifecycleTokenId);
+      const expectedTitle =
+        lifecycleTokenId === "cleared_by_death"
+          ? `Cleared ${subject} On Death`
+          : lifecycleTokenId === "expired" && statusTokenId === "in_combat"
+            ? "Out of Combat"
+            : `${prefix} ${subject}`;
+      const expectedSummary =
+        lifecycleTokenId === "expired" || lifecycleTokenId === "cleared_by_death"
+          ? null
+          : lifecycleTokenId === "trap_broken" && statusTokenId === "stun_hunter_trap"
+            ? "The Freezing Trap stun ended early because the recipient received damage."
+            : status.effect;
+      assert.deepEqual(lifecycle, {
+        title: expectedTitle,
+        summary: expectedSummary,
+      });
+      assert.equal(Object.isFrozen(lifecycle), true);
+    }
+  }
+  assert.deepEqual(statusLifecyclePresentation("slow_warrior_charge", "applied"), {
+    title: "Applied Warrior (Ultimate: Charge) Slow",
+    summary:
+      "A Warrior's concussive Charge slows this agent's movement for its duration.",
+  });
+  assert.equal(statusLifecyclePresentation("slow_warrior_charge", "unknown"), null);
+});
+
 test("death clear is distinct from natural expiry and damage break", () => {
   const deathClear = resolveVisualToken("lifecycle", "cleared_by_death");
   const expired = resolveVisualToken("lifecycle", "expired");
   const damageBreak = resolveVisualToken("lifecycle", "trap_broken");
 
-  assert.equal(deathClear.label, "Cleared by death");
+  assert.equal(deathClear.label, "Cleared On Death");
   assert.match(deathClear.accessibleName, /cleared.*recorded new death/u);
   assert.notEqual(deathClear.glyphKey, expired.glyphKey);
   assert.notEqual(deathClear.glyphKey, damageBreak.glyphKey);
   assert.notEqual(deathClear.cssKey, expired.cssKey);
   assert.notEqual(deathClear.cssKey, damageBreak.cssKey);
+});
+
+test("status compositor outcomes use the exact locked lifecycle vocabulary", () => {
+  const labels = Object.freeze({
+    applied: "Applied",
+    refreshed: "Refreshed",
+    trap_broken_and_reapplied: "Broken, Then Reapplied",
+    reapplied: "Reapplied",
+    trap_broken: "Broken",
+    expired: "Expired",
+    cleared_by_death: "Cleared On Death",
+  });
+  for (const [tokenId, label] of Object.entries(labels)) {
+    assert.equal(resolveVisualToken("lifecycle", tokenId).label, label, tokenId);
+  }
+  for (const [tokenId, shortLabel] of [
+    ["applied", "Applied"],
+    ["refreshed", "Refreshed"],
+    ["expired", "Expired"],
+  ]) {
+    const lifecycle = resolveVisualToken("lifecycle", tokenId);
+    assert.equal(lifecycle.shortLabel, shortLabel, tokenId);
+  }
+  const reapplied = resolveVisualToken("lifecycle", "reapplied");
+  assert.equal(reapplied.shortLabel, "Reapplied");
+  assert.equal(reapplied.accessibleName, "Status reapplied");
+  assert.equal(reapplied.glyphKey, "lifecycle-applied");
+  assert.doesNotMatch(JSON.stringify(reapplied), /expir/iu);
+});
+
+test("product vocabulary uses the locked exact ability and aura names", () => {
+  assert.deepEqual(
+    [1, 2, 3, 4, 5].map((classId) => ultimateTokenFromClassId(classId).label),
+    ["Burst", "Charge", "Freezing Trap", "Crippling Poison", "Holy Word: Salvation"],
+  );
+  assert.equal(
+    resolveVisualToken("modifier", "mage_amplification").label,
+    "Sorcerer’s Empowerment",
+  );
+  assert.equal(
+    resolveVisualToken("modifier", "warrior_mitigation").label,
+    "Guardian’s Barrier",
+  );
+  assert.equal(
+    resolveVisualToken("modifier", "rogue_anti_heal").label,
+    "Crippling Poison Anti-Heal",
+  );
 });
 
 test("every CP2 catalog status resolves through an explicit presentation mapping", () => {
@@ -128,6 +246,18 @@ test("every CP2 catalog status resolves through an explicit presentation mapping
     "future_catalog_status",
   );
   assert.equal(resolveVisualToken("status", "future_catalog_status").cssKey, "unknown");
+});
+
+test("every catalog aura resolves through an explicit modifier mapping", () => {
+  for (const [catalogId, tokenId] of Object.entries(
+    EXPECTED_CATALOG_AURA_MODIFIER_MAP,
+  )) {
+    const definition = resolveVisualToken("modifier", catalogId);
+    assert.equal(definition.tokenId, tokenId);
+    assert.notEqual(definition.cssKey, "unknown");
+    assert.notEqual(definition.glyphKey, "unknown");
+    assert.notEqual(iconDefinition(definition.glyphKey).glyphKey, "unknown");
+  }
 });
 
 test("numeric class and team identities map only to display vocabulary", () => {
@@ -182,6 +312,20 @@ test("class glyphs use the canonical Hunter bow and Priest medic cross", () => {
         stroke: "none",
       },
     ],
+  );
+});
+
+test("durable in-combat state uses the allowlisted crossed-swords glyph", () => {
+  const inCombat = iconDefinition("combat-in-progress");
+  assert.equal(KNOWN_GLYPH_KEYS.includes("combat-in-progress"), true);
+  assert.equal(inCombat.glyphKey, "combat-in-progress");
+  assert.deepEqual(
+    inCombat.primitives.map((primitive) => primitive.tag),
+    ["path", "path"],
+  );
+  assert.deepEqual(
+    inCombat.primitives.map((primitive) => primitive.attributes.d),
+    ["M4 3 15 14M13 16l3-3 4 4-3 3Z", "M20 3 9 14M11 16l-3-3-4 4 3 3Z"],
   );
 });
 
@@ -240,6 +384,21 @@ test("class-specific Ultimate tokens preserve activation vocabulary", () => {
   );
 });
 
+test("Crippling Poison uses a dagger-and-venom activation glyph", () => {
+  const poison = iconDefinition("activation-poison");
+  assert.equal(poison.glyphKey, "activation-poison");
+  assert.deepEqual(
+    poison.primitives.map((primitive) => primitive.tag),
+    ["path", "path", "path", "path"],
+  );
+  assert.deepEqual(
+    poison.primitives.slice(0, 3).map((primitive) => primitive.attributes.d),
+    ["M4 20 9 15", "M6 14 10 18", "M9 15 20 4 17 12 12 17Z"],
+  );
+  assert.equal(poison.primitives[3].attributes.fill, "currentColor");
+  assert.equal(poison.primitives[3].attributes.stroke, "none");
+});
+
 test("activation impact grammar is explicit, non-numeric, and fail-closed", () => {
   assert.deepEqual(
     EXPECTED_ACTIVATIONS.map((tokenId) => activationImpactSemantic(tokenId)),
@@ -276,6 +435,12 @@ test("unknown and malformed IDs use a stable non-injecting fallback", () => {
   assert.equal(future.glyphKey, "unknown");
   assert.equal(future.cssKey, "unknown");
   assert.equal(future.fallback, "?");
+
+  const futureModifier = resolveVisualToken("modifier", "future/aura:hover");
+  assert.equal(futureModifier.tokenId, "future/aura:hover");
+  assert.equal(futureModifier.glyphKey, "unknown");
+  assert.equal(futureModifier.cssKey, "unknown");
+  assert.equal(futureModifier.fallback, "?");
 
   assert.equal(resolveVisualToken("status", null).tokenId, "unknown");
   assert.equal(resolveVisualToken("status", "__proto__").cssKey, "unknown");

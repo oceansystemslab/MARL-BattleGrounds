@@ -1,5 +1,11 @@
+import {
+  authorizedPresentationResearcherSceneView,
+  authorizedPresentationSceneView,
+  isAuthorizedPresentationFrame,
+} from "./authorized-presentation-adapter.js";
 import { formatCompactDisplayNumber, formatDisplayNumber } from "./display.js";
 import {
+  createSpawnShieldView,
   explainAgent,
   explainAura,
   explainCooldown,
@@ -13,17 +19,19 @@ import {
   explainPovStatus,
   explainRange,
   explainStatus,
-  explainVisibility,
 } from "./explanations.js";
 import { createSvgIcon } from "./icons.js";
 import {
   createViewportTransform,
   layoutRequiredDocks,
   layoutStatusDocks,
-  protectedBodyRect,
 } from "./layout.js";
-import { createRouteGeometry } from "./routes.js";
+import { createRouteGeometry, routeMarkerPose } from "./routes.js";
 import { registerTooltipOwner } from "./tooltip.js";
+import {
+  DEFAULT_VISUAL_FILTER_STATE,
+  isVisualPaintPartEnabled,
+} from "./visual-filters.js";
 import {
   classTokenFromId,
   resolveVisualToken,
@@ -51,6 +59,34 @@ const LEGALITY_DOCK_DIMENSIONS = Object.freeze({
   cellWidth: 30,
   cellHeight: 18,
   cellGap: 3,
+});
+const DURABLE_VISUAL_PAINT_PARTS = Object.freeze({
+  auraFields: Object.freeze({ surface: "durable", kind: "aura_field" }),
+  auraModifierBadges: Object.freeze({
+    surface: "durable",
+    kind: "aura_modifier_badge",
+  }),
+  durationStatusBadges: Object.freeze({
+    surface: "durable",
+    kind: "duration_status_badge",
+  }),
+  povDurationStatusBadges: Object.freeze({
+    surface: "durable",
+    kind: "pov_duration_status_badge",
+  }),
+  spawnShield: Object.freeze({ surface: "durable", kind: "spawn_shield" }),
+  cooldownBadges: Object.freeze({
+    surface: "durable",
+    kind: "cooldown_badge",
+  }),
+  selectionReticle: Object.freeze({
+    surface: "durable",
+    kind: "selection_reticle",
+  }),
+  selectedPairLegality: Object.freeze({
+    surface: "durable",
+    kind: "selected_pair_legality",
+  }),
 });
 
 export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
@@ -81,6 +117,10 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   classIcon: SVGSVGElement,
  *   classLetter: SVGElement,
  *   deadMark: SVGElement,
+ *   shieldRoot: SVGElement | null,
+ *   shieldChip: SVGElement | null,
+ *   shieldIcon: SVGSVGElement | null,
+ *   shieldText: SVGElement | null,
  *   selectionRoot: SVGElement,
  *   controlledHalo: SVGElement,
  *   selectedReticle: SVGElement,
@@ -95,7 +135,7 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   ownerDocument: Document,
  *   viewportKey: string,
  *   viewportBounds: Rectangle,
- *   protectedRects: ReadonlyArray<Rectangle>,
+ *   protectedRects: ReadonlyArray<ProtectedRegion>,
  *   worldToScreen: (
  *     point: {x: number, y: number} | readonly [number, number],
  *   ) => {x: number, y: number},
@@ -103,7 +143,10 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  * }} ChoreographySurface
  * @typedef {{
  *   agent: JsonRecord,
- *   globalSlot: number,
+ *   identityKey: number | string,
+ *   layoutSlot: number,
+ *   globalSlot: number | null,
+ *   presentationKey: string | null,
  *   center: {x: number, y: number},
  *   radius: number,
  *   controlled: boolean,
@@ -118,6 +161,22 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   width: number,
  *   height: number,
  * }} Rectangle
+ * @typedef {Rectangle & {
+ *   layoutKey: string,
+ *   bounds: Rectangle,
+ *   protectedKind: "body" | "status" | "cooldown" | "modifier" | "legality",
+ *   ownerPresentationKey: string | null,
+ * }} ProtectedRegion
+ * @typedef {{
+ *   showAuraFields: boolean,
+ *   showAuraModifierBadges: boolean,
+ *   showDurationStatusBadges: boolean,
+ *   showPovDurationStatusBadges: boolean,
+ *   showSpawnShield: boolean,
+ *   showCooldownBadges: boolean,
+ *   showSelectionReticle: boolean,
+ *   showSelectedPairLegality: boolean,
+ * }} DurableVisualPolicy
  */
 
 /**
@@ -129,11 +188,152 @@ function isRecord(value) {
 }
 
 /**
+ * Publish one durable obstacle with a stable semantic identity. Top-level
+ * coordinates remain available to older surface consumers during migration;
+ * the cross-phase allocator consumes the explicit nested bounds.
+ *
+ * @param {"body" | "status" | "cooldown" | "modifier" | "legality"} protectedKind
+ * @param {string} ownerIdentity
+ * @param {Rectangle} bounds
+ * @param {string | null} ownerPresentationKey
+ * @param {string} [placementIdentity]
+ * @returns {ProtectedRegion}
+ */
+function choreographyProtectedRegion(
+  protectedKind,
+  ownerIdentity,
+  bounds,
+  ownerPresentationKey,
+  placementIdentity = ownerIdentity,
+) {
+  const frozenBounds = Object.freeze({ ...bounds });
+  return Object.freeze({
+    layoutKey: JSON.stringify([
+      "durable",
+      protectedKind,
+      ownerIdentity,
+      placementIdentity,
+    ]),
+    bounds: frozenBounds,
+    ...frozenBounds,
+    protectedKind,
+    ownerPresentationKey,
+  });
+}
+
+/**
  * @param {unknown} value
  * @returns {any[]}
  */
 function asArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+/** @param {unknown} value */
+function statusTokenId(value) {
+  const status = isRecord(value) ? value : {};
+  const candidate = status.token_id ?? status.status_id;
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : null;
+}
+
+/** @param {unknown} value */
+function statusRemainingDuration(value) {
+  const status = isRecord(value) ? value : {};
+  const candidate = status.remaining_duration ?? status.duration;
+  return Number.isInteger(candidate) ? Number(candidate) : null;
+}
+
+/** @param {unknown} local @param {unknown} researcher */
+function sameRecordedPublicValue(local, researcher) {
+  if (Object.is(local, researcher)) return true;
+  return (
+    typeof local === "number" &&
+    Number.isFinite(local) &&
+    typeof researcher === "number" &&
+    Number.isFinite(researcher) &&
+    (local === Math.fround(researcher) || Math.fround(local) === researcher)
+  );
+}
+
+/**
+ * Require every locally disclosed public status fact to agree before using the
+ * geometry-free researcher copy for source attribution.
+ *
+ * @param {unknown} rawLocal
+ * @param {unknown} rawResearcher
+ */
+function samePublicStatusFacts(rawLocal, rawResearcher) {
+  const local = isRecord(rawLocal) ? rawLocal : null;
+  const researcher = isRecord(rawResearcher) ? rawResearcher : null;
+  if (
+    local === null ||
+    researcher === null ||
+    statusTokenId(local) !== statusTokenId(researcher) ||
+    statusRemainingDuration(local) !== statusRemainingDuration(researcher)
+  ) {
+    return false;
+  }
+  const aliases = [
+    ["status_channel", "status_channel"],
+    ["configured_duration_steps", "configured_duration_steps"],
+    ["family", "family"],
+    ["source_class_id", "source_class_id"],
+    ["source_class_name", "source_class_name"],
+    ["source_action_component", "source_action_component"],
+    ["mechanic_action_component", "source_action_component"],
+    ["magnitude_kind", "magnitude_kind"],
+    ["magnitude", "magnitude"],
+    ["breaks_on_positive_damage", "breaks_on_positive_damage"],
+  ];
+  return aliases.every(([localKey, researcherKey]) => {
+    if (local[localKey] === undefined) return true;
+    return sameRecordedPublicValue(local[localKey], researcher[researcherKey]);
+  });
+}
+
+/**
+ * Resolve browser-local paint policy without copying or changing the accepted
+ * presentation. The visual-filter module owns validation and exact registry
+ * classification.
+ *
+ * @param {unknown} state
+ * @returns {Readonly<DurableVisualPolicy>}
+ */
+function durableVisualPolicy(state) {
+  return Object.freeze({
+    showAuraFields: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.auraFields,
+    ),
+    showAuraModifierBadges: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.auraModifierBadges,
+    ),
+    showDurationStatusBadges: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.durationStatusBadges,
+    ),
+    showPovDurationStatusBadges: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.povDurationStatusBadges,
+    ),
+    showSpawnShield: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.spawnShield,
+    ),
+    showCooldownBadges: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.cooldownBadges,
+    ),
+    showSelectionReticle: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.selectionReticle,
+    ),
+    showSelectedPairLegality: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.selectedPairLegality,
+    ),
+  });
 }
 
 /**
@@ -142,6 +342,31 @@ function asArray(value) {
  */
 function finiteNumber(value, fallback = 0) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+/**
+ * Read one normalized own data property without invoking an accessor or
+ * surfacing a hostile Proxy trap.
+ *
+ * @param {unknown} value
+ * @param {string} key
+ * @returns {unknown}
+ */
+function ownEnumerableDataValue(value, key) {
+  try {
+    if (typeof value !== "object" || value === null) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (
+      descriptor === undefined ||
+      !descriptor.enumerable ||
+      !Object.hasOwn(descriptor, "value")
+    ) {
+      return undefined;
+    }
+    return descriptor.value;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -160,13 +385,72 @@ function agentIdentity(agent) {
 
 /**
  * @param {unknown} frame
+ * @param {string | null | undefined} [localInspectedPresentationKey]
  * @returns {JsonRecord | null}
  */
-function frameScene(frame) {
-  if (!isRecord(frame)) {
-    return null;
+function frameScene(frame, localInspectedPresentationKey = undefined) {
+  return isAuthorizedPresentationFrame(frame)
+    ? authorizedPresentationSceneView(frame, localInspectedPresentationKey)
+    : null;
+}
+
+/**
+ * @param {JsonRecord} agent
+ * @returns {number | string | null}
+ */
+function agentDisplayIdentity(agent) {
+  if (typeof agent.display_key === "string" && agent.display_key.length > 0) {
+    return agent.display_key;
   }
-  return isRecord(frame.scene) ? frame.scene : null;
+  return Number.isInteger(agent.global_slot) ? Number(agent.global_slot) : null;
+}
+
+/** @param {JsonRecord} agent @param {number} fallback */
+function agentLayoutSlot(agent, fallback) {
+  return Number.isInteger(agent.global_slot) ? Number(agent.global_slot) : fallback;
+}
+
+/**
+ * Add only the identity actually carried by the accepted display row.
+ *
+ * @param {SVGElement} element
+ * @param {JsonRecord} record
+ */
+function setDisplayIdentityData(element, record) {
+  if (
+    typeof record.presentation_key === "string" &&
+    record.presentation_key.length > 0
+  ) {
+    element.dataset.presentationKey = record.presentation_key;
+    element.removeAttribute("data-slot");
+  } else if (Number.isInteger(record.global_slot)) {
+    element.dataset.slot = String(record.global_slot);
+    element.removeAttribute("data-presentation-key");
+  }
+}
+
+/** @param {JsonRecord} record */
+function displayIdentityAttributes(record) {
+  return typeof record.presentation_key === "string"
+    ? { "data-presentation-key": record.presentation_key }
+    : Number.isInteger(record.global_slot)
+      ? { "data-slot": record.global_slot }
+      : {};
+}
+
+/**
+ * Build tooltip input with the accepted display identity only. A layout slot
+ * may position a body, but it never becomes an Agent POV global-slot fact.
+ *
+ * @param {JsonRecord} agent
+ */
+function displayIdentityRecord(agent) {
+  return {
+    ...(typeof agent.presentation_key === "string"
+      ? { presentation_key: agent.presentation_key }
+      : {}),
+    public_agent_id: agent.public_agent_id,
+  };
 }
 
 /**
@@ -242,8 +526,8 @@ function targetReticlePath(centerX, centerY, outerRadius) {
  * @param {string} className
  * @param {"kind" | "token_id"} tokenAttribute
  * @param {ViewportTransform} transform
- * @param {ReadonlyMap<number, string>} [classByGlobalSlot]
- * @param {((record: JsonRecord) => Record<string, any>) | null} [explain]
+ * @param {ReadonlyMap<number | string, string>} [classByIdentity]
+ * @param {((record: JsonRecord) => Record<string, any> | null) | null} [explain]
  * @param {boolean} [withStrokeHitRegion]
  */
 function renderCircleLayer(
@@ -252,7 +536,7 @@ function renderCircleLayer(
   className,
   tokenAttribute,
   transform,
-  classByGlobalSlot = new Map(),
+  classByIdentity = new Map(),
   explain = null,
   withStrokeHitRegion = false,
 ) {
@@ -281,15 +565,12 @@ function renderCircleLayer(
         circle.dataset.token = record[tokenAttribute];
       }
     }
-    if (Number.isInteger(record.global_slot)) {
-      circle.dataset.slot = String(record.global_slot);
-      const classKey = classByGlobalSlot.get(record.global_slot);
-      if (classKey) {
-        circle.dataset.class = classKey;
-      }
-    }
-    if (Number.isInteger(record.source_global_slot)) {
-      circle.dataset.sourceSlot = String(record.source_global_slot);
+    setDisplayIdentityData(circle, record);
+    const identity =
+      typeof record.presentation_key === "string" ? record.presentation_key : null;
+    const classKey = identity === null ? undefined : classByIdentity.get(identity);
+    if (classKey) {
+      circle.dataset.class = classKey;
     }
     if (explain === null) {
       circles.push(circle);
@@ -297,6 +578,9 @@ function renderCircleLayer(
     }
     if (!withStrokeHitRegion) {
       const descriptor = explain(record);
+      if (descriptor === null) {
+        continue;
+      }
       circle.setAttribute("aria-label", descriptor.title);
       registerTooltipOwner(circle, descriptor);
       circles.push(circle);
@@ -316,11 +600,12 @@ function renderCircleLayer(
       hitRegion.dataset[tokenAttribute === "kind" ? "kind" : "token"] =
         record[tokenAttribute];
     }
-    if (Number.isInteger(record.global_slot)) {
-      hitRegion.dataset.slot = String(record.global_slot);
-    }
+    setDisplayIdentityData(hitRegion, record);
     owner.append(circle, hitRegion);
     const descriptor = explain(record);
+    if (descriptor === null) {
+      continue;
+    }
     owner.setAttribute("role", "img");
     owner.setAttribute("tabindex", "0");
     owner.setAttribute("aria-label", descriptor.title);
@@ -349,44 +634,40 @@ export class BattlefieldRenderer {
     this.empty = empty;
     /** @type {ViewportTransform | null} */
     this.transform = null;
-    /** @type {ReadonlyArray<Rectangle>} */
+    /** @type {ReadonlyArray<ProtectedRegion>} */
     this.choreographyProtectedRects = Object.freeze([]);
     /** @type {Readonly<{
-     *   base: ReadonlyArray<Rectangle>,
-     *   legality: ReadonlyArray<Rectangle>,
-     *   status: ReadonlyArray<Rectangle>,
+     *   base: ReadonlyArray<ProtectedRegion>,
+     *   legality: ReadonlyArray<ProtectedRegion>,
+     *   status: ReadonlyArray<ProtectedRegion>,
      * }>} */
     this.choreographyProtectedRectGroups = Object.freeze({
       base: Object.freeze([]),
       legality: Object.freeze([]),
       status: Object.freeze([]),
     });
-    this.compactActiveCombatRequested = false;
-    this.compactActiveCombat = false;
+    /** @type {ReadonlyMap<string, JsonRecord>} */
+    this.agentByPresentationKey = new Map();
     /** @type {ReadonlyMap<number, JsonRecord>} */
-    this.agentByGlobalSlot = new Map();
-    /** @type {ReadonlyMap<number, JsonRecord>} */
-    this.classMechanicsById = new Map();
+    this.agentByLayoutSlot = new Map();
+    /** @type {ReadonlyMap<string, JsonRecord>} */
+    this.researcherAgentByPublicId = new Map();
 
     const map = createLayer("map", { "aria-hidden": "true" });
     const aura = createLayer("aura", { "aria-hidden": "true" });
     const debugRange = createLayer("debug-range", {
-      "aria-label": "Exact analysis and presentation-layout debug overlays",
+      "aria-label": "Authorized ability and effect ranges",
     });
     this.rangeCues = createLayer("range-cues", { "aria-hidden": "true" });
-    this.visibilityCues = createLayer("visibility-cues");
-    this.protectedZoneCues = createLayer("protected-zone-cues", {
-      "aria-hidden": "true",
-    });
-    debugRange.append(this.rangeCues, this.visibilityCues, this.protectedZoneCues);
+    debugRange.append(this.rangeCues);
     const pendingRoute = createLayer("pending-route", { "aria-hidden": "true" });
     const transientRoute = createLayer("transient-route", {
-      "aria-hidden": "true",
+      "aria-label": "Authorized combat event routes",
     });
     const obstacle = createLayer("obstacle", { "aria-label": "Map obstacles" });
     const body = createLayer("body", { "aria-label": "Authorized agents" });
     const selectionLegality = createLayer("selection-legality", {
-      "aria-label": "Selection and exact selected-target legality",
+      "aria-label": "Selection and exact actor-owned legality",
     });
     this.selectionCues = createLayer("selection-cues", {
       "aria-hidden": "true",
@@ -397,7 +678,7 @@ export class BattlefieldRenderer {
       "aria-label": "Durable status, cooldown, and modifier cues",
     });
     const transientEvents = createLayer("transient-events", {
-      "aria-hidden": "true",
+      "aria-label": "Authorized combat event summaries",
     });
     const accessibleLabels = createLayer("accessible-labels");
 
@@ -415,7 +696,7 @@ export class BattlefieldRenderer {
       accessibleLabels,
     };
 
-    /** @type {Map<number, AgentNodes>} */
+    /** @type {Map<number | string, AgentNodes>} */
     this.agentNodes = new Map();
     /** @type {Map<string, SVGElement>} */
     this.observedBodyNodes = new Map();
@@ -442,18 +723,25 @@ export class BattlefieldRenderer {
    * Paint the durable facts in a debugger frame.
    *
    * @param {unknown} frame
-   * @param {{offline?: boolean}} [options]
+   * @param {{
+   *   offline?: boolean,
+   *   showRanges?: boolean,
+   *   localInspectedPresentationKey?: string | null,
+   *   visualFilterState?: Readonly<Record<string, boolean>>,
+   *   renderPolicy?: "live_once" | "replay_animated" | "replay_static",
+   * }} [options]
    * @returns {boolean} Whether the frame contained a paintable scene.
    */
   render(frame, options = {}) {
-    const scene = frameScene(frame);
-    const frameRecord = isRecord(frame) ? frame : {};
-    const preset =
-      frameRecord.preset === "presentation" ||
-      frameRecord.preset === "analysis" ||
-      frameRecord.preset === "debug"
-        ? frameRecord.preset
-        : "analysis";
+    const visualFilterState =
+      options.visualFilterState === undefined
+        ? DEFAULT_VISUAL_FILTER_STATE
+        : options.visualFilterState;
+    const visualPolicy = durableVisualPolicy(visualFilterState);
+    const scene = frameScene(frame, options.localInspectedPresentationKey);
+    const researcherScene = isAuthorizedPresentationFrame(frame)
+      ? authorizedPresentationResearcherSceneView(frame)
+      : scene;
     const map = isRecord(scene?.map) ? scene.map : null;
     const width = finiteNumber(map?.width);
     const height = finiteNumber(map?.height);
@@ -469,6 +757,7 @@ export class BattlefieldRenderer {
       this.battlefield.removeAttribute("viewBox");
       this.battlefield.removeAttribute("data-preset");
       this.battlefield.removeAttribute("data-audience");
+      this.battlefield.removeAttribute("data-render-policy");
       this.battlefield.setAttribute(
         "aria-label",
         "Battlefield unavailable; no authorized scene was returned.",
@@ -478,6 +767,7 @@ export class BattlefieldRenderer {
         ? "The local debugger service is unavailable. Commands are not being retried."
         : "No authorized battlefield scene was returned.";
       this.transform = null;
+      this.researcherAgentByPublicId = new Map();
       return false;
     }
 
@@ -498,93 +788,130 @@ export class BattlefieldRenderer {
     });
     this.transform = transform;
     this.battlefield.setAttribute("viewBox", `0 0 ${viewportWidth} ${viewportHeight}`);
-    this.battlefield.dataset.preset = preset;
+    this.battlefield.dataset.preset = "analysis";
     this.battlefield.dataset.audience = scene.audience;
+    if (options.renderPolicy === undefined) {
+      this.battlefield.removeAttribute("data-render-policy");
+    } else {
+      this.battlefield.dataset.renderPolicy = options.renderPolicy;
+    }
+    const audienceLabel = scene.audience === "researcher" ? "Oracle View" : "Agent POV";
     this.battlefield.setAttribute(
       "aria-label",
-      `${scene.audience_badge ?? "Debugger"} battlefield, ${width} by ${height}.`,
+      `${audienceLabel} battlefield, ${width} by ${height}.`,
     );
     this.empty.hidden = true;
 
-    this.#renderMap(transform.mapBounds);
-    const classByGlobalSlot = new Map(
+    this.#renderMap(
+      transform,
+      width,
+      height,
+      isRecord(frame) && frame.product_kind === "combat_debugger",
+    );
+    const classByIdentity = new Map(
       asArray(scene.agents)
-        .filter((agent) => isRecord(agent) && Number.isInteger(agent.global_slot))
+        .filter(
+          (agent) => isRecord(agent) && typeof agent.presentation_key === "string",
+        )
         .map((agent) => [
-          Number(agent.global_slot),
+          String(agent.presentation_key),
           classTokenFromId(agent.class_id).cssKey,
         ]),
     );
-    this.agentByGlobalSlot = new Map(
+    this.agentByPresentationKey = new Map(
       asArray(scene.agents)
-        .filter((agent) => isRecord(agent) && Number.isInteger(agent.global_slot))
-        .map((agent) => [Number(agent.global_slot), agent]),
-    );
-    this.classMechanicsById = new Map(
-      asArray(scene.class_mechanics)
         .filter(
-          (mechanics) => isRecord(mechanics) && Number.isInteger(mechanics.class_id),
+          (agent) => isRecord(agent) && typeof agent.presentation_key === "string",
         )
-        .map((mechanics) => [Number(mechanics.class_id), mechanics]),
+        .map((agent) => [String(agent.presentation_key), agent]),
+    );
+    this.researcherAgentByPublicId = new Map(
+      asArray(researcherScene?.agents)
+        .filter((agent) => isRecord(agent) && typeof agent.public_agent_id === "string")
+        .map((agent) => [String(agent.public_agent_id), agent]),
     );
     renderCircleLayer(
       this.layers.aura,
-      asArray(scene.aura_fields),
+      visualPolicy.showAuraFields
+        ? asArray(scene.aura_fields).filter(
+            (field) => isRecord(field) && field.source_alive === true,
+          )
+        : [],
       "aura-field",
       "token_id",
       transform,
       new Map(),
-      (record) =>
-        explainAura(
+      (record) => {
+        const sourcePublicAgentId = ownEnumerableDataValue(
           record,
-          this.agentByGlobalSlot.get(record.source_global_slot) ?? null,
-        ),
+          "source_public_agent_id",
+        );
+        const sourceAgent =
+          typeof sourcePublicAgentId === "string"
+            ? (this.researcherAgentByPublicId.get(sourcePublicAgentId) ?? null)
+            : null;
+        const explanationRecord =
+          sourceAgent === null
+            ? record
+            : {
+                ...record,
+                source_presentation_key: sourceAgent.presentation_key,
+                source_public_agent_id: sourceAgent.public_agent_id,
+              };
+        return explainAura(explanationRecord, sourceAgent, scene.audience);
+      },
     );
     renderCircleLayer(
       this.rangeCues,
-      asArray(scene.ranges),
+      options.showRanges === false ? [] : asArray(scene.ranges),
       "range-ring",
       "kind",
       transform,
-      classByGlobalSlot,
+      classByIdentity,
       (record) => {
-        const owner = this.agentByGlobalSlot.get(record.global_slot) ?? null;
-        return explainRange(
-          record,
-          owner,
-          owner ? (this.classMechanicsById.get(owner.class_id) ?? null) : null,
-        );
+        const owner =
+          (typeof record.presentation_key === "string"
+            ? this.agentByPresentationKey.get(record.presentation_key)
+            : null) ?? null;
+        return explainRange(record, owner);
       },
       true,
     );
     this.#renderPendingRoute(scene, transform);
     this.#renderObstacles(map, transform);
-    const projectedAgents = this.#renderAgents(scene, transform);
-    this.#renderObservedBodies(scene, transform);
-    this.#renderDebugOverlays(scene, projectedAgents, preset === "debug");
+    const projectedAgents = this.#renderAgents(scene, transform, visualPolicy);
+    this.agentByLayoutSlot = new Map(
+      projectedAgents.map((projected) => [projected.layoutSlot, projected.agent]),
+    );
+    this.#renderObservedBodies(
+      scene,
+      transform,
+      visualPolicy.showPovDurationStatusBadges,
+    );
     this.#renderStatusDocks(scene, projectedAgents, transform, {
-      showLegality: preset !== "presentation",
-      showModifiers: scene.audience === "researcher",
+      showLegality: visualPolicy.showSelectedPairLegality,
+      showModifiers: visualPolicy.showAuraModifierBadges,
+      showStatuses: visualPolicy.showDurationStatusBadges,
+      showCooldowns: visualPolicy.showCooldownBadges,
       audience: scene.audience,
     });
-    this.#applyCompactActiveCombatPolicy();
+    this.#refreshChoreographyProtectedRects();
 
     this.layers.accessibleLabels.replaceChildren();
     return true;
   }
 
   /**
-   * Prioritize accepted combat truth while a compact battlefield is actively
-   * presenting transient events. Suppressed SVG owners remain in the DOM with
-   * their complete authorized metadata; only their battlefield paint and
-   * choreography collision reservation change.
+   * Compatibility seam retained for callers predating cross-phase occupancy.
+   * Durable scientific facts are never suppressed; the allocator now reserves
+   * their named regions at every supported viewport.
    *
-   * @param {boolean} active
+   * @param {boolean} _active
    * @returns {boolean} Whether the effective compact-active state changed.
    */
-  setCompactActiveCombat(active) {
-    this.compactActiveCombatRequested = Boolean(active);
-    return this.#applyCompactActiveCombatPolicy();
+  setCompactActiveCombat(_active) {
+    this.#refreshChoreographyProtectedRects();
+    return false;
   }
 
   /**
@@ -621,9 +948,15 @@ export class BattlefieldRenderer {
       return null;
     }
     const protectedLayoutKey = this.choreographyProtectedRects
-      .map((bounds) =>
-        [bounds.left, bounds.top, bounds.right, bounds.bottom]
+      .map((region) =>
+        [
+          region.bounds.left,
+          region.bounds.top,
+          region.bounds.right,
+          region.bounds.bottom,
+        ]
           .map((value) => Number(value).toFixed(3))
+          .concat(region.layoutKey)
           .join(","),
       )
       .join(";");
@@ -659,8 +992,6 @@ export class BattlefieldRenderer {
     this.layers.map.replaceChildren();
     this.layers.aura.replaceChildren();
     this.rangeCues.replaceChildren();
-    this.visibilityCues.replaceChildren();
-    this.protectedZoneCues.replaceChildren();
     this.layers.pendingRoute.replaceChildren();
     this.layers.obstacle.replaceChildren();
     this.layers.body.replaceChildren();
@@ -671,82 +1002,82 @@ export class BattlefieldRenderer {
     this.layers.durableStatusModifier.removeAttribute("data-suppressed-cooldown-slots");
     this.layers.durableStatusModifier.removeAttribute("data-suppressed-modifier-slots");
     this.layers.durableStatusModifier.removeAttribute("data-compacted-required-docks");
+    this.layers.durableStatusModifier.removeAttribute(
+      "data-suppressed-status-presentation-keys",
+    );
+    this.layers.durableStatusModifier.removeAttribute(
+      "data-suppressed-cooldown-presentation-keys",
+    );
+    this.layers.durableStatusModifier.removeAttribute(
+      "data-suppressed-modifier-presentation-keys",
+    );
+    this.layers.durableStatusModifier.removeAttribute(
+      "data-compacted-required-presentations",
+    );
     this.layers.accessibleLabels.replaceChildren();
     this.agentNodes.clear();
     this.observedBodyNodes.clear();
-    this.agentByGlobalSlot = new Map();
-    this.classMechanicsById = new Map();
+    this.agentByPresentationKey = new Map();
+    this.agentByLayoutSlot = new Map();
+    this.researcherAgentByPublicId = new Map();
     this.choreographyProtectedRects = Object.freeze([]);
     this.choreographyProtectedRectGroups = Object.freeze({
       base: Object.freeze([]),
       legality: Object.freeze([]),
       status: Object.freeze([]),
     });
-    this.compactActiveCombat = false;
-    this.battlefield.dataset.compactActiveCombat = "false";
-    this.battlefield.removeAttribute("data-compact-active-suppressed-facts");
     this.transform = null;
-  }
-
-  /**
-   * @returns {boolean}
-   */
-  #applyCompactActiveCombatPolicy() {
-    const transform = this.transform;
-    const nextActive = Boolean(
-      this.compactActiveCombatRequested &&
-        transform &&
-        transform.viewportBounds.width <= 600 &&
-        transform.viewportBounds.height <= 420,
-    );
-    const changed = nextActive !== this.compactActiveCombat;
-    this.compactActiveCombat = nextActive;
-    this.battlefield.dataset.compactActiveCombat = String(nextActive);
-    if (nextActive) {
-      this.battlefield.dataset.compactActiveSuppressedFacts =
-        "ranges,pending-route,selected-legality,status-summaries";
-    } else {
-      this.battlefield.removeAttribute("data-compact-active-suppressed-facts");
-    }
-
-    const suppressedOwners = [
-      this.rangeCues,
-      this.layers.pendingRoute,
-      this.legalityCues,
-      ...this.layers.durableStatusModifier.querySelectorAll(
-        '.status-dock, .required-dock-fallback-dock[data-kind="status"]',
-      ),
-    ];
-    for (const owner of suppressedOwners) {
-      if (!(owner instanceof SVGElement)) {
-        continue;
-      }
-      owner.dataset.compactActiveSuppressed = String(nextActive);
-      if (nextActive) {
-        owner.setAttribute("aria-hidden", "true");
-      } else if (owner !== this.rangeCues && owner !== this.layers.pendingRoute) {
-        owner.removeAttribute("aria-hidden");
-      }
-    }
-    this.#refreshChoreographyProtectedRects();
-    return changed;
   }
 
   #refreshChoreographyProtectedRects() {
     const groups = this.choreographyProtectedRectGroups;
     this.choreographyProtectedRects = Object.freeze(
-      [
-        ...groups.base,
-        ...(this.compactActiveCombat ? [] : groups.status),
-        ...(this.compactActiveCombat ? [] : groups.legality),
-      ].map((bounds) => Object.freeze({ ...bounds })),
+      [...groups.base, ...groups.status, ...groups.legality].map((region) =>
+        Object.freeze({
+          ...region,
+          bounds: Object.freeze({ ...region.bounds }),
+        }),
+      ),
     );
   }
 
   /**
-   * @param {Rectangle} bounds
+   * @param {ViewportTransform} transform
+   * @param {number} width
+   * @param {number} height
+   * @param {boolean} showUnitGrid
    */
-  #renderMap(bounds) {
+  #renderMap(transform, width, height, showUnitGrid) {
+    const bounds = transform.mapBounds;
+    const gridLines = [];
+    if (showUnitGrid && Number.isInteger(width) && Number.isInteger(height)) {
+      for (let x = 1; x < width; x += 1) {
+        const start = screenPoint([x, 0], transform);
+        const end = screenPoint([x, height], transform);
+        gridLines.push(
+          svgElement("line", {
+            class: "map-grid-line map-grid-line--vertical",
+            x1: start.x,
+            y1: start.y,
+            x2: end.x,
+            y2: end.y,
+          }),
+        );
+      }
+      for (let y = 1; y < height; y += 1) {
+        const start = screenPoint([0, y], transform);
+        const end = screenPoint([width, y], transform);
+        gridLines.push(
+          svgElement("line", {
+            class: "map-grid-line map-grid-line--horizontal",
+            x1: start.x,
+            y1: start.y,
+            x2: end.x,
+            y2: end.y,
+          }),
+        );
+      }
+    }
     this.layers.map.replaceChildren(
       svgElement("rect", {
         class: "map-boundary",
@@ -756,6 +1087,7 @@ export class BattlefieldRenderer {
         height: bounds.height,
         rx: 8,
       }),
+      ...gridLines,
     );
   }
 
@@ -793,6 +1125,13 @@ export class BattlefieldRenderer {
       role: "img",
       tabindex: "0",
     });
+    const marker = routeMarkerPose(geometry, 1);
+    const arrow = svgElement("path", {
+      class: "pending-route-arrow",
+      d: "M -13 -6 L 0 0 L -13 6 L -9 0 Z",
+      transform: `translate(${marker.x} ${marker.y}) rotate(${marker.degrees})`,
+      "aria-hidden": "true",
+    });
     path.dataset.lane = String(route.lane ?? 0);
     path.dataset.legal = String(Boolean(route.legal));
     path.dataset.sourceAgentId = String(route.source_public_agent_id ?? "");
@@ -803,11 +1142,36 @@ export class BattlefieldRenderer {
     if (Number.isInteger(route.target_global_slot)) {
       path.dataset.targetSlot = String(route.target_global_slot);
     }
+    if (typeof route.source_presentation_key === "string") {
+      path.dataset.sourcePresentationKey = route.source_presentation_key;
+    }
+    if (typeof route.target_presentation_key === "string") {
+      path.dataset.targetPresentationKey = route.target_presentation_key;
+    }
     path.dataset.routeKind = geometry.kind;
-    const routeDescriptor = explainPendingRoute(route);
+    arrow.dataset.lane = String(route.lane ?? 0);
+    arrow.dataset.legal = String(Boolean(route.legal));
+    arrow.dataset.sourceAgentId = String(route.source_public_agent_id ?? "");
+    arrow.dataset.targetAgentId = String(route.target_public_agent_id ?? "");
+    const sourceAgent = asArray(scene.agents).find(
+      (agent) =>
+        isRecord(agent) &&
+        agent.presentation_key === route.source_presentation_key &&
+        agent.public_agent_id === route.source_public_agent_id,
+    );
+    const recipientAgent = asArray(scene.agents).find(
+      (agent) =>
+        isRecord(agent) &&
+        agent.presentation_key === route.target_presentation_key &&
+        agent.public_agent_id === route.target_public_agent_id,
+    );
+    const routeDescriptor = explainPendingRoute(route, {
+      sourceAgent,
+      recipientAgent,
+    });
     hitPath.setAttribute("aria-label", routeDescriptor.title);
     registerTooltipOwner(hitPath, routeDescriptor);
-    this.layers.pendingRoute.replaceChildren(path, hitPath);
+    this.layers.pendingRoute.replaceChildren(path, arrow, hitPath);
   }
 
   /**
@@ -858,54 +1222,83 @@ export class BattlefieldRenderer {
   /**
    * @param {JsonRecord} scene
    * @param {ViewportTransform} transform
+   * @param {Readonly<DurableVisualPolicy>} visualPolicy
    * @returns {ProjectedAgent[]}
    */
-  #renderAgents(scene, transform) {
+  #renderAgents(scene, transform, visualPolicy) {
     const agents = asArray(scene.agents).filter(
-      (agent) => isRecord(agent) && Number.isInteger(agent.global_slot),
+      (agent) => isRecord(agent) && agentDisplayIdentity(agent) !== null,
     );
-    const nextSlots = new Set(agents.map((agent) => Number(agent.global_slot)));
-    for (const [slot, nodes] of this.agentNodes) {
-      if (!nextSlots.has(slot)) {
+    const nextIdentities = new Set(agents.map(agentDisplayIdentity));
+    for (const [identityKey, nodes] of this.agentNodes) {
+      if (!nextIdentities.has(identityKey)) {
         nodes.root.remove();
+        nodes.shieldRoot?.remove();
         nodes.selectionRoot.remove();
-        this.agentNodes.delete(slot);
+        this.agentNodes.delete(identityKey);
       }
     }
 
     const selection = isRecord(scene.selection) ? scene.selection : {};
     /** @type {ProjectedAgent[]} */
     const projectedAgents = [];
-    for (const agent of agents) {
-      const slot = Number(agent.global_slot);
-      const controlled = slot === selection.controlled_global_slot;
-      const selected = slot === selection.selected_global_slot;
+    for (const [index, agent] of agents.entries()) {
+      const identityKey = agentDisplayIdentity(agent);
+      if (identityKey === null) {
+        continue;
+      }
+      const globalSlot = Number.isInteger(agent.global_slot)
+        ? Number(agent.global_slot)
+        : null;
+      const presentationKey =
+        typeof agent.presentation_key === "string" ? agent.presentation_key : null;
+      const layoutSlot = agentLayoutSlot(agent, index);
+      const controlled =
+        globalSlot !== null
+          ? globalSlot === selection.controlled_global_slot
+          : presentationKey === selection.controlled_presentation_key;
+      const selected =
+        globalSlot !== null
+          ? globalSlot === selection.selected_global_slot
+          : presentationKey === selection.selected_presentation_key;
       const center = screenPoint(agent.position, transform);
       const radius = transform.worldLengthToScreen(finiteNumber(agent.radius, 0.5));
-      let nodes = this.agentNodes.get(slot);
+      let nodes = this.agentNodes.get(identityKey);
       if (!nodes) {
-        nodes = this.#createAgentNodes(slot);
-        this.agentNodes.set(slot, nodes);
+        nodes = this.#createAgentNodes(agent, visualPolicy);
+        this.agentNodes.set(identityKey, nodes);
       }
-      this.#updateAgentNodes(nodes, agent, center, radius, controlled, selected);
+      this.#updateAgentNodes(
+        nodes,
+        agent,
+        scene.spawn_shield_mechanics,
+        center,
+        radius,
+        controlled,
+        selected,
+        visualPolicy,
+      );
       registerTooltipOwner(
         nodes.root,
         scene.audience === "agent_pov"
           ? explainPovAgent(agent, { controlled, selected })
-          : explainAgent(
-              agent,
-              { controlled, selected },
-              this.classMechanicsById.get(agent.class_id) ?? null,
-              agents,
-            ),
+          : explainAgent(agent),
       );
 
       // Appending an existing child reorders it without replacing its identity.
       this.layers.body.append(nodes.root);
+      if (visualPolicy.showSpawnShield && nodes.shieldRoot !== null) {
+        this.layers.body.append(nodes.shieldRoot);
+      } else {
+        nodes.shieldRoot?.remove();
+      }
       this.selectionCues.append(nodes.selectionRoot);
       projectedAgents.push({
         agent,
-        globalSlot: slot,
+        identityKey,
+        layoutSlot,
+        globalSlot,
+        presentationKey,
         center,
         radius,
         controlled,
@@ -924,8 +1317,9 @@ export class BattlefieldRenderer {
    *
    * @param {JsonRecord} scene
    * @param {ViewportTransform} transform
+   * @param {boolean} showDurationStatusBadges
    */
-  #renderObservedBodies(scene, transform) {
+  #renderObservedBodies(scene, transform, showDurationStatusBadges) {
     const bodies = asArray(scene.observed_bodies).filter(
       (body) =>
         isRecord(body) &&
@@ -992,14 +1386,29 @@ export class BattlefieldRenderer {
       root.dataset.class = classToken.cssKey;
       root.dataset.alive = String(Boolean(body.alive));
       const statuses = asArray(body.statuses);
-      const statusDescriptions = statuses.map((status) => {
+      const paintedStatuses = showDurationStatusBadges ? statuses : [];
+      const statusDescriptions = paintedStatuses.map((status) => {
         const token = resolveVisualToken("status", status.token_id);
         return `${token.accessibleName}, ${formatDisplayNumber(status.duration)} ticks`;
       });
       root.dataset.statusCount = String(statuses.length);
       root.setAttribute(
         "aria-label",
-        `${body.relation} observation row ${body.observation_row}, Agent ID ${body.public_agent_id}, ${classToken.label}, life state ${body.alive ? "alive" : "corpse"}, health ${formatDisplayNumber(body.current_health)} of ${formatDisplayNumber(body.max_health)}, effective speed ${formatDisplayNumber(body.effective_movement_speed)}, ${Number(body.steps_until_out_of_combat) > 0 ? `in combat with ${body.steps_until_out_of_combat} ${body.steps_until_out_of_combat === 1 ? "tick" : "ticks"} until out of combat` : "out of combat"}, ${statusDescriptions.length === 0 ? "no persistent statuses" : `statuses ${statusDescriptions.join(", ")}`}`,
+        [
+          `${body.relation} observation row ${body.observation_row}`,
+          `Agent ID ${body.public_agent_id}`,
+          classToken.label,
+          `life state ${body.alive ? "alive" : "corpse"}`,
+          `health ${formatDisplayNumber(body.current_health)} of ${formatDisplayNumber(body.max_health)}`,
+          `effective speed ${formatDisplayNumber(body.effective_movement_speed)}`,
+          showDurationStatusBadges
+            ? statusDescriptions.length === 0
+              ? "no persistent statuses"
+              : `statuses ${statusDescriptions.join(", ")}`
+            : null,
+        ]
+          .filter((part) => part !== null)
+          .join(", "),
       );
 
       const healthRadius = Math.max(radius - 4, radius * 0.7);
@@ -1049,12 +1458,12 @@ export class BattlefieldRenderer {
       label.textContent = `${body.relation === "ally" ? "ALLY" : "ENEMY"} ${body.observation_row}`;
       const statusCellWidth = 18;
       const statusCellHeight = 15;
-      const statusColumns = Math.min(statuses.length, 5);
-      const statusNodes = statuses.map((status, index) => {
+      const statusColumns = Math.min(paintedStatuses.length, 5);
+      const statusNodes = paintedStatuses.map((status, index) => {
         const token = resolveVisualToken("status", status.token_id);
         const rowIndex = Math.floor(index / 5);
         const columnIndex = index % 5;
-        const rowCount = Math.min(5, statuses.length - rowIndex * 5);
+        const rowCount = Math.min(5, paintedStatuses.length - rowIndex * 5);
         const x =
           center.x - (rowCount * statusCellWidth) / 2 + columnIndex * statusCellWidth;
         const y = center.y - radius - 19 - rowIndex * statusCellHeight;
@@ -1063,7 +1472,7 @@ export class BattlefieldRenderer {
           class: "pov-observed-status",
           transform: `translate(${x} ${y})`,
           role: "img",
-          "aria-label": `${token.accessibleName}, duration ${formatDisplayNumber(status.duration)} ticks; source agent identity is not disclosed`,
+          "aria-label": `${token.accessibleName}, duration ${formatDisplayNumber(status.duration)} ticks`,
           "data-token-id": token.tokenId,
           "data-duration": status.duration,
           "data-status-feature-index": status.status_feature_index,
@@ -1103,162 +1512,31 @@ export class BattlefieldRenderer {
         }
         registerTooltipOwner(
           cell,
-          explainPovStatus(status, {
-            public_agent_id: body.public_agent_id,
-            class_id: body.class_id,
-            team_id: body.team_id,
-          }),
+          this.#explainStatus(
+            status,
+            {
+              presentation_key: body.presentation_key,
+              public_agent_id: body.public_agent_id,
+              class_id: body.class_id,
+              team_id: body.team_id,
+            },
+            "agent_pov",
+          ),
         );
         return cell;
       });
       statusGroup.replaceChildren(...statusNodes);
-      statusGroup.setAttribute("data-columns", String(statusColumns));
+      if (showDurationStatusBadges) {
+        statusGroup.setAttribute("data-columns", String(statusColumns));
+      } else {
+        statusGroup.removeAttribute("data-columns");
+      }
       registerTooltipOwner(
         root,
         explainPovAgent(body, { controlled: false, selected: false }),
       );
       this.layers.body.append(root);
     }
-  }
-
-  /**
-   * Render only researcher-authorized observer visibility and clearly marked
-   * presentation-layout protected zones in Technical. Neither cue changes bodies
-   * or claims to be simulator geometry.
-   *
-   * @param {JsonRecord} scene
-   * @param {ProjectedAgent[]} projectedAgents
-   * @param {boolean} showDebug
-   */
-  #renderDebugOverlays(scene, projectedAgents, showDebug) {
-    this.visibilityCues.replaceChildren();
-    this.protectedZoneCues.replaceChildren();
-    const transform = this.transform;
-    if (!showDebug || !transform) {
-      return;
-    }
-
-    const protectedZones = projectedAgents.map((agent) => {
-      const bounds = protectedBodyRect(
-        {
-          center: agent.center,
-          radius: agent.radius,
-          controlled: agent.controlled,
-          selected: agent.selected,
-        },
-        {
-          bodyPadding: 4,
-          selectionAllowance: 12,
-        },
-      );
-      return svgElement("rect", {
-        class: "debug-protected-zone",
-        x: bounds.left,
-        y: bounds.top,
-        width: bounds.width,
-        height: bounds.height,
-        rx: 5,
-        "data-zone": "debug-protected",
-        "data-slot": agent.globalSlot,
-      });
-    });
-    const observedProtectedZones = asArray(scene.observed_bodies).flatMap((body) => {
-      if (
-        !isRecord(body) ||
-        (body.relation !== "ally" && body.relation !== "enemy") ||
-        !Number.isInteger(body.observation_row) ||
-        !Array.isArray(body.position) ||
-        body.position.length !== 2 ||
-        body.position.some(
-          (coordinate) =>
-            typeof coordinate !== "number" || !Number.isFinite(coordinate),
-        )
-      ) {
-        return [];
-      }
-      const center = screenPoint(body.position, transform);
-      const bounds = protectedBodyRect(
-        {
-          center,
-          radius: transform.worldLengthToScreen(finiteNumber(body.radius, 0.5)),
-          controlled: false,
-          selected: false,
-        },
-        {
-          bodyPadding: 4,
-          selectionAllowance: 12,
-        },
-      );
-      return [
-        svgElement("rect", {
-          class: "debug-protected-zone",
-          x: bounds.left,
-          y: bounds.top,
-          width: bounds.width,
-          height: bounds.height,
-          rx: 5,
-          "data-zone": "debug-protected",
-          "data-observation-key": `${body.relation}:${body.observation_row}`,
-        }),
-      ];
-    });
-    this.protectedZoneCues.replaceChildren(
-      ...protectedZones,
-      ...observedProtectedZones,
-    );
-
-    if (scene.audience !== "researcher") {
-      return;
-    }
-    const visibilityCues = [];
-    for (const fact of asArray(scene.observer_visibility)) {
-      if (!isRecord(fact) || !Number.isInteger(fact.candidate_global_slot)) {
-        continue;
-      }
-      const agent = projectedAgents.find(
-        ({ globalSlot }) => globalSlot === fact.candidate_global_slot,
-      );
-      if (!agent) {
-        continue;
-      }
-      const visible = Boolean(fact.visible);
-      const group = svgElement("g", {
-        class: "debug-visibility-cue",
-        role: "img",
-        "aria-label": `${agentIdentity(this.agentByGlobalSlot.get(fact.observer_global_slot))} ${visible ? "can" : "cannot"} see ${agentIdentity(agent.agent)}`,
-        "data-zone": "debug-visibility",
-        "data-observer-slot": fact.observer_global_slot,
-        "data-candidate-slot": agent.globalSlot,
-        "data-visible": visible,
-      });
-      const radius = agent.radius + 16;
-      registerTooltipOwner(
-        group,
-        explainVisibility(fact, {
-          observerAgent: this.agentByGlobalSlot.get(fact.observer_global_slot) ?? null,
-          candidateAgent: agent.agent,
-        }),
-      );
-      group.append(
-        svgElement("circle", {
-          class: "debug-visibility-cue__ring",
-          cx: agent.center.x,
-          cy: agent.center.y,
-          r: radius,
-        }),
-        svgElement("text", {
-          class: "debug-visibility-cue__label",
-          x: agent.center.x + radius * 0.72,
-          y: agent.center.y - radius * 0.72,
-        }),
-      );
-      const label = group.lastElementChild;
-      if (label) {
-        label.textContent = visible ? "V" : "H";
-      }
-      visibilityCues.push(group);
-    }
-    this.visibilityCues.replaceChildren(...visibilityCues);
   }
 
   /**
@@ -1269,7 +1547,7 @@ export class BattlefieldRenderer {
    * @param {ProjectedAgent[]} projectedAgents
    * @param {ViewportTransform} transform
    * @param {Rectangle[]} reservedRects
-   * @returns {Rectangle[]}
+   * @returns {ProtectedRegion[]}
    */
   #renderSelectedLegality(scene, projectedAgents, transform, reservedRects) {
     this.legalityCues.replaceChildren();
@@ -1277,25 +1555,29 @@ export class BattlefieldRenderer {
     if (!legality) {
       return [];
     }
-    const target = projectedAgents.find(
-      ({ globalSlot }) => globalSlot === legality.target_global_slot,
+    const owner = projectedAgents.find(
+      ({ presentationKey, agent }) =>
+        typeof legality.owner_presentation_key === "string" &&
+        typeof legality.owner_public_agent_id === "string" &&
+        presentationKey === legality.owner_presentation_key &&
+        agent.public_agent_id === legality.owner_public_agent_id,
     );
-    if (!target) {
+    if (!owner) {
       return [];
     }
 
     const layout = layoutStatusDocks(
       {
         agents: projectedAgents.map((agent) => ({
-          globalSlot: agent.globalSlot,
+          globalSlot: agent.layoutSlot,
           center: agent.center,
           radius: agent.radius,
           statuses:
-            agent.globalSlot === target.globalSlot
+            agent.layoutSlot === owner.layoutSlot
               ? Object.freeze(["basic", "ultimate"])
               : Object.freeze([]),
           controlled: agent.controlled,
-          selected: agent.selected || agent.globalSlot === legality.target_global_slot,
+          selected: agent.selected || agent.layoutSlot === owner.layoutSlot,
         })),
         viewport: transform.viewportBounds,
         reservedRects,
@@ -1308,20 +1590,29 @@ export class BattlefieldRenderer {
       },
     );
     const placement = layout.docks.find(
-      ({ globalSlot }) => globalSlot === target.globalSlot,
+      ({ globalSlot }) => globalSlot === owner.layoutSlot,
     );
     if (!placement) {
-      this.legalityCues.dataset.suppressedSlot = String(target.globalSlot);
+      if (owner.globalSlot !== null) {
+        this.legalityCues.removeAttribute("data-suppressed-presentation-key");
+        this.legalityCues.dataset.suppressedSlot = String(owner.globalSlot);
+      } else {
+        this.legalityCues.removeAttribute("data-suppressed-slot");
+        this.legalityCues.dataset.suppressedPresentationKey = String(
+          owner.presentationKey,
+        );
+      }
       return [];
     }
     this.legalityCues.removeAttribute("data-suppressed-slot");
+    this.legalityCues.removeAttribute("data-suppressed-presentation-key");
 
     const group = svgElement("g", {
       class: "legality-dock",
       role: "group",
-      "aria-label": `Exact selected-target legality for ${agentIdentity(target.agent)}`,
+      "aria-label": `Exact actor-owned legality for ${agentIdentity(owner.agent)}`,
       "data-zone": "legality",
-      "data-slot": target.globalSlot,
+      "data-presentation-key": owner.presentationKey,
       "data-anchor": placement.anchor,
       "data-collision-free": placement.collisionFree,
     });
@@ -1342,13 +1633,13 @@ export class BattlefieldRenderer {
         lane: 0,
         label: "0/B",
         name: "Basic",
-        available: Boolean(legality.lane_0_available),
+        available: Boolean(legality.basic_available),
       },
       {
         lane: 1,
         label: "1/U",
         name: "Ultimate",
-        available: Boolean(legality.lane_1_available),
+        available: Boolean(legality.ultimate_available),
       },
     ];
     for (const [index, lane] of lanes.entries()) {
@@ -1360,14 +1651,23 @@ export class BattlefieldRenderer {
       const pill = svgElement("g", {
         class: "legality-pill",
         role: "img",
-        "aria-label": `${lane.name} lane ${lane.available ? "available" : "unavailable"}${armed ? `, armed and ${legality.armed_pair_legal ? "legal" : "illegal"}` : ""} for ${agentIdentity(target.agent)}`,
+        "aria-label": `${lane.name} lane ${lane.available ? "available" : "unavailable"}${armed ? `, armed and ${legality.armed_pair_legal ? "legal" : "illegal"}` : ""} for ${agentIdentity(owner.agent)}`,
         "data-zone": "legality-pill",
         "data-lane": lane.lane,
         "data-available": lane.available,
         "data-armed": armed,
         "data-pair-legal": armed ? Boolean(legality.armed_pair_legal) : null,
       });
-      registerTooltipOwner(pill, explainLegality(legality, lane.lane === 0 ? 0 : 1));
+      const explanation = explainLegality(
+        legality,
+        lane.lane === 0 ? 0 : 1,
+        owner.agent,
+      );
+      if (explanation === null) {
+        this.legalityCues.replaceChildren();
+        return [];
+      }
+      registerTooltipOwner(pill, explanation);
       pill.append(
         svgElement("rect", {
           class: "legality-pill__box",
@@ -1390,7 +1690,17 @@ export class BattlefieldRenderer {
       group.append(pill);
     }
     this.legalityCues.replaceChildren(group);
-    return [placement.bounds];
+    const ownerPresentationKey =
+      typeof owner.presentationKey === "string" ? owner.presentationKey : null;
+    const ownerIdentity = ownerPresentationKey ?? `slot:${owner.layoutSlot}`;
+    return [
+      choreographyProtectedRegion(
+        "legality",
+        ownerIdentity,
+        placement.bounds,
+        ownerPresentationKey,
+      ),
+    ];
   }
 
   /**
@@ -1400,24 +1710,33 @@ export class BattlefieldRenderer {
    * @param {JsonRecord} scene
    * @param {ProjectedAgent[]} projectedAgents
    * @param {ViewportTransform} transform
-   * @param {{showLegality: boolean, showModifiers: boolean, audience: "researcher" | "agent_pov"}} policy
+   * @param {{
+   *   showLegality: boolean,
+   *   showModifiers: boolean,
+   *   showStatuses: boolean,
+   *   showCooldowns: boolean,
+   *   audience: "researcher" | "agent_pov",
+   * }} policy
    */
   #renderStatusDocks(scene, projectedAgents, transform, policy) {
     const compactMinimumViewport =
       transform.viewportBounds.width <= 600 && transform.viewportBounds.height <= 420;
     const requiredStatusSlots = new Set(
-      projectedAgents
-        .filter(
-          (agent) => agent.statuses.length > 0 && (agent.controlled || agent.selected),
-        )
-        .map(({ globalSlot }) => globalSlot),
+      policy.showStatuses
+        ? projectedAgents
+            .filter(
+              (agent) =>
+                agent.statuses.length > 0 && (agent.controlled || agent.selected),
+            )
+            .map(({ layoutSlot }) => layoutSlot)
+        : [],
     );
     const requiredDockRequests = [
       ...projectedAgents
-        .filter(({ globalSlot }) => requiredStatusSlots.has(globalSlot))
+        .filter(({ layoutSlot }) => requiredStatusSlots.has(layoutSlot))
         .map((agent) => ({
-          layoutKey: `status:${agent.globalSlot}`,
-          globalSlot: agent.globalSlot,
+          layoutKey: `status:${agent.layoutSlot}`,
+          globalSlot: agent.layoutSlot,
           publicAgentId: agent.agent.public_agent_id,
           statuses: agent.statuses,
           dockOptions: {
@@ -1435,13 +1754,13 @@ export class BattlefieldRenderer {
         })),
       ...projectedAgents.flatMap((agent) => {
         const ticks = agent.agent.ultimate_cooldown;
-        if (!Number.isInteger(ticks) || Number(ticks) <= 0) {
+        if (!policy.showCooldowns || !Number.isInteger(ticks) || Number(ticks) <= 0) {
           return [];
         }
         return [
           {
-            layoutKey: `cooldown:${agent.globalSlot}`,
-            globalSlot: agent.globalSlot,
+            layoutKey: `cooldown:${agent.layoutSlot}`,
+            globalSlot: agent.layoutSlot,
             publicAgentId: agent.agent.public_agent_id,
             statuses: Object.freeze([
               Object.freeze({
@@ -1468,7 +1787,7 @@ export class BattlefieldRenderer {
     const requiredDockLayout = layoutRequiredDocks(
       {
         agents: projectedAgents.map((agent) => ({
-          globalSlot: agent.globalSlot,
+          globalSlot: agent.layoutSlot,
           center: agent.center,
           radius: agent.radius,
           statuses: Object.freeze([]),
@@ -1499,12 +1818,13 @@ export class BattlefieldRenderer {
     const optionalStatusLayout = layoutStatusDocks(
       {
         agents: projectedAgents.map((agent) => ({
-          globalSlot: agent.globalSlot,
+          globalSlot: agent.layoutSlot,
           center: agent.center,
           radius: agent.radius,
-          statuses: requiredStatusSlots.has(agent.globalSlot)
-            ? Object.freeze([])
-            : agent.statuses,
+          statuses:
+            policy.showStatuses && !requiredStatusSlots.has(agent.layoutSlot)
+              ? agent.statuses
+              : Object.freeze([]),
           controlled: agent.controlled,
           selected: agent.selected,
         })),
@@ -1557,17 +1877,24 @@ export class BattlefieldRenderer {
     if (!policy.showLegality) {
       this.legalityCues.replaceChildren();
       this.legalityCues.removeAttribute("data-suppressed-slot");
+      this.legalityCues.removeAttribute("data-suppressed-presentation-key");
     }
     const modifierLayout = policy.showModifiers
       ? layoutStatusDocks(
           {
             agents: projectedAgents.map((agent) => ({
-              globalSlot: agent.globalSlot,
+              globalSlot: agent.layoutSlot,
               center: agent.center,
               radius: agent.radius,
-              statuses: asArray(agent.agent.modifiers),
-              controlled: false,
-              selected: false,
+              statuses: asArray(agent.agent.modifiers).filter(
+                (modifier) =>
+                  !isRecord(modifier) ||
+                  typeof modifier.multiplier !== "number" ||
+                  !Number.isFinite(modifier.multiplier) ||
+                  modifier.multiplier !== 1,
+              ),
+              controlled: agent.controlled,
+              selected: agent.selected,
             })),
             viewport: transform.viewportBounds,
             reservedRects: [
@@ -1609,19 +1936,104 @@ export class BattlefieldRenderer {
     const compactRequiredNodes = compactRequiredDocks.map((placement) =>
       this.#renderRequiredDockFallback(placement, policy.audience),
     );
-    this.layers.durableStatusModifier.dataset.suppressedStatusSlots =
-      statusLayout.suppressedGlobalSlots.join(",");
-    this.layers.durableStatusModifier.dataset.suppressedCooldownSlots =
-      cooldownLayout.suppressedGlobalSlots.join(",");
-    this.layers.durableStatusModifier.dataset.compactedRequiredDocks =
-      requiredDockLayout.compactedLayoutKeys.join(",");
-    if (policy.showModifiers) {
-      this.layers.durableStatusModifier.dataset.suppressedModifierSlots =
-        modifierLayout.suppressedGlobalSlots.join(",");
-    } else {
+    const usesPresentationKeys = projectedAgents.some(
+      ({ presentationKey }) => presentationKey !== null,
+    );
+    const presentationKeysForLayoutSlots = (
+      /** @type {ReadonlyArray<number>} */ slots,
+    ) =>
+      slots.flatMap((layoutSlot) => {
+        const key = this.agentByLayoutSlot.get(layoutSlot)?.presentation_key;
+        return typeof key === "string" ? [key] : [];
+      });
+    if (usesPresentationKeys) {
+      this.layers.durableStatusModifier.removeAttribute("data-suppressed-status-slots");
+      this.layers.durableStatusModifier.removeAttribute(
+        "data-suppressed-cooldown-slots",
+      );
       this.layers.durableStatusModifier.removeAttribute(
         "data-suppressed-modifier-slots",
       );
+      this.layers.durableStatusModifier.removeAttribute(
+        "data-compacted-required-docks",
+      );
+      if (policy.showStatuses) {
+        this.layers.durableStatusModifier.dataset.suppressedStatusPresentationKeys =
+          presentationKeysForLayoutSlots(statusLayout.suppressedGlobalSlots).join(",");
+      } else {
+        this.layers.durableStatusModifier.removeAttribute(
+          "data-suppressed-status-presentation-keys",
+        );
+      }
+      if (policy.showCooldowns) {
+        this.layers.durableStatusModifier.dataset.suppressedCooldownPresentationKeys =
+          presentationKeysForLayoutSlots(cooldownLayout.suppressedGlobalSlots).join(
+            ",",
+          );
+      } else {
+        this.layers.durableStatusModifier.removeAttribute(
+          "data-suppressed-cooldown-presentation-keys",
+        );
+      }
+      if (policy.showModifiers) {
+        this.layers.durableStatusModifier.dataset.suppressedModifierPresentationKeys =
+          presentationKeysForLayoutSlots(modifierLayout.suppressedGlobalSlots).join(
+            ",",
+          );
+      } else {
+        this.layers.durableStatusModifier.removeAttribute(
+          "data-suppressed-modifier-presentation-keys",
+        );
+      }
+      this.layers.durableStatusModifier.dataset.compactedRequiredPresentations =
+        requiredDockLayout.compactedLayoutKeys
+          .flatMap((layoutKey) => {
+            const [kind, rawLayoutSlot] = layoutKey.split(":");
+            const key = this.agentByLayoutSlot.get(
+              Number(rawLayoutSlot),
+            )?.presentation_key;
+            return typeof key === "string" ? [`${kind}:${key}`] : [];
+          })
+          .join(",");
+    } else {
+      this.layers.durableStatusModifier.removeAttribute(
+        "data-suppressed-status-presentation-keys",
+      );
+      this.layers.durableStatusModifier.removeAttribute(
+        "data-suppressed-cooldown-presentation-keys",
+      );
+      this.layers.durableStatusModifier.removeAttribute(
+        "data-suppressed-modifier-presentation-keys",
+      );
+      this.layers.durableStatusModifier.removeAttribute(
+        "data-compacted-required-presentations",
+      );
+      if (policy.showStatuses) {
+        this.layers.durableStatusModifier.dataset.suppressedStatusSlots =
+          statusLayout.suppressedGlobalSlots.join(",");
+      } else {
+        this.layers.durableStatusModifier.removeAttribute(
+          "data-suppressed-status-slots",
+        );
+      }
+      if (policy.showCooldowns) {
+        this.layers.durableStatusModifier.dataset.suppressedCooldownSlots =
+          cooldownLayout.suppressedGlobalSlots.join(",");
+      } else {
+        this.layers.durableStatusModifier.removeAttribute(
+          "data-suppressed-cooldown-slots",
+        );
+      }
+      this.layers.durableStatusModifier.dataset.compactedRequiredDocks =
+        requiredDockLayout.compactedLayoutKeys.join(",");
+      if (policy.showModifiers) {
+        this.layers.durableStatusModifier.dataset.suppressedModifierSlots =
+          modifierLayout.suppressedGlobalSlots.join(",");
+      } else {
+        this.layers.durableStatusModifier.removeAttribute(
+          "data-suppressed-modifier-slots",
+        );
+      }
     }
     this.layers.durableStatusModifier.replaceChildren(
       ...modifierNodes,
@@ -1630,29 +2042,75 @@ export class BattlefieldRenderer {
       ...statusNodes,
     );
     this.#resolveNumericDockCellContent();
-    const compactRequiredStatusRects = compactRequiredDocks
+    /** @param {number} globalSlot */
+    const protectedOwner = (globalSlot) => {
+      const key = this.agentByLayoutSlot.get(globalSlot)?.presentation_key;
+      const ownerPresentationKey = typeof key === "string" ? key : null;
+      return Object.freeze({
+        ownerPresentationKey,
+        ownerIdentity: ownerPresentationKey ?? `slot:${globalSlot}`,
+      });
+    };
+    /**
+     * @param {"body" | "status" | "cooldown" | "modifier"} kind
+     * @param {number} globalSlot
+     * @param {Rectangle} bounds
+     * @param {string} placementIdentity
+     */
+    const protectedDock = (kind, globalSlot, bounds, placementIdentity) => {
+      const owner = protectedOwner(globalSlot);
+      return choreographyProtectedRegion(
+        kind,
+        owner.ownerIdentity,
+        bounds,
+        owner.ownerPresentationKey,
+        placementIdentity,
+      );
+    };
+    const bodyProtectedRegions = statusLayout.protectedBodies.map(
+      ({ globalSlot, bounds }) =>
+        protectedDock("body", globalSlot, bounds, `body:${globalSlot}`),
+    );
+    const cooldownProtectedRegions = cooldownDocks.map(
+      ({ globalSlot, bounds, layoutKey }) =>
+        protectedDock("cooldown", globalSlot, bounds, layoutKey),
+    );
+    const compactRequiredStatusRegions = compactRequiredDocks
       .filter(({ layoutKey }) => layoutKey.startsWith("status:"))
-      .map(({ bounds }) => bounds);
-    const compactRequiredCooldownRects = compactRequiredDocks
+      .map(({ globalSlot, bounds, layoutKey }) =>
+        protectedDock("status", globalSlot, bounds, `compact:${layoutKey}`),
+      );
+    const compactRequiredCooldownRegions = compactRequiredDocks
       .filter(({ layoutKey }) => layoutKey.startsWith("cooldown:"))
-      .map(({ bounds }) => bounds);
+      .map(({ globalSlot, bounds, layoutKey }) =>
+        protectedDock("cooldown", globalSlot, bounds, `compact:${layoutKey}`),
+      );
+    const modifierProtectedRegions = modifierLayout.docks.map(
+      ({ globalSlot, bounds }) =>
+        protectedDock("modifier", globalSlot, bounds, `modifier:${globalSlot}`),
+    );
+    const statusProtectedRegions = statusLayout.docks.map((placement) =>
+      protectedDock(
+        "status",
+        placement.globalSlot,
+        placement.bounds,
+        "layoutKey" in placement && typeof placement.layoutKey === "string"
+          ? placement.layoutKey
+          : `status:${placement.globalSlot}`,
+      ),
+    );
     this.choreographyProtectedRectGroups = Object.freeze({
-      base: Object.freeze(
-        [
-          ...statusLayout.protectedBodies.map(({ bounds }) => bounds),
-          ...cooldownRects,
-          ...compactRequiredCooldownRects,
-          ...modifierLayout.docks.map(({ bounds }) => bounds),
-        ].map((bounds) => Object.freeze({ ...bounds })),
-      ),
-      legality: Object.freeze(
-        legalityRects.map((bounds) => Object.freeze({ ...bounds })),
-      ),
-      status: Object.freeze(
-        [...statusRects, ...compactRequiredStatusRects].map((bounds) =>
-          Object.freeze({ ...bounds }),
-        ),
-      ),
+      base: Object.freeze([
+        ...bodyProtectedRegions,
+        ...cooldownProtectedRegions,
+        ...compactRequiredCooldownRegions,
+        ...modifierProtectedRegions,
+      ]),
+      legality: Object.freeze(legalityRects),
+      status: Object.freeze([
+        ...statusProtectedRegions,
+        ...compactRequiredStatusRegions,
+      ]),
     });
     this.#refreshChoreographyProtectedRects();
   }
@@ -1742,29 +2200,30 @@ export class BattlefieldRenderer {
       isCooldown && Number.isInteger(firstItem.ticks) && firstItem.ticks > 0
         ? Number(firstItem.ticks)
         : null;
-    const ownerAgent = this.agentByGlobalSlot.get(placement.globalSlot) ?? {};
+    const ownerAgent = this.agentByLayoutSlot.get(placement.globalSlot) ?? {};
     const explanation = isCooldown
       ? explainCooldown(
           {
-            global_slot: placement.globalSlot,
-            public_agent_id: ownerAgent.public_agent_id,
-            class_id: firstItem.classId,
+            ...displayIdentityRecord(ownerAgent),
             ultimate_cooldown: ticks,
           },
           ownerAgent,
-          this.classMechanicsById.get(firstItem.classId) ?? null,
         )
       : audience === "agent_pov"
-        ? explainPovOverflow(rawItems, ownerAgent)
+        ? this.#explainStatusOverflow(rawItems, ownerAgent, audience)
         : explainOverflow(rawItems, "status", ownerAgent, [
-            ...this.agentByGlobalSlot.values(),
+            ...this.agentByLayoutSlot.values(),
           ]);
-    const valueLabel = isCooldown ? `U${ticks ?? "?"}` : `S${placement.hiddenCount}`;
+    if (explanation === null) {
+      return svgElement("g", { "aria-hidden": "true" });
+    }
+    const valueLabel = isCooldown ? `U${ticks ?? "?"}` : `+${placement.hiddenCount}`;
     const group = svgElement("g", {
       class: "required-dock-fallback-dock",
       "data-zone": "required-dock-fallback-dock",
-      "data-slot": placement.globalSlot,
-      "data-layout-key": placement.layoutKey,
+      ...displayIdentityAttributes(ownerAgent),
+      "data-layout-key":
+        typeof ownerAgent.presentation_key === "string" ? null : placement.layoutKey,
       "data-kind": kind,
       "data-anchor": placement.anchor,
       "data-collision-free": placement.collisionFree,
@@ -1787,7 +2246,7 @@ export class BattlefieldRenderer {
         .map((row) => `${row.label}: ${row.value}`)
         .join(". ")}`,
       "data-zone": isCooldown ? "ultimate-cooldown" : "status-overflow",
-      "data-slot": placement.globalSlot,
+      ...displayIdentityAttributes(ownerAgent),
       "data-layout-key": placement.layoutKey,
       "data-kind": kind,
       "data-hidden-count": placement.hiddenCount,
@@ -1813,7 +2272,7 @@ export class BattlefieldRenderer {
     const valueLine = svgElement("tspan", {
       class: "required-dock-fallback__value",
       x: placement.bounds.left + placement.bounds.width / 2,
-      dy: "0.9em",
+      dy: isCooldown ? "0.9em" : "0.35em",
     });
     valueLine.textContent = valueLabel;
     cell.append(
@@ -1827,7 +2286,11 @@ export class BattlefieldRenderer {
       }),
       labelText,
     );
-    labelText.append(ownerLine, valueLine);
+    if (isCooldown) {
+      labelText.append(ownerLine, valueLine);
+    } else {
+      labelText.append(valueLine);
+    }
     group.append(cell);
     return group;
   }
@@ -1849,11 +2312,11 @@ export class BattlefieldRenderer {
       Number.isInteger(item.ticks) && item.ticks > 0 ? Number(item.ticks) : "?";
     const classToken = classTokenFromId(item.classId);
     const token = ultimateTokenFromClassId(item.classId);
-    const ownerAgent = this.agentByGlobalSlot.get(placement.globalSlot) ?? {};
+    const ownerAgent = this.agentByLayoutSlot.get(placement.globalSlot) ?? {};
     const group = svgElement("g", {
       class: "cooldown-dock",
       "data-zone": "cooldown-dock",
-      "data-slot": placement.globalSlot,
+      ...displayIdentityAttributes(ownerAgent),
       "data-class": classToken.cssKey,
       "data-anchor": placement.anchor,
       "data-expanded": placement.expanded,
@@ -1861,6 +2324,17 @@ export class BattlefieldRenderer {
       "data-visible-count": placement.visibleCount,
       "data-hidden-count": placement.hiddenCount,
     });
+    const explanation = explainCooldown(
+      {
+        ...displayIdentityRecord(ownerAgent),
+        ultimate_cooldown: ticks,
+      },
+      ownerAgent,
+    );
+    if (explanation === null) {
+      group.setAttribute("aria-hidden", "true");
+      return group;
+    }
     if (placement.anchor !== "north" || placement.tangentShift !== 0) {
       group.append(
         svgElement("line", {
@@ -1885,7 +2359,7 @@ export class BattlefieldRenderer {
       role: "img",
       "aria-label": `${token.accessibleName} cooldown, ${accessibleTicks}, ${agentIdentity(ownerAgent)}`,
       "data-zone": "ultimate-cooldown",
-      "data-slot": placement.globalSlot,
+      ...displayIdentityAttributes(ownerAgent),
       "data-class": classToken.cssKey,
       "data-token": token.cssKey,
       "data-token-id": token.tokenId,
@@ -1931,19 +2405,7 @@ export class BattlefieldRenderer {
       y: y + COOLDOWN_DOCK_DIMENSIONS.cellHeight / 2,
     });
     value.textContent = String(ticks);
-    registerTooltipOwner(
-      cell,
-      explainCooldown(
-        {
-          global_slot: placement.globalSlot,
-          public_agent_id: ownerAgent.public_agent_id,
-          class_id: item.classId,
-          ultimate_cooldown: ticks,
-        },
-        ownerAgent,
-        this.classMechanicsById.get(item.classId) ?? null,
-      ),
-    );
+    registerTooltipOwner(cell, explanation);
     cell.append(box, iconCompartment, valueCompartment, icon, value);
     group.append(cell);
     return group;
@@ -1957,11 +2419,11 @@ export class BattlefieldRenderer {
    * @returns {SVGElement}
    */
   #renderFactDock(placement, kind, dimensions, audience) {
-    const ownerAgent = this.agentByGlobalSlot.get(placement.globalSlot) ?? {};
+    const ownerAgent = this.agentByLayoutSlot.get(placement.globalSlot) ?? {};
     const group = svgElement("g", {
       class: `${kind}-dock`,
       "data-zone": `${kind}-dock`,
-      "data-slot": placement.globalSlot,
+      ...displayIdentityAttributes(ownerAgent),
       "data-anchor": placement.anchor,
       "data-expanded": placement.expanded,
       "data-collision-free": placement.collisionFree,
@@ -2022,9 +2484,9 @@ export class BattlefieldRenderer {
       const cell = svgElement("g", {
         class: `${kind}-cell`,
         role: "img",
-        "aria-label": `${token.accessibleName}, ${accessibleValue}, ${agentIdentity(ownerAgent)}${audience === "agent_pov" && kind === "status" ? "; source agent identity is not disclosed" : ""}`,
+        "aria-label": `${token.accessibleName}, ${accessibleValue}, ${agentIdentity(ownerAgent)}`,
         "data-zone": `${kind}-cell`,
-        "data-slot": placement.globalSlot,
+        ...displayIdentityAttributes(ownerAgent),
         "data-token": token.cssKey,
         "data-token-id": token.tokenId,
         "data-index": index,
@@ -2089,8 +2551,8 @@ export class BattlefieldRenderer {
         cell,
         kind === "status"
           ? audience === "agent_pov"
-            ? explainPovStatus(item, ownerAgent)
-            : explainStatus(item, ownerAgent, [...this.agentByGlobalSlot.values()])
+            ? this.#explainStatus(item, ownerAgent, audience)
+            : explainStatus(item, ownerAgent, [...this.agentByLayoutSlot.values()])
           : explainModifier(item, ownerAgent),
       );
       cell.append(box, ...compartments, icon, text);
@@ -2119,18 +2581,18 @@ export class BattlefieldRenderer {
       const overflow = svgElement("g", {
         class: `${kind}-overflow`,
         role: "img",
-        "aria-label": `${placement.overflowLabel} hidden ${kind} cues for ${agentIdentity(ownerAgent)}: ${hiddenLabels.join("; ")}${audience === "agent_pov" && kind === "status" ? "; source agent identity is not disclosed" : ""}`,
+        "aria-label": `${placement.overflowLabel} hidden ${kind} cues for ${agentIdentity(ownerAgent)}: ${hiddenLabels.join("; ")}`,
         "data-zone": `${kind}-overflow`,
-        "data-slot": placement.globalSlot,
+        ...displayIdentityAttributes(ownerAgent),
         "data-hidden-count": placement.hiddenCount,
         "data-owner-label": agentIdentity(ownerAgent),
       });
       registerTooltipOwner(
         overflow,
         audience === "agent_pov" && kind === "status"
-          ? explainPovOverflow(placement.hiddenStatuses, ownerAgent)
+          ? this.#explainStatusOverflow(placement.hiddenStatuses, ownerAgent, audience)
           : explainOverflow(placement.hiddenStatuses, kind, ownerAgent, [
-              ...this.agentByGlobalSlot.values(),
+              ...this.agentByLayoutSlot.values(),
             ]),
       );
       const overflowLabel = svgElement("text", {
@@ -2138,23 +2600,7 @@ export class BattlefieldRenderer {
         x: x + dimensions.cellWidth / 2,
         y: y + dimensions.cellHeight / 2,
       });
-      if (kind === "status") {
-        const ownerLine = svgElement("tspan", {
-          class: "status-overflow__owner",
-          x: x + dimensions.cellWidth / 2,
-          dy: "-0.34em",
-        });
-        ownerLine.textContent = agentIdentity(ownerAgent);
-        const countLine = svgElement("tspan", {
-          class: "status-overflow__count",
-          x: x + dimensions.cellWidth / 2,
-          dy: "0.9em",
-        });
-        countLine.textContent = placement.overflowLabel;
-        overflowLabel.append(ownerLine, countLine);
-      } else {
-        overflowLabel.textContent = placement.overflowLabel;
-      }
+      overflowLabel.textContent = placement.overflowLabel;
       overflow.append(
         svgElement("rect", {
           class: `${kind}-cell__box`,
@@ -2172,15 +2618,139 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * @param {number} slot
+   * Use researcher-space source provenance only after an exact public-fact
+   * join to a status already present in the fog-authorized scene.
+   *
+   * @param {unknown} rawStatus
+   * @param {JsonRecord} localRecipient
+   * @param {"researcher" | "agent_pov"} audience
+   */
+  #explainStatus(rawStatus, localRecipient, audience) {
+    if (audience !== "agent_pov") {
+      return explainStatus(rawStatus, localRecipient, [
+        ...this.agentByLayoutSlot.values(),
+      ]);
+    }
+    const publicAgentId =
+      typeof localRecipient.public_agent_id === "string"
+        ? localRecipient.public_agent_id
+        : null;
+    const researcherRecipient =
+      publicAgentId === null
+        ? null
+        : (this.researcherAgentByPublicId.get(publicAgentId) ?? null);
+    const matches = asArray(researcherRecipient?.statuses).filter((candidate) =>
+      samePublicStatusFacts(rawStatus, candidate),
+    );
+    const tooltipRecipient =
+      researcherRecipient !== null &&
+      typeof localRecipient.presentation_key === "string"
+        ? {
+            ...researcherRecipient,
+            presentation_key: localRecipient.presentation_key,
+          }
+        : null;
+    return tooltipRecipient !== null && matches.length === 1
+      ? explainStatus(matches[0], tooltipRecipient, [
+          ...this.researcherAgentByPublicId.values(),
+        ])
+      : explainPovStatus(rawStatus, localRecipient);
+  }
+
+  /**
+   * @param {ReadonlyArray<unknown>} rawStatuses
+   * @param {JsonRecord} localRecipient
+   * @param {"researcher" | "agent_pov"} audience
+   */
+  #explainStatusOverflow(rawStatuses, localRecipient, audience) {
+    if (audience !== "agent_pov") {
+      return explainOverflow(rawStatuses, "status", localRecipient, [
+        ...this.agentByLayoutSlot.values(),
+      ]);
+    }
+    const publicAgentId =
+      typeof localRecipient.public_agent_id === "string"
+        ? localRecipient.public_agent_id
+        : null;
+    const researcherRecipient =
+      publicAgentId === null
+        ? null
+        : (this.researcherAgentByPublicId.get(publicAgentId) ?? null);
+    const researcherStatuses = asArray(researcherRecipient?.statuses);
+    const joined = rawStatuses.map((status) => {
+      const matches = researcherStatuses.filter((candidate) =>
+        samePublicStatusFacts(status, candidate),
+      );
+      return matches.length === 1 ? matches[0] : null;
+    });
+    const tooltipRecipient =
+      researcherRecipient !== null &&
+      typeof localRecipient.presentation_key === "string"
+        ? {
+            ...researcherRecipient,
+            presentation_key: localRecipient.presentation_key,
+          }
+        : null;
+    return tooltipRecipient !== null && joined.every((status) => status !== null)
+      ? explainOverflow(joined, "status", tooltipRecipient, [
+          ...this.researcherAgentByPublicId.values(),
+        ])
+      : explainPovOverflow(rawStatuses, localRecipient);
+  }
+
+  /**
+   * @param {JsonRecord} agent
+   * @returns {{
+   *   root: SVGElement,
+   *   chip: SVGElement,
+   *   icon: SVGSVGElement,
+   *   text: SVGElement,
+   * }}
+   */
+  #createSpawnShieldNodes(agent) {
+    const root = svgElement("g", {
+      class: "agent-spawn-shield",
+      role: "img",
+      "data-zone": "spawn-shield",
+      ...displayIdentityAttributes(agent),
+    });
+    const chip = svgElement("rect", {
+      class: "agent-spawn-shield__chip",
+      width: 27,
+      height: 16,
+      rx: 6,
+      fill: "#000",
+      stroke: "#fff",
+      "stroke-width": "1.5",
+      "vector-effect": "non-scaling-stroke",
+    });
+    const icon = createSvgIcon(this.battlefield.ownerDocument, "status-spawn-shield", {
+      className: "agent-spawn-shield__icon",
+    });
+    const text = svgElement("text", {
+      class: "agent-spawn-shield__ticks",
+      fill: "#fff",
+      "font-size": "9",
+      "font-weight": "800",
+      "text-anchor": "middle",
+      "dominant-baseline": "central",
+      "pointer-events": "none",
+    });
+    root.append(chip, icon, text);
+    return { root, chip, icon, text };
+  }
+
+  /**
+   * @param {JsonRecord} agent
+   * @param {Readonly<DurableVisualPolicy>} visualPolicy
    * @returns {AgentNodes}
    */
-  #createAgentNodes(slot) {
+  #createAgentNodes(agent, visualPolicy) {
     const root = svgElement("g", {
       class: "agent",
       tabindex: "-1",
       role: "img",
-      "data-slot": slot,
+      ...displayIdentityAttributes(agent),
     });
     const body = svgElement("circle", {
       class: "agent-body",
@@ -2212,6 +2782,9 @@ export class BattlefieldRenderer {
       class: "agent-dead-mark",
       "aria-hidden": "true",
     });
+    const shieldNodes = visualPolicy.showSpawnShield
+      ? this.#createSpawnShieldNodes(agent)
+      : null;
     root.append(
       body,
       teamRing,
@@ -2225,7 +2798,7 @@ export class BattlefieldRenderer {
 
     const selectionRoot = svgElement("g", {
       class: "agent-selection",
-      "data-slot": slot,
+      ...displayIdentityAttributes(agent),
       "data-zone": "selection",
       "aria-hidden": "true",
     });
@@ -2246,6 +2819,10 @@ export class BattlefieldRenderer {
       classIcon,
       classLetter,
       deadMark,
+      shieldRoot: shieldNodes?.root ?? null,
+      shieldChip: shieldNodes?.chip ?? null,
+      shieldIcon: shieldNodes?.icon ?? null,
+      shieldText: shieldNodes?.text ?? null,
       selectionRoot,
       controlledHalo,
       selectedReticle,
@@ -2255,14 +2832,32 @@ export class BattlefieldRenderer {
   /**
    * @param {AgentNodes} nodes
    * @param {JsonRecord} agent
+   * @param {unknown} spawnShieldMechanics
    * @param {{x: number, y: number}} center
    * @param {number} radius
    * @param {boolean} controlled
    * @param {boolean} selected
+   * @param {Readonly<DurableVisualPolicy>} visualPolicy
    */
-  #updateAgentNodes(nodes, agent, center, radius, controlled, selected) {
+  #updateAgentNodes(
+    nodes,
+    agent,
+    spawnShieldMechanics,
+    center,
+    radius,
+    controlled,
+    selected,
+    visualPolicy,
+  ) {
     const classToken = classTokenFromId(agent.class_id);
     const teamToken = teamTokenFromId(agent.team_id);
+    if (visualPolicy.showSpawnShield && nodes.shieldRoot === null) {
+      const shieldNodes = this.#createSpawnShieldNodes(agent);
+      nodes.shieldRoot = shieldNodes.root;
+      nodes.shieldChip = shieldNodes.chip;
+      nodes.shieldIcon = shieldNodes.icon;
+      nodes.shieldText = shieldNodes.text;
+    }
     const healthRadius = Math.max(radius - 4, radius * 0.7);
     const healthRatio = Math.max(
       0,
@@ -2272,12 +2867,37 @@ export class BattlefieldRenderer {
           Math.max(finiteNumber(agent.max_health, 1), Number.EPSILON),
       ),
     );
+    const stepsUntilOutOfCombat =
+      Number.isInteger(agent.steps_until_out_of_combat) &&
+      agent.steps_until_out_of_combat >= 0
+        ? Number(agent.steps_until_out_of_combat)
+        : 0;
+    const inCombat = stepsUntilOutOfCombat > 0;
 
     nodes.root.dataset.team = teamToken.cssKey;
     nodes.root.dataset.class = classToken.cssKey;
     nodes.root.dataset.alive = String(Boolean(agent.alive));
     nodes.root.dataset.controlled = String(controlled);
     nodes.root.dataset.selected = String(selected);
+    nodes.root.dataset.combatStatus = inCombat ? "IC" : "OOC";
+    nodes.root.dataset.stepsUntilOutOfCombat = String(stepsUntilOutOfCombat);
+    const spawnShieldView = visualPolicy.showSpawnShield
+      ? createSpawnShieldView(agent, spawnShieldMechanics)
+      : null;
+    const spawnShieldRemaining = Number.isInteger(agent.spawn_shield_remaining)
+      ? Math.max(0, Number(agent.spawn_shield_remaining))
+      : 0;
+    if (
+      (!visualPolicy.showSpawnShield || spawnShieldView?.active !== true) &&
+      nodes.shieldRoot !== null &&
+      nodes.shieldRoot.ownerDocument.activeElement === nodes.shieldRoot
+    ) {
+      nodes.shieldRoot.blur();
+    }
+    nodes.root.dataset.spawnShieldRemaining = String(spawnShieldRemaining);
+    nodes.root.dataset.respawnedOnIncomingTransition = String(
+      agent.respawned_on_incoming_transition === true,
+    );
     nodes.root.setAttribute(
       "aria-label",
       [
@@ -2286,6 +2906,7 @@ export class BattlefieldRenderer {
         teamToken.label,
         `health ${formatDisplayNumber(agent.current_health)} of ${formatDisplayNumber(agent.max_health)}`,
         agent.alive ? "alive" : "dead",
+        spawnShieldView?.rootAriaLabel ?? null,
         controlled ? "controlled actor" : null,
         selected ? "selected target" : null,
       ]
@@ -2309,6 +2930,44 @@ export class BattlefieldRenderer {
         `L ${center.x + radius - 7} ${center.y + 4}`,
       ].join(" "),
     });
+    if (
+      spawnShieldView !== null &&
+      nodes.shieldRoot !== null &&
+      nodes.shieldChip !== null &&
+      nodes.shieldIcon !== null &&
+      nodes.shieldText !== null
+    ) {
+      setAttributes(nodes.shieldRoot, {
+        hidden: spawnShieldView.active ? null : "",
+        tabindex: spawnShieldView.active ? "0" : "-1",
+        "aria-label": spawnShieldView.shieldAriaLabel,
+      });
+      const shieldChipX = center.x + radius * 0.6;
+      const shieldChipY = center.y - radius - 13;
+      setAttributes(nodes.shieldChip, {
+        x: shieldChipX,
+        y: shieldChipY,
+      });
+      setAttributes(nodes.shieldIcon, {
+        x: shieldChipX + 2.5,
+        y: shieldChipY + 2.5,
+        width: 11,
+        height: 11,
+      });
+      setAttributes(nodes.shieldText, {
+        x: shieldChipX + 20,
+        y: shieldChipY + 8,
+      });
+      nodes.shieldText.textContent = spawnShieldView.badgeText;
+      if (spawnShieldView.active) {
+        nodes.shieldRoot.removeAttribute("aria-description");
+        registerTooltipOwner(nodes.shieldRoot, spawnShieldView.descriptor);
+      } else {
+        nodes.shieldRoot.removeAttribute("data-tooltip-owner");
+        nodes.shieldRoot.removeAttribute("aria-describedby");
+        nodes.shieldRoot.removeAttribute("aria-description");
+      }
+    }
     setAttributes(nodes.healthTrack, {
       cx: center.x,
       cy: center.y,
@@ -2365,7 +3024,7 @@ export class BattlefieldRenderer {
     });
     setAttributes(nodes.selectedReticle, {
       d: targetReticlePath(center.x, center.y, radius + 12),
-      hidden: selected ? null : "",
+      hidden: selected && visualPolicy.showSelectionReticle ? null : "",
     });
   }
 }

@@ -363,19 +363,24 @@ def test_declared_script_horizon_blocks_an_extra_step_without_core_done(
     assert "declared horizon" in blocked.notice
 
 
-def test_input_results_distinguish_transition_restart_and_ui_only_changes() -> None:
+def test_input_results_distinguish_transition_restart_and_canonical_preset_noop() -> (
+    None
+):
     initial = _session()
 
-    ui_only = dispatch_command(
+    preset_noop = dispatch_command(
         initial,
-        SetPresetCommandV1(preset="debug"),
+        SetPresetCommandV1(preset="presentation"),
         view_mode="researcher",
         preset="analysis",
         include_stress=False,
     )
-    assert ui_only.changed
-    assert ui_only.transition_applied is None
-    assert not ui_only.episode_restarted
+    assert preset_noop.handled
+    assert not preset_noop.changed
+    assert preset_noop.preset == "analysis"
+    assert preset_noop.session is initial
+    assert preset_noop.transition_applied is None
+    assert not preset_noop.episode_restarted
 
     transitioned = dispatch_command(
         initial,

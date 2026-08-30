@@ -1529,6 +1529,14 @@ class CombatCountdownResetEventV1(EvaluationEventBaseV1):
     agent_global_slot: _GlobalSlot
 
 
+class AgentLeftCombatEventV1(EvaluationEventBaseV1):
+    """One alive agent whose out-of-combat countdown reached zero."""
+
+    event_type: Literal["agent_left_combat"] = "agent_left_combat"
+    phase_rank: Literal[50] = 50
+    agent_global_slot: _GlobalSlot
+
+
 class HealthRegeneratedEventV1(EvaluationEventBaseV1):
     """One realized positive out-of-combat health regeneration."""
 
@@ -1713,6 +1721,7 @@ type EvaluationEventV1 = Annotated[
     | SourceHealingOutputEventV1
     | RecipientHealthResolutionEventV1
     | CombatCountdownResetEventV1
+    | AgentLeftCombatEventV1
     | HealthRegeneratedEventV1
     | CooldownStartedEventV1
     | CooldownReadyEventV1
@@ -1817,6 +1826,7 @@ __all__ = [
     "ActionMaskV1",
     "ActionRejectedEventV1",
     "AgentDiedEventV1",
+    "AgentLeftCombatEventV1",
     "AgentRespawnedEventV1",
     "AggregationKeyV1",
     "AssignedPolicySlotV1",

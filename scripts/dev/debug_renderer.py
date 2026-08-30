@@ -1,4 +1,4 @@
-"""CLI entry point for the deterministic Visual Debugger and Analyzer."""
+"""CLI entry point for the manual MARL-BattleGrounds Combat Debugger."""
 
 from __future__ import annotations
 
@@ -17,29 +17,32 @@ if TYPE_CHECKING:
     from scripts.dev.visual_debugger.scenarios import DebuggerScenario
 
 type _ViewMode = Literal["researcher", "pov"]
-type _Preset = Literal["presentation", "analysis", "debug"]
 type _ActionSourceKind = Literal["manual", "scripted", "mixed"]
+
+_REPLAY_LAUNCHER = "scripts/dev/run_replay_viewer.sh"
+_MOVED_OPTION_LABELS = (
+    ("scenario", "--scenario"),
+    ("replay", "--replay"),
+    ("sample_replay", "--sample-replay"),
+    ("frame_index", "--frame-index"),
+    ("pov_slot", "--pov-slot"),
+    ("list_scenarios", "--list-scenarios"),
+    ("list_sample_replays", "--list-sample-replays"),
+    ("include_stress", "--include-stress"),
+)
 
 
 @dataclass(frozen=True, slots=True)
 class _LaunchOptions:
-    """Resolved values plus exact command-line presence information."""
+    """Resolved live-debugger values plus exact CLI presence information."""
 
-    scenario: str | None
-    replay: Path | None
     record_replay: Path | None
-    frame_index: int | None
-    pov_slot: int | None
-    list_scenarios: bool
-    include_stress: bool
     seed: int
     controlled_slot: int | None
     static: bool
     no_open: bool
     port: int
     view: _ViewMode
-    preset: _Preset
-    verbose: bool
     ranges: bool
     supplied: frozenset[str]
 
@@ -47,77 +50,63 @@ class _LaunchOptions:
 _EPILOG = """\
 battlefield controls (while the battlefield has focus):
   Tab / Shift+Tab       cycle active actors without discarding their drafts
-  left click            select an active global target
-  Shift+left click      control the clicked active actor
-  right click / Escape  clear target to target-none
+  left click            control the clicked authorized actor
+  Shift+left click      select the clicked active target
+  Escape                clear target to target-none and leave battlefield focus
   1 / 2                 explicitly arm Basic lane 0 / Ultimate lane 1
   W A S D               cardinal movement
   Q E Z C               diagonal movement
   arrow keys            cardinal movement aliases
   X                     select Stay movement
-  Space / Enter         researcher: submit every staged action as one joint turn
-                        agent POV: submit only the controlled actor
-  N                     advance the next registered scripted frame
-  R                     deterministic scenario reset
+  Space / Enter         submit every staged action as one joint turn
+  R                     reset the manual 20x10 arena deterministically
   G                     toggle controlled-actor ranges
-  V                     toggle concise/verbose logs
-  [ / ]                 previous/next scenario
-  P                     pause/resume presentation-only motion
   ?                     open browser controls/help
 
 browser controls:
-  Scenario/View/Preset  switch authoritative session presentation
-  Graphics speed        set presentation-only motion from 0.01x through 2.00x
-  Motion Off            disable or restore animated explanations
-  Skip                  settle the current explanation immediately
-  Reconnect             fetch the current authoritative frame
-  Exit / Ctrl-C         stop the local Visual Debugger and Analyzer
-
-read-only replay controls:
-  First / Previous      move to an earlier captured frame, settled
-  Play / Next           serialize exact next-frame explanations
-  Last / frame slider   seek to an absolute captured frame, settled
-  Home / End            keyboard first/last while the timeline has focus
-  Left / Right / Space  keyboard previous/next/play-pause
+  View                   switch between Oracle and authorized agent POV
+  Reconnect              fetch the current authoritative frame
+  Exit / Ctrl-C          stop the local Combat Debugger
 
 live selected-target inspector:
-  SELECTED TARGET       identity, relation, distance, and public geometry
-  PENDING ACTION        movement, ability, target, and exact lane legality
-  TECHNICAL DETAILS     raw actor/target indices and same-epoch mask values
+  SELECTED TARGET        identity, relation, distance, and public geometry
+  PENDING JOINT ACTION   movement, ability, target, and exact lane legality
+  TECHNICAL FRAME        exact authority-safe facts permitted by the active leaf:
+                         Episode or Artifact digest prefix; Frame; Simulator step;
+                         conditional Incoming transition; replay-only movement scale
 
-scenarios:
-  arena_5v5             interactive geometry/combat laboratory
-  basic_support         scripted Basic damage/healing sequence
-  ultimate_showcase     scripted five-Ultimate sequence
-  aura_crossfire        scripted amplification/mitigation crossfire
-  status_stack          scripted status composition and lifecycle sequence
-  team_focus_crossfire  scripted focus fire and coordinated healing
-  mirrored_ultimates    scripted reciprocal five-class Ultimate sequence
+The Combat Debugger always opens the manual arena in fixed Analysis
+presentation. Replay artifacts and scripted demonstrations now use:
+  scripts/dev/run_replay_viewer.sh
 """
 
 
+def _parse_view(value: str) -> _ViewMode:
+    """Map the public Oracle name and hidden legacy token to wire authority."""
+    if value in ("oracle", "researcher"):
+        return "researcher"
+    if value == "pov":
+        return "pov"
+    raise argparse.ArgumentTypeError("invalid choice: expected 'oracle' or 'pov'")
+
+
+def _parse_compatibility_preset(value: str) -> Literal["analysis"]:
+    """Accept historical preset spellings while fixing the product to Analysis."""
+    if value in ("analysis", "presentation", "debug", "technical"):
+        return "analysis"
+    raise argparse.ArgumentTypeError("invalid legacy preset")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    """Build the complete analyzer CLI without importing Matplotlib."""
+    """Build the live-only debugger CLI without importing runtime backends."""
     parser = argparse.ArgumentParser(
         description=(
-            "Open the deterministic MARL-BattleGrounds Visual Debugger and Analyzer."
+            "Open the manual 20x10 MARL-BattleGrounds Combat Debugger in fixed "
+            "Analysis presentation."
         ),
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False,
-    )
-    parser.add_argument(
-        "--scenario",
-        metavar="NAME",
-        default=argparse.SUPPRESS,
-        help="scenario to open (default: arena_5v5)",
-    )
-    parser.add_argument(
-        "--replay",
-        metavar="PATH",
-        type=Path,
-        default=argparse.SUPPRESS,
-        help="validated local replay to view in a browser or render with --static",
     )
     parser.add_argument(
         "--record-replay",
@@ -125,35 +114,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=argparse.SUPPRESS,
         help=(
-            "record one live browser episode to a canonical replay and metric "
+            "record one manual arena episode to a canonical replay and metric "
             "sidecar, then review it"
         ),
-    )
-    parser.add_argument(
-        "--frame-index",
-        metavar="N",
-        type=int,
-        default=argparse.SUPPRESS,
-        help="initial replay frame (browser default: 0; required with --static)",
-    )
-    parser.add_argument(
-        "--pov-slot",
-        metavar="N",
-        type=int,
-        default=argparse.SUPPRESS,
-        help="initial configured-active actor for replay POV authorization",
-    )
-    parser.add_argument(
-        "--list-scenarios",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="list scenario names, modes, and descriptions, then exit",
-    )
-    parser.add_argument(
-        "--include-stress",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="include developer visual-stress scenarios in lookup and menus",
     )
     parser.add_argument(
         "--seed",
@@ -167,13 +130,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         type=int,
         default=argparse.SUPPRESS,
-        help="initial active global slot; otherwise use scenario default",
+        help="initial active global slot; otherwise use the arena default",
     )
     parser.add_argument(
         "--static",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="render a stateless Matplotlib reset snapshot without a browser server",
+        help="render a stateless Matplotlib arena snapshot without a browser server",
     )
     parser.add_argument(
         "--no-open",
@@ -190,21 +153,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--view",
-        choices=("researcher", "pov"),
+        type=_parse_view,
+        metavar="{oracle,pov}",
         default=argparse.SUPPRESS,
-        help="initial browser view authorization (default: researcher)",
-    )
-    parser.add_argument(
-        "--preset",
-        choices=("presentation", "analysis", "debug"),
-        default=argparse.SUPPRESS,
-        help="initial browser presentation preset (default: analysis)",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="print verbose transition diagnostics",
+        help="initial browser view authorization (default: oracle)",
     )
     parser.add_argument(
         "--ranges",
@@ -212,23 +164,71 @@ def build_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help="show or hide controlled-actor ranges (default: show)",
     )
+
+    # Compatibility-only inputs remain accepted but are absent from public help.
+    parser.add_argument(
+        "--preset",
+        type=_parse_compatibility_preset,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_const",
+        const=False,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+
+    # Former mixed-product selectors are parsed solely to provide one actionable
+    # migration error before any simulator, rendering, or server import occurs.
+    parser.add_argument("--scenario", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    parser.add_argument("--replay", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--sample-replay", default=argparse.SUPPRESS, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--frame-index", default=argparse.SUPPRESS, help=argparse.SUPPRESS
+    )
+    parser.add_argument("--pov-slot", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--list-scenarios",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--list-sample-replays",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--include-stress",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
+def _reject_moved_options(
+    parser: argparse.ArgumentParser,
+    namespace: argparse.Namespace,
+) -> None:
+    supplied = vars(namespace)
+    for destination, label in _MOVED_OPTION_LABELS:
+        if destination in supplied:
+            parser.error(f"{label} moved to the Replay Viewer; use {_REPLAY_LAUNCHER}.")
+
+
 def _resolve_launch_options(namespace: argparse.Namespace) -> _LaunchOptions:
-    """Apply defaults only after preserving which options were explicit."""
-    supplied = frozenset(vars(namespace))
+    supplied = frozenset(vars(namespace)) - {"preset", "verbose"}
     return _LaunchOptions(
-        scenario=cast(str | None, getattr(namespace, "scenario", None)),
-        replay=cast(Path | None, getattr(namespace, "replay", None)),
         record_replay=cast(
             Path | None,
             getattr(namespace, "record_replay", None),
         ),
-        frame_index=cast(int | None, getattr(namespace, "frame_index", None)),
-        pov_slot=cast(int | None, getattr(namespace, "pov_slot", None)),
-        list_scenarios=cast(bool, getattr(namespace, "list_scenarios", False)),
-        include_stress=cast(bool, getattr(namespace, "include_stress", False)),
         seed=cast(int, getattr(namespace, "seed", 0)),
         controlled_slot=cast(
             int | None,
@@ -238,141 +238,26 @@ def _resolve_launch_options(namespace: argparse.Namespace) -> _LaunchOptions:
         no_open=cast(bool, getattr(namespace, "no_open", False)),
         port=cast(int, getattr(namespace, "port", 0)),
         view=cast(_ViewMode, getattr(namespace, "view", "researcher")),
-        preset=cast(_Preset, getattr(namespace, "preset", "analysis")),
-        verbose=cast(bool, getattr(namespace, "verbose", False)),
         ranges=cast(bool, getattr(namespace, "ranges", True)),
         supplied=supplied,
     )
-
-
-_OPTION_LABELS = (
-    ("scenario", "--scenario"),
-    ("list_scenarios", "--list-scenarios"),
-    ("include_stress", "--include-stress"),
-    ("seed", "--seed"),
-    ("controlled_slot", "--controlled-slot"),
-    ("pov_slot", "--pov-slot"),
-    ("view", "--view"),
-    ("preset", "--preset"),
-    ("ranges", "--ranges/--no-ranges"),
-    ("port", "--port"),
-    ("no_open", "--no-open"),
-    ("verbose", "--verbose"),
-    ("record_replay", "--record-replay"),
-)
 
 
 def _validate_option_matrix(
     parser: argparse.ArgumentParser,
     options: _LaunchOptions,
 ) -> None:
-    if options.record_replay is not None:
-        if options.replay is not None:
-            parser.error("--record-replay cannot be combined with --replay.")
-        if options.static:
-            parser.error("--record-replay is available only in live browser mode.")
-        if options.list_scenarios:
-            parser.error("--record-replay cannot be combined with --list-scenarios.")
-        if "frame_index" in options.supplied:
-            parser.error("--frame-index is unavailable with --record-replay.")
-        if "pov_slot" in options.supplied:
-            parser.error("--pov-slot is unavailable with --record-replay.")
-
-    if options.replay is None:
-        if "frame_index" in options.supplied:
-            parser.error("--frame-index requires --replay.")
-        if "pov_slot" in options.supplied:
-            parser.error("--pov-slot requires --replay.")
-        return
-
-    if options.static:
-        if "frame_index" not in options.supplied:
-            parser.error("--frame-index is required with --replay --static.")
-        allowed = frozenset(("replay", "static", "frame_index"))
-        launch_label = "--replay --static"
-    else:
-        allowed = frozenset(
-            (
-                "replay",
-                "frame_index",
-                "pov_slot",
-                "view",
-                "preset",
-                "ranges",
-                "port",
-                "no_open",
-            )
-        )
-        launch_label = "--replay"
-
-    forbidden = options.supplied - allowed
-    for destination, option_label in _OPTION_LABELS:
-        if destination in forbidden:
-            parser.error(f"{option_label} is unavailable with {launch_label}.")
-
-
-def _run_browser_replay(options: _LaunchOptions) -> int:
-    """Load and resolve replay authority before importing the HTTP server."""
-    from marl_battlegrounds.evaluation.replay_io import (
-        ReplayLoadError,
-        load_replay_bundle_v1,
-    )
-
-    assert options.replay is not None
-    try:
-        bundle = load_replay_bundle_v1(options.replay)
-    except ReplayLoadError as exc:
-        raise ValueError(f"Replay could not be loaded: {exc}") from exc
-
-    from scripts.dev.visual_debugger.replay_service import ReplayViewerService
-
-    service = ReplayViewerService(
-        bundle,
-        initial_frame_index=(0 if options.frame_index is None else options.frame_index),
-        view_mode=options.view,
-        pov_global_slot=options.pov_slot,
-        preset=options.preset,
-        show_ranges=options.ranges,
-        verbose=False,
-    )
-
-    from scripts.dev.visual_debugger.replay_protocol import (
-        ReplayApiErrorV1,
-        ReplayCommandRequestV1,
-    )
-    from scripts.dev.visual_debugger.server import (
-        REPLAY_HTTP_ROUTES,
-        HttpCoordinatorBinding,
-        serve_browser_debugger,
-    )
-
-    coordinator = HttpCoordinatorBinding(
-        mode="replay",
-        routes=REPLAY_HTTP_ROUTES,
-        request_model=ReplayCommandRequestV1,
-        error_factory=ReplayApiErrorV1,
-        current_frame=service.current_frame,
-        apply_command=service.apply_command,
-        current_timeline=service.current_timeline,
-    )
-    return serve_browser_debugger(
-        service,
-        asset_root=_REPOSITORY_ROOT / "web" / "visual_debugger",
-        port=options.port,
-        open_browser=not options.no_open,
-        coordinator=coordinator,
-    )
+    if options.record_replay is not None and options.static:
+        parser.error("--record-replay is available only in live browser mode.")
 
 
 def _validate_launch(
     scenario: DebuggerScenario,
     *,
     controlled_global_slot: int | None,
-    include_stress: bool,
 ) -> None:
-    if scenario.audience == "stress" and not include_stress:
-        msg = f"stress scenario {scenario.name!r} requires --include-stress."
-        raise ValueError(msg)
+    if scenario.name != "arena_5v5" or scenario.mode != "interactive":
+        raise ValueError("the Combat Debugger requires the manual arena_5v5 scenario")
     if controlled_global_slot is None:
         return
     config, _ = scenario.build_scenario()
@@ -381,11 +266,9 @@ def _validate_launch(
         0 <= controlled_global_slot < len(active_mask)
         and bool(active_mask[controlled_global_slot])
     ):
-        msg = (
-            f"controlled slot g{controlled_global_slot} is not active in "
-            f"scenario {scenario.name!r}."
+        raise ValueError(
+            f"controlled slot g{controlled_global_slot} is not active in arena_5v5."
         )
-        raise ValueError(msg)
 
 
 def _recording_action_source_kind(session: object) -> _ActionSourceKind:
@@ -405,33 +288,14 @@ def _recording_action_source_kind(session: object) -> _ActionSourceKind:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Parse, list, or run while preserving standard command exit semantics."""
+    """Launch only the manual live arena or its recording workflow."""
     parser = build_parser()
-    options = _resolve_launch_options(parser.parse_args(argv))
+    namespace = parser.parse_args(argv)
+    _reject_moved_options(parser, namespace)
+    options = _resolve_launch_options(namespace)
     _validate_option_matrix(parser, options)
-    if options.list_scenarios:
-        from scripts.dev.visual_debugger.scenarios import iter_scenario_summaries
 
-        for summary in iter_scenario_summaries(
-            include_stress=options.include_stress,
-        ):
-            print(summary)
-        return 0
     try:
-        if options.replay is not None and options.static:
-            from scripts.dev.visual_debugger.static_renderer import (
-                run_static_replay_renderer,
-            )
-
-            assert options.frame_index is not None
-            return run_static_replay_renderer(
-                replay_path=options.replay,
-                frame_index=options.frame_index,
-                show_ranges=True,
-            )
-        if options.replay is not None:
-            return _run_browser_replay(options)
-
         recording_destination = None
         if options.record_replay is not None:
             from marl_battlegrounds.evaluation.replay_io import (
@@ -441,7 +305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             try:
                 recording_destination = preflight_replay_bundle_destination_v1(
-                    options.record_replay,
+                    options.record_replay
                 )
             except ReplaySaveError as exc:
                 raise ValueError(
@@ -456,15 +320,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         from scripts.dev.visual_debugger.scenarios import get_scenario
 
-        scenario = get_scenario(options.scenario or "arena_5v5")
+        scenario = get_scenario("arena_5v5")
         _validate_launch(
             scenario,
             controlled_global_slot=options.controlled_slot,
-            include_stress=options.include_stress,
         )
-        code_revision = discover_debugger_code_revision_v1(
-            _REPOSITORY_ROOT,
-        )
+        code_revision = discover_debugger_code_revision_v1(_REPOSITORY_ROOT)
         evaluation_launch_specification = (
             build_debugger_evaluation_launch_specification_v1(
                 root_seed=options.seed,
@@ -477,16 +338,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         if options.static:
-            from scripts.dev.visual_debugger.static_renderer import (
-                run_static_renderer,
-            )
+            from scripts.dev.visual_debugger.static_renderer import run_static_renderer
 
             return run_static_renderer(
                 scenario=scenario,
                 seed=options.seed,
                 evaluation_launch_specification=evaluation_launch_specification,
                 controlled_global_slot=options.controlled_slot,
-                verbose=options.verbose,
+                verbose=False,
                 show_ranges=options.ranges,
             )
 
@@ -500,14 +359,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             evaluation_launch_specification=evaluation_launch_specification,
             controlled_global_slot=options.controlled_slot,
             show_ranges=options.ranges,
-            verbose_logging=options.verbose,
+            verbose_logging=False,
         )
         if recording_destination is None:
             service = DebuggerService(
                 session,
                 view_mode=options.view,
-                preset=options.preset,
-                include_stress=options.include_stress,
+                preset="analysis",
+                include_stress=False,
             )
             return serve_browser_debugger(
                 service,
@@ -528,9 +387,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
         try:
-            runtime_provenance = capture_debugger_runtime_provenance_v1(
-                code_revision,
-            )
+            runtime_provenance = capture_debugger_runtime_provenance_v1(code_revision)
         except RuntimeError as exc:
             raise ValueError(
                 "Replay recording runtime provenance is unavailable; verify the "
@@ -549,8 +406,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         service = DebuggerService(
             session,
             view_mode=options.view,
-            preset=options.preset,
-            include_stress=options.include_stress,
+            preset="analysis",
+            include_stress=False,
             recorder=recorder,
         )
         recording_coordinator = RecordingDebuggerCoordinator(service)
@@ -565,10 +422,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except OSError as exc:
-        print(
-            f"error: Visual Debugger and Analyzer could not start: {exc}",
-            file=sys.stderr,
-        )
+        print(f"error: Combat Debugger could not start: {exc}", file=sys.stderr)
         return 2
     except ValueError as exc:
         parser.error(str(exc))

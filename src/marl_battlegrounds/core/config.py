@@ -77,10 +77,11 @@ _MAX_TEAM_DEATHMATCH_SCORE_THRESHOLD = _MAX_EXACT_FLOAT32_INTEGER - (
     MAX_AGENTS_PER_TEAM - 1
 )
 
-# Product entry points share one movement calibration. Generic ``EnvConfig``
+# Product sessions use one movement calibration so researchers cannot change
+# policy-relevant dynamics from a presentation surface. Generic ``EnvConfig``
 # construction deliberately retains the full validated ``(0.0, 1.0]`` domain
-# for explicit experiments and contract tests.
-CANONICAL_PRODUCT_MOVEMENT_SCALE: Final[float] = 1.0
+# for tests and explicitly experimental callers.
+CANONICAL_PRODUCT_MOVEMENT_SCALE: Final = 1.0
 
 
 def resolve_agent_profile(
@@ -756,18 +757,18 @@ def validate_env_config(config: EnvConfig) -> None:
 
 
 def validate_product_env_config(config: EnvConfig) -> None:
-    """Validate a complete product configuration and its movement authority.
+    """Validate one product episode, including its fixed movement calibration.
 
-    Explicit experiments may continue to use :func:`validate_env_config` with
-    any movement scale in its generic domain. Product factories and sessions
-    must call this stricter boundary so presentation or construction code
-    cannot silently change policy-relevant movement dynamics.
+    This boundary composes the generic scientific configuration validator and
+    then applies the product-only movement-scale contract. Tests and explicit
+    experimental construction should continue to call :func:`validate_env_config`
+    when exercising noncanonical scales.
     """
     validate_env_config(config)
     if config.ordinary_movement_distance_scale != CANONICAL_PRODUCT_MOVEMENT_SCALE:
         raise ValueError(
             "product ordinary_movement_distance_scale must equal "
-            f"{CANONICAL_PRODUCT_MOVEMENT_SCALE}, not "
+            f"{CANONICAL_PRODUCT_MOVEMENT_SCALE:.2f}, not "
             f"{config.ordinary_movement_distance_scale}."
         )
 

@@ -14,6 +14,7 @@ from marl_battlegrounds.evaluation.events import decode_evaluation_events_v1
 from marl_battlegrounds.evaluation.models import (
     ActionAcceptanceFactsV1,
     ActionMaskV1,
+    AgentLeftCombatEventV1,
     AgentRespawnedEventV1,
     AuraTransitionFactsV1,
     BaseObservationV1,
@@ -52,13 +53,14 @@ _FALSE_THREE_CHANNEL_MATRIX = ((False,) * 3,) * 10
 _ZERO_DISPLACEMENT_MATRIX = ((0.0, 0.0),) * 10
 _EVENT_ADAPTER: TypeAdapter[EvaluationEventV1] = TypeAdapter(EvaluationEventV1)
 
-_ALL_EVENT_TYPES = {
+_NEUTRAL_EVENT_TYPES = {
     "action_rejected",
     "ability_activated",
     "source_damage_output",
     "source_healing_output",
     "recipient_health_resolution",
     "combat_countdown_reset",
+    "agent_left_combat",
     "health_regenerated",
     "cooldown_started",
     "cooldown_ready",
@@ -101,6 +103,7 @@ def _snapshot(
     alive_mask: tuple[bool, ...] = (True,) * 10,
     current_health: tuple[float, ...] = _HEALTH_100,
     ultimate_cooldowns: tuple[int, ...] = _ZERO_INT_10,
+    steps_until_out_of_combat: tuple[int, ...] = _ZERO_INT_10,
     agent_positions: tuple[tuple[float, float], ...] | None = None,
     team_deathmatch_scores: tuple[int, int] = (0, 0),
 ) -> GlobalAnalysisSnapshotV1:
@@ -120,7 +123,7 @@ def _snapshot(
         priest_blessing_of_freedom_slow_floor_durations=_ZERO_INT_10,
         team_respawn_wave_countdowns=(1, 1),
         spawn_shield_durations=_ZERO_INT_10,
-        steps_until_out_of_combat=_ZERO_INT_10,
+        steps_until_out_of_combat=steps_until_out_of_combat,
         previous_timestep_move_actions=_ZERO_INT_10,
         previous_timestep_select_target_actions=_ZERO_INT_10,
         previous_timestep_use_ultimate_actions=_ZERO_INT_10,
@@ -303,10 +306,10 @@ def test_neutral_real_transition_decodes_to_no_events() -> None:
     assert _decode(_neutral_facts()) == ()
 
 
-def test_event_union_contains_exactly_23_strict_variants() -> None:
+def test_event_union_contains_exactly_24_strict_variants() -> None:
     schema = _EVENT_ADAPTER.json_schema()
 
-    assert len(schema["oneOf"]) == 23
+    assert len(schema["oneOf"]) == 24
 
 
 def test_team_deathmatch_decodes_bilateral_score_edges_and_threshold_result() -> None:
@@ -663,6 +666,7 @@ def test_decoder_emits_all_atomic_variants_with_canonical_ids_and_order() -> Non
     )
 
     start_health = _replace_item(_HEALTH_100, 5, 30.0)
+    start_combat_countdowns = _replace_item(_ZERO_INT_10, 3, 1)
     start_cooldowns = _replace_item(_ZERO_INT_10, 2, 1)
     successor_cooldowns = _replace_item(_ZERO_INT_10, 0, 5)
     successor_cooldowns = _replace_item(successor_cooldowns, 1, 5)
@@ -674,6 +678,7 @@ def test_decoder_emits_all_atomic_variants_with_canonical_ids_and_order() -> Non
         start_snapshot=_snapshot(
             current_health=start_health,
             ultimate_cooldowns=start_cooldowns,
+            steps_until_out_of_combat=start_combat_countdowns,
         ),
         successor_snapshot=_snapshot(
             current_health=_replace_item(start_health, 5, 0.0),
@@ -696,6 +701,7 @@ def test_decoder_emits_all_atomic_variants_with_canonical_ids_and_order() -> Non
         "recipient_health_resolution",
         "combat_countdown_reset",
         "health_regenerated",
+        "agent_left_combat",
         "cooldown_started",
         "cooldown_started",
         "cooldown_ready",
@@ -719,7 +725,7 @@ def test_decoder_emits_all_atomic_variants_with_canonical_ids_and_order() -> Non
         "respawn_wave_occurred",
         "agent_respawned",
     )
-    assert set(_event_types(events)) == _ALL_EVENT_TYPES
+    assert set(_event_types(events)) == _NEUTRAL_EVENT_TYPES
     assert Counter(_event_types(events)) == Counter(
         {
             "action_rejected": 3,
@@ -728,6 +734,7 @@ def test_decoder_emits_all_atomic_variants_with_canonical_ids_and_order() -> Non
             "source_healing_output": 1,
             "recipient_health_resolution": 1,
             "combat_countdown_reset": 1,
+            "agent_left_combat": 1,
             "health_regenerated": 1,
             "cooldown_started": 3,
             "cooldown_ready": 1,
@@ -758,6 +765,7 @@ def test_decoder_emits_all_atomic_variants_with_canonical_ids_and_order() -> Non
         start_snapshot=_snapshot(
             current_health=start_health,
             ultimate_cooldowns=start_cooldowns,
+            steps_until_out_of_combat=start_combat_countdowns,
         ),
         successor_snapshot=_snapshot(
             current_health=_replace_item(start_health, 5, 0.0),
@@ -815,6 +823,7 @@ def test_decoder_emits_all_atomic_variants_with_canonical_ids_and_order() -> Non
     ) == (
         ("combat_countdown_reset", 1, None),
         ("health_regenerated", 2, 4.0),
+        ("agent_left_combat", 3, None),
     )
     assert tuple(
         (payload["event_type"], payload["agent_global_slot"])
@@ -1009,6 +1018,85 @@ def test_cooldown_ready_is_alive_independent_and_zero_to_zero_is_silent() -> Non
     ready = events[0]
     assert isinstance(ready, CooldownReadyEventV1)
     assert ready.agent_global_slot == 2
+
+
+def test_agent_left_combat_requires_alive_non_reset_one_to_zero_edge() -> None:
+    events = _decode(
+        _neutral_facts(),
+        start_snapshot=_snapshot(
+            steps_until_out_of_combat=_replace_item(_ZERO_INT_10, 0, 1)
+        ),
+        successor_snapshot=_snapshot(),
+    )
+
+    assert len(events) == 1
+    expiration = events[0]
+    assert isinstance(expiration, AgentLeftCombatEventV1)
+    assert expiration.agent_global_slot == 0
+
+
+@pytest.mark.parametrize(
+    (
+        "start_countdown",
+        "successor_countdown",
+        "countdown_was_reset",
+        "successor_alive",
+    ),
+    (
+        (0, 0, False, True),
+        (2, 1, False, True),
+        (1, 0, True, True),
+        (1, 0, False, False),
+    ),
+    ids=("zero-to-zero", "two-to-one", "reset", "death"),
+)
+def test_agent_left_combat_rejects_non_expiration_edges(
+    start_countdown: int,
+    successor_countdown: int,
+    countdown_was_reset: bool,
+    successor_alive: bool,
+) -> None:
+    facts = _neutral_facts()
+    if countdown_was_reset:
+        facts = facts.model_copy(
+            update={
+                "regeneration_facts": facts.regeneration_facts.model_copy(
+                    update={
+                        "combat_countdown_was_reset_by_agent": _replace_item(
+                            _FALSE_10, 0, True
+                        )
+                    }
+                )
+            }
+        )
+    if not successor_alive:
+        facts = facts.model_copy(
+            update={
+                "death_facts": facts.death_facts.model_copy(
+                    update={
+                        "is_newly_dead_by_recipient": _replace_item(_FALSE_10, 0, True)
+                    }
+                )
+            }
+        )
+    successor_alive_mask = _replace_item((True,) * 10, 0, successor_alive)
+    successor_health = _replace_item(_HEALTH_100, 0, 100.0 if successor_alive else 0.0)
+
+    events = _decode(
+        facts,
+        start_snapshot=_snapshot(
+            steps_until_out_of_combat=_replace_item(_ZERO_INT_10, 0, start_countdown)
+        ),
+        successor_snapshot=_snapshot(
+            alive_mask=successor_alive_mask,
+            current_health=successor_health,
+            steps_until_out_of_combat=_replace_item(
+                _ZERO_INT_10, 0, successor_countdown
+            ),
+        ),
+    )
+
+    assert not any(isinstance(event, AgentLeftCombatEventV1) for event in events)
 
 
 @pytest.mark.parametrize("amount_field", ("damage", "healing"))

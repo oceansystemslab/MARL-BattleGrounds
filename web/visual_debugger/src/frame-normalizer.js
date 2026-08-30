@@ -7,6 +7,7 @@ const RESEARCHER_EVENT_TYPES_V2 = new Set([
   "source_healing_output",
   "recipient_health_resolution",
   "combat_countdown_reset",
+  "agent_left_combat",
   "health_regenerated",
   "cooldown_started",
   "cooldown_ready",
@@ -90,16 +91,11 @@ const SCENARIO_METADATA_KEYS_V1 = Object.freeze([
   "description",
   "frame_count",
   "mode",
-  "movement_scale_maximum",
-  "movement_scale_minimum",
-  "movement_scale_overridden",
-  "movement_scale_step",
   "name",
   "next_frame_description",
   "next_frame_index",
   "next_frame_label",
   "ordinary_movement_distance_scale",
-  "scenario_default_movement_scale",
   "script_complete",
   "title",
 ]);
@@ -553,29 +549,10 @@ function normalizeScenarioMetadataV1(value) {
     },
     "Live researcher scenario option",
   );
-  const scaleFields = [
-    "movement_scale_minimum",
-    "movement_scale_maximum",
-    "movement_scale_step",
-    "ordinary_movement_distance_scale",
-    "scenario_default_movement_scale",
-  ];
   if (
-    scaleFields.some(
-      (field) =>
-        typeof scenario[field] !== "number" || !Number.isFinite(scenario[field]),
-    ) ||
-    scenario.movement_scale_minimum !== 0.01 ||
-    scenario.movement_scale_maximum !== 1 ||
-    scenario.movement_scale_step !== 0.01 ||
-    scenario.ordinary_movement_distance_scale < 0.01 ||
-    scenario.ordinary_movement_distance_scale > 1 ||
-    scenario.scenario_default_movement_scale < 0.01 ||
-    scenario.scenario_default_movement_scale > 1 ||
-    typeof scenario.movement_scale_overridden !== "boolean" ||
-    scenario.movement_scale_overridden !==
-      (scenario.ordinary_movement_distance_scale !==
-        scenario.scenario_default_movement_scale) ||
+    typeof scenario.ordinary_movement_distance_scale !== "number" ||
+    !Number.isFinite(scenario.ordinary_movement_distance_scale) ||
+    scenario.ordinary_movement_distance_scale !== 1 ||
     !Number.isInteger(scenario.completed_frame_count) ||
     scenario.completed_frame_count < 0 ||
     !Number.isInteger(scenario.frame_count) ||
@@ -1045,6 +1022,7 @@ const RESEARCHER_EVENT_SUFFIX_KEYS_V2 = Object.freeze({
     "transition_start_health",
   ]),
   combat_countdown_reset: Object.freeze(["agent_anchor", "agent_global_slot"]),
+  agent_left_combat: Object.freeze(["agent_anchor", "agent_global_slot"]),
   health_regenerated: Object.freeze([
     "actual_health_regenerated",
     "agent_anchor",
@@ -1129,6 +1107,7 @@ const RESEARCHER_EVENT_PHASE_RANK_V2 = Object.freeze({
   source_healing_output: 30,
   recipient_health_resolution: 40,
   combat_countdown_reset: 50,
+  agent_left_combat: 50,
   health_regenerated: 50,
   cooldown_started: 60,
   cooldown_ready: 60,
@@ -3214,6 +3193,11 @@ function normalizeResearcherEvent(
       eventAnchor("agent_anchor", agentSlot, "transition_start");
       break;
     }
+    case "agent_left_combat": {
+      const agentSlot = eventSlot("agent_global_slot");
+      eventAnchor("agent_anchor", agentSlot, "successor");
+      break;
+    }
     case "health_regenerated": {
       const agentSlot = eventSlot("agent_global_slot");
       nonnegative("actual_health_regenerated");
@@ -4639,7 +4623,7 @@ function normalizePovHud(rawHud, selfActor, mask, visibleBodies, frame) {
   const selfId = selfActor.public_agent_id;
   if (
     rawHud.controlled_public_agent_id !== selfId ||
-    !["controlled_actor", "scripted_playback"].includes(rawHud.pending_submission_scope)
+    !["joint_turn", "scripted_playback"].includes(rawHud.pending_submission_scope)
   ) {
     throw new TypeError("POV HUD actor or submission scope is invalid.");
   }
@@ -5168,8 +5152,8 @@ export function normalizeLiveDebuggerFrameV2(value) {
       frame.frame_index ||
     requireInteger(frame.simulator_step_count, "Live debugger simulator-step count") !==
       frame.simulator_step_count ||
-    !["presentation", "analysis", "debug"].includes(frame.preset) ||
-    typeof frame.verbose !== "boolean" ||
+    !["presentation", "analysis"].includes(frame.preset) ||
+    frame.verbose !== false ||
     (frame.frame_kind === "researcher_live_debugger" &&
       typeof frame.show_ranges !== "boolean")
   ) {
@@ -5281,7 +5265,7 @@ export function normalizeLiveDebuggerFrameV2(value) {
     frame_index: frame.frame_index,
     frame_id: frame.frame_id,
     simulator_step_count: frame.simulator_step_count,
-    preset: frame.preset,
+    preset: "analysis",
     verbose: frame.verbose,
     terminal,
     recording,

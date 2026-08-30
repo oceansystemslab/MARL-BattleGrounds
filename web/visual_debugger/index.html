@@ -8,8 +8,9 @@
     >
     <meta name="referrer" content="no-referrer">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>MARL-BattleGrounds Visual Debugger and Analyzer</title>
+    <title>MARL-BattleGrounds</title>
     <link rel="stylesheet" href="/styles.css">
+    <script src="/bootstrap.js"></script>
     <script type="module" src="/src/main.js"></script>
   </head>
   <body>
@@ -18,7 +19,7 @@
     <header class="app-header">
       <div class="brand">
         <p class="eyebrow">MARL-BattleGrounds</p>
-        <h1>Visual Debugger and Analyzer</h1>
+        <h1 id="app-title">MARL-BattleGrounds</h1>
       </div>
       <div class="header-status" aria-live="polite">
         <span id="connection-status" class="status-pill" data-state="loading">
@@ -36,106 +37,17 @@
       </div>
     </header>
 
-    <section class="session-toolbar" aria-label="Analyzer session">
-      <label id="scenario-control" data-live-only>
-        <span>Scenario</span>
-        <select id="scenario-select" aria-label="Scenario" disabled>
-          <option>Loading…</option>
-        </select>
-      </label>
+    <section class="session-toolbar" aria-label="Session controls">
       <label>
         <span>View</span>
         <select id="view-select" aria-label="View mode" disabled>
-          <option value="researcher">Researcher</option>
+          <option value="researcher">Oracle View</option>
           <option value="pov">Agent POV</option>
         </select>
       </label>
-      <label>
-        <span>Preset</span>
-        <select id="preset-select" aria-label="Presentation preset" disabled>
-          <option value="presentation">Presentation</option>
-          <option value="analysis">Analysis</option>
-          <option value="debug">Technical</option>
-        </select>
-      </label>
-      <fieldset class="movement-scale-control" data-live-only>
-        <legend>Movement scale</legend>
-        <div class="movement-scale-control__row">
-          <input
-            id="movement-scale-input"
-            type="range"
-            min="0.01"
-            max="1.00"
-            step="0.01"
-            value="1.00"
-            aria-label="Ordinary movement distance scale"
-            aria-describedby="movement-scale-help"
-            disabled
-          >
-          <output id="movement-scale-value" for="movement-scale-input">1.00</output>
-        </div>
-        <div class="movement-scale-control__actions">
-          <button id="movement-scale-tenth-button" type="button" disabled>
-            0.10
-          </button>
-          <button id="movement-scale-default-button" type="button" disabled>
-            Default
-          </button>
-        </div>
-        <span id="movement-scale-help" class="sr-only">
-          Changing movement scale performs an authoritative reset without
-          advancing the simulator.
-        </span>
-      </fieldset>
       <fieldset class="session-facts" aria-label="Session facts">
-        <span>Revision <strong id="revision-value">—</strong></span>
         <span>Step <strong id="step-value">—</strong></span>
         <span>Transition <strong id="transition-value">—</strong></span>
-      </fieldset>
-      <fieldset class="motion-controls" aria-label="Graphics rendering controls">
-        <legend class="sr-only">Graphics rendering controls</legend>
-        <button
-          id="motion-pause-button"
-          class="button button--quiet"
-          type="button"
-          aria-pressed="false"
-        >
-          Pause
-        </button>
-        <label class="graphics-speed-control">
-          <span>Graphics rendering speed</span>
-          <span class="graphics-speed-control__row">
-            <input
-              id="graphics-speed-input"
-              type="range"
-              min="0.01"
-              max="2.00"
-              step="0.01"
-              value="1.00"
-              aria-label="Graphics rendering speed"
-            >
-            <output id="graphics-speed-value" for="graphics-speed-input">1.00×</output>
-          </span>
-        </label>
-        <button
-          id="motion-off-button"
-          class="button button--quiet"
-          type="button"
-          aria-pressed="false"
-        >
-          Motion Off
-        </button>
-        <button
-          id="motion-skip-button"
-          class="button button--quiet"
-          type="button"
-          disabled
-        >
-          Skip
-        </button>
-        <output id="motion-status" class="motion-status" aria-live="polite">
-          Graphics 1.00×
-        </output>
       </fieldset>
       <div class="toolbar-actions">
         <button id="reconnect-button" class="button button--quiet" type="button">
@@ -145,7 +57,7 @@
           Help
         </button>
         <button id="exit-button" class="button button--danger" type="button" disabled>
-          Exit analyzer
+          Exit
         </button>
       </div>
     </section>
@@ -247,26 +159,50 @@
           </div>
           <div>
             <dt>Completion</dt>
-            <dd id="replay-completion-badge">—</dd>
+            <dd id="replay-completion-badge" tabindex="0">—</dd>
           </div>
           <div>
             <dt>Processing</dt>
-            <dd id="replay-processing-badge">—</dd>
+            <dd id="replay-processing-badge" tabindex="0">—</dd>
           </div>
           <div>
             <dt>End reason</dt>
             <dd id="replay-end-reason">—</dd>
           </div>
-          <div>
-            <dt>Incoming</dt>
-            <dd id="replay-incoming-value">Initial frame</dd>
-          </div>
         </dl>
       </div>
+      <fieldset
+        id="replay-artifact-actions"
+        class="replay-artifact-actions"
+        aria-label="Replay artifact actions"
+        data-replay-only
+        hidden
+      >
+        <legend class="sr-only">Replay artifact actions</legend>
+        <button
+          id="replay-export-png-button"
+          type="button"
+          aria-describedby="replay-export-png-help"
+          disabled
+        >Export PNG</button>
+        <span id="replay-export-png-help" class="sr-only">
+          Export the settled battlefield alone at twice its displayed resolution.
+        </span>
+        <button
+          id="replay-download-metrics-button"
+          type="button"
+          aria-describedby="replay-download-metrics-help"
+          disabled
+        >Download Metrics</button>
+        <span id="replay-download-metrics-help" class="sr-only">
+          Download the canonical metric report for this replay.
+        </span>
+      </fieldset>
       <fieldset class="replay-timeline__transport">
         <legend class="sr-only">Replay transport</legend>
-        <button id="replay-first-button" type="button" aria-label="First replay frame">First</button>
-        <button id="replay-previous-button" type="button" aria-label="Previous replay frame">Previous</button>
+        <button id="replay-first-button" type="button" aria-label="Start replay tick">Start</button>
+        <button id="replay-back-ten-button" type="button" aria-label="Go back ten replay ticks">−10</button>
+        <button id="replay-previous-button" type="button" aria-label="Previous replay tick">−1</button>
         <button
           id="replay-play-pause-button"
           class="button--primary"
@@ -274,10 +210,11 @@
           aria-label="Play replay"
           aria-pressed="false"
         >Play</button>
-        <button id="replay-next-button" type="button" aria-label="Next replay frame">Next</button>
-        <button id="replay-last-button" type="button" aria-label="Last replay frame">Last</button>
+        <button id="replay-next-button" type="button" aria-label="Next replay tick">+1</button>
+        <button id="replay-forward-ten-button" type="button" aria-label="Go forward ten replay ticks">+10</button>
+        <button id="replay-last-button" type="button" aria-label="End replay tick">End</button>
         <label class="replay-timeline__slider">
-          <span>Frame</span>
+          <span>Tick</span>
           <input
             id="replay-frame-slider"
             type="range"
@@ -285,34 +222,35 @@
             max="0"
             step="1"
             value="0"
-            aria-label="Replay frame"
+            aria-label="Replay tick"
             disabled
           >
         </label>
         <output id="replay-frame-position" for="replay-frame-slider" aria-live="polite">
-          Frame 0 / 0
+          Tick 0 / 0
         </output>
-      </fieldset>
-      <fieldset class="replay-timeline__options">
-        <legend class="sr-only">Replay presentation options</legend>
-        <button id="replay-ranges-button" type="button" aria-pressed="false">
-          Ranges
-        </button>
-        <button id="replay-verbosity-button" type="button" aria-pressed="false">
-          Verbose details
-        </button>
-        <button id="replay-clear-reference-button" type="button">
-          Clear Reference
-        </button>
-        <span class="replay-shortcuts">
-          <kbd>Home</kbd>/<kbd>End</kbd> edges · <kbd>←</kbd>/<kbd>→</kbd> step · <kbd>Space</kbd> play
-        </span>
+        <label class="replay-timeline__rate">
+          <span>Speed</span>
+          <select id="replay-playback-rate" aria-label="Replay playback speed">
+            <option value="0.25">0.25×</option>
+            <option value="0.5">0.50×</option>
+            <option value="0.75">0.75×</option>
+            <option value="1" selected>1.00×</option>
+            <option value="1.25">1.25×</option>
+            <option value="1.5">1.50×</option>
+            <option value="1.75">1.75×</option>
+            <option value="2">2.00×</option>
+          </select>
+        </label>
+        <output id="replay-transport-status" aria-live="polite">
+          Frame — / — · Tick — / — · 1.00× · OFFLINE
+        </output>
       </fieldset>
     </section>
 
     <div id="notice" class="notice" data-level="info" role="status" hidden></div>
 
-    <main class="workspace">
+    <main id="workspace" class="workspace">
       <section class="battlefield-panel" aria-labelledby="battlefield-heading">
         <div class="panel-heading">
           <div>
@@ -328,226 +266,272 @@
           <svg
             id="battlefield"
             class="battlefield"
-            role="application"
-            tabindex="0"
-            aria-label="Interactive battlefield. Press Help for keyboard controls."
+            role="img"
+            tabindex="-1"
+            aria-label="Battlefield unavailable until product identity is validated."
             aria-describedby="battlefield-instructions"
           ></svg>
           <p id="battlefield-empty" class="battlefield-empty">
-            Connecting to the local analyzer service…
+            Connecting to the local product service…
           </p>
         </div>
-        <p id="battlefield-instructions" class="sr-only">
-          The battlefield owns debugger keyboard commands while it has focus.
-          Tab and Shift Tab cycle controlled actors here. Escape clears the
-          target and moves focus to the command deck, or to Help while commands
-          are unavailable. Tab behaves normally in the side panel.
-        </p>
+        <div class="battlefield-support">
+          <p id="battlefield-instructions" class="battlefield-instructions">
+            Product-specific Battlefield instructions are loading.
+          </p>
+          <fieldset
+            id="battlefield-utilities"
+            class="battlefield-utilities"
+            aria-label="Battlefield presentation controls"
+          >
+            <legend class="sr-only">Battlefield presentation controls</legend>
+            <button
+              id="replay-clear-reference-button"
+              type="button"
+              data-replay-only
+              hidden
+            >Clear Selection</button>
+          </fieldset>
+        </div>
 
-        <section class="command-deck" aria-label="Debugger commands" data-live-only>
-          <header class="command-deck__header">
-            <div>
-              <p class="command-deck__eyebrow">Joint action composer</p>
-              <h3>Stage, inspect, then submit</h3>
-            </div>
-            <span class="command-deck__shortcut">
-              <kbd>Enter</kbd>
-              commits every staged row
+        <details id="command-deck" class="command-deck" data-live-only open>
+          <summary class="command-deck__header">
+            <span class="command-deck__title-group">
+              <span class="command-deck__eyebrow">Joint action composer</span>
+              <strong class="command-deck__title">Stage, inspect, then submit</strong>
             </span>
-          </header>
+          </summary>
 
-          <div class="command-deck__composer">
-            <div class="command-group command-group--compose command-group--movement">
-              <div class="command-group__heading">
-                <span class="command-step" aria-hidden="true">01</span>
-                <div>
-                  <h4>Movement</h4>
-                  <p id="command-controlled-actor" aria-live="polite">
-                    Actor · unavailable
-                  </p>
+          <div
+            id="command-deck-body"
+            class="disclosure-body command-deck__body"
+            data-disclosure-body="command-deck"
+          >
+            <div class="command-deck__composer">
+              <div class="command-group command-group--compose command-group--movement">
+                <div class="command-group__heading">
+                  <span class="command-step" aria-hidden="true">01</span>
+                  <div>
+                    <h4>Movement</h4>
+                    <p id="command-controlled-actor" aria-live="polite">
+                      Actor · unavailable
+                    </p>
+                  </div>
+                </div>
+                <div class="movement-grid">
+                  <button type="button" data-key="q" data-move-action="6" data-command-role="draft" aria-label="Move northwest">↖</button>
+                  <button type="button" data-key="w" data-move-action="1" data-command-role="draft" aria-label="Move north">↑</button>
+                  <button type="button" data-key="e" data-move-action="5" data-command-role="draft" aria-label="Move northeast">↗</button>
+                  <button type="button" data-key="a" data-move-action="4" data-command-role="draft" aria-label="Move west">←</button>
+                  <button id="stay-button" type="button" data-key="x" data-move-action="0" data-command-role="draft" aria-label="Stay">•</button>
+                  <button type="button" data-key="d" data-move-action="3" data-command-role="draft" aria-label="Move east">→</button>
+                  <button type="button" data-key="z" data-move-action="8" data-command-role="draft" aria-label="Move southwest">↙</button>
+                  <button type="button" data-key="s" data-move-action="2" data-command-role="draft" aria-label="Move south">↓</button>
+                  <button type="button" data-key="c" data-move-action="7" data-command-role="draft" aria-label="Move southeast">↘</button>
                 </div>
               </div>
-              <div class="movement-grid">
-                <button type="button" data-key="q" data-move-action="6" data-command-role="draft" aria-label="Move northwest">↖</button>
-                <button type="button" data-key="w" data-move-action="1" data-command-role="draft" aria-label="Move north">↑</button>
-                <button type="button" data-key="e" data-move-action="5" data-command-role="draft" aria-label="Move northeast">↗</button>
-                <button type="button" data-key="a" data-move-action="4" data-command-role="draft" aria-label="Move west">←</button>
-                <button id="stay-button" type="button" data-key="x" data-move-action="0" data-command-role="draft" aria-label="Stay">•</button>
-                <button type="button" data-key="d" data-move-action="3" data-command-role="draft" aria-label="Move east">→</button>
-                <button type="button" data-key="z" data-move-action="8" data-command-role="draft" aria-label="Move southwest">↙</button>
-                <button type="button" data-key="s" data-move-action="2" data-command-role="draft" aria-label="Move south">↓</button>
-                <button type="button" data-key="c" data-move-action="7" data-command-role="draft" aria-label="Move southeast">↘</button>
-              </div>
-            </div>
 
-            <div class="command-group command-group--compose command-group--action">
-              <div class="command-group__heading">
-                <span class="command-step" aria-hidden="true">02</span>
-                <div>
-                  <h4>Action</h4>
-                  <p>Target and combat lane</p>
+              <div class="command-group command-group--compose command-group--action">
+                <div class="command-group__heading">
+                  <span class="command-step" aria-hidden="true">02</span>
+                  <div>
+                    <h4>Action</h4>
+                    <p>Target and combat lane</p>
+                  </div>
+                </div>
+                <label class="command-target">
+                  <span>Target</span>
+                  <select id="command-target-select" aria-label="Pending target">
+                    <option value="">No target</option>
+                  </select>
+                </label>
+                <div class="button-row command-choice-row">
+                  <button id="no-combat-button" type="button" data-key="0" data-command-role="draft" aria-pressed="false">No combat</button>
+                  <button id="basic-button" type="button" data-key="1" data-command-role="draft" aria-pressed="false">Arm Basic</button>
+                  <button id="ultimate-button" type="button" data-key="2" data-command-role="draft" aria-pressed="false">Arm Ultimate</button>
                 </div>
               </div>
-              <label class="command-target">
-                <span>Target</span>
-                <select id="command-target-select" aria-label="Pending target">
-                  <option value="">No target</option>
-                </select>
-              </label>
-              <div class="button-row command-choice-row">
-                <button id="no-combat-button" type="button" data-key="0" data-command-role="draft" aria-pressed="false">No combat</button>
-                <button id="basic-button" type="button" data-key="1" data-command-role="draft" aria-pressed="false">Arm Basic</button>
-                <button id="ultimate-button" type="button" data-key="2" data-command-role="draft" aria-pressed="false">Arm Ultimate</button>
+            </div>
+
+            <div class="command-commit">
+              <div class="command-commit__copy">
+                <span>Commit</span>
+                <strong id="command-commit-title">Submit the staged joint turn</strong>
+                <small id="command-commit-summary">One authoritative transition</small>
               </div>
-            </div>
-          </div>
-
-          <div class="command-commit">
-            <div class="command-commit__copy">
-              <span>Commit</span>
-              <strong>Submit the staged joint turn</strong>
-              <small>One authoritative transition</small>
-            </div>
-            <div class="command-commit__actions">
-              <button id="submit-turn-button" type="button" data-key="Enter" data-command-role="interactive-submit" class="button--primary">
-                Submit joint turn
-              </button>
-              <button id="advance-script-button" type="button" data-key="n" data-command-role="script-advance">Advance scripted frame</button>
-            </div>
-          </div>
-
-          <div class="command-deck__utilities">
-            <div class="command-group command-group--utility command-group--inspect">
-              <h4>Inspect</h4>
-              <div class="button-row command-button-row">
-                <button type="button" data-key="Tab">Next actor</button>
-                <button type="button" data-key="Tab" data-shift="true">
-                  Previous actor
+              <div class="command-commit__actions">
+                <button id="submit-turn-button" type="button" data-key="Enter" data-command-role="interactive-submit" class="button--primary">
+                  Submit joint turn
                 </button>
-                <button type="button" data-key="Escape">Clear target</button>
-                <button id="live-ranges-button" type="button" data-key="g" aria-pressed="false">Ranges</button>
-                <button id="live-verbosity-button" type="button" data-key="v" aria-pressed="false">Verbosity</button>
               </div>
             </div>
 
-            <div class="command-group command-group--utility command-group--session">
-              <h4>Session</h4>
-              <div class="button-row command-button-row">
-                <button id="reset-button" type="button">Reset</button>
-                <button type="button" data-key="[">Previous scenario</button>
-                <button type="button" data-key="]">Next scenario</button>
+            <div class="command-deck__utilities">
+              <div class="command-group command-group--utility command-group--inspect">
+                <h4>Inspect</h4>
+                <div class="button-row command-button-row">
+                  <button type="button" data-key="Tab">Next actor</button>
+                  <button type="button" data-key="Tab" data-shift="true">
+                    Previous actor
+                  </button>
+                  <button type="button" data-key="Escape">Clear target</button>
+                </div>
+              </div>
+
+              <div class="command-group command-group--utility command-group--session">
+                <h4>Session</h4>
+                <div class="button-row command-button-row">
+                  <button id="reset-button" type="button">Reset</button>
+                </div>
               </div>
             </div>
           </div>
-        </section>
+        </details>
       </section>
 
-      <aside class="hud-panel" aria-label="Analyzer inspector">
-        <section class="hud-section" aria-labelledby="roster-heading">
-          <div class="section-heading">
-            <h2 id="roster-heading">Roster</h2>
-            <span id="roster-count" class="count-badge">0 visible</span>
+      <aside class="hud-panel" aria-label="Inspector">
+        <details id="roster-details" class="hud-section" open>
+          <summary class="section-heading">
+            <strong id="roster-heading" class="section-title">Roster</strong>
+            <span id="roster-count" class="count-badge">0 actors</span>
+          </summary>
+          <div id="roster-details-body" class="disclosure-body" data-disclosure-body="roster-details">
+            <div id="roster" class="roster">
+              <p class="empty-copy">No authorized agents received yet.</p>
+            </div>
           </div>
-          <div id="roster" class="roster">
-            <p class="empty-copy">No authorized agents received yet.</p>
-          </div>
-        </section>
-
-        <section class="hud-section" aria-labelledby="selection-heading">
-          <h2 id="selection-heading">Controlled and selected</h2>
-          <div id="selection-card" class="fact-card">
-            <p class="empty-copy">No selection facts received yet.</p>
-          </div>
-        </section>
-
-        <section
-          id="semantic-inspector"
-          class="hud-section semantic-inspector"
-          aria-labelledby="semantic-inspector-heading"
-          hidden
-        >
-          <div class="section-heading">
-            <h2 id="semantic-inspector-heading">Full explanation</h2>
-            <button
-              id="semantic-inspector-close-button"
-              class="button button--quiet"
-              type="button"
-            >
-              Close
-            </button>
-          </div>
-          <div id="semantic-inspector-content" class="semantic-inspector__content"></div>
-        </section>
-
-        <section class="hud-section" aria-labelledby="pending-heading" data-live-only>
-          <div class="section-heading">
-            <h2 id="pending-heading">Pending joint turn</h2>
-            <span id="pending-count" class="count-badge">0 actors</span>
-          </div>
-          <p id="pending-scope" class="section-note">
-            Waiting for authoritative submission scope.
-          </p>
-          <article id="pending-card" class="action-card">
-            <p class="empty-copy">No pending action.</p>
-          </article>
-        </section>
-
-        <section class="hud-section" aria-labelledby="accepted-heading" data-live-only>
-          <h2 id="accepted-heading">Latest transition</h2>
-          <article id="accepted-card" class="action-card">
-            <p class="empty-copy">No transition yet.</p>
-          </article>
-          <p
-            id="accepted-announcement"
-            class="sr-only"
-            aria-live="polite"
-            aria-atomic="true"
-          ></p>
-        </section>
-
-        <section class="hud-section" aria-labelledby="events-heading">
-          <div class="section-heading">
-            <h2 id="events-heading">Latest events</h2>
-            <span id="event-count" class="count-badge">0</span>
-          </div>
-          <ol id="event-feed" class="event-feed">
-            <li class="empty-copy">No transition events.</li>
-          </ol>
-        </section>
-
-        <details id="visual-key" class="hud-section visual-key" data-live-only>
-          <summary>Visual key</summary>
-          <dl class="visual-key__list">
-            <dt><span class="key-swatch key-swatch--team-a"></span>Team A</dt>
-            <dd>Blue solid perimeter</dd>
-            <dt><span class="key-swatch key-swatch--team-b"></span>Team B</dt>
-            <dd>Red solid perimeter with right-edge chevron</dd>
-            <dt><span class="key-swatch key-swatch--controlled"></span>Controlled</dt>
-            <dd>Bright outer halo</dd>
-            <dt><span class="key-swatch key-swatch--selected"></span>Selected</dt>
-            <dd>Magenta corner reticle</dd>
-            <dt><span class="key-range key-range--observation"></span>Observation</dt>
-            <dd>White dotted range</dd>
-            <dt><span class="key-range key-range--basic"></span>Basic range</dt>
-            <dd>Class-colored dashed range</dd>
-            <dt><span class="key-range key-range--ultimate"></span>Ultimate range</dt>
-            <dd>Purple dash-dot range</dd>
-            <dt><span class="key-swatch key-swatch--basic"></span>0/B</dt>
-            <dd>Exact Basic-lane availability</dd>
-            <dt><span class="key-swatch key-swatch--ultimate"></span>1/U</dt>
-            <dd>Exact Ultimate-lane availability</dd>
-            <dt><span class="key-swatch key-swatch--net"></span>NET</dt>
-            <dd>
-              One recipient-level before/after health outcome; never a
-              per-source amount
-            </dd>
-          </dl>
         </details>
 
-        <details class="hud-section diagnostics">
+        <details id="agent-details" class="hud-section semantic-inspector">
+          <summary><span id="selection-heading">Comprehensive Agent Class Details</span></summary>
+          <div id="agent-details-body" class="disclosure-body" data-disclosure-body="agent-details">
+            <div id="selection-card" class="fact-card">
+              <p class="empty-copy">Select an authorized agent to inspect its details.</p>
+            </div>
+          </div>
+        </details>
+
+        <details id="pending-turn-details" class="hud-section">
+          <summary class="section-heading">
+            <strong id="pending-heading" class="section-title">Pending Joint Action</strong>
+            <span id="pending-count" class="count-badge">0 actors</span>
+          </summary>
+          <div
+            id="pending-turn-details-body"
+            class="disclosure-body"
+            data-disclosure-body="pending-turn-details"
+          >
+            <p id="pending-scope" class="section-note">
+              Waiting for authoritative submission scope.
+            </p>
+            <article id="pending-card" class="action-card">
+              <p class="empty-copy">No pending action.</p>
+            </article>
+          </div>
+        </details>
+
+        <details id="latest-transition-details" class="hud-section">
+          <summary><span id="accepted-heading">Latest Transition</span></summary>
+          <div
+            id="latest-transition-details-body"
+            class="disclosure-body"
+            data-disclosure-body="latest-transition-details"
+          >
+            <article id="accepted-card" class="action-card">
+              <p class="empty-copy">No transition yet.</p>
+            </article>
+            <p
+              id="accepted-announcement"
+              class="sr-only"
+              aria-live="polite"
+              aria-atomic="true"
+            ></p>
+          </div>
+        </details>
+
+        <details id="visual-filters" class="hud-section visual-filters">
+          <summary class="section-heading">
+            <strong class="section-title">Visual Filters</strong>
+            <span id="visual-filter-count" class="count-badge">19 enabled</span>
+          </summary>
+          <div
+            id="visual-filters-body"
+            class="disclosure-body"
+            data-disclosure-body="visual-filters"
+          >
+            <p id="visual-filters-help" class="section-note">
+              These controls change battlefield presentation only. Scientific data
+              remain unchanged.
+            </p>
+            <fieldset class="visual-filters__fieldset">
+              <legend class="sr-only">Battlefield visual filters</legend>
+              <div id="visual-filter-options" class="visual-filters__options"></div>
+              <div class="visual-filters__ranges">
+                <div>
+                  <strong>Ranges</strong>
+                  <span>Show or hide authorized range overlays.</span>
+                </div>
+                <button
+                  id="live-ranges-button"
+                  type="button"
+                  data-live-only
+                  data-key="g"
+                  aria-pressed="false"
+                >Ranges</button>
+                <button
+                  id="replay-ranges-button"
+                  type="button"
+                  data-replay-only
+                  aria-pressed="false"
+                  hidden
+                >Ranges</button>
+              </div>
+            </fieldset>
+            <div class="visual-filters__actions">
+              <button id="enable-all-visual-filters-button" type="button" disabled>
+                Enable All
+              </button>
+              <button id="disable-all-visual-filters-button" type="button">
+                Disable All
+              </button>
+            </div>
+          </div>
+        </details>
+
+        <details id="visual-key" class="hud-section visual-key">
+          <summary>Visual Key</summary>
+          <div id="visual-key-body" class="disclosure-body" data-disclosure-body="visual-key">
+            <dl id="live-visual-key" class="visual-key__list" data-live-only>
+              <dt><span class="key-swatch key-swatch--team-a"></span>Team A</dt>
+              <dd>Blue solid perimeter</dd>
+              <dt><span class="key-swatch key-swatch--team-b"></span>Team B</dt>
+              <dd>Red solid perimeter with right-edge chevron</dd>
+              <dt><span class="key-swatch key-swatch--controlled"></span>Controlled</dt>
+              <dd>Bright outer halo</dd>
+              <dt><span class="key-swatch key-swatch--selected"></span>Selected target</dt>
+              <dd>Magenta corner reticle</dd>
+            </dl>
+            <dl id="replay-visual-key" class="visual-key__list" data-replay-only hidden>
+              <dt><span class="key-swatch key-swatch--team-a"></span>Team A</dt>
+              <dd>Blue solid perimeter</dd>
+              <dt><span class="key-swatch key-swatch--team-b"></span>Team B</dt>
+              <dd>Red solid perimeter with right-edge chevron</dd>
+              <dt><span class="key-swatch key-swatch--selected"></span>Selected agent</dt>
+              <dd>Magenta corner reticle</dd>
+            </dl>
+          </div>
+        </details>
+
+        <details id="technical-frame-details" class="hud-section diagnostics">
           <summary>Technical frame</summary>
-          <div id="diagnostics-card" class="diagnostics-card">
-            <p class="empty-copy">No frame received.</p>
+          <div
+            id="technical-frame-details-body"
+            class="disclosure-body"
+            data-disclosure-body="technical-frame-details"
+          >
+            <div id="diagnostics-card" class="diagnostics-card">
+              <p class="empty-copy">No frame received.</p>
+            </div>
           </div>
         </details>
       </aside>
@@ -569,51 +553,82 @@
         <div class="section-heading">
           <div>
             <p class="eyebrow">Browser controls</p>
-            <h2 id="help-heading">Analyzer help</h2>
+            <h2 id="help-heading">Controls and help</h2>
           </div>
           <button id="help-close-button" class="button button--quiet" type="submit" value="close">Close</button>
         </div>
-        <p data-live-only>
-          Click the battlefield once to give it command focus. Panel controls
-          keep ordinary browser keyboard and Tab behavior.
-        </p>
-        <dl class="help-grid" data-live-only>
-          <dt>Tab / Shift+Tab</dt><dd>Cycle the controlled actor</dd>
-          <dt>Shift+left click</dt><dd>Control the clicked visible actor</dd>
-          <dt>Left click</dt><dd>Select a visible target</dd>
-          <dt>Right click</dt><dd>Clear the target</dd>
-          <dt>Escape</dt>
-          <dd>Clear the target and leave battlefield focus</dd>
-          <dt>WASD / QEZC</dt><dd>Choose movement for the controlled actor</dd>
-          <dt>Arrow keys</dt><dd>Cardinal movement aliases</dd>
-          <dt>X</dt><dd>Set the controlled actor to Stay</dd>
-          <dt>0 / 1 / 2</dt><dd>Stage no combat / Basic / Ultimate</dd>
-          <dt>Space / Enter</dt>
-          <dd>
-            Submit every staged actor in researcher view, or only the
-            controlled actor in agent POV
-          </dd>
-          <dt>N</dt><dd>Advance the next registered scripted frame only</dd>
-          <dt>R</dt><dd>Deterministically reset the scenario</dd>
-          <dt>G / V</dt><dd>Toggle ranges / diagnostic verbosity</dd>
-          <dt>[ / ]</dt><dd>Previous / next scenario</dd>
-          <dt>P</dt><dd>Pause or resume presentation motion</dd>
-          <dt>Graphics rendering speed</dt>
-          <dd>Choose any local explanation speed from 0.01× to 2.00×</dd>
-          <dt>Pause / Motion Off / Skip</dt>
-          <dd>Pause, disable, or settle the current visual explanation</dd>
-        </dl>
-        <p class="help-note" data-live-only>
-          Actor drafts persist when you cycle or directly control another
-          actor. Scripted scenarios are inspection-only: manual draft and
-          Submit controls are unavailable, and N advances the registered
-          trajectory.
+        <div data-live-only data-live-help-mode="oracle" hidden>
+          <p>
+            Click the battlefield once to give it command focus. Panel controls
+            keep ordinary browser keyboard and Tab behavior.
+          </p>
+          <dl class="help-grid">
+            <dt>Tab / Shift+Tab</dt><dd>Cycle the controlled actor</dd>
+            <dt>Left click</dt><dd>Control the clicked authorized actor</dd>
+            <dt>Shift+left click</dt><dd>Select the clicked authorized target</dd>
+            <dt>Escape</dt>
+            <dd>Clear the target and leave battlefield focus</dd>
+            <dt>WASD / QEZC</dt><dd>Choose movement for the controlled actor</dd>
+            <dt>Arrow keys</dt><dd>Cardinal movement aliases</dd>
+            <dt>X</dt><dd>Set the controlled actor to Stay</dd>
+            <dt>0 / 1 / 2</dt><dd>Stage no combat / Basic / Ultimate</dd>
+            <dt>Space / Enter</dt><dd>Submit every staged actor</dd>
+            <dt>R</dt><dd>Deterministically reset the episode</dd>
+            <dt>G</dt><dd>Toggle Oracle View ranges</dd>
+          </dl>
+          <p class="help-note">
+            Actor drafts persist when you cycle or directly control another
+            actor.
+          </p>
+        </div>
+        <div data-live-only data-live-help-mode="agent" hidden>
+          <p>
+            Click the battlefield once to give the current controlled actor's
+            draft keyboard focus. Panels remain global researcher controls;
+            only the battlefield snapshot is fog-limited.
+          </p>
+          <dl class="help-grid">
+            <dt>Tab / Shift+Tab</dt><dd>Cycle the controlled actor and Agent POV</dd>
+            <dt>Visible agent body</dt><dd>Control that actor and switch Agent POV</dd>
+            <dt>Roster row</dt><dd>Control any active actor and switch Agent POV</dd>
+            <dt>Shift+left click</dt><dd>Select a visible authorized target</dd>
+            <dt>Escape</dt>
+            <dd>Clear the target and leave battlefield focus</dd>
+            <dt>WASD / QEZC</dt><dd>Choose movement for the controlled actor</dd>
+            <dt>Arrow keys</dt><dd>Cardinal movement aliases</dd>
+            <dt>X</dt><dd>Set the controlled actor to Stay</dd>
+            <dt>0 / 1 / 2</dt><dd>Stage no combat / Basic / Ultimate</dd>
+            <dt>Space / Enter</dt><dd>Submit every staged actor</dd>
+            <dt>R</dt><dd>Deterministically reset the episode</dd>
+            <dt>G</dt><dd>Toggle fog-authorized ranges without a command</dd>
+          </dl>
+          <p class="help-note">
+            Actor drafts persist when you cycle or directly control another
+            actor. Agent POV changes only the battlefield's fog of war.
+          </p>
+        </div>
+        <div data-live-only data-live-help-mode="scripted" hidden>
+          <p>
+            Scripted live view is inspection-only. Ordinary Tab and Shift+Tab
+            move browser focus.
+          </p>
+          <dl class="help-grid">
+            <dt>Agent body or roster row</dt>
+            <dd>Inspect an authorized actor locally</dd>
+            <dt>Advance scripted frame</dt>
+            <dd>Apply exactly one registered scripted transition</dd>
+            <dt>Ranges</dt><dd>Change presentation-only range visibility</dd>
+          </dl>
+        </div>
+        <p data-live-only data-live-help-mode="unavailable" hidden>
+          Live controls are unavailable until one coherent authorized frame is
+          installed.
         </p>
         <p class="help-note" data-live-only>
           Animation, layout, hover, help, and panel state are presentation-only.
           Python remains authoritative for every simulator and legality decision.
-          Normal motion briefly holds only the next Submit/Next-frame input;
-          Skip, reduced motion, and Off release it immediately.
+          Submit settles an active explanation before sending the current draft;
+          the operating system's reduced-motion preference is honored automatically.
         </p>
         <div data-replay-only hidden>
           <p>
@@ -621,17 +636,18 @@
             recorded frame; it cannot submit an action or advance the simulator.
           </p>
           <dl class="help-grid">
-            <dt>Home / End</dt><dd>Go to the first / last captured frame</dd>
-            <dt>Left / Right</dt><dd>Go to the previous / next captured frame</dd>
+            <dt>LEFT ARROW / RIGHT ARROW</dt>
+            <dd>Go to the previous / next captured tick</dd>
+            <dt>Escape</dt><dd>Clear the selected agent</dd>
             <dt>Space</dt><dd>Play or pause serialized replay</dd>
-            <dt>Frame slider</dt><dd>Seek after a short debounce</dd>
-            <dt>Graphics rendering controls</dt>
-            <dd>Change local explanation speed or disable motion</dd>
+            <dt>Frame slider</dt><dd>Preview without a request; commit one exact seek</dd>
+            <dt>Playback speed</dt><dd>Scale the complete replay presentation clock</dd>
           </dl>
           <p class="help-note">
-            Autoplay keeps one request in flight and waits for each incoming
-            explanation to settle. Seeking, errors, disconnects, hidden tabs,
-            and the captured endpoint pause it.
+            Start, −10, −1, +1, +10, End, and committed slider seeks show
+            one complete static transition summary. Play restarts the displayed
+            incoming transition at logical time zero, waits for its scaled
+            presentation to settle, and then continues with one request in flight.
           </p>
         </div>
       </form>
@@ -676,7 +692,7 @@
 
     <noscript>
       <p class="noscript">
-        This local analyzer needs JavaScript to display authoritative Python
+        This local product needs JavaScript to display authoritative Python
         frames. It does not simulate in the browser.
       </p>
     </noscript>

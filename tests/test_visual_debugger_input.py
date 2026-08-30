@@ -32,7 +32,6 @@ from scripts.dev.visual_debugger.protocol import (
     ResetCommandV1,
     RosterSelectionCommandV1,
     ScenarioSwitchCommandV1,
-    SetMovementScaleCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
 )
@@ -110,11 +109,7 @@ def _authorized_pov_slots(session: DebuggerSession) -> set[int]:
         (ResetCommandV1(), "reset"),
         (KeyboardCommandV1(key="r"), "reset"),
         (KeyboardCommandV1(key="R", shift_key=True), None),
-        (
-            ScenarioSwitchCommandV1(scenario_name="basic_support"),
-            "scenario_switch",
-        ),
-        (SetMovementScaleCommandV1(movement_scale=0.1), "movement_scale"),
+        (ScenarioSwitchCommandV1(scenario_name="basic_support"), None),
         (FinishAndReviewCommandV1(), None),
     ),
 )
@@ -412,7 +407,24 @@ def test_zero_key_stages_explicit_no_combat_without_losing_draft_context() -> No
 
 
 def test_actor_pov_target_action_selects_a_currently_visible_recipient() -> None:
-    session = _session("basic_support")
+    session = _session()
+    result = dispatch_command(
+        session,
+        ActorPovTargetActionCommandV1(target_action=2),
+        view_mode="pov",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.handled
+    assert result.changed
+    assert result.notice is None
+    assert result.session.pending_action.selected_global_target_slot == 1
+    assert result.transition_applied is None
+
+
+def test_actor_pov_target_action_stages_hidden_researcher_space_recipient() -> None:
+    session = _session()
     result = dispatch_command(
         session,
         ActorPovTargetActionCommandV1(target_action=6),
@@ -428,34 +440,15 @@ def test_actor_pov_target_action_selects_a_currently_visible_recipient() -> None
     assert result.transition_applied is None
 
 
-def test_actor_pov_target_action_rejects_hidden_recipient_without_disclosure() -> None:
-    session = _session("basic_support")
-    result = dispatch_command(
-        session,
-        ActorPovTargetActionCommandV1(target_action=8),
-        view_mode="pov",
-        preset="analysis",
-        include_stress=False,
-    )
-
-    assert result.handled
-    assert not result.changed
-    assert result.session is session
-    assert result.notice == (
-        "Target action 8 is unavailable in the current authorized POV."
-    )
-    assert "g7" not in result.notice
-
-
 def test_actor_pov_target_action_zero_clears_the_pending_target() -> None:
     selected = dispatch_command(
-        _session("basic_support"),
-        ActorPovTargetActionCommandV1(target_action=6),
+        _session(),
+        ActorPovTargetActionCommandV1(target_action=2),
         view_mode="pov",
         preset="analysis",
         include_stress=False,
     ).session
-    assert selected.pending_action.selected_global_target_slot == 5
+    assert selected.pending_action.selected_global_target_slot == 1
 
     cleared = dispatch_command(
         selected,
@@ -472,10 +465,10 @@ def test_actor_pov_target_action_zero_clears_the_pending_target() -> None:
 
 
 def test_actor_pov_target_action_is_rejected_in_researcher_mode() -> None:
-    session = _session("basic_support")
+    session = _session()
     result = dispatch_command(
         session,
-        ActorPovTargetActionCommandV1(target_action=6),
+        ActorPovTargetActionCommandV1(target_action=2),
         view_mode="researcher",
         preset="analysis",
         include_stress=False,
@@ -527,6 +520,89 @@ def test_scripted_playback_rejects_manual_drafts_and_submit_keys(key: str) -> No
     assert "press N" in result.notice
     assert int(result.session.state.step_count) == 0
     assert result.session.key is session.key
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        KeyboardCommandV1(key="Tab"),
+        KeyboardCommandV1(key="Tab", shift_key=True),
+        KeyboardCommandV1(key="Escape"),
+        KeyboardCommandV1(key="r"),
+        KeyboardCommandV1(key="v"),
+        KeyboardCommandV1(key="n", repeat=True),
+        KeyboardCommandV1(key="n", shift_key=True),
+        KeyboardCommandV1(key="g", ctrl_key=True),
+        ResetCommandV1(),
+        ScenarioSwitchCommandV1(scenario_name="arena_5v5"),
+        SetPresetCommandV1(preset="presentation"),
+        FinishAndReviewCommandV1(),
+        BattlefieldPointerCommandV1(
+            world_x=3.0,
+            world_y=10.0,
+            button="primary",
+        ),
+        BattlefieldPointerCommandV1(
+            world_x=3.0,
+            world_y=10.0,
+            button="secondary",
+        ),
+        RosterSelectionCommandV1(role="control", global_slot=5),
+        RosterSelectionCommandV1(role="target", global_slot=5),
+        ActorPovTargetActionCommandV1(target_action=6),
+    ),
+)
+def test_scripted_inspection_rejects_every_nonadvance_scientific_command(
+    command: DebuggerCommandV1,
+) -> None:
+    session = _session("aura_crossfire")
+    result = dispatch_command(
+        session,
+        command,
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.handled
+    assert not result.changed
+    assert result.session is session
+    assert result.transition_applied is None
+    assert result.notice is not None
+    assert "inspection-only" in result.notice
+    assert result.session.controlled_global_slot == session.controlled_global_slot
+    assert result.session.pending_action is session.pending_action
+    assert result.session.state is session.state
+    assert result.session.action_mask is session.action_mask
+    assert result.session.key is session.key
+
+
+def test_scripted_view_switch_preserves_the_exact_inspection_session() -> None:
+    session = _session("aura_crossfire")
+    result = dispatch_command(
+        session,
+        SetViewCommandV1(view_mode="pov"),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert result.handled
+    assert result.changed
+    assert result.view_mode == "pov"
+    assert result.session is session
+
+    exit_result = dispatch_command(
+        session,
+        ExitCommandV1(),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+    assert exit_result.handled
+    assert not exit_result.changed
+    assert exit_result.session is session
+    assert exit_result.shutdown_requested
 
 
 def test_n_advances_only_scripted_playback() -> None:
@@ -584,24 +660,6 @@ def test_applied_transition_packaging_preserves_typed_failure(
     assert caught.value is failure
 
 
-def test_ui_only_pov_sanitizer_failure_remains_outside_transition_boundary(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail_sanitizer(*_args: object, **_kwargs: object) -> object:
-        raise RuntimeError("ui-only sanitizer failure")
-
-    monkeypatch.setattr(input_module, "sanitize_pov_pending_target", fail_sanitizer)
-
-    with pytest.raises(RuntimeError, match="ui-only sanitizer failure"):
-        dispatch_command(
-            _session(),
-            SetViewCommandV1(view_mode="pov"),
-            view_mode="researcher",
-            preset="analysis",
-            include_stress=False,
-        )
-
-
 def test_researcher_and_pov_submit_scopes_are_explicit_and_single_step() -> None:
     researcher = _session()
     researcher_result = dispatch_command(
@@ -637,7 +695,7 @@ def test_researcher_and_pov_submit_scopes_are_explicit_and_single_step() -> None
     assert pov_result.changed
     assert pov_view is not None
     assert pov_result.transition_applied is pov_view
-    assert pov_result.session.last_report_actor_slots == (0,)
+    assert pov_result.session.last_report_actor_slots == tuple(range(MAX_AGENT_SLOTS))
     submitted_action = (
         pov_view.transition.facts.action_acceptance_facts.submitted_joint_action
     )
@@ -650,7 +708,12 @@ def test_researcher_and_pov_submit_scopes_are_explicit_and_single_step() -> None
         0,
         0,
     )
-    for actor_slot in range(1, MAX_AGENT_SLOTS):
+    assert (
+        submitted_action.move[1],
+        submitted_action.select_target[1],
+        submitted_action.use_ultimate[1],
+    ) == (MOVE_EAST, 0, 0)
+    for actor_slot in range(2, MAX_AGENT_SLOTS):
         assert (
             submitted_action.move[actor_slot],
             submitted_action.select_target[actor_slot],
@@ -686,7 +749,9 @@ def test_ctrl_alt_and_meta_modified_inputs_are_suppressed() -> None:
         assert result.session is session
 
 
-def test_terminal_blocks_pending_edits_but_keeps_actor_inspection() -> None:
+def test_terminal_scripted_inspection_keeps_every_draft_and_actor_control_fixed() -> (
+    None
+):
     terminal = _session("basic_support")
     for _ in range(2):
         terminal = dispatch_command(
@@ -725,13 +790,14 @@ def test_terminal_blocks_pending_edits_but_keeps_actor_inspection() -> None:
     assert armed.session is terminal
     assert not movement.changed
     assert not armed.changed
-    assert cycled.changed
-    assert cycled.session.controlled_global_slot == 1
+    assert not cycled.changed
+    assert cycled.session is terminal
+    assert cycled.session.controlled_global_slot == terminal.controlled_global_slot
     assert cycled.session.state is terminal.state
     assert cycled.session.key is terminal.key
 
 
-def test_terminal_pov_submit_sanitizes_draft_without_reusing_incoming_transition(
+def test_terminal_pov_submit_retains_draft_without_reusing_incoming_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registered = get_scenario("arena_5v5")
@@ -784,9 +850,10 @@ def test_terminal_pov_submit_sanitizes_draft_without_reusing_incoming_transition
         include_stress=False,
     )
 
-    assert result.changed
+    assert not result.changed
+    assert result.session is staged
     assert result.transition_applied is None
-    assert result.session.pending_action.selected_global_target_slot is None
+    assert result.session.pending_action.selected_global_target_slot == hidden_target
     assert result.session.incoming_evaluation_view is previous_incoming
     assert result.session.state is state
     assert result.session.key is key
@@ -809,24 +876,24 @@ def test_scene_hit_test_uses_only_authorized_agents_and_stable_tie_break() -> No
     assert hit_test_scene_agents((), *first.position) is None
 
 
-def test_pointer_selection_is_server_hit_tested_and_shift_controls_actor() -> None:
+def test_pointer_hit_test_uses_plain_control_shift_target_and_escape_clear() -> None:
     session = _session("arena_5v5")
-    selected = dispatch_command(
+    controlled = dispatch_command(
         session,
         BattlefieldPointerCommandV1(
-            world_x=15.0,
-            world_y=10.0,
+            world_x=3.0,
+            world_y=5.0,
             button="primary",
         ),
         view_mode="researcher",
         preset="analysis",
         include_stress=False,
     )
-    controlled = dispatch_command(
-        selected.session,
+    selected = dispatch_command(
+        controlled.session,
         BattlefieldPointerCommandV1(
-            world_x=3.0,
-            world_y=6.0,
+            world_x=17.0,
+            world_y=1.0,
             button="primary",
             shift_key=True,
         ),
@@ -835,31 +902,28 @@ def test_pointer_selection_is_server_hit_tested_and_shift_controls_actor() -> No
         include_stress=False,
     )
     cleared = dispatch_command(
-        controlled.session,
-        BattlefieldPointerCommandV1(
-            world_x=0.0,
-            world_y=0.0,
-            button="secondary",
-        ),
+        selected.session,
+        KeyboardCommandV1(key="Escape"),
         view_mode="researcher",
         preset="analysis",
         include_stress=False,
     )
 
-    assert selected.session.pending_action.selected_global_target_slot == 5
     assert controlled.session.controlled_global_slot == 2
     assert controlled.session.pending_action.selected_global_target_slot is None
-    assert controlled.session.pending_actions[0].selected_global_target_slot == 5
+    assert selected.session.controlled_global_slot == 2
+    assert selected.session.pending_action.selected_global_target_slot == 5
+    assert selected.session.pending_actions[0].selected_global_target_slot is None
     assert cleared.session.pending_action.selected_global_target_slot is None
     assert cleared.session.state is session.state
     assert cleared.session.key is session.key
 
 
-def test_pov_pointer_and_roster_cannot_select_hidden_agent() -> None:
+def test_pov_pointer_stays_fog_local_while_roster_selects_hidden_agent() -> None:
     session = _session("arena_5v5")
     assert 5 not in _authorized_pov_slots(session)
 
-    pointer = dispatch_command(
+    plain_pointer = dispatch_command(
         session,
         BattlefieldPointerCommandV1(
             world_x=15.0,
@@ -870,22 +934,42 @@ def test_pov_pointer_and_roster_cannot_select_hidden_agent() -> None:
         preset="analysis",
         include_stress=False,
     )
-    roster = dispatch_command(
+    shifted_pointer = dispatch_command(
         session,
-        RosterSelectionCommandV1(role="target", global_slot=5),
+        BattlefieldPointerCommandV1(
+            world_x=15.0,
+            world_y=10.0,
+            button="primary",
+            shift_key=True,
+        ),
         view_mode="pov",
         preset="analysis",
         include_stress=False,
     )
+    roster_results = tuple(
+        dispatch_command(
+            session,
+            RosterSelectionCommandV1(role=role, global_slot=5),
+            view_mode="pov",
+            preset="analysis",
+            include_stress=False,
+        )
+        for role in ("target", "control")
+    )
 
-    assert pointer.session is session
-    assert not pointer.changed
-    assert roster.session is session
-    assert not roster.changed
-    assert roster.notice == "Agent g5 is unavailable in this view."
+    for pointer in (plain_pointer, shifted_pointer):
+        assert pointer.session is session
+        assert not pointer.changed
+    target_result, control_result = roster_results
+    assert target_result.changed
+    assert target_result.notice is None
+    assert target_result.session.pending_action.selected_global_target_slot == 5
+    assert control_result.changed
+    assert control_result.notice is None
+    assert control_result.session.controlled_global_slot == 5
 
 
-def test_entering_pov_clears_hidden_pending_target_without_advancing_epoch() -> None:
+def test_entering_pov_preserves_hidden_pending_target_without_advancing_epoch() -> None:
     session = select_clicked_target(_session("arena_5v5"), 5)
     state = session.state
     key = session.key
@@ -899,13 +983,13 @@ def test_entering_pov_clears_hidden_pending_target_without_advancing_epoch() -> 
 
     assert result.changed
     assert result.view_mode == "pov"
-    assert result.session.pending_action.selected_global_target_slot is None
+    assert result.session.pending_action.selected_global_target_slot == 5
     assert result.session.state is state
     assert result.session.key is key
     assert int(result.session.state.step_count) == 0
 
 
-def test_pov_submit_clears_target_that_leaves_successor_visibility() -> None:
+def test_pov_submit_preserves_target_that_leaves_successor_visibility() -> None:
     registered = get_scenario("arena_5v5")
     build_registered_scenario = registered.build_scenario
 
@@ -950,84 +1034,29 @@ def test_pov_submit_clears_target_that_leaves_successor_visibility() -> None:
 
     assert int(submitted.session.state.step_count) == 1
     assert 5 not in _authorized_pov_slots(submitted.session)
-    assert submitted.session.pending_action.selected_global_target_slot is None
+    assert submitted.session.pending_action.selected_global_target_slot == 5
 
 
-def test_scenario_switch_enforces_stress_authorization() -> None:
+@pytest.mark.parametrize("include_stress", (False, True))
+def test_scenario_switch_remains_parseable_but_cannot_mutate_the_live_lab(
+    include_stress: bool,
+) -> None:
     session = _session()
-    blocked = dispatch_command(
+    result = dispatch_command(
         session,
         ScenarioSwitchCommandV1(scenario_name="charge_convergence"),
         view_mode="researcher",
         preset="analysis",
-        include_stress=False,
-    )
-    allowed = dispatch_command(
-        session,
-        ScenarioSwitchCommandV1(scenario_name="charge_convergence"),
-        view_mode="researcher",
-        preset="analysis",
-        include_stress=True,
+        include_stress=include_stress,
     )
 
-    assert blocked.session is session
-    assert not blocked.changed
-    assert blocked.notice is not None
-    assert allowed.changed
-    assert allowed.session.scenario_name == "charge_convergence"
-    assert allowed.session.run_generation == session.run_generation + 1
-
-
-def test_movement_scale_dispatch_is_researcher_only_and_no_op_aware() -> None:
-    session = _session(controlled_slot=3)
-    scaled = dispatch_command(
-        session,
-        SetMovementScaleCommandV1(movement_scale=0.1),
-        view_mode="researcher",
-        preset="debug",
-        include_stress=False,
-    )
-    duplicate = dispatch_command(
-        scaled.session,
-        SetMovementScaleCommandV1(movement_scale=0.1),
-        view_mode="researcher",
-        preset="debug",
-        include_stress=False,
-    )
-    blocked = dispatch_command(
-        scaled.session,
-        SetMovementScaleCommandV1(movement_scale=0.25),
-        view_mode="pov",
-        preset="presentation",
-        include_stress=False,
-    )
-    restored = dispatch_command(
-        scaled.session,
-        SetMovementScaleCommandV1(movement_scale=None),
-        view_mode="researcher",
-        preset="debug",
-        include_stress=False,
-    )
-
-    assert scaled.handled
-    assert scaled.changed
-    assert scaled.session.config.ordinary_movement_distance_scale == 0.1
-    assert scaled.session.controlled_global_slot == 3
-    assert scaled.view_mode == "researcher"
-    assert scaled.preset == "debug"
-    assert duplicate.handled
-    assert not duplicate.changed
-    assert duplicate.session is scaled.session
-    assert duplicate.notice is not None
-    assert blocked.handled
-    assert not blocked.changed
-    assert blocked.session is scaled.session
-    assert blocked.view_mode == "pov"
-    assert blocked.preset == "presentation"
-    assert blocked.notice is not None
-    assert "researcher view" in blocked.notice
-    assert restored.changed
-    assert restored.session.config.ordinary_movement_distance_scale == 1.0
+    assert result.session is session
+    assert result.handled
+    assert not result.changed
+    assert not result.episode_restarted
+    assert result.notice == "Scenario switching moved to the read-only Replay Viewer."
+    assert result.session.scenario_name == "arena_5v5"
+    assert result.session.run_generation == session.run_generation
 
 
 def test_view_preset_reset_and_exit_commands_report_frame_changes_exactly() -> None:
@@ -1041,7 +1070,7 @@ def test_view_preset_reset_and_exit_commands_report_frame_changes_exactly() -> N
     )
     preset = dispatch_command(
         session,
-        SetPresetCommandV1(preset="debug"),
+        SetPresetCommandV1.model_validate({"preset": "debug"}),
         view_mode="researcher",
         preset="analysis",
         include_stress=False,
@@ -1062,8 +1091,8 @@ def test_view_preset_reset_and_exit_commands_report_frame_changes_exactly() -> N
     )
 
     assert not same_view.changed
-    assert preset.changed
-    assert preset.preset == "debug"
+    assert not preset.changed
+    assert preset.preset == "analysis"
     assert reset.changed
     assert reset.session.run_generation == session.run_generation + 1
     assert not exit_result.changed

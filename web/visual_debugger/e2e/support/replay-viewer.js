@@ -12,6 +12,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const STARTUP_TIMEOUT_MS = 60_000;
+export const REPLAY_VIEWER_ENTRYPOINT = "scripts/dev/replay_viewer.py";
 
 /**
  * Generate real canonical artifacts through the public Python capture,
@@ -22,6 +23,8 @@ const STARTUP_TIMEOUT_MS = 60_000;
  *   complete: string,
  *   partial: string,
  *   shared: string,
+ *   corpseNoShared: string,
+ *   corpseShared: string,
  *   missingMetric: string,
  * }>}
  */
@@ -52,6 +55,8 @@ export async function exportReplayArtifacts() {
       typeof payload.complete !== "string" ||
       typeof payload.partial !== "string" ||
       typeof payload.shared !== "string" ||
+      typeof payload.corpse_no_shared !== "string" ||
+      typeof payload.corpse_shared !== "string" ||
       typeof payload.missing_metric !== "string"
     ) {
       throw new TypeError("Replay exporter returned an invalid path manifest.");
@@ -61,6 +66,8 @@ export async function exportReplayArtifacts() {
       complete: payload.complete,
       partial: payload.partial,
       shared: payload.shared,
+      corpseNoShared: payload.corpse_no_shared,
+      corpseShared: payload.corpse_shared,
       missingMetric: payload.missing_metric,
     };
   } catch (error) {
@@ -89,31 +96,76 @@ export async function removeReplayArtifacts(outputDirectory) {
 }
 
 /**
- * Start the production CLI in browser replay mode against one canonical file.
+ * Start the production CLI against one canonical file, checked sample, or
+ * isolated scripted-scenario materialization.
  *
  * @param {{
- *   replayPath: string,
+ *   replayPath?: string,
+ *   sampleReplay?: string,
+ *   scenario?: string,
+ *   seed?: number,
+ *   includeStress?: boolean,
  *   frameIndex?: number,
  *   view?: "researcher" | "pov",
  *   povSlot?: number,
  *   preset?: "presentation" | "analysis" | "debug",
  *   ranges?: boolean,
  * }} options
- * @returns {Promise<{
- *   process: import("node:child_process").ChildProcess,
- *   url: string,
- * }>}
+ * @returns {string[]}
  */
-export function startReplayViewer({
+export function replayViewerArguments({
   replayPath,
+  sampleReplay,
+  scenario,
+  seed,
+  includeStress,
   frameIndex,
   view,
   povSlot,
   preset,
   ranges,
 }) {
+  const selectors = [replayPath, sampleReplay, scenario].filter(
+    (value) => typeof value === "string",
+  );
+  if (selectors.length !== 1) {
+    throw new TypeError(
+      "Replay viewer startup requires exactly one replayPath, sampleReplay, or scenario.",
+    );
+  }
+  const replayValue =
+    typeof replayPath === "string"
+      ? replayPath
+      : typeof sampleReplay === "string"
+        ? sampleReplay
+        : scenario;
+  if (typeof replayValue !== "string") {
+    throw new TypeError("Replay viewer startup requires a replay selector.");
+  }
   /** @type {string[]} */
-  const replayArguments = ["--replay", replayPath, "--no-open", "--port", "0"];
+  const replayArguments = [
+    typeof replayPath === "string"
+      ? "--replay"
+      : typeof sampleReplay === "string"
+        ? "--sample-replay"
+        : "--scenario",
+    replayValue,
+    "--no-open",
+    "--port",
+    "0",
+  ];
+  if (seed !== undefined) {
+    if (typeof scenario !== "string" || !Number.isInteger(seed)) {
+      throw new TypeError("Replay scenario seed must be an integer.");
+    }
+    replayArguments.push("--seed", String(seed));
+  }
+  if (includeStress === true) {
+    if (typeof scenario !== "string") {
+      throw new TypeError("includeStress is available only for replay scenarios.");
+    }
+    replayArguments.push("--include-stress");
+  }
   if (Number.isInteger(frameIndex)) {
     replayArguments.push("--frame-index", String(frameIndex));
   }
@@ -129,16 +181,23 @@ export function startReplayViewer({
   if (typeof ranges === "boolean") {
     replayArguments.push(ranges ? "--ranges" : "--no-ranges");
   }
+  return ["run", "python", "-u", REPLAY_VIEWER_ENTRYPOINT, ...replayArguments];
+}
 
+/**
+ * @param {Parameters<typeof replayViewerArguments>[0]} options
+ * @returns {Promise<{
+ *   process: import("node:child_process").ChildProcess,
+ *   url: string,
+ * }>}
+ */
+export function startReplayViewer(options) {
+  const replayArguments = replayViewerArguments(options);
   return new Promise((resolveUrl, reject) => {
-    const child = spawn(
-      "uv",
-      ["run", "python", "-u", "scripts/dev/debug_renderer.py", ...replayArguments],
-      {
-        cwd: REPOSITORY_ROOT,
-        env: process.env,
-      },
-    );
+    const child = spawn("uv", replayArguments, {
+      cwd: REPOSITORY_ROOT,
+      env: process.env,
+    });
     let settled = false;
     let stdout = "";
     let stderr = "";
@@ -167,7 +226,7 @@ export function startReplayViewer({
     child.stdout?.on("data", (chunk) => {
       stdout += String(chunk);
       const match = stdout.match(
-        /Visual Debugger and Analyzer: (http:\/\/127\.0\.0\.1:\d+\/#token=[A-Za-z0-9_-]+)/,
+        /MARL-BattleGrounds Replay Viewer: (http:\/\/127\.0\.0\.1:\d+\/#token=[A-Za-z0-9_-]+)/,
       );
       if (!match || settled) {
         return;

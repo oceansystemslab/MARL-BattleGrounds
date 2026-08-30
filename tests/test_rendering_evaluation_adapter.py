@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import inspect
+import json
 import subprocess
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
+from pydantic import TypeAdapter
 from scripts.dev.visual_debugger import static_renderer
 from tests.evaluation_fixtures import (
     CapturedEvaluationTrajectory,
@@ -19,6 +23,13 @@ from marl_battlegrounds.evaluation.metrics import (
     EvaluationEpisodeObserverV1,
     EvaluationTransitionViewV1,
     build_evaluation_observer_v1,
+)
+from marl_battlegrounds.evaluation.models import (
+    EvaluationEpisodeContextV1,
+    EvaluationFrameV1,
+    ResolvedEnvConfigV1,
+    StaticMechanicsCatalogV1,
+    canonical_digest_sha256,
 )
 from marl_battlegrounds.evaluation.pov import (
     build_actor_pov_current_slice_v1,
@@ -41,10 +52,12 @@ from marl_battlegrounds.rendering.evaluation_adapter import (
     advance_status_source_evidence_v2,
     build_evaluation_battlefield_scene_v2,
     build_researcher_analyzer_projection_v2,
+    build_shared_obs_authority_source_material_projection_v1,
     build_shared_obs_source_material_projection_v1,
     build_status_source_evidence_index_v2,
     build_visual_event_batch_v2,
     initialize_status_source_evidence_v2,
+    validate_oracle_scene_static_authority_v1,
 )
 from marl_battlegrounds.rendering.evaluation_wire_features import (
     AGENT_FEATURE_ACTIVE_V1,
@@ -105,6 +118,14 @@ class _ReplaySceneCase:
     bundle: ReplayBundleV1
 
 
+class _PoisonEvaluationContextV1(EvaluationEpisodeContextV1):
+    """No-extra subtype used to prove exact authority input ownership."""
+
+
+class _PoisonEvaluationFrameV1(EvaluationFrameV1):
+    """No-extra subtype used to prove exact authority input ownership."""
+
+
 def _runtime_provenance() -> RuntimeProvenanceV1:
     return RuntimeProvenanceV1(
         python_version="3.13.0",
@@ -150,6 +171,16 @@ def replay_scene_case() -> _ReplaySceneCase:
     )
 
 
+@pytest.fixture(scope="module")
+def shared_projection_trajectory() -> CapturedEvaluationTrajectory:
+    return captured_evaluation_trajectory(
+        transition_count=2,
+        expected_horizon=2,
+        execution_information_mode="shared_obs",
+        episode_id="shared-authority-source",
+    )
+
+
 def _incoming_view(
     replay: ReplayArtifactV1,
     frame_index: int,
@@ -162,6 +193,56 @@ def _incoming_view(
         transition=replay.transitions[frame_index - 1],
         successor_frame=replay.frames[frame_index],
     )
+
+
+def _context_with_map_width(
+    context: EvaluationEpisodeContextV1,
+    *,
+    map_width: float,
+) -> EvaluationEpisodeContextV1:
+    config_payload = context.resolved_env_config.model_dump(mode="json")
+    config_payload["map_width"] = map_width
+    config_payload["canonical_digest_sha256"] = canonical_digest_sha256(
+        config_payload,
+        exclude={"canonical_digest_sha256"},
+    )
+    config = ResolvedEnvConfigV1.model_validate_json(json.dumps(config_payload))
+    context_payload = context.model_dump(mode="json")
+    context_payload["resolved_env_config"] = config.model_dump(mode="json")
+    return EvaluationEpisodeContextV1.model_validate_json(json.dumps(context_payload))
+
+
+def _context_with_spawn_shield_speed(
+    context: EvaluationEpisodeContextV1,
+    *,
+    movement_speed: float,
+) -> EvaluationEpisodeContextV1:
+    config_payload = context.resolved_env_config.model_dump(mode="json")
+    config_payload["spawn_shield_movement_speed"] = movement_speed
+    config_payload["canonical_digest_sha256"] = canonical_digest_sha256(
+        config_payload,
+        exclude={"canonical_digest_sha256"},
+    )
+    config = ResolvedEnvConfigV1.model_validate_json(json.dumps(config_payload))
+    context_payload = context.model_dump(mode="json")
+    context_payload["resolved_env_config"] = config.model_dump(mode="json")
+    return EvaluationEpisodeContextV1.model_validate_json(json.dumps(context_payload))
+
+
+def _context_with_mage_basic_damage(
+    context: EvaluationEpisodeContextV1,
+) -> EvaluationEpisodeContextV1:
+    catalog_payload = context.static_mechanics_catalog.model_dump(mode="json")
+    class_rows = catalog_payload["class_mechanics"]
+    class_rows[1]["basic_raw_damage"] += 1.0
+    catalog_payload["canonical_digest_sha256"] = canonical_digest_sha256(
+        catalog_payload,
+        exclude={"canonical_digest_sha256"},
+    )
+    catalog = StaticMechanicsCatalogV1.model_validate_json(json.dumps(catalog_payload))
+    context_payload = context.model_dump(mode="json")
+    context_payload["static_mechanics_catalog"] = catalog.model_dump(mode="json")
+    return EvaluationEpisodeContextV1.model_validate_json(json.dumps(context_payload))
 
 
 def test_researcher_scene_v2_projects_only_canonical_context_and_frame_truth(
@@ -256,6 +337,143 @@ def test_researcher_scene_v2_projects_only_canonical_context_and_frame_truth(
     assert (
         scene.next_decision_selected_legality.lane_0_available
         == frame.action_mask.select_target_use_ultimate_joint_mask[0][target_action][0]
+    )
+
+
+def test_oracle_scene_static_authority_rejects_cross_context_and_static_poison(
+    replay_scene_case: _ReplaySceneCase,
+) -> None:
+    trajectory = replay_scene_case.trajectory
+    context = trajectory.context
+    view = EvaluationTransitionViewV1(
+        context=context,
+        start_frame=trajectory.frames[0],
+        transition=trajectory.transitions[0],
+        successor_frame=trajectory.frames[1],
+    )
+    scene = build_evaluation_battlefield_scene_v2(
+        context,
+        trajectory.frames[1],
+        transition_view=view,
+    )
+    context_before = context.model_dump_json()
+    scene_adapter = TypeAdapter(BattlefieldSceneV2)
+    scene_before = scene_adapter.dump_json(scene)
+    assert validate_oracle_scene_static_authority_v1(context, scene) is None
+    assert context.model_dump_json() == context_before
+    assert scene_adapter.dump_json(scene) == scene_before
+
+    map_context = _context_with_map_width(
+        context,
+        map_width=context.resolved_env_config.map_width + 1.0,
+    )
+    assert map_context.resolved_env_config.map_width != scene.map.width
+    with pytest.raises(ValueError, match=r"map.*context static authority"):
+        validate_oracle_scene_static_authority_v1(map_context, scene)
+
+    class_context = _context_with_mage_basic_damage(context)
+    assert (
+        class_context.static_mechanics_catalog.class_mechanics[1].basic_raw_damage
+        != context.static_mechanics_catalog.class_mechanics[1].basic_raw_damage
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"class mechanics.*context static authority",
+    ):
+        validate_oracle_scene_static_authority_v1(class_context, scene)
+
+    agent = scene.agents[0]
+    pad = scene.spawn_pads[0]
+    wave = scene.respawn_waves[0]
+    aura = scene.aura_fields[0]
+    static_poisons = (
+        replace(
+            scene,
+            agents=(replace(agent, radius=agent.radius + 0.25), *scene.agents[1:]),
+        ),
+        replace(
+            scene,
+            agents=(
+                replace(
+                    agent,
+                    spawn_shield_remaining=(
+                        context.resolved_env_config.spawn_shield_duration_steps + 1
+                    ),
+                ),
+                *scene.agents[1:],
+            ),
+        ),
+        replace(
+            scene,
+            spawn_pads=(
+                replace(pad, position=(pad.position[0] + 0.25, pad.position[1])),
+                *scene.spawn_pads[1:],
+            ),
+        ),
+        replace(
+            scene,
+            respawn_waves=(
+                replace(wave, period_steps=wave.period_steps + 1),
+                *scene.respawn_waves[1:],
+            ),
+        ),
+        replace(
+            scene,
+            aura_fields=(
+                replace(aura, radius=aura.radius + 0.25),
+                *scene.aura_fields[1:],
+            ),
+        ),
+    )
+    for poisoned in static_poisons:
+        with pytest.raises(
+            ValueError, match=r"context static authority|counters exceed"
+        ):
+            validate_oracle_scene_static_authority_v1(context, poisoned)
+
+    shielded_agent = replace(
+        agent,
+        life_state="alive",
+        spawn_shield_remaining=1,
+        effective_movement_speed=(
+            context.resolved_env_config.spawn_shield_movement_speed
+        ),
+    )
+    shielded_scene = replace(
+        scene,
+        agents=(shielded_agent, *scene.agents[1:]),
+    )
+    shielded_before = scene_adapter.dump_json(shielded_scene)
+    assert validate_oracle_scene_static_authority_v1(context, shielded_scene) is None
+    assert scene_adapter.dump_json(shielded_scene) == shielded_before
+
+    different_shield_speed = _context_with_spawn_shield_speed(
+        context,
+        movement_speed=context.resolved_env_config.spawn_shield_movement_speed + 1.0,
+    )
+    with pytest.raises(ValueError, match=r"active spawn shield.*speed authority"):
+        validate_oracle_scene_static_authority_v1(
+            different_shield_speed,
+            shielded_scene,
+        )
+
+    unshielded_dynamic_speed = replace(
+        scene,
+        agents=(
+            replace(
+                agent,
+                spawn_shield_remaining=0,
+                effective_movement_speed=(agent.effective_movement_speed + 0.125),
+            ),
+            *scene.agents[1:],
+        ),
+    )
+    assert (
+        validate_oracle_scene_static_authority_v1(
+            different_shield_speed,
+            unshielded_dynamic_speed,
+        )
+        is None
     )
 
 
@@ -665,6 +883,168 @@ def test_shared_obs_projection_discloses_only_source_material_for_team_b() -> No
         )
 
 
+@pytest.mark.parametrize("frame_index", (0, 1, 2))
+def test_shared_authority_source_factory_matches_diagnostic_projection_bytes(
+    shared_projection_trajectory: CapturedEvaluationTrajectory,
+    frame_index: int,
+) -> None:
+    trajectory = shared_projection_trajectory
+    context = trajectory.context
+    frame = trajectory.frames[frame_index]
+    context_bytes = context.model_dump_json()
+    frame_bytes = frame.model_dump_json()
+    view = (
+        None
+        if frame_index == 0
+        else EvaluationTransitionViewV1(
+            context=context,
+            start_frame=trajectory.frames[frame_index - 1],
+            transition=trajectory.transitions[frame_index - 1],
+            successor_frame=frame,
+        )
+    )
+    diagnostic = build_shared_obs_source_material_projection_v1(
+        context,
+        frame,
+        selected_global_slot=5,
+        transition_view=view,
+    )
+    authority = build_shared_obs_authority_source_material_projection_v1(
+        context,
+        frame,
+        selected_global_slot=5,
+    )
+    adapter = TypeAdapter(SharedObsSourceMaterialProjectionV1)
+
+    assert authority == diagnostic
+    assert adapter.dump_json(authority) == adapter.dump_json(diagnostic)
+    assert context.model_dump_json() == context_bytes
+    assert frame.model_dump_json() == frame_bytes
+
+
+def test_shared_authority_source_factory_has_no_transition_input(
+    shared_projection_trajectory: CapturedEvaluationTrajectory,
+) -> None:
+    parameters = inspect.signature(
+        build_shared_obs_authority_source_material_projection_v1
+    ).parameters
+    assert tuple(parameters) == ("context", "frame", "selected_global_slot")
+    trajectory = shared_projection_trajectory
+    frame = trajectory.frames[1]
+    before = build_shared_obs_authority_source_material_projection_v1(
+        trajectory.context,
+        frame,
+        selected_global_slot=0,
+    )
+    transition = trajectory.transitions[0]
+    mutated_transition = transition.model_copy(
+        update={
+            "events": (),
+            "canonical_reward_by_agent": tuple(
+                value + 1.0 for value in transition.canonical_reward_by_agent
+            ),
+            "canonical_reward_by_team": SimpleNamespace(forbidden="team-reward"),
+            "facts": SimpleNamespace(forbidden="history"),
+        }
+    )
+    assert mutated_transition != transition
+    after = build_shared_obs_authority_source_material_projection_v1(
+        trajectory.context,
+        frame,
+        selected_global_slot=0,
+    )
+
+    assert after == before
+
+
+def test_shared_authority_source_factory_rejects_exact_input_poisons(
+    shared_projection_trajectory: CapturedEvaluationTrajectory,
+) -> None:
+    trajectory = shared_projection_trajectory
+    context = trajectory.context
+    frame = trajectory.frames[1]
+    context_subclass = _PoisonEvaluationContextV1.model_validate_json(
+        context.model_dump_json()
+    )
+    frame_subclass = _PoisonEvaluationFrameV1.model_validate_json(
+        frame.model_dump_json()
+    )
+    frame_bool = cast(Any, frame).model_construct(
+        **{
+            **frame.model_dump(mode="python"),
+            "frame_index": True,
+        }
+    )
+    snapshot_list = frame.snapshot.model_copy(
+        update={"alive_mask": list(frame.snapshot.alive_mask)}
+    )
+    frame_list = frame.model_copy(update={"snapshot": snapshot_list})
+    cases = (
+        (context_subclass, frame, 0),
+        (context, frame_subclass, 0),
+        (context, frame_bool, 0),
+        (context, frame_list, 0),
+        (context, frame, True),
+    )
+
+    for candidate_context, candidate_frame, selected_slot in cases:
+        with pytest.raises((TypeError, ValueError)):
+            build_shared_obs_authority_source_material_projection_v1(
+                candidate_context,
+                candidate_frame,
+                selected_global_slot=selected_slot,
+            )
+
+
+def test_shared_authority_source_factory_rejects_context_and_regime_mismatch(
+    shared_projection_trajectory: CapturedEvaluationTrajectory,
+    replay_scene_case: _ReplaySceneCase,
+) -> None:
+    trajectory = shared_projection_trajectory
+    other = captured_evaluation_trajectory(
+        transition_count=1,
+        expected_horizon=1,
+        execution_information_mode="shared_obs",
+        episode_id="other-shared-authority-source",
+    )
+    availability = [
+        list(row)
+        for row in cast(
+            tuple[tuple[bool, ...], ...],
+            trajectory.frames[
+                1
+            ].shared_obs_information_availability_by_recipient_and_sensor_source,
+        )
+    ]
+    availability[0][0] = True
+    invalid_availability = trajectory.frames[1].model_copy(
+        update={
+            "shared_obs_information_availability_by_recipient_and_sensor_source": (
+                tuple(tuple(row) for row in availability)
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="join to the context episode"):
+        build_shared_obs_authority_source_material_projection_v1(
+            trajectory.context,
+            other.frames[1],
+            selected_global_slot=0,
+        )
+    with pytest.raises(ValueError, match="requires a shared_obs episode"):
+        build_shared_obs_authority_source_material_projection_v1(
+            replay_scene_case.trajectory.context,
+            replay_scene_case.trajectory.frames[0],
+            selected_global_slot=0,
+        )
+    with pytest.raises(ValueError, match="availability must be false"):
+        build_shared_obs_authority_source_material_projection_v1(
+            trajectory.context,
+            invalid_availability,
+            selected_global_slot=0,
+        )
+
+
 def test_shared_obs_source_material_builder_rejects_no_shared_obs(
     replay_scene_case: _ReplaySceneCase,
 ) -> None:
@@ -783,6 +1163,10 @@ def test_rendering_surface_exports_stabilized_cp7_projection_seams() -> None:
     assert (
         rendering.build_evaluation_battlefield_scene_v2
         is build_evaluation_battlefield_scene_v2
+    )
+    assert (
+        rendering.build_shared_obs_authority_source_material_projection_v1
+        is build_shared_obs_authority_source_material_projection_v1
     )
     assert (
         rendering.build_shared_obs_source_material_projection_v1

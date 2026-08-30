@@ -77,9 +77,11 @@ facts. Evaluation rewards are explicitly `canonical_reward_by_agent` and,
 when task-authored, `canonical_reward_by_team`; shaped or auxiliary rewards do
 not enter these fields.
 
-The discriminated V1 event union has exactly 23 atomic variants. Newly dead
-recipient truth belongs to `AgentDiedEventV1`; each authoritative positive damage
-source on that lethal transition receives a separate
+The discriminated V1 event union has exactly 24 atomic variants.
+`AgentLeftCombatEventV1` records an alive recipient's canonical countdown edge
+from one to zero at phase rank 50, after countdown reset and before
+regeneration. Newly dead recipient truth belongs to `AgentDiedEventV1`; each
+authoritative positive damage source on that lethal transition receives a separate
 `LethalDamageContributionEventV1`. Death sorts before its contribution records
 at phase rank 90. A contribution is not a killer, last hit, or complete
 historical elimination attribution. `TeamDeathmatchScoreChangedEventV1` records

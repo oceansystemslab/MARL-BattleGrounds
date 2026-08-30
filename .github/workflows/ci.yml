@@ -12,7 +12,7 @@ jobs:
   python-test-gates:
     name: Python tests (${{ matrix.shard }}/12)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 9
     strategy:
       fail-fast: true
       max-parallel: 12
@@ -35,6 +35,18 @@ jobs:
       - name: Sync environment
         run: uv sync --locked --extra dev --extra viz
 
+      - name: Check formatting
+        if: matrix.shard == 10
+        run: uv run ruff format --check .
+
+      - name: Run linter
+        if: matrix.shard == 11
+        run: uv run ruff check .
+
+      - name: Run type checker
+        if: matrix.shard == 12
+        run: uv run pyright
+
       - name: Run Python test shard
         run: >-
           uv run pytest
@@ -42,138 +54,28 @@ jobs:
           --ci-shard=${{ matrix.shard }}/12
           --maxfail=1
 
-  python-static-gates:
-    name: Python static gates
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
-        with:
-          version: "0.11.16"
-          enable-cache: true
-
-      - name: Install Python
-        run: uv python install
-
-      - name: Sync environment
-        run: uv sync --locked --extra dev --extra viz
-
-      - name: Check formatting
-        run: uv run ruff format --check .
-
-      - name: Run linter
-        run: uv run ruff check .
-
-      - name: Run type checker
-        run: uv run pyright
-
   quality-gates:
     name: Quality gates
     if: always()
     needs:
       - python-test-gates
-      - python-static-gates
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
       - name: Confirm Python gates passed
         env:
-          STATIC_RESULT: ${{ needs.python-static-gates.result }}
           TEST_RESULT: ${{ needs.python-test-gates.result }}
         run: |
-          if [[ "${STATIC_RESULT}" != "success" || "${TEST_RESULT}" != "success" ]]; then
-            echo "Python static or test shard gates failed."
-            exit 1
-          fi
-
-  frontend-style-gates:
-    name: Frontend style and type gates
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: .node-version
-          cache: npm
-          cache-dependency-path: web/visual_debugger/package-lock.json
-
-      - name: Install frontend dependencies
-        working-directory: web/visual_debugger
-        run: npm ci
-
-      - name: Run frontend style and type gates
-        run: scripts/dev/check_frontend.sh --style-only
-
-  frontend-unit-gates:
-    name: Frontend unit gates
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
-        with:
-          version: "0.11.16"
-          enable-cache: true
-
-      - name: Install Python
-        run: uv python install
-
-      - name: Sync Python fixture-export environment
-        run: uv sync --locked --extra dev
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: .node-version
-          cache: npm
-          cache-dependency-path: web/visual_debugger/package-lock.json
-
-      - name: Install frontend dependencies
-        working-directory: web/visual_debugger
-        run: npm ci
-
-      - name: Run frontend unit gates
-        run: scripts/dev/check_frontend.sh --unit-only
-
-  frontend-static-gates:
-    name: Frontend static gates
-    if: always()
-    needs:
-      - frontend-style-gates
-      - frontend-unit-gates
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-
-    steps:
-      - name: Confirm frontend static gates passed
-        env:
-          STYLE_RESULT: ${{ needs.frontend-style-gates.result }}
-          UNIT_RESULT: ${{ needs.frontend-unit-gates.result }}
-        run: |
-          if [[ "${STYLE_RESULT}" != "success" || "${UNIT_RESULT}" != "success" ]]; then
-            echo "Frontend style/type or unit gates failed."
+          if [[ "${TEST_RESULT}" != "success" ]]; then
+            echo "Python static or test gates failed."
             exit 1
           fi
 
   frontend-browser-gates:
     name: Browser gates (${{ matrix.shard }}/8)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 6
     strategy:
       fail-fast: true
       max-parallel: 8
@@ -207,12 +109,15 @@ jobs:
         working-directory: web/visual_debugger
         run: npm ci
 
+      - name: Run frontend static gates
+        if: matrix.shard == 7
+        run: scripts/dev/check_frontend.sh --static-only
+
       - name: Install Chromium
         working-directory: web/visual_debugger
         run: npx playwright install --with-deps chromium
 
       - name: Run browser shard
-        timeout-minutes: 12
         run: >-
           scripts/dev/check_frontend.sh
           --e2e-shard ${{ matrix.shard }}/8
@@ -231,7 +136,6 @@ jobs:
     name: Frontend and browser gates
     if: always()
     needs:
-      - frontend-static-gates
       - frontend-browser-gates
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -239,10 +143,9 @@ jobs:
     steps:
       - name: Confirm frontend gates passed
         env:
-          STATIC_RESULT: ${{ needs.frontend-static-gates.result }}
           BROWSER_RESULT: ${{ needs.frontend-browser-gates.result }}
         run: |
-          if [[ "${STATIC_RESULT}" != "success" || "${BROWSER_RESULT}" != "success" ]]; then
-            echo "Frontend static or browser shard gates failed."
+          if [[ "${BROWSER_RESULT}" != "success" ]]; then
+            echo "Frontend static or browser gates failed."
             exit 1
           fi

@@ -1,0 +1,147 @@
+{
+  "demo_provenance": {
+    "benchmark_eligible": false,
+    "code_revision": {
+      "commit_sha": "b39886b5b53a85a7e2f296ba32c7840e42630eb8",
+      "dirty_patch_digest": null,
+      "is_dirty": false,
+      "package_version": "0.0.0",
+      "source_tree_digest": "3d770d709f3cbab4e8b9690298fee5bb31910d747ef630d4617330d191879dd6"
+    },
+    "host_attestation": false,
+    "notice": "Deterministic unofficial presentation demo; not a benchmark, policy evaluation, source-tree attestation, or host attestation.",
+    "official": false,
+    "policy_execution_included": false,
+    "runtime_provenance": {
+      "backend": "cpu",
+      "batch_shape": [
+        1
+      ],
+      "device": "cpu",
+      "driver_version": null,
+      "environment_count": 1,
+      "jax_version": "0.10.1",
+      "jaxlib_version": "0.10.1",
+      "machine": "x86_64",
+      "numpy_version": "2.4.6",
+      "package_version": "0.0.0",
+      "platform": "linux",
+      "policy_execution_included": false,
+      "precision": "float32",
+      "pydantic_version": "2.13.4",
+      "python_version": "3.14.5",
+      "runtime_version": "cpu",
+      "schema_id": "marl_battlegrounds.evaluation.runtime_provenance",
+      "schema_version": 1
+    },
+    "source_tree_attestation": false
+  },
+  "generator_id": "visual-debugger-sample-replays-v1",
+  "samples": [
+    {
+      "description": "Lethal damage through the first post-shield interaction.",
+      "display_name": "Death, Respawn, and Spawn Shield",
+      "event_kind_coverage": [
+        "ability_activated",
+        "action_rejected",
+        "agent_died",
+        "agent_left_combat",
+        "agent_respawned",
+        "combat_countdown_reset",
+        "lethal_damage_contribution",
+        "ordinary_movement_phase_displacement",
+        "recipient_health_resolution",
+        "respawn_wave_occurred",
+        "source_damage_output",
+        "spawn_shield_expired",
+        "status_applied",
+        "status_broken_by_damage",
+        "status_cleared_by_new_death"
+      ],
+      "frame_count": 8,
+      "metric_report": {
+        "byte_length": 22324,
+        "file": "death-respawn-shield.marlbg-metrics.json",
+        "sha256": "62bc1b20523dd89c9cba919461d1480ca3f63fb4df2419b22400c39b4eac51d7"
+      },
+      "name": "death-respawn-shield",
+      "replay": {
+        "byte_length": 540726,
+        "file": "death-respawn-shield.marlbg-replay.json",
+        "sha256": "e9bd69b5e560e0a47107f59227bf4240999f6fafc420f3f8188c9fb7c5e3e27b"
+      },
+      "seed": 0,
+      "source_scenario": "death_respawn_cycle",
+      "transition_count": 7
+    },
+    {
+      "description": "Recovery, rejection, refresh, break, reapply, and expiry.",
+      "display_name": "Recovery and Status Lifecycle",
+      "event_kind_coverage": [
+        "ability_activated",
+        "action_rejected",
+        "agent_left_combat",
+        "combat_countdown_reset",
+        "cooldown_ready",
+        "cooldown_started",
+        "health_regenerated",
+        "recipient_health_resolution",
+        "respawn_wave_occurred",
+        "source_damage_output",
+        "status_aged_to_zero",
+        "status_applied",
+        "status_broken_by_damage",
+        "status_refreshed_or_extended"
+      ],
+      "frame_count": 8,
+      "metric_report": {
+        "byte_length": 25207,
+        "file": "recovery-status-lifecycle.marlbg-metrics.json",
+        "sha256": "7d33cd13c84fd5959d0842e27109a264af16b1eb22c871adcf1d5e2a26ae8463"
+      },
+      "name": "recovery-status-lifecycle",
+      "replay": {
+        "byte_length": 581196,
+        "file": "recovery-status-lifecycle.marlbg-replay.json",
+        "sha256": "9eb6bcccda90bf213c6d47c1fa3f9655fab57c406da9661763194c7020544d1c"
+      },
+      "seed": 0,
+      "source_scenario": "recovery_refresh_cycle",
+      "transition_count": 7
+    },
+    {
+      "description": "Reciprocal demonstrations of every class Ultimate family.",
+      "display_name": "Mirrored Five-Class Ultimates",
+      "event_kind_coverage": [
+        "ability_activated",
+        "charge_phase_displacement",
+        "combat_countdown_reset",
+        "cooldown_started",
+        "ordinary_movement_phase_displacement",
+        "recipient_health_resolution",
+        "respawn_wave_occurred",
+        "source_damage_output",
+        "source_healing_output",
+        "status_aged_to_zero",
+        "status_applied"
+      ],
+      "frame_count": 6,
+      "metric_report": {
+        "byte_length": 26348,
+        "file": "mirrored-five-class-ultimates.marlbg-metrics.json",
+        "sha256": "6e0d15e4d6e84c019ebe71343c315f1699895557b35b2d4eecf184364f9dde4a"
+      },
+      "name": "mirrored-five-class-ultimates",
+      "replay": {
+        "byte_length": 452639,
+        "file": "mirrored-five-class-ultimates.marlbg-replay.json",
+        "sha256": "761761b9c61f69c8bd68a3176382f44a60411f365bdbb52ce3a2d060956cf626"
+      },
+      "seed": 0,
+      "source_scenario": "mirrored_ultimates",
+      "transition_count": 5
+    }
+  ],
+  "schema_id": "marl_battlegrounds.visual_debugger.sample_replay_manifest",
+  "schema_version": 1
+}

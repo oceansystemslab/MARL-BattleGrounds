@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock
+from typing import Literal
 from unittest.mock import Mock
 
 import jax.numpy as jnp
@@ -19,6 +20,10 @@ from scripts.dev.visual_debugger.evaluation_bridge import (
 from scripts.dev.visual_debugger.frame import build_debugger_frame
 from scripts.dev.visual_debugger.input import InputDispatchResult
 from scripts.dev.visual_debugger.model import DebuggerSession
+from scripts.dev.visual_debugger.presentation_protocol import (
+    LiveNoSharedObsAuthorizedPresentationFrameV1,
+    LiveOracleAuthorizedPresentationFrameV1,
+)
 from scripts.dev.visual_debugger.protocol import (
     ActorPovLiveDebuggerFrameV2,
     ActorPovTargetActionCommandV1,
@@ -37,7 +42,6 @@ from scripts.dev.visual_debugger.protocol import (
     RosterSelectionCommandV1,
     SaveAsCommandV1,
     ScenarioSwitchCommandV1,
-    SetMovementScaleCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
     ViewMode,
@@ -47,7 +51,7 @@ from scripts.dev.visual_debugger.recording import (
     build_debugger_recording_specification_v1,
 )
 from scripts.dev.visual_debugger.replay_protocol import ResearcherReplayViewerFrameV1
-from scripts.dev.visual_debugger.scenarios import get_scenario
+from scripts.dev.visual_debugger.scenarios import get_scenario, list_scenarios
 from scripts.dev.visual_debugger.service import DebuggerService
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
@@ -392,7 +396,7 @@ def test_live_presentation_commands_publish_authoritative_audience_fields() -> N
     pov = service.apply_command(
         _request(
             "switch-pov",
-            base_revision=2,
+            base_revision=1,
             command=SetViewCommandV1(view_mode="pov"),
         )
     )
@@ -404,11 +408,37 @@ def test_live_presentation_commands_publish_authoritative_audience_fields() -> N
     assert isinstance(verbose.payload, CommandResponseV2)
     assert isinstance(verbose.payload.frame, ResearcherLiveDebuggerFrameV2)
     assert verbose.payload.frame.show_ranges is False
-    assert verbose.payload.frame.verbose is True
+    assert verbose.payload.result == "no_op"
+    assert verbose.payload.frame.verbose is False
     assert isinstance(pov.payload, CommandResponseV2)
     assert isinstance(pov.payload.frame, ActorPovLiveDebuggerFrameV2)
-    assert pov.payload.frame.verbose is True
+    assert pov.payload.frame.verbose is False
     assert "show_ranges" not in pov.payload.frame.model_dump(mode="json")
+
+
+@pytest.mark.parametrize(
+    "legacy_preset",
+    ("presentation", "analysis", "technical", "debug"),
+)
+def test_live_preset_requests_are_fixed_analysis_no_ops(
+    legacy_preset: str,
+) -> None:
+    service = _service()
+
+    result = service.apply_command(
+        _request(
+            f"legacy-preset-{legacy_preset}",
+            base_revision=0,
+            command=SetPresetCommandV1.model_validate({"preset": legacy_preset}),
+        )
+    )
+
+    assert isinstance(result.payload, CommandResponseV2)
+    assert result.payload.result == "no_op"
+    assert isinstance(result.payload.frame, ResearcherLiveDebuggerFrameV2)
+    assert result.payload.frame.preset == "analysis"
+    assert result.payload.frame.revision == 0
+    assert service.revision == 0
 
 
 def test_shift_r_is_a_host_no_op_and_ordinary_r_remains_a_restart() -> None:
@@ -542,56 +572,7 @@ def test_unavailable_browser_draft_is_a_revision_preserving_no_op() -> None:
     assert "canonical no-combat tuple" in result.payload.notice
 
 
-def test_movement_scale_reset_is_idempotent_revisioned_and_never_steps(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    service = _service()
-
-    def forbidden_step(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("movement-scale reset must not call step")
-
-    monkeypatch.setattr(control_module, "step", forbidden_step)
-    request = _request(
-        "scale-once",
-        base_revision=0,
-        command=SetMovementScaleCommandV1(movement_scale=0.1),
-    )
-
-    applied = service.apply_command(request)
-    duplicate = service.apply_command(request)
-    stale = service.apply_command(
-        _request(
-            "stale-scale",
-            base_revision=0,
-            command=SetMovementScaleCommandV1(movement_scale=0.25),
-        )
-    )
-    same_effective = service.apply_command(
-        _request(
-            "same-scale",
-            base_revision=1,
-            command=SetMovementScaleCommandV1(movement_scale=0.1),
-        )
-    )
-
-    assert isinstance(applied.payload, CommandResponseV2)
-    assert isinstance(applied.payload.frame, ResearcherLiveDebuggerFrameV2)
-    assert applied.payload.result == "applied"
-    assert applied.payload.frame.revision == 1
-    assert applied.payload.frame.run_generation == 1
-    assert applied.payload.frame.simulator_step_count == 0
-    assert applied.payload.frame.scenario.ordinary_movement_distance_scale == 0.1
-    assert isinstance(duplicate.payload, CommandResponseV2)
-    assert duplicate.payload.result == "duplicate"
-    assert stale.outcome == "stale_revision"
-    assert isinstance(same_effective.payload, CommandResponseV2)
-    assert same_effective.payload.result == "no_op"
-    assert same_effective.payload.frame.revision == 1
-    assert service.session.run_generation == 1
-    assert int(service.session.state.step_count) == 0
-
-
-def test_entering_pov_clears_a_hidden_pending_target_without_stepping() -> None:
+def test_entering_pov_preserves_a_hidden_pending_target_without_stepping() -> None:
     service = _service()
     researcher_slots = {
         row.global_slot
@@ -626,13 +607,13 @@ def test_entering_pov_clears_a_hidden_pending_target_without_stepping() -> None:
 
     assert isinstance(changed_view.payload, CommandResponseV2)
     assert changed_view.payload.frame.view_mode == "pov"
-    assert service.session.pending_action.selected_global_target_slot is None
+    assert service.session.pending_action.selected_global_target_slot == hidden_target
     assert service.session.state is before_view.state
     assert bool(jnp.array_equal(service.session.key, before_view.key))
     assert int(service.session.state.step_count) == 0
 
 
-def test_terminal_pov_sanitizer_change_does_not_append_stale_transition(
+def test_terminal_pov_submit_retains_draft_without_appending_stale_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registered = get_scenario("arena_5v5")
@@ -655,7 +636,7 @@ def test_terminal_pov_sanitizer_change_does_not_append_stale_transition(
         view_mode="pov",
         preset="analysis",
         include_stress=False,
-        session_id="terminal-pov-sanitizer",
+        session_id="terminal-pov-submit",
     )
     terminal = service.apply_command(
         _request(
@@ -681,14 +662,8 @@ def test_terminal_pov_sanitizer_change_does_not_append_stale_transition(
     previous_key = service.session.key
     previous_observer_count = service.evaluation_validated_transition_count
 
-    def clear_terminal_target(session: DebuggerSession) -> DebuggerSession:
-        return control_module.clear_pending_target(session)
-
     step_spy = Mock(side_effect=AssertionError("terminal submit must not step"))
     capture_spy = Mock(side_effect=AssertionError("terminal submit must not capture"))
-    monkeypatch.setattr(
-        input_module, "sanitize_pov_pending_target", clear_terminal_target
-    )
     monkeypatch.setattr(control_module, "step", step_spy)
     monkeypatch.setattr(
         control_module,
@@ -696,18 +671,18 @@ def test_terminal_pov_sanitizer_change_does_not_append_stale_transition(
         capture_spy,
     )
 
-    sanitized = service.apply_command(
+    retained = service.apply_command(
         _request(
-            "sanitize-terminal-pov-target",
+            "retain-terminal-pov-target",
             base_revision=2,
             command=KeyboardCommandV1(key="Enter"),
         )
     )
 
-    assert isinstance(sanitized.payload, CommandResponseV2)
-    assert sanitized.payload.result == "applied"
-    assert service.revision == 3
-    assert service.session.pending_action.selected_global_target_slot is None
+    assert isinstance(retained.payload, CommandResponseV2)
+    assert retained.payload.result == "no_op"
+    assert service.revision == 2
+    assert service.session.pending_action.selected_global_target_slot == target
     assert service.session.incoming_evaluation_view is previous_incoming
     assert service.session.state is previous_state
     assert service.session.key is previous_key
@@ -717,7 +692,7 @@ def test_terminal_pov_sanitizer_change_does_not_append_stale_transition(
     assert not service.faulted
 
 
-def test_initial_pov_service_clears_hidden_pending_target() -> None:
+def test_initial_pov_service_preserves_hidden_pending_target() -> None:
     session = create_session(
         get_scenario("arena_5v5"),
         seed=0,
@@ -742,7 +717,7 @@ def test_initial_pov_service_clears_hidden_pending_target() -> None:
         session_id="initial-pov",
     )
 
-    assert service.session.pending_action.selected_global_target_slot is None
+    assert service.session.pending_action.selected_global_target_slot == hidden_target
     frame = service.current_frame()
     assert isinstance(frame, ActorPovLiveDebuggerFrameV2)
     assert not hasattr(frame.hud, "selected_global_slot")
@@ -768,16 +743,16 @@ def test_same_base_concurrent_commands_dispatch_at_most_once(
     monkeypatch.setattr(service_module, "dispatch_command", counting_dispatch)
     requests = (
         _request(
-            "preset-a",
+            "view-a",
             base_revision=0,
             client_id="client-a",
-            command=SetPresetCommandV1(preset="presentation"),
+            command=SetViewCommandV1(view_mode="pov"),
         ),
         _request(
-            "preset-b",
+            "view-b",
             base_revision=0,
             client_id="client-b",
-            command=SetPresetCommandV1(preset="debug"),
+            command=SetViewCommandV1(view_mode="pov"),
         ),
     )
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -826,6 +801,144 @@ def test_same_base_concurrent_submits_call_authoritative_step_once(
     ]
     assert int(service.session.state.step_count) == 1
     assert service.revision == 1
+
+
+@pytest.mark.parametrize(("actor_slot", "target_slot"), ((1, 6), (6, 1)))
+def test_interactive_warrior_charge_is_identical_and_presentable_in_both_views(
+    actor_slot: int,
+    target_slot: int,
+) -> None:
+    registered = get_scenario("arena_5v5")
+    config, state = registered.build_scenario()
+    positions = (
+        state.agent_positions.at[1]
+        .set(jnp.asarray((6.0, 6.0), dtype=jnp.float32))
+        .at[6]
+        .set(jnp.asarray((10.0, 6.0), dtype=jnp.float32))
+    )
+    charge_duel = replace(
+        registered,
+        build_scenario=lambda: (
+            config,
+            state._replace(agent_positions=positions),
+        ),
+    )
+    evidence_by_view: dict[
+        ViewMode,
+        tuple[int, int, tuple[int, int, int], tuple[int, int, int]],
+    ] = {}
+
+    for view_mode in ("researcher", "pov"):
+        session = create_session(
+            charge_duel,
+            seed=0,
+            evaluation_launch_specification=debugger_test_launch_specification(),
+            controlled_global_slot=0,
+            show_ranges=True,
+            verbose_logging=False,
+        )
+        service = DebuggerService(
+            session,
+            view_mode=view_mode,
+            preset="analysis",
+            include_stress=False,
+            session_id=f"interactive-charge-{actor_slot}-{view_mode}",
+        )
+        initial = service.current_presentation()
+        assert initial == service.current_presentation()
+        commands = (
+            RosterSelectionCommandV1(role="control", global_slot=actor_slot),
+            RosterSelectionCommandV1(role="target", global_slot=target_slot),
+            KeyboardCommandV1(key="2"),
+            KeyboardCommandV1(key="Enter"),
+        )
+        for command_index, command in enumerate(commands, start=1):
+            applied = service.apply_command(
+                _request(
+                    f"charge-{actor_slot}-{view_mode}-{command_index}",
+                    base_revision=service.revision,
+                    command=command,
+                )
+            )
+            assert applied.outcome == "response"
+            assert isinstance(applied.payload, CommandResponseV2)
+            assert applied.payload.result == "applied"
+            assert service.revision == command_index
+            current = service.current_presentation()
+            assert current == service.current_presentation()
+
+        incoming = service.session.incoming_evaluation_view
+        assert incoming is not None
+        acceptance = incoming.transition.facts.action_acceptance_facts
+        submitted = (
+            int(acceptance.submitted_joint_action.move[actor_slot]),
+            int(acceptance.submitted_joint_action.select_target[actor_slot]),
+            int(acceptance.submitted_joint_action.use_ultimate[actor_slot]),
+        )
+        accepted = (
+            int(acceptance.accepted_joint_action.move[actor_slot]),
+            int(acceptance.accepted_joint_action.select_target[actor_slot]),
+            int(acceptance.accepted_joint_action.use_ultimate[actor_slot]),
+        )
+        target_action = service.session.evaluation_context.static_mechanics_catalog
+        expected_target_action = (
+            target_action.global_recipient_slot_by_actor_and_target_action[
+                actor_slot
+            ].index(target_slot)
+        )
+        assert submitted[1:] == (expected_target_action, 1)
+        assert accepted == submitted
+        assert service.session.controlled_global_slot == actor_slot
+        assert (
+            service.session.pending_actions[actor_slot].selected_global_target_slot
+            == target_slot
+        )
+        assert service.session.current_evaluation_frame.frame_index == 1
+        assert service.evaluation_validated_transition_count == 1
+        assert not service.faulted
+
+        settled = service.current_presentation()
+        payload = settled.payload
+        actor_public_id = service.session.evaluation_context.roster[
+            actor_slot
+        ].public_agent_id
+        target_public_id = service.session.evaluation_context.roster[
+            target_slot
+        ].public_agent_id
+        if type(payload) is LiveOracleAuthorizedPresentationFrameV1:
+            scene = payload.current_endpoint.scene
+        else:
+            assert type(payload) is LiveNoSharedObsAuthorizedPresentationFrameV1
+            assert payload.source.source_recipient_public_agent_id == actor_public_id
+            scene = payload.current_endpoint.parts.scene
+        target_row = next(
+            row for row in scene.agents if row.public_agent_id == target_public_id
+        )
+        charge_statuses = tuple(
+            status
+            for status in target_row.statuses
+            if status.status_id.startswith("warrior_charge_")
+        )
+        assert tuple(status.status_id for status in charge_statuses) == (
+            "warrior_charge_stun",
+            "warrior_charge_slow",
+        )
+        if view_mode == "researcher":
+            assert all(
+                tuple(source.source_public_agent_id for source in status.direct_sources)
+                == (actor_public_id,)
+                for status in charge_statuses
+            )
+        else:
+            assert all(not status.direct_sources for status in charge_statuses)
+        evidence_by_view[view_mode] = (
+            service.session.controlled_global_slot,
+            target_slot,
+            submitted,
+            accepted,
+        )
+
+    assert evidence_by_view["researcher"] == evidence_by_view["pov"]
 
 
 def test_frame_build_failure_keeps_epoch_coherent_and_consumes_command_id(
@@ -1110,6 +1223,136 @@ def test_endpoint_auto_save_installs_saved_status_and_review_handoff(
     assert recorder.lifecycle == "reviewing"
 
 
+def test_scripted_service_fences_hidden_control_edits_before_advancing_once() -> None:
+    service = _service("aura_crossfire")
+    before_session = service.session
+    before_frame = service.current_frame()
+    before_controlled_slot = before_session.controlled_global_slot
+
+    for command_id, command in (
+        ("scripted-hidden-tab", KeyboardCommandV1(key="Tab")),
+        ("scripted-hidden-reset", ResetCommandV1()),
+    ):
+        blocked = service.apply_command(
+            _request(
+                command_id,
+                base_revision=0,
+                command=command,
+            )
+        )
+        assert isinstance(blocked.payload, CommandResponseV2)
+        assert blocked.payload.result == "no_op"
+        assert blocked.payload.frame is before_frame
+        assert blocked.payload.notice is not None
+        assert "inspection-only" in blocked.payload.notice
+        assert service.session is before_session
+        assert service.session.controlled_global_slot == before_controlled_slot
+        assert service.revision == 0
+        assert service.evaluation_validated_transition_count == 0
+
+    advanced = service.apply_command(
+        _request(
+            "scripted-advance",
+            base_revision=0,
+            command=KeyboardCommandV1(key="n"),
+        )
+    )
+
+    assert isinstance(advanced.payload, CommandResponseV2)
+    assert advanced.payload.result == "applied"
+    assert service.revision == 1
+    assert service.session.current_evaluation_frame.frame_index == 1
+    assert service.evaluation_validated_transition_count == 1
+
+
+_SCRIPTED_SCENARIO_NAMES = tuple(
+    scenario.name
+    for scenario in list_scenarios(include_stress=True)
+    if scenario.mode == "scripted"
+)
+
+
+@pytest.mark.parametrize("scenario_name", _SCRIPTED_SCENARIO_NAMES)
+@pytest.mark.parametrize("view_mode", ("researcher", "pov"))
+def test_every_scripted_scenario_preflights_each_successor_in_both_views(
+    scenario_name: str,
+    view_mode: ViewMode,
+) -> None:
+    """Every authored successor must remain presentable before it can commit."""
+    service = _service(scenario_name, include_stress=True)
+    scenario = get_scenario(scenario_name)
+    if view_mode == "pov":
+        switched = service.apply_command(
+            _request(
+                f"{scenario_name}-pov",
+                base_revision=service.revision,
+                command=SetViewCommandV1(view_mode="pov"),
+            )
+        )
+        assert switched.outcome == "response"
+        assert isinstance(switched.payload, CommandResponseV2)
+        assert switched.payload.result == "applied"
+
+    for script_index, _frame in enumerate(scenario.frames):
+        before_revision = service.revision
+        before_frame_index = service.session.current_evaluation_frame.frame_index
+        before_transition_count = service.evaluation_validated_transition_count
+        advanced = service.apply_command(
+            _request(
+                f"{scenario_name}-{view_mode}-n-{script_index}",
+                base_revision=before_revision,
+                command=KeyboardCommandV1(key="n"),
+            )
+        )
+
+        assert advanced.outcome == "response"
+        assert isinstance(advanced.payload, CommandResponseV2)
+        assert advanced.payload.result == "applied"
+        assert service.revision == before_revision + 1
+        assert (
+            service.session.current_evaluation_frame.frame_index
+            == before_frame_index + 1
+        )
+        assert (
+            service.evaluation_validated_transition_count == before_transition_count + 1
+        )
+        assert not service.faulted
+
+        first = service.current_presentation()
+        second = service.current_presentation()
+        assert first.outcome == second.outcome == "response"
+        assert first.payload is not None
+        assert second.payload is not None
+        assert first.payload.model_dump_json() == second.payload.model_dump_json()
+
+        if scenario_name != "death_respawn_cycle" or script_index != 2:
+            continue
+        if type(first.payload) is LiveOracleAuthorizedPresentationFrameV1:
+            assert first.payload.latest_events is not None
+            events = first.payload.latest_events.events
+            assert tuple(
+                event.rejection_component
+                for event in events
+                if event.event_kind == "action_rejected"
+            ) == ("movement", "combat_pair")
+            assert (
+                tuple(event.event_kind for event in events).count(
+                    "respawn_wave_occurred"
+                )
+                == 1
+            )
+        else:
+            assert type(first.payload) is LiveNoSharedObsAuthorizedPresentationFrameV1
+            assert first.payload.visual_events is not None
+            events = first.payload.visual_events.events
+            assert tuple(
+                event.rejection_component
+                for event in events
+                if event.event_kind == "action_rejected"
+            ) == ("movement", "combat_pair")
+        assert tuple(event.event_kind for event in events).count("agent_respawned") == 1
+
+
 def test_exact_horizon_truncation_auto_saves_as_complete_declared_horizon(
     tmp_path: Path,
 ) -> None:
@@ -1184,14 +1427,45 @@ def test_recording_restart_fence_and_confirmed_discard_replace_atomically(
     assert service.evaluation_validated_transition_count == 0
 
 
+def test_scripted_recording_rejects_confirmed_reset_without_discarding_prefix(
+    tmp_path: Path,
+) -> None:
+    service, recorder = _recording_service(tmp_path, "basic_support")
+    first = service.apply_command(
+        _request(
+            "scripted-prefix",
+            base_revision=0,
+            command=KeyboardCommandV1(key="n"),
+        )
+    )
+    assert isinstance(first.payload, CommandResponseV2)
+    before_session = service.session
+    before_frame = service.current_frame()
+
+    blocked = service.apply_command(
+        _request(
+            "scripted-confirmed-reset",
+            base_revision=1,
+            command=ConfirmDiscardAndReplaceCommandV1(replacement=ResetCommandV1()),
+        )
+    )
+
+    assert isinstance(blocked.payload, CommandResponseV2)
+    assert blocked.payload.result == "no_op"
+    assert blocked.payload.frame is before_frame
+    assert blocked.payload.notice is not None
+    assert "inspection-only" in blocked.payload.notice
+    assert service.session is before_session
+    assert service.revision == 1
+    assert recorder.lifecycle == "recording"
+    assert recorder.validated_transition_count == 1
+
+
 @pytest.mark.parametrize(
     "command",
     (
         ResetCommandV1(),
         KeyboardCommandV1(key="r"),
-        KeyboardCommandV1(key="]"),
-        ScenarioSwitchCommandV1(scenario_name="basic_support"),
-        SetMovementScaleCommandV1(movement_scale=0.1),
     ),
 )
 def test_captured_recording_prefix_fences_every_restart_entry_point(
@@ -1219,6 +1493,52 @@ def test_captured_recording_prefix_fences_every_restart_entry_point(
 
     assert isinstance(fenced.payload, CommandResponseV2)
     assert fenced.payload.result == "no_op"
+    assert service.session is prefix_session
+    assert service.revision == 1
+    assert recorder.lifecycle == "recording"
+    assert recorder.validated_transition_count == 1
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_notice"),
+    (
+        (
+            KeyboardCommandV1(key="]"),
+            "Scenario navigation moved to the read-only Replay Viewer.",
+        ),
+        (
+            ScenarioSwitchCommandV1(scenario_name="basic_support"),
+            "Scenario switching moved to the read-only Replay Viewer.",
+        ),
+    ),
+)
+def test_obsolete_scenario_commands_are_no_ops_during_recording(
+    tmp_path: Path,
+    command: object,
+    expected_notice: str,
+) -> None:
+    service, recorder = _recording_service(tmp_path)
+    submitted = service.apply_command(
+        _request(
+            "obsolete-scenario-prefix",
+            base_revision=0,
+            command=KeyboardCommandV1(key="Enter"),
+        )
+    )
+    assert isinstance(submitted.payload, CommandResponseV2)
+    prefix_session = service.session
+
+    ignored = service.apply_command(
+        _request(
+            f"obsolete-scenario-{type(command).__name__}",
+            base_revision=1,
+            command=command,
+        )
+    )
+
+    assert isinstance(ignored.payload, CommandResponseV2)
+    assert ignored.payload.result == "no_op"
+    assert ignored.payload.notice == expected_notice
     assert service.session is prefix_session
     assert service.revision == 1
     assert recorder.lifecycle == "recording"
@@ -1739,7 +2059,7 @@ def test_closed_recording_retains_only_exact_presentation_command_semantics(
 
     commands = (
         SetViewCommandV1(view_mode="pov"),
-        SetPresetCommandV1(preset="debug"),
+        SetPresetCommandV1.model_validate({"preset": "debug"}),
         KeyboardCommandV1(key="g"),
         KeyboardCommandV1(key="v"),
         KeyboardCommandV1(key="p"),
@@ -1759,17 +2079,17 @@ def test_closed_recording_retains_only_exact_presentation_command_semantics(
 
     assert [result.result for result in results] == [
         "applied",
+        "no_op",
         "applied",
-        "applied",
-        "applied",
+        "no_op",
         "no_op",
         "no_op",
     ]
     assert service.current_frame().view_mode == "pov"
-    assert service.current_frame().preset == "debug"
+    assert service.current_frame().preset == "analysis"
     assert service.session.show_ranges is False
-    assert service.session.verbose_logging is True
-    assert service.revision == 5
+    assert service.session.verbose_logging is False
+    assert service.revision == 3
     assert service.evaluation_validated_transition_count == 0
     assert recorder.lifecycle == "saved"
     assert service.current_frame().recording == recorder.status
@@ -1908,15 +2228,15 @@ def test_typed_transition_failure_with_save_failure_stays_recoverable(
     assert recorder.lifecycle == "reviewing"
 
 
-@pytest.mark.parametrize("failure_site", ("pov_sanitizer", "result_envelope"))
+@pytest.mark.parametrize("view_mode", ("researcher", "pov"))
 def test_transition_result_packaging_failure_saves_uncommitted_candidate_prefix(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    failure_site: str,
+    view_mode: Literal["researcher", "pov"],
 ) -> None:
     service, recorder = _recording_service(
         tmp_path,
-        view_mode="pov" if failure_site == "pov_sanitizer" else "researcher",
+        view_mode=view_mode,
     )
     initial_session = service.session
     tracked_step = Mock(wraps=control_module.step)
@@ -1931,13 +2251,10 @@ def test_transition_result_packaging_failure_saves_uncommitted_candidate_prefix(
         "capture_evaluation_transition_unit_v1",
         tracked_capture,
     )
-    if failure_site == "pov_sanitizer":
-        monkeypatch.setattr(input_module, "sanitize_pov_pending_target", fail_packaging)
-    else:
-        monkeypatch.setattr(input_module, "_result", fail_packaging)
+    monkeypatch.setattr(input_module, "_result", fail_packaging)
 
     request = _request(
-        f"{failure_site}-failure",
+        f"{view_mode}-result-envelope-failure",
         base_revision=0,
         command=KeyboardCommandV1(key="Enter"),
     )

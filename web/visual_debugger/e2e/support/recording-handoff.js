@@ -46,7 +46,7 @@ export async function removeRecordingArtifacts(outputDirectory) {
  * recording destination. Startup failures synchronously reap the child and
  * remove the unique directory before they escape.
  *
- * @param {{scenario?: string, stem?: string}} options
+ * @param {{stem?: string}} options
  * @returns {Promise<{
  *   process: import("node:child_process").ChildProcess,
  *   url: string,
@@ -55,10 +55,7 @@ export async function removeRecordingArtifacts(outputDirectory) {
  *   metricReportPath: string,
  * }>}
  */
-export async function startRecordingDebugger({
-  scenario = "basic_support",
-  stem = "episode",
-} = {}) {
+export async function startRecordingDebugger({ stem = "episode" } = {}) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(stem)) {
     throw new TypeError("Recording E2E stems must be safe filename components.");
   }
@@ -75,8 +72,6 @@ export async function startRecordingDebugger({
       "--no-open",
       "--port",
       "0",
-      "--scenario",
-      scenario,
       "--record-replay",
       replayPath,
     ],
@@ -117,7 +112,7 @@ export async function startRecordingDebugger({
       child.stdout?.on("data", (chunk) => {
         stdout += String(chunk);
         const match = stdout.match(
-          /Visual Debugger and Analyzer: (http:\/\/127\.0\.0\.1:\d+\/#token=[A-Za-z0-9_-]+)/,
+          /MARL-BattleGrounds Combat Debugger: (http:\/\/127\.0\.0\.1:\d+\/#token=[A-Za-z0-9_-]+)/,
         );
         if (match) {
           finish(() => resolveUrl(match[1]));

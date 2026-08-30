@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from secrets import token_urlsafe
 from threading import RLock
-from typing import Literal
+from typing import Literal, cast
 
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
@@ -18,17 +19,34 @@ from marl_battlegrounds.evaluation.pov import (
     export_actor_pov_replay_v1,
 )
 from marl_battlegrounds.evaluation.replay import ReplayArtifactReferenceV1
-from marl_battlegrounds.evaluation.replay_io import LoadedReplayBundleV1
+from marl_battlegrounds.evaluation.replay_io import (
+    LoadedReplayBundleV1,
+    canonical_metric_report_artifact_json_bytes_v1,
+)
 from marl_battlegrounds.rendering.evaluation_adapter import (
     EvaluationScenePresentationStateV1,
+    SharedObsSourceMaterialProjectionV1,
     build_researcher_analyzer_projection_v2,
-    build_shared_obs_source_material_projection_v1,
+    build_shared_obs_authority_source_material_projection_v1,
     build_status_source_evidence_index_v2,
+    build_visual_event_batch_v2,
 )
 from marl_battlegrounds.rendering.pov_scene import (
     ActorPovProjectionIndexV1,
     build_actor_pov_analyzer_projection_v1,
     build_actor_pov_projection_index_v1,
+)
+from scripts.dev.visual_debugger.presentation import (
+    build_replay_no_shared_obs_authorized_presentation_v1,
+    build_replay_oracle_authorized_presentation_v1,
+    build_replay_researcher_space_v1,
+    build_replay_shared_obs_authorized_presentation_v1,
+)
+from scripts.dev.visual_debugger.presentation_protocol import (
+    PresentationResourceResultV1,
+    ReplayNoSharedObsAuthorizedPresentationFrameV1,
+    ReplayResearcherSpaceV1,
+    ReplaySharedObsAuthorizedPresentationFrameV1,
 )
 from scripts.dev.visual_debugger.replay_protocol import (
     ACTOR_POV_METRIC_REPORT_AVAILABILITY_V1,
@@ -39,6 +57,7 @@ from scripts.dev.visual_debugger.replay_protocol import (
     ActorPovReplayViewerFrameV1,
     ReplayAbsoluteSeekCommandV1,
     ReplayApiErrorV1,
+    ReplayArtifactFactsV1,
     ReplayArtifactSummaryV1,
     ReplayCommandRequestV1,
     ReplayCommandResponseV1,
@@ -64,12 +83,14 @@ from scripts.dev.visual_debugger.replay_protocol import (
     ResearcherReplayTimelineRowV1,
     ResearcherReplayTimelineV1,
     ResearcherReplayViewerFrameV1,
-    SharedObsSourceMaterialReplayTimelineRowV1,
-    SharedObsSourceMaterialReplayTimelineV1,
-    SharedObsSourceMaterialReplayViewerFrameV1,
+    SharedObsAgentPovReplayArtifactSummaryV1,
+    SharedObsAgentPovReplayTimelineRowV1,
+    SharedObsAgentPovReplayTimelineV1,
+    SharedObsAgentPovReplayViewerFrameV1,
 )
 
 _COMMAND_RECORD_LIMIT = 256
+_METRIC_REPORT_SUFFIX = ".marlbg-metrics.json"
 
 type ReplayServiceOutcomeV1 = Literal[
     "response",
@@ -79,6 +100,12 @@ type ReplayServiceOutcomeV1 = Literal[
     "command_id_conflict",
     "server_shutting_down",
     "service_faulted",
+]
+
+type ReplayMetricReportOutcomeV1 = Literal[
+    "available",
+    "missing",
+    "forbidden",
 ]
 
 
@@ -92,6 +119,29 @@ class ReplayServiceCommandResultV1:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplayMetricReportResultV1:
+    """One transport-neutral canonical metric-report retrieval result."""
+
+    outcome: ReplayMetricReportOutcomeV1
+    payload: bytes | None
+    filename: str | None
+
+    def __post_init__(self) -> None:
+        if self.outcome not in ("available", "missing", "forbidden"):
+            raise ValueError("unknown replay metric-report outcome")
+        if self.outcome == "available":
+            if type(self.payload) is not bytes:
+                raise TypeError("available metric report requires immutable bytes")
+            if type(self.filename) is not str or not self.filename:
+                raise TypeError("available metric report requires a filename")
+            return
+        if self.payload is not None or self.filename is not None:
+            raise ValueError(
+                "unavailable metric report cannot carry bytes or a filename"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class _CommandRecord:
     fingerprint: str
     shutdown_requested: bool
@@ -102,6 +152,16 @@ class _PovCacheEntry:
     artifact: ActorPovReplayArtifactV1
     projection_index: ActorPovProjectionIndexV1
     timeline: ActorPovReplayTimelineV1
+
+
+def _safe_metric_report_filename(episode_id: str) -> str:
+    """Return the bounded attachment basename derived from one episode ID."""
+    if type(episode_id) is not str:
+        raise TypeError("episode_id must be a string")
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", episode_id).strip("._-")
+    stem = stem[:96].strip("._-")
+    stem = stem.replace(_METRIC_REPORT_SUFFIX, "-").strip("._-") or "replay"
+    return f"{stem}{_METRIC_REPORT_SUFFIX}"
 
 
 def _replay_reference(bundle: LoadedReplayBundleV1) -> ReplayArtifactReferenceV1:
@@ -164,6 +224,25 @@ def _pov_completion_badge(
     )
 
 
+def _shared_completion_badge(
+    bundle: LoadedReplayBundleV1,
+) -> ActorPovReplayCompletionBadgeV1:
+    """Project physical SharedObs completion without researcher failure detail."""
+    completion = bundle.replay.completion
+    return ActorPovReplayCompletionBadgeV1(
+        episode_id=completion.episode_id,
+        completion_state=completion.completion_state,
+        expected_transition_count=completion.expected_transition_count,
+        captured_transition_count=completion.validated_transition_count,
+        terminated=completion.terminated,
+        truncated=completion.truncated,
+        completion_bases=completion.completion_bases,
+        public_end_or_failure_reason=(
+            None if completion.completion_state == "complete" else "captured_prefix"
+        ),
+    )
+
+
 def _endpoint_kind(
     completion: ReplayCompletionBadgeV1 | ActorPovReplayCompletionBadgeV1,
 ) -> ReplayTimelineEndpointKindV1:
@@ -195,7 +274,7 @@ class ReplayViewerService:
         selected_global_slot: int | None = None,
         armed_lane: Literal[0, 1] | None = None,
         pov_global_slot: int | None = None,
-        preset: ReplayPresetV1 = "analysis",
+        preset: ReplayPresetV1 | Literal["technical", "debug"] = "analysis",
         show_ranges: bool = True,
         verbose: bool = False,
         viewer_session_id: str | None = None,
@@ -214,7 +293,7 @@ class ReplayViewerService:
             raise ValueError("initial frame index is outside the captured replay")
         if view_mode not in ("researcher", "pov"):
             raise ValueError("unknown replay view mode")
-        if preset not in ("presentation", "analysis", "debug"):
+        if preset not in ("presentation", "analysis", "technical", "debug"):
             raise ValueError("unknown replay preset")
         if type(show_ranges) is not bool or type(verbose) is not bool:
             raise TypeError("replay presentation flags must be booleans")
@@ -226,33 +305,35 @@ class ReplayViewerService:
         self._bundle = bundle
         self._replay = bundle.replay
         self._context = bundle.replay.header.context
-        self._active_slots = tuple(
+        self._active_slots: tuple[int, ...] = tuple(
             row.global_slot for row in self._context.roster if row.configured_active
         )
-        focal_slots = tuple(
+        focal_slots: tuple[int, ...] = tuple(
             row.global_slot
             for row in self._context.policy_assignments
             if isinstance(row, AssignedPolicySlotV1) and row.evaluation_role == "focal"
         )
-        default_slot = min(focal_slots) if focal_slots else None
-        researcher_slot = (
+        default_slot: int | None = min(focal_slots) if focal_slots else None
+        researcher_slot: int | None = (
             default_slot if reference_global_slot is None else reference_global_slot
         )
-        reference_slot = selected_global_slot
-        actor_slot = default_slot if pov_global_slot is None else pov_global_slot
+        inspection_slot: int | None = selected_global_slot
+        actor_slot: int | None = (
+            default_slot if pov_global_slot is None else pov_global_slot
+        )
         self._require_active_or_none(
             researcher_slot,
             name="reference_global_slot",
         )
-        self._require_active_or_none(reference_slot, name="selected_global_slot")
+        self._require_active_or_none(inspection_slot, name="selected_global_slot")
         self._require_active_or_none(actor_slot, name="pov_global_slot")
         if armed_lane is not None and (
             type(armed_lane) is not int or armed_lane not in (0, 1)
         ):
             raise ValueError("armed_lane must be the Python int zero or one, or None")
-        if reference_slot is not None and researcher_slot is None:
+        if inspection_slot is not None and researcher_slot is None:
             raise ValueError("selected_global_slot requires a researcher reference")
-        if armed_lane is not None and reference_slot is None:
+        if armed_lane is not None and inspection_slot is None:
             raise ValueError("armed_lane requires a selected_global_slot")
         if view_mode == "pov" and actor_slot is None:
             raise ValueError("POV replay view requires a configured-active actor")
@@ -274,7 +355,13 @@ class ReplayViewerService:
             metric_report_availability=ACTOR_POV_METRIC_REPORT_AVAILABILITY_V1,
         )
         self._completion = _completion_badge(bundle)
+        self._shared_completion = _shared_completion_badge(bundle)
         self._processing = _processing_badge(bundle)
+        self._artifact_facts = ReplayArtifactFactsV1(
+            artifact_summary=self._artifact_summary,
+            completion=self._completion,
+            processing=self._processing,
+        )
         self._status_index = build_status_source_evidence_index_v2(
             self._context,
             self._replay.frames,
@@ -282,9 +369,7 @@ class ReplayViewerService:
         )
         self._researcher_timeline = self._build_researcher_timeline()
         self._pov_cache: dict[int, _PovCacheEntry] = {}
-        self._shared_timeline_cache: dict[
-            int, SharedObsSourceMaterialReplayTimelineV1
-        ] = {}
+        self._shared_timeline_cache: dict[int, SharedObsAgentPovReplayTimelineV1] = {}
 
         self._viewer_session_id = (
             token_urlsafe(24) if viewer_session_id is None else viewer_session_id
@@ -294,13 +379,13 @@ class ReplayViewerService:
         self._cursor_generation = 0
         self._choreography_generation = 0
         self._view_mode: ReplayViewModeV1 = view_mode
-        self._reference_global_slot = researcher_slot
-        self._selected_global_slot = reference_slot
+        self._reference_global_slot: int | None = researcher_slot
+        self._inspection_global_slot: int | None = inspection_slot
         self._armed_lane = armed_lane
-        self._pov_global_slot = actor_slot
-        self._preset: ReplayPresetV1 = preset
+        self._pov_global_slot: int | None = actor_slot
+        self._preset: ReplayPresetV1 = "analysis"
         self._show_ranges = show_ranges
-        self._verbose = verbose
+        self._verbose = False
         self._shutting_down = False
         self._faulted = False
         self._lock = RLock()
@@ -313,7 +398,7 @@ class ReplayViewerService:
             cursor_generation=self._cursor_generation,
             choreography_generation=self._choreography_generation,
             view_mode=self._view_mode,
-            selected_global_slot=self._selected_global_slot,
+            inspection_global_slot=self._inspection_global_slot,
             armed_lane=self._armed_lane,
             pov_global_slot=self._pov_global_slot,
             preset=self._preset,
@@ -356,6 +441,322 @@ class ReplayViewerService:
     def current_frame(self) -> ReplayViewerFrameV1:
         with self._lock:
             return self._frame
+
+    def current_metric_report(self) -> ReplayMetricReportResultV1:
+        """Return the replay's canonical metric artifact in every visual POV."""
+        with self._lock:
+            artifact = self._bundle.metric_report_artifact
+            if artifact is None:
+                return ReplayMetricReportResultV1(
+                    outcome="missing",
+                    payload=None,
+                    filename=None,
+                )
+            return ReplayMetricReportResultV1(
+                outcome="available",
+                payload=canonical_metric_report_artifact_json_bytes_v1(artifact),
+                filename=_safe_metric_report_filename(
+                    self._context.identity.episode_id
+                ),
+            )
+
+    def current_presentation(self) -> PresentationResourceResultV1:
+        """Build the authorized resource from one committed replay snapshot."""
+        with self._lock:
+            if self._view_mode != "researcher":
+                if self._context.execution_information_mode == "no_shared_obs":
+                    raw_frame = self._frame
+                    if type(raw_frame) is not ActorPovReplayViewerFrameV1:
+                        raise RuntimeError(
+                            "NoSharedObs replay view does not hold its committed "
+                            "recipient frame"
+                        )
+                    self._validate_committed_presentation_snapshot(
+                        raw_frame,
+                        oracle=False,
+                    )
+                    if self._pov_global_slot is None:
+                        raise RuntimeError(
+                            "NoSharedObs replay view has no fixed POV recipient"
+                        )
+                    entry = self._pov_cache.get(self._pov_global_slot)
+                    if entry is None:
+                        raise RuntimeError(
+                            "committed NoSharedObs replay frame has no POV cache entry"
+                        )
+                    if (
+                        entry.projection_index.content.selected_global_slot
+                        != self._pov_global_slot
+                    ):
+                        raise RuntimeError(
+                            "committed NoSharedObs cache entry does not join the "
+                            "fixed POV recipient"
+                        )
+                    frame = build_replay_no_shared_obs_authorized_presentation_v1(
+                        entry.projection_index,
+                        raw_frame,
+                        global_context=self._context,
+                        current_global_frame=self._replay.frames[
+                            raw_frame.cursor.frame_index
+                        ],
+                        previous_global_frame=(
+                            None
+                            if raw_frame.cursor.frame_index == 0
+                            else self._replay.frames[raw_frame.cursor.frame_index - 1]
+                        ),
+                        public_catalog=self._context.static_mechanics_catalog,
+                        source_authority_epoch=raw_frame.revision,
+                        incoming_visual_events=(
+                            None
+                            if raw_frame.cursor.frame_index == 0
+                            else build_visual_event_batch_v2(
+                                cast(
+                                    EvaluationTransitionViewV1,
+                                    self._transition_view(raw_frame.cursor.frame_index),
+                                )
+                            )
+                        ),
+                        researcher_space=self._researcher_space_for_frame(
+                            frame_index=raw_frame.cursor.frame_index,
+                            selected_global_slot=self._pov_global_slot,
+                        ),
+                    )
+                    return PresentationResourceResultV1(
+                        outcome="response",
+                        payload=frame,
+                    )
+                raw_frame = self._frame
+                if type(raw_frame) is not SharedObsAgentPovReplayViewerFrameV1:
+                    raise RuntimeError(
+                        "SharedObs replay view does not hold its committed "
+                        "private recipient frame"
+                    )
+                self._validate_committed_presentation_snapshot(
+                    raw_frame,
+                    oracle=False,
+                )
+                if self._pov_global_slot is None:
+                    raise RuntimeError(
+                        "SharedObs replay view has no fixed POV recipient"
+                    )
+                frame_index = raw_frame.cursor.frame_index
+                current_recipient, current_nonrecipient = (
+                    self._shared_authority_sources(
+                        frame_index=frame_index,
+                        recipient_global_slot=self._pov_global_slot,
+                    )
+                )
+                if frame_index == 0:
+                    previous_recipient = None
+                    previous_nonrecipient: tuple[
+                        SharedObsSourceMaterialProjectionV1, ...
+                    ] = ()
+                    incoming_transition = None
+                else:
+                    previous_recipient, previous_nonrecipient = (
+                        self._shared_authority_sources(
+                            frame_index=frame_index - 1,
+                            recipient_global_slot=self._pov_global_slot,
+                        )
+                    )
+                    incoming_transition = self._replay.transitions[frame_index - 1]
+                outgoing_transition = (
+                    None
+                    if frame_index == len(self._replay.transitions)
+                    else self._replay.transitions[frame_index]
+                )
+                frame = build_replay_shared_obs_authorized_presentation_v1(
+                    raw_frame,
+                    global_context=self._context,
+                    current_global_frame=self._replay.frames[frame_index],
+                    previous_global_frame=(
+                        None
+                        if frame_index == 0
+                        else self._replay.frames[frame_index - 1]
+                    ),
+                    public_catalog=self._context.static_mechanics_catalog,
+                    source_authority_epoch=raw_frame.revision,
+                    authorized_recipient_global_slot=self._pov_global_slot,
+                    current_recipient_source_material=current_recipient,
+                    current_active_nonrecipient_source_material=(current_nonrecipient),
+                    previous_recipient_source_material=previous_recipient,
+                    previous_active_nonrecipient_source_material=(
+                        previous_nonrecipient
+                    ),
+                    incoming_visual_events=(
+                        None
+                        if frame_index == 0
+                        else build_visual_event_batch_v2(
+                            cast(
+                                EvaluationTransitionViewV1,
+                                self._transition_view(frame_index),
+                            )
+                        )
+                    ),
+                    incoming_transition=incoming_transition,
+                    outgoing_transition=outgoing_transition,
+                    researcher_space=self._researcher_space_for_frame(
+                        frame_index=frame_index,
+                        selected_global_slot=self._pov_global_slot,
+                    ),
+                )
+                return PresentationResourceResultV1(outcome="response", payload=frame)
+
+            raw_frame = self._frame
+            if type(raw_frame) is not ResearcherReplayViewerFrameV1:
+                raise RuntimeError(
+                    "Oracle replay view does not hold its committed researcher frame"
+                )
+            self._validate_committed_presentation_snapshot(raw_frame, oracle=True)
+            source_frame_index = raw_frame.cursor.frame_index
+            current_frame = self._replay.frames[source_frame_index]
+            incoming_transition = (
+                None
+                if source_frame_index == 0
+                else self._replay.transitions[source_frame_index - 1]
+            )
+            outgoing_transition = (
+                None
+                if source_frame_index == len(self._replay.transitions)
+                else self._replay.transitions[source_frame_index]
+            )
+            frame = build_replay_oracle_authorized_presentation_v1(
+                self._context,
+                current_frame,
+                raw_frame,
+                source_authority_epoch=raw_frame.revision,
+                selected_internal_slot=self._inspection_global_slot,
+                incoming_transition=incoming_transition,
+                outgoing_transition=outgoing_transition,
+            )
+            return PresentationResourceResultV1(
+                outcome="response",
+                payload=frame,
+            )
+
+    def _validate_committed_presentation_snapshot(
+        self,
+        raw_frame: ReplayViewerFrameV1,
+        *,
+        oracle: bool,
+    ) -> None:
+        """Require the raw envelope to equal this locked service snapshot."""
+        cursor = raw_frame.cursor
+        if type(cursor) is not ReplayCursorV1:
+            raise RuntimeError("committed replay frame has an invalid cursor root")
+        if (
+            type(raw_frame.viewer_session_id) is not str
+            or raw_frame.viewer_session_id != self._viewer_session_id
+            or type(raw_frame.revision) is not int
+            or raw_frame.revision != self._revision
+            or type(cursor.frame_index) is not int
+            or cursor.frame_index != self._frame_index
+            or type(cursor.final_frame_index) is not int
+            or cursor.final_frame_index != len(self._replay.transitions)
+        ):
+            raise RuntimeError("committed replay frame does not join service state")
+        if oracle and (
+            type(cursor.cursor_generation) is not int
+            or cursor.cursor_generation != self._cursor_generation
+            or type(cursor.choreography_generation) is not int
+            or cursor.choreography_generation != self._choreography_generation
+        ):
+            raise RuntimeError("committed Oracle cursor generations are stale")
+        if not oracle:
+            if type(raw_frame) not in (
+                ActorPovReplayViewerFrameV1,
+                SharedObsAgentPovReplayViewerFrameV1,
+            ):
+                raise RuntimeError(
+                    "committed Agent replay artifact facts use the wrong root"
+                )
+            agent_raw_frame = cast(
+                ActorPovReplayViewerFrameV1 | SharedObsAgentPovReplayViewerFrameV1,
+                raw_frame,
+            )
+            if (
+                type(agent_raw_frame.artifact_facts) is not ReplayArtifactFactsV1
+                or agent_raw_frame.artifact_facts != self._artifact_facts
+            ):
+                raise RuntimeError(
+                    "committed Agent replay artifact facts do not join service state"
+                )
+        if not oracle and self._context.execution_information_mode == "shared_obs":
+            if type(raw_frame) is not SharedObsAgentPovReplayViewerFrameV1:
+                raise RuntimeError(
+                    "committed SharedObs frame has the wrong product root"
+                )
+            if self._pov_global_slot is None:
+                raise RuntimeError("committed SharedObs frame has no fixed recipient")
+            timeline = self._shared_timeline_cache.get(self._pov_global_slot)
+            if timeline is None:
+                raise RuntimeError(
+                    "committed SharedObs frame has no private timeline cache entry"
+                )
+            roster = self._context.roster[self._pov_global_slot]
+            episode_id = self._context.identity.episode_id
+            prefix = f"{episode_id}:shared-obs-visual-union:{roster.public_agent_id}"
+            expected_incoming_id = (
+                None
+                if self._frame_index == 0
+                else f"{prefix}:transition:{self._frame_index - 1}"
+            )
+            source_frame = self._replay.frames[self._frame_index]
+            if (
+                type(raw_frame.artifact_summary)
+                is not SharedObsAgentPovReplayArtifactSummaryV1
+                or raw_frame.artifact_summary != timeline.artifact_summary
+                or raw_frame.timeline_id != timeline.timeline_id
+                or raw_frame.public_agent_id != roster.public_agent_id
+                or raw_frame.recipient_frame_id != f"{prefix}:frame:{self._frame_index}"
+                or raw_frame.simulator_step_count != source_frame.simulator_step_count
+                or raw_frame.incoming_recipient_transition_id != expected_incoming_id
+                or type(raw_frame.completion) is not ActorPovReplayCompletionBadgeV1
+                or raw_frame.completion != self._shared_completion
+                or raw_frame.artifact_facts != self._artifact_facts
+            ):
+                raise RuntimeError(
+                    "committed SharedObs transport identity does not join service "
+                    "authority"
+                )
+        if oracle:
+            if type(raw_frame) is not ResearcherReplayViewerFrameV1:
+                raise RuntimeError("committed Oracle frame has the wrong product root")
+            recorded_scale = (
+                self._context.resolved_env_config.ordinary_movement_distance_scale
+            )
+            source_frame = self._replay.frames[self._frame_index]
+            incoming = self._transition_view(self._frame_index)
+            expected_projection = build_researcher_analyzer_projection_v2(
+                self._context,
+                source_frame,
+                transition_view=incoming,
+                presentation=EvaluationScenePresentationStateV1(
+                    controlled_global_slot=self._reference_global_slot,
+                    selected_global_slot=self._inspection_global_slot,
+                    armed_lane=self._armed_lane,
+                    show_ranges=self._show_ranges,
+                ),
+                status_source_evidence_state=self._status_index.state_for_frame(
+                    self._frame_index
+                ),
+            )
+            if (
+                type(raw_frame.artifact_summary) is not ReplayArtifactSummaryV1
+                or raw_frame.artifact_summary is not self._artifact_summary
+                or type(raw_frame.timeline_id) is not str
+                or raw_frame.timeline_id != self._researcher_timeline.timeline_id
+                or type(raw_frame.recorded_ordinary_movement_distance_scale)
+                is not float
+                or raw_frame.recorded_ordinary_movement_distance_scale != recorded_scale
+                or type(raw_frame.show_ranges) is not bool
+                or raw_frame.show_ranges != self._show_ranges
+                or type(raw_frame.projection) is not type(expected_projection)
+                or raw_frame.projection != expected_projection
+            ):
+                raise RuntimeError(
+                    "committed Oracle provenance does not join service authority"
+                )
 
     def current_timeline(self) -> ReplayTimelineV1:
         with self._lock:
@@ -435,7 +836,7 @@ class ReplayViewerService:
             cursor_generation = self._cursor_generation
             choreography_generation = self._choreography_generation
             view_mode = self._view_mode
-            selected_global_slot = self._selected_global_slot
+            inspection_global_slot = self._inspection_global_slot
             armed_lane = self._armed_lane
             pov_global_slot = self._pov_global_slot
             preset = self._preset
@@ -506,9 +907,10 @@ class ReplayViewerService:
                         "audience_unavailable",
                         "Researcher selection is unavailable in POV replay.",
                     )
+                requested_selection: int | None = command.selected_global_slot
                 try:
                     self._require_active_or_none(
-                        command.selected_global_slot,
+                        requested_selection,
                         name="selected_global_slot",
                     )
                 except ValueError:
@@ -519,8 +921,15 @@ class ReplayViewerService:
                         "audience_unavailable",
                         "The requested researcher selection is unavailable.",
                     )
-                if command.selected_global_slot != selected_global_slot:
-                    selected_global_slot = command.selected_global_slot
+                selection_changed = requested_selection != inspection_global_slot
+                pov_changed = (
+                    requested_selection is not None
+                    and requested_selection != pov_global_slot
+                )
+                if selection_changed or pov_changed:
+                    inspection_global_slot = requested_selection
+                    if requested_selection is not None:
+                        pov_global_slot = requested_selection
                     armed_lane = None
                     changed = True
             elif type(command) is ReplaySetViewCommandV1:
@@ -533,14 +942,34 @@ class ReplayViewerService:
                         "No configured-active actor is available for POV replay.",
                     )
                 if command.view_mode != view_mode:
+                    if command.view_mode == "pov":
+                        if (
+                            inspection_global_slot is not None
+                            and inspection_global_slot != pov_global_slot
+                        ):
+                            pov_global_slot = inspection_global_slot
+                    elif inspection_global_slot != pov_global_slot:
+                        inspection_global_slot = pov_global_slot
+                        armed_lane = None
                     view_mode = command.view_mode
                     changed = True
             elif type(command) is ReplaySetPovActorCommandV1:
+                requested_slot: int | None = command.global_slot
                 try:
+                    if command.presentation_key is not None:
+                        if view_mode != "pov":
+                            raise ValueError(
+                                "presentation-key actor switching requires POV"
+                            )
+                        requested_slot = self._visible_pov_actor_slot(
+                            command.presentation_key
+                        )
                     self._require_active_or_none(
-                        command.global_slot,
+                        requested_slot,
                         name="pov_global_slot",
                     )
+                    if requested_slot is None:  # pragma: no cover - model invariant.
+                        raise ValueError("POV actor reference is absent")
                 except ValueError:
                     return self._record_error(
                         command_key,
@@ -549,13 +978,18 @@ class ReplayViewerService:
                         "audience_unavailable",
                         "The requested POV actor is unavailable.",
                     )
-                if command.global_slot != pov_global_slot:
-                    pov_global_slot = command.global_slot
+                if (
+                    requested_slot != pov_global_slot
+                    or requested_slot != inspection_global_slot
+                ):
+                    pov_global_slot = requested_slot
+                    inspection_global_slot = requested_slot
+                    armed_lane = None
                     changed = True
             elif type(command) is ReplaySetPresetCommandV1:
-                if command.preset != preset:
-                    preset = command.preset
-                    changed = True
+                # V1 compatibility command. All legacy preset requests
+                # canonicalize to the single product Analysis presentation.
+                preset = "analysis"
             elif type(command) is ReplaySetRangesCommandV1:
                 if view_mode != "researcher":
                     return self._record_error(
@@ -569,9 +1003,9 @@ class ReplayViewerService:
                     show_ranges = command.show_ranges
                     changed = True
             elif type(command) is ReplaySetVerbosityCommandV1:
-                if command.verbose != verbose:
-                    verbose = command.verbose
-                    changed = True
+                # Retained as a V1 compatibility command. Verbose presentation
+                # is no longer a product mode, so both values are a fixed no-op.
+                verbose = False
             elif type(command) is ReplayExitCommandV1:
                 shutdown_requested = True
             else:  # pragma: no cover - exact discriminated union is exhaustive.
@@ -586,7 +1020,7 @@ class ReplayViewerService:
                         cursor_generation=cursor_generation,
                         choreography_generation=choreography_generation,
                         view_mode=view_mode,
-                        selected_global_slot=selected_global_slot,
+                        inspection_global_slot=inspection_global_slot,
                         armed_lane=armed_lane,
                         pov_global_slot=pov_global_slot,
                         preset=preset,
@@ -630,7 +1064,7 @@ class ReplayViewerService:
             self._cursor_generation = cursor_generation
             self._choreography_generation = choreography_generation
             self._view_mode = view_mode
-            self._selected_global_slot = selected_global_slot
+            self._inspection_global_slot = inspection_global_slot
             self._armed_lane = armed_lane
             self._pov_global_slot = pov_global_slot
             self._preset = preset
@@ -652,17 +1086,14 @@ class ReplayViewerService:
         cursor_generation: int,
         choreography_generation: int,
         view_mode: ReplayViewModeV1,
-        selected_global_slot: int | None,
+        inspection_global_slot: int | None,
         armed_lane: Literal[0, 1] | None,
         pov_global_slot: int | None,
         preset: ReplayPresetV1,
         show_ranges: bool,
         verbose: bool,
         pov_cache: dict[int, _PovCacheEntry],
-        shared_timeline_cache: dict[
-            int,
-            SharedObsSourceMaterialReplayTimelineV1,
-        ],
+        shared_timeline_cache: dict[int, SharedObsAgentPovReplayTimelineV1],
     ) -> ReplayViewerFrameV1:
         cursor = ReplayCursorV1(
             frame_index=frame_index,
@@ -671,15 +1102,15 @@ class ReplayViewerService:
             choreography_generation=choreography_generation,
         )
         frame = self._replay.frames[frame_index]
-        incoming = self._transition_view(frame_index)
         if view_mode == "researcher":
+            incoming = self._transition_view(frame_index)
             projection = build_researcher_analyzer_projection_v2(
                 self._context,
                 frame,
                 transition_view=incoming,
                 presentation=EvaluationScenePresentationStateV1(
                     controlled_global_slot=self._reference_global_slot,
-                    selected_global_slot=selected_global_slot,
+                    selected_global_slot=inspection_global_slot,
                     armed_lane=armed_lane,
                     show_ranges=show_ranges,
                 ),
@@ -694,7 +1125,7 @@ class ReplayViewerService:
                 timeline_id=self._researcher_timeline.timeline_id,
                 cursor=cursor,
                 preset=preset,
-                verbose=verbose,
+                verbose=False,
                 frame_id=frame.frame_id,
                 simulator_step_count=frame.simulator_step_count,
                 incoming_transition_index=(
@@ -706,12 +1137,16 @@ class ReplayViewerService:
                 completion=self._completion,
                 processing=self._processing,
                 show_ranges=show_ranges,
+                recorded_ordinary_movement_distance_scale=(
+                    self._context.resolved_env_config.ordinary_movement_distance_scale
+                ),
                 projection=projection,
             )
         if pov_global_slot is None:
             raise ValueError("POV replay view requires a configured-active actor")
         roster = self._context.roster[pov_global_slot]
         if self._context.execution_information_mode == "no_shared_obs":
+            incoming = self._transition_view(frame_index)
             entry = self._pov_entry(pov_global_slot, cache=pov_cache)
             projection = build_actor_pov_analyzer_projection_v1(
                 entry.projection_index,
@@ -725,7 +1160,7 @@ class ReplayViewerService:
                 timeline_id=entry.timeline.timeline_id,
                 cursor=cursor,
                 preset=preset,
-                verbose=verbose,
+                verbose=False,
                 pov_global_slot=pov_global_slot,
                 public_agent_id=roster.public_agent_id,
                 pov_frame_id=pov_frame.pov_frame_id,
@@ -733,35 +1168,36 @@ class ReplayViewerService:
                 incoming_pov_transition_id=projection.incoming_transition_id,
                 completion=_pov_completion_badge(entry.artifact),
                 processing_disclosure=ActorPovProcessingDisclosureV1(),
+                artifact_facts=self._artifact_facts,
                 projection=projection,
             )
-        projection = build_shared_obs_source_material_projection_v1(
-            self._context,
-            frame,
-            selected_global_slot=pov_global_slot,
-            transition_view=incoming,
-        )
         timeline = self._shared_timeline(
             pov_global_slot,
             cache=shared_timeline_cache,
         )
-        return SharedObsSourceMaterialReplayViewerFrameV1(
+        prefix = (
+            f"{self._context.identity.episode_id}:shared-obs-visual-union:"
+            f"{roster.public_agent_id}"
+        )
+        return SharedObsAgentPovReplayViewerFrameV1(
+            schema_version=1,
+            frame_kind="shared_obs_agent_pov_replay_viewer",
             viewer_session_id=self._viewer_session_id,
             revision=revision,
-            artifact_summary=self._artifact_summary,
+            artifact_summary=timeline.artifact_summary,
             timeline_id=timeline.timeline_id,
             cursor=cursor,
-            preset=preset,
-            verbose=verbose,
-            selected_global_slot=pov_global_slot,
+            preset="analysis",
+            verbose=False,
+            view_mode="pov",
             public_agent_id=roster.public_agent_id,
-            source_material_frame_id=projection.base_sensor_frame.source_material_frame_id,
-            source_frame_id=frame.frame_id,
+            recipient_frame_id=f"{prefix}:frame:{frame_index}",
             simulator_step_count=frame.simulator_step_count,
-            incoming_transition_id=projection.incoming_transition_id,
-            completion=self._completion,
-            processing=self._processing,
-            projection=projection,
+            incoming_recipient_transition_id=(
+                None if frame_index == 0 else f"{prefix}:transition:{frame_index - 1}"
+            ),
+            completion=self._shared_completion,
+            artifact_facts=self._artifact_facts,
         )
 
     def _build_researcher_timeline(self) -> ResearcherReplayTimelineV1:
@@ -848,49 +1284,101 @@ class ReplayViewerService:
         cache[global_slot] = entry
         return entry
 
+    def _shared_authority_sources(
+        self,
+        *,
+        frame_index: int,
+        recipient_global_slot: int,
+    ) -> tuple[
+        SharedObsSourceMaterialProjectionV1,
+        tuple[SharedObsSourceMaterialProjectionV1, ...],
+    ]:
+        """Build one uncached, same-epoch fixed-recipient authority source set."""
+        if self._context.execution_information_mode != "shared_obs":
+            raise RuntimeError("Shared authority sources require a SharedObs replay")
+        if type(frame_index) is not int or not (
+            0 <= frame_index < len(self._replay.frames)
+        ):
+            raise RuntimeError("Shared authority source frame is outside the replay")
+        if (
+            type(recipient_global_slot) is not int
+            or recipient_global_slot not in self._active_slots
+        ):
+            raise RuntimeError("Shared authority recipient is not configured active")
+        frame = self._replay.frames[frame_index]
+
+        def build(global_slot: int) -> SharedObsSourceMaterialProjectionV1:
+            return build_shared_obs_authority_source_material_projection_v1(
+                self._context,
+                frame,
+                selected_global_slot=global_slot,
+            )
+
+        recipient = build(recipient_global_slot)
+        contributors = tuple(
+            build(global_slot)
+            for global_slot in self._active_slots
+            if global_slot != recipient_global_slot
+        )
+        return recipient, contributors
+
     def _shared_timeline(
         self,
         global_slot: int,
         *,
-        cache: dict[int, SharedObsSourceMaterialReplayTimelineV1],
-    ) -> SharedObsSourceMaterialReplayTimelineV1:
+        cache: dict[int, SharedObsAgentPovReplayTimelineV1],
+    ) -> SharedObsAgentPovReplayTimelineV1:
         cached = cache.get(global_slot)
         if cached is not None:
             return cached
         roster = self._context.roster[global_slot]
-        endpoint = _endpoint_kind(self._completion)
+        summary = self._shared_artifact_summary(roster.public_agent_id)
+        endpoint = _endpoint_kind(self._shared_completion)
         final = len(self._replay.frames) - 1
+        prefix = (
+            f"{self._context.identity.episode_id}:shared-obs-visual-union:"
+            f"{roster.public_agent_id}"
+        )
         rows = tuple(
-            SharedObsSourceMaterialReplayTimelineRowV1(
+            SharedObsAgentPovReplayTimelineRowV1(
                 frame_index=index,
-                source_material_frame_id=(
-                    f"{self._context.identity.episode_id}:shared-obs-source-material:"
-                    f"{roster.public_agent_id}:frame:{index}"
-                ),
+                recipient_frame_id=f"{prefix}:frame:{index}",
                 simulator_step_count=frame.simulator_step_count,
-                incoming_transition_id=(
-                    None
-                    if index == 0
-                    else self._replay.transitions[index - 1].transition_id
+                incoming_recipient_transition_id=(
+                    None if index == 0 else f"{prefix}:transition:{index - 1}"
                 ),
                 endpoint_kind=endpoint if index == final else "none",
             )
             for index, frame in enumerate(self._replay.frames)
         )
-        timeline = SharedObsSourceMaterialReplayTimelineV1(
-            timeline_id=(
-                f"{self._replay.artifact_id}:timeline:shared-obs-source-material:"
-                f"{roster.public_agent_id}"
-            ),
-            artifact_summary=self._artifact_summary,
+        timeline = SharedObsAgentPovReplayTimelineV1(
+            schema_version=1,
+            timeline_kind="shared_obs_agent_pov",
+            timeline_id=f"{prefix}:timeline",
+            artifact_summary=summary,
             final_frame_index=final,
-            selected_global_slot=global_slot,
-            public_agent_id=roster.public_agent_id,
-            completion=self._completion,
+            completion=self._shared_completion,
             rows=rows,
         )
         cache[global_slot] = timeline
         return timeline
+
+    def _shared_artifact_summary(
+        self,
+        public_agent_id: str,
+    ) -> SharedObsAgentPovReplayArtifactSummaryV1:
+        episode_id = self._context.identity.episode_id
+        return SharedObsAgentPovReplayArtifactSummaryV1(
+            schema_version=1,
+            recipient_replay_id=(
+                f"{episode_id}:shared-obs-visual-union:{public_agent_id}:replay"
+            ),
+            episode_id=episode_id,
+            public_agent_id=public_agent_id,
+            expected_transition_count=self._replay.header.expected_transition_count,
+            captured_transition_count=len(self._replay.transitions),
+            captured_frame_count=len(self._replay.frames),
+        )
 
     def _transition_view(self, frame_index: int) -> EvaluationTransitionViewV1 | None:
         if frame_index == 0:
@@ -902,11 +1390,79 @@ class ReplayViewerService:
             successor_frame=self._replay.frames[frame_index],
         )
 
+    def _researcher_space_for_frame(
+        self,
+        *,
+        frame_index: int,
+        selected_global_slot: int,
+    ) -> ReplayResearcherSpaceV1:
+        incoming_view = self._transition_view(frame_index)
+        projection = build_researcher_analyzer_projection_v2(
+            self._context,
+            self._replay.frames[frame_index],
+            transition_view=incoming_view,
+            presentation=EvaluationScenePresentationStateV1(
+                controlled_global_slot=self._reference_global_slot,
+                selected_global_slot=selected_global_slot,
+                armed_lane=None,
+                show_ranges=self._show_ranges,
+            ),
+            status_source_evidence_state=self._status_index.state_for_frame(
+                frame_index
+            ),
+        )
+        return build_replay_researcher_space_v1(
+            self._context,
+            projection.scene,
+            authority_session_id=self._viewer_session_id,
+            final_frame_index=self._artifact_summary.recorded_transition_count,
+            selected_global_slot=selected_global_slot,
+            incoming_transition=(
+                None if incoming_view is None else incoming_view.transition
+            ),
+            outgoing_transition=(
+                None
+                if frame_index == len(self._replay.transitions)
+                else self._replay.transitions[frame_index]
+            ),
+        )
+
     def _require_active_or_none(self, value: int | None, *, name: str) -> None:
         if value is None:
             return
         if type(value) is not int or value not in self._active_slots:
             raise ValueError(f"{name} must name a configured-active replay actor")
+
+    def _visible_pov_actor_slot(self, presentation_key: str) -> int:
+        """Resolve one current POV-scene key without exposing slot topology."""
+        result = self.current_presentation()
+        presentation = result.payload
+        if result.outcome != "response" or type(presentation) not in (
+            ReplayNoSharedObsAuthorizedPresentationFrameV1,
+            ReplaySharedObsAuthorizedPresentationFrameV1,
+        ):
+            raise ValueError("current POV presentation is unavailable")
+        agent_presentation = cast(
+            ReplayNoSharedObsAuthorizedPresentationFrameV1
+            | ReplaySharedObsAuthorizedPresentationFrameV1,
+            presentation,
+        )
+        matching_agents = tuple(
+            agent
+            for agent in agent_presentation.current_endpoint.parts.scene.agents
+            if agent.presentation_key == presentation_key
+        )
+        if len(matching_agents) != 1:
+            raise ValueError("POV actor key is not visible in current authority")
+        public_agent_id = matching_agents[0].public_agent_id
+        matching_slots = tuple(
+            row.global_slot
+            for row in self._context.roster
+            if row.configured_active and row.public_agent_id == public_agent_id
+        )
+        if len(matching_slots) != 1 or matching_slots[0] not in self._active_slots:
+            raise ValueError("POV actor key does not join one active roster row")
+        return matching_slots[0]
 
     def _error_result(
         self,
@@ -973,6 +1529,7 @@ class ReplayViewerService:
 
 
 __all__ = [
+    "PresentationResourceResultV1",
     "ReplayServiceCommandResultV1",
     "ReplayServiceOutcomeV1",
     "ReplayViewerService",

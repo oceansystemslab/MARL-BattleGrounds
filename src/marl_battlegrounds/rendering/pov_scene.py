@@ -512,57 +512,21 @@ def build_actor_pov_projection_index_v1(
     return ActorPovProjectionIndexV1(content=content)
 
 
-def build_actor_pov_analyzer_projection_v1(
-    source: (
-        ActorPovProjectionIndexV1 | ActorPovReplayContentV1 | ActorPovCurrentSliceV1
-    ),
+def _build_actor_pov_battlefield_scene_v1(
+    frame: ActorPovFrameV1,
     *,
-    frame_index: int | None = None,
-) -> ActorPovAnalyzerProjectionV1:
-    """Build one projection exclusively from recipient-authorized POV content."""
-    if type(source) is ActorPovProjectionIndexV1:
-        content = source.content
-        if type(frame_index) is not int or not 0 <= frame_index < len(content.frames):
-            raise IndexError("frame_index is outside the captured POV prefix.")
-        frame = content.frames[frame_index]
-        incoming = None if frame_index == 0 else content.transitions[frame_index - 1]
-        episode_id = content.episode_id
-        selected_global_slot = content.selected_global_slot
-        selected_team_local_slot = content.selected_team_local_slot
-        public_agent_id = content.public_agent_id
-        configured_team_id = content.configured_team_id
-        class_id = content.class_id
-        observation_materialization = content.observation_materialization
-        axis_mapping = content.axis_mapping
-    elif type(source) is ActorPovReplayContentV1:
-        return build_actor_pov_analyzer_projection_v1(
-            build_actor_pov_projection_index_v1(source),
-            frame_index=frame_index,
-        )
-    elif type(source) is ActorPovCurrentSliceV1:
-        if frame_index is not None and frame_index != source.frame.frame_index:
-            raise ValueError(
-                "a live current slice accepts only its own canonical frame index."
-            )
-        frame = source.frame
-        incoming = source.incoming_transition
-        episode_id = source.episode_id
-        selected_global_slot = source.selected_global_slot
-        selected_team_local_slot = source.selected_team_local_slot
-        public_agent_id = source.public_agent_id
-        configured_team_id = source.configured_team_id
-        class_id = source.class_id
-        observation_materialization = source.observation_materialization
-        axis_mapping = source.axis_mapping
-    else:
-        raise TypeError(
-            "source must be an exact POV projection index, replay content, or "
-            "current slice."
-        )
+    episode_id: str,
+    selected_global_slot: int,
+    selected_team_local_slot: int,
+    public_agent_id: str,
+    configured_team_id: int,
+    class_id: int,
+    observation_materialization: Literal["exact_no_shared_obs_actor_input"],
+    axis_mapping: ActorPovAxisMappingV1,
+) -> ActorPovBattlefieldSceneV1:
+    """Decode one already-authorized recipient frame into battlefield facts."""
     if type(frame) is not ActorPovFrameV1:
         raise TypeError("selected POV frame must be the exact V1 root.")
-    if incoming is not None and type(incoming) is not ActorPovTransitionV1:
-        raise TypeError("incoming POV transition must be the exact V1 root.")
     if type(axis_mapping) is not ActorPovAxisMappingV1:
         raise TypeError("POV axis mapping must be the exact V1 root.")
     self_row = frame.self_features
@@ -651,35 +615,98 @@ def build_actor_pov_analyzer_projection_v1(
         )
         for team_index in range(2)
     )
-    return ActorPovAnalyzerProjectionV1(
-        scene=ActorPovBattlefieldSceneV1(
-            schema_version=ACTOR_POV_SCENE_SCHEMA_VERSION,
-            audience_badge=f"AGENT POV · {public_agent_id}",
-            observation_materialization=observation_materialization,
-            episode_id=episode_id,
-            frame_index=frame.frame_index,
-            pov_frame_id=frame.pov_frame_id,
-            source_frame_id=frame.source_frame_id,
-            simulator_step_count=frame.simulator_step_count,
-            map=_map_scene(frame.map_obstacle_features, frame.context_features),
-            self_actor=self_actor,
-            visible_bodies=(
-                *_visible_bodies(
-                    "ally",
-                    frame.ally_unit_features,
-                    frame.ally_visibility_mask,
-                    axis_mapping.ally_observation_row_public_agent_id_by_id,
-                ),
-                *_visible_bodies(
-                    "enemy",
-                    frame.enemy_unit_features,
-                    frame.enemy_visibility_mask,
-                    axis_mapping.enemy_observation_row_public_agent_id_by_id,
-                ),
+    return ActorPovBattlefieldSceneV1(
+        schema_version=ACTOR_POV_SCENE_SCHEMA_VERSION,
+        audience_badge=f"AGENT POV · {public_agent_id}",
+        observation_materialization=observation_materialization,
+        episode_id=episode_id,
+        frame_index=frame.frame_index,
+        pov_frame_id=frame.pov_frame_id,
+        source_frame_id=frame.source_frame_id,
+        simulator_step_count=frame.simulator_step_count,
+        map=_map_scene(frame.map_obstacle_features, frame.context_features),
+        self_actor=self_actor,
+        visible_bodies=(
+            *_visible_bodies(
+                "ally",
+                frame.ally_unit_features,
+                frame.ally_visibility_mask,
+                axis_mapping.ally_observation_row_public_agent_id_by_id,
             ),
-            spawn_pads=spawn_pads,
-            respawn_waves=respawn_waves,
+            *_visible_bodies(
+                "enemy",
+                frame.enemy_unit_features,
+                frame.enemy_visibility_mask,
+                axis_mapping.enemy_observation_row_public_agent_id_by_id,
+            ),
         ),
+        spawn_pads=spawn_pads,
+        respawn_waves=respawn_waves,
+    )
+
+
+def build_actor_pov_analyzer_projection_v1(
+    source: (
+        ActorPovProjectionIndexV1 | ActorPovReplayContentV1 | ActorPovCurrentSliceV1
+    ),
+    *,
+    frame_index: int | None = None,
+) -> ActorPovAnalyzerProjectionV1:
+    """Build one projection exclusively from recipient-authorized POV content."""
+    if type(source) is ActorPovProjectionIndexV1:
+        content = source.content
+        if type(frame_index) is not int or not 0 <= frame_index < len(content.frames):
+            raise IndexError("frame_index is outside the captured POV prefix.")
+        frame = content.frames[frame_index]
+        incoming = None if frame_index == 0 else content.transitions[frame_index - 1]
+        episode_id = content.episode_id
+        selected_global_slot = content.selected_global_slot
+        selected_team_local_slot = content.selected_team_local_slot
+        public_agent_id = content.public_agent_id
+        configured_team_id = content.configured_team_id
+        class_id = content.class_id
+        observation_materialization = content.observation_materialization
+        axis_mapping = content.axis_mapping
+    elif type(source) is ActorPovReplayContentV1:
+        return build_actor_pov_analyzer_projection_v1(
+            build_actor_pov_projection_index_v1(source),
+            frame_index=frame_index,
+        )
+    elif type(source) is ActorPovCurrentSliceV1:
+        if frame_index is not None and frame_index != source.frame.frame_index:
+            raise ValueError(
+                "a live current slice accepts only its own canonical frame index."
+            )
+        frame = source.frame
+        incoming = source.incoming_transition
+        episode_id = source.episode_id
+        selected_global_slot = source.selected_global_slot
+        selected_team_local_slot = source.selected_team_local_slot
+        public_agent_id = source.public_agent_id
+        configured_team_id = source.configured_team_id
+        class_id = source.class_id
+        observation_materialization = source.observation_materialization
+        axis_mapping = source.axis_mapping
+    else:
+        raise TypeError(
+            "source must be an exact POV projection index, replay content, or "
+            "current slice."
+        )
+    if incoming is not None and type(incoming) is not ActorPovTransitionV1:
+        raise TypeError("incoming POV transition must be the exact V1 root.")
+    scene = _build_actor_pov_battlefield_scene_v1(
+        frame,
+        episode_id=episode_id,
+        selected_global_slot=selected_global_slot,
+        selected_team_local_slot=selected_team_local_slot,
+        public_agent_id=public_agent_id,
+        configured_team_id=configured_team_id,
+        class_id=class_id,
+        observation_materialization=observation_materialization,
+        axis_mapping=axis_mapping,
+    )
+    return ActorPovAnalyzerProjectionV1(
+        scene=scene,
         next_decision_action_mask=frame.action_mask,
         incoming_transition_id=(
             None if incoming is None else incoming.pov_transition_id

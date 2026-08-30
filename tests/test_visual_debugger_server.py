@@ -150,9 +150,15 @@ def test_index_and_allowlisted_assets_use_security_headers(
     server, _ = running_server
     for path, expected_type in (
         ("/", "text/html"),
+        ("/bootstrap.js", "text/javascript"),
         ("/styles.css", "text/css"),
         ("/src/main.js", "text/javascript"),
+        ("/src/authorized-presentation-adapter.js", "text/javascript"),
+        ("/src/authorized-presentation-normalizer.js", "text/javascript"),
+        ("/src/authorized-presentation-schema.js", "text/javascript"),
+        ("/src/presentation-install.js", "text/javascript"),
         ("/src/replay-controls.js", "text/javascript"),
+        ("/src/replay-export.js", "text/javascript"),
         ("/src/replay-frame-normalizer.js", "text/javascript"),
         ("/src/explanations.js", "text/javascript"),
         ("/src/tooltip.js", "text/javascript"),
@@ -175,6 +181,21 @@ def test_index_and_allowlisted_assets_use_security_headers(
             "Content-Security-Policy", ""
         )
         assert body
+
+
+def test_bootstrap_exposes_only_the_live_product_identity(
+    running_server: tuple[DebuggerHTTPServer, Thread],
+) -> None:
+    server, _ = running_server
+
+    response, body = _exchange(server, "GET", "/bootstrap.js")
+
+    assert response.status == 200
+    assert response.getheader("Cache-Control") == "no-store"
+    assert body == (
+        b"globalThis.__MARL_DEBUGGER_BOOTSTRAP__ = Object.freeze("
+        b'{"product_kind":"combat_debugger","schema_version":1});\n'
+    )
 
 
 def test_frame_api_requires_token_and_never_mutates_service(
@@ -202,6 +223,23 @@ def test_frame_api_requires_token_and_never_mutates_service(
     assert accepted.status == 200
     assert json.loads(accepted_body)["revision"] == 0
     assert server.debugger_service.session is initial
+
+
+def test_live_mode_does_not_expose_the_replay_metric_route(
+    running_server: tuple[DebuggerHTTPServer, Thread],
+) -> None:
+    server, _ = running_server
+
+    response, body = _exchange(
+        server,
+        "GET",
+        "/api/replay/metric-report",
+        headers=_authorized_headers(),
+    )
+
+    assert response.status == HTTPStatus.NOT_FOUND
+    assert json.loads(body)["error_code"] == "not_found"
+    assert server.coordinator.current_metric_report is None
 
 
 def test_host_origin_and_cross_site_requests_are_rejected(
@@ -625,15 +663,25 @@ def test_unexpected_service_failure_returns_generic_internal_error(
     "relative_path",
     (
         Path("src") / "main.js",
+        Path("src") / "authorized-presentation-adapter.js",
+        Path("src") / "authorized-presentation-normalizer.js",
+        Path("src") / "authorized-presentation-schema.js",
         Path("src") / "display.js",
         Path("src") / "explanations.js",
+        Path("src") / "presentation-install.js",
+        Path("src") / "replay-export.js",
         Path("src") / "tooltip.js",
         Path("assets") / "fonts" / "AtkinsonHyperlegible-Regular.woff2",
     ),
     ids=(
         "main-module",
+        "authorized-presentation-adapter-module",
+        "authorized-presentation-normalizer-module",
+        "authorized-presentation-schema-module",
         "display-module",
         "explanations-module",
+        "presentation-install-module",
+        "replay-export-module",
         "tooltip-module",
         "font",
     ),
@@ -735,7 +783,7 @@ def test_keyboard_interrupt_without_close_hook_preserves_legacy_success(
 
     captured = capsys.readouterr()
     assert result == 0
-    assert "Visual Debugger and Analyzer stopped." in captured.out
+    assert "MARL-BattleGrounds Combat Debugger stopped." in captured.out
 
 
 def test_keyboard_interrupt_invokes_graceful_close_once_under_router_lock(
