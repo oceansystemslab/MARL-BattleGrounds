@@ -61,7 +61,7 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
         (
             "tests/test_visual_debugger_scenarios.py::"
             "test_every_authoritative_visual_mechanic_has_regular_and_stress_evidence"
-        ): 300,
+        ): 500,
         (
             "tests/test_visual_debugger_scenarios.py::"
             "test_every_registered_scripted_command_matches_authored_acceptance"

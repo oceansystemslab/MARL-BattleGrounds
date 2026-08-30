@@ -284,7 +284,7 @@ def test_production_profile_names_and_weights_exactly_four_extracted_families() 
         (
             "tests/test_visual_debugger_scenarios.py::"
             "test_every_authoritative_visual_mechanic_has_regular_and_stress_evidence"
-        ): 300,
+        ): 500,
         (
             "tests/test_visual_debugger_scenarios.py::"
             "test_every_registered_scripted_command_matches_authored_acceptance"
@@ -307,29 +307,36 @@ def test_production_profile_names_and_weights_exactly_four_extracted_families() 
     )
 
 
-def test_dominant_family_weight_keeps_its_atomic_family_on_one_shard() -> None:
-    path = "tests/test_hosted_preflight.py"
-    dominant = (path, f"{path}::test_every_case")
-    residual = (path, f"{path}::test_residual")
+def test_dominant_family_weights_keep_atomic_families_on_separate_shards() -> None:
+    semantic_path = "tests/test_semantic_inventory.py"
+    preflight_path = "tests/test_hosted_preflight.py"
+    semantic = (semantic_path, f"{semantic_path}::test_every_mechanic")
+    preflight = (preflight_path, f"{preflight_path}::test_every_case")
+    semantic_residual = (semantic_path, f"{semantic_path}::test_residual")
+    preflight_residual = (preflight_path, f"{preflight_path}::test_residual")
     ordinary = {
         (f"tests/test_{index}.py", f"tests/test_{index}.py::test_value"): 100
-        for index in range(11)
+        for index in range(10)
     }
     counts: dict[TestFamilyKey, int] = {
-        dominant: 30,
-        residual: 5,
+        semantic: 1,
+        preflight: 30,
+        semantic_residual: 5,
+        preflight_residual: 5,
         **ordinary,
     }
     profile = ShardCostProfile(
-        extracted_family_costs={dominant[1]: 500},
-        residual_file_costs={path: 100},
+        extracted_family_costs={semantic[1]: 500, preflight[1]: 500},
+        residual_file_costs={semantic_path: 100, preflight_path: 100},
         strict=True,
     )
 
     assignments = assign_test_families(counts, 12, cost_profile=profile)
 
-    owner = next(shard for shard in assignments if dominant in shard)
-    assert owner == (dominant,)
+    semantic_owner = next(shard for shard in assignments if semantic in shard)
+    preflight_owner = next(shard for shard in assignments if preflight in shard)
+    assert semantic_owner == (semantic,)
+    assert preflight_owner == (preflight,)
     flattened = tuple(family for shard in assignments for family in shard)
     assert set(flattened) == set(counts)
     assert len(flattened) == len(set(flattened))
