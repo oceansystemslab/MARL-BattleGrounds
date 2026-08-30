@@ -2794,12 +2794,12 @@
         "schema_version": 1,
         "source": {
           "episode_id": "service-shared",
-          "source_artifact_digest_sha256": "d0696363f5bab9488af92d35d1e10ad32a6e9849ec0f5e29877c7832818f77a2",
+          "source_artifact_digest_sha256": "2c49e8d00a558558cef678c654ea62adb97b6364a362870820fb6e1bcd764239",
           "source_artifact_id": "service-shared:replay",
           "source_authority_epoch": 0,
           "source_authorized_endpoint_digest_sha256": "6330d2a5127d005121d343d481cc4c670330d0a80aedd38cf12d58e8cdbe240f",
           "source_choreography_generation": 0,
-          "source_context_digest_sha256": "752fd4f72ef8bd078ae8472f37c6c1c1e4003916d1c4a11ccafee2d238286c30",
+          "source_context_digest_sha256": "c1cf20c3650706412f7ddb03af9742841395eae069013e3f0efc35ca9d06eabe",
           "source_cursor_generation": 0,
           "source_final_frame_index": 2,
           "source_frame_id": "service-shared:frame:1",
@@ -2811,10 +2811,10 @@
           "source_session_id": "cp2-7-replay-audience-switch-fixture",
           "source_simulator_step_count": 1,
           "source_timeline_id": "service-shared:replay:timeline:researcher",
-          "source_trajectory_content_digest_sha256": "1919ef38270e44b1de9ef6cd195e4596c13ab7f7befeb1998b52475435655ec2"
+          "source_trajectory_content_digest_sha256": "ec55f98c92d7427c01409734ec95614e13c88b751137cd62593dc5d6e6ff2cb6"
         },
         "technical_frame": {
-          "artifact_digest_prefix": "d0696363f5ba",
+          "artifact_digest_prefix": "2c49e8d00a55",
           "frame_index": 1,
           "incoming_transition_id": "service-shared:transition:0",
           "recorded_ordinary_movement_distance_scale": 1.0,
@@ -2977,14 +2977,14 @@
           "recorded_transition_count": 2,
           "replay_reference": {
             "artifact_id": "service-shared:replay",
-            "canonical_byte_length": 209007,
-            "canonical_digest_sha256": "d0696363f5bab9488af92d35d1e10ad32a6e9849ec0f5e29877c7832818f77a2",
-            "context_digest_sha256": "752fd4f72ef8bd078ae8472f37c6c1c1e4003916d1c4a11ccafee2d238286c30",
+            "canonical_byte_length": 209226,
+            "canonical_digest_sha256": "2c49e8d00a558558cef678c654ea62adb97b6364a362870820fb6e1bcd764239",
+            "context_digest_sha256": "c1cf20c3650706412f7ddb03af9742841395eae069013e3f0efc35ca9d06eabe",
             "episode_id": "service-shared",
             "replay_schema_version": 1,
             "schema_id": "marl_battlegrounds.evaluation.replay_artifact_reference",
             "schema_version": 1,
-            "trajectory_content_digest_sha256": "1919ef38270e44b1de9ef6cd195e4596c13ab7f7befeb1998b52475435655ec2"
+            "trajectory_content_digest_sha256": "ec55f98c92d7427c01409734ec95614e13c88b751137cd62593dc5d6e6ff2cb6"
           },
           "schema_version": 1
         },
@@ -3043,14 +3043,14 @@
           "recorded_transition_count": 2,
           "replay_reference": {
             "artifact_id": "service-shared:replay",
-            "canonical_byte_length": 209007,
-            "canonical_digest_sha256": "d0696363f5bab9488af92d35d1e10ad32a6e9849ec0f5e29877c7832818f77a2",
-            "context_digest_sha256": "752fd4f72ef8bd078ae8472f37c6c1c1e4003916d1c4a11ccafee2d238286c30",
+            "canonical_byte_length": 209226,
+            "canonical_digest_sha256": "2c49e8d00a558558cef678c654ea62adb97b6364a362870820fb6e1bcd764239",
+            "context_digest_sha256": "c1cf20c3650706412f7ddb03af9742841395eae069013e3f0efc35ca9d06eabe",
             "episode_id": "service-shared",
             "replay_schema_version": 1,
             "schema_id": "marl_battlegrounds.evaluation.replay_artifact_reference",
             "schema_version": 1,
-            "trajectory_content_digest_sha256": "1919ef38270e44b1de9ef6cd195e4596c13ab7f7befeb1998b52475435655ec2"
+            "trajectory_content_digest_sha256": "ec55f98c92d7427c01409734ec95614e13c88b751137cd62593dc5d6e6ff2cb6"
           },
           "schema_version": 1
         },
@@ -5862,14 +5862,14 @@
             "recorded_transition_count": 2,
             "replay_reference": {
               "artifact_id": "service-shared:replay",
-              "canonical_byte_length": 209007,
-              "canonical_digest_sha256": "d0696363f5bab9488af92d35d1e10ad32a6e9849ec0f5e29877c7832818f77a2",
-              "context_digest_sha256": "752fd4f72ef8bd078ae8472f37c6c1c1e4003916d1c4a11ccafee2d238286c30",
+              "canonical_byte_length": 209226,
+              "canonical_digest_sha256": "2c49e8d00a558558cef678c654ea62adb97b6364a362870820fb6e1bcd764239",
+              "context_digest_sha256": "c1cf20c3650706412f7ddb03af9742841395eae069013e3f0efc35ca9d06eabe",
               "episode_id": "service-shared",
               "replay_schema_version": 1,
               "schema_id": "marl_battlegrounds.evaluation.replay_artifact_reference",
               "schema_version": 1,
-              "trajectory_content_digest_sha256": "1919ef38270e44b1de9ef6cd195e4596c13ab7f7befeb1998b52475435655ec2"
+              "trajectory_content_digest_sha256": "ec55f98c92d7427c01409734ec95614e13c88b751137cd62593dc5d6e6ff2cb6"
             },
             "schema_version": 1
           },
@@ -6090,7 +6090,7 @@
               }
             ]
           },
-          "authorized_endpoint_digest_sha256": "ca11ee7d7d5717e6e0df4e3aab572efbe3ca25e61d9f62c449cc5295015a8edf",
+          "authorized_endpoint_digest_sha256": "dfb757f96cc58ebe6913add016f800cc4c833dc9b72d498b5b2e8b25990999da",
           "endpoint_kind": "no_shared_obs_authorized_current",
           "parts": {
             "next_decision_action_mask": {
@@ -6747,9 +6747,9 @@
                 "visibility_effect": "concealed_from_opponents"
               }
             },
-            "source_episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+            "source_episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
             "source_frame_index": 0,
-            "source_recipient_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:actor-pov:0:frame:0",
+            "source_recipient_frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:actor-pov:0:frame:0",
             "source_simulator_step_count": 0
           }
         },
@@ -6757,7 +6757,7 @@
         "latest_transition": null,
         "live_inspection": {
           "envelope_kind": "live_no_shared_obs_source_bound_inspection",
-          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+          "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
           "inspection": {
             "draft": {
               "actor_anchor": [
@@ -6973,7 +6973,7 @@
           },
           "source_authority_epoch": 0,
           "source_frame_index": 0,
-          "source_recipient_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:actor-pov:0:frame:0",
+          "source_recipient_frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:actor-pov:0:frame:0",
           "source_recipient_public_agent_id": "0",
           "source_revision": 0,
           "source_run_generation": 0,
@@ -6981,7 +6981,7 @@
           "source_simulator_step_count": 0
         },
         "local_oracle_corpse_overlay": {
-          "authorized_overlay_digest_sha256": "904ef6889a68bd33028e1a5845f29010e27e014ea8770c52b3ab4d14a4d8a35d",
+          "authorized_overlay_digest_sha256": "398224fb9982bc165fd70085b388a9786ad6ee9e9d9078235dab0d7e918ee9b1",
           "corpse_observations": [],
           "living_sensor_public_agent_ids": [
             "0"
@@ -6991,8 +6991,8 @@
           "recipient_presentation_key": "pov_3b73c1f8efdac8f9d6b10fa4bd4e82ae42cf17e703ae5f611d1dba7377b68163",
           "recipient_public_agent_id": "0",
           "source_authority_epoch": 0,
-          "source_episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
-          "source_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
+          "source_episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
+          "source_frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:frame:0",
           "source_frame_index": 0,
           "source_simulator_step_count": 0
         },
@@ -7244,7 +7244,7 @@
               "ultimate_target_mode": "ally"
             }
           ],
-          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+          "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
           "frame_index": 0,
           "identity_directory": {
             "directory_kind": "oracle_public_identity_directory",
@@ -7851,7 +7851,7 @@
           "source_run_generation": 0,
           "source_session_id": "cp2-7-live-pov-fixture",
           "technical_frame": {
-            "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+            "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
             "evaluation_frame_index": 0,
             "incoming_transition_id": null,
             "simulator_step_count": 0,
@@ -7860,12 +7860,12 @@
         },
         "schema_version": 1,
         "source": {
-          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+          "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
           "source_authority_epoch": 0,
-          "source_authorized_endpoint_digest_sha256": "ca11ee7d7d5717e6e0df4e3aab572efbe3ca25e61d9f62c449cc5295015a8edf",
+          "source_authorized_endpoint_digest_sha256": "dfb757f96cc58ebe6913add016f800cc4c833dc9b72d498b5b2e8b25990999da",
           "source_frame_index": 0,
           "source_kind": "live_no_shared_obs_frame",
-          "source_recipient_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:actor-pov:0:frame:0",
+          "source_recipient_frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:actor-pov:0:frame:0",
           "source_recipient_public_agent_id": "0",
           "source_revision": 0,
           "source_run_generation": 0,
@@ -7874,7 +7874,7 @@
           "source_submission_scope": "joint_turn"
         },
         "technical_frame": {
-          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+          "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
           "incoming_recipient_transition_id": null,
           "recipient_frame_index": 0,
           "simulator_step_count": 0,
@@ -7883,8 +7883,8 @@
         "visual_events": null
       },
       "transport": {
-        "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
-        "frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
+        "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
+        "frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:frame:0",
         "frame_index": 0,
         "frame_kind": "actor_pov_live_debugger",
         "hud": {
@@ -8167,7 +8167,7 @@
           },
           "scene": {
             "audience_badge": "AGENT POV \u00b7 0",
-            "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+            "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
             "frame_index": 0,
             "map": {
               "height": 10.0,
@@ -8200,7 +8200,7 @@
               "width": 20.0
             },
             "observation_materialization": "exact_no_shared_obs_actor_input",
-            "pov_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:actor-pov:0:frame:0",
+            "pov_frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:actor-pov:0:frame:0",
             "respawn_waves": [
               {
                 "actor_relative_team_index": 0,
@@ -8254,7 +8254,7 @@
               "ultimate_cooldown_remaining": 0
             },
             "simulator_step_count": 0,
-            "source_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
+            "source_frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:frame:0",
             "spawn_pads": [
               {
                 "actor_relative_team_index": 0,
@@ -8682,10 +8682,10 @@
               }
             ]
           },
-          "authorized_endpoint_digest_sha256": "bd78fb3b1380c2bbba6b294a3ced84e4f0d1f7e8239f42bb67217c7deaf4a02e",
+          "authorized_endpoint_digest_sha256": "2ab18ded412a6a8a8f7ed3b9eabf0a4606c0d9502b493546bb9bb2ef77f7a856",
           "endpoint_kind": "oracle_authorized_current",
-          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
-          "frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
+          "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
+          "frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:frame:0",
           "frame_index": 0,
           "identity_directory": {
             "directory_kind": "oracle_public_identity_directory",
@@ -9616,7 +9616,7 @@
         "latest_transition": null,
         "live_inspection": {
           "envelope_kind": "live_oracle_source_bound_inspection",
-          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+          "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
           "inspection": {
             "draft": {
               "actor_anchor": [
@@ -9861,7 +9861,7 @@
             "submission_scope": "joint_turn"
           },
           "source_authority_epoch": 0,
-          "source_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
+          "source_frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:frame:0",
           "source_frame_index": 0,
           "source_revision": 0,
           "source_run_generation": 0,
@@ -9967,10 +9967,10 @@
         "product_kind": "combat_debugger",
         "schema_version": 1,
         "source": {
-          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+          "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
           "source_authority_epoch": 0,
-          "source_authorized_endpoint_digest_sha256": "bd78fb3b1380c2bbba6b294a3ced84e4f0d1f7e8239f42bb67217c7deaf4a02e",
-          "source_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
+          "source_authorized_endpoint_digest_sha256": "2ab18ded412a6a8a8f7ed3b9eabf0a4606c0d9502b493546bb9bb2ef77f7a856",
+          "source_frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:frame:0",
           "source_frame_index": 0,
           "source_kind": "live_oracle_frame",
           "source_revision": 0,
@@ -9980,7 +9980,7 @@
           "source_submission_scope": "joint_turn"
         },
         "technical_frame": {
-          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+          "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
           "evaluation_frame_index": 0,
           "incoming_transition_id": null,
           "simulator_step_count": 0,
@@ -10060,8 +10060,8 @@
             "title": "Recovery, refresh, and reapplication"
           }
         ],
-        "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
-        "frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
+        "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
+        "frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:frame:0",
         "frame_index": 0,
         "frame_kind": "researcher_live_debugger",
         "hud": {
@@ -10218,7 +10218,7 @@
               "fact_id": "episode_id",
               "label": "Evaluation episode",
               "technical": true,
-              "value": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906"
+              "value": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1"
             }
           ],
           "latest_transition": null,
@@ -11066,8 +11066,8 @@
                 "ultimate_target_mode": "ally"
               }
             ],
-            "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
-            "frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
+            "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
+            "frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:frame:0",
             "frame_index": 0,
             "incoming_event_ids": [],
             "incoming_transition_id": null,
@@ -11317,8 +11317,8 @@
           "schema_version": 2,
           "status_source_evidence": {
             "active_statuses": [],
-            "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
-            "frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
+            "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
+            "frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:frame:0",
             "frame_index": 0,
             "schema_version": 2
           }
@@ -13215,14 +13215,14 @@
           "recorded_transition_count": 2,
           "replay_reference": {
             "artifact_id": "service-complete:replay",
-            "canonical_byte_length": 207237,
-            "canonical_digest_sha256": "7ea4c43d1f5a558f51b6400f55875f718e25dcf50891d8601ab93689501e5791",
-            "context_digest_sha256": "a6b5365cc62765f5b17a50cdc1623a804ce6932b95c804028d13dfdb4c529716",
+            "canonical_byte_length": 207456,
+            "canonical_digest_sha256": "46b8b7222c8443110a0f8dcb093eaf7ca206008e00b634fba5556df20d90ffa7",
+            "context_digest_sha256": "79edefa443c58433fc8010d9b4c541ba948c527f5ad17236179a7bb3c552ede5",
             "episode_id": "service-complete",
             "replay_schema_version": 1,
             "schema_id": "marl_battlegrounds.evaluation.replay_artifact_reference",
             "schema_version": 1,
-            "trajectory_content_digest_sha256": "5f62559be066f4e1e100d338f523d1206fd9db9eb6822bbc00928da2c7589650"
+            "trajectory_content_digest_sha256": "2594a71395b9a8e63a395b19ddbe6a6ad7edb92a2b5f4d82082cde8e12a48b9f"
           },
           "schema_version": 1
         },
@@ -13281,14 +13281,14 @@
             "recorded_transition_count": 2,
             "replay_reference": {
               "artifact_id": "service-complete:replay",
-              "canonical_byte_length": 207237,
-              "canonical_digest_sha256": "7ea4c43d1f5a558f51b6400f55875f718e25dcf50891d8601ab93689501e5791",
-              "context_digest_sha256": "a6b5365cc62765f5b17a50cdc1623a804ce6932b95c804028d13dfdb4c529716",
+              "canonical_byte_length": 207456,
+              "canonical_digest_sha256": "46b8b7222c8443110a0f8dcb093eaf7ca206008e00b634fba5556df20d90ffa7",
+              "context_digest_sha256": "79edefa443c58433fc8010d9b4c541ba948c527f5ad17236179a7bb3c552ede5",
               "episode_id": "service-complete",
               "replay_schema_version": 1,
               "schema_id": "marl_battlegrounds.evaluation.replay_artifact_reference",
               "schema_version": 1,
-              "trajectory_content_digest_sha256": "5f62559be066f4e1e100d338f523d1206fd9db9eb6822bbc00928da2c7589650"
+              "trajectory_content_digest_sha256": "2594a71395b9a8e63a395b19ddbe6a6ad7edb92a2b5f4d82082cde8e12a48b9f"
             },
             "schema_version": 1
           },
@@ -13325,14 +13325,14 @@
           "recorded_transition_count": 2,
           "replay_reference": {
             "artifact_id": "service-complete:replay",
-            "canonical_byte_length": 207237,
-            "canonical_digest_sha256": "7ea4c43d1f5a558f51b6400f55875f718e25dcf50891d8601ab93689501e5791",
-            "context_digest_sha256": "a6b5365cc62765f5b17a50cdc1623a804ce6932b95c804028d13dfdb4c529716",
+            "canonical_byte_length": 207456,
+            "canonical_digest_sha256": "46b8b7222c8443110a0f8dcb093eaf7ca206008e00b634fba5556df20d90ffa7",
+            "context_digest_sha256": "79edefa443c58433fc8010d9b4c541ba948c527f5ad17236179a7bb3c552ede5",
             "episode_id": "service-complete",
             "replay_schema_version": 1,
             "schema_id": "marl_battlegrounds.evaluation.replay_artifact_reference",
             "schema_version": 1,
-            "trajectory_content_digest_sha256": "5f62559be066f4e1e100d338f523d1206fd9db9eb6822bbc00928da2c7589650"
+            "trajectory_content_digest_sha256": "2594a71395b9a8e63a395b19ddbe6a6ad7edb92a2b5f4d82082cde8e12a48b9f"
           },
           "schema_version": 1
         },
@@ -14729,12 +14729,12 @@
         "schema_version": 1,
         "source": {
           "episode_id": "service-complete",
-          "source_artifact_digest_sha256": "7ea4c43d1f5a558f51b6400f55875f718e25dcf50891d8601ab93689501e5791",
+          "source_artifact_digest_sha256": "46b8b7222c8443110a0f8dcb093eaf7ca206008e00b634fba5556df20d90ffa7",
           "source_artifact_id": "service-complete:replay",
           "source_authority_epoch": 0,
           "source_authorized_endpoint_digest_sha256": "452ea8ab0b178c09b608b29a739123a82709fe1a0f116a3d2c89377578e32d36",
           "source_choreography_generation": 0,
-          "source_context_digest_sha256": "a6b5365cc62765f5b17a50cdc1623a804ce6932b95c804028d13dfdb4c529716",
+          "source_context_digest_sha256": "79edefa443c58433fc8010d9b4c541ba948c527f5ad17236179a7bb3c552ede5",
           "source_cursor_generation": 0,
           "source_final_frame_index": 2,
           "source_frame_id": "service-complete:frame:1",
@@ -14746,10 +14746,10 @@
           "source_session_id": "cp2-7-replay-oracle-fixture",
           "source_simulator_step_count": 1,
           "source_timeline_id": "service-complete:replay:timeline:researcher",
-          "source_trajectory_content_digest_sha256": "5f62559be066f4e1e100d338f523d1206fd9db9eb6822bbc00928da2c7589650"
+          "source_trajectory_content_digest_sha256": "2594a71395b9a8e63a395b19ddbe6a6ad7edb92a2b5f4d82082cde8e12a48b9f"
         },
         "technical_frame": {
-          "artifact_digest_prefix": "7ea4c43d1f5a",
+          "artifact_digest_prefix": "46b8b7222c84",
           "frame_index": 1,
           "incoming_transition_id": "service-complete:transition:0",
           "recorded_ordinary_movement_distance_scale": 1.0,
@@ -14912,14 +14912,14 @@
           "recorded_transition_count": 2,
           "replay_reference": {
             "artifact_id": "service-complete:replay",
-            "canonical_byte_length": 207237,
-            "canonical_digest_sha256": "7ea4c43d1f5a558f51b6400f55875f718e25dcf50891d8601ab93689501e5791",
-            "context_digest_sha256": "a6b5365cc62765f5b17a50cdc1623a804ce6932b95c804028d13dfdb4c529716",
+            "canonical_byte_length": 207456,
+            "canonical_digest_sha256": "46b8b7222c8443110a0f8dcb093eaf7ca206008e00b634fba5556df20d90ffa7",
+            "context_digest_sha256": "79edefa443c58433fc8010d9b4c541ba948c527f5ad17236179a7bb3c552ede5",
             "episode_id": "service-complete",
             "replay_schema_version": 1,
             "schema_id": "marl_battlegrounds.evaluation.replay_artifact_reference",
             "schema_version": 1,
-            "trajectory_content_digest_sha256": "5f62559be066f4e1e100d338f523d1206fd9db9eb6822bbc00928da2c7589650"
+            "trajectory_content_digest_sha256": "2594a71395b9a8e63a395b19ddbe6a6ad7edb92a2b5f4d82082cde8e12a48b9f"
           },
           "schema_version": 1
         },
@@ -14978,14 +14978,14 @@
           "recorded_transition_count": 2,
           "replay_reference": {
             "artifact_id": "service-complete:replay",
-            "canonical_byte_length": 207237,
-            "canonical_digest_sha256": "7ea4c43d1f5a558f51b6400f55875f718e25dcf50891d8601ab93689501e5791",
-            "context_digest_sha256": "a6b5365cc62765f5b17a50cdc1623a804ce6932b95c804028d13dfdb4c529716",
+            "canonical_byte_length": 207456,
+            "canonical_digest_sha256": "46b8b7222c8443110a0f8dcb093eaf7ca206008e00b634fba5556df20d90ffa7",
+            "context_digest_sha256": "79edefa443c58433fc8010d9b4c541ba948c527f5ad17236179a7bb3c552ede5",
             "episode_id": "service-complete",
             "replay_schema_version": 1,
             "schema_id": "marl_battlegrounds.evaluation.replay_artifact_reference",
             "schema_version": 1,
-            "trajectory_content_digest_sha256": "5f62559be066f4e1e100d338f523d1206fd9db9eb6822bbc00928da2c7589650"
+            "trajectory_content_digest_sha256": "2594a71395b9a8e63a395b19ddbe6a6ad7edb92a2b5f4d82082cde8e12a48b9f"
           },
           "schema_version": 1
         },
@@ -17789,14 +17789,14 @@
             "recorded_transition_count": 2,
             "replay_reference": {
               "artifact_id": "service-shared:replay",
-              "canonical_byte_length": 209007,
-              "canonical_digest_sha256": "d0696363f5bab9488af92d35d1e10ad32a6e9849ec0f5e29877c7832818f77a2",
-              "context_digest_sha256": "752fd4f72ef8bd078ae8472f37c6c1c1e4003916d1c4a11ccafee2d238286c30",
+              "canonical_byte_length": 209226,
+              "canonical_digest_sha256": "2c49e8d00a558558cef678c654ea62adb97b6364a362870820fb6e1bcd764239",
+              "context_digest_sha256": "c1cf20c3650706412f7ddb03af9742841395eae069013e3f0efc35ca9d06eabe",
               "episode_id": "service-shared",
               "replay_schema_version": 1,
               "schema_id": "marl_battlegrounds.evaluation.replay_artifact_reference",
               "schema_version": 1,
-              "trajectory_content_digest_sha256": "1919ef38270e44b1de9ef6cd195e4596c13ab7f7befeb1998b52475435655ec2"
+              "trajectory_content_digest_sha256": "ec55f98c92d7427c01409734ec95614e13c88b751137cd62593dc5d6e6ff2cb6"
             },
             "schema_version": 1
           },
@@ -25000,7 +25000,7 @@
         "source_authority_epoch": 11,
         "source_authorized_endpoint_digest_sha256": "28a30da7583764325896ab02705463d7e146a069f66ca160f143ac0217b292e6",
         "source_choreography_generation": 1,
-        "source_context_digest_sha256": "5c0870b37b9176ca8394a25d7dccc4fc3acd22fbdd281512930cd3a722ab76f1",
+        "source_context_digest_sha256": "e760ea57e04668c7a4de4d1ec3ed027bf8cc87c643663705dca34b1754d59e28",
         "source_cursor_generation": 1,
         "source_final_frame_index": 3,
         "source_frame_id": "episode-001:frame:1",
@@ -27444,7 +27444,7 @@
             }
           ]
         },
-        "authorized_endpoint_digest_sha256": "96c3006bc5af2d459e847c92a1582f41e53c66fdd96db2bd26f4481ae7ff4178",
+        "authorized_endpoint_digest_sha256": "ded1727af0ee2be28c14abc81435ae3a99110c269027331957a9052e53f0773a",
         "endpoint_kind": "no_shared_obs_authorized_current",
         "parts": {
           "next_decision_action_mask": {
@@ -28101,9 +28101,9 @@
               "visibility_effect": "concealed_from_opponents"
             }
           },
-          "source_episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+          "source_episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
           "source_frame_index": 0,
-          "source_recipient_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:actor-pov:0:frame:0",
+          "source_recipient_frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:actor-pov:0:frame:0",
           "source_simulator_step_count": 0
         }
       },
@@ -28111,7 +28111,7 @@
       "latest_transition": null,
       "live_inspection": {
         "envelope_kind": "live_no_shared_obs_source_bound_inspection",
-        "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+        "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
         "inspection": {
           "draft": {
             "actor_anchor": [
@@ -28327,7 +28327,7 @@
         },
         "source_authority_epoch": 0,
         "source_frame_index": 0,
-        "source_recipient_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:actor-pov:0:frame:0",
+        "source_recipient_frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:actor-pov:0:frame:0",
         "source_recipient_public_agent_id": "0",
         "source_revision": 0,
         "source_run_generation": 0,
@@ -28335,7 +28335,7 @@
         "source_simulator_step_count": 0
       },
       "local_oracle_corpse_overlay": {
-        "authorized_overlay_digest_sha256": "505cd74a59c174f8ece1e52ebcda63db44b9ac97c6679cd5f1a5392465fcf47c",
+        "authorized_overlay_digest_sha256": "e8d8e1e7b8c4dd3e0f768214ae32e943dbb1f3a531773ce7e574b52b0e6c7a50",
         "corpse_observations": [
           {
             "corpse": {
@@ -28405,8 +28405,8 @@
         "recipient_presentation_key": "pov_caa99a5cec43bd9cfa0e23d7b17d05e3481a8cbe43437060d416d3048de07a4f",
         "recipient_public_agent_id": "0",
         "source_authority_epoch": 0,
-        "source_episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
-        "source_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:frame:0",
+        "source_episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
+        "source_frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:frame:0",
         "source_frame_index": 0,
         "source_simulator_step_count": 0
       },
@@ -28658,7 +28658,7 @@
             "ultimate_target_mode": "ally"
           }
         ],
-        "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+        "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
         "frame_index": 0,
         "identity_directory": {
           "directory_kind": "oracle_public_identity_directory",
@@ -29252,7 +29252,7 @@
         "source_run_generation": 0,
         "source_session_id": "browser-live-no-shared-corpse-overlay",
         "technical_frame": {
-          "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+          "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
           "evaluation_frame_index": 0,
           "incoming_transition_id": null,
           "simulator_step_count": 0,
@@ -29261,12 +29261,12 @@
       },
       "schema_version": 1,
       "source": {
-        "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+        "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
         "source_authority_epoch": 0,
-        "source_authorized_endpoint_digest_sha256": "96c3006bc5af2d459e847c92a1582f41e53c66fdd96db2bd26f4481ae7ff4178",
+        "source_authorized_endpoint_digest_sha256": "ded1727af0ee2be28c14abc81435ae3a99110c269027331957a9052e53f0773a",
         "source_frame_index": 0,
         "source_kind": "live_no_shared_obs_frame",
-        "source_recipient_frame_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906:actor-pov:0:frame:0",
+        "source_recipient_frame_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1:actor-pov:0:frame:0",
         "source_recipient_public_agent_id": "0",
         "source_revision": 0,
         "source_run_generation": 0,
@@ -29275,7 +29275,7 @@
         "source_submission_scope": "joint_turn"
       },
       "technical_frame": {
-        "episode_id": "debugger-episode:2af076abc28d4efe1e041f9d850e02b022740034e67882e7640740a49c8fe906",
+        "episode_id": "debugger-episode:5cf7a595248dac593ee8af1122fa46932f3bdac1452a3b00d0c6eb7098a091f1",
         "incoming_recipient_transition_id": null,
         "recipient_frame_index": 0,
         "simulator_step_count": 0,
@@ -42748,7 +42748,7 @@
         "source_authority_epoch": 13,
         "source_authorized_endpoint_digest_sha256": "c7caccb646fa8688c14583c71b7f1f42123eb366eb86e1b004ddf21b6dd90268",
         "source_choreography_generation": 3,
-        "source_context_digest_sha256": "5c0870b37b9176ca8394a25d7dccc4fc3acd22fbdd281512930cd3a722ab76f1",
+        "source_context_digest_sha256": "e760ea57e04668c7a4de4d1ec3ed027bf8cc87c643663705dca34b1754d59e28",
         "source_cursor_generation": 3,
         "source_final_frame_index": 3,
         "source_frame_id": "episode-001:frame:3",
@@ -43788,7 +43788,7 @@
         "source_authority_epoch": 13,
         "source_authorized_endpoint_digest_sha256": "a2d22f3c19c30d9704b650cc46d22e473104f0c35cc6479391b162e389c6e8ea",
         "source_choreography_generation": 3,
-        "source_context_digest_sha256": "5c0870b37b9176ca8394a25d7dccc4fc3acd22fbdd281512930cd3a722ab76f1",
+        "source_context_digest_sha256": "e760ea57e04668c7a4de4d1ec3ed027bf8cc87c643663705dca34b1754d59e28",
         "source_cursor_generation": 3,
         "source_final_frame_index": 3,
         "source_frame_id": "episode-001:frame:3",
@@ -44811,7 +44811,7 @@
         "source_authority_epoch": 10,
         "source_authorized_endpoint_digest_sha256": "9537ea37af0f890dc86fb4a91f8eff03f85a5558335d8b310acf3c3d66424254",
         "source_choreography_generation": 0,
-        "source_context_digest_sha256": "5c0870b37b9176ca8394a25d7dccc4fc3acd22fbdd281512930cd3a722ab76f1",
+        "source_context_digest_sha256": "e760ea57e04668c7a4de4d1ec3ed027bf8cc87c643663705dca34b1754d59e28",
         "source_cursor_generation": 0,
         "source_final_frame_index": 3,
         "source_frame_id": "episode-001:frame:0",
