@@ -275,28 +275,28 @@ def test_strict_cost_profile_rejects_stale_entries(
         build_test_work_units({present: 1}, profile)
 
 
-def test_production_profile_names_exactly_four_extracted_families() -> None:
+def test_production_profile_names_and_weights_exactly_four_extracted_families() -> None:
     assert CI_SHARD_COST_PROFILE.file_cost_overrides == {
         "tests/test_visual_debugger_replay_service.py": 400,
         "tests/test_visual_debugger_sample_replays.py": 420,
     }
-    assert set(CI_SHARD_COST_PROFILE.extracted_family_costs) == {
+    assert CI_SHARD_COST_PROFILE.extracted_family_costs == {
         (
             "tests/test_visual_debugger_scenarios.py::"
             "test_every_authoritative_visual_mechanic_has_regular_and_stress_evidence"
-        ),
+        ): 300,
         (
             "tests/test_visual_debugger_scenarios.py::"
             "test_every_registered_scripted_command_matches_authored_acceptance"
-        ),
+        ): 70,
         (
             "tests/test_visual_debugger_scenarios.py::"
             "test_researcher_scenarios_cover_every_canonical_event_kind"
-        ),
+        ): 50,
         (
             "tests/test_visual_debugger_service.py::"
             "test_every_scripted_scenario_preflights_each_successor_in_both_views"
-        ),
+        ): 500,
     }
     assert CI_SHARD_COST_PROFILE.residual_file_costs == {
         "tests/test_visual_debugger_scenarios.py": 160,
@@ -305,6 +305,35 @@ def test_production_profile_names_exactly_four_extracted_families() -> None:
     assert CI_SHARD_COST_PROFILE.reserved_costs_by_shard_count[12] == (
         (0,) * 11 + (50,)
     )
+
+
+def test_dominant_family_weight_keeps_its_atomic_family_on_one_shard() -> None:
+    path = "tests/test_hosted_preflight.py"
+    dominant = (path, f"{path}::test_every_case")
+    residual = (path, f"{path}::test_residual")
+    ordinary = {
+        (f"tests/test_{index}.py", f"tests/test_{index}.py::test_value"): 100
+        for index in range(11)
+    }
+    counts: dict[TestFamilyKey, int] = {
+        dominant: 30,
+        residual: 5,
+        **ordinary,
+    }
+    profile = ShardCostProfile(
+        extracted_family_costs={dominant[1]: 500},
+        residual_file_costs={path: 100},
+        strict=True,
+    )
+
+    assignments = assign_test_families(counts, 12, cost_profile=profile)
+
+    owner = next(shard for shard in assignments if dominant in shard)
+    assert owner == (dominant,)
+    flattened = tuple(family for shard in assignments for family in shard)
+    assert set(flattened) == set(counts)
+    assert len(flattened) == len(set(flattened))
+    assert all(assignments)
 
 
 def test_collected_items_have_one_owner_across_twelve_nonempty_shards() -> None:

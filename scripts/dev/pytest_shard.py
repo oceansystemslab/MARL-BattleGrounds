@@ -73,7 +73,7 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
         (
             "tests/test_visual_debugger_service.py::"
             "test_every_scripted_scenario_preflights_each_successor_in_both_views"
-        ): 320,
+        ): 500,
     },
     residual_file_costs={
         "tests/test_visual_debugger_scenarios.py": 160,

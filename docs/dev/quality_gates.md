@@ -190,8 +190,10 @@ units so file-local fixtures and compiled execution paths are not repeated
 across workers. A small, explicit runtime profile may extract a measured slow
 family from a declared hotspot file while keeping that parameterized family
 indivisible and all residual families together. Expensive module-fixture files
-remain indivisible. Twelve nonempty workers use deterministic weighted
-longest-processing-time packing, including reserved capacity for a static gate.
+remain indivisible. The hosted service-preflight family has a deliberately
+dominant scheduling weight so its intact 30-case proof receives a dedicated
+worker. Twelve nonempty workers use deterministic weighted longest-processing-
+time packing, including reserved capacity for a static gate.
 Collection fails closed if a configured file or family disappears, moves, or
 would be assigned twice. The profile changes CI scheduling only; it never
 selects a smaller test inventory.
