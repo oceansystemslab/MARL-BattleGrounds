@@ -55,23 +55,27 @@ implementation jobs may run concurrently under the current GitHub-hosted
 account limit. Local validation may use the developer workstation's additional
 CPU concurrency.
 
-The nine-minute Python and six-minute browser matrix-job timeouts provide
-small setup and teardown headroom; they are not the end-to-end target because
-downstream aggregates necessarily run after their dependencies. Local timing
-first moved Python from six to seven minutes. Hosted run `33329934258` then
-proved seven insufficient by cancelling eight still-running Python shards at
-the whole-job boundary without a test failure. Hosted run `33330400572` then
-proved eight insufficient in the same way for five still-running shards. The
-ceiling therefore moved by the next single increment to nine minutes. Every
-publication candidate must still be checked against hosted timestamps. A
-material regression beyond the approximately five-minute target requires
-profiling and a CI-only follow-up, while ordinary single-digit timing variance
-does not. Rebalance intact work units within the current twelve-Python/eight-
-browser, twenty-job ceiling before increasing a timeout. If the slowest
-indivisible work unit cannot fit the current ceiling, raise the applicable
-timeout by exactly one minute at a time and stop at the first measured
-sufficient value. Never omit tests or weaken assertions to satisfy the timing
-target.
+The nine-minute Python and six-minute browser matrix-job timeouts are runaway-
+job safety ceilings, not performance targets. Downstream aggregates
+necessarily run after their dependencies. Hosted runs `33329934258`,
+`33330400572`, and `33330879589` showed that repeatedly expiring an unchanged
+distribution at seven, eight, and nine minutes did not correct its load
+imbalance. The final run left only Python shards 1 and 6 unfinished, with no
+test failure.
+
+The scheduler therefore smooths eight exact, fixture-safe work units from
+measured overloaded shards into shards with measured headroom. It fails closed
+if a future collection changes an expected source owner. The resulting local
+12-way proof selects all 3,397 tests exactly once: pytest time ranges from 3:38
+to 4:34 and whole-command wall time from 3:50 to 4:50. Every publication
+candidate must still be checked against hosted timestamps. A material
+regression beyond the approximately five-minute target requires profiling and
+an actionable CI-only follow-up; ordinary timing variance does not. Rebalance
+intact work units within the current twelve-Python/eight-browser, twenty-job
+ceiling before changing a timeout. Once that split is exhausted, let valid
+work finish under a generous safety ceiling. Do not cancel and rerun unchanged
+work; adjust the ceiling only with measured headroom or another concrete
+correction. Never omit tests or weaken assertions to satisfy the timing target.
 
 ## Authoritative Replay and Debugger integration baseline
 
@@ -257,10 +261,11 @@ requires the eight profiles to be a disjoint, complete cover. Each profile
 retains one worker and file-local ordering.
 Required CI does not retry deterministic failures, stops a red shard after its
 first failure, and enforces the nine-minute Python and six-minute browser
-matrix-job ceilings. Apply the one-minute escalation rule above only after
-measured rebalancing cannot make an indivisible unit fit. The script does not
-install dependencies or update snapshots. Run it from the exact frozen commit
-candidate. When a changed helper spawns a package manager, interpreter,
+matrix-job safety ceilings. Rebalance measured work before changing a ceiling,
+and never cancel unchanged valid work merely to enforce the performance
+target. The script does not install dependencies or update snapshots. Run it
+from the exact frozen commit candidate. When a changed helper spawns a package
+manager, interpreter,
 generated-artifact exporter, or browser, also exercise that path once from a
 clean worktree with cold local environment state; a warm developer
 environment can suppress first-run output and setup behavior that CI will

@@ -20,6 +20,7 @@ from _pytest.nodes import Item
 
 type TestFamilyKey = tuple[str, str]
 type ModuleFixtureKey = tuple[str, str]
+type TestWorkUnitRelocation = tuple[str, int, int]
 
 
 def _empty_string_costs() -> dict[str, int]:
@@ -27,6 +28,10 @@ def _empty_string_costs() -> dict[str, int]:
 
 
 def _empty_reserved_costs() -> dict[int, tuple[int, ...]]:
+    return {}
+
+
+def _empty_relocations() -> dict[int, tuple[TestWorkUnitRelocation, ...]]:
     return {}
 
 
@@ -48,6 +53,9 @@ class ShardCostProfile:
     residual_file_costs: Mapping[str, int] = field(default_factory=_empty_string_costs)
     reserved_costs_by_shard_count: Mapping[int, tuple[int, ...]] = field(
         default_factory=_empty_reserved_costs
+    )
+    relocations_by_shard_count: Mapping[int, tuple[TestWorkUnitRelocation, ...]] = (
+        field(default_factory=_empty_relocations)
     )
     repeatable_module_fixtures: frozenset[ModuleFixtureKey] = field(
         default_factory=_empty_module_fixture_keys
@@ -99,6 +107,57 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
         "tests/test_visual_debugger_sample_replays.py": 500,
     },
     reserved_costs_by_shard_count={12: (0,) * 11 + (50,)},
+    relocations_by_shard_count={
+        12: (
+            (
+                "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
+                "test_eager_jit_vmap_key_forms_and_x64_keep_exact_actions_and_dtypes",
+                11,
+                1,
+            ),
+            (
+                "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
+                "test_policy_uses_exact_masks_and_ignores_misleading_marginals",
+                9,
+                4,
+            ),
+            (
+                "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
+                "test_dead_inactive_and_stunned_masks_produce_the_canonical_inert_action",
+                5,
+                2,
+            ),
+            (
+                "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
+                "test_dormant_task_history_and_lifecycle_fields_do_not_change_the_policy",
+                6,
+                4,
+            ),
+            (
+                "residual:tests/test_visual_debugger_service.py",
+                6,
+                10,
+            ),
+            (
+                "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
+                "test_invalid_damage_modifier_never_suppresses_an_aged_trap",
+                1,
+                11,
+            ),
+            (
+                "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
+                "test_mage_burst_uses_the_locked_configured_crowd_and_covering_boundaries",
+                1,
+                4,
+            ),
+            (
+                "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
+                "test_warrior_charge_locks_health_trap_and_mage_burst_comparators",
+                1,
+                10,
+            ),
+        )
+    },
     repeatable_module_fixtures=frozenset(
         {
             (
@@ -415,6 +474,38 @@ def assign_test_families(
         shard_index = min(range(shard_count), key=lambda index: (loads[index], index))
         assignments[shard_index].extend(unit.families)
         loads[shard_index] += unit.cost
+
+    unit_by_identifier = {unit.identifier: unit for unit in units}
+    seen_relocations: set[str] = set()
+    for (
+        identifier,
+        source_shard,
+        target_shard,
+    ) in profile.relocations_by_shard_count.get(shard_count, ()):
+        if identifier in seen_relocations:
+            raise ValueError(f"duplicate CI shard relocation: {identifier}")
+        seen_relocations.add(identifier)
+        if type(source_shard) is not int or type(target_shard) is not int:
+            raise ValueError("CI shard relocation indexes must be integer shard IDs")
+        if not 1 <= source_shard <= shard_count or not 1 <= target_shard <= shard_count:
+            raise ValueError("CI shard relocation indexes must use one-based shard IDs")
+        if source_shard == target_shard:
+            raise ValueError("CI shard relocation must change the owning shard")
+        unit = unit_by_identifier.get(identifier)
+        if unit is None:
+            raise ValueError(f"stale CI shard relocation work unit: {identifier}")
+        source_index = source_shard - 1
+        target_index = target_shard - 1
+        source_families = assignments[source_index]
+        if not all(family in source_families for family in unit.families):
+            raise ValueError(
+                "CI shard relocation source drift: "
+                f"{identifier} is not wholly owned by shard {source_shard}"
+            )
+        for family in unit.families:
+            source_families.remove(family)
+        assignments[target_index].extend(unit.families)
+
     if any(not families for families in assignments):
         raise ValueError("weighted CI shard assignment produced an empty shard")
     return tuple(tuple(sorted(families)) for families in assignments)

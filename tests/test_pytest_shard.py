@@ -429,6 +429,103 @@ def test_weighted_assignment_is_stable_and_reserves_static_gate_capacity() -> No
         match="assignments must own every test family exactly once",
     ):
         shard_costs(duplicated, counts, cost_profile=profile)
+    families = {
+        (f"tests/test_{name}.py", f"tests/test_{name}.py::test_value"): cost
+        for name, cost in (("a", 100), ("b", 90), ("c", 80), ("d", 70))
+    }
+    relocated_identifier = "file:tests/test_d.py"
+    profile = ShardCostProfile(
+        relocations_by_shard_count={
+            3: ((relocated_identifier, 3, 2),),
+        }
+    )
+
+    assignments = assign_test_families(families, 3, cost_profile=profile)
+    relocated_family = ("tests/test_d.py", "tests/test_d.py::test_value")
+
+    assert assignments == assign_test_families(
+        dict(reversed(tuple(families.items()))),
+        3,
+        cost_profile=profile,
+    )
+    assert relocated_family not in assignments[2]
+    assert relocated_family in assignments[1]
+    assert sorted(family for shard in assignments for family in shard) == sorted(
+        families
+    )
+
+    wrong_source = ShardCostProfile(
+        relocations_by_shard_count={
+            3: ((relocated_identifier, 1, 2),),
+        }
+    )
+    with pytest.raises(ValueError, match="CI shard relocation source drift"):
+        assign_test_families(families, 3, cost_profile=wrong_source)
+
+    stale_unit = ShardCostProfile(
+        relocations_by_shard_count={
+            3: (("file:tests/test_missing.py", 3, 2),),
+        }
+    )
+    with pytest.raises(ValueError, match="stale CI shard relocation work unit"):
+        assign_test_families(families, 3, cost_profile=stale_unit)
+
+    invalid_profiles = (
+        (
+            ShardCostProfile(
+                relocations_by_shard_count={
+                    3: ((relocated_identifier, 0, 2),),
+                }
+            ),
+            "relocation indexes must use one-based shard IDs",
+        ),
+        (
+            ShardCostProfile(
+                relocations_by_shard_count={
+                    3: ((relocated_identifier, 3, 3),),
+                }
+            ),
+            "relocation must change the owning shard",
+        ),
+        (
+            ShardCostProfile(
+                relocations_by_shard_count={
+                    3: (
+                        (relocated_identifier, 3, 2),
+                        (relocated_identifier, 3, 1),
+                    ),
+                }
+            ),
+            "duplicate CI shard relocation",
+        ),
+        (
+            ShardCostProfile(
+                relocations_by_shard_count={
+                    3: (("file:tests/test_a.py", 1, 2),),
+                }
+            ),
+            "weighted CI shard assignment produced an empty shard",
+        ),
+    )
+    for invalid_profile, message in invalid_profiles:
+        with pytest.raises(ValueError, match=message):
+            assign_test_families(families, 3, cost_profile=invalid_profile)
+
+    for invalid_index in (True, 1.5, "1"):
+        for invalid_relocation in (
+            (relocated_identifier, invalid_index, 2),
+            (relocated_identifier, 3, invalid_index),
+        ):
+            invalid_type = ShardCostProfile(
+                relocations_by_shard_count={
+                    3: (invalid_relocation,),  # type: ignore[arg-type]
+                }
+            )
+            with pytest.raises(
+                ValueError,
+                match="relocation indexes must be integer shard IDs",
+            ):
+                assign_test_families(families, 3, cost_profile=invalid_type)
 
 
 def test_weighted_assignment_rejects_an_empty_reserved_shard() -> None:
@@ -532,6 +629,52 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
     }
     assert CI_SHARD_COST_PROFILE.reserved_costs_by_shard_count[12] == (
         (0,) * 11 + (50,)
+    )
+    assert set(CI_SHARD_COST_PROFILE.relocations_by_shard_count) == {12}
+    tdm_prefix = "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
+    assert CI_SHARD_COST_PROFILE.relocations_by_shard_count[12] == (
+        (
+            tdm_prefix
+            + "test_eager_jit_vmap_key_forms_and_x64_keep_exact_actions_and_dtypes",
+            11,
+            1,
+        ),
+        (
+            tdm_prefix
+            + "test_policy_uses_exact_masks_and_ignores_misleading_marginals",
+            9,
+            4,
+        ),
+        (
+            tdm_prefix
+            + "test_dead_inactive_and_stunned_masks_produce_the_canonical_inert_action",
+            5,
+            2,
+        ),
+        (
+            tdm_prefix
+            + "test_dormant_task_history_and_lifecycle_fields_do_not_change_the_policy",
+            6,
+            4,
+        ),
+        ("residual:tests/test_visual_debugger_service.py", 6, 10),
+        (
+            tdm_prefix + "test_invalid_damage_modifier_never_suppresses_an_aged_trap",
+            1,
+            11,
+        ),
+        (
+            tdm_prefix + "test_mage_burst_uses_the_locked_configured_crowd_"
+            "and_covering_boundaries",
+            1,
+            4,
+        ),
+        (
+            tdm_prefix
+            + "test_warrior_charge_locks_health_trap_and_mage_burst_comparators",
+            1,
+            10,
+        ),
     )
     assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset(
         {
