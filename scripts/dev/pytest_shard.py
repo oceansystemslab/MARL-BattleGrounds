@@ -1,8 +1,8 @@
-"""Deterministically shard pytest by parameterized test family for CI.
+"""Deterministically shard pytest by test-file affinity for CI.
 
 Load this module with ``pytest -p scripts.dev.pytest_shard`` and pass an exact
-``--ci-shard=N/M`` selector.  Every parameterized instance of one test stays
-together while independent function families can run on separate workers.
+``--ci-shard=N/M`` selector. Every test file has one worker, and every
+parameterized instance of one test therefore remains together as well.
 """
 
 from __future__ import annotations
@@ -61,19 +61,25 @@ def family_key_from_item(item: Item) -> TestFamilyKey:
 def assign_test_families(
     item_counts: Mapping[TestFamilyKey, int], shard_count: int
 ) -> tuple[tuple[TestFamilyKey, ...], ...]:
-    """LPT-pack atomic test families by their collected item counts."""
+    """LPT-pack whole test files by their collected item counts."""
     if shard_count < 1:
         raise ValueError("shard_count must be positive")
     if any(count < 1 for count in item_counts.values()):
         raise ValueError("every test family must contain at least one item")
-    if len(item_counts) < shard_count:
-        raise ValueError("shard_count cannot exceed the number of test families")
+    families_by_path: dict[str, list[TestFamilyKey]] = {}
+    file_loads: Counter[str] = Counter()
+    for family, count in item_counts.items():
+        path = family[0]
+        families_by_path.setdefault(path, []).append(family)
+        file_loads[path] += count
+    if len(families_by_path) < shard_count:
+        raise ValueError("shard_count cannot exceed the number of test files")
 
     loads = [0] * shard_count
     assignments: list[list[TestFamilyKey]] = [[] for _ in range(shard_count)]
-    for family, count in sorted(item_counts.items(), key=lambda row: (-row[1], row[0])):
+    for path, count in sorted(file_loads.items(), key=lambda row: (-row[1], row[0])):
         shard_index = min(range(shard_count), key=lambda index: (loads[index], index))
-        assignments[shard_index].append(family)
+        assignments[shard_index].extend(families_by_path[path])
         loads[shard_index] += count
     return tuple(tuple(sorted(families)) for families in assignments)
 
@@ -84,7 +90,7 @@ def pytest_addoption(parser: Parser) -> None:
     group.addoption(
         "--ci-shard",
         metavar="N/M",
-        help="Run one deterministic test-family shard of the collected tests.",
+        help="Run one deterministic test-file-affinity shard of the collected tests.",
     )
 
 

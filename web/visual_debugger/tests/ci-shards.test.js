@@ -6,14 +6,16 @@ import { fileURLToPath } from "node:url";
 
 import {
   playwrightArgumentsForShard,
+  playwrightEnvironmentForShard,
+  validatedEnvironment,
   validatedCiManifest,
 } from "../e2e/support/run-ci-shard.js";
 
 const frontendRoot = fileURLToPath(new URL("..", import.meta.url));
 const playwrightCli = path.join(frontendRoot, "node_modules/@playwright/test/cli.js");
 
-/** @param {string[]} arguments_ */
-function collectedPlaywrightIds(arguments_) {
+/** @param {string[]} arguments_ @param {Record<string, string>} [environment] */
+function collectedPlaywrightIds(arguments_, environment = {}) {
   const result = spawnSync(
     process.execPath,
     [
@@ -28,7 +30,7 @@ function collectedPlaywrightIds(arguments_) {
     {
       cwd: frontendRoot,
       encoding: "utf8",
-      env: process.env,
+      env: { ...process.env, ...environment },
       maxBuffer: 32 * 1024 * 1024,
     },
   );
@@ -76,12 +78,46 @@ test("CI browser manifest is nonempty, exact, and eight-way", () => {
   assert.ok(manifest.shards.every((shard) => shard.files.length > 0));
   assert.deepEqual(
     manifest.shards.slice(0, 2).map((shard) => shard.test_titles?.length),
-    [4, 4],
+    [4, 3],
   );
-  assert.deepEqual(manifest.shards[2].files, [
+  assert.deepEqual(manifest.shards[2], {
+    files: ["authorized-presentation-install.spec.js"],
+    test_titles: [
+      "six real scientific trajectories preserve public causality and hidden-root privacy",
+    ],
+    env: { MARL_CP5_SLICE_5_ONLY: "1" },
+  });
+  assert.deepEqual(manifest.shards[4].files, [
+    "recording-handoff.spec.js",
     "authorized-presentation-renderer.spec.js",
     "resize.spec.js",
   ]);
+  assert.deepEqual(
+    manifest.shards.slice(6).map((shard) => shard.test_titles?.length),
+    [2, 1],
+  );
+});
+
+test("CI browser profile environment is additive", () => {
+  const manifest = validatedCiManifest();
+  assert.deepEqual(
+    playwrightEnvironmentForShard(manifest.shards[2], { PATH: "/bin" }),
+    { PATH: "/bin", MARL_CP5_SLICE_5_ONLY: "1" },
+  );
+});
+
+test("CI browser profile environment rejects unsafe or empty settings", () => {
+  for (const value of [
+    {},
+    { PATH: "/tmp" },
+    { MARL_EMPTY: "" },
+    { MARL_NON_STRING: 1 },
+  ]) {
+    assert.throws(
+      () => validatedEnvironment(value, "profile env"),
+      /environment object|nonempty MARL_\* string settings/u,
+    );
+  }
 });
 
 test("CI browser profiles are an exact disjoint cover of collected Playwright tests", {
@@ -93,7 +129,7 @@ test("CI browser profiles are an exact disjoint cover of collected Playwright te
     .map((filename) => `e2e/${filename}`);
   const complete = collectedPlaywrightIds(allFiles);
   const assignedByShard = manifest.shards.map((shard) =>
-    collectedPlaywrightIds(playwrightArgumentsForShard(shard)),
+    collectedPlaywrightIds(playwrightArgumentsForShard(shard), shard.env),
   );
   assert.ok(complete.length > 0);
   assert.ok(assignedByShard.every((ids) => ids.length > 0));

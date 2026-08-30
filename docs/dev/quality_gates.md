@@ -183,14 +183,14 @@ uv run pyright
 `scripts/dev/check.sh` runs the four Python review commands after the
 environment is prepared.
 
-CI performs ordinary pytest collection in every Python shard, then groups the
-collected items by test-family identity: the test path, pytest's exact parent
-collector node ID, and the item's unparameterized `originalname` when pytest
-provides it. Every parameterized instance of one test function therefore
-remains atomic, while independent functions from one module may use different
-workers. Parameterized class collectors remain distinct families because their
-parameter identity is part of pytest's parent node ID. Ten nonempty workers use
-deterministic longest-processing-time packing by collected item count.
+CI performs ordinary pytest collection in every Python shard, identifies each
+atomic test family by test path, exact parent collector node ID, and pytest's
+unparameterized `originalname`, then keeps all families from one test file on
+one worker. This file affinity preserves parameterized-family atomicity while
+avoiding repeated file-local fixtures and compiled execution paths across
+workers. Parameterized class collectors remain distinct internal families,
+but their file still has one owner. Twelve nonempty workers use deterministic
+longest-processing-time packing by total collected item count per file.
 
 After frontend changes have stopped, install the locked contributor toolchain
 and pinned Chromium, then run the complete frontend/browser gate once:
@@ -202,13 +202,15 @@ scripts/dev/check_frontend.sh
 ```
 
 With no arguments, the frontend script runs format check, lint, typecheck, unit
-tests, and the required Playwright E2E/visual inventory. CI runs one combined
-frontend format/lint/type/unit job with the minimal Python fixture-export
-environment, then distributes the exact browser inventory across eight
-validated, nonempty profiles. The long serial authorized-presentation install
-suite is split by exact collected test title without changing its serial mode;
-an executable list-only proof requires the eight profiles to be a disjoint,
-complete cover. Each profile retains one worker and file-local ordering.
+tests, and the required Playwright E2E/visual inventory. CI runs the combined
+frontend format/lint/type/unit gate inside one short browser profile, then
+distributes the exact browser inventory across eight validated, nonempty
+profiles. The long serial authorized-presentation install suite is split by
+exact collected test title without changing its serial mode; its six-trajectory
+profile uses the existing setup-isolation flag but executes the same collected
+test and assertions. An executable list-only proof requires the eight profiles
+to be a disjoint, complete cover. Each profile retains one worker and file-local
+ordering.
 Required CI does not retry deterministic failures, stops a red shard after its
 first failure, and enforces a five-minute job ceiling. The script does not
 install dependencies or update snapshots. Run it from the exact frozen commit
@@ -248,11 +250,12 @@ changes. CI uploads Playwright failure artifacts.
 
 GitHub Actions runs:
 
-- ten deterministic test-family Python shards plus one parallel Ruff/Pyright
-  job with locked `dev` and `viz` extras;
-- one combined frontend format/lint/type/unit job and eight isolated browser
-  profiles with pinned Playwright Chromium and shard-qualified failure
-  artifacts; and
+- twelve deterministic whole-file-affinity Python shards with Ruff formatting,
+  Ruff lint, and Pyright distributed across the matrix using locked `dev` and
+  `viz` extras;
+- eight isolated browser profiles with pinned Playwright Chromium,
+  shard-qualified failure artifacts, and the combined frontend
+  format/lint/type/unit gate folded into a short profile; and
 - focused self-hosted GPU sanity for the CUDA backend and compiled environment
   contracts, with the complete GPU regression scheduled or manually requested.
 

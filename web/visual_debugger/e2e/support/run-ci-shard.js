@@ -7,8 +7,8 @@ const frontendRoot = fileURLToPath(new URL("../..", import.meta.url));
 const e2eRoot = path.join(frontendRoot, "e2e");
 const manifestPath = path.join(e2eRoot, "ci-shards.json");
 
-/** @typedef {{files: string[], test_titles?: string[]}} CiShard */
-/** @typedef {{schema_version: 2, shards: CiShard[]}} CiManifest */
+/** @typedef {{files: string[], test_titles?: string[], env?: Record<string, string>}} CiShard */
+/** @typedef {{schema_version: 3, shards: CiShard[]}} CiManifest */
 
 /** @param {unknown} value @param {string} label */
 function validatedNonemptyStrings(value, label) {
@@ -44,6 +44,28 @@ function discoveredPlaywrightSpecFiles(directory, relativeDirectory = "") {
   return discovered.sort();
 }
 
+/** @param {unknown} value @param {string} label */
+export function validatedEnvironment(value, label) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${label} must be an environment object`);
+  }
+  const entries = Object.entries(value);
+  if (
+    entries.length === 0 ||
+    entries.some(
+      ([name, setting]) =>
+        !/^MARL_[A-Z0-9_]+$/u.test(name) ||
+        typeof setting !== "string" ||
+        setting.length === 0,
+    )
+  ) {
+    throw new Error(`${label} must contain nonempty MARL_* string settings`);
+  }
+  return Object.fromEntries(
+    entries.sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
 /** @returns {CiManifest} */
 export function validatedCiManifest() {
   const value = /** @type {unknown} */ (JSON.parse(readFileSync(manifestPath, "utf8")));
@@ -51,7 +73,7 @@ export function validatedCiManifest() {
     typeof value !== "object" ||
     value === null ||
     !("schema_version" in value) ||
-    value.schema_version !== 2 ||
+    value.schema_version !== 3 ||
     !("shards" in value) ||
     !Array.isArray(value.shards) ||
     value.shards.length !== 8
@@ -67,8 +89,12 @@ export function validatedCiManifest() {
       entry.files,
       `CI browser shard ${index + 1} files`,
     );
+    const env =
+      "env" in entry
+        ? validatedEnvironment(entry.env, `CI browser shard ${index + 1} env`)
+        : undefined;
     if (!("test_titles" in entry)) {
-      return { files };
+      return env === undefined ? { files } : { files, env };
     }
     const testTitles = validatedNonemptyStrings(
       entry.test_titles,
@@ -79,7 +105,9 @@ export function validatedCiManifest() {
         `CI browser shard ${index + 1} may select exact titles from only one file`,
       );
     }
-    return { files, test_titles: testTitles };
+    return env === undefined
+      ? { files, test_titles: testTitles }
+      : { files, test_titles: testTitles, env };
   });
 
   const actual = discoveredPlaywrightSpecFiles(e2eRoot);
@@ -100,7 +128,7 @@ export function validatedCiManifest() {
       throw new Error(`browser spec ${filename} assigns one title more than once`);
     }
   }
-  return { schema_version: 2, shards };
+  return { schema_version: 3, shards };
 }
 
 /** @param {string} value */
@@ -116,6 +144,14 @@ export function playwrightArgumentsForShard(shard) {
     args.push("--grep", `(?:^|\\s)(?:${alternatives})$`);
   }
   return args;
+}
+
+/**
+ * @param {CiShard} shard
+ * @param {NodeJS.ProcessEnv} inherited
+ */
+export function playwrightEnvironmentForShard(shard, inherited) {
+  return { ...inherited, ...(shard.env ?? {}) };
 }
 
 /** @param {string} value */
@@ -147,7 +183,11 @@ if (fileURLToPath(import.meta.url) === path.resolve(process.argv[1] ?? "")) {
       "playwright.config.js",
       ...forwarded,
     ],
-    { cwd: frontendRoot, env: process.env, stdio: "inherit" },
+    {
+      cwd: frontendRoot,
+      env: playwrightEnvironmentForShard(manifest.shards[shardIndex], process.env),
+      stdio: "inherit",
+    },
   );
   process.exit(result.status ?? 1);
 }
