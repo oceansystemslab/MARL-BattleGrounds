@@ -55,18 +55,21 @@ implementation jobs may run concurrently under the current GitHub-hosted
 account limit. Local validation may use the developer workstation's additional
 CPU concurrency.
 
-The six-minute `timeout-minutes` value on each substantive matrix job provides
-small scheduling and teardown headroom; it is not the end-to-end target because
-downstream aggregates necessarily run after their dependencies. Every
-publication candidate must still be checked against hosted timestamps. A
-material regression beyond the approximately five-minute target requires
-profiling and a CI-only follow-up, while ordinary single-digit timing variance
-does not. Rebalance intact work units within the current twelve-Python/eight-
-browser, twenty-job ceiling before increasing a timeout. If the slowest
-indivisible work unit physically cannot fit six minutes, raise the applicable
-timeout by exactly one minute at a time and stop at the first measured
-sufficient value. Never omit tests or weaken assertions to satisfy the timing
-target.
+The seven-minute Python and six-minute browser matrix-job timeouts provide
+small setup and teardown headroom; they are not the end-to-end target because
+downstream aggregates necessarily run after their dependencies. The Python
+ceiling was raised by exactly one minute after the slowest rebalanced pytest
+command measured 5:34.46, leaving insufficient room for hosted checkout,
+toolchain setup, and environment sync under the former six-minute whole-job
+ceiling. Every publication candidate must still be checked against hosted
+timestamps. A material regression beyond the approximately five-minute target
+requires profiling and a CI-only follow-up, while ordinary single-digit timing
+variance does not. Rebalance intact work units within the current twelve-
+Python/eight-browser, twenty-job ceiling before increasing a timeout. If the
+slowest indivisible work unit cannot fit the current ceiling, raise the
+applicable timeout by exactly one minute at a time and stop at the first
+measured sufficient value. Never omit tests or weaken assertions to satisfy
+the timing target.
 
 ## Authoritative Replay and Debugger integration baseline
 
@@ -251,11 +254,11 @@ profiles and use the same setup-isolation flag. An executable list-only proof
 requires the eight profiles to be a disjoint, complete cover. Each profile
 retains one worker and file-local ordering.
 Required CI does not retry deterministic failures, stops a red shard after its
-first failure, and initially enforces a six-minute matrix-job ceiling. Apply the
-one-minute escalation rule above only after measured rebalancing cannot make an
-indivisible unit fit. The script does not install dependencies or update
-snapshots. Run it from the exact frozen commit candidate. When a changed helper
-spawns a package manager, interpreter,
+first failure, and enforces the seven-minute Python and six-minute browser
+matrix-job ceilings. Apply the one-minute escalation rule above only after
+measured rebalancing cannot make an indivisible unit fit. The script does not
+install dependencies or update snapshots. Run it from the exact frozen commit
+candidate. When a changed helper spawns a package manager, interpreter,
 generated-artifact exporter, or browser, also exercise that path once from a
 clean worktree with cold local environment state; a warm developer
 environment can suppress first-run output and setup behavior that CI will
