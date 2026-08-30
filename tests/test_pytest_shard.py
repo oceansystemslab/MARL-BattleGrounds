@@ -1,19 +1,36 @@
 """Focused tests for deterministic weighted CI test-work-unit sharding."""
 
 from collections import Counter
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
+from _pytest.nodes import Item
 from scripts.dev.pytest_shard import (
     CI_SHARD_COST_PROFILE,
     ShardCostProfile,
     TestFamilyKey,
     assign_test_families,
     build_test_work_units,
+    dynamic_fixture_request_sites_from_item,
     family_key_from_metadata,
+    module_fixture_keys_from_item,
     parse_shard_spec,
     shard_costs,
     shard_loads,
+    validate_split_dynamic_fixture_requests,
+    validate_split_fixture_affinity,
 )
+
+
+@pytest.fixture(scope="module")
+def module_affinity_anchor() -> object:
+    return object()
+
+
+@pytest.fixture
+def indirect_affinity_anchor(module_affinity_anchor: object) -> object:
+    return module_affinity_anchor
 
 
 def test_parse_shard_spec_uses_one_based_cli_and_zero_based_internal_index() -> None:
@@ -171,6 +188,135 @@ def test_declared_slow_family_is_atomic_and_residual_file_stays_together() -> No
     )
 
 
+def test_split_fixture_affinity_rejects_every_shared_module_fixture_definition(
+    request: pytest.FixtureRequest,
+    indirect_affinity_anchor: object,
+) -> None:
+    del indirect_affinity_anchor
+    path = "tests/test_pytest_shard.py"
+    extracted = (
+        path,
+        f"{path}::test_split_fixture_affinity_rejects_every_shared_module_fixture_definition",
+    )
+    second_extracted = (path, f"{path}::test_second_extracted_family")
+    residual = (path, f"{path}::test_fixture_consumer")
+    node = cast(Item, request.node)
+    fixture_keys = module_fixture_keys_from_item(node)
+    request_sites = dynamic_fixture_request_sites_from_item(node)
+    module_fixture = (path, "module_affinity_anchor")
+    assert module_fixture in fixture_keys
+    assert node.nodeid in request_sites
+    profile = ShardCostProfile(
+        extracted_family_costs={extracted[1]: 100},
+        residual_file_costs={path: 40},
+        strict=True,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="split test families cannot share module-scoped fixtures",
+    ):
+        validate_split_fixture_affinity(
+            {
+                extracted: fixture_keys,
+                residual: frozenset({module_fixture}),
+            },
+            profile,
+        )
+
+    extracted_pair_profile = ShardCostProfile(
+        extracted_family_costs={
+            extracted[1]: 100,
+            second_extracted[1]: 90,
+        },
+        residual_file_costs={path: 40},
+        strict=True,
+    )
+    with pytest.raises(
+        ValueError,
+        match="split test families cannot share module-scoped fixtures",
+    ):
+        validate_split_fixture_affinity(
+            {
+                extracted: fixture_keys,
+                second_extracted: fixture_keys,
+                residual: frozenset({(path, "independent_module_fixture")}),
+            },
+            extracted_pair_profile,
+        )
+
+    validate_split_fixture_affinity(
+        {
+            extracted: fixture_keys,
+            residual: frozenset({(path, "independent_module_fixture")}),
+        },
+        profile,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="split test files cannot use pytest's dynamic request fixture API",
+    ):
+        validate_split_dynamic_fixture_requests(
+            {
+                extracted: request_sites,
+                residual: frozenset(),
+            },
+            profile,
+        )
+    validate_split_dynamic_fixture_requests(
+        {
+            extracted: frozenset(),
+            residual: frozenset(),
+        },
+        profile,
+    )
+
+    overridden_item = cast(
+        Item,
+        SimpleNamespace(
+            _fixtureinfo=SimpleNamespace(
+                name2fixturedefs={
+                    "shared_fixture": (
+                        SimpleNamespace(scope="module", baseid="tests/parent.py"),
+                        SimpleNamespace(scope="function", baseid=path),
+                    )
+                }
+            )
+        ),
+    )
+    assert ("tests/parent.py", "shared_fixture") in module_fixture_keys_from_item(
+        overridden_item
+    )
+
+    def project_fixture() -> None:
+        return None
+
+    dynamic_fixture_item = cast(
+        Item,
+        SimpleNamespace(
+            nodeid=f"{path}::test_dynamic_fixture_consumer",
+            _fixtureinfo=SimpleNamespace(
+                argnames=(),
+                name2fixturedefs={
+                    "project_fixture": (
+                        SimpleNamespace(
+                            argname="project_fixture",
+                            argnames=("request",),
+                            baseid=path,
+                            func=project_fixture,
+                            scope="function",
+                        ),
+                    )
+                },
+            ),
+        ),
+    )
+    assert dynamic_fixture_request_sites_from_item(dynamic_fixture_item) == frozenset(
+        {f"{path}::project_fixture"}
+    )
+
+
 def test_indivisible_measured_file_never_splits_between_shards() -> None:
     path = "tests/test_expensive_fixture.py"
     first = (path, f"{path}::test_first")
@@ -275,10 +421,9 @@ def test_strict_cost_profile_rejects_stale_entries(
         build_test_work_units({present: 1}, profile)
 
 
-def test_production_profile_names_and_weights_exactly_four_extracted_families() -> None:
+def test_production_profile_names_and_weights_exactly_five_extracted_families() -> None:
     assert CI_SHARD_COST_PROFILE.file_cost_overrides == {
         "tests/test_visual_debugger_replay_service.py": 400,
-        "tests/test_visual_debugger_sample_replays.py": 420,
     }
     assert CI_SHARD_COST_PROFILE.extracted_family_costs == {
         (
@@ -297,23 +442,35 @@ def test_production_profile_names_and_weights_exactly_four_extracted_families() 
             "tests/test_visual_debugger_service.py::"
             "test_every_scripted_scenario_preflights_each_successor_in_both_views"
         ): 500,
+        (
+            "tests/test_visual_debugger_sample_replays.py::"
+            "test_checked_samples_match_fresh_cpu_generation_scientific_truth"
+        ): 400,
     }
     assert CI_SHARD_COST_PROFILE.residual_file_costs == {
         "tests/test_visual_debugger_scenarios.py": 160,
         "tests/test_visual_debugger_service.py": 200,
+        "tests/test_visual_debugger_sample_replays.py": 500,
     }
     assert CI_SHARD_COST_PROFILE.reserved_costs_by_shard_count[12] == (
         (0,) * 11 + (50,)
     )
 
 
-def test_dominant_family_weights_keep_atomic_families_on_separate_shards() -> None:
+def test_dominant_units_preserve_hotspot_affinity_and_exact_ownership() -> None:
     semantic_path = "tests/test_semantic_inventory.py"
     preflight_path = "tests/test_hosted_preflight.py"
+    sample_path = "tests/test_sample_replays.py"
     semantic = (semantic_path, f"{semantic_path}::test_every_mechanic")
     preflight = (preflight_path, f"{preflight_path}::test_every_case")
+    independent_generation = (
+        sample_path,
+        f"{sample_path}::test_checked_samples_match_fresh_generation",
+    )
     semantic_residual = (semantic_path, f"{semantic_path}::test_residual")
     preflight_residual = (preflight_path, f"{preflight_path}::test_residual")
+    first_fixture_consumer = (sample_path, f"{sample_path}::test_first_fixture_user")
+    second_fixture_consumer = (sample_path, f"{sample_path}::test_second_fixture_user")
     ordinary = {
         (f"tests/test_{index}.py", f"tests/test_{index}.py::test_value"): 100
         for index in range(10)
@@ -321,13 +478,24 @@ def test_dominant_family_weights_keep_atomic_families_on_separate_shards() -> No
     counts: dict[TestFamilyKey, int] = {
         semantic: 1,
         preflight: 30,
+        independent_generation: 1,
         semantic_residual: 5,
         preflight_residual: 5,
+        first_fixture_consumer: 20,
+        second_fixture_consumer: 39,
         **ordinary,
     }
     profile = ShardCostProfile(
-        extracted_family_costs={semantic[1]: 500, preflight[1]: 500},
-        residual_file_costs={semantic_path: 100, preflight_path: 100},
+        extracted_family_costs={
+            semantic[1]: 500,
+            preflight[1]: 500,
+            independent_generation[1]: 400,
+        },
+        residual_file_costs={
+            semantic_path: 100,
+            preflight_path: 100,
+            sample_path: 500,
+        },
         strict=True,
     )
 
@@ -335,8 +503,17 @@ def test_dominant_family_weights_keep_atomic_families_on_separate_shards() -> No
 
     semantic_owner = next(shard for shard in assignments if semantic in shard)
     preflight_owner = next(shard for shard in assignments if preflight in shard)
+    sample_residual_owner = next(
+        shard for shard in assignments if first_fixture_consumer in shard
+    )
     assert semantic_owner == (semantic,)
     assert preflight_owner == (preflight,)
+    assert sample_residual_owner == (
+        first_fixture_consumer,
+        second_fixture_consumer,
+    )
+    assert independent_generation not in sample_residual_owner
+    assert sum(independent_generation in shard for shard in assignments) == 1
     flattened = tuple(family for shard in assignments for family in shard)
     assert set(flattened) == set(counts)
     assert len(flattened) == len(set(flattened))

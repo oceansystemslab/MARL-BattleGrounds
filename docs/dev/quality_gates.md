@@ -189,14 +189,21 @@ pytest's unparameterized `originalname`. Ordinary files remain single affinity
 units so file-local fixtures and compiled execution paths are not repeated
 across workers. A small, explicit runtime profile may extract a measured slow
 family from a declared hotspot file while keeping that parameterized family
-indivisible and all residual families together. Expensive module-fixture files
-remain indivisible. The hosted semantic-inventory and service-preflight
-families have deliberately dominant scheduling weights so each intact proof
-receives a dedicated worker. Twelve nonempty workers use deterministic weighted
-longest-processing-time packing, including reserved capacity for a static gate.
-Collection fails closed if a configured file or family disappears, moves, or
-would be assigned twice. The profile changes CI scheduling only; it never
-selects a smaller test inventory.
+indivisible and all residual families together. All consumers of an expensive
+module-scoped fixture remain in one residual affinity unit; a separately
+measured family that does not consume that fixture may be extracted without
+repeating fixture setup. Collection resolves statically declared transitive
+fixture dependencies and fails closed if a split would share a module-scoped
+fixture across workers. Pytest's dynamic `request` fixture API is prohibited
+inside profiled split files; collection rejects a split if a test or any
+non-pytest fixture in its resolved chain declares `request`.
+The hosted semantic-inventory and service-preflight
+families, plus the sample-replay fixture residual, have deliberately dominant
+scheduling weights so each intact proof receives a dedicated worker. Twelve
+nonempty workers use deterministic weighted longest-processing-time packing,
+including reserved capacity for a static gate. Collection fails closed if a
+configured file or family disappears, moves, or would be assigned twice. The
+profile changes CI scheduling only; it never selects a smaller test inventory.
 
 After frontend changes have stopped, install the locked contributor toolchain
 and pinned Chromium, then run the complete frontend/browser gate once:

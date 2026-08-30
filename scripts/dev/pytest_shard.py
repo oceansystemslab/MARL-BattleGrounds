@@ -18,6 +18,7 @@ from _pytest.config.argparsing import Parser
 from _pytest.nodes import Item
 
 type TestFamilyKey = tuple[str, str]
+type ModuleFixtureKey = tuple[str, str]
 
 
 def _empty_string_costs() -> dict[str, int]:
@@ -55,7 +56,6 @@ class TestWorkUnit:
 CI_SHARD_COST_PROFILE = ShardCostProfile(
     file_cost_overrides={
         "tests/test_visual_debugger_replay_service.py": 400,
-        "tests/test_visual_debugger_sample_replays.py": 420,
     },
     extracted_family_costs={
         (
@@ -74,10 +74,15 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
             "tests/test_visual_debugger_service.py::"
             "test_every_scripted_scenario_preflights_each_successor_in_both_views"
         ): 500,
+        (
+            "tests/test_visual_debugger_sample_replays.py::"
+            "test_checked_samples_match_fresh_cpu_generation_scientific_truth"
+        ): 400,
     },
     residual_file_costs={
         "tests/test_visual_debugger_scenarios.py": 160,
         "tests/test_visual_debugger_service.py": 200,
+        "tests/test_visual_debugger_sample_replays.py": 500,
     },
     reserved_costs_by_shard_count={12: (0,) * 11 + (50,)},
     strict=True,
@@ -130,6 +135,96 @@ def logical_path_from_family(family: TestFamilyKey) -> str:
     if not logical_path:
         raise ValueError("test family node ID must contain a logical test path")
     return logical_path
+
+
+def module_fixture_keys_from_item(item: Item) -> frozenset[ModuleFixtureKey]:
+    """Return resolved module-scoped fixtures in an item's transitive closure."""
+    fixture_info = getattr(item, "_fixtureinfo", None)
+    fixture_defs_by_name = getattr(fixture_info, "name2fixturedefs", {})
+    fixture_keys: set[ModuleFixtureKey] = set()
+    for fixture_name, fixture_defs in fixture_defs_by_name.items():
+        for fixture_def in fixture_defs or ():
+            if fixture_def.scope == "module":
+                fixture_keys.add((fixture_def.baseid, fixture_name))
+    return frozenset(fixture_keys)
+
+
+def dynamic_fixture_request_sites_from_item(item: Item) -> frozenset[str]:
+    """Return non-pytest call sites that can select fixtures dynamically."""
+    fixture_info = getattr(item, "_fixtureinfo", None)
+    request_sites: set[str] = set()
+    if "request" in getattr(fixture_info, "argnames", ()):
+        request_sites.add(item.nodeid)
+    fixture_defs_by_name = getattr(fixture_info, "name2fixturedefs", {})
+    for fixture_defs in fixture_defs_by_name.values():
+        for fixture_def in fixture_defs or ():
+            fixture_module = getattr(fixture_def.func, "__module__", "")
+            is_pytest_builtin = fixture_module == "pytest" or fixture_module.startswith(
+                "_pytest."
+            )
+            if "request" in fixture_def.argnames and not is_pytest_builtin:
+                request_sites.add(f"{fixture_def.baseid}::{fixture_def.argname}")
+    return frozenset(request_sites)
+
+
+def validate_split_fixture_affinity(
+    module_fixtures_by_family: Mapping[TestFamilyKey, frozenset[ModuleFixtureKey]],
+    cost_profile: ShardCostProfile,
+) -> None:
+    """Reject a split that would construct one module fixture on two workers."""
+    extracted_nodeids = set(cost_profile.extracted_family_costs)
+    extracted_paths = {
+        nodeid.split("::", maxsplit=1)[0] for nodeid in extracted_nodeids
+    }
+    for logical_path in sorted(extracted_paths):
+        fixture_owners: dict[ModuleFixtureKey, set[str]] = {}
+        for family, fixture_keys in module_fixtures_by_family.items():
+            if logical_path_from_family(family) != logical_path:
+                continue
+            work_unit = (
+                f"family:{family[1]}"
+                if family[1] in extracted_nodeids
+                else f"residual:{logical_path}"
+            )
+            for fixture_key in fixture_keys:
+                fixture_owners.setdefault(fixture_key, set()).add(work_unit)
+        shared_fixtures = {
+            fixture_key: sorted(owners)
+            for fixture_key, owners in fixture_owners.items()
+            if len(owners) > 1
+        }
+        if shared_fixtures:
+            labels = {
+                f"{baseid}::{name}": owners
+                for (baseid, name), owners in sorted(shared_fixtures.items())
+            }
+            raise ValueError(
+                f"split test families cannot share module-scoped fixtures: {labels}"
+            )
+
+
+def validate_split_dynamic_fixture_requests(
+    request_sites_by_family: Mapping[TestFamilyKey, frozenset[str]],
+    cost_profile: ShardCostProfile,
+) -> None:
+    """Reject dynamic fixture selection inside any profiled split test file."""
+    split_paths = {
+        nodeid.split("::", maxsplit=1)[0]
+        for nodeid in cost_profile.extracted_family_costs
+    }
+    request_sites = sorted(
+        {
+            request_site
+            for family, family_request_sites in request_sites_by_family.items()
+            if logical_path_from_family(family) in split_paths
+            for request_site in family_request_sites
+        }
+    )
+    if request_sites:
+        raise ValueError(
+            "split test files cannot use pytest's dynamic request fixture API: "
+            f"{request_sites}"
+        )
 
 
 def _positive_costs(values: Mapping[str, int], label: str) -> None:
@@ -280,7 +375,30 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
 
     shard_index, shard_count = parse_shard_spec(raw_spec)
     families = tuple(family_key_from_item(item) for item in items)
+    module_fixtures_by_family: dict[TestFamilyKey, set[ModuleFixtureKey]] = {}
+    request_sites_by_family: dict[TestFamilyKey, set[str]] = {}
+    for item, family in zip(items, families, strict=True):
+        module_fixtures_by_family.setdefault(family, set()).update(
+            module_fixture_keys_from_item(item)
+        )
+        request_sites_by_family.setdefault(family, set()).update(
+            dynamic_fixture_request_sites_from_item(item)
+        )
     try:
+        validate_split_fixture_affinity(
+            {
+                family: frozenset(fixture_keys)
+                for family, fixture_keys in module_fixtures_by_family.items()
+            },
+            CI_SHARD_COST_PROFILE,
+        )
+        validate_split_dynamic_fixture_requests(
+            {
+                family: frozenset(request_sites)
+                for family, request_sites in request_sites_by_family.items()
+            },
+            CI_SHARD_COST_PROFILE,
+        )
         assignments = assign_test_families(
             Counter(families),
             shard_count,
