@@ -232,7 +232,7 @@ class PolicyFacts(NamedTuple):
     focal_features: Array  # (58,) float32
     ally_features: Array  # (5, 58) float32
     enemy_features: Array  # (5, 58) float32
-    obstacles: Array  # (16, 8) float32
+    obstacles: Array  # (MAX_OBSTACLE_SLOTS, 8) float32
     ally_visible: Array  # (5,) bool
     enemy_visible: Array  # (5,) bool
     own_active: Array  # (5,) bool

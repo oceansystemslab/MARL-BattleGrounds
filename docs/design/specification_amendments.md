@@ -1131,3 +1131,36 @@ SharedObs actor-input export remains unavailable until the Milestone 12
 compositor is implemented, performance-tested, and accepted. Presentation and
 replay support therefore do not activate SharedObs training or authorize any
 claim that the composed learner tensor is available.
+
+## A18. Final pre-alpha obstacle-capacity expansion
+
+**Classification:** one-time, approved pre-alpha V1 schema migration.
+**Supersedes:** V1 immutability and schema-freeze clauses only where they fix
+the obstacle-slot axis at 16. All other V1 identities and semantic contracts
+remain unchanged.
+
+The combined wall-and-pillar capacity expands from 16 to 32. Resolved
+configuration therefore carries exactly `[32, 8]` obstacle rows, and each
+captured base observation carries exactly `[10, 32, 8]`. The independent V1
+evaluation wire constant advances to the same capacity without importing the
+live simulator constant.
+
+Active obstacles occupy one contiguous, semantically ordered prefix. Every
+inactive row is canonical all-zero padding. Appending places an obstacle at the
+end of the active prefix, deletion compacts that prefix, and explicit reordering
+changes fixed-slot order. Rows 16 through 31 must reach policy observation,
+capture, replay, presentation, and rendering whenever the simulator consumes
+them for collision, movement legality, or line of sight.
+
+This is the final approved pre-alpha in-place V1 break. Existing development
+replays, fixtures, schemas, manifests, metric companions, and content digests
+are disposable and must be regenerated at 32 rows. No V2 family, legacy loader,
+dual-schema branch, padding compatibility shim, or alias for 16-row artifacts
+is authorized. V1 refreezes at 32 immediately after the migration.
+
+For every pre-migration layout with at most 16 active obstacles, the original
+obstacle prefix, state, action masks, rewards, and transitions remain unchanged;
+the observation change is only the added canonical zero tail and consequent
+artifact identities. Obstacle geometry, overlap, ordering, collision, movement,
+visibility, line-of-sight, observation-redaction, and rendering semantics do not
+otherwise change.

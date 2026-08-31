@@ -56,6 +56,7 @@ from marl_battlegrounds.core.types import (
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
+    MAX_OBSTACLE_SLOTS,
     MOVE_EAST,
     MOVE_STAY,
     MOVE_WEST,
@@ -187,7 +188,7 @@ def _policy_facts(
         focal_features=focal_row,
         ally_features=ally_features,
         enemy_features=enemy_features,
-        obstacles=jnp.zeros((16, 8), dtype=jnp.float32),
+        obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, 8), dtype=jnp.float32),
         ally_visible=own_active,
         enemy_visible=enemy_active,
         own_active=own_active,
@@ -302,7 +303,10 @@ def _assert_scalar_policy_input_contract(
     assert observation.self_features.shape == (58,), "self_features shape"
     assert observation.ally_unit_features.shape == (5, 58), "ally feature shape"
     assert observation.enemy_unit_features.shape == (5, 58), "enemy feature shape"
-    assert observation.map_obstacle_features.shape == (16, 8), "obstacle shape"
+    assert observation.map_obstacle_features.shape == (
+        MAX_OBSTACLE_SLOTS,
+        8,
+    ), "obstacle shape"
     assert observation.ally_visibility_mask.shape == (5,), "ally visibility shape"
     assert observation.enemy_visibility_mask.shape == (5,), "enemy visibility shape"
     assert action_mask.move_mask.shape == (9,), "move support shape"
@@ -524,7 +528,7 @@ def test_adapter_selects_only_authorized_fixed_shape_facts() -> None:
     assert facts.focal_features.shape == (58,)
     assert facts.ally_features.shape == (5, 58)
     assert facts.enemy_features.shape == (5, 58)
-    assert facts.obstacles.shape == (16, 8)
+    assert facts.obstacles.shape == (MAX_OBSTACLE_SLOTS, 8)
     assert facts.own_active.shape == (5,)
     assert facts.enemy_active.shape == (5,)
     assert facts.own_alive.shape == (5,)
@@ -2096,7 +2100,9 @@ def test_invalid_map_only_neutralizes_the_endpoint_obstruction_predicate(
     obstacle = obstacle.at[OBSTACLE_FEATURE_RADIUS].set(0.1)
     obstacle = obstacle.at[OBSTACLE_FEATURE_ACTIVE].set(1.0)
     facts = _policy_facts(focal, enemies=enemies)._replace(
-        obstacles=jnp.zeros((16, 8), dtype=jnp.float32).at[0].set(obstacle),
+        obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, 8), dtype=jnp.float32)
+        .at[MAX_OBSTACLE_SLOTS - 1]
+        .set(obstacle),
         map_width=jnp.asarray(0.0, dtype=jnp.float32),
     )
 
@@ -2133,7 +2139,9 @@ def test_invalid_focal_radius_preserves_independent_los_obstruction(
     obstacle = obstacle.at[OBSTACLE_FEATURE_RADIUS].set(0.1)
     obstacle = obstacle.at[OBSTACLE_FEATURE_ACTIVE].set(1.0)
     facts = _policy_facts(focal, enemies=enemies)._replace(
-        obstacles=jnp.zeros((16, 8), dtype=jnp.float32).at[0].set(obstacle),
+        obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, 8), dtype=jnp.float32)
+        .at[MAX_OBSTACLE_SLOTS - 1]
+        .set(obstacle),
     )
 
     actual = policy_module._obstruction(

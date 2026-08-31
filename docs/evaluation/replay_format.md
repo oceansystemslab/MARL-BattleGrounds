@@ -46,11 +46,20 @@ fallback, compatibility shim, or parallel V2 model family for that approved
 in-place expansion. After the alpha schema freeze, any incompatible wire
 change requires a schema-version bump.
 
+[Amendment A18](../design/specification_amendments.md#a18-final-pre-alpha-obstacle-capacity-expansion)
+authorizes the final pre-alpha V1 shape expansion: the ordered obstacle axis is
+now exactly 32 rows in resolved configuration and exactly `[10, 32, 8]` in
+captured base observations. Active walls and pillars occupy a contiguous
+ordered prefix and every inactive row is canonical all-zero padding.
+Development V1 artifacts created with 16 rows are disposable and are
+regenerated in place; there is no V2 alias, legacy loader, or compatibility
+shim. V1 is refrozen at 32 rows after this migration.
+
 The current V1 writers, readers, validators, canonical bytes, and digests stay
 unchanged. Milestone 10 must introduce an explicit future V2 context and replay
 binding before mixed per-slot execution-information assignments become an
 official artifact. V2 must use version dispatch rather than field guessing or
-silent V1 reinterpretation; existing V1 artifacts retain their original bytes,
+silent V1 reinterpretation; post-A18 V1 artifacts retain their original bytes,
 identities, and digests.
 
 That future mixed-capable normal form remains one physical episode record: one
@@ -319,8 +328,9 @@ not by itself confer official status. Official consumers must subsequently call
 `validate_official_scenario_evaluation_record_v2`, whose deliberately separate
 host boundary rehydrates and checks the carried configuration and curated state
 against current core authorities. Evaluation-owned V1 wire dimensions are
-frozen for artifact decoding and checked against the current core dimensions in
-ordinary tests; changing them requires an explicit schema migration. The V1
+frozen at the post-A18 values for artifact decoding and checked against the
+current core dimensions in ordinary tests; changing them again requires an
+explicit schema migration. The V1
 filesystem backend requires POSIX directory-descriptor and no-follow support so
 every component and final operation remain bound to one opened directory inode;
 it fails closed with `unsupported_platform` when those guarantees are unavailable.

@@ -11,14 +11,25 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import jax.numpy as jnp
 import pytest
 from pydantic import TypeAdapter
 from scripts.dev.visual_debugger import static_renderer
 from tests.evaluation_fixtures import (
     CapturedEvaluationTrajectory,
     captured_evaluation_trajectory,
+    evaluation_env_config,
 )
 
+from marl_battlegrounds.core.types import (
+    MAX_OBSTACLE_SLOTS,
+    OBSTACLE_FEATURE_ACTIVE,
+    OBSTACLE_FEATURE_RADIUS,
+    OBSTACLE_FEATURE_TYPE,
+    OBSTACLE_FEATURE_X,
+    OBSTACLE_FEATURE_Y,
+    OBSTACLE_TYPE_PILLAR,
+)
 from marl_battlegrounds.evaluation.metrics import (
     EvaluationEpisodeObserverV1,
     EvaluationTransitionViewV1,
@@ -338,6 +349,44 @@ def test_researcher_scene_v2_projects_only_canonical_context_and_frame_truth(
         scene.next_decision_selected_legality.lane_0_available
         == frame.action_mask.select_target_use_ultimate_joint_mask[0][target_action][0]
     )
+
+
+def test_slot_31_reaches_capture_actor_pov_and_researcher_rendering() -> None:
+    """The expanded obstacle tail stays visible through every public join."""
+    config = evaluation_env_config()
+    pillar = jnp.zeros((8,), dtype=jnp.float32)
+    pillar = pillar.at[OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_PILLAR)
+    pillar = pillar.at[OBSTACLE_FEATURE_X].set(10.0)
+    pillar = pillar.at[OBSTACLE_FEATURE_Y].set(6.0)
+    pillar = pillar.at[OBSTACLE_FEATURE_RADIUS].set(0.75)
+    pillar = pillar.at[OBSTACLE_FEATURE_ACTIVE].set(1.0)
+    config = config._replace(
+        obstacles=config.obstacles.at[MAX_OBSTACLE_SLOTS - 1].set(pillar)
+    )
+    trajectory = captured_evaluation_trajectory(
+        transition_count=0,
+        expected_horizon=config.max_steps,
+        config=config,
+    )
+    frame = trajectory.frames[0]
+
+    actor_pov = build_actor_pov_current_slice_v1(
+        trajectory.context,
+        frame,
+        global_slot=0,
+    )
+    researcher = build_researcher_analyzer_projection_v2(
+        trajectory.context,
+        frame,
+    )
+
+    captured_row = frame.base_observation.map_obstacle_features[0][-1]
+    assert captured_row[OBSTACLE_FEATURE_ACTIVE] == 1.0
+    assert actor_pov.frame.map_obstacle_features[-1] == captured_row
+    assert tuple(row.obstacle_id for row in researcher.scene.map.obstacles) == (
+        "obstacle-31",
+    )
+    assert researcher.scene.map.obstacles[0].kind == "pillar"
 
 
 def test_oracle_scene_static_authority_rejects_cross_context_and_static_poison(

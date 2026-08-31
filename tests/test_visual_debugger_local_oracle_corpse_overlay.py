@@ -53,6 +53,7 @@ from marl_battlegrounds.evaluation.models import (
 )
 from marl_battlegrounds.evaluation.pov import build_actor_pov_current_slice_v1
 from marl_battlegrounds.evaluation.replay_io import LoadedReplayBundleV1
+from marl_battlegrounds.evaluation.wire_shapes import MAX_OBSTACLE_SLOTS_V1
 from marl_battlegrounds.rendering.authorized_pov_scene import (
     SharedObsAuthorizedScenePartsV1,
     build_no_shared_obs_authorized_scene_v1,
@@ -557,7 +558,8 @@ def _padded_obstacles(
 ) -> tuple[ResolvedObstacleV1, ...]:
     by_slot = {row.obstacle_slot: row for row in active_rows}
     return tuple(
-        by_slot.get(slot, _resolved_obstacle(obstacle_slot=slot)) for slot in range(16)
+        by_slot.get(slot, _resolved_obstacle(obstacle_slot=slot))
+        for slot in range(MAX_OBSTACLE_SLOTS_V1)
     )
 
 

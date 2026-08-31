@@ -128,12 +128,6 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
                 2,
             ),
             (
-                "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
-                "test_dormant_task_history_and_lifecycle_fields_do_not_change_the_policy",
-                6,
-                4,
-            ),
-            (
                 "residual:tests/test_visual_debugger_service.py",
                 6,
                 10,
