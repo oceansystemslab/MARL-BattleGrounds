@@ -43,17 +43,57 @@ concretely:
 Efficiency is part of the Software Engineering North Star. Duplicate proof and
 unbounded serialized test time are process defects, not signs of rigor.
 
+## Mandatory Codex candidate qualification
+
+Immediately before every Codex-authored commit, stage the exact final
+candidate and run:
+
+```bash
+scripts/dev/check_before_commit.sh
+```
+
+The wrapper requires a fully staged candidate with no tracked unstaged changes
+or nonignored untracked candidate files. It fingerprints those bytes, runs the
+complete CPU Python and frontend/browser inventories, and rejects any candidate
+mutation during validation. Any byte change after a pass invalidates that pass
+and requires the complete command to be run again before committing.
+
+Dependency installation remains a separate preparation step. The validation
+scripts use the existing Python sharder and browser profile manifest as their
+only test-inventory authorities; the wrapper does not define another scheduler
+or duplicate test membership. Both ordinary gates force the CPU backend so a
+GPU-equipped workstation cannot accidentally execute broad contributor tests
+through CUDA. Both canonical gates reject deprecated platform selectors and JIT
+disablement that could conflict with CPU selection or replace compiled proofs
+with eager execution. The Python gate also rejects ambient pytest options that
+could omit tests. The frontend gate forces Playwright's CI-only checks and rejects
+ambient selector or capture variables that could reduce or alter the executed
+browser inventory.
+
+Before Codex pushes a commit, opens a PR, merges, or qualifies a release, the
+exact clean commit must also pass the maintainer-only local GPU gate:
+
+```bash
+scripts/dev/check_gpu.sh
+```
+
+Ordinary contributors do not need an NVIDIA GPU. `--allow-dirty` is useful for
+diagnosis but is explicitly not release-qualification evidence. A local pass
+is strong CI-parity evidence, not a guarantee that GitHub-hosted runners or the
+service itself will succeed; after publication, every required hosted aggregate
+must still be checked.
+
 ## Evidence economics and CI runtime budget
 
-The required push/PR pipeline targets an approximately five-minute repository-
-controlled critical path, measured from the first hosted job's `started_at`
-timestamp through the later stable aggregate's `completed_at` timestamp. GitHub
-queue delay before runner start is external and reported separately. Sharding is
-explicitly permitted—and expected—when it preserves an exact, non-overlapping
-test inventory. Aggregate jobs retain the stable required-check names; twenty
-implementation jobs may run concurrently under the current GitHub-hosted
-account limit. Local validation may use the developer workstation's additional
-CPU concurrency.
+The required push/PR pipeline initially targets an approximately six-minute
+repository-controlled critical path, measured from the first hosted job's
+`started_at` timestamp through the later stable aggregate's `completed_at`
+timestamp. GitHub queue delay before runner start is external and reported
+separately. Sharding is explicitly permitted—and expected—when it preserves an
+exact, non-overlapping test inventory. Aggregate jobs retain the stable
+required-check names; twenty implementation jobs may run concurrently under
+the current GitHub-hosted account limit. Local validation may use the developer
+workstation's additional CPU concurrency.
 
 The nine-minute Python and six-minute browser matrix-job timeouts are runaway-
 job safety ceilings, not performance targets. Downstream aggregates
@@ -66,16 +106,32 @@ test failure.
 The scheduler therefore smooths eight exact, fixture-safe work units from
 measured overloaded shards into shards with measured headroom. It fails closed
 if a future collection changes an expected source owner. The resulting local
-12-way proof selects all 3,397 tests exactly once: pytest time ranges from 3:38
+12-way proof selects all 3,403 tests exactly once: pytest time ranges from 3:38
 to 4:34 and whole-command wall time from 3:50 to 4:50. Every publication
 candidate must still be checked against hosted timestamps. A material
-regression beyond the approximately five-minute target requires profiling and
+regression beyond the approximately six-minute target requires profiling and
 an actionable CI-only follow-up; ordinary timing variance does not. Rebalance
 intact work units within the current twelve-Python/eight-browser, twenty-job
 ceiling before changing a timeout. Once that split is exhausted, let valid
 work finish under a generous safety ceiling. Do not cancel and rerun unchanged
 work; adjust the ceiling only with measured headroom or another concrete
 correction. Never omit tests or weaken assertions to satisfy the timing target.
+
+The twelve Python shards and eight browser profiles are continuing ownership
+obligations, not a one-time optimization. Any change that adds, removes,
+renames, moves, or parameterizes tests must re-prove that the relevant inventory
+is an exact, disjoint cover and review measured shard/profile elapsed times.
+Rebalance intact work units first; if one test file is the irreducible hotspot,
+split that file mechanically into coherent test-family files without weakening
+or changing its assertions. Keep parameterized families and fixture-affinity
+boundaries intact.
+
+If measured evidence proves the current six-minute target unattainable after
+safe balancing at the twelve-plus-eight, twenty-job ceiling, increase the
+documented target by exactly one minute. Record the measurements and the reason
+no further safe redistribution exists. Never omit tests, duplicate execution,
+weaken assertions, or cancel a valid run merely because it crossed the target.
+Cancel only when a concrete corrective change is ready to apply before rerun.
 
 ## Authoritative Replay and Debugger integration baseline
 
@@ -101,9 +157,9 @@ Put each assertion at the cheapest layer that can genuinely disprove the risk:
   boundary: native focus, hit testing, responsive geometry, authority clearing,
   public causal flows, privacy across rendered surfaces, exact-once recovery,
   and a small representative visual baseline.
-- GPU CI owns backend discovery plus focused compiled JAX compatibility. The
-  complete CPU suite is not rerun on the GPU for every push; a complete GPU
-  regression is scheduled or explicitly requested.
+- Local maintainer GPU qualification owns CUDA backend discovery plus focused
+  compiled JAX compatibility. The complete CPU suite is never rerun on the GPU
+  as part of this gate, and no full GPU regression is required.
 
 Do not keep a browser test merely because one incidental CSS value or catalog
 member is unique. Exhaustive mechanic cross-products, repeated viewport tours,
@@ -184,23 +240,22 @@ runtime strings may differ across CPU/CUDA/PJRT installations.
 
 ## Complete local closeout gates
 
-These commands are available for release closeout, manual full verification,
-or environments without the CI shard matrix. They are not an instruction to
-duplicate the same complete inventory locally before every push.
+These scripts are the canonical complete local inventories. Codex runs both
+through `check_before_commit.sh` immediately before every commit; a human may
+also invoke either gate independently for release closeout or manual full
+verification.
 
 After Python changes have stopped, prepare the locked environment and run the
 complete Python gate once:
 
 ```bash
 uv sync --locked --extra dev --extra viz
-uv run pytest
-uv run ruff format --check .
-uv run ruff check .
-uv run pyright
+scripts/dev/check.sh
 ```
 
-`scripts/dev/check.sh` runs the four Python review commands after the
-environment is prepared.
+`scripts/dev/check.sh` forces `JAX_PLATFORMS=cpu`, runs all twelve Python shards
+as an exact cover, and runs Ruff format checking, Ruff lint, and Pyright once
+after the environment is prepared. It does not install or update dependencies.
 
 CI performs ordinary pytest collection in every Python shard and identifies
 each atomic test family by test path, exact parent collector node ID, and
@@ -260,10 +315,12 @@ profiles and use the same setup-isolation flag. An executable list-only proof
 requires the eight profiles to be a disjoint, complete cover. Each profile
 retains one worker and file-local ordering.
 Required CI does not retry deterministic failures, stops a red shard after its
-first failure, and enforces the nine-minute Python and six-minute browser
-matrix-job safety ceilings. Rebalance measured work before changing a ceiling,
-and never cancel unchanged valid work merely to enforce the performance
-target. The script does not install dependencies or update snapshots. Run it
+first failure, and enforces matrix-job safety ceilings that are deliberately
+larger than the current performance target. Rebalance measured work before
+changing a ceiling, and never cancel unchanged valid work merely to enforce the
+performance target. When safe balancing is exhausted, raise the target by one
+minute with recorded evidence rather than repeatedly terminating the same valid
+workload. The script does not install dependencies or update snapshots. Run it
 from the exact frozen commit candidate. When a changed helper spawns a package
 manager, interpreter,
 generated-artifact exporter, or browser, also exercise that path once from a
@@ -307,9 +364,10 @@ GitHub Actions runs:
   locked `dev` and `viz` extras;
 - eight isolated browser profiles with pinned Playwright Chromium,
   shard-qualified failure artifacts, and the combined frontend
-  format/lint/type/unit gate folded into a short profile; and
-- focused self-hosted GPU sanity for the CUDA backend and compiled environment
-  contracts, with the complete GPU regression scheduled or manually requested.
+  format/lint/type/unit gate folded into a short profile.
+
+GitHub Actions does not target a self-hosted GPU. GPU qualification is a
+deliberate local maintainer gate described in `docs/dev/gpu_sanity.md`.
 
 Pre-commit hooks remain fast hygiene, not a substitute for the affected
 behavioral proof or final closeout gates.
