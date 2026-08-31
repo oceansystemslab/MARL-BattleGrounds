@@ -12,6 +12,7 @@ from scripts.dev.visual_debugger.server import (
     LIVE_HTTP_ROUTES,
     REPLAY_HTTP_ROUTES,
     GracefulCloseResult,
+    HttpAuthoringBinding,
     HttpCoordinatorBinding,
     HttpCoordinatorReplacement,
     HttpCoordinatorRouter,
@@ -27,7 +28,12 @@ class RecordingDebuggerCoordinator:
 
     __slots__ = ("_live_binding", "_router", "_service")
 
-    def __init__(self, service: DebuggerService) -> None:
+    def __init__(
+        self,
+        service: DebuggerService,
+        *,
+        authoring: HttpAuthoringBinding | None = None,
+    ) -> None:
         if type(service) is not DebuggerService:
             raise TypeError("recording coordinator requires exact DebuggerService")
         if service.recording_status is None:
@@ -42,6 +48,7 @@ class RecordingDebuggerCoordinator:
             apply_command=self.apply_command,
             current_presentation=service.current_presentation,
             current_metric_report=None,
+            authoring=authoring,
         )
         self._router = HttpCoordinatorRouter(
             service=service,

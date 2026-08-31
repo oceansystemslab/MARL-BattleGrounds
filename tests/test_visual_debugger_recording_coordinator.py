@@ -17,6 +17,7 @@ from scripts.dev.visual_debugger.evaluation_bridge import (
 )
 from scripts.dev.visual_debugger.presentation_protocol import (
     LiveOracleAuthorizedPresentationFrameV1,
+    ReplayNoSharedObsAuthorizedPresentationFrameV1,
     ReplayOracleAuthorizedPresentationFrameV1,
 )
 from scripts.dev.visual_debugger.protocol import (
@@ -36,12 +37,14 @@ from scripts.dev.visual_debugger.recording_coordinator import (
     RecordingDebuggerCoordinator,
 )
 from scripts.dev.visual_debugger.replay_protocol import (
+    ActorPovReplayViewerFrameV1,
     ReplayCommandRequestV1,
     ReplayCommandResponseV1,
     ReplayCommandV1,
     ReplayLastFrameCommandV1,
     ReplayNextFrameCommandV1,
     ReplaySelectAgentCommandV1,
+    ReplaySetViewCommandV1,
     ResearcherReplayTimelineV1,
     ResearcherReplayViewerFrameV1,
     SharedObsAgentPovReplayTimelineV1,
@@ -54,6 +57,9 @@ from scripts.dev.visual_debugger.service import DebuggerService
 from tests.export_visual_debugger_replay_artifacts import export_artifacts
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
+from marl_battlegrounds.evaluation.actor_projection import (
+    NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+)
 from marl_battlegrounds.evaluation.models import (
     EvaluationFrameV1,
     EvaluationTransitionV1,
@@ -200,7 +206,7 @@ def test_presentation_command_keeps_the_exact_live_binding(tmp_path: Path) -> No
 def test_finish_installs_replay_before_return_and_starts_settled_at_zero(
     tmp_path: Path,
 ) -> None:
-    coordinator = _coordinator(tmp_path)
+    coordinator, recorder = _coordinator_and_recorder(tmp_path)
     live = coordinator.router.snapshot()
     assert live.binding.current_metric_report is None
     live_presentation_result = live.binding.current_presentation()
@@ -254,6 +260,31 @@ def test_finish_installs_replay_before_return_and_starts_settled_at_zero(
     assert metric_result.filename.endswith(".marlbg-metrics.json")
 
     assert replay.binding.apply_command is not None
+    viewer = cast(ReplayViewerService, replay.service)
+    assert recorder.verified_loaded_bundle is not None
+    assert (
+        recorder.verified_loaded_bundle.replay.header.context.actor_projection
+        == NO_SHARED_OBS_ACTOR_PROJECTION_V2
+    )
+    opened = viewer.apply_command(
+        _replay_request(
+            viewer,
+            "open-recorded-no-shared-agent-pov",
+            ReplaySetViewCommandV1(view_mode="pov"),
+        )
+    )
+    assert opened.outcome == "response"
+    assert isinstance(opened.payload, ReplayCommandResponseV1)
+    assert type(opened.payload.frame) is ActorPovReplayViewerFrameV1
+    agent_presentation = viewer.current_presentation()
+    assert agent_presentation.outcome == "response"
+    assert (
+        type(agent_presentation.payload)
+        is ReplayNoSharedObsAuthorizedPresentationFrameV1
+    )
+    assert (
+        agent_presentation.payload.authority.exact_actor_input_export_available is False
+    )
 
 
 def test_recording_handoff_http_gets_use_actual_private_shared_roots(

@@ -100,8 +100,14 @@ const SCENARIO_METADATA_KEYS_V1 = Object.freeze([
   "title",
 ]);
 
+const COMBAT_CONFIGURATION_KEYS_V1 = Object.freeze([
+  "execution_information_mode",
+  "team_b_controller",
+]);
+
 const RESEARCHER_LIVE_FRAME_KEYS_V2 = Object.freeze([
   "available_scenarios",
+  "combat_configuration",
   "episode_id",
   "frame_id",
   "frame_index",
@@ -125,6 +131,7 @@ const RESEARCHER_LIVE_FRAME_KEYS_V2 = Object.freeze([
 ]);
 
 const ACTOR_POV_LIVE_FRAME_KEYS_V2 = Object.freeze([
+  "combat_configuration",
   "episode_id",
   "frame_id",
   "frame_index",
@@ -133,6 +140,28 @@ const ACTOR_POV_LIVE_FRAME_KEYS_V2 = Object.freeze([
   "incoming_pov_transition_id",
   "preset",
   "projection",
+  "recording",
+  "revision",
+  "run_generation",
+  "schema_version",
+  "session_id",
+  "simulator_step_count",
+  "terminal",
+  "verbose",
+  "view_mode",
+]);
+
+const SHARED_OBS_AGENT_POV_LIVE_FRAME_KEYS_V2 = Object.freeze([
+  "combat_configuration",
+  "episode_id",
+  "frame_id",
+  "frame_index",
+  "frame_kind",
+  "incoming_recipient_transition_id",
+  "pending_submission_scope",
+  "preset",
+  "recipient_frame_id",
+  "recipient_public_agent_id",
   "recording",
   "revision",
   "run_generation",
@@ -484,6 +513,29 @@ function requireExactKeys(value, expected, message) {
   ) {
     throw new TypeError(message);
   }
+}
+
+/** @param {unknown} value */
+function normalizeCombatConfigurationV1(value) {
+  const configuration = requireRecord(
+    value,
+    "Live combat configuration must be an object.",
+  );
+  requireExactKeys(
+    configuration,
+    COMBAT_CONFIGURATION_KEYS_V1,
+    "Live combat configuration has unknown or missing fields.",
+  );
+  if (
+    !["manual", "scripted_tdm"].includes(configuration.team_b_controller) ||
+    !["shared_obs", "no_shared_obs"].includes(configuration.execution_information_mode)
+  ) {
+    throw new TypeError("Live combat configuration is invalid.");
+  }
+  return Object.freeze({
+    team_b_controller: configuration.team_b_controller,
+    execution_information_mode: configuration.execution_information_mode,
+  });
 }
 
 /**
@@ -5107,6 +5159,104 @@ export function normalizeDebuggerAudienceProjectionV2(value) {
 }
 
 /**
+ * Normalize the projection-free SharedObs live recipient transport. Battlefield
+ * and decision authority arrive only through the separately joined authorized
+ * presentation.
+ *
+ * @param {Record<string, any>} frame
+ * @returns {Readonly<Record<string, any>>}
+ */
+function normalizeSharedObsAgentPovLiveFrameV2(frame) {
+  requireExactKeys(
+    frame,
+    SHARED_OBS_AGENT_POV_LIVE_FRAME_KEYS_V2,
+    "SharedObs live frame has unknown or missing top-level fields.",
+  );
+  if (
+    frame.schema_version !== 2 ||
+    frame.frame_kind !== "shared_obs_agent_pov_live_debugger" ||
+    frame.view_mode !== "pov" ||
+    !["presentation", "analysis"].includes(frame.preset) ||
+    frame.verbose !== false
+  ) {
+    throw new TypeError("SharedObs live frame identity is invalid.");
+  }
+  const sessionId = requireNonemptyString(
+    frame.session_id,
+    "SharedObs live session ID",
+  );
+  const runGeneration = requireInteger(
+    frame.run_generation,
+    "SharedObs live run generation",
+  );
+  const revision = requireInteger(frame.revision, "SharedObs live revision");
+  const episodeId = requireNonemptyString(
+    frame.episode_id,
+    "SharedObs live episode ID",
+  );
+  const frameIndex = requireInteger(frame.frame_index, "SharedObs live frame index");
+  const simulatorStepCount = requireInteger(
+    frame.simulator_step_count,
+    "SharedObs live simulator-step count",
+  );
+  const frameId = requireNonemptyString(frame.frame_id, "SharedObs live frame ID");
+  const recipient = requireNonemptyString(
+    frame.recipient_public_agent_id,
+    "SharedObs live recipient",
+  );
+  const recipientFrameId = requireNonemptyString(
+    frame.recipient_frame_id,
+    "SharedObs live recipient frame ID",
+  );
+  if (frameId !== `${episodeId}:frame:${frameIndex}`) {
+    throw new TypeError("SharedObs live global frame ID is not canonical.");
+  }
+  const prefix = `${episodeId}:shared-obs-visual-union:${recipient}`;
+  if (recipientFrameId !== `${prefix}:frame:${frameIndex}`) {
+    throw new TypeError("SharedObs live recipient frame ID is not canonical.");
+  }
+  const expectedTransitionId =
+    frameIndex === 0 ? null : `${prefix}:transition:${frameIndex - 1}`;
+  if (frame.incoming_recipient_transition_id !== expectedTransitionId) {
+    throw new TypeError("SharedObs live transition identity is not canonical.");
+  }
+  if (!["joint_turn", "scripted_playback"].includes(frame.pending_submission_scope)) {
+    throw new TypeError("SharedObs live submission scope is invalid.");
+  }
+  const terminal = normalizeTerminalStateV2(frame.terminal);
+  const recording = normalizeRecordingStatusV1(frame.recording, frameIndex);
+  const combatConfiguration = normalizeCombatConfigurationV1(
+    frame.combat_configuration,
+  );
+  if (combatConfiguration.execution_information_mode !== "shared_obs") {
+    throw new TypeError("SharedObs live frame requires SharedObs configuration.");
+  }
+  return Object.freeze({
+    session_id: sessionId,
+    run_generation: runGeneration,
+    revision,
+    episode_id: episodeId,
+    frame_index: frameIndex,
+    frame_id: frameId,
+    simulator_step_count: simulatorStepCount,
+    preset: "analysis",
+    verbose: false,
+    terminal,
+    recording,
+    combat_configuration: combatConfiguration,
+    frame_kind: "shared_obs_agent_pov_live_debugger",
+    schema_version: 2,
+    view_mode: "pov",
+    recipient_public_agent_id: recipient,
+    recipient_frame_id: recipientFrameId,
+    incoming_recipient_transition_id: expectedTransitionId,
+    pending_submission_scope: frame.pending_submission_scope,
+    simulator_step: simulatorStepCount,
+    transition_id: expectedTransitionId,
+  });
+}
+
+/**
  * Normalize one validated LiveDebuggerFrameV2 at the API boundary.
  *
  * All downstream browser components consume only `scene` and `event_batch`.
@@ -5120,6 +5270,9 @@ export function normalizeDebuggerAudienceProjectionV2(value) {
  */
 export function normalizeLiveDebuggerFrameV2(value) {
   const frame = requireRecord(value, "Live debugger frame must be an object.");
+  if (frame.frame_kind === "shared_obs_agent_pov_live_debugger") {
+    return normalizeSharedObsAgentPovLiveFrameV2(frame);
+  }
   if (frame.schema_version !== 2) {
     throw new TypeError("Live debugger frame must use schema version 2.");
   }
@@ -5168,6 +5321,15 @@ export function normalizeLiveDebuggerFrameV2(value) {
     throw new TypeError("Live debugger frame identity is not canonical.");
   }
   const recording = normalizeRecordingStatusV1(frame.recording, frame.frame_index);
+  const combatConfiguration = normalizeCombatConfigurationV1(
+    frame.combat_configuration,
+  );
+  if (
+    frame.frame_kind === "actor_pov_live_debugger" &&
+    combatConfiguration.execution_information_mode !== "no_shared_obs"
+  ) {
+    throw new TypeError("NoSharedObs live frame requires NoSharedObs configuration.");
+  }
   if (frame.frame_kind === "researcher_live_debugger") {
     const expectedTransitionIndex =
       frame.frame_index === 0 ? null : frame.frame_index - 1;
@@ -5269,6 +5431,7 @@ export function normalizeLiveDebuggerFrameV2(value) {
     verbose: frame.verbose,
     terminal,
     recording,
+    combat_configuration: combatConfiguration,
     frame_kind: frame.frame_kind,
     schema_version: 2,
     view_mode: frame.view_mode,
@@ -5308,6 +5471,9 @@ export function liveDebuggerFrameIsScripted(value) {
     return (
       isRecord(value.hud) && value.hud.pending_submission_scope === "scripted_playback"
     );
+  }
+  if (value.frame_kind === "shared_obs_agent_pov_live_debugger") {
+    return value.pending_submission_scope === "scripted_playback";
   }
   return isRecord(value.scenario) && value.scenario.mode === "scripted";
 }

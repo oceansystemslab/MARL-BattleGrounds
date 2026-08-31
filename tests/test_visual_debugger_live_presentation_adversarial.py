@@ -12,6 +12,10 @@ import pytest
 from scripts.dev.visual_debugger.live_presentation import (
     build_live_no_shared_obs_authorized_presentation_v1,
 )
+from scripts.dev.visual_debugger.no_shared_visual import (
+    build_live_no_shared_obs_visual_adjacent_slice_v1,
+    build_live_no_shared_obs_visual_current_slice_v1,
+)
 from scripts.dev.visual_debugger.presentation_protocol import (
     LiveNoSharedObsAuthorizedPresentationFrameV1,
 )
@@ -34,8 +38,6 @@ from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.pov import (
     ActorPovAdjacentTransitionSliceV1,
     ActorPovCurrentSliceV1,
-    build_actor_pov_adjacent_transition_slice_v1,
-    build_actor_pov_current_slice_v1,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import build_visual_event_batch_v2
 
@@ -209,13 +211,13 @@ def _recipient_pair(
     session = service.session
     incoming = session.incoming_evaluation_view
     assert incoming is not None
-    current_slice = build_actor_pov_current_slice_v1(
+    current_slice = build_live_no_shared_obs_visual_current_slice_v1(
         session.evaluation_context,
         session.current_evaluation_frame,
         global_slot=session.controlled_global_slot,
         incoming_transition_view=incoming,
     )
-    carrier = build_actor_pov_adjacent_transition_slice_v1(
+    carrier = build_live_no_shared_obs_visual_adjacent_slice_v1(
         incoming,
         global_slot=session.controlled_global_slot,
     )

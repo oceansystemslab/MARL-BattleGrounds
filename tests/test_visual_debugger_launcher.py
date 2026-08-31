@@ -22,6 +22,7 @@ from scripts.dev.visual_debugger.evaluation_bridge import (
     DebuggerEvaluationLaunchSpecificationV1,
 )
 from scripts.dev.visual_debugger.model import DebuggerScenario
+from scripts.dev.visual_debugger.protocol import SharedObsAgentPovLiveDebuggerFrameV2
 from scripts.dev.visual_debugger.sample_replays import (
     SAMPLE_REPLAY_DEMO_PROVENANCE_NOTICE,
     SAMPLE_REPLAYS,
@@ -34,7 +35,8 @@ from scripts.dev.visual_debugger.service import DebuggerService
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _DEBUGGER_PYTHON_ENTRYPOINT = _REPOSITORY_ROOT / "scripts" / "dev" / "debug_renderer.py"
-_DEBUGGER_SHELL_LAUNCHER = (
+_DEBUGGER_SHELL_LAUNCHER = _REPOSITORY_ROOT / "scripts" / "dev" / "run_dev_client.sh"
+_COMPAT_DEBUGGER_SHELL_LAUNCHER = (
     _REPOSITORY_ROOT / "scripts" / "dev" / "run_debug_renderer.sh"
 )
 _REPLAY_PYTHON_ENTRYPOINT = _REPOSITORY_ROOT / "scripts" / "dev" / "replay_viewer.py"
@@ -112,6 +114,8 @@ def test_debugger_parser_exposes_live_arena_contract_and_hidden_compatibility() 
             "debug",
             "--verbose",
             "--no-ranges",
+            "--execution-information-mode",
+            "no_shared_obs",
         )
     )
 
@@ -124,6 +128,7 @@ def test_debugger_parser_exposes_live_arena_contract_and_hidden_compatibility() 
     assert args.preset == "analysis"
     assert args.verbose is False
     assert args.ranges is False
+    assert args.execution_information_mode == "no_shared_obs"
 
 
 def test_replay_parser_exposes_narrow_static_replay_contract() -> None:
@@ -786,7 +791,7 @@ def test_debugger_help_is_live_only_and_hides_legacy_tokens() -> None:
     )
 
     assert result.returncode == 0
-    assert "manual 20x10" in result.stdout
+    assert "MARL-BattleGrounds DevClient" in result.stdout
     assert "18x12" not in result.stdout
     for option in (
         "--record-replay",
@@ -798,6 +803,7 @@ def test_debugger_help_is_live_only_and_hides_legacy_tokens() -> None:
         "--view",
         "--ranges",
         "--no-ranges",
+        "--execution-information-mode",
     ):
         assert option in result.stdout
     assert "--ui" not in result.stdout
@@ -863,7 +869,7 @@ def test_replay_help_is_read_only_and_hides_live_and_legacy_tokens() -> None:
     )
 
     assert result.returncode == 0
-    assert "manual 20x10 combat laboratory" in result.stdout
+    assert "DevClient developer workspace" in result.stdout
     assert "manual 18x12 combat laboratory" not in result.stdout
     for option in (
         "--replay",
@@ -1275,6 +1281,7 @@ def test_missing_matplotlib_is_actionable_and_returns_two(tmp_path: Path) -> Non
         ("--controlled-slot", "-1"),
         ("--seed", "not-an-int"),
         ("--view", "researcher-visible-typo"),
+        ("--execution-information-mode", "partially_shared"),
     ),
 )
 def test_invalid_cli_inputs_use_argparse_exit_two(argv: tuple[str, ...]) -> None:
@@ -1319,12 +1326,14 @@ def test_browser_default_builds_service_and_forwards_lifecycle_options(
         asset_root: Path,
         port: int,
         open_browser: bool,
+        authoring: object,
     ) -> int:
         observed.update(
             service=service,
             asset_root=asset_root,
             port=port,
             open_browser=open_browser,
+            authoring=authoring,
         )
         return 17
 
@@ -1346,10 +1355,14 @@ def test_browser_default_builds_service_and_forwards_lifecycle_options(
     assert observed["asset_root"] == _REPOSITORY_ROOT / "web" / "visual_debugger"
     assert observed["port"] == 8123
     assert observed["open_browser"] is False
-    frame = cast(DebuggerService, observed["service"]).current_frame()
+    assert observed["authoring"] is not None
+    service = cast(DebuggerService, observed["service"])
+    frame = service.current_frame()
+    assert type(frame) is SharedObsAgentPovLiveDebuggerFrameV2
     assert frame.view_mode == "pov"
     assert frame.preset == "analysis"
-    assert not hasattr(frame.projection.scene, "ranges")
+    assert service.session.show_ranges is False
+    assert "projection" not in frame.model_dump(mode="json")
 
 
 def test_recording_preflights_before_scenario_provenance_session_or_server(
@@ -1468,9 +1481,12 @@ def test_recording_launch_injects_retaining_recorder_router_and_graceful_close(
 
     def fake_runtime(
         code_revision: CodeRevisionV1,
+        *,
+        policy_execution_included: bool,
     ) -> RuntimeProvenanceV1:
         nonlocal capture_count
         capture_count += 1
+        assert not policy_execution_included
         return RuntimeProvenanceV1(
             python_version="3.14.0",
             package_version=code_revision.package_version,
@@ -2008,7 +2024,7 @@ def test_launchers_propagate_uv_exit_code(tmp_path: Path, launcher: Path) -> Non
 @pytest.mark.parametrize(
     ("launcher", "product"),
     (
-        (_DEBUGGER_SHELL_LAUNCHER, "Combat Debugger"),
+        (_DEBUGGER_SHELL_LAUNCHER, "DevClient"),
         (_REPLAY_SHELL_LAUNCHER, "Replay Viewer"),
     ),
 )
@@ -2030,6 +2046,7 @@ def test_launchers_report_missing_uv(launcher: Path, product: str) -> None:
 
 def test_launchers_are_executable() -> None:
     assert _DEBUGGER_SHELL_LAUNCHER.stat().st_mode & stat.S_IXUSR
+    assert _COMPAT_DEBUGGER_SHELL_LAUNCHER.stat().st_mode & stat.S_IXUSR
     assert _REPLAY_SHELL_LAUNCHER.stat().st_mode & stat.S_IXUSR
 
 

@@ -22,6 +22,7 @@ from scripts.dev.visual_debugger.control import (
     select_clicked_target,
     select_controlled_actor,
     select_no_combat,
+    set_combat_configuration,
     set_pending_movement,
     submit_interactive,
     submit_joint_action,
@@ -39,6 +40,7 @@ from scripts.dev.visual_debugger.model import (
     LaneAvailability,
     PendingAction,
     ScenarioFrame,
+    TeamBController,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
@@ -53,7 +55,11 @@ from marl_battlegrounds.core.types import (
     MOVE_WEST,
     Action,
 )
-from marl_battlegrounds.evaluation.models import ActionMaskV1
+from marl_battlegrounds.evaluation.models import (
+    ActionMaskV1,
+    ExecutionInformationMode,
+)
+from marl_battlegrounds.policies.actor import ActorAction
 
 
 def _session(
@@ -62,6 +68,8 @@ def _session(
     controlled_slot: int | None = None,
     verbose: bool = False,
     capture_profile: DebuggerCaptureProfileV1 = "debug",
+    team_b_controller: TeamBController = "manual",
+    execution_information_mode: ExecutionInformationMode = "no_shared_obs",
 ) -> DebuggerSession:
     scenario = get_scenario(name)
     default_launch = debugger_test_launch_specification(7)
@@ -78,6 +86,8 @@ def _session(
         scenario,
         seed=7,
         evaluation_launch_specification=launch,
+        team_b_controller=team_b_controller,
+        execution_information_mode=execution_information_mode,
         controlled_global_slot=controlled_slot,
         show_ranges=True,
         verbose_logging=verbose,
@@ -142,9 +152,10 @@ def test_every_debugger_structure_has_the_exact_audited_field_schema() -> None:
             "frames",
             "default_controlled_slot",
             "audience",
+            "provenance",
         ),
         DebuggerSession: (
-            "scenario_name",
+            "scenario",
             "seed",
             "run_generation",
             "scenario_default_movement_scale",
@@ -159,6 +170,7 @@ def test_every_debugger_structure_has_the_exact_audited_field_schema() -> None:
             "status_source_evidence_state",
             "last_submission_kind",
             "last_report_actor_slots",
+            "team_b_controller",
             "controlled_global_slot",
             "pending_actions",
             "next_script_frame_index",
@@ -219,6 +231,70 @@ def test_create_session_has_exact_initial_pending_and_epoch_contract() -> None:
             (row.name, row.value) for row in session.evaluation_context.aggregation_keys
         )["action_source"]
         == "manual"
+    )
+    assert session.team_b_controller == "manual"
+    assert (
+        session.current_evaluation_frame.shared_obs_information_availability_by_recipient_and_sensor_source
+        is None
+    )
+
+
+def test_shared_session_and_successor_capture_the_exact_episode_topology() -> None:
+    session = _session(execution_information_mode="shared_obs")
+    initial_availability = session.current_evaluation_frame.shared_obs_information_availability_by_recipient_and_sensor_source  # noqa: E501
+
+    assert initial_availability is not None
+    assert len(initial_availability) == MAX_AGENT_SLOTS
+    successor = submit_interactive(session)
+    assert (
+        successor.current_evaluation_frame.shared_obs_information_availability_by_recipient_and_sensor_source
+        == initial_availability
+    )
+
+
+def test_combat_configuration_restarts_only_for_a_real_change() -> None:
+    initial = _session()
+    with pytest.raises(ValueError, match="team_b_controller"):
+        set_combat_configuration(
+            initial,
+            team_b_controller="scripted_ctf",  # type: ignore[arg-type]
+            execution_information_mode="no_shared_obs",
+        )
+    with pytest.raises(ValueError, match="execution_information_mode"):
+        set_combat_configuration(
+            initial,
+            team_b_controller="manual",
+            execution_information_mode="partially_shared",  # type: ignore[arg-type]
+        )
+    no_op = set_combat_configuration(
+        initial,
+        team_b_controller="manual",
+        execution_information_mode="no_shared_obs",
+    )
+    changed = set_combat_configuration(
+        initial,
+        team_b_controller="scripted_tdm",
+        execution_information_mode="shared_obs",
+    )
+
+    assert no_op is initial
+    assert changed.run_generation == initial.run_generation + 1
+    assert changed.team_b_controller == "scripted_tdm"
+    assert changed.evaluation_context.execution_information_mode == "shared_obs"
+    assert changed.evaluation_context.identity.episode_id != (
+        initial.evaluation_context.identity.episode_id
+    )
+    assert (
+        changed.evaluation_context.seed_protocol
+        == initial.evaluation_context.seed_protocol
+    )
+    assert _tree_equal(changed.state, initial.state)
+    assert _tree_equal(changed.observation, initial.observation)
+    assert _tree_equal(changed.action_mask, initial.action_mask)
+    assert bool(jnp.array_equal(changed.key, initial.key))
+    assert (
+        changed.current_evaluation_frame.shared_obs_information_availability_by_recipient_and_sensor_source
+        is not None
     )
 
 
@@ -712,6 +788,111 @@ def test_manual_and_scripted_submission_delegate_to_shared_boundary(
     ]
 
 
+def test_mixed_submission_keeps_team_a_rows_and_uses_identical_policy_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared = _session(
+        team_b_controller="scripted_tdm",
+        execution_information_mode="shared_obs",
+    )
+    no_shared = _session(
+        team_b_controller="scripted_tdm",
+        execution_information_mode="no_shared_obs",
+    )
+    for session_name, session in (("shared", shared), ("no_shared", no_shared)):
+        pending = list(session.pending_actions)
+        pending[0] = replace(pending[0], move_action=MOVE_EAST)
+        pending[1] = replace(pending[1], move_action=MOVE_NORTH)
+        if session_name == "shared":
+            shared = replace(session, pending_actions=tuple(pending))
+        else:
+            no_shared = replace(session, pending_actions=tuple(pending))
+
+    bank_calls = 0
+    policy_keys: dict[str, object] = {}
+    submitted: list[Action] = []
+    scripted_team_b = ActorAction(
+        move=jnp.arange(5, dtype=jnp.int32),
+        select_target=jnp.zeros((5,), dtype=jnp.int32),
+        use_ultimate=jnp.ones((5,), dtype=jnp.int32),
+    )
+
+    def fake_bank(_observation: object) -> object:
+        nonlocal bank_calls
+        bank_calls += 1
+        return object()
+
+    def fake_shared(
+        _observation: object,
+        _action_mask: object,
+        keys: object,
+        _source_bank: object,
+        _availability: object,
+        *,
+        policy: object,
+        team_identity: object,
+    ) -> ActorAction:
+        del policy, team_identity
+        policy_keys["shared"] = keys
+        return scripted_team_b
+
+    def fake_no_shared(
+        _observation: object,
+        _action_mask: object,
+        keys: object,
+        *,
+        policy: object,
+        team_identity: object,
+    ) -> ActorAction:
+        del policy, team_identity
+        policy_keys["no_shared"] = keys
+        return scripted_team_b
+
+    def fake_submit(
+        session: DebuggerSession,
+        action: Action,
+        *,
+        submission_kind: str,
+        report_actor_slots: tuple[int, ...],
+    ) -> DebuggerSession:
+        assert submission_kind == "interactive"
+        assert report_actor_slots == tuple(range(MAX_AGENT_SLOTS))
+        submitted.append(action)
+        return session
+
+    monkeypatch.setattr(control, "build_shared_obs_sensor_source_bank", fake_bank)
+    monkeypatch.setattr(control, "execute_shared_obs_team_policy", fake_shared)
+    monkeypatch.setattr(control, "execute_no_shared_obs_team_policy", fake_no_shared)
+    monkeypatch.setattr(control, "submit_joint_action", fake_submit)
+
+    assert submit_interactive(shared) is shared
+    assert submit_interactive(no_shared) is no_shared
+
+    assert bank_calls == 1
+    assert _tree_equal(policy_keys["shared"], policy_keys["no_shared"])
+    for action in submitted:
+        assert tuple(int(value) for value in action.move[:5]) == (
+            MOVE_EAST,
+            MOVE_NORTH,
+            MOVE_STAY,
+            MOVE_STAY,
+            MOVE_STAY,
+        )
+        assert tuple(int(value) for value in action.move[5:]) == (0, 1, 2, 3, 4)
+        assert tuple(int(value) for value in action.use_ultimate[5:]) == (1,) * 5
+
+
+def test_scripted_team_b_remains_selectable_but_pending_edits_are_fenced() -> None:
+    session = _session(team_b_controller="scripted_tdm")
+    selected = select_controlled_actor(session, 5)
+
+    assert selected.controlled_global_slot == 5
+    assert set_pending_movement(selected, MOVE_EAST) is selected
+    assert arm_basic(selected) is selected
+    assert arm_ultimate(selected) is selected
+    assert select_no_combat(selected) is selected
+
+
 def test_post_submit_rebuilds_every_draft_from_the_successor_mask() -> None:
     scenario, session = (
         get_scenario("basic_support"),
@@ -831,10 +1012,10 @@ def test_reset_replays_identical_initial_session_and_clears_history() -> None:
     assert _tree_equal(reset_result.state, initial.state)
     assert _tree_equal(reset_result.observation, initial.observation)
     assert _tree_equal(reset_result.action_mask, initial.action_mask)
-    assert not bool(jnp.array_equal(reset_result.key, initial.key))
+    assert bool(jnp.array_equal(reset_result.key, initial.key))
     assert (
         reset_result.evaluation_context.seed_protocol.environment_seed
-        != initial.evaluation_context.seed_protocol.environment_seed
+        == initial.evaluation_context.seed_protocol.environment_seed
     )
     assert (
         reset_result.evaluation_context.identity.episode_id

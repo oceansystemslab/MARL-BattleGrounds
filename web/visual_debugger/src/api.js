@@ -17,6 +17,7 @@ const CLIENT_STORAGE_KEY = "marl-battlegrounds.debugger-client-id";
 const TOKEN_HEADER = "X-MARL-Debugger-Token";
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const REPLAY_METRIC_REPORT_ROUTE = "/api/replay/metric-report";
+const AUTHORING_COMMAND_ROUTE = "/api/dev/authoring/command";
 const REPLAY_METRIC_REPORT_CONTENT_TYPE = "application/json; charset=utf-8";
 const REPLAY_METRIC_REPORT_SUFFIX = ".marlbg-metrics.json";
 const UNJOINED_SHARED_REPLAY_FRAME_KINDS = new Set([
@@ -26,6 +27,7 @@ const UNJOINED_SHARED_REPLAY_FRAME_KINDS = new Set([
 const LIVE_JOIN_FRAME_KINDS = new Set([
   "researcher_live_debugger",
   "actor_pov_live_debugger",
+  "shared_obs_agent_pov_live_debugger",
 ]);
 const REPLAY_JOIN_FRAME_KINDS = new Set([
   "researcher_replay_viewer",
@@ -585,6 +587,38 @@ export async function postCommand(token, request) {
 }
 
 /**
+ * Send one whole-draft DevClient authoring command exactly once. This route is
+ * absent from Replay Viewer bindings.
+ *
+ * @param {string | null} token
+ * @param {unknown} request
+ * @returns {Promise<any>}
+ */
+export async function postAuthoringCommand(token, request) {
+  let response;
+  try {
+    response = await fetchWithTimeout(AUTHORING_COMMAND_ROUTE, {
+      method: "POST",
+      headers: {
+        ...authorizationHeaders(token),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+    });
+  } catch (error) {
+    throw new DebuggerApiError(
+      error instanceof Error
+        ? `Authoring outcome is unknown because the connection failed: ${error.message}`
+        : "Authoring outcome is unknown because the connection failed.",
+    );
+  }
+  return decodeResponse(response);
+}
+
+/**
  * Send one replay command exactly once. Replay requests have a separate route
  * and can never enter the live debugger dispatcher.
  *
@@ -790,7 +824,9 @@ export function extractFrame(payload) {
   }
   if (
     Number.isInteger(payload.revision) &&
-    (isRecord(payload.scene) || isRecord(payload.projection))
+    (isRecord(payload.scene) ||
+      isRecord(payload.projection) ||
+      payload.frame_kind === "shared_obs_agent_pov_live_debugger")
   ) {
     return normalizeLiveDebuggerFrameV2(payload);
   }

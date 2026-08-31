@@ -210,6 +210,8 @@ def _record_one_sample(
         scenario,
         seed=sample.seed,
         evaluation_launch_specification=launch,
+        team_b_controller="manual",
+        execution_information_mode="no_shared_obs",
         controlled_global_slot=None,
         show_ranges=True,
         verbose_logging=False,
@@ -354,7 +356,10 @@ def generate_sample_replays(
         _REPOSITORY_ROOT,
         package_version="0.0.0",
     )
-    runtime_provenance = capture_debugger_runtime_provenance_v1(resolved_revision)
+    runtime_provenance = capture_debugger_runtime_provenance_v1(
+        resolved_revision,
+        policy_execution_included=False,
+    )
     if runtime_provenance.backend != "cpu":
         raise RuntimeError("sample replay runtime provenance must capture CPU")
     if runtime_provenance.policy_execution_included:

@@ -1,4 +1,4 @@
-"""Focused CP2.5-B five-leaf protocol, integrity, and privacy proofs."""
+"""Focused CP2.5-B presentation protocol, integrity, and privacy proofs."""
 # pyright: reportPrivateUsage=false
 
 from __future__ import annotations
@@ -26,6 +26,9 @@ from scripts.dev.visual_debugger.live_presentation import (
 )
 from scripts.dev.visual_debugger.local_oracle_corpse_overlay import (
     build_local_oracle_corpse_overlay_v1,
+)
+from scripts.dev.visual_debugger.no_shared_visual import (
+    build_live_no_shared_obs_visual_adjacent_slice_v1,
 )
 from scripts.dev.visual_debugger.presentation import (
     build_replay_oracle_authorized_presentation_v1,
@@ -104,7 +107,6 @@ from marl_battlegrounds.evaluation.models import (
 from marl_battlegrounds.evaluation.pov import (
     ActorPovAxisMappingV1,
     ActorPovTransitionV1,
-    build_actor_pov_adjacent_transition_slice_v1,
 )
 from marl_battlegrounds.rendering import evaluation_wire_features as wire
 from marl_battlegrounds.rendering.authorized_incoming import (
@@ -1661,18 +1663,18 @@ def _live_no_shared_at(
     )
 
 
-def test_union_has_exactly_five_discriminated_leaves() -> None:
+def test_union_has_exactly_six_discriminated_leaves() -> None:
     schema = TypeAdapter(AuthorizedPresentationFrameV1).json_schema()
-    assert len(cast(list[object], schema["oneOf"])) == 5
+    assert len(cast(list[object], schema["oneOf"])) == 6
     mapping = cast(dict[str, object], schema["discriminator"])["mapping"]
     assert set(cast(dict[str, str], mapping)) == {
         "live_oracle",
         "live_no_shared_obs_agent_pov",
+        "live_shared_obs_agent_pov",
         "replay_oracle",
         "replay_no_shared_obs_agent_pov",
         "replay_shared_obs_agent_pov",
     }
-    assert not any("live_shared" in key for key in cast(dict[str, str], mapping))
 
 
 def test_recursive_schema_is_closed_required_and_key_catalog_is_exhaustive() -> None:
@@ -4073,7 +4075,7 @@ def test_real_death_successor_keeps_selected_recipient_corpse_authorized() -> No
     session = select_controlled_actor(session, 5)
     view = session.incoming_evaluation_view
     assert view is not None
-    death = build_actor_pov_adjacent_transition_slice_v1(view, global_slot=5)
+    death = build_live_no_shared_obs_visual_adjacent_slice_v1(view, global_slot=5)
     assert death.start_frame.self_features[5] == 1.0
     assert death.successor_frame.self_features[5] == 0.0
 

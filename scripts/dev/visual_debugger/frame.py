@@ -6,7 +6,6 @@ from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV1
 from marl_battlegrounds.evaluation.pov import (
     ActorPovAxisMappingV1,
     ActorPovCurrentSliceV1,
-    build_actor_pov_current_slice_v1,
 )
 from marl_battlegrounds.evaluation.wire_shapes import (
     NUM_MOVE_ACTIONS_V1,
@@ -25,7 +24,10 @@ from marl_battlegrounds.rendering.scene import (
     BattlefieldSceneV2,
     ResearcherAnalyzerProjectionV2,
 )
-from scripts.dev.visual_debugger.model import DebuggerSession
+from scripts.dev.visual_debugger.model import DebuggerScenario, DebuggerSession
+from scripts.dev.visual_debugger.no_shared_visual import (
+    build_live_no_shared_obs_visual_current_slice_v1,
+)
 from scripts.dev.visual_debugger.protocol import (
     ActionTupleCardV1,
     ActorActionResultV1,
@@ -38,6 +40,7 @@ from scripts.dev.visual_debugger.protocol import (
     ActorPovPendingActionCardV1,
     ActorPovTargetReferenceV1,
     CandidateLegalityCardV1,
+    CombatConfigurationV1,
     DiagnosticFactV1,
     LatestTransitionCardV2,
     MovementLegalityCardV1,
@@ -49,13 +52,18 @@ from scripts.dev.visual_debugger.protocol import (
     ResearcherLiveDebuggerFrameV2,
     ScenarioMetadataV1,
     ScenarioOptionV1,
+    SharedObsAgentPovLiveDebuggerFrameV2,
     TargetReferenceV1,
     TerminalStateV2,
     ViewMode,
 )
-from scripts.dev.visual_debugger.scenarios import get_scenario, list_scenarios
+from scripts.dev.visual_debugger.scenarios import list_scenarios
 
-type LiveDebuggerFrame = ResearcherLiveDebuggerFrameV2 | ActorPovLiveDebuggerFrameV2
+type LiveDebuggerFrame = (
+    ResearcherLiveDebuggerFrameV2
+    | ActorPovLiveDebuggerFrameV2
+    | SharedObsAgentPovLiveDebuggerFrameV2
+)
 
 
 def _actor_pov_recording_status(
@@ -72,8 +80,7 @@ def _actor_pov_recording_status(
     )
 
 
-def _scenario_option(name: str) -> ScenarioOptionV1:
-    scenario = get_scenario(name)
+def _scenario_option(scenario: DebuggerScenario) -> ScenarioOptionV1:
     return ScenarioOptionV1(
         name=scenario.name,
         title=scenario.title,
@@ -84,13 +91,13 @@ def _scenario_option(name: str) -> ScenarioOptionV1:
 
 
 def _scenario_metadata(session: DebuggerSession) -> ScenarioMetadataV1:
-    scenario = get_scenario(session.scenario_name)
+    scenario = session.scenario
     effective_scale = (
         session.evaluation_context.resolved_env_config.ordinary_movement_distance_scale
     )
     if scenario.mode == "interactive":
         return ScenarioMetadataV1(
-            **_scenario_option(scenario.name).model_dump(),
+            **_scenario_option(scenario).model_dump(),
             ordinary_movement_distance_scale=effective_scale,
             completed_frame_count=0,
             frame_count=0,
@@ -104,7 +111,7 @@ def _scenario_metadata(session: DebuggerSession) -> ScenarioMetadataV1:
         scenario.frames[completed] if completed < len(scenario.frames) else None
     )
     return ScenarioMetadataV1(
-        **_scenario_option(scenario.name).model_dump(),
+        **_scenario_option(scenario).model_dump(),
         ordinary_movement_distance_scale=effective_scale,
         completed_frame_count=completed,
         frame_count=len(scenario.frames),
@@ -134,6 +141,16 @@ def _terminal_state(session: DebuggerSession) -> TerminalStateV2:
         truncated=truncated,
         reached_declared_horizon=horizon,
         reason=reason,
+    )
+
+
+def _combat_configuration(session: DebuggerSession) -> CombatConfigurationV1:
+    """Expose the two episode-replacing settings from their sole authorities."""
+    return CombatConfigurationV1(
+        team_b_controller=session.team_b_controller,
+        execution_information_mode=(
+            session.evaluation_context.execution_information_mode
+        ),
     )
 
 
@@ -454,7 +471,7 @@ def _build_researcher_hud(
     selection = scene.selection
     if selection is None:
         raise ValueError("live researcher projections require a selection record")
-    scenario = get_scenario(session.scenario_name)
+    scenario = session.scenario
     scope: PendingSubmissionScope = (
         "scripted_playback" if scenario.mode == "scripted" else "joint_turn"
     )
@@ -625,7 +642,7 @@ def _build_pov_hud(
         target_action=target_action,
         use_ultimate_action=0 if pending.armed_lane is None else pending.armed_lane,
     )
-    scenario = get_scenario(session.scenario_name)
+    scenario = session.scenario
     scope = "scripted_playback" if scenario.mode == "scripted" else "joint_turn"
     return ActorPovHudFrameV1(
         controlled_public_agent_id=slice_.public_agent_id,
@@ -710,6 +727,7 @@ def build_debugger_frame(
             frame_index=frame.frame_index,
             frame_id=frame.frame_id,
             simulator_step_count=frame.simulator_step_count,
+            combat_configuration=_combat_configuration(session),
             incoming_transition_index=(
                 None if incoming is None else incoming.transition.transition_index
             ),
@@ -723,14 +741,48 @@ def build_debugger_frame(
             recording=recording_status,
             scenario=_scenario_metadata(session),
             available_scenarios=tuple(
-                _scenario_option(scenario.name)
+                _scenario_option(scenario)
                 for scenario in list_scenarios(include_stress=include_stress)
             ),
             projection=projection,
             hud=_build_researcher_hud(session, projection, revision=revision),
         )
 
-    slice_ = build_actor_pov_current_slice_v1(
+    if context.execution_information_mode == "shared_obs":
+        recipient = context.roster[session.controlled_global_slot]
+        if not recipient.configured_active:
+            raise ValueError("SharedObs POV requires a configured-active recipient.")
+        local_prefix = (
+            f"{context.identity.episode_id}:shared-obs-visual-union:"
+            f"{recipient.public_agent_id}"
+        )
+        submission_scope: PendingSubmissionScope = (
+            "scripted_playback" if session.scenario.mode == "scripted" else "joint_turn"
+        )
+        return SharedObsAgentPovLiveDebuggerFrameV2(
+            session_id=session_id,
+            run_generation=session.run_generation,
+            revision=revision,
+            episode_id=context.identity.episode_id,
+            frame_index=frame.frame_index,
+            frame_id=frame.frame_id,
+            simulator_step_count=frame.simulator_step_count,
+            combat_configuration=_combat_configuration(session),
+            preset=preset,
+            verbose=False,
+            terminal=terminal,
+            recording=_actor_pov_recording_status(recording_status),
+            recipient_public_agent_id=recipient.public_agent_id,
+            recipient_frame_id=f"{local_prefix}:frame:{frame.frame_index}",
+            incoming_recipient_transition_id=(
+                None
+                if frame.frame_index == 0
+                else f"{local_prefix}:transition:{frame.frame_index - 1}"
+            ),
+            pending_submission_scope=submission_scope,
+        )
+
+    slice_ = build_live_no_shared_obs_visual_current_slice_v1(
         context,
         frame,
         global_slot=session.controlled_global_slot,
@@ -747,6 +799,7 @@ def build_debugger_frame(
         frame_index=frame.frame_index,
         frame_id=frame.frame_id,
         simulator_step_count=frame.simulator_step_count,
+        combat_configuration=_combat_configuration(session),
         preset=preset,
         verbose=False,
         terminal=terminal,

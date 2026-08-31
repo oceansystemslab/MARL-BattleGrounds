@@ -21,6 +21,13 @@
         <p class="eyebrow">MARL-BattleGrounds</p>
         <h1 id="app-title">MARL-BattleGrounds</h1>
       </div>
+      <nav id="devclient-nav" class="devclient-nav" aria-label="DevClient areas" data-live-only hidden>
+        <button type="button" data-devclient-area="combat" aria-current="page">
+          Combat Debugger
+        </button>
+        <button type="button" data-devclient-area="maps">Maps</button>
+        <button type="button" data-devclient-area="scenarios">Scenarios</button>
+      </nav>
       <div class="header-status" aria-live="polite">
         <span id="connection-status" class="status-pill" data-state="loading">
           Connecting
@@ -48,6 +55,41 @@
       <fieldset class="session-facts" aria-label="Session facts">
         <span>Step <strong id="step-value">—</strong></span>
         <span>Transition <strong id="transition-value">—</strong></span>
+      </fieldset>
+      <fieldset
+        id="devclient-combat-config"
+        class="devclient-combat-config"
+        aria-label="DevClient combat configuration"
+        data-live-only
+        hidden
+      >
+        <label>
+          <span>Scenario</span>
+          <select id="devclient-scenario-select" aria-label="Saved valid scenario">
+            <option value="">Built-in arena</option>
+          </select>
+        </label>
+        <button id="devclient-scenario-load" type="button" disabled>Load</button>
+        <label>
+          <span>Team A controller</span>
+          <select id="devclient-team-a-controller" disabled>
+            <option value="manual">Manual</option>
+          </select>
+        </label>
+        <label>
+          <span>Team B controller</span>
+          <select id="devclient-team-b-controller">
+            <option value="manual" selected>Manual</option>
+            <option value="scripted_tdm">Scripted TDM</option>
+          </select>
+        </label>
+        <label>
+          <span>Information</span>
+          <select id="devclient-information-mode">
+            <option value="shared_obs" selected>SharedObs</option>
+            <option value="no_shared_obs">NoSharedObs</option>
+          </select>
+        </label>
       </fieldset>
       <div class="toolbar-actions">
         <button id="reconnect-button" class="button button--quiet" type="button">
@@ -536,6 +578,107 @@
         </details>
       </aside>
     </main>
+
+    <section id="authoring-shell" class="authoring-shell" data-live-only hidden>
+      <header class="authoring-toolbar">
+        <div>
+          <p id="authoring-eyebrow" class="eyebrow">Map Author</p>
+          <h2 id="authoring-title">Untitled map</h2>
+        </div>
+        <div class="authoring-toolbar__actions">
+          <label id="authoring-new-scenario-choice" hidden>
+            <span>New scenario from</span>
+            <select id="authoring-new-scenario-mode">
+              <option value="blank">Blank scenario</option>
+              <option value="copy_saved_map">Copy saved map</option>
+              <option value="duplicate_saved_scenario">Duplicate saved scenario</option>
+            </select>
+          </label>
+          <button id="authoring-new" type="button">New</button>
+          <button id="authoring-open" type="button">Open</button>
+          <button id="authoring-save" type="button">Save</button>
+          <button id="authoring-save-as" type="button">Save As</button>
+          <button id="authoring-validate" type="button">Validate</button>
+          <button id="authoring-freeze" type="button">Freeze Candidate</button>
+          <button id="authoring-open-debug" class="button--primary" type="button">
+            Open in Debug
+          </button>
+        </div>
+      </header>
+
+      <div class="authoring-grid">
+        <aside class="authoring-panel authoring-objects" aria-labelledby="authoring-objects-heading">
+          <div class="section-heading">
+            <h3 id="authoring-objects-heading">Objects</h3>
+            <span id="authoring-object-count" class="count-badge">0</span>
+          </div>
+          <div id="authoring-palette" class="authoring-palette">
+            <button type="button" data-authoring-add="wall">Wall</button>
+            <button type="button" data-authoring-add="pillar">Pillar</button>
+          </div>
+          <span id="authoring-object-list-help" class="sr-only">
+            Select an object for exact editing. Scenario agents can also be dragged onto the map.
+          </span>
+          <ol id="authoring-object-list" class="authoring-object-list"></ol>
+        </aside>
+
+        <section class="authoring-canvas-panel" aria-labelledby="authoring-canvas-heading">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Editable world</p>
+              <h3 id="authoring-canvas-heading">Map</h3>
+            </div>
+            <p class="authoring-hint">
+              Drag centers · 0.5-unit snap · hold Alt for exact placement
+            </p>
+          </div>
+          <div class="authoring-canvas-shell">
+            <svg
+              id="authoring-canvas"
+              class="authoring-canvas"
+              role="application"
+              aria-label="Map authoring canvas"
+              tabindex="0"
+            ></svg>
+          </div>
+          <div class="authoring-canvas-actions">
+            <button id="authoring-undo" type="button" disabled>Undo</button>
+            <button id="authoring-redo" type="button" disabled>Redo</button>
+            <button id="authoring-duplicate" type="button" disabled>Duplicate</button>
+            <button id="authoring-delete" class="button--danger" type="button" disabled>
+              Delete
+            </button>
+            <button id="authoring-order-up" type="button" disabled>Move up</button>
+            <button id="authoring-order-down" type="button" disabled>Move down</button>
+          </div>
+        </section>
+
+        <aside class="authoring-panel authoring-inspector" aria-labelledby="authoring-inspector-heading">
+          <div class="section-heading">
+            <h3 id="authoring-inspector-heading">Numeric Inspector</h3>
+          </div>
+          <span id="authoring-inspector-help" class="sr-only">
+            Edit the selected document, object, or agent with exact typed values.
+          </span>
+          <form id="authoring-inspector-form" novalidate>
+            <p class="empty-copy">Select an object or agent to edit exact values.</p>
+          </form>
+        </aside>
+      </div>
+
+      <section class="authoring-problems" aria-labelledby="authoring-problems-heading">
+        <div class="section-heading">
+          <h3 id="authoring-problems-heading">Linked Problems</h3>
+          <span id="authoring-problem-count" class="count-badge">0</span>
+        </div>
+        <span id="authoring-problem-list-help" class="sr-only">
+          Select a problem to focus its object and exact inspector field.
+        </span>
+        <ol id="authoring-problem-list" class="authoring-problem-list">
+          <li class="empty-copy">Validate to inspect host-authoritative errors and warnings.</li>
+        </ol>
+      </section>
+    </section>
 
     <aside
       id="visual-tooltip"

@@ -40,6 +40,12 @@ type ArmOrigin = Literal["automatic", "explicit"]
 type ScenarioMode = Literal["interactive", "scripted"]
 type ScenarioAudience = Literal["researcher", "stress"]
 type SubmissionKind = Literal["interactive", "scripted"]
+type TeamBController = Literal["manual", "scripted_tdm"]
+type ScenarioSourceKind = Literal[
+    "current_buffer",
+    "saved_draft",
+    "candidate",
+]
 
 
 def _validate_slot(global_slot: int, *, name: str) -> None:
@@ -141,6 +147,34 @@ class ScenarioFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class DebuggerScenarioProvenance:
+    """Exact authored-source identities retained by diagnostic captures."""
+
+    source_kind: ScenarioSourceKind
+    source_identity: str
+    scenario_semantic_digest: str
+    map_semantic_digest: str
+    resolved_configuration_digest: str
+    resolved_initial_state_digest: str
+
+    def __post_init__(self) -> None:
+        if self.source_kind not in ("current_buffer", "saved_draft", "candidate"):
+            raise ValueError("unknown authored scenario source kind.")
+        if not self.source_identity:
+            raise ValueError("source_identity must be nonempty.")
+        for name, value in (
+            ("scenario_semantic_digest", self.scenario_semantic_digest),
+            ("map_semantic_digest", self.map_semantic_digest),
+            ("resolved_configuration_digest", self.resolved_configuration_digest),
+            ("resolved_initial_state_digest", self.resolved_initial_state_digest),
+        ):
+            if len(value) != 64 or any(
+                character not in "0123456789abcdef" for character in value
+            ):
+                raise ValueError(f"{name} must be lowercase SHA-256 hex.")
+
+
+@dataclass(frozen=True, slots=True)
 class DebuggerScenario:
     name: str
     title: str
@@ -150,6 +184,7 @@ class DebuggerScenario:
     frames: tuple[ScenarioFrame, ...]
     default_controlled_slot: int
     audience: ScenarioAudience = "researcher"
+    provenance: DebuggerScenarioProvenance | None = None
 
     def __post_init__(self) -> None:
         _validate_slot(self.default_controlled_slot, name="default_controlled_slot")
@@ -192,7 +227,7 @@ class RawContinuationIdentity:
 
 @dataclass(frozen=True, slots=True)
 class DebuggerSession:
-    scenario_name: str
+    scenario: DebuggerScenario
     seed: int
     run_generation: int
     scenario_default_movement_scale: float
@@ -207,12 +242,18 @@ class DebuggerSession:
     status_source_evidence_state: StatusSourceEvidenceStateV2
     last_submission_kind: SubmissionKind | None
     last_report_actor_slots: tuple[int, ...]
+    team_b_controller: TeamBController
     controlled_global_slot: int
     pending_actions: tuple[PendingAction, ...]
     next_script_frame_index: int
     show_ranges: bool
     verbose_logging: bool
     raw_continuation_identity: RawContinuationIdentity | None = None
+
+    @property
+    def scenario_name(self) -> str:
+        """Return the owned scenario's stable display and provenance name."""
+        return self.scenario.name
 
     def __post_init__(self) -> None:
         from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
@@ -222,6 +263,8 @@ class DebuggerSession:
         )
         from marl_battlegrounds.rendering.scene import StatusSourceEvidenceStateV2
 
+        if type(self.scenario) is not DebuggerScenario:
+            raise TypeError("scenario must be the exact DebuggerScenario type.")
         continuation = self.raw_continuation_identity
         if continuation is None:
             continuation = RawContinuationIdentity(
@@ -338,6 +381,8 @@ class DebuggerSession:
             _validate_slot(actor_slot, name="last_report_actor_slot")
             if not self.evaluation_context.roster[actor_slot].configured_active:
                 raise ValueError("last report actor slots must be configured active.")
+        if self.team_b_controller not in ("manual", "scripted_tdm"):
+            raise ValueError("team_b_controller must be manual or scripted_tdm.")
         evidence_state = self.status_source_evidence_state
         if type(evidence_state) is not StatusSourceEvidenceStateV2:
             raise TypeError("status_source_evidence_state must be the exact V2 state.")

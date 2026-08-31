@@ -28,6 +28,7 @@ from scripts.dev.visual_debugger.protocol import (
     SaveAsCommandV1,
     ScenarioMetadataV1,
     ScenarioSwitchCommandV1,
+    SetCombatConfigurationCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
     TargetReferenceV1,
@@ -119,6 +120,10 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
         ResetCommandV1(),
         SetViewCommandV1(view_mode="pov"),
         SetPresetCommandV1(preset="analysis"),
+        SetCombatConfigurationCommandV1(
+            team_b_controller="scripted_tdm",
+            execution_information_mode="shared_obs",
+        ),
         FinishAndReviewCommandV1(),
         ReviewReplayCommandV1(),
         RetrySaveCommandV1(),
@@ -126,6 +131,12 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
         ConfirmDiscardAndReplaceCommandV1(replacement=ResetCommandV1()),
         ConfirmDiscardAndReplaceCommandV1(
             replacement=ScenarioSwitchCommandV1(scenario_name="basic_support")
+        ),
+        ConfirmDiscardAndReplaceCommandV1(
+            replacement=SetCombatConfigurationCommandV1(
+                team_b_controller="scripted_tdm",
+                execution_information_mode="no_shared_obs",
+            )
         ),
         ExitCommandV1(),
     ),

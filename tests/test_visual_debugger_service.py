@@ -13,7 +13,11 @@ import scripts.dev.visual_debugger.control as control_module
 import scripts.dev.visual_debugger.input as input_module
 import scripts.dev.visual_debugger.recording as recording_module
 import scripts.dev.visual_debugger.service as service_module
-from scripts.dev.visual_debugger.control import create_session, select_clicked_target
+from scripts.dev.visual_debugger.control import (
+    create_session,
+    select_clicked_target,
+    set_combat_configuration,
+)
 from scripts.dev.visual_debugger.evaluation_bridge import (
     build_debugger_evaluation_launch_specification_v1,
 )
@@ -23,6 +27,7 @@ from scripts.dev.visual_debugger.model import DebuggerSession
 from scripts.dev.visual_debugger.presentation_protocol import (
     LiveNoSharedObsAuthorizedPresentationFrameV1,
     LiveOracleAuthorizedPresentationFrameV1,
+    LiveSharedObsAuthorizedPresentationFrameV1,
 )
 from scripts.dev.visual_debugger.protocol import (
     ActorPovLiveDebuggerFrameV2,
@@ -42,8 +47,10 @@ from scripts.dev.visual_debugger.protocol import (
     RosterSelectionCommandV1,
     SaveAsCommandV1,
     ScenarioSwitchCommandV1,
+    SetCombatConfigurationCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
+    SharedObsAgentPovLiveDebuggerFrameV2,
     ViewMode,
 )
 from scripts.dev.visual_debugger.recording import (
@@ -186,7 +193,29 @@ def _service(
     )
 
 
-def _runtime_provenance() -> RuntimeProvenanceV1:
+def _shared_obs_pov_service() -> DebuggerService:
+    session = create_session(
+        get_scenario("arena_5v5"),
+        seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
+        controlled_global_slot=0,
+        show_ranges=True,
+        verbose_logging=False,
+        execution_information_mode="shared_obs",
+    )
+    return DebuggerService(
+        session,
+        view_mode="pov",
+        preset="analysis",
+        include_stress=False,
+        session_id="shared-obs-pov-test-session",
+    )
+
+
+def _runtime_provenance(
+    *,
+    policy_execution_included: bool = False,
+) -> RuntimeProvenanceV1:
     return RuntimeProvenanceV1(
         python_version="3.13.0",
         package_version="0.1.0",
@@ -201,7 +230,7 @@ def _runtime_provenance() -> RuntimeProvenanceV1:
         precision="float32",
         environment_count=1,
         batch_shape=(1,),
-        policy_execution_included=False,
+        policy_execution_included=policy_execution_included,
     )
 
 
@@ -212,6 +241,10 @@ def _recording_service(
     reducers: tuple[EvaluationMetricReducerV1, ...] = (),
     view_mode: ViewMode = "researcher",
     maximum_episode_steps: int | None = None,
+    team_b_controller: Literal["manual", "scripted_tdm"] = "manual",
+    execution_information_mode: Literal[
+        "shared_obs", "no_shared_obs"
+    ] = "no_shared_obs",
 ) -> tuple[DebuggerService, DebuggerReplayRecorderV1]:
     debug_launch = debugger_test_launch_specification()
     launch = build_debugger_evaluation_launch_specification_v1(
@@ -232,6 +265,8 @@ def _recording_service(
         scenario,
         seed=0,
         evaluation_launch_specification=launch,
+        team_b_controller=team_b_controller,
+        execution_information_mode=execution_information_mode,
         controlled_global_slot=None,
         show_ranges=True,
         verbose_logging=False,
@@ -239,9 +274,15 @@ def _recording_service(
     recorder = DebuggerReplayRecorderV1(
         specification=build_debugger_recording_specification_v1(
             action_source_kind=(
-                "scripted" if scenario.mode == "scripted" else "manual"
+                "scripted"
+                if scenario.mode == "scripted"
+                else "mixed"
+                if team_b_controller == "scripted_tdm"
+                else "manual"
             ),
-            runtime_provenance=_runtime_provenance(),
+            runtime_provenance=_runtime_provenance(
+                policy_execution_included=(team_b_controller == "scripted_tdm")
+            ),
         ),
         destination=preflight_replay_bundle_destination_v1(
             tmp_path / "episode.marlbg-replay.json"
@@ -354,6 +395,62 @@ def test_initial_and_current_frame_reads_are_coherent_and_non_mutating() -> None
     assert first.incoming_transition_id is None
     assert service.session is initial_session
     assert bool(jnp.array_equal(service.session.key, initial_key))
+
+
+def test_live_shared_obs_presentation_uses_distinct_live_authorities_only() -> None:
+    service = _shared_obs_pov_service()
+    raw = service.current_frame()
+    result = service.current_presentation()
+
+    assert type(raw) is SharedObsAgentPovLiveDebuggerFrameV2
+    assert result.outcome == "response"
+    presentation = result.payload
+    assert type(presentation) is LiveSharedObsAuthorizedPresentationFrameV1
+    assert presentation.source.source_kind == "live_shared_obs_visual_union_frame"
+    assert presentation.source.source_recipient_frame_id == raw.recipient_frame_id
+    assert presentation.authority.observation_mode == "shared_obs_visual_union"
+    assert presentation.authority.exact_actor_input_export_available is False
+    assert presentation.technical_frame.technical_kind == (
+        "live_shared_obs_technical_frame"
+    )
+    assert presentation.live_inspection.envelope_kind == (
+        "live_shared_obs_source_bound_inspection"
+    )
+    serialized = presentation.model_dump_json()
+    for replay_only_or_materialized_name in (
+        "source_artifact_id",
+        "source_timeline_id",
+        "playback_state",
+        "source_bank",
+        "source_material",
+    ):
+        assert replay_only_or_materialized_name not in serialized
+
+
+def test_live_shared_obs_pointer_selects_an_authorized_union_agent() -> None:
+    service = _shared_obs_pov_service()
+    snapshot = service.session.current_evaluation_frame.snapshot
+    teammate_position = snapshot.agent_positions[1]
+
+    result = service.apply_command(
+        _request(
+            "shared-pointer-target",
+            base_revision=0,
+            command=BattlefieldPointerCommandV1(
+                world_x=teammate_position[0],
+                world_y=teammate_position[1],
+                button="primary",
+                shift_key=True,
+            ),
+        )
+    )
+
+    assert result.outcome == "response"
+    assert isinstance(result.payload, CommandResponseV2)
+    assert result.payload.result == "applied"
+    assert result.payload.frame.revision == 1
+    assert service.revision == 1
+    assert service.session.pending_action.selected_global_target_slot == 1
 
 
 def test_ui_edit_advances_only_frame_revision() -> None:
@@ -1425,6 +1522,72 @@ def test_recording_restart_fence_and_confirmed_discard_replace_atomically(
     assert confirmed.payload.frame.recording.captured_transition_count == 0
     assert service.session.evaluation_context.identity.episode_id != old_episode_id
     assert service.evaluation_validated_transition_count == 0
+
+
+def test_recording_configuration_change_requires_exact_discard_and_restarts(
+    tmp_path: Path,
+) -> None:
+    service, old_recorder = _recording_service(tmp_path)
+    submitted = service.apply_command(
+        _request(
+            "prefix-before-configuration",
+            base_revision=0,
+            command=KeyboardCommandV1(key="Enter"),
+        )
+    )
+    assert isinstance(submitted.payload, CommandResponseV2)
+    replacement = SetCombatConfigurationCommandV1(
+        team_b_controller="scripted_tdm",
+        execution_information_mode="shared_obs",
+    )
+    replacement_session = set_combat_configuration(
+        service.session,
+        team_b_controller=replacement.team_b_controller,
+        execution_information_mode=replacement.execution_information_mode,
+    )
+    replacement_recorder = old_recorder.replacement_for(
+        replacement_session.evaluation_context,
+        replacement_session.current_evaluation_frame,
+    )
+    assert replacement_recorder.specification.action_source_kind == "mixed"
+    assert (
+        replacement_recorder.specification.runtime_provenance.policy_execution_included
+        is True
+    )
+
+    fenced = service.apply_command(
+        _request(
+            "fenced-configuration",
+            base_revision=1,
+            command=replacement,
+        )
+    )
+    confirmed = service.apply_command(
+        _request(
+            "confirmed-configuration",
+            base_revision=1,
+            command=ConfirmDiscardAndReplaceCommandV1(replacement=replacement),
+        )
+    )
+
+    assert isinstance(fenced.payload, CommandResponseV2)
+    assert fenced.payload.result == "no_op"
+    assert isinstance(confirmed.payload, CommandResponseV2)
+    assert confirmed.payload.result == "applied"
+    assert old_recorder.lifecycle == "discarded"
+    assert service.session.team_b_controller == "scripted_tdm"
+    assert service.session.evaluation_context.execution_information_mode == "shared_obs"
+    assert (
+        confirmed.payload.frame.combat_configuration.team_b_controller
+        == replacement.team_b_controller
+    )
+    assert (
+        confirmed.payload.frame.combat_configuration.execution_information_mode
+        == replacement.execution_information_mode
+    )
+    assert confirmed.payload.frame.frame_index == 0
+    assert confirmed.payload.frame.recording is not None
+    assert confirmed.payload.frame.recording.captured_transition_count == 0
 
 
 def test_scripted_recording_rejects_confirmed_reset_without_discarding_prefix(

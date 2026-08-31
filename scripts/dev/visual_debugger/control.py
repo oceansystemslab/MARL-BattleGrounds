@@ -5,15 +5,19 @@ from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
+from jax import Array
 
 from marl_battlegrounds.core.config import validate_product_env_config
 from marl_battlegrounds.core.env import initialize_scenario_state, step
 from marl_battlegrounds.core.types import (
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
+    MAX_AGENTS_PER_TEAM,
     MOVE_STAY,
     NUM_MOVE_ACTIONS,
     NUM_TARGET_ACTIONS,
+    TEAM_A_ID,
+    TEAM_B_ID,
     Action,
     ActionMask,
     EnvConfig,
@@ -28,6 +32,25 @@ from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
     ActionMaskV1,
     EvaluationEpisodeContextV1,
+    ExecutionInformationMode,
+)
+from marl_battlegrounds.policies.actor import (
+    ActorAction,
+    build_joint_action_from_actor_actions,
+)
+from marl_battlegrounds.policies.no_shared_obs import (
+    execute_no_shared_obs_team_policy,
+)
+from marl_battlegrounds.policies.scripted.no_shared_obs import (
+    team_deathmatch_no_shared_obs_policy,
+)
+from marl_battlegrounds.policies.scripted.shared_obs import (
+    team_deathmatch_shared_obs_policy,
+)
+from marl_battlegrounds.policies.shared_obs import (
+    build_default_shared_obs_information_availability,
+    build_shared_obs_sensor_source_bank,
+    execute_shared_obs_team_policy,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
     advance_status_source_evidence_v2,
@@ -48,8 +71,8 @@ from scripts.dev.visual_debugger.model import (
     PendingAction,
     ScenarioFrame,
     SubmissionKind,
+    TeamBController,
 )
-from scripts.dev.visual_debugger.scenarios import get_scenario
 
 type DebuggerTransitionFailureStageV1 = Literal[
     "action_build",
@@ -227,6 +250,12 @@ def _replace_controlled_pending_action(
     pending_action: PendingAction,
 ) -> DebuggerSession:
     """Replace only the controlled actor's row in the immutable draft tuple."""
+    controlled_row = session.evaluation_context.roster[session.controlled_global_slot]
+    if (
+        session.team_b_controller == "scripted_tdm"
+        and controlled_row.configured_team_id == TEAM_B_ID
+    ):
+        return session
     pending_actions = list(session.pending_actions)
     pending_actions[session.controlled_global_slot] = pending_action
     return replace(session, pending_actions=tuple(pending_actions))
@@ -278,6 +307,78 @@ def build_interactive_joint_action(
         target = target.at[actor_slot].set(target_action)
         ultimate = ultimate.at[actor_slot].set(pending_action.armed_lane)
     return Action(move=move, select_target=target, use_ultimate=ultimate)
+
+
+def _team_a_actor_action(action: Action) -> ActorAction:
+    """Project the fixed Team A block from one already-built manual action."""
+    return ActorAction(
+        move=action.move[:MAX_AGENTS_PER_TEAM],
+        select_target=action.select_target[:MAX_AGENTS_PER_TEAM],
+        use_ultimate=action.use_ultimate[:MAX_AGENTS_PER_TEAM],
+    )
+
+
+def _scripted_policy_keys(session: DebuggerSession) -> Array:
+    """Derive same-start actor keys without consuming the environment stream."""
+    seed = session.evaluation_context.seed_protocol.adversarial_opponent_seed
+    if type(seed) is not int:
+        raise ValueError("scripted Team B requires an adversarial policy seed.")
+    decision_key = jax.random.fold_in(
+        jax.random.key(seed),
+        session.current_evaluation_frame.frame_index,
+    )
+    return jax.random.split(decision_key, num=MAX_AGENT_SLOTS)
+
+
+def _build_manual_scripted_joint_action(session: DebuggerSession) -> Action:
+    """Combine same-epoch Team A drafts with canonical scripted Team B rows."""
+    team_a_slots = tuple(
+        row.global_slot
+        for row in session.evaluation_context.roster
+        if row.configured_active and row.configured_team_id == TEAM_A_ID
+    )
+    manual_action = build_interactive_joint_action(
+        session.evaluation_context,
+        session.pending_actions,
+        actor_global_slots=team_a_slots,
+    )
+    policy_keys = _scripted_policy_keys(session)
+    mode = session.evaluation_context.execution_information_mode
+    if mode == "shared_obs":
+        information_availability = _captured_information_availability(session)
+        assert information_availability is not None
+        source_bank = build_shared_obs_sensor_source_bank(session.observation)
+        team_b_action = cast(
+            ActorAction,
+            execute_shared_obs_team_policy(
+                session.observation,
+                session.action_mask,
+                policy_keys,
+                source_bank,
+                information_availability,
+                policy=team_deathmatch_shared_obs_policy,
+                team_identity=TEAM_B_ID,
+            ),
+        )
+    elif mode == "no_shared_obs":
+        if _captured_information_availability(session) is not None:
+            raise ValueError("NoSharedObs must not expose SharedObs availability.")
+        team_b_action = cast(
+            ActorAction,
+            execute_no_shared_obs_team_policy(
+                session.observation,
+                session.action_mask,
+                policy_keys,
+                policy=team_deathmatch_no_shared_obs_policy,
+                team_identity=TEAM_B_ID,
+            ),
+        )
+    else:
+        raise ValueError("unsupported execution information mode")
+    return build_joint_action_from_actor_actions(
+        _team_a_actor_action(manual_action),
+        team_b_action,
+    )
 
 
 def build_scripted_joint_action(
@@ -346,14 +447,52 @@ def _fresh_snapshot(
 
 def _debugger_action_source_kind(
     scenario: DebuggerScenario,
+    team_b_controller: TeamBController,
 ) -> DebuggerActionSourceKindV1:
-    """Return the only action source authorized by the scenario mode."""
-    return "manual" if scenario.mode == "interactive" else "scripted"
+    """Return truthful episode-level action-source provenance."""
+    if scenario.mode == "scripted":
+        return "scripted"
+    return "mixed" if team_b_controller == "scripted_tdm" else "manual"
 
 
-def _debugger_expected_horizon(scenario: DebuggerScenario, config: EnvConfig) -> int:
-    """Use the resolved script length or the interactive config maximum."""
-    return len(scenario.frames) if scenario.mode == "scripted" else config.max_steps
+def _initial_information_availability(
+    config: EnvConfig,
+    execution_information_mode: ExecutionInformationMode,
+) -> Array | None:
+    """Build the episode-wide SharedObs topology exactly once per fresh epoch."""
+    if execution_information_mode == "shared_obs":
+        return build_default_shared_obs_information_availability(
+            config.agent_profile.active_mask,
+            config.agent_profile.team_ids,
+        )
+    if execution_information_mode == "no_shared_obs":
+        return None
+    raise ValueError("execution_information_mode must be shared_obs or no_shared_obs")
+
+
+def _captured_information_availability(session: DebuggerSession) -> Array | None:
+    """Return the exact matrix recorded on the current policy-input frame."""
+    captured = session.current_evaluation_frame.shared_obs_information_availability_by_recipient_and_sensor_source  # noqa: E501
+    if session.evaluation_context.execution_information_mode == "shared_obs":
+        if captured is None:
+            raise ValueError("SharedObs execution requires captured availability.")
+        return jnp.asarray(captured, dtype=jnp.bool_)
+    if captured is not None:
+        raise ValueError("NoSharedObs execution must omit SharedObs availability.")
+    return None
+
+
+def _debugger_expected_horizon(
+    scenario: DebuggerScenario,
+    config: EnvConfig,
+    state: EnvState,
+) -> int:
+    """Use the script length or remaining interactive simulator transitions."""
+    return (
+        len(scenario.frames)
+        if scenario.mode == "scripted"
+        else config.max_steps - int(state.step_count)
+    )
 
 
 def create_session(
@@ -364,8 +503,15 @@ def create_session(
     controlled_global_slot: int | None,
     show_ranges: bool,
     verbose_logging: bool,
+    team_b_controller: TeamBController = "manual",
+    execution_information_mode: ExecutionInformationMode = "no_shared_obs",
 ) -> DebuggerSession:
-    """Create one deterministic immutable debugger session."""
+    """Create one deterministic immutable debugger session.
+
+    Production launchers pass both run controls explicitly. The defaults keep
+    existing low-level test and diagnostic construction on its former manual,
+    NoSharedObs contract.
+    """
     if seed != evaluation_launch_specification.root_seed:
         raise ValueError("seed must equal the debugger evaluation launch root seed.")
     (
@@ -380,15 +526,25 @@ def create_session(
         scenario=scenario,
         config=config,
         run_generation=0,
-        action_source_kind=_debugger_action_source_kind(scenario),
-        expected_horizon=_debugger_expected_horizon(scenario, config),
+        action_source_kind=_debugger_action_source_kind(
+            scenario,
+            team_b_controller,
+        ),
+        team_b_controller=team_b_controller,
+        execution_information_mode=execution_information_mode,
+        expected_horizon=_debugger_expected_horizon(scenario, config, state),
     )
     next_key = jax.random.key(evaluation_context.seed_protocol.environment_seed)
+    information_availability = _initial_information_availability(
+        config,
+        execution_information_mode,
+    )
     initial_frame = capture_initial_evaluation_frame_v1(
         evaluation_context,
         state,
         observation,
         action_mask,
+        information_availability,
     )
     status_source_evidence_state = initialize_status_source_evidence_v2(
         evaluation_context,
@@ -411,7 +567,7 @@ def create_session(
     )
 
     session = DebuggerSession(
-        scenario_name=scenario.name,
+        scenario=scenario,
         seed=seed,
         run_generation=0,
         scenario_default_movement_scale=scenario_default_movement_scale,
@@ -427,6 +583,7 @@ def create_session(
         status_source_evidence_state=status_source_evidence_state,
         last_submission_kind=None,
         last_report_actor_slots=(),
+        team_b_controller=team_b_controller,
         controlled_global_slot=requested_slot,
         pending_actions=_default_pending_actions(
             evaluation_context,
@@ -687,6 +844,9 @@ def submit_joint_action(
             info.transition_facts,
             reward,
             done_flags,
+            successor_shared_obs_information_availability_by_recipient_and_sensor_source=(
+                _captured_information_availability(session)
+            ),
         )
     except Exception as error:
         raise _transition_failure(
@@ -737,6 +897,21 @@ def submit_interactive(
     actor_global_slots: tuple[int, ...] | None = None,
 ) -> DebuggerSession:
     """Submit one authorized collection of same-epoch pending actor rows."""
+    if session.team_b_controller == "scripted_tdm":
+        try:
+            action = _build_manual_scripted_joint_action(session)
+        except Exception as error:
+            raise _transition_failure(
+                "action_build",
+                "scripted_action_build_failed",
+                error,
+            ) from error
+        return submit_joint_action(
+            session,
+            action,
+            submission_kind="interactive",
+            report_actor_slots=_active_context_slots(session),
+        )
     submission_slots = (
         _active_context_slots(session)
         if actor_global_slots is None
@@ -766,7 +941,7 @@ def submit_next_script_frame(
     session: DebuggerSession,
 ) -> DebuggerSession:
     """Submit the next registered multi-actor frame through the shared boundary."""
-    scenario = get_scenario(session.scenario_name)
+    scenario = session.scenario
     if session.next_script_frame_index >= len(scenario.frames):
         return session
     frame = scenario.frames[session.next_script_frame_index]
@@ -802,7 +977,7 @@ def reset_session(
     session: DebuggerSession,
 ) -> DebuggerSession:
     """Recreate the deterministic initial epoch at the product scale."""
-    scenario = get_scenario(session.scenario_name)
+    scenario = session.scenario
     return _restart_session(
         session,
         scenario,
@@ -815,8 +990,18 @@ def _restart_session(
     scenario: DebuggerScenario,
     *,
     preserve_controlled_slot: bool,
+    team_b_controller: TeamBController | None = None,
+    execution_information_mode: ExecutionInformationMode | None = None,
 ) -> DebuggerSession:
     """Build one coherent fresh epoch without entering the simulator step seam."""
+    next_team_b_controller = (
+        session.team_b_controller if team_b_controller is None else team_b_controller
+    )
+    next_information_mode = (
+        session.evaluation_context.execution_information_mode
+        if execution_information_mode is None
+        else execution_information_mode
+    )
     (
         scenario_default_movement_scale,
         config,
@@ -838,15 +1023,25 @@ def _restart_session(
         scenario=scenario,
         config=config,
         run_generation=run_generation,
-        action_source_kind=_debugger_action_source_kind(scenario),
-        expected_horizon=_debugger_expected_horizon(scenario, config),
+        action_source_kind=_debugger_action_source_kind(
+            scenario,
+            next_team_b_controller,
+        ),
+        team_b_controller=next_team_b_controller,
+        execution_information_mode=next_information_mode,
+        expected_horizon=_debugger_expected_horizon(scenario, config, state),
     )
     next_key = jax.random.key(evaluation_context.seed_protocol.environment_seed)
+    information_availability = _initial_information_availability(
+        config,
+        next_information_mode,
+    )
     initial_frame = capture_initial_evaluation_frame_v1(
         evaluation_context,
         state,
         observation,
         action_mask,
+        information_availability,
     )
     status_source_evidence_state = initialize_status_source_evidence_v2(
         evaluation_context,
@@ -869,7 +1064,7 @@ def _restart_session(
     )
     restarted = replace(
         session,
-        scenario_name=scenario.name,
+        scenario=scenario,
         run_generation=run_generation,
         scenario_default_movement_scale=scenario_default_movement_scale,
         config=config,
@@ -884,6 +1079,7 @@ def _restart_session(
         status_source_evidence_state=status_source_evidence_state,
         last_submission_kind=None,
         last_report_actor_slots=(),
+        team_b_controller=next_team_b_controller,
         controlled_global_slot=controlled_slot,
         pending_actions=_default_pending_actions(
             evaluation_context,
@@ -892,6 +1088,34 @@ def _restart_session(
         next_script_frame_index=0,
     )
     return restarted
+
+
+def set_combat_configuration(
+    session: DebuggerSession,
+    *,
+    team_b_controller: TeamBController,
+    execution_information_mode: ExecutionInformationMode,
+) -> DebuggerSession:
+    """Replace the episode only when its controller or information mode changes."""
+    if team_b_controller not in ("manual", "scripted_tdm"):
+        raise ValueError("team_b_controller must be manual or scripted_tdm")
+    if execution_information_mode not in ("shared_obs", "no_shared_obs"):
+        raise ValueError(
+            "execution_information_mode must be shared_obs or no_shared_obs"
+        )
+    if (
+        session.team_b_controller == team_b_controller
+        and session.evaluation_context.execution_information_mode
+        == execution_information_mode
+    ):
+        return session
+    return _restart_session(
+        session,
+        session.scenario,
+        preserve_controlled_slot=True,
+        team_b_controller=team_b_controller,
+        execution_information_mode=execution_information_mode,
+    )
 
 
 def switch_scenario(

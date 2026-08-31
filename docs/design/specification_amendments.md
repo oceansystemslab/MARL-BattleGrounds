@@ -1239,3 +1239,100 @@ common trainer, trunk, heads, masking, rollout lifecycle, and update loop.
 Checkpoints remain regime-tagged rather than switching regime in place. This
 amendment changes no `EnvConfig`, `EnvState`, `Observation`, `Action`, mask,
 reset, transition, reward, termination, geometry, or task semantic.
+
+## A20. DevClient authoring and saved-scenario execution boundary
+
+**Classification:** required product and experiment-architecture clarification.
+**Supersedes:** the product name and live-inheritance assumptions in A16, plus
+the requirement to author speculative King of the Hill and Capture the Flag
+objective annotations before those task milestones resume.
+**Clarifies:** Sections 2.3.1, 2.3.6, 2.8.3-2.8.4, 2.9, 2.12.6-2.12.7,
+and 4.3.7; Amendments A15-A17; and the Milestone 7-12 handoffs.
+
+The live developer product is the **MARL-BattleGrounds DevClient**. It contains
+three deliberately small areas: the existing Combat Debugger, a reusable Map
+Author, and a task-controlled Scenario Author. Internal
+`visual_debugger` package paths and the `combat_debugger` wire identity may
+remain unchanged as implementation details. The read-only Replay Viewer is a
+separate researcher-facing application. It retains its own launcher, product
+identity, routes, lifecycle, title, controls, and artifact responsibilities and
+must never receive DevClient authoring authority or navigation.
+
+The Map Author and Scenario Author reuse the DevClient's established native
+HTML, CSS, JavaScript, SVG coordinates, icons, viewport behavior, authenticated
+loopback service, and visual language. Authoring uses one selection, direct
+center dragging, exact numeric fields, fixed snapping with an explicit bypass,
+keyboard nudging, local undo/redo, ordered obstacle controls, and linked host
+problems. It deliberately omits a frontend framework, multi-selection,
+alignment guides, transform handles, layers, groups, freehand geometry,
+configurable grids, collaboration, plugins, and generic asset-management
+machinery. The existing read-only combat renderer remains read-only; a small
+authoring renderer/controller sits beside it.
+
+A reusable map contains positive finite decimal dimensions, an ordered list of
+walls and pillars, and exactly five fixed spawn pads per team. Obstacle order is
+semantic fixed-slot order. The one-world-unit visual grid is not persisted.
+Wall rotation is authored in degrees and normalized host-side to float32
+radians. Ten pads always exist. Obstacle overlap is permitted, and out-of-bounds
+obstacles produce a warning rather than a new simulator-invalid condition.
+
+A scenario owns an embedded, independently editable copy of complete map
+content. Optional source-map identity, revision, or digest is nonsemantic
+provenance only: later map changes never propagate into the scenario, and
+scenario edits never mutate the source map. The scenario task section is a
+discriminated contract with only `team_deathmatch` in this version. King of the
+Hill and Capture the Flag remain specified future tasks, but their runtime and
+authoring work is postponed until after the other roadmap milestones. Their
+history is not removed, and their real task-owned union members are added only
+when those milestones resume; no speculative objective controls, plugin
+framework, or generic objective abstraction is authorized now.
+
+Team Deathmatch scenarios carry complete fixed Team A and Team B roster blocks,
+one-to-five-agent contiguous active prefixes, per-slot initial state, episode
+configuration, current global state, and bounded controlled-study metadata.
+Physical scenario content is independent of controller assignment and
+information regime. The same saved scenario can therefore be reset to the same
+immutable state and seed for manual/manual or manual/scripted comparison under
+SharedObs or NoSharedObs without duplicating the asset. Previous-action history
+is always the canonical neutral initialization and is not authorable.
+
+The authoritative host pipeline is strict whole-draft parsing, ordered map
+normalization, fixed-shape obstacle padding, catalog profile resolution,
+ordinary reset, overlay of only authorized state fields, forced neutral
+previous-action history, existing product configuration validation, existing
+scenario initial-state validation, and authored-state initialization. Browser
+code never constructs JAX arrays, recreates mechanics, repairs invalid content,
+or becomes a second simulator. No change to core configuration, state,
+observation, action, reset, step, geometry, combat, reward, termination, or task
+semantics is authorized by this amendment.
+
+Development assets use three explicit lifecycle stages: a mutable
+revision-fenced draft, an immutable content-addressed candidate produced by
+validation, and an explicit owner-only promotion to normalized tracked content.
+Draft saves are atomic and stale revisions fail closed. Semantic identity
+excludes names, timestamps, draft revisions, browser object IDs, and source-map
+provenance, while retaining ordered geometry, embedded scenario map content,
+roster, configuration, state, and study contract. Freeze and promotion never
+overwrite an existing identity. A map remains partition-neutral; selecting
+training or evaluation populations owns partition and leakage decisions.
+
+The Combat Debugger includes a simple persistent saved-scenario loader. On a
+later DevClient session it lists saved scenario drafts whose latest revisions
+are execution-valid and frozen scenario candidates. Loading reopens the exact
+saved revision or candidate, strictly parses it, recompiles it through current
+authorities, and revalidates it before atomically replacing the Debug session.
+A failed revalidation returns linked problems and leaves the current session
+untouched. `Open in Debug` from the Scenario Author calls this same host loading
+service; it is a convenience route, not a separate execution model and not the
+only way to load saved work. The current authoring buffer is first compiled and
+validated into an immutable in-memory candidate snapshot; mutable browser
+state is never executed directly.
+
+Combat execution continues to use one current decision epoch, one joint action,
+and one unchanged simulator step. Team A remains manually controlled in this
+version. Team B is selectable between manual control and the scripted Team
+Deathmatch policy. SharedObs and NoSharedObs are selectable run configuration,
+with SharedObs the researcher-facing default and NoSharedObs a separately
+reported first-class regime. Changing controller or information regime resets
+the exact loaded scenario snapshot and seed. Manual runs are diagnostic and do
+not become official policy-evaluation evidence.

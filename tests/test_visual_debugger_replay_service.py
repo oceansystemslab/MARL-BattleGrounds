@@ -78,6 +78,9 @@ import marl_battlegrounds.core.geometry as core_geometry_module
 import marl_battlegrounds.evaluation.capture as evaluation_capture_module
 import marl_battlegrounds.evaluation.events as evaluation_events_module
 import marl_battlegrounds.rendering.evaluation_adapter as evaluation_adapter_module
+from marl_battlegrounds.evaluation.actor_projection import (
+    NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+)
 from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v1
 from marl_battlegrounds.evaluation.metrics import (
     CompletionState,
@@ -1602,6 +1605,7 @@ def test_current_presentation_no_shared_uses_fixed_recipient_epochs(
     assert presentation.current_endpoint.action_axis.owner_public_agent_id == (
         raw.public_agent_id
     )
+    assert presentation.authority.exact_actor_input_export_available is True
     mask = presentation.current_endpoint.parts.next_decision_action_mask
     assert len(mask.move) == 9
     assert len(mask.select_target) == 11
@@ -3821,6 +3825,65 @@ def test_agent_researcher_space_stays_global_while_battlefield_stays_fogged(
     assert {
         row.public_agent_id for row in agent.current_endpoint.parts.scene.agents
     } <= set(oracle_agents)
+
+
+def test_no_shared_v2_replay_uses_ephemeral_visual_pov_without_relabeling_source() -> (
+    None
+):
+    source = captured_evaluation_trajectory(
+        transition_count=2,
+        expected_horizon=2,
+        episode_id="service-no-shared-v2-visual",
+    )
+    trajectory = CapturedEvaluationTrajectory(
+        context=source.context.model_copy(
+            update={"actor_projection": NO_SHARED_OBS_ACTOR_PROJECTION_V2}
+        ),
+        frames=source.frames,
+        transitions=source.transitions,
+    )
+    case = _loaded_case(trajectory, completion_state="complete")
+    canonical_replay = canonical_json_bytes(case.bundle.replay)
+
+    with pytest.raises(ValueError, match="projection version 1"):
+        export_actor_pov_replay_v1(case.bundle.replay, global_slot=0)
+
+    service = ReplayViewerService(
+        case.bundle,
+        initial_frame_index=1,
+        viewer_session_id="no-shared-v2-visual",
+    )
+    opened = _response(
+        _apply(
+            service,
+            ReplaySetViewCommandV1(view_mode="pov"),
+            command_id="open-no-shared-v2-pov",
+        )
+    )
+    assert type(opened.frame) is ActorPovReplayViewerFrameV1
+    assert opened.frame.pov_global_slot == 0
+    presentation = cast(
+        ReplayNoSharedObsAuthorizedPresentationFrameV1,
+        _presentation_response(service.current_presentation()),
+    )
+    assert presentation.authority.exact_actor_input_export_available is False
+
+    rotated = _response(
+        _apply(
+            service,
+            ReplaySetPovActorCommandV1(global_slot=1),
+            command_id="rotate-no-shared-v2-pov",
+        )
+    )
+    assert type(rotated.frame) is ActorPovReplayViewerFrameV1
+    assert rotated.frame.pov_global_slot == 1
+    timeline = service.current_timeline()
+    assert type(timeline) is ActorPovReplayTimelineV1
+    assert timeline.pov_global_slot == 1
+    assert case.bundle.replay.header.context.actor_projection == (
+        NO_SHARED_OBS_ACTOR_PROJECTION_V2
+    )
+    assert canonical_json_bytes(case.bundle.replay) == canonical_replay
 
 
 @pytest.mark.parametrize("audience", ("no_shared_obs", "shared_obs"))

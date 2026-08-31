@@ -60,15 +60,15 @@
       ],
       "frame_count": 8,
       "metric_report": {
-        "byte_length": 24401,
+        "byte_length": 24491,
         "file": "death-respawn-shield.marlbg-metrics.json",
-        "sha256": "a4eee4684b14cb5d9e39665a1bb043ff3ac09f1d3041058ea1196279bea74f7d"
+        "sha256": "b17fcf75fd2ad8eee10b3255ce12bab59355adc714d6cf64575b472e9fb17b24"
       },
       "name": "death-respawn-shield",
       "replay": {
-        "byte_length": 586323,
+        "byte_length": 586413,
         "file": "death-respawn-shield.marlbg-replay.json",
-        "sha256": "2edcad32c2981710e4892814aee7dfd55713e460372b7290dc90673fc8db517e"
+        "sha256": "c74a427ed83be376342cff7e9e23f87e4fbb37d077e3118fce3b65c78b98ca7a"
       },
       "seed": 0,
       "source_scenario": "death_respawn_cycle",
@@ -95,15 +95,15 @@
       ],
       "frame_count": 8,
       "metric_report": {
-        "byte_length": 27284,
+        "byte_length": 27444,
         "file": "recovery-status-lifecycle.marlbg-metrics.json",
-        "sha256": "9a91f6beee5f349ca599a909248a10ae27d0fcb1714c65b67144a576d51b0ccd"
+        "sha256": "7a35885386d4bcb62694c25ce9509338d2ee82bc79dbbc32ae2bdd0595c20735"
       },
       "name": "recovery-status-lifecycle",
       "replay": {
-        "byte_length": 626793,
+        "byte_length": 626953,
         "file": "recovery-status-lifecycle.marlbg-replay.json",
-        "sha256": "5af027b9433d3eaea90be084c93924161edd40300e42b256d554a2cd76c494c3"
+        "sha256": "00093847f33d7084b6f330abe2bf94983844c611524c49eeb5424e811456d894"
       },
       "seed": 0,
       "source_scenario": "recovery_refresh_cycle",
@@ -127,15 +127,15 @@
       ],
       "frame_count": 6,
       "metric_report": {
-        "byte_length": 28425,
+        "byte_length": 28613,
         "file": "mirrored-five-class-ultimates.marlbg-metrics.json",
-        "sha256": "5ec10d9f12521472febf2c97a30eb664ead652b2c3300f8c9366dddcb6b0893b"
+        "sha256": "4ac2760125d1c21e518f26f5112ca518b1889817d4539b6a2fd11c07f5a5f116"
       },
       "name": "mirrored-five-class-ultimates",
       "replay": {
-        "byte_length": 487356,
+        "byte_length": 487544,
         "file": "mirrored-five-class-ultimates.marlbg-replay.json",
-        "sha256": "9339523e26df6e73394399b195c5af437832299dfcf1b608c51e2836b58505d5"
+        "sha256": "c3ae627beaddf4c49121c79d2326486dda8462c2ae2424ce37d1ea30646a6695"
       },
       "seed": 0,
       "source_scenario": "mirrored_ultimates",

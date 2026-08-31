@@ -1030,7 +1030,7 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
   );
   await expect(page.locator("html")).toHaveAttribute("data-audience", "agent_pov");
   const livePov = JSON.parse(await authenticatedText(page, "/api/presentation/frame"));
-  expect(livePov.presentation_kind).toBe("live_no_shared_obs_agent_pov");
+  expect(livePov.presentation_kind).toBe("live_shared_obs_agent_pov");
   await expectFilterSurface(page, disabledPair);
 
   const visiblePovTarget = targetSelect
@@ -1145,7 +1145,7 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
   expect(
     JSON.parse(await authenticatedText(page, "/api/presentation/frame"))
       .presentation_kind,
-  ).toBe("live_no_shared_obs_agent_pov");
+  ).toBe("live_shared_obs_agent_pov");
 
   await expectReplayAgentTargetFilter(
     page,

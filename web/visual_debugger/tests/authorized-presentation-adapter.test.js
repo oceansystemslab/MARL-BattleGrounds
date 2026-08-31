@@ -271,7 +271,7 @@ test("only unforgeably normalized roots enter the presentation adapter", async (
   assert.equal(authorizedPresentationSceneView(raw, null), null);
 });
 
-test("preference authority keys project the exact frozen tuple for all five leaves", async () => {
+test("preference authority keys project the exact frozen tuple for all six leaves", async () => {
   for (const [kind, raw] of Object.entries(fixture.presentations)) {
     const frame = await normalized(kind);
     const key = authorizedPresentationPreferenceKey(frame);
@@ -554,6 +554,7 @@ test("Oracle, live Agent control, and Replay Agent navigation keep separate capa
 test("Agent researcher roster is global while live and replay battlefields remain fog-scoped", async () => {
   for (const kind of [
     "live_no_shared_obs_agent_pov",
+    "live_shared_obs_agent_pov",
     "replay_no_shared_obs_agent_pov",
     "replay_shared_obs_agent_pov",
   ]) {
@@ -590,6 +591,7 @@ test("Agent researcher roster is global while live and replay battlefields remai
 test("scene adapter preserves exact mask and owner-centered settled overlays", async () => {
   for (const kind of [
     "live_no_shared_obs_agent_pov",
+    "live_shared_obs_agent_pov",
     "replay_no_shared_obs_agent_pov",
     "replay_shared_obs_agent_pov",
   ]) {
@@ -662,7 +664,7 @@ test("scene adapter preserves exact mask and owner-centered settled overlays", a
   }
 });
 
-test("all five leaves project the combat countdown as one durable display status", async () => {
+test("all six leaves project the combat countdown as one durable display status", async () => {
   for (const kind of Object.keys(fixture.presentations)) {
     const baseline = authorizedPresentationSceneView(
       await normalized(/** @type {keyof typeof fixture.presentations} */ (kind)),
@@ -1290,10 +1292,11 @@ test("Agent visual events, local evidence, Submitted/Accepted, Technical Frame, 
   );
 });
 
-test("Latest Transition is exact for all five leaves and empty at frame zero", async () => {
+test("Latest Transition is exact for recorded later frames and empty at frame zero", async () => {
   const laterCases = [
     ["live_oracle", 5],
     ["live_no_shared_obs_agent_pov", 5],
+    ["live_shared_obs_agent_pov", 10],
     ["replay_oracle", 5],
     ["replay_no_shared_obs_agent_pov", 5],
     ["replay_shared_obs_agent_pov", 5],
@@ -1483,7 +1486,8 @@ test("Pending Joint Action is one exact researcher-space row per live actor", as
   }
 });
 
-test("Technical Frame projects the exact final five-leaf allowlist atomically", async () => {
+test("Technical Frame projects the exact final six-leaf allowlist atomically", async () => {
+  const liveShared = fixture.presentations.live_shared_obs_agent_pov;
   const cases = [
     [
       "live_oracle",
@@ -1501,6 +1505,23 @@ test("Technical Frame projects the exact final five-leaf allowlist atomically", 
         ["frame", "Frame", 1],
         ["simulator_step", "Simulator Step", 1],
         ["incoming_transition", "Incoming Transition", "episode-001:transition:0"],
+      ],
+    ],
+    [
+      "live_shared_obs_agent_pov",
+      [
+        ["episode", "Episode", liveShared.technical_frame.episode_id],
+        ["frame", "Frame", liveShared.technical_frame.recipient_frame_index],
+        [
+          "simulator_step",
+          "Simulator Step",
+          liveShared.technical_frame.simulator_step_count,
+        ],
+        [
+          "incoming_transition",
+          "Incoming Transition",
+          liveShared.researcher_space.technical_frame.incoming_transition_id,
+        ],
       ],
     ],
     [

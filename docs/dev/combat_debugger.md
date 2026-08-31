@@ -1,41 +1,46 @@
-# Combat Debugger
+# DevClient and Combat Debugger
 
-The Combat Debugger is the live, manual MARL-BattleGrounds laboratory. It
-always opens `arena_5v5`, whose map is 20×10, and always uses the fixed Analysis
-presentation. Use it to inspect same-epoch authority, compose simultaneous
-actions, submit transitions, and optionally record one manual episode.
+The DevClient is the local developer workspace for MARL-BattleGrounds. It has
+three deliberately small areas: Combat Debugger, Maps, and Scenarios. Use the
+Combat Debugger to inspect same-epoch authority, compose simultaneous actions,
+load an execution-valid saved scenario, submit transitions, and optionally
+record one manual episode. Use Maps and Scenarios to author local reusable maps
+and complete Team Deathmatch starting states without creating a second
+simulator in the browser.
 
-Scripted demonstrations, checked samples, and existing artifacts belong to the
-[Replay Viewer](replay_viewer.md). The debugger has no public scenario or
-replay selector.
+Scripted demonstrations, checked samples, and existing replay artifacts belong
+to the separate [Replay Viewer](replay_viewer.md). It receives no DevClient
+navigation or authoring authority.
 
 ## Launch
 
 Open the default Oracle view:
 
 ```bash
-./scripts/dev/run_debug_renderer.sh
+./scripts/dev/run_dev_client.sh
 ```
 
 Useful launch variants:
 
 ```bash
 # Start with one active global slot selected and hide ranges.
-./scripts/dev/run_debug_renderer.sh --controlled-slot 5 --no-ranges
+./scripts/dev/run_dev_client.sh --controlled-slot 5 --no-ranges
 
 # Start in the selected actor's authorized POV.
-./scripts/dev/run_debug_renderer.sh --view pov --controlled-slot 5
+./scripts/dev/run_dev_client.sh --view pov --controlled-slot 5
 
 # Print the loopback URL without asking the operating system to open it.
-./scripts/dev/run_debug_renderer.sh --no-open --port 8123
+./scripts/dev/run_dev_client.sh --no-open --port 8123
 
 # Show the executable CLI contract.
-./scripts/dev/run_debug_renderer.sh --help
+./scripts/dev/run_dev_client.sh --help
 ```
 
 The launcher resolves the repository from its own location, binds only to
 `127.0.0.1`, chooses an ephemeral port by default, prints the URL, and attempts
 to open a modern browser. Node.js and npm are not runtime requirements.
+
+`run_debug_renderer.sh` remains a thin compatibility redirect to this launcher.
 
 The public options are:
 
@@ -53,6 +58,59 @@ The public options are:
 Option abbreviations are rejected. Replay, sample, scripted-scenario,
 frame-index, and replay-POV-slot options are rejected with the Replay Viewer
 launcher named in the error.
+
+## Maps and scenarios
+
+The Maps and Scenarios areas share one small authoring surface: an object or
+roster list, the SVG map, an exact numeric inspector, and linked host problems.
+Drag centers for quick placement, hold Alt to bypass the fixed 0.5-world-unit
+snap, use arrow keys for exact nudging, and use the inspector for dimensions,
+wall size/rotation, roster, episode, current state, and controlled-study fields.
+Ten spawn pads are fixed identities; obstacles have explicit duplicate, delete,
+and up/down order controls.
+
+Drafts are local files under ignored `artifacts/dev_client/` storage. Save uses
+an exact revision fence, so an older browser cannot overwrite a newer revision.
+Validate distinguishes execution-valid scenarios from freeze-qualified study
+candidates. Freeze writes an immutable content-addressed candidate; it does not
+promote the asset into tracked scientific configuration.
+
+A new scenario can start blank, copy a saved map, or duplicate a saved
+scenario. Copied map content is independent: later changes never propagate in
+either direction. The browser edits JSON-shaped fields only. Python compiles
+the whole draft into existing `EnvConfig` and `EnvState` authorities and runs
+the existing validators before any scenario can enter the Combat Debugger.
+
+After owner review, promote one frozen candidate into a tracked, versioned
+configuration with the explicit CLI boundary:
+
+```bash
+uv run python scripts/dev/promote_dev_asset.py \
+  --candidate <candidate-sha256> \
+  --asset-id <durable-lowercase-id> \
+  --version <positive-integer>
+```
+
+Promotion reopens and revalidates the exact candidate, preserves its semantic
+digest, records owner approval provenance, and writes either
+`configs/maps/<asset-id>/v<version>.json` or
+`configs/scenarios/<asset-id>/v<version>.json`. It never overwrites an existing
+ID/version and does not assign a map to a training or evaluation partition.
+
+## Loading a saved scenario
+
+The Combat Debugger scenario selector lists the latest execution-valid saved
+scenario revisions and frozen scenario candidates. Load reopens the exact
+persisted source, strictly parses it, recompiles it, and revalidates it before
+the current session changes. Failure leaves the current session untouched and
+returns linked problems. `Open in Debug` in the Scenarios area is a shortcut to
+the same loading service. Reset restores the loaded authored state and seed,
+including its map, roster, scores, timers, and current timestep.
+
+Team A remains manual. Team B may be manual or use the scripted Team
+Deathmatch policy. SharedObs is the default information regime, while
+NoSharedObs remains a first-class selectable regime. Changing controller or
+information regime resets the exact loaded scenario before comparison.
 
 ## Authority and views
 
@@ -183,7 +241,7 @@ Create the destination parent, then opt into recording:
 
 ```bash
 mkdir -p recordings
-./scripts/dev/run_debug_renderer.sh \
+./scripts/dev/run_dev_client.sh \
   --record-replay recordings/episode.marlbg-replay.json
 ```
 
@@ -220,8 +278,8 @@ remain available. Closing a browser tab alone neither saves nor stops Python.
 Render the manual arena's authorized reset state without a browser server:
 
 ```bash
-./scripts/dev/run_debug_renderer.sh --static
-./scripts/dev/run_debug_renderer.sh \
+./scripts/dev/run_dev_client.sh --static
+./scripts/dev/run_dev_client.sh \
   --static --seed 7 --controlled-slot 5 --no-ranges
 ```
 

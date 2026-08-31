@@ -19,7 +19,7 @@ const SCIENTIFIC_DISCLOSURES = Object.freeze([
 /** @typedef {{move_action: number, target_action: number, use_ultimate_action: number}} ActionTuple */
 /** @typedef {{actor_public_agent_id: string, submitted_action: ActionTuple, accepted_action: ActionTuple}} TransitionActionRow */
 /** @typedef {{status_id: string}} IncomingStatus */
-/** @typedef {{cue_type: string, start_statuses: IncomingStatus[], successor_statuses: IncomingStatus[]}} IncomingStatusCue */
+/** @typedef {{delta_kind: string, agent_public_agent_id: string, changed_dynamic_fields: string[], start_observation: {statuses: IncomingStatus[]}, successor_observation: {statuses: IncomingStatus[]}}} IncomingStatusDelta */
 
 test.beforeAll(async () => {
   const started = await startDebugger();
@@ -1254,25 +1254,29 @@ test("post-Charge Agent history stays installable through a reciprocal Charge", 
     await expectHealthyInstallation();
 
     const agentAfterSettling = await currentAuthorizedPresentation(page);
-    expect(agentAfterSettling.presentation_kind).toBe("live_no_shared_obs_agent_pov");
+    expect(agentAfterSettling.presentation_kind).toBe("live_shared_obs_agent_pov");
     expect(agentAfterSettling.authority.recipient_public_agent_id).toBe("6");
-    const statusHistory = /** @type {IncomingStatusCue[]} */ (
-      agentAfterSettling.latest_events.cues
-    ).find((cue) => cue.cue_type === "own_status_changed");
+    const statusHistory = /** @type {IncomingStatusDelta[]} */ (
+      agentAfterSettling.latest_events.deltas
+    ).find(
+      (delta) =>
+        delta.delta_kind === "observed_values_change" &&
+        delta.agent_public_agent_id === "6" &&
+        delta.changed_dynamic_fields.includes("statuses"),
+    );
     expect(statusHistory).toBeTruthy();
     if (statusHistory === undefined) {
-      throw new Error("Agent 6 has no post-Charge status history cue.");
+      throw new Error("Agent 6 has no post-Charge status history delta.");
     }
-    expect(statusHistory.start_statuses.map((status) => status.status_id)).toEqual([
-      "warrior_charge_stun",
-      "warrior_charge_slow",
-    ]);
-    expect(statusHistory.successor_statuses.map((status) => status.status_id)).toEqual([
-      "warrior_charge_slow",
-    ]);
+    expect(
+      statusHistory.start_observation.statuses.map((status) => status.status_id),
+    ).toEqual(["warrior_charge_stun", "warrior_charge_slow"]);
+    expect(
+      statusHistory.successor_observation.statuses.map((status) => status.status_id),
+    ).toEqual(["warrior_charge_slow"]);
     for (const status of [
-      ...statusHistory.start_statuses,
-      ...statusHistory.successor_statuses,
+      ...statusHistory.start_observation.statuses,
+      ...statusHistory.successor_observation.statuses,
     ]) {
       expect("direct_sources" in status).toBe(false);
       expect("source_public_agent_id" in status).toBe(false);

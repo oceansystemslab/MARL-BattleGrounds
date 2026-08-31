@@ -17,6 +17,10 @@ from scripts.dev.visual_debugger.live_presentation import (
     build_live_oracle_authorized_presentation_v1,
     build_live_researcher_space_v1,
 )
+from scripts.dev.visual_debugger.no_shared_visual import (
+    build_live_no_shared_obs_visual_adjacent_slice_v1,
+    build_live_no_shared_obs_visual_current_slice_v1,
+)
 from scripts.dev.visual_debugger.presentation_protocol import (
     LiveEditableDraftInspectionV1,
     LiveNoSharedObsAuthorizedPresentationFrameV1,
@@ -46,10 +50,6 @@ from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContextV1,
     EvaluationFrameV1,
-)
-from marl_battlegrounds.evaluation.pov import (
-    build_actor_pov_adjacent_transition_slice_v1,
-    build_actor_pov_current_slice_v1,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import build_visual_event_batch_v2
 
@@ -379,6 +379,10 @@ def test_scripted_live_presentation_is_explicitly_inspection_only(
     if view_mode == "pov":
         _switch_to_pov(service)
     raw = service.current_frame()
+    if view_mode == "researcher":
+        assert type(raw) is ResearcherLiveDebuggerFrameV2
+    else:
+        assert type(raw) is ActorPovLiveDebuggerFrameV2
     assert raw.hud.pending_submission_scope == "scripted_playback"
 
     result = service.current_presentation()
@@ -898,7 +902,7 @@ def test_live_public_builders_derive_epoch_and_reject_cross_audience_inputs() ->
     pov_session = service.session
     pov_raw = service.current_frame()
     assert type(pov_raw) is ActorPovLiveDebuggerFrameV2
-    current_slice = build_actor_pov_current_slice_v1(
+    current_slice = build_live_no_shared_obs_visual_current_slice_v1(
         pov_session.evaluation_context,
         pov_session.current_evaluation_frame,
         global_slot=pov_session.controlled_global_slot,
@@ -936,7 +940,7 @@ def test_live_no_shared_builder_requires_exact_adjacent_carrier() -> None:
     session = service.session
     raw = service.current_frame()
     assert type(raw) is ActorPovLiveDebuggerFrameV2
-    current_slice = build_actor_pov_current_slice_v1(
+    current_slice = build_live_no_shared_obs_visual_current_slice_v1(
         session.evaluation_context,
         session.current_evaluation_frame,
         global_slot=session.controlled_global_slot,
@@ -969,7 +973,7 @@ def test_live_no_shared_builder_requires_exact_adjacent_carrier() -> None:
             researcher_space=researcher_space,
         )
     assert session.incoming_evaluation_view is not None
-    carrier = build_actor_pov_adjacent_transition_slice_v1(
+    carrier = build_live_no_shared_obs_visual_adjacent_slice_v1(
         session.incoming_evaluation_view,
         global_slot=session.controlled_global_slot,
     )
@@ -1069,14 +1073,12 @@ def test_live_presentation_getter_holds_lock_against_submit(
     assert settled.payload.latest_transition is not None
 
 
-def test_live_module_exposes_no_shared_product_builder() -> None:
+def test_live_module_exposes_every_product_builder() -> None:
     import scripts.dev.visual_debugger.live_presentation as module
 
     assert module.__all__ == [
         "build_live_no_shared_obs_authorized_presentation_v1",
         "build_live_oracle_authorized_presentation_v1",
         "build_live_researcher_space_v1",
+        "build_live_shared_obs_authorized_presentation_v1",
     ]
-    assert not any(
-        "shared_obs" in name and "no_shared_obs" not in name for name in dir(module)
-    )

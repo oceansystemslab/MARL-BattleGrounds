@@ -53,6 +53,8 @@ def run_static_renderer(
         scenario,
         seed=seed,
         evaluation_launch_specification=evaluation_launch_specification,
+        team_b_controller="manual",
+        execution_information_mode="no_shared_obs",
         controlled_global_slot=controlled_global_slot,
         show_ranges=show_ranges,
         verbose_logging=verbose,

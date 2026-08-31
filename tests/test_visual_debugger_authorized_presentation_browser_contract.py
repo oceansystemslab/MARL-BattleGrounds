@@ -36,7 +36,7 @@ _FIXTURE_ASSET = (
 )
 
 
-def test_generated_browser_schema_and_five_leaf_fixture_are_exact() -> None:
+def test_generated_browser_schema_and_fixture_are_exact() -> None:
     """Checked assets must equal fresh Python output byte for byte."""
     assert _SCHEMA_ASSET.read_text(encoding="utf-8") == render_browser_schema_module()
     rendered_fixture = render_fixture()
@@ -46,6 +46,7 @@ def test_generated_browser_schema_and_five_leaf_fixture_are_exact() -> None:
     assert set(payload["presentations"]) == {
         "live_oracle",
         "live_no_shared_obs_agent_pov",
+        "live_shared_obs_agent_pov",
         "replay_oracle",
         "replay_no_shared_obs_agent_pov",
         "replay_shared_obs_agent_pov",

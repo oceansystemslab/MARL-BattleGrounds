@@ -7,10 +7,8 @@ test("standalone launchers install their exact product identity", async ({ page 
   const live = await startDebugger();
   try {
     await page.goto(live.url);
-    await expect(page).toHaveTitle("MARL-BattleGrounds Combat Debugger");
-    await expect(page.locator("#app-title")).toHaveText(
-      "MARL-BattleGrounds Combat Debugger",
-    );
+    await expect(page).toHaveTitle("MARL-BattleGrounds DevClient");
+    await expect(page.locator("#app-title")).toHaveText("MARL-BattleGrounds DevClient");
     await expect(page.locator("html")).toHaveAttribute(
       "data-product-kind",
       "combat_debugger",
@@ -23,6 +21,15 @@ test("standalone launchers install their exact product identity", async ({ page 
   const replay = await startReplayViewer({
     sampleReplay: "death-respawn-shield",
   });
+  /** @type {string[]} */
+  const authoringModuleRequests = [];
+  /** @param {import("@playwright/test").Request} request */
+  const recordAuthoringModuleRequest = (request) => {
+    if (request.url().endsWith("/src/dev-client.js")) {
+      authoringModuleRequests.push(request.url());
+    }
+  };
+  page.on("request", recordAuthoringModuleRequest);
   let releaseMain = () => {};
   /** @type {Promise<void>} */
   const mainRelease = new Promise((resolve) => {
@@ -77,7 +84,9 @@ test("standalone launchers install their exact product identity", async ({ page 
       "replay_viewer",
     );
     await expect(page.locator("html")).toHaveAttribute("data-viewer-mode", "replay");
+    expect(authoringModuleRequests).toEqual([]);
   } finally {
+    page.off("request", recordAuthoringModuleRequest);
     releaseMain();
     await stopDebugger(replay.process);
   }

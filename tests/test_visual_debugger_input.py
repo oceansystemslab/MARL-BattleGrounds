@@ -22,6 +22,9 @@ from scripts.dev.visual_debugger.input import (
     recording_restart_intent_v1,
 )
 from scripts.dev.visual_debugger.model import DebuggerSession
+from scripts.dev.visual_debugger.no_shared_visual import (
+    build_live_no_shared_obs_visual_current_slice_v1,
+)
 from scripts.dev.visual_debugger.protocol import (
     ActorPovTargetActionCommandV1,
     BattlefieldPointerCommandV1,
@@ -32,6 +35,7 @@ from scripts.dev.visual_debugger.protocol import (
     ResetCommandV1,
     RosterSelectionCommandV1,
     ScenarioSwitchCommandV1,
+    SetCombatConfigurationCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
 )
@@ -49,7 +53,7 @@ from marl_battlegrounds.core.types import (
     EnvConfig,
     EnvState,
 )
-from marl_battlegrounds.evaluation.pov import build_actor_pov_current_slice_v1
+from marl_battlegrounds.evaluation.models import ExecutionInformationMode
 from marl_battlegrounds.rendering.evaluation_adapter import (
     build_researcher_analyzer_projection_v2,
 )
@@ -63,6 +67,7 @@ def _session(
     name: str = "arena_5v5",
     *,
     controlled_slot: int | None = None,
+    execution_information_mode: ExecutionInformationMode = "no_shared_obs",
 ) -> DebuggerSession:
     return create_session(
         get_scenario(name),
@@ -71,6 +76,7 @@ def _session(
         controlled_global_slot=controlled_slot,
         show_ranges=True,
         verbose_logging=False,
+        execution_information_mode=execution_information_mode,
     )
 
 
@@ -85,7 +91,7 @@ def _researcher_agents(session: DebuggerSession) -> tuple[AgentSceneV2, ...]:
 
 
 def _authorized_pov_slots(session: DebuggerSession) -> set[int]:
-    slice_ = build_actor_pov_current_slice_v1(
+    slice_ = build_live_no_shared_obs_visual_current_slice_v1(
         session.evaluation_context,
         session.current_evaluation_frame,
         global_slot=session.controlled_global_slot,
@@ -110,6 +116,13 @@ def _authorized_pov_slots(session: DebuggerSession) -> set[int]:
         (KeyboardCommandV1(key="r"), "reset"),
         (KeyboardCommandV1(key="R", shift_key=True), None),
         (ScenarioSwitchCommandV1(scenario_name="basic_support"), None),
+        (
+            SetCombatConfigurationCommandV1(
+                team_b_controller="scripted_tdm",
+                execution_information_mode="shared_obs",
+            ),
+            "combat_configuration",
+        ),
         (FinishAndReviewCommandV1(), None),
     ),
 )
@@ -143,6 +156,39 @@ def test_recording_lifecycle_command_is_safe_when_recording_is_disabled() -> Non
     assert result.handled
     assert not result.changed
     assert result.notice == "Replay recording is not enabled for this debugger session."
+
+
+def test_combat_configuration_command_is_exact_no_op_or_fresh_episode() -> None:
+    session = _session()
+    unchanged = dispatch_command(
+        session,
+        SetCombatConfigurationCommandV1(
+            team_b_controller="manual",
+            execution_information_mode="no_shared_obs",
+        ),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+    changed = dispatch_command(
+        session,
+        SetCombatConfigurationCommandV1(
+            team_b_controller="scripted_tdm",
+            execution_information_mode="shared_obs",
+        ),
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert unchanged.session is session
+    assert not unchanged.changed
+    assert not unchanged.episode_restarted
+    assert changed.changed
+    assert changed.episode_restarted
+    assert changed.session.run_generation == session.run_generation + 1
+    assert changed.session.team_b_controller == "scripted_tdm"
+    assert changed.session.evaluation_context.execution_information_mode == "shared_obs"
 
 
 @pytest.mark.parametrize(
@@ -967,6 +1013,27 @@ def test_pov_pointer_stays_fog_local_while_roster_selects_hidden_agent() -> None
     assert control_result.changed
     assert control_result.notice is None
     assert control_result.session.controlled_global_slot == 5
+
+
+def test_shared_pov_pointer_uses_the_authorized_visual_union() -> None:
+    session = _session("arena_5v5", execution_information_mode="shared_obs")
+    teammate_position = session.current_evaluation_frame.snapshot.agent_positions[1]
+
+    selected = dispatch_command(
+        session,
+        BattlefieldPointerCommandV1(
+            world_x=teammate_position[0],
+            world_y=teammate_position[1],
+            button="primary",
+            shift_key=True,
+        ),
+        view_mode="pov",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    assert selected.changed
+    assert selected.session.pending_action.selected_global_target_slot == 1
 
 
 def test_entering_pov_preserves_hidden_pending_target_without_advancing_epoch() -> None:

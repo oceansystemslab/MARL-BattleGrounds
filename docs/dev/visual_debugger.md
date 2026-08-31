@@ -1,40 +1,41 @@
 # Browser tools migration
 
-The former combined “Visual Debugger and Analyzer” surface is now two explicit
-products with separate launchers and authority boundaries:
+The former combined “Visual Debugger and Analyzer” surface is now the DevClient
+and the separate Replay Viewer, with independent launchers and authority:
 
 | Product | Use it for | Canonical launcher |
 | --- | --- | --- |
-| [Combat Debugger](combat_debugger.md) | Manual live work and optional recording in the fixed 20×10 arena | `./scripts/dev/run_debug_renderer.sh` |
+| [DevClient](combat_debugger.md) | Combat Debugger plus local reusable Map and TDM Scenario authoring | `./scripts/dev/run_dev_client.sh` |
 | [Replay Viewer](replay_viewer.md) | Existing replay artifacts, checked samples, and isolated scripted demonstrations | `./scripts/dev/run_replay_viewer.sh` |
 
 Both products use the fixed Analysis presentation and the same native browser
-renderer. They do not share command authority: the Combat Debugger can submit
-manual actions, while the Replay Viewer is read-only.
+visual language. They do not share command authority: the DevClient can author
+assets and submit live actions, while the Replay Viewer is read-only.
 
 ## Command migration
 
 | Previous intent | Current command |
 | --- | --- |
-| Open the manual live arena | `./scripts/dev/run_debug_renderer.sh` |
-| Record the manual arena | `./scripts/dev/run_debug_renderer.sh --record-replay PATH` |
-| Render a manual reset snapshot | `./scripts/dev/run_debug_renderer.sh --static` |
+| Open the developer workspace | `./scripts/dev/run_dev_client.sh` |
+| Record a Combat Debugger episode | `./scripts/dev/run_dev_client.sh --record-replay PATH` |
+| Render a Combat Debugger reset snapshot | `./scripts/dev/run_dev_client.sh --static` |
 | Open a replay formerly selected with debugger `--replay` | `./scripts/dev/run_replay_viewer.sh --replay PATH` |
 | Open a checked sample formerly selected with debugger `--sample-replay` | `./scripts/dev/run_replay_viewer.sh --sample-replay NAME` |
 | Open a scripted demonstration formerly selected with debugger `--scenario` | `./scripts/dev/run_replay_viewer.sh --scenario NAME` |
 | List replay scenarios or samples | `./scripts/dev/run_replay_viewer.sh --list-scenarios` or `./scripts/dev/run_replay_viewer.sh --list-sample-replays` |
 | Render an exact replay frame | `./scripts/dev/run_replay_viewer.sh --replay PATH --static --frame-index N` |
 
-The Combat Debugger intentionally has no scenario selector or scripted-advance
-control. The Replay Viewer intentionally has no action composer, manual
-submission, reset, or recording destination. Each launcher rejects options
-belonging to the other product with a migration error.
+The Combat Debugger lists execution-valid saved scenario drafts and frozen
+candidates. The Scenario Author's `Open in Debug` shortcut calls that same
+loader. The Replay Viewer intentionally has no authoring route, action composer,
+manual submission, reset, or recording destination. The historical
+`run_debug_renderer.sh` launcher remains a compatibility redirect only.
 
 ## Shared boundaries
 
 - Python remains the authority for simulator state, legality, replay
   validation, audience projection, and metric access.
-- Browser layout, help, panels, animation, ranges, and the 20 visual filters
+- Browser layout, help, panels, animation, and the 19 visible filter controls
   are presentation-only.
 - The replay transport uses Start/End controls, exact seeks, and document-level
   unmodified Left/Right/Space shortcuts that yield to interactive controls.

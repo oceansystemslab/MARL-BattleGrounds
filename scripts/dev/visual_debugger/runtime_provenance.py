@@ -22,6 +22,8 @@ class _RuntimeDevice(Protocol):
 
 def capture_debugger_runtime_provenance_v1(
     code_revision: CodeRevisionV1,
+    *,
+    policy_execution_included: bool = False,
 ) -> RuntimeProvenanceV1:
     """Capture one path-free host/runtime record for a recording launch.
 
@@ -31,6 +33,8 @@ def capture_debugger_runtime_provenance_v1(
     """
     if type(code_revision) is not CodeRevisionV1:
         raise TypeError("code_revision must be exact CodeRevisionV1")
+    if type(policy_execution_included) is not bool:
+        raise TypeError("policy_execution_included must be an exact bool")
 
     import jax
 
@@ -66,7 +70,7 @@ def capture_debugger_runtime_provenance_v1(
         precision="float64" if x64_enabled else "float32",
         environment_count=1,
         batch_shape=(1,),
-        policy_execution_included=False,
+        policy_execution_included=policy_execution_included,
     )
 
 

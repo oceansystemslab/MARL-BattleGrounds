@@ -7,16 +7,13 @@ from threading import RLock
 from typing import Literal, cast
 
 from marl_battlegrounds.evaluation.metrics import EvaluationEpisodeObserverV1
-from marl_battlegrounds.evaluation.pov import (
-    build_actor_pov_adjacent_transition_slice_v1,
-    build_actor_pov_current_slice_v1,
-)
 from marl_battlegrounds.rendering.evaluation_adapter import (
     build_visual_event_batch_v2,
 )
 from scripts.dev.visual_debugger.control import (
     DebuggerTransitionFailureStageV1,
     DebuggerTransitionFailureV1,
+    switch_scenario,
 )
 from scripts.dev.visual_debugger.frame import LiveDebuggerFrame, build_debugger_frame
 from scripts.dev.visual_debugger.input import (
@@ -28,8 +25,13 @@ from scripts.dev.visual_debugger.live_presentation import (
     build_live_no_shared_obs_authorized_presentation_v1,
     build_live_oracle_authorized_presentation_v1,
     build_live_researcher_space_v1,
+    build_live_shared_obs_authorized_presentation_v1,
 )
-from scripts.dev.visual_debugger.model import DebuggerSession
+from scripts.dev.visual_debugger.model import DebuggerScenario, DebuggerSession
+from scripts.dev.visual_debugger.no_shared_visual import (
+    build_live_no_shared_obs_visual_adjacent_slice_v1,
+    build_live_no_shared_obs_visual_current_slice_v1,
+)
 from scripts.dev.visual_debugger.presentation_protocol import (
     PresentationResourceResultV1,
 )
@@ -52,6 +54,7 @@ from scripts.dev.visual_debugger.protocol import (
     SaveAsCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
+    SharedObsAgentPovLiveDebuggerFrameV2,
     ViewMode,
 )
 from scripts.dev.visual_debugger.recording import (
@@ -59,7 +62,7 @@ from scripts.dev.visual_debugger.recording import (
     DebuggerReplayRecorderV1,
 )
 from scripts.dev.visual_debugger.replay_service import ReplayViewerService
-from scripts.dev.visual_debugger.scenarios import STRESS_SCENARIOS, get_scenario
+from scripts.dev.visual_debugger.scenarios import STRESS_SCENARIOS
 
 _COMMAND_RECORD_LIMIT = 256
 _CLOSED_RECORDING_PRESENTATION_KEYS = frozenset(("g", "v", "p", "?"))
@@ -227,6 +230,40 @@ class DebuggerService:
         """Return the current immutable session for diagnostics and tests."""
         with self._lock:
             return self._session
+
+    def load_scenario(self, scenario: DebuggerScenario) -> DebuggerSession:
+        """Atomically replace the live diagnostic episode with one scenario."""
+        if type(scenario) is not DebuggerScenario:
+            raise TypeError("scenario must be the exact DebuggerScenario type.")
+        with self._lock:
+            if self._shutting_down:
+                raise RuntimeError("the debugger is shutting down")
+            if self._faulted:
+                raise RuntimeError("the debugger service is faulted")
+            if self._recorder is not None:
+                raise RuntimeError(
+                    "authored scenarios cannot replace a replay-recording session"
+                )
+
+            candidate_session = switch_scenario(self._session, scenario)
+            candidate_revision = self._revision + 1
+            candidate_frame = self._build_frame(
+                session=candidate_session,
+                revision=candidate_revision,
+            )
+            self._build_authorized_presentation(
+                session=candidate_session,
+                raw_frame=candidate_frame,
+                view_mode=self._view_mode,
+            )
+            candidate_observer = self._new_evaluation_observer(candidate_session)
+
+            self._session = candidate_session
+            self._revision = candidate_revision
+            self._frame = candidate_frame
+            self._evaluation_observer = candidate_observer
+            self._command_records.clear()
+            return candidate_session
 
     @property
     def revision(self) -> int:
@@ -436,25 +473,14 @@ class DebuggerService:
                 raw_frame,
             )
         else:
-            if type(raw_frame) is not ActorPovLiveDebuggerFrameV2:
+            if type(raw_frame) not in (
+                ActorPovLiveDebuggerFrameV2,
+                SharedObsAgentPovLiveDebuggerFrameV2,
+            ):
                 raise RuntimeError(
                     "POV live service lacks its committed recipient frame."
                 )
             recipient = session.controlled_global_slot
-            current_slice = build_actor_pov_current_slice_v1(
-                context,
-                current,
-                global_slot=recipient,
-                incoming_transition_view=incoming,
-            )
-            carrier = (
-                None
-                if incoming is None
-                else build_actor_pov_adjacent_transition_slice_v1(
-                    incoming,
-                    global_slot=recipient,
-                )
-            )
             oracle_raw_frame = self._build_frame(
                 session=session,
                 revision=raw_frame.revision,
@@ -472,21 +498,51 @@ class DebuggerService:
                 incoming,
                 oracle_raw_frame,
             )
-            presentation = build_live_no_shared_obs_authorized_presentation_v1(
-                current_slice,
-                carrier,
-                raw_frame,
-                global_context=context,
-                current_global_frame=current,
-                previous_global_frame=(
-                    None if incoming is None else incoming.start_frame
-                ),
-                public_catalog=context.static_mechanics_catalog,
-                incoming_visual_events=(
-                    None if incoming is None else build_visual_event_batch_v2(incoming)
-                ),
-                researcher_space=build_live_researcher_space_v1(oracle_presentation),
-            )
+            researcher_space = build_live_researcher_space_v1(oracle_presentation)
+            if type(raw_frame) is SharedObsAgentPovLiveDebuggerFrameV2:
+                presentation = build_live_shared_obs_authorized_presentation_v1(
+                    context,
+                    current,
+                    incoming,
+                    raw_frame,
+                    authorized_recipient_global_slot=recipient,
+                    pending_action=session.pending_actions[recipient],
+                    researcher_space=researcher_space,
+                )
+            else:
+                if type(raw_frame) is not ActorPovLiveDebuggerFrameV2:
+                    raise AssertionError("POV raw-frame narrowing failed.")
+                current_slice = build_live_no_shared_obs_visual_current_slice_v1(
+                    context,
+                    current,
+                    global_slot=recipient,
+                    incoming_transition_view=incoming,
+                )
+                carrier = (
+                    None
+                    if incoming is None
+                    else build_live_no_shared_obs_visual_adjacent_slice_v1(
+                        incoming,
+                        global_slot=recipient,
+                    )
+                )
+                presentation = build_live_no_shared_obs_authorized_presentation_v1(
+                    current_slice,
+                    carrier,
+                    raw_frame,
+                    global_context=context,
+                    current_global_frame=current,
+                    previous_global_frame=(
+                        None if incoming is None else incoming.start_frame
+                    ),
+                    public_catalog=context.static_mechanics_catalog,
+                    incoming_visual_events=(
+                        None
+                        if incoming is None
+                        else build_visual_event_batch_v2(incoming)
+                    ),
+                    researcher_space=researcher_space,
+                )
         return PresentationResourceResultV1(
             outcome="response",
             payload=presentation,
@@ -1443,7 +1499,7 @@ class DebuggerService:
             )
             if dispatched.transition_applied is not None:
                 transition_view = dispatched.transition_applied
-                scenario = get_scenario(self._session.scenario_name)
+                scenario = self._session.scenario
                 expected_submission_kind: Literal["interactive", "scripted"] = (
                     "scripted" if scenario.mode == "scripted" else "interactive"
                 )

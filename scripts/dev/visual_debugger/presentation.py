@@ -5,13 +5,10 @@ from __future__ import annotations
 from typing import cast
 
 from marl_battlegrounds.evaluation.models import (
-    ActionAcceptanceFactsV1,
     EvaluationEpisodeContextV1,
     EvaluationFrameV1,
     EvaluationTransitionV1,
-    JointActionV1,
     StaticMechanicsCatalogV1,
-    TransitionFactsV1,
     canonical_digest_sha256,
 )
 from marl_battlegrounds.rendering.authorized_incoming import (
@@ -65,12 +62,12 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     ReplaySharedObsAuthorizedPresentationFrameV1,
     ReplaySharedObsPresentationSourceIdentityV1,
     ReplaySharedObsTechnicalFrameV1,
-    SharedObsLatestTransitionV1,
     SharedObsPresentationAuthorityV1,
     SharedObsUpcomingTransitionV1,
     build_no_shared_obs_authorized_current_endpoint_v1,
     build_oracle_authorized_current_endpoint_v1,
     build_shared_obs_authorized_current_endpoint_v1,
+    build_shared_obs_latest_transition_v1,
 )
 from scripts.dev.visual_debugger.replay_protocol import (
     ActorPovReplayCompletionBadgeV1,
@@ -385,6 +382,7 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
     source_authority_epoch: int,
     incoming_visual_events: VisualEventBatchV2 | None,
     researcher_space: ReplayResearcherSpaceV1,
+    exact_actor_input_export_available: bool = True,
 ) -> ReplayNoSharedObsAuthorizedPresentationFrameV1:
     """Package one committed recipient-local NoSharedObs replay frame."""
     from scripts.dev.visual_debugger.local_oracle_corpse_overlay import (
@@ -399,6 +397,8 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
         raise TypeError("raw_frame must use the exact ActorPov replay root.")
     if type(public_catalog) is not StaticMechanicsCatalogV1:
         raise TypeError("public_catalog must use its exact evaluation root.")
+    if type(exact_actor_input_export_available) is not bool:
+        raise TypeError("exact actor-input export availability must be boolean.")
     if type(raw_frame.cursor) is not ReplayCursorV1:
         raise TypeError("raw_frame cursor must use the exact replay cursor root.")
     if type(raw_frame.projection) is not ActorPovAnalyzerProjectionV1:
@@ -588,7 +588,7 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
             recipient_public_agent_id=current.recipient_public_agent_id,
             recipient_presentation_key=current.recipient_presentation_key,
             projection_basis="recipient_own_recorded_observation",
-            exact_actor_input_export_available=True,
+            exact_actor_input_export_available=(exact_actor_input_export_available),
         ),
         analysis_mode="analysis",
         current_endpoint=endpoint,
@@ -609,124 +609,6 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
         ),
         replay_inspection=replay_inspection,
         researcher_space=researcher_space,
-    )
-
-
-def _shared_obs_latest_transition_v1(
-    incoming_transition: EvaluationTransitionV1 | None,
-    *,
-    successor: SharedObsAuthorizedScenePartsV1,
-    action_axis: AgentPovActionAxisV1,
-    authorized_recipient_global_slot: int,
-) -> SharedObsLatestTransitionV1 | None:
-    if type(authorized_recipient_global_slot) is not int or not (
-        0 <= authorized_recipient_global_slot < 10
-    ):
-        raise ValueError(
-            "authorized_recipient_global_slot must be an exact V1 actor slot."
-        )
-    frame_index = successor.source_frame_index
-    if frame_index == 0:
-        if incoming_transition is not None:
-            raise ValueError("SharedObs frame zero cannot receive incoming T_(n-1).")
-        return None
-    if type(incoming_transition) is not EvaluationTransitionV1:
-        raise TypeError("non-initial SharedObs presentation requires exact T_(n-1).")
-    transition = incoming_transition
-    if (
-        type(transition.schema_id) is not str
-        or transition.schema_id != "marl_battlegrounds.evaluation.transition"
-        or type(transition.schema_version) is not int
-        or transition.schema_version != 1
-    ):
-        raise ValueError("incoming transition must retain its exact V1 schema.")
-    for name in (
-        "episode_id",
-        "transition_id",
-        "start_frame_id",
-        "successor_frame_id",
-    ):
-        value = getattr(transition, name)
-        if type(value) is not str or not value.strip():
-            raise TypeError(f"incoming transition {name} must be a nonempty string.")
-    if type(transition.transition_index) is not int:
-        raise TypeError("incoming transition index must be an exact Python int.")
-    if type(transition.facts) is not TransitionFactsV1:
-        raise TypeError("incoming transition facts must use their exact V1 root.")
-    facts = transition.facts
-    if (
-        type(facts.schema_id) is not str
-        or facts.schema_id != "marl_battlegrounds.evaluation.transition_facts"
-        or type(facts.schema_version) is not int
-        or facts.schema_version != 1
-        or facts.has_transition is not True
-        or type(facts.transition_start_step_count) is not int
-    ):
-        raise ValueError("incoming transition facts must retain exact used headers.")
-    expected_index = frame_index - 1
-    episode_id = successor.source_episode_id
-    if (
-        transition.episode_id != episode_id
-        or transition.transition_index != expected_index
-        or transition.transition_id != f"{episode_id}:transition:{expected_index}"
-        or transition.start_frame_id != f"{episode_id}:frame:{expected_index}"
-        or transition.successor_frame_id != f"{episode_id}:frame:{frame_index}"
-        or facts.transition_start_step_count + 1
-        != successor.source_simulator_step_count
-    ):
-        raise ValueError("incoming transition must be exact T_(n-1).")
-    if type(facts.action_acceptance_facts) is not ActionAcceptanceFactsV1:
-        raise TypeError("incoming action acceptance must use its exact V1 root.")
-    acceptance = facts.action_acceptance_facts
-    submitted = acceptance.submitted_joint_action
-    accepted = acceptance.accepted_joint_action
-    if type(submitted) is not JointActionV1 or type(accepted) is not JointActionV1:
-        raise TypeError("incoming actions must use exact joint-action roots.")
-    for owner, name in ((submitted, "submitted"), (accepted, "accepted")):
-        for values, field_name in (
-            (owner.move, "move"),
-            (owner.select_target, "select_target"),
-            (owner.use_ultimate, "use_ultimate"),
-        ):
-            if type(values) is not tuple or len(values) != 10:
-                raise ValueError(
-                    f"incoming {name} {field_name} must retain ten actor rows."
-                )
-    submitted_row = SubmittedActionTupleV1(
-        move_action=submitted.move[authorized_recipient_global_slot],
-        target_action=submitted.select_target[authorized_recipient_global_slot],
-        use_ultimate_action=submitted.use_ultimate[authorized_recipient_global_slot],
-    )
-    accepted_row = AcceptedActionTupleV1(
-        move_action=accepted.move[authorized_recipient_global_slot],
-        target_action=accepted.select_target[authorized_recipient_global_slot],
-        use_ultimate_action=accepted.use_ultimate[authorized_recipient_global_slot],
-    )
-    prefix = (
-        f"{episode_id}:shared-obs-visual-union:{successor.recipient_public_agent_id}"
-    )
-    return SharedObsLatestTransitionV1(
-        transition_kind="shared_obs_incoming_submitted_accepted",
-        episode_id=episode_id,
-        incoming_transition_index=expected_index,
-        incoming_transition_id=f"{prefix}:transition:{expected_index}",
-        incoming_start_frame_id=f"{prefix}:frame:{expected_index}",
-        incoming_successor_frame_id=f"{prefix}:frame:{frame_index}",
-        incoming_start_simulator_step_count=facts.transition_start_step_count,
-        incoming_successor_simulator_step_count=(successor.source_simulator_step_count),
-        action_rows=(
-            LatestTransitionActionRowV1(
-                actor_presentation_key=action_axis.owner_presentation_key,
-                actor_public_agent_id=action_axis.owner_public_agent_id,
-                target_action_recipient_public_agent_id_by_id=(
-                    action_axis.target_public_agent_id_by_action
-                ),
-                submitted_action=submitted_row,
-                accepted_action=accepted_row,
-            ),
-        ),
-        recipient_public_agent_id=successor.recipient_public_agent_id,
-        recipient_presentation_key=successor.recipient_presentation_key,
     )
 
 
@@ -972,7 +854,7 @@ def build_replay_shared_obs_authorized_presentation_v1(
         parts=current,
         axis_mapping=current_recipient_source_material.axis_mapping,
     )
-    latest_transition = _shared_obs_latest_transition_v1(
+    latest_transition = build_shared_obs_latest_transition_v1(
         incoming_transition,
         successor=current,
         action_axis=endpoint.action_axis,

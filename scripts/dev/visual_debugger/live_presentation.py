@@ -1,11 +1,10 @@
 """Live packaging seams for the authorized presentation resource.
 
-The Combat Debugger owns two presentation audiences: the full researcher
-Oracle and a selected-recipient NoSharedObs Agent POV.  The Agent battlefield
-remains fog-authorized while a separate geometry-free researcher branch owns
-global controls and panels.  This module packages only already-committed live
-epochs.  It does not step the simulator, retain history, read replay artifacts,
-or expose a live SharedObs product.
+The Combat Debugger owns the full researcher Oracle and selected-recipient
+NoSharedObs or SharedObs Agent POVs. Agent battlefields remain authorized while
+a separate geometry-free researcher branch owns global controls and panels.
+This module packages only already-committed live epochs. It does not step the
+simulator, retain history, or read replay artifacts.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from marl_battlegrounds.evaluation.pov import (
 )
 from marl_battlegrounds.rendering.authorized_incoming import (
     build_live_no_shared_obs_incoming_summary_v1,
+    build_shared_obs_incoming_summary_v1,
 )
 from marl_battlegrounds.rendering.authorized_inspection import (
     AuthorizedAxisOnlyTargetActionV1,
@@ -32,9 +32,12 @@ from marl_battlegrounds.rendering.authorized_inspection import (
     DraftArmedLaneV1,
     build_live_no_shared_obs_draft_inspection_v1,
     build_live_oracle_draft_inspection_v1,
+    build_live_shared_obs_draft_inspection_v1,
 )
 from marl_battlegrounds.rendering.authorized_pov_scene import (
+    SharedObsAuthorizedScenePartsV1,
     build_no_shared_obs_authorized_scene_v1,
+    build_shared_obs_authorized_scene_v1,
 )
 from marl_battlegrounds.rendering.authorized_presentation import (
     AcceptedActionTupleV1,
@@ -44,6 +47,8 @@ from marl_battlegrounds.rendering.authorized_presentation import (
     oracle_presentation_key_v1,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
+    SharedObsSourceMaterialProjectionV1,
+    build_shared_obs_authority_source_material_projection_v1,
     build_visual_event_batch_v2,
 )
 from marl_battlegrounds.rendering.pov_scene import (
@@ -54,6 +59,7 @@ from marl_battlegrounds.rendering.scene import (
     ResearcherAnalyzerProjectionV2,
     VisualEventBatchV2,
 )
+from scripts.dev.visual_debugger.model import PendingAction
 from scripts.dev.visual_debugger.presentation_protocol import (
     AgentPovActionAxisV1,
     LatestTransitionActionRowV1,
@@ -73,13 +79,20 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     LiveResearcherEditableDraftInspectionV1,
     LiveResearcherSpaceV1,
     LiveScriptedPlaybackInspectionV1,
+    LiveSharedObsAuthorizedPresentationFrameV1,
+    LiveSharedObsInspectionEnvelopeV1,
+    LiveSharedObsPresentationSourceIdentityV1,
+    LiveSharedObsTechnicalFrameV1,
     NoSharedObsLatestTransitionV1,
     NoSharedObsPresentationAuthorityV1,
     OracleLatestTransitionV1,
     OraclePresentationAuthorityV1,
     ReplayResearcherRosterAgentV1,
+    SharedObsPresentationAuthorityV1,
     build_no_shared_obs_authorized_current_endpoint_v1,
     build_oracle_authorized_current_endpoint_v1,
+    build_shared_obs_authorized_current_endpoint_v1,
+    build_shared_obs_latest_transition_v1,
 )
 from scripts.dev.visual_debugger.protocol import (
     ActorPovHudFrameV1,
@@ -89,6 +102,7 @@ from scripts.dev.visual_debugger.protocol import (
     PendingActionCardV1,
     ResearcherHudFrameV2,
     ResearcherLiveDebuggerFrameV2,
+    SharedObsAgentPovLiveDebuggerFrameV2,
     TargetReferenceV1,
 )
 
@@ -163,6 +177,37 @@ def _require_no_shared_used_containers(
         raise TypeError("raw POV pending target must use its exact V1 root.")
 
 
+def _require_shared_live_header(
+    raw_frame: SharedObsAgentPovLiveDebuggerFrameV2,
+) -> None:
+    if type(raw_frame) is not SharedObsAgentPovLiveDebuggerFrameV2:
+        raise TypeError(
+            "raw_frame must be the exact SharedObsAgentPovLiveDebuggerFrameV2 root."
+        )
+    if (
+        raw_frame.schema_version != 2
+        or raw_frame.frame_kind != "shared_obs_agent_pov_live_debugger"
+        or raw_frame.view_mode != "pov"
+        or raw_frame.verbose is not False
+    ):
+        raise ValueError("raw SharedObs frame does not retain its exact wire identity.")
+    for name in ("session_id", "episode_id", "frame_id"):
+        value = getattr(raw_frame, name)
+        if type(value) is not str or not value:
+            raise TypeError(f"raw SharedObs {name} must be a nonempty exact string.")
+    for name in (
+        "run_generation",
+        "revision",
+        "frame_index",
+        "simulator_step_count",
+    ):
+        value = getattr(raw_frame, name)
+        if type(value) is not int or value < 0:
+            raise TypeError(f"raw SharedObs {name} must be a nonnegative exact int.")
+    if raw_frame.frame_id != f"{raw_frame.episode_id}:frame:{raw_frame.frame_index}":
+        raise ValueError("raw SharedObs global frame ID is not canonical.")
+
+
 def _canonical_live_view(
     context: EvaluationEpisodeContextV1,
     current_frame: EvaluationFrameV1,
@@ -187,6 +232,38 @@ def _canonical_live_view(
     if view.context != context or view.successor_frame != current_frame:
         raise ValueError("incoming live view must enter the selected current frame.")
     return view
+
+
+def _shared_obs_source_materials(
+    context: EvaluationEpisodeContextV1,
+    frame: EvaluationFrameV1,
+    *,
+    recipient_global_slot: int,
+) -> tuple[
+    SharedObsSourceMaterialProjectionV1,
+    tuple[SharedObsSourceMaterialProjectionV1, ...],
+]:
+    sources = tuple(
+        build_shared_obs_authority_source_material_projection_v1(
+            context,
+            frame,
+            selected_global_slot=roster.global_slot,
+        )
+        for roster in context.roster
+        if roster.configured_active
+    )
+    recipient = next(
+        (
+            source
+            for source in sources
+            if source.base_sensor_scene.self_actor.global_slot == recipient_global_slot
+        ),
+        None,
+    )
+    if recipient is None:
+        raise ValueError("SharedObs recipient is absent from active source material.")
+    nonrecipient = tuple(source for source in sources if source is not recipient)
+    return recipient, nonrecipient
 
 
 def _draft_lane_v1(
@@ -871,8 +948,276 @@ def build_live_no_shared_obs_authorized_presentation_v1(
     )
 
 
+def build_live_shared_obs_authorized_presentation_v1(
+    context: EvaluationEpisodeContextV1,
+    current_frame: EvaluationFrameV1,
+    incoming_transition_view: EvaluationTransitionViewV1 | None,
+    raw_frame: SharedObsAgentPovLiveDebuggerFrameV2,
+    *,
+    authorized_recipient_global_slot: int,
+    pending_action: PendingAction,
+    researcher_space: LiveResearcherSpaceV1,
+) -> LiveSharedObsAuthorizedPresentationFrameV1:
+    """Package one committed live SharedObs visual union and researcher UI."""
+    from scripts.dev.visual_debugger.local_oracle_corpse_overlay import (
+        build_local_oracle_corpse_overlay_v1,
+        compose_local_oracle_corpse_scene_v1,
+        validate_local_oracle_corpse_overlay_against_source_v1,
+    )
+
+    _require_shared_live_header(raw_frame)
+    view = _canonical_live_view(context, current_frame, incoming_transition_view)
+    if context.execution_information_mode != "shared_obs":
+        raise ValueError("live SharedObs presentation requires SharedObs context.")
+    if type(authorized_recipient_global_slot) is not int or not (
+        0 <= authorized_recipient_global_slot < len(context.roster)
+    ):
+        raise ValueError("SharedObs recipient slot must be an exact roster index.")
+    recipient_roster = context.roster[authorized_recipient_global_slot]
+    if not recipient_roster.configured_active:
+        raise ValueError("SharedObs recipient must be configured active.")
+    if type(pending_action) is not PendingAction:
+        raise TypeError("pending_action must be the exact PendingAction root.")
+
+    current_recipient, current_nonrecipient = _shared_obs_source_materials(
+        context,
+        current_frame,
+        recipient_global_slot=authorized_recipient_global_slot,
+    )
+    current = build_shared_obs_authorized_scene_v1(
+        current_recipient,
+        all_active_nonrecipient_source_material=current_nonrecipient,
+        public_catalog=context.static_mechanics_catalog,
+        authority_session_id=raw_frame.session_id,
+    )
+    endpoint = build_shared_obs_authorized_current_endpoint_v1(
+        parts=current,
+        axis_mapping=current_recipient.axis_mapping,
+    )
+    if (
+        raw_frame.episode_id != current.source_episode_id
+        or raw_frame.frame_index != current.source_frame_index
+        or raw_frame.frame_id != current_frame.frame_id
+        or raw_frame.simulator_step_count != current.source_simulator_step_count
+        or raw_frame.recipient_public_agent_id != recipient_roster.public_agent_id
+        or raw_frame.recipient_public_agent_id != current.recipient_public_agent_id
+        or raw_frame.recipient_frame_id != current.source_recipient_frame_id
+    ):
+        raise ValueError("raw SharedObs identity does not join authorized s_n.")
+
+    current_living_ids = {
+        roster.public_agent_id
+        for roster in context.roster
+        if roster.configured_active
+        and current_frame.snapshot.alive_mask[roster.global_slot]
+    }
+    current_sensor_ids = tuple(
+        source.source_public_agent_id
+        for source in current.authorized_sensor_sources
+        if source.source_public_agent_id in current_living_ids
+    )
+    corpse_overlay = build_local_oracle_corpse_overlay_v1(
+        context,
+        current_frame,
+        current.scene,
+        authority_session_id=raw_frame.session_id,
+        source_authority_epoch=raw_frame.revision,
+        recipient_public_agent_id=current.recipient_public_agent_id,
+        living_sensor_public_agent_ids=current_sensor_ids,
+    )
+    validate_local_oracle_corpse_overlay_against_source_v1(
+        corpse_overlay,
+        context,
+        current_frame,
+        current.scene,
+        authority_session_id=raw_frame.session_id,
+        source_authority_epoch=raw_frame.revision,
+        recipient_public_agent_id=current.recipient_public_agent_id,
+        living_sensor_public_agent_ids=current_sensor_ids,
+    )
+
+    previous: SharedObsAuthorizedScenePartsV1 | None = None
+    visual_events = None
+    if view is not None:
+        previous_recipient, previous_nonrecipient = _shared_obs_source_materials(
+            context,
+            view.start_frame,
+            recipient_global_slot=authorized_recipient_global_slot,
+        )
+        previous = build_shared_obs_authorized_scene_v1(
+            previous_recipient,
+            all_active_nonrecipient_source_material=previous_nonrecipient,
+            public_catalog=context.static_mechanics_catalog,
+            authority_session_id=raw_frame.session_id,
+        )
+        previous_living_ids = {
+            roster.public_agent_id
+            for roster in context.roster
+            if roster.configured_active
+            and view.start_frame.snapshot.alive_mask[roster.global_slot]
+        }
+        previous_sensor_ids = tuple(
+            source.source_public_agent_id
+            for source in previous.authorized_sensor_sources
+            if source.source_public_agent_id in previous_living_ids
+        )
+        previous_overlay = build_local_oracle_corpse_overlay_v1(
+            context,
+            view.start_frame,
+            previous.scene,
+            authority_session_id=raw_frame.session_id,
+            source_authority_epoch=raw_frame.revision,
+            recipient_public_agent_id=current.recipient_public_agent_id,
+            living_sensor_public_agent_ids=previous_sensor_ids,
+        )
+        incoming_recipient_transition_id = raw_frame.incoming_recipient_transition_id
+        if incoming_recipient_transition_id is None:
+            raise ValueError("non-initial SharedObs frame lacks its incoming identity.")
+        visual_events = build_agent_pov_visual_incoming_summary_v1(
+            build_visual_event_batch_v2(view),
+            transition_start_scene=previous.scene,
+            successor_scene=current.scene,
+            transition_start_corpse_choreography_scene=(
+                compose_local_oracle_corpse_scene_v1(
+                    previous.scene,
+                    previous_overlay,
+                    researcher_class_mechanics=researcher_space.class_mechanics,
+                )
+            ),
+            successor_corpse_choreography_scene=(
+                compose_local_oracle_corpse_scene_v1(
+                    current.scene,
+                    corpse_overlay,
+                    researcher_class_mechanics=researcher_space.class_mechanics,
+                )
+            ),
+            recipient_public_agent_id=current.recipient_public_agent_id,
+            incoming_recipient_transition_id=incoming_recipient_transition_id,
+            incoming_start_recipient_frame_id=previous.source_recipient_frame_id,
+            incoming_successor_recipient_frame_id=current.source_recipient_frame_id,
+        )
+
+    latest_events = build_shared_obs_incoming_summary_v1(previous, current)
+    latest_transition = build_shared_obs_latest_transition_v1(
+        None if view is None else view.transition,
+        successor=current,
+        action_axis=endpoint.action_axis,
+        authorized_recipient_global_slot=authorized_recipient_global_slot,
+    )
+    if raw_frame.incoming_recipient_transition_id != (
+        None if latest_transition is None else latest_transition.incoming_transition_id
+    ):
+        raise ValueError("raw SharedObs incoming identity does not join Latest.")
+
+    if pending_action.selected_global_target_slot is None:
+        pending_target_action = 0
+    else:
+        catalog = context.static_mechanics_catalog
+        target_axis = catalog.global_recipient_slot_by_actor_and_target_action[
+            authorized_recipient_global_slot
+        ]
+        try:
+            pending_target_action = target_axis.index(
+                pending_action.selected_global_target_slot
+            )
+        except ValueError as error:
+            raise ValueError(
+                "pending target is absent from the SharedObs target axis."
+            ) from error
+
+    submission_scope = raw_frame.pending_submission_scope
+    if submission_scope == "joint_turn":
+        input_inspection = LiveEditableDraftInspectionV1(
+            inspection_kind="editable_live_draft",
+            submission_scope="joint_turn",
+            draft=build_live_shared_obs_draft_inspection_v1(
+                current,
+                current_recipient,
+                authorized_recipient_global_slot=authorized_recipient_global_slot,
+                draft_move_action=pending_action.move_action,
+                draft_target_action=pending_target_action,
+                draft_armed_lane=_draft_lane_v1(
+                    target_action=pending_target_action,
+                    raw_armed_lane=pending_action.armed_lane,
+                ),
+            ),
+        )
+    elif submission_scope == "scripted_playback":
+        input_inspection = LiveScriptedPlaybackInspectionV1(
+            inspection_kind="scripted_playback_inspection",
+            submission_scope="scripted_playback",
+            editable_draft_available=False,
+            advance_semantics="registered_script_frame",
+        )
+    else:  # pragma: no cover - exact raw model narrows this branch.
+        raise ValueError("SharedObs live frame has an invalid submission scope.")
+
+    source = LiveSharedObsPresentationSourceIdentityV1(
+        source_kind="live_shared_obs_visual_union_frame",
+        source_session_id=raw_frame.session_id,
+        source_run_generation=raw_frame.run_generation,
+        source_revision=raw_frame.revision,
+        source_authority_epoch=raw_frame.revision,
+        episode_id=current.source_episode_id,
+        source_frame_index=current.source_frame_index,
+        source_recipient_public_agent_id=current.recipient_public_agent_id,
+        source_recipient_frame_id=current.source_recipient_frame_id,
+        source_simulator_step_count=current.source_simulator_step_count,
+        source_submission_scope=submission_scope,
+        source_authorized_endpoint_digest_sha256=(
+            endpoint.authorized_endpoint_digest_sha256
+        ),
+    )
+    return LiveSharedObsAuthorizedPresentationFrameV1(
+        schema_version=1,
+        presentation_kind="live_shared_obs_agent_pov",
+        product_kind="combat_debugger",
+        source=source,
+        authority=SharedObsPresentationAuthorityV1(
+            authority_kind="agent_pov",
+            observation_mode="shared_obs_visual_union",
+            recipient_public_agent_id=current.recipient_public_agent_id,
+            recipient_presentation_key=current.recipient_presentation_key,
+            projection_basis="authorized_same_epoch_sensor_source_visual_union",
+            exact_actor_input_export_available=False,
+        ),
+        analysis_mode="analysis",
+        current_endpoint=endpoint,
+        local_oracle_corpse_overlay=corpse_overlay,
+        latest_events=latest_events,
+        visual_events=visual_events,
+        latest_transition=latest_transition,
+        technical_frame=LiveSharedObsTechnicalFrameV1(
+            technical_kind="live_shared_obs_technical_frame",
+            episode_id=source.episode_id,
+            recipient_frame_index=source.source_frame_index,
+            simulator_step_count=source.source_simulator_step_count,
+            incoming_recipient_transition_id=(
+                None
+                if latest_transition is None
+                else latest_transition.incoming_transition_id
+            ),
+        ),
+        live_inspection=LiveSharedObsInspectionEnvelopeV1(
+            envelope_kind="live_shared_obs_source_bound_inspection",
+            source_session_id=source.source_session_id,
+            source_run_generation=source.source_run_generation,
+            source_revision=source.source_revision,
+            source_authority_epoch=source.source_authority_epoch,
+            episode_id=source.episode_id,
+            source_frame_index=source.source_frame_index,
+            source_recipient_public_agent_id=source.source_recipient_public_agent_id,
+            source_recipient_frame_id=source.source_recipient_frame_id,
+            source_simulator_step_count=source.source_simulator_step_count,
+            inspection=input_inspection,
+        ),
+        researcher_space=researcher_space,
+    )
+
+
 __all__ = [
     "build_live_no_shared_obs_authorized_presentation_v1",
     "build_live_oracle_authorized_presentation_v1",
     "build_live_researcher_space_v1",
+    "build_live_shared_obs_authorized_presentation_v1",
 ]

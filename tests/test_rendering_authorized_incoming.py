@@ -22,6 +22,10 @@ from scripts.dev.visual_debugger.control import (
 from scripts.dev.visual_debugger.evaluation_bridge import (
     build_debugger_evaluation_launch_specification_v1,
 )
+from scripts.dev.visual_debugger.no_shared_visual import (
+    build_live_no_shared_obs_visual_adjacent_slice_v1,
+    build_replay_no_shared_obs_visual_content_v1,
+)
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from tests.evaluation_fixtures import (
     CapturedEvaluationTrajectory,
@@ -32,6 +36,9 @@ from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.core.types import Action
 from marl_battlegrounds.evaluation import pov as pov_module
+from marl_battlegrounds.evaluation.actor_projection import (
+    NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+)
 from marl_battlegrounds.evaluation.metrics import (
     EvaluationTransitionViewV1,
     build_evaluation_observer_v1,
@@ -177,8 +184,18 @@ def _replay_index(
         report,
         runtime_provenance=runtime,
     ).replay
-    artifact = export_actor_pov_replay_v1(replay, global_slot=global_slot)
-    return build_actor_pov_projection_index_v1(artifact.content)
+    content = (
+        build_replay_no_shared_obs_visual_content_v1(
+            replay,
+            global_slot=global_slot,
+        )
+        if trajectory.context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V2
+        else export_actor_pov_replay_v1(
+            replay,
+            global_slot=global_slot,
+        ).content
+    )
+    return build_actor_pov_projection_index_v1(content)
 
 
 def _replace_tuple_item[T](
@@ -1191,7 +1208,10 @@ def test_real_death_and_respawn_keep_recipient_self_authorized_in_live_and_repla
         frames.append(view.successor_frame)
         transitions.append(view.transition)
         carriers.append(
-            build_actor_pov_adjacent_transition_slice_v1(view, global_slot=5)
+            build_live_no_shared_obs_visual_adjacent_slice_v1(
+                view,
+                global_slot=5,
+            )
         )
     death, _corpse_wait, respawn = carriers
     assert death.start_frame.self_features[5] == 1.0

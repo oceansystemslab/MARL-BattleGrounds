@@ -133,14 +133,14 @@ no further safe redistribution exists. Never omit tests, duplicate execution,
 weaken assertions, or cancel a valid run merely because it crossed the target.
 Cancel only when a concrete corrective change is ready to apply before rerun.
 
-## Authoritative Replay and Debugger integration baseline
+## Authoritative Replay and DevClient integration baseline
 
 Commit `82077d275caef8bc3d08322e6c9f55c8d5242aec` is the accepted Replay Viewer
-and Combat Debugger product baseline. A later integration into `main` must keep
-this commit as an ancestor and run the Replay/Debugger presentation, control,
-Oracle/Agent parity, privacy, and real-browser gates against the integrated
-tree. Conflict resolution must not replace these product bytes wholesale or
-silently restore older behavior from another branch.
+and Combat Debugger product baseline beneath the DevClient. A later integration
+into `main` must keep this commit as an ancestor and run the Replay/DevClient
+presentation, control, Oracle/Agent parity, privacy, and real-browser gates
+against the integrated tree. Conflict resolution must not replace these product
+bytes wholesale or silently restore older behavior from another branch.
 
 This is a regression guard, not a permanent feature freeze. Changes explicitly
 requested by the user, or deliberate additions required by later `main`
@@ -178,7 +178,9 @@ test inventory executed on a passing candidate.
 | Change | Smallest justified proof |
 | --- | --- |
 | Core or Python semantics | Nearest Python unit/integration tests, then targeted Ruff/Pyright |
-| Team Deathmatch task semantics | Configuration/state validation, score/termination/reward transition tests, evaluation capture/replay/event tests, rollout tests, and scripted NoSharedObs policy integration |
+| Team Deathmatch task semantics | Configuration/state validation, score/termination/reward transition tests, evaluation capture/replay/event tests, rollout tests, and scripted SharedObs/NoSharedObs policy integration |
+| DevClient map/scenario authoring | Strict draft parsing, compile/validation joins, digest/persistence/tamper tests, browser authoring units, and the smallest persisted reopen/load Playwright flow |
+| DevClient controller or information mode | Protocol/input/service/frame tests, same-start causal proofs, truthful capture/provenance tests, and the affected real-browser selector flow |
 | Actor projection version change | Projection/capture tests, explicit older-version rejection, exact actor-input export tests for the new version, and Oracle/Agent privacy parity before enabling that version in Replay Agent POV |
 | Debugger scene/event schema | Scene/Event V2, live-frame, audience-boundary, and choreography tests |
 | Command/service/server behavior | Protocol, input, service, server, and affected real-browser case |

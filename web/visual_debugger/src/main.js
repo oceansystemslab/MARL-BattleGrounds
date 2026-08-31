@@ -58,15 +58,15 @@ import {
 import { PresentationInstallCoordinator } from "./presentation-install.js";
 import {
   bindReplayTimelineControls,
-  ReplayPlaybackController,
   REPLAY_TRANSPORT_STATES,
+  ReplayPlaybackController,
   renderReplayTimelineControls,
   replayCommandRequest,
   replayTimelineSimulatorStep,
   validateReplayCommandOutcome,
 } from "./replay-controls.js";
-import { isReplayAgentRecipientRotation } from "./replay-recipient-rotation.js";
 import { captureReplayBattlefieldPngV1 } from "./replay-export.js";
+import { isReplayAgentRecipientRotation } from "./replay-recipient-rotation.js";
 import { BattlefieldRenderer } from "./scene.js";
 import {
   createSemanticDescriptor,
@@ -384,7 +384,7 @@ let workspaceMinimumHeightBeforeAuthorityInstall = null;
 const expectedDisclosureToggles = new WeakMap();
 
 const PRODUCT_TITLES = Object.freeze({
-  combat_debugger: "MARL-BattleGrounds Combat Debugger",
+  combat_debugger: "MARL-BattleGrounds DevClient",
   replay_viewer: "MARL-BattleGrounds Replay Viewer",
 });
 const PRODUCT_HANDOFF_COMMANDS = new Set([
@@ -404,7 +404,7 @@ const SCRIPTED_INSPECTION_RECORDING_COMMANDS = new Set([
 class ProductIdentityMismatchError extends Error {}
 class ProductReviewHandoff extends Error {}
 
-/** @type {Readonly<{schema_version: 1, product_kind: "combat_debugger" | "replay_viewer"}> | null} */
+/** @type {Readonly<{schema_version: 1, product_kind: "combat_debugger" | "replay_viewer", authoring_available: boolean}> | null} */
 let productIdentity = null;
 /** @type {string | null} */
 let startupProductIdentityError = null;
@@ -415,13 +415,19 @@ let startupProductIdentityError = null;
  * product-identity authority.
  *
  * @param {unknown} rawIdentity
+ * @returns {Readonly<{schema_version: 1, product_kind: "combat_debugger" | "replay_viewer", authoring_available: boolean}>}
  */
 function applyProductIdentity(rawIdentity) {
   if (!isRecord(rawIdentity)) {
     throw new TypeError("Product bootstrap must be an object.");
   }
   const keys = Object.keys(rawIdentity).sort();
-  if (keys.length !== 2 || keys[0] !== "product_kind" || keys[1] !== "schema_version") {
+  if (
+    keys.length !== 3 ||
+    keys[0] !== "authoring_available" ||
+    keys[1] !== "product_kind" ||
+    keys[2] !== "schema_version"
+  ) {
     throw new TypeError("Product bootstrap has an invalid shape.");
   }
   if (rawIdentity.schema_version !== 1) {
@@ -433,9 +439,16 @@ function applyProductIdentity(rawIdentity) {
   ) {
     throw new TypeError("Product bootstrap kind is unsupported.");
   }
+  if (typeof rawIdentity.authoring_available !== "boolean") {
+    throw new TypeError("Product bootstrap authoring capability is invalid.");
+  }
+  if (rawIdentity.product_kind === "replay_viewer" && rawIdentity.authoring_available) {
+    throw new TypeError("Replay Viewer cannot receive authoring authority.");
+  }
   productIdentity = Object.freeze({
     schema_version: 1,
     product_kind: rawIdentity.product_kind,
+    authoring_available: rawIdentity.authoring_available,
   });
   if (!visualFilterProductDefaultsApplied) {
     visualFilterState =
@@ -454,8 +467,9 @@ function applyProductIdentity(rawIdentity) {
   elements.helpHeading.textContent =
     productIdentity.product_kind === "replay_viewer"
       ? "Replay Viewer help"
-      : "Combat Debugger help";
+      : "DevClient help";
   document.documentElement.dataset.productKind = productIdentity.product_kind;
+  return productIdentity;
 }
 
 /** @param {Record<string, any>} frame */
@@ -475,13 +489,118 @@ function assertFrameMatchesProductIdentity(frame) {
 }
 
 try {
-  applyProductIdentity(Reflect.get(globalThis, "__MARL_DEBUGGER_BOOTSTRAP__"));
+  const startupIdentity = applyProductIdentity(
+    Reflect.get(globalThis, "__MARL_DEBUGGER_BOOTSTRAP__"),
+  );
+  if (
+    startupIdentity.product_kind === "combat_debugger" &&
+    startupIdentity.authoring_available
+  ) {
+    void import("./dev-client.js").then(() => {
+      publishInstalledCombatConfiguration(state.frame);
+    });
+  }
 } catch (error) {
   startupProductIdentityError =
     error instanceof Error ? error.message : "Product bootstrap is invalid.";
 }
 
 const CONTROL_HELP = Object.freeze([
+  [
+    "[data-devclient-area]",
+    "DevClient area",
+    "Switch between the Combat Debugger, reusable Maps, and task-controlled Scenarios.",
+  ],
+  [
+    "#devclient-scenario-select",
+    "Saved scenario",
+    "Choose a persisted execution-valid scenario draft or frozen candidate.",
+  ],
+  [
+    "#devclient-scenario-load",
+    "Load scenario",
+    "Reopen, compile, and revalidate the selected scenario before replacing the current Debug session.",
+  ],
+  [
+    "#devclient-team-a-controller",
+    "Team A controller",
+    "Team A remains under manual control in this DevClient version.",
+  ],
+  [
+    "#devclient-team-b-controller",
+    "Team B controller",
+    "Choose manual control or the scripted Team Deathmatch policy, then restart from the same snapshot.",
+  ],
+  [
+    "#devclient-information-mode",
+    "Information mode",
+    "Choose SharedObs or NoSharedObs, then restart from the same scenario snapshot and seed.",
+  ],
+  [
+    "#authoring-new-scenario-mode",
+    "Scenario starting point",
+    "Start blank, copy a saved map, or duplicate a saved scenario.",
+  ],
+  ["#authoring-new", "New draft", "Create a new local map or scenario draft."],
+  ["#authoring-open", "Open draft", "Open an exact saved draft revision."],
+  [
+    "#authoring-save",
+    "Save draft",
+    "Atomically save the complete draft at its current revision.",
+  ],
+  [
+    "#authoring-save-as",
+    "Save draft as",
+    "Save the complete draft under a new safe asset identity.",
+  ],
+  [
+    "#authoring-validate",
+    "Validate draft",
+    "Compile the current draft with host-authoritative rules and show linked problems.",
+  ],
+  [
+    "#authoring-freeze",
+    "Freeze candidate",
+    "Create an immutable candidate only when the draft is freeze-qualified.",
+  ],
+  [
+    "#authoring-open-debug",
+    "Open in Debug",
+    "Compile and revalidate an immutable snapshot, then load it through the Combat Debugger scenario path.",
+  ],
+  [
+    "[data-authoring-add]",
+    "Add obstacle",
+    "Append a wall or pillar to the map's ordered active obstacle prefix.",
+  ],
+  [
+    "#authoring-canvas",
+    "Authoring canvas",
+    "Select and drag centers, pan with Space or the middle button, zoom with the wheel, and nudge with arrow keys.",
+    "composite",
+  ],
+  ["#authoring-undo", "Undo", "Undo the most recent browser-local edit."],
+  ["#authoring-redo", "Redo", "Redo the most recently undone browser-local edit."],
+  [
+    "#authoring-duplicate",
+    "Duplicate obstacle",
+    "Append a copy of the selected wall or pillar.",
+  ],
+  [
+    "#authoring-delete",
+    "Delete obstacle",
+    "Delete the selected wall or pillar and compact the ordered obstacle prefix.",
+  ],
+  [
+    "#authoring-order-up",
+    "Move obstacle up",
+    "Move the selected obstacle earlier in fixed-slot order.",
+  ],
+  [
+    "#authoring-order-down",
+    "Move obstacle down",
+    "Move the selected obstacle later in fixed-slot order.",
+  ],
   [
     "#replay-timeline",
     "Replay timeline",
@@ -1016,6 +1135,7 @@ function installJoinedAuthority(joined) {
   state.frame = joined.transport;
   state.presentation = joined.presentation;
   state.timeline = isRecord(joined.timeline) ? joined.timeline : null;
+  publishInstalledCombatConfiguration(joined.transport);
   presentationPreferenceNeedsContentRender = true;
   document.documentElement.dataset.presentationAuthority = "installed";
 }
@@ -1404,17 +1524,20 @@ function rebindAuthorizedPrimaryFocus(
 function isLiveAgentRecipientRotation(previous, next) {
   const left = previous.tuple;
   const right = next.tuple;
+  const sameLiveAgentMode =
+    right[3] === left[3] &&
+    right[5] === left[5] &&
+    ((left[3] === "live_no_shared_obs_agent_pov" && left[5] === "no_shared_obs") ||
+      (left[3] === "live_shared_obs_agent_pov" &&
+        left[5] === "shared_obs_visual_union"));
   return (
     left[0] === "combat_debugger" &&
     right[0] === left[0] &&
     right[1] === left[1] &&
     right[2] === left[2] &&
-    left[3] === "live_no_shared_obs_agent_pov" &&
-    right[3] === left[3] &&
+    sameLiveAgentMode &&
     left[4] === "agent_pov" &&
     right[4] === left[4] &&
-    left[5] === "no_shared_obs" &&
-    right[5] === left[5] &&
     left[6] === null &&
     right[6] === null &&
     typeof left[7] === "string" &&
@@ -1777,6 +1900,65 @@ function closeAgentDetailsWithoutLatching() {
 
 function isReplayMode() {
   return productIdentity?.product_kind === "replay_viewer";
+}
+
+/** @param {unknown} frame */
+function combatConfigurationFromFrame(frame) {
+  if (!isRecord(frame)) {
+    return null;
+  }
+  const candidate = frame.combat_configuration;
+  if (
+    !isRecord(candidate) ||
+    (candidate.team_b_controller !== "manual" &&
+      candidate.team_b_controller !== "scripted_tdm") ||
+    (candidate.execution_information_mode !== "shared_obs" &&
+      candidate.execution_information_mode !== "no_shared_obs")
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    team_b_controller: candidate.team_b_controller,
+    execution_information_mode: candidate.execution_information_mode,
+  });
+}
+
+/** @param {unknown} frame */
+function publishInstalledCombatConfiguration(frame) {
+  if (productIdentity?.product_kind !== "combat_debugger") {
+    return;
+  }
+  const configuration = combatConfigurationFromFrame(frame);
+  if (configuration === null) {
+    return;
+  }
+  document.dispatchEvent(
+    new CustomEvent("marl-devclient-combat-configuration-installed", {
+      detail: configuration,
+    }),
+  );
+}
+
+/** @param {unknown} value */
+function requestedCombatConfigurationCommand(value) {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const requested = combatConfigurationFromFrame({ combat_configuration: value });
+  const installed = combatConfigurationFromFrame(state.frame);
+  if (
+    requested === null ||
+    installed === null ||
+    (requested.team_b_controller === installed.team_b_controller &&
+      requested.execution_information_mode === installed.execution_information_mode)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    command_type: "set_combat_configuration",
+    team_b_controller: requested.team_b_controller,
+    execution_information_mode: requested.execution_information_mode,
+  });
 }
 
 /** @param {typeof visualFilterState} snapshot */
@@ -2429,7 +2611,8 @@ function liveScriptedInspectionOnly() {
   return (
     installedAuthorityIsCoherent() &&
     (state.frame?.frame_kind === "researcher_live_debugger" ||
-      state.frame?.frame_kind === "actor_pov_live_debugger") &&
+      state.frame?.frame_kind === "actor_pov_live_debugger" ||
+      state.frame?.frame_kind === "shared_obs_agent_pov_live_debugger") &&
     authorizedPresentationInspectionState(state.presentation).state_kind ===
       "live_scripted"
   );
@@ -2931,6 +3114,50 @@ const DEFERRED_SUBMIT_PREPARATION_COMMAND_TYPES = new Set([
   "battlefield_pointer",
   "roster_selection",
 ]);
+
+function scriptedTeamBControlsAreReadOnly() {
+  const configuration = combatConfigurationFromFrame(state.frame);
+  if (configuration?.team_b_controller !== "scripted_tdm") {
+    return false;
+  }
+  const inspectionState = authorizedPresentationResearcherInspectionState(
+    state.presentation,
+  );
+  if (inspectionState.state_kind !== "live_editable") {
+    return false;
+  }
+  const inspection = isRecord(inspectionState.inspection)
+    ? inspectionState.inspection
+    : null;
+  if (inspection === null) {
+    return false;
+  }
+  const actor = authorizedResearcherAgentForPresentationKey(
+    state.presentation,
+    inspection.actor_presentation_key,
+  );
+  return (
+    actor?.team_id === 2 && actor.public_agent_id === inspection.actor_public_agent_id
+  );
+}
+
+/** @param {Record<string, unknown>} command */
+function scriptedTeamBBlocksActionEdit(command) {
+  if (!scriptedTeamBControlsAreReadOnly()) {
+    return false;
+  }
+  if (command.command_type === "battlefield_pointer") {
+    return true;
+  }
+  if (command.command_type === "roster_selection" && command.role === "target") {
+    return true;
+  }
+  if (command.command_type !== "keyboard" || typeof command.key !== "string") {
+    return false;
+  }
+  const key = command.key.toLowerCase();
+  return DRAFT_KEYS.has(key) || key === "escape";
+}
 
 /** @param {Record<string, unknown>} command */
 function commandPreparesDeferredSubmit(command) {
@@ -3560,8 +3787,24 @@ function renderCommandAvailability() {
     option.textContent = "No authorized targets";
     elements.commandTargetSelect.replaceChildren(option);
   }
+  const scriptedTeamBReadOnly = scriptedTeamBControlsAreReadOnly();
+  elements.commandDeck?.setAttribute(
+    "data-team-b-read-only",
+    String(scriptedTeamBReadOnly),
+  );
+  if (scriptedTeamBReadOnly) {
+    elements.commandControlledActor.textContent += " · Scripted TDM (read-only)";
+    elements.commandControlledActor.setAttribute(
+      "aria-label",
+      `${elements.commandControlledActor.getAttribute("aria-label") ?? "Controlled Team B actor"}. Scripted TDM supplies this actor's action; select Team A to edit.`,
+    );
+  }
   elements.commandTargetSelect.disabled =
-    disabled || !editableDraft || scientificFenced || isTerminal(state.frame);
+    disabled ||
+    !editableDraft ||
+    scientificFenced ||
+    isTerminal(state.frame) ||
+    scriptedTeamBReadOnly;
   if (elements.commandDeck) {
     const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (
       elements.commandDeck.querySelectorAll("button[data-key]")
@@ -3578,6 +3821,7 @@ function renderCommandAvailability() {
         disabled ||
         scientificFenced ||
         !enabledByInspection ||
+        scriptedTeamBBlocksActionEdit(command) ||
         (scriptedAdvance && isTerminal(state.frame)) ||
         recordingDecision.action === "block" ||
         !mode.allowed;
@@ -4033,6 +4277,15 @@ function recordingReplacementLabel(replacement) {
   if (replacement.command_type === "scenario_switch") {
     return `Switch to scenario ${String(replacement.scenario_name)}`;
   }
+  if (replacement.command_type === "set_combat_configuration") {
+    const controller =
+      replacement.team_b_controller === "scripted_tdm" ? "Scripted TDM" : "Manual";
+    const information =
+      replacement.execution_information_mode === "shared_obs"
+        ? "SharedObs"
+        : "NoSharedObs";
+    return `Restart with Team B ${controller} and ${information}`;
+  }
   return "Replace the current episode";
 }
 
@@ -4400,6 +4653,15 @@ async function dispatchCommand(command, { deferredSubmit = null } = {}) {
       }
       return;
     }
+  }
+  if (scriptedTeamBBlocksActionEdit(command)) {
+    setNotice(
+      "Team B is controlled by Scripted TDM. Select a Team A actor to edit actions; Submit remains available.",
+      "warning",
+    );
+    renderConnection();
+    renderCommandAvailability();
+    return;
   }
   if (liveScriptedInspectionOnly() && !allowedDuringLiveScriptedInspection(command)) {
     setNotice(
@@ -4962,6 +5224,22 @@ elements.reconnectButton.addEventListener("click", () => {
   }
   void loadCurrentFrame();
 });
+
+if (!isReplayMode()) {
+  document.addEventListener("marl-devclient-combat-configuration", (event) => {
+    const command = requestedCombatConfigurationCommand(
+      event instanceof CustomEvent ? event.detail : null,
+    );
+    if (command !== null) {
+      void dispatchCommand(command);
+    } else {
+      publishInstalledCombatConfiguration(state.frame);
+    }
+  });
+  document.addEventListener("marl-devclient-debug-session-replaced", () => {
+    void loadCurrentFrame();
+  });
+}
 
 elements.helpButton.addEventListener("click", () => {
   elements.helpDialog.showModal();

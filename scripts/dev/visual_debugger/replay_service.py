@@ -9,13 +9,16 @@ from secrets import token_urlsafe
 from threading import RLock
 from typing import Literal, cast
 
+from marl_battlegrounds.evaluation.actor_projection import (
+    NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+)
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV1,
     canonical_json_bytes,
 )
 from marl_battlegrounds.evaluation.pov import (
-    ActorPovReplayArtifactV1,
+    ActorPovReplayContentV1,
     export_actor_pov_replay_v1,
 )
 from marl_battlegrounds.evaluation.replay import ReplayArtifactReferenceV1
@@ -35,6 +38,9 @@ from marl_battlegrounds.rendering.pov_scene import (
     ActorPovProjectionIndexV1,
     build_actor_pov_analyzer_projection_v1,
     build_actor_pov_projection_index_v1,
+)
+from scripts.dev.visual_debugger.no_shared_visual import (
+    build_replay_no_shared_obs_visual_content_v1,
 )
 from scripts.dev.visual_debugger.presentation import (
     build_replay_no_shared_obs_authorized_presentation_v1,
@@ -149,9 +155,11 @@ class _CommandRecord:
 
 @dataclass(frozen=True, slots=True)
 class _PovCacheEntry:
-    artifact: ActorPovReplayArtifactV1
+    content: ActorPovReplayContentV1
+    completion: ActorPovReplayCompletionBadgeV1
     projection_index: ActorPovProjectionIndexV1
     timeline: ActorPovReplayTimelineV1
+    exact_actor_input_export_available: bool
 
 
 def _safe_metric_report_filename(episode_id: str) -> str:
@@ -208,9 +216,8 @@ def _processing_badge(bundle: LoadedReplayBundleV1) -> ReplayProcessingBadgeV1:
 
 
 def _pov_completion_badge(
-    artifact: ActorPovReplayArtifactV1,
+    content: ActorPovReplayContentV1,
 ) -> ActorPovReplayCompletionBadgeV1:
-    content = artifact.content
     completion = content.completion
     return ActorPovReplayCompletionBadgeV1(
         episode_id=content.episode_id,
@@ -519,6 +526,9 @@ class ReplayViewerService:
                         researcher_space=self._researcher_space_for_frame(
                             frame_index=raw_frame.cursor.frame_index,
                             selected_global_slot=self._pov_global_slot,
+                        ),
+                        exact_actor_input_export_available=(
+                            entry.exact_actor_input_export_available
                         ),
                     )
                     return PresentationResourceResultV1(
@@ -1152,7 +1162,7 @@ class ReplayViewerService:
                 entry.projection_index,
                 frame_index=frame_index,
             )
-            pov_frame = entry.artifact.content.frames[frame_index]
+            pov_frame = entry.content.frames[frame_index]
             return ActorPovReplayViewerFrameV1(
                 viewer_session_id=self._viewer_session_id,
                 revision=revision,
@@ -1166,7 +1176,7 @@ class ReplayViewerService:
                 pov_frame_id=pov_frame.pov_frame_id,
                 simulator_step_count=pov_frame.simulator_step_count,
                 incoming_pov_transition_id=projection.incoming_transition_id,
-                completion=_pov_completion_badge(entry.artifact),
+                completion=entry.completion,
                 processing_disclosure=ActorPovProcessingDisclosureV1(),
                 artifact_facts=self._artifact_facts,
                 projection=projection,
@@ -1237,14 +1247,23 @@ class ReplayViewerService:
         cached = cache.get(global_slot)
         if cached is not None:
             return cached
-        artifact = export_actor_pov_replay_v1(
-            self._replay,
-            global_slot=global_slot,
-        )
-        projection_index = build_actor_pov_projection_index_v1(artifact.content)
-        completion = _pov_completion_badge(artifact)
+        if self._context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V2:
+            content = build_replay_no_shared_obs_visual_content_v1(
+                self._replay,
+                global_slot=global_slot,
+            )
+            exact_actor_input_export_available = False
+        else:
+            artifact = export_actor_pov_replay_v1(
+                self._replay,
+                global_slot=global_slot,
+            )
+            content = artifact.content
+            exact_actor_input_export_available = True
+        projection_index = build_actor_pov_projection_index_v1(content)
+        completion = _pov_completion_badge(content)
         endpoint = _endpoint_kind(completion)
-        final = len(artifact.content.frames) - 1
+        final = len(content.frames) - 1
         rows = tuple(
             ActorPovReplayTimelineRowV1(
                 frame_index=index,
@@ -1253,33 +1272,33 @@ class ReplayViewerService:
                 incoming_pov_transition_id=(
                     None
                     if index == 0
-                    else artifact.content.transitions[index - 1].pov_transition_id
+                    else content.transitions[index - 1].pov_transition_id
                 ),
                 incoming_cue_count=(
-                    0
-                    if index == 0
-                    else len(artifact.content.transitions[index - 1].cues)
+                    0 if index == 0 else len(content.transitions[index - 1].cues)
                 ),
                 endpoint_kind=endpoint if index == final else "none",
             )
-            for index, frame in enumerate(artifact.content.frames)
+            for index, frame in enumerate(content.frames)
         )
         timeline = ActorPovReplayTimelineV1(
             timeline_id=(
                 f"{self._replay.artifact_id}:timeline:actor-pov:"
-                f"{artifact.content.public_agent_id}"
+                f"{content.public_agent_id}"
             ),
             artifact_summary=self._pov_artifact_summary,
             final_frame_index=final,
             pov_global_slot=global_slot,
-            public_agent_id=artifact.content.public_agent_id,
+            public_agent_id=content.public_agent_id,
             completion=completion,
             rows=rows,
         )
         entry = _PovCacheEntry(
-            artifact=artifact,
+            content=content,
+            completion=completion,
             projection_index=projection_index,
             timeline=timeline,
+            exact_actor_input_export_available=(exact_actor_input_export_available),
         )
         cache[global_slot] = entry
         return entry

@@ -579,7 +579,7 @@ test("main shares the Agent Details latch and rejects stale local keys and focus
   );
   assert.match(
     source,
-    /function isLiveAgentRecipientRotation\([\s\S]*left\[0\] === "combat_debugger"[\s\S]*right\[1\] === left\[1\][\s\S]*right\[2\] === left\[2\][\s\S]*left\[3\] === "live_no_shared_obs_agent_pov"[\s\S]*right\[8\] !== left\[8\]/u,
+    /function isLiveAgentRecipientRotation\([\s\S]*sameLiveAgentMode[\s\S]*live_no_shared_obs_agent_pov[\s\S]*live_shared_obs_agent_pov[\s\S]*left\[0\] === "combat_debugger"[\s\S]*right\[1\] === left\[1\][\s\S]*right\[2\] === left\[2\][\s\S]*right\[8\] !== left\[8\]/u,
   );
   assert.match(
     source,

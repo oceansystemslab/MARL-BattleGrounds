@@ -327,10 +327,21 @@ test("recording restart resolution retains direct compatibility without scenario
 });
 
 test("captured recording prefixes require exact discard confirmation for replacement", () => {
-  const frame = recordingFrame();
+  const frame = {
+    ...recordingFrame(),
+    combat_configuration: {
+      team_b_controller: "manual",
+      execution_information_mode: "shared_obs",
+    },
+  };
   for (const command of [
     { command_type: "reset" },
     { command_type: "scenario_switch", scenario_name: "bravo" },
+    {
+      command_type: "set_combat_configuration",
+      team_b_controller: "scripted_tdm",
+      execution_information_mode: "shared_obs",
+    },
     keyboardCommand("r"),
   ]) {
     const decision = recordingCommandDecision(frame, command);
@@ -348,6 +359,14 @@ test("captured recording prefixes require exact discard confirmation for replace
     recordingCommandDecision({ ...frame, recording: null }, { command_type: "reset" })
       .action,
     "allow",
+  );
+  assert.equal(
+    recordingReplacementCommand(frame, {
+      command_type: "set_combat_configuration",
+      team_b_controller: "manual",
+      execution_information_mode: "shared_obs",
+    }),
+    null,
   );
   for (const command of [
     keyboardCommand("w"),

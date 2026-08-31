@@ -637,7 +637,7 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
         (
             tdm_prefix
             + "test_eager_jit_vmap_key_forms_and_x64_keep_exact_actions_and_dtypes",
-            5,
+            8,
             1,
         ),
         (
@@ -649,33 +649,28 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
         (
             tdm_prefix
             + "test_dead_inactive_and_stunned_masks_produce_the_canonical_inert_action",
-            9,
+            7,
             2,
         ),
         (
             tdm_prefix
             + "test_dormant_task_history_and_lifecycle_fields_do_not_change_the_policy",
-            7,
+            12,
             4,
         ),
         ("residual:tests/test_visual_debugger_service.py", 6, 10),
         (
             tdm_prefix + "test_invalid_damage_modifier_never_suppresses_an_aged_trap",
-            7,
+            12,
             11,
         ),
         (
             tdm_prefix + "test_mage_burst_uses_the_locked_configured_crowd_"
             "and_covering_boundaries",
-            7,
+            12,
             4,
         ),
-        (
-            tdm_prefix
-            + "test_warrior_charge_locks_health_trap_and_mage_burst_comparators",
-            7,
-            10,
-        ),
+        ("file:tests/test_shared_obs_runtime.py", 11, 9),
     )
     assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset(
         {
