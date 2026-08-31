@@ -74,6 +74,7 @@ class TestWorkUnit:
 
 CI_SHARD_COST_PROFILE = ShardCostProfile(
     file_cost_overrides={
+        "tests/test_shared_obs_runtime.py": 110,
         "tests/test_visual_debugger_replay_service.py": 400,
     },
     split_file_family_cost_floors={
@@ -112,20 +113,26 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
             (
                 "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
                 "test_eager_jit_vmap_key_forms_and_x64_keep_exact_actions_and_dtypes",
-                11,
+                5,
                 1,
             ),
             (
                 "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
                 "test_policy_uses_exact_masks_and_ignores_misleading_marginals",
-                9,
+                6,
                 4,
             ),
             (
                 "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
                 "test_dead_inactive_and_stunned_masks_produce_the_canonical_inert_action",
-                5,
+                9,
                 2,
+            ),
+            (
+                "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
+                "test_dormant_task_history_and_lifecycle_fields_do_not_change_the_policy",
+                7,
+                4,
             ),
             (
                 "residual:tests/test_visual_debugger_service.py",
@@ -135,19 +142,19 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
             (
                 "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
                 "test_invalid_damage_modifier_never_suppresses_an_aged_trap",
-                1,
+                7,
                 11,
             ),
             (
                 "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
                 "test_mage_burst_uses_the_locked_configured_crowd_and_covering_boundaries",
-                1,
+                7,
                 4,
             ),
             (
                 "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
                 "test_warrior_charge_locks_health_trap_and_mage_burst_comparators",
-                1,
+                7,
                 10,
             ),
         )

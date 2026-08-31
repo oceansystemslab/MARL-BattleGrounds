@@ -352,12 +352,16 @@ def test_profile_and_source_identity_are_complete_immutable_host_values() -> Non
         "NUMERIC_PROFILE_ID",
         "POLICY_ID",
         "POLICY_SEMANTIC_VERSION",
+        "SHARED_OBS_ADAPTER_ID",
+        "SHARED_OBS_ADAPTER_VERSION",
         "SEMANTIC_PROFILE_ID",
         "TASK_HEAD_VERSION",
         "TEAM_DEATHMATCH_PROFILE",
         "TRACE_ONTOLOGY_VERSION",
         "decide_team_deathmatch_no_shared_obs",
+        "decide_team_deathmatch_shared_obs",
         "team_deathmatch_no_shared_obs_policy",
+        "team_deathmatch_shared_obs_policy",
     }
     assert POLICY_ID == "scripted/team_deathmatch"
     assert POLICY_SEMANTIC_VERSION == 1
@@ -2398,7 +2402,6 @@ def test_policy_modules_have_no_runtime_validator_or_forbidden_dependencies() ->
     assert policy_source.count("jax.lax.switch(") == 1
     assert imported_modules.isdisjoint(
         {
-            "marl_battlegrounds.policies.scripted.common",
             "marl_battlegrounds.policies.scripted.shared_obs",
             "marl_battlegrounds.policies.scripted.king_of_the_hill",
             "marl_battlegrounds.policies.scripted.capture_the_flag",
@@ -2406,7 +2409,6 @@ def test_policy_modules_have_no_runtime_validator_or_forbidden_dependencies() ->
     )
     scripted_directory = Path(policy_module.__file__).parent
     for placeholder in (
-        "common.py",
         "king_of_the_hill.py",
         "capture_the_flag.py",
     ):

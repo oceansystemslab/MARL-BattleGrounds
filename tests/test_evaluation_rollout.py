@@ -25,7 +25,7 @@ from marl_battlegrounds.core.types import (
     Observation,
     Reward,
 )
-from marl_battlegrounds.evaluation.rollout import rollout
+from marl_battlegrounds.evaluation.rollout import ReferenceRolloutResult, rollout
 from marl_battlegrounds.policies.actor import ActorAction
 from marl_battlegrounds.policies.no_shared_obs import NoSharedObsPolicy
 from marl_battlegrounds.policies.random_valid import random_policy
@@ -214,6 +214,7 @@ def _run(
         jax.random.key(17) if key is None else key,
         policy_a,
         policy_b,
+        execution_information_mode="no_shared_obs",
     )
 
 
@@ -224,13 +225,8 @@ def _unpack(
     tuple[EnvState, ActionMask, Action],
 ]:
     """Give the fixed C1 history tuple a readable local type boundary."""
-    return cast(
-        tuple[
-            tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
-            tuple[EnvState, ActionMask, Action],
-        ],
-        history,
-    )
+    result = cast(ReferenceRolloutResult, history)
+    return result.successors, result.currents
 
 
 def _assert_real_actions_are_masked(history: object) -> None:

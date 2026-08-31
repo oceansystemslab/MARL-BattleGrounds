@@ -230,11 +230,14 @@ capture/replay, and failure-semantics integration. Milestone 11 selects
 promoted partition-neutral maps into direct, custom-distribution, or
 curriculum training populations and feeds their resolved specifications into
 the common training spine. Milestone 12 consumes those selections through the
-common JAX rollout/update path and owns the regime-specific compositor, learner
-projections, compiled actor front ends, and trainer/checkpoint integration; it
-does not own a roster catalog, training-selection policy, promotion boundary,
-or mutable development-draft loader. M12 rejects held-out evaluation/scenario
-assets before training execution.
+common JAX rollout/update path. A19 advances structured source-bank
+composition, scripted/reference-policy adaptation, homogeneous runtime
+selection, and reconstruction into the Milestone 7 interlude. Milestone 12
+owns the compatible learned neural projections, compiled neural actor front
+ends, and trainer/checkpoint integration; it does not own a roster catalog,
+training-selection policy, promotion boundary, or mutable development-draft
+loader. M12 rejects held-out evaluation/scenario assets before training
+execution.
 
 Every learned checkpoint is fixed to one `execution_information_mode`, one
 actor-input projection version, and one compatible compiled actor-front-end
@@ -838,7 +841,12 @@ Evaluation frames store base observations and masks once. They do not duplicate
 materialized SharedObs. SharedObs actor inputs remain reproducible from the
 same-epoch base sensor projections, source-axis/provenance mapping, required
 recipient-by-source availability inputs, and recorded actor-input projection
-version.
+version. A19's structured source bank may be reconstructed on demand from
+those authorities, using the recorded source/global-slot mappings rather than
+the current code's mapping constants. Reference-rollout capture consumes the
+exact availability returned with the rollout result; it does not independently
+recompute the executed topology. Learned encoder tensors remain a separate
+Milestone 12 contract.
 World-state critic inputs and privileged evaluation snapshots are separate
 contracts and never leak into actor inputs.
 
