@@ -1062,6 +1062,11 @@ def test_two_scripted_teams_share_one_same_epoch_source_bank(
         ("scripted_tdm", "manual"),
         ("manual", "scripted_tdm"),
         ("scripted_tdm", "scripted_tdm"),
+        ("random_valid", "manual"),
+        ("manual", "random_valid"),
+        ("random_valid", "random_valid"),
+        ("random_valid", "scripted_tdm"),
+        ("scripted_tdm", "random_valid"),
     ),
 )
 @pytest.mark.parametrize("information_mode", ("shared_obs", "no_shared_obs"))
@@ -1100,13 +1105,12 @@ def test_every_controller_and_information_mode_executes_one_real_coherent_step(
 
     first = execute()
     repeated = execute()
-    any_scripted = "scripted_tdm" in (
-        team_a_controller,
-        team_b_controller,
+    any_policy = any(
+        controller != "manual" for controller in (team_a_controller, team_b_controller)
     )
 
     assert step_calls == 2
-    assert bank_calls == (2 if information_mode == "shared_obs" and any_scripted else 0)
+    assert bank_calls == (2 if information_mode == "shared_obs" and any_policy else 0)
     assert int(first.state.step_count) == 1
     assert first.current_evaluation_frame.frame_index == 1
     assert first.incoming_evaluation_view is not None
@@ -1126,7 +1130,76 @@ def test_every_controller_and_information_mode_executes_one_real_coherent_step(
     assert actual_policy_kinds == expected_policy_kinds
 
 
-def test_scripted_policy_keys_follow_roles_and_preserve_adversarial_team_b(
+@pytest.mark.parametrize(
+    ("team_a_controller", "team_b_controller", "random_slots"),
+    (
+        ("random_valid", "manual", range(0, 5)),
+        ("manual", "random_valid", range(5, 10)),
+        ("random_valid", "random_valid", range(0, 10)),
+    ),
+)
+@pytest.mark.parametrize("information_mode", ("shared_obs", "no_shared_obs"))
+def test_random_controller_samples_only_exact_mask_support(
+    team_a_controller: TeamController,
+    team_b_controller: TeamController,
+    random_slots: range,
+    information_mode: ExecutionInformationMode,
+) -> None:
+    session = _session(
+        team_a_controller=team_a_controller,
+        team_b_controller=team_b_controller,
+        execution_information_mode=information_mode,
+    )
+
+    action = control._build_configured_joint_action(  # pyright: ignore[reportPrivateUsage]
+        session
+    )
+
+    for slot in random_slots:
+        move = int(action.move[slot])
+        target = int(action.select_target[slot])
+        ultimate = int(action.use_ultimate[slot])
+        assert bool(session.action_mask.move_mask[slot, move])
+        assert bool(
+            session.action_mask.select_target_use_ultimate_joint_mask[
+                slot,
+                target,
+                ultimate,
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    ("team_a_controller", "team_b_controller"),
+    (
+        ("random_valid", "manual"),
+        ("manual", "random_valid"),
+        ("random_valid", "random_valid"),
+    ),
+)
+def test_random_actions_are_information_mode_invariant_under_identical_keys(
+    team_a_controller: TeamController,
+    team_b_controller: TeamController,
+) -> None:
+    shared = _session(
+        team_a_controller=team_a_controller,
+        team_b_controller=team_b_controller,
+        execution_information_mode="shared_obs",
+    )
+    no_shared = _session(
+        team_a_controller=team_a_controller,
+        team_b_controller=team_b_controller,
+        execution_information_mode="no_shared_obs",
+    )
+
+    configured_action = control._build_configured_joint_action  # pyright: ignore[reportPrivateUsage]
+    shared_action = configured_action(shared)
+    no_shared_action = configured_action(no_shared)
+
+    assert _tree_equal(shared_action, no_shared_action)
+
+
+def test_policy_keys_follow_roles_and_preserve_adversarial_team_b(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _session(
@@ -1195,9 +1268,11 @@ def test_scripted_policy_keys_follow_roles_and_preserve_adversarial_team_b(
     (
         ("scripted_tdm", "manual", 0),
         ("manual", "scripted_tdm", 5),
+        ("random_valid", "manual", 0),
+        ("manual", "random_valid", 5),
     ),
 )
-def test_scripted_team_remains_selectable_but_pending_edits_are_fenced(
+def test_policy_team_remains_selectable_but_pending_edits_are_fenced(
     team_a_controller: TeamController,
     team_b_controller: TeamController,
     controlled_slot: int,
@@ -1427,6 +1502,7 @@ def test_submission_rejects_bad_shape_or_dtype_before_stepping(
     ("boundary", "expected_stage", "expected_code"),
     (
         ("interactive_action", "action_build", "interactive_action_build_failed"),
+        ("policy_action", "action_build", "policy_action_build_failed"),
         ("scripted_action", "action_build", "scripted_action_build_failed"),
         ("random_split", "simulation", "simulator_step_failed"),
         ("step", "simulation", "simulator_step_failed"),
@@ -1442,7 +1518,10 @@ def test_submission_failures_have_stable_typed_stage_and_preserve_input_epoch(
     expected_code: str,
 ) -> None:
     scripted = boundary == "scripted_action"
-    session = _session("basic_support" if scripted else "arena_5v5")
+    session = _session(
+        "basic_support" if scripted else "arena_5v5",
+        team_a_controller="random_valid" if boundary == "policy_action" else "manual",
+    )
     initial_frame = session.current_evaluation_frame
     initial_state = session.state
 
@@ -1451,6 +1530,8 @@ def test_submission_failures_have_stable_typed_stage_and_preserve_input_epoch(
 
     if boundary == "interactive_action":
         monkeypatch.setattr(control, "build_interactive_joint_action", fail)
+    elif boundary == "policy_action":
+        monkeypatch.setattr(control, "_build_configured_joint_action", fail)
     elif boundary == "scripted_action":
         monkeypatch.setattr(control, "build_scripted_joint_action", fail)
     elif boundary == "random_split":

@@ -230,7 +230,8 @@ def _context_action_source(context: EvaluationEpisodeContextV1) -> str:
 def _context_policy_execution_included(context: EvaluationEpisodeContextV1) -> bool:
     """Derive actual policy execution from exact per-slot assignments."""
     return any(
-        isinstance(row, AssignedPolicySlotV1) and row.policy_kind == "scripted_tdm"
+        isinstance(row, AssignedPolicySlotV1)
+        and row.policy_kind in ("scripted_tdm", "random_valid")
         for row in context.policy_assignments
     )
 
@@ -552,7 +553,7 @@ class DebuggerReplayRecorderV1:
         if self._lifecycle not in ("recording", "sealed") or self._bundle is not None:
             raise RuntimeError("only an unfinalized recorder may build a replacement")
         action_source = _context_action_source(context)
-        if action_source not in ("manual", "scripted", "mixed"):
+        if action_source not in ("manual", "scripted", "mixed", "policy"):
             raise ValueError("replacement context has an unsupported action source")
         replacement_specification = build_debugger_recording_specification_v1(
             action_source_kind=action_source,

@@ -135,6 +135,11 @@ export function targetSelectionCommand(value) {
   };
 }
 
+/** @param {unknown} value */
+function isTeamController(value) {
+  return value === "manual" || value === "scripted_tdm" || value === "random_valid";
+}
+
 /**
  * Resolve only effective episode replacements to the exact non-keyboard
  * command accepted by ConfirmDiscardAndReplaceCommandV1. This is advisory UX;
@@ -157,8 +162,8 @@ export function recordingReplacementCommand(frame, command) {
       !installed ||
       typeof installed !== "object" ||
       Array.isArray(installed) ||
-      (teamAController !== "manual" && teamAController !== "scripted_tdm") ||
-      (teamBController !== "manual" && teamBController !== "scripted_tdm") ||
+      !isTeamController(teamAController) ||
+      !isTeamController(teamBController) ||
       (informationMode !== "shared_obs" && informationMode !== "no_shared_obs") ||
       (installed.team_a_controller === teamAController &&
         installed.team_b_controller === teamBController &&

@@ -56,6 +56,30 @@ async function applyLiveCommand(page, activate) {
 
 /**
  * @param {import("@playwright/test").Page} page
+ * @param {{ teamA: string, teamB: string, information: string }} configuration
+ */
+async function exercisePolicyControllers(page, configuration) {
+  const requested = [
+    ["#devclient-team-a-controller", configuration.teamA],
+    ["#devclient-team-b-controller", configuration.teamB],
+    ["#devclient-information-mode", configuration.information],
+  ];
+  for (const [selector, value] of requested) {
+    const control = page.locator(selector);
+    if ((await control.inputValue()) !== value) {
+      await applyLiveCommand(page, () => control.selectOption(value));
+    }
+    await expect(control).toHaveValue(value);
+  }
+  await expect(page.locator("#step-value")).toHaveText("7");
+  await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
+  await expect(page.locator("#step-value")).toHaveText("8");
+  await applyLiveCommand(page, () => page.locator("#reset-button").click());
+  await expect(page.locator("#step-value")).toHaveText("7");
+}
+
+/**
+ * @param {import("@playwright/test").Page} page
  * @param {readonly string[]} answers
  * @param {() => Promise<unknown>} activate
  */
@@ -287,17 +311,34 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     await editField(page, "Center X", 9.5);
     await editField(page, "Center Y", 5.5);
-    await editField(page, "Name", "   ");
-    await expect(page.getByLabel("Name", { exact: true })).toHaveValue("obstacle-0");
+    await expectNoAuthoringCommands(page, async () => {
+      const objectId = page.getByLabel("Object ID", { exact: true });
+      await objectId.fill("   ");
+      await objectId.press("Tab");
+    });
+    await expect(page.getByLabel("Object ID", { exact: true })).toHaveValue(
+      "obstacle-0",
+    );
     await expect(
       page.getByRole("button", { name: "obstacle-0", exact: true }),
     ).toBeVisible();
-    await editField(page, "Name", "North gate");
-    const wall = page.locator('.authoring-svg-object[data-object-id="obstacle-0"]');
-    await expect(wall).toHaveAttribute("data-object-id", "obstacle-0");
+    await editField(page, "Object ID", "north-gate");
+    const wall = page.locator('.authoring-svg-object[data-object-id="north-gate"]');
+    await expect(wall).toHaveAttribute("data-object-id", "north-gate");
     await expect(
-      page.getByRole("button", { name: "North gate", exact: true }),
+      page.getByRole("button", { name: "north-gate", exact: true }),
     ).toBeVisible();
+    await applyAuthoringCommand(page, "validate", () =>
+      page.locator("#authoring-undo").click(),
+    );
+    await expect(
+      page.getByRole("button", { name: "obstacle-0", exact: true }),
+    ).toHaveAttribute("aria-current", "false");
+    await expect(page.getByLabel("Object ID", { exact: true })).toHaveCount(0);
+    await applyAuthoringCommand(page, "validate", () =>
+      page.locator("#authoring-redo").click(),
+    );
+    await page.getByRole("button", { name: "north-gate", exact: true }).click();
     await expect(wall.locator("title")).toHaveCount(0);
     await wall.hover();
     await expect(page.locator("#visual-tooltip")).toBeHidden();
@@ -309,21 +350,21 @@ test("authoring persists through restart and drives same-start Combat comparison
       page.locator("#authoring-undo").click(),
     );
     await expect(wall).toBeVisible();
-    await page.getByRole("button", { name: "North gate", exact: true }).click();
+    await page.getByRole("button", { name: "north-gate", exact: true }).click();
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("9.5");
     await applyAuthoringCommand(page, "validate", () =>
       page.locator("#authoring-duplicate").click(),
     );
     await expect(
-      page.getByRole("button", { name: "obstacle-1", exact: true }),
+      page.getByRole("button", { name: "obstacle-0", exact: true }),
     ).toBeVisible();
     await applyAuthoringCommand(page, "validate", () =>
       page.locator("#authoring-undo").click(),
     );
     await expect(
-      page.getByRole("button", { name: "obstacle-1", exact: true }),
+      page.getByRole("button", { name: "obstacle-0", exact: true }),
     ).toHaveCount(0);
-    await page.getByRole("button", { name: "North gate", exact: true }).click();
+    await page.getByRole("button", { name: "north-gate", exact: true }).click();
 
     await expectNoAuthoringCommands(page, () =>
       dismissOnePrompt(page, () => page.locator("#authoring-save").click()),
@@ -406,7 +447,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     expect(await authoringViewBox(page)).toBe(fullMapViewBox);
     await expect(page.getByLabel("Center X", { exact: true })).toHaveCount(0);
-    await page.getByRole("button", { name: "North gate", exact: true }).click();
+    await page.getByRole("button", { name: "north-gate", exact: true }).click();
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("10.5");
     await applyAuthoringCommand(page, "validate", () =>
       page.locator("#authoring-undo").click(),
@@ -414,7 +455,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("13.5");
     await canvas.focus();
     await applyAuthoringCommand(page, "validate", () => page.keyboard.press("r"));
-    await page.getByRole("button", { name: "North gate", exact: true }).click();
+    await page.getByRole("button", { name: "north-gate", exact: true }).click();
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("10.5");
     await canvas.hover({ position: { x: 240, y: 160 } });
     await page.mouse.wheel(0, 360);
@@ -461,14 +502,14 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     await expect(page.locator("#authoring-title")).toHaveText("Untitled map");
     await expect(
-      page.locator('.authoring-svg-object[data-object-id="obstacle-0"]'),
+      page.locator('.authoring-svg-object[data-object-id="north-gate"]'),
     ).toBeVisible();
-    await page.getByRole("button", { name: "North gate", exact: true }).click();
+    await page.getByRole("button", { name: "north-gate", exact: true }).click();
     await editField(page, "Center X", 14.5);
     await applyAuthoringCommand(page, "validate", () =>
       page.locator("#authoring-reset").click(),
     );
-    await page.getByRole("button", { name: "North gate", exact: true }).click();
+    await page.getByRole("button", { name: "north-gate", exact: true }).click();
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("10.5");
     await canvas.hover({ position: { x: 240, y: 160 } });
     await page.mouse.wheel(0, -360);
@@ -510,17 +551,17 @@ test("authoring persists through restart and drives same-start Combat comparison
       revision: 2,
     });
     await expect(
-      page.locator('.authoring-svg-object[data-object-id="obstacle-0"]'),
+      page.locator('.authoring-svg-object[data-object-id="north-gate"]'),
     ).toBeVisible();
     await expectSpawnPadRadius(page);
-    await page.getByRole("button", { name: "North gate", exact: true }).click();
-    await editField(page, "Name", "Scenario gate");
+    await page.getByRole("button", { name: "north-gate", exact: true }).click();
+    await editField(page, "Object ID", "scenario-gate");
     await expect(
-      page.getByRole("button", { name: "Scenario gate", exact: true }),
+      page.getByRole("button", { name: "scenario-gate", exact: true }),
     ).toBeVisible();
     await expect(
-      page.locator('.authoring-svg-object[data-object-id="obstacle-0"]'),
-    ).toHaveAttribute("data-object-id", "obstacle-0");
+      page.locator('.authoring-svg-object[data-object-id="scenario-gate"]'),
+    ).toHaveAttribute("data-object-id", "scenario-gate");
     await page.getByRole("button", { name: "scenario document", exact: true }).click();
     await expect(page.getByLabel("Notes", { exact: true })).toBeVisible();
     await expect(page.getByText("Role", { exact: true })).toHaveCount(0);
@@ -671,7 +712,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("10.5");
     await expect(
-      page.getByRole("button", { name: "North gate", exact: true }),
+      page.getByRole("button", { name: "north-gate", exact: true }),
     ).toHaveAttribute("aria-current", "true");
     await selectPersistedAsset(page, "#authoring-saved-draft-select", mapId);
     await expect(page.locator("#authoring-delete-saved")).toBeEnabled();
@@ -707,7 +748,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     expect(await authoringViewBox(page)).toBe(contextualMapViewBox);
     await expect(
-      page.getByRole("button", { name: "North gate", exact: true }),
+      page.getByRole("button", { name: "north-gate", exact: true }),
     ).toHaveAttribute("aria-current", "true");
     await expect
       .poll(async () =>
@@ -857,7 +898,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue("manual");
     await expect(page.locator("#command-deck")).toHaveAttribute(
-      "data-scripted-controller-read-only",
+      "data-policy-controller-read-only",
       "true",
     );
     await expect(page.locator("#submit-turn-button")).toBeEnabled();
@@ -898,6 +939,19 @@ test("authoring persists through restart and drives same-start Combat comparison
     await applyLiveCommand(page, () => page.locator("#reset-button").click());
     await expect(page.locator("#step-value")).toHaveText("7");
 
+    for (const [teamA, teamB] of [
+      ["random_valid", "manual"],
+      ["manual", "random_valid"],
+      ["random_valid", "scripted_tdm"],
+      ["random_valid", "random_valid"],
+    ]) {
+      await exercisePolicyControllers(page, {
+        teamA,
+        teamB,
+        information: "shared_obs",
+      });
+    }
+
     await applyLiveCommand(page, () =>
       page.locator("#devclient-information-mode").selectOption("no_shared_obs"),
     );
@@ -906,6 +960,19 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     await expect(page.locator("#step-value")).toHaveText("7");
     await expect(page.locator("#authoring-shell")).toBeHidden();
+
+    for (const [teamA, teamB] of [
+      ["random_valid", "manual"],
+      ["manual", "random_valid"],
+      ["random_valid", "scripted_tdm"],
+      ["random_valid", "random_valid"],
+    ]) {
+      await exercisePolicyControllers(page, {
+        teamA,
+        teamB,
+        information: "no_shared_obs",
+      });
+    }
 
     await stopDebugger(devClient.process);
     devClient = await startIsolatedDevClient({ artifactRoot });

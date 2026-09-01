@@ -20,10 +20,11 @@ from scripts.dev.visual_debugger.control import (
 )
 from scripts.dev.visual_debugger.evaluation_bridge import (
     build_debugger_evaluation_launch_specification_v1,
+    debugger_action_source_kind_v1,
 )
 from scripts.dev.visual_debugger.frame import build_debugger_frame
 from scripts.dev.visual_debugger.input import InputDispatchResult
-from scripts.dev.visual_debugger.model import DebuggerSession
+from scripts.dev.visual_debugger.model import DebuggerSession, TeamController
 from scripts.dev.visual_debugger.presentation_protocol import (
     LiveNoSharedObsAuthorizedPresentationFrameV1,
     LiveOracleAuthorizedPresentationFrameV1,
@@ -241,7 +242,8 @@ def _recording_service(
     reducers: tuple[EvaluationMetricReducerV1, ...] = (),
     view_mode: ViewMode = "researcher",
     maximum_episode_steps: int | None = None,
-    team_b_controller: Literal["manual", "scripted_tdm"] = "manual",
+    team_a_controller: TeamController = "manual",
+    team_b_controller: TeamController = "manual",
     execution_information_mode: Literal[
         "shared_obs", "no_shared_obs"
     ] = "no_shared_obs",
@@ -265,6 +267,7 @@ def _recording_service(
         scenario,
         seed=0,
         evaluation_launch_specification=launch,
+        team_a_controller=team_a_controller,
         team_b_controller=team_b_controller,
         execution_information_mode=execution_information_mode,
         controlled_global_slot=None,
@@ -273,15 +276,16 @@ def _recording_service(
     )
     recorder = DebuggerReplayRecorderV1(
         specification=build_debugger_recording_specification_v1(
-            action_source_kind=(
-                "scripted"
-                if scenario.mode == "scripted"
-                else "mixed"
-                if team_b_controller == "scripted_tdm"
-                else "manual"
+            action_source_kind=debugger_action_source_kind_v1(
+                scenario,
+                team_a_controller,
+                team_b_controller,
             ),
             runtime_provenance=_runtime_provenance(
-                policy_execution_included=(team_b_controller == "scripted_tdm")
+                policy_execution_included=any(
+                    controller != "manual"
+                    for controller in (team_a_controller, team_b_controller)
+                )
             ),
         ),
         destination=preflight_replay_bundle_destination_v1(

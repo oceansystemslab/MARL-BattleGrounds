@@ -75,8 +75,9 @@ Space-drag or middle-button drag pans it. **Recenter** restores the complete-map
 view without changing the draft. **Reset (R)** restores the latest New, Open,
 or successfully saved baseline and can be undone immediately. The `R` shortcut
 does not fire while typing in a form control. Ten spawn pads are fixed
-identities; obstacle names are editable, and obstacles have explicit duplicate,
-delete, and up/down order controls.
+identities. Wall and pillar IDs are editable directly; deletion does not
+renumber survivors, so an author may explicitly close a numbering gap.
+Obstacles also have duplicate, delete, and up/down order controls.
 
 Drafts are local files under ignored `artifacts/dev_client/` storage. A compact
 selector opens saved revisions for the active tab. The status line names the
@@ -114,10 +115,12 @@ changes; failure leaves the current session untouched and returns linked
 problems. Reset restores the immutable loaded snapshot and seed, including its
 map, roster, scores, timers, and current timestep.
 
-Team A and Team B may each remain manual or use the scripted Team Deathmatch
-policy. The two selectors deliberately share one controller identity boundary
-so future saved policy/controller types can be added without changing scenario
-content; V1 exposes only `Manual` and `Scripted TDM`. SharedObs is the default
+Team A and Team B may each remain manual, use the scripted Team Deathmatch
+policy, or use the built-in Random policy. Random samples only the exact current
+valid action support and deliberately ignores observation features; under the
+same key and mask it therefore produces the same action in SharedObs and
+NoSharedObs. The selectors share one controller boundary without introducing a
+generic policy registry or checkpoint loader. SharedObs is the default
 information regime, while NoSharedObs remains a first-class selectable regime.
 Changing either controller or the information regime resets the exact loaded
 scenario and seed before comparison.

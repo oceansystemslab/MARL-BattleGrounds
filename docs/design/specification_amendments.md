@@ -1459,3 +1459,49 @@ mutable browser buffer, filename, or successful Combat preview remains
 insufficient scientific evidence. This later lifecycle is not reintroduced as
 a DevClient promotion stage. Public evaluation roles and Replay contracts are
 unchanged.
+
+## A23. Editable obstacle identities and random controller execution
+
+**Classification:** approved private pre-alpha authoring and diagnostic-control
+correction.
+**Supersedes:** A22 only where it requires immutable obstacle object IDs, a
+separate obstacle display name, or exactly two interactive controller values.
+It preserves A22's revisioned Save/Delete lifecycle, symmetric team ownership,
+single simulator path, Replay separation, and future learned-policy boundary.
+
+An obstacle has one visible identity: its `object_id`. The Map and Scenario
+authors permit that ID to be edited directly for walls and pillars. Spawn-pad
+and agent IDs remain fixed. One rename trims surrounding whitespace, enforces
+the existing host `ObjectId` grammar, rejects every collision with an obstacle,
+pad, or scenario agent before mutation, and then updates selection and linked
+validation through one undoable transaction. Invalid, duplicate, and
+same-value requests have no persistence or simulator effect. Deletion does not
+renumber surviving obstacles; the author may explicitly close a numbering gap.
+
+The redundant obstacle `name` member is removed from the strict private V1
+authoring contract and browser. Obsolete input carrying that member is rejected
+without a compatibility shim. Obstacle IDs remain browser/validation join
+metadata: ordered obstacle rows still own fixed-slot semantics, while object
+IDs remain excluded from semantic map/scenario digests and compiled physics
+arrays. Save/Open, Reset, map copy, and scenario duplication preserve the exact
+authored IDs.
+
+Both interactive team selectors admit `manual`, `scripted_tdm`, and
+`random_valid`. `random_valid` invokes the existing team-agnostic policy that
+samples only the exact valid action support; this amendment does not change
+that policy or create a registry, checkpoint format, plugin system, or saved
+controller lifecycle. A private SharedObs ABI adapter deliberately ignores
+shared sensor material and delegates to the same random policy, so equal keys
+and masks produce equal random actions in SharedObs and NoSharedObs. Both teams
+still choose from one current observation/mask epoch, assemble one joint
+action, and enter one unchanged simulator step. Shared execution constructs at
+most one source bank for the epoch; NoSharedObs constructs none.
+
+Per-slot provenance records `random_valid`, algorithm
+`canonical-random-valid`, and stochastic execution. Manual plus any policy is
+`mixed`; Scripted TDM on both teams remains `scripted`; a fully
+policy-controlled pair containing Random is `policy`. Actual policy execution
+is true whenever either interactive controller is nonmanual. Existing Replay
+artifacts and Replay Viewer behavior remain unchanged; the strict shared live
+presentation and debugger-recording validators merely admit the new truthful
+controller and action-source identities.

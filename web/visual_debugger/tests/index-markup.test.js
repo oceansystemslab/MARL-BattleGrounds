@@ -82,6 +82,23 @@ test("static debugger IDs are unique", async () => {
   assert.equal(new Set(ids).size, ids.length);
 });
 
+test("both DevClient team selectors expose the same explicit controllers", async () => {
+  const markup = await readFile(indexUrl, "utf8");
+  for (const id of ["devclient-team-a-controller", "devclient-team-b-controller"]) {
+    const select = elementBody(markup, id, "select");
+    assert.deepEqual(
+      [...select.matchAll(/<option value="([^"]+)"[^>]*>([^<]+)<\/option>/gu)].map(
+        ([, value, label]) => [value, label],
+      ),
+      [
+        ["manual", "Manual"],
+        ["scripted_tdm", "Scripted TDM"],
+        ["random_valid", "Random"],
+      ],
+    );
+  }
+});
+
 test("replay Help names the exact arrow keys and Escape selection behavior", async () => {
   const markup = await readFile(indexUrl, "utf8");
   const help = elementBody(markup, "help-dialog", "dialog");

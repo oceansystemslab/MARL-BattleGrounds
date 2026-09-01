@@ -5591,8 +5591,12 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
       "Live combat configuration identity",
     );
     if (
-      !["manual", "scripted_tdm"].includes(configuration.team_a_controller) ||
-      !["manual", "scripted_tdm"].includes(configuration.team_b_controller) ||
+      !["manual", "scripted_tdm", "random_valid"].includes(
+        configuration.team_a_controller,
+      ) ||
+      !["manual", "scripted_tdm", "random_valid"].includes(
+        configuration.team_b_controller,
+      ) ||
       !["shared_obs", "no_shared_obs"].includes(
         configuration.execution_information_mode,
       ) ||

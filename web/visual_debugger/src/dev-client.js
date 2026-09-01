@@ -19,6 +19,7 @@ import {
   mapContent,
   moveAuthoringObjectWithSnap,
   normalizeAuthoringProblems,
+  renameAuthoringObstacleId,
   reorderAuthoringObstacle,
   restoreAuthoringContent,
   selectedAuthoringObject,
@@ -182,16 +183,19 @@ export function createCombatConfigurationController(bindings) {
   let authoritative = null;
 
   /** @param {unknown} value */
+  function isSupportedController(value) {
+    return value === "manual" || value === "scripted_tdm" || value === "random_valid";
+  }
+
+  /** @param {unknown} value */
   function normalize(value) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       return null;
     }
     const candidate = /** @type {Record<string, unknown>} */ (value);
     if (
-      (candidate.team_a_controller !== "manual" &&
-        candidate.team_a_controller !== "scripted_tdm") ||
-      (candidate.team_b_controller !== "manual" &&
-        candidate.team_b_controller !== "scripted_tdm") ||
+      !isSupportedController(candidate.team_a_controller) ||
+      !isSupportedController(candidate.team_b_controller) ||
       (candidate.execution_information_mode !== "shared_obs" &&
         candidate.execution_information_mode !== "no_shared_obs")
     ) {
@@ -605,6 +609,17 @@ function installDevClient() {
     state.editor.validation = null;
     renderAll();
     void validateDraft();
+  }
+
+  /** Clear a selection whose structural identity is absent after history restore. */
+  function clearStaleSelection() {
+    if (
+      state.editor.draft !== null &&
+      state.editor.selectedId !== null &&
+      selectedAuthoringObject(state.editor.draft, state.editor.selectedId) === null
+    ) {
+      state.editor.selectedId = null;
+    }
   }
 
   function recenterAuthoringView() {
@@ -1136,6 +1151,35 @@ function installDevClient() {
     if (!edit || !state.editor.draft) {
       return;
     }
+    const selected = selectedAuthoringObject(
+      state.editor.draft,
+      state.editor.selectedId,
+    );
+    if (
+      edit.path.at(-1) === "object_id" &&
+      (selected?.kind === "wall" || selected?.kind === "pillar")
+    ) {
+      try {
+        const result = renameAuthoringObstacleId(
+          state.editor.draft,
+          selected.object_id,
+          edit.value,
+        );
+        if (result.draft === state.editor.draft) {
+          renderAll();
+          return;
+        }
+        state.editor.selectedId = result.object_id;
+        state.editor.problems = [];
+        commit(result.draft);
+      } catch (error) {
+        showLocalError(
+          error instanceof Error ? error.message : "Obstacle ID could not be changed.",
+        );
+        renderAll();
+      }
+      return;
+    }
     const alive = edit.path.at(-1) === "alive" && state.editor.selectedId;
     const teamSize =
       edit.path.length === 2 &&
@@ -1164,6 +1208,9 @@ function installDevClient() {
     if (previousContent && state.editor.draft) {
       state.editor.future.push(authoringContentSnapshot(state.editor.draft));
       state.editor.draft = restoreAuthoringContent(state.editor.draft, previousContent);
+      state.editor.validation = null;
+      state.editor.problems = [];
+      clearStaleSelection();
       renderAll();
       void validateDraft();
     }
@@ -1173,6 +1220,9 @@ function installDevClient() {
     if (nextContent && state.editor.draft) {
       state.editor.past.push(authoringContentSnapshot(state.editor.draft));
       state.editor.draft = restoreAuthoringContent(state.editor.draft, nextContent);
+      state.editor.validation = null;
+      state.editor.problems = [];
+      clearStaleSelection();
       renderAll();
       void validateDraft();
     }

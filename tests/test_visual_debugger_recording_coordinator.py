@@ -27,6 +27,7 @@ from scripts.dev.visual_debugger.protocol import (
     KeyboardCommandV1,
     ResearcherLiveDebuggerFrameV2,
     ReviewReplayCommandV1,
+    SetCombatConfigurationCommandV1,
     SetPresetCommandV1,
 )
 from scripts.dev.visual_debugger.recording import (
@@ -285,6 +286,64 @@ def test_finish_installs_replay_before_return_and_starts_settled_at_zero(
     assert (
         agent_presentation.payload.authority.exact_actor_input_export_available is False
     )
+
+
+def test_random_policy_recording_publishes_reloads_and_opens_in_replay(
+    tmp_path: Path,
+) -> None:
+    coordinator, _initial_recorder = _coordinator_and_recorder(tmp_path)
+    configured = coordinator.apply_command(
+        _live_request(
+            "configure-random-recording",
+            base_revision=0,
+            command=SetCombatConfigurationCommandV1(
+                team_a_controller="random_valid",
+                team_b_controller="random_valid",
+                execution_information_mode="shared_obs",
+            ),
+        )
+    )
+    assert isinstance(configured.payload, CommandResponseV2)
+    assert configured.payload.result == "applied"
+
+    submitted = coordinator.apply_command(
+        _live_request(
+            "submit-random-recording",
+            base_revision=1,
+            command=KeyboardCommandV1(key="Enter"),
+        )
+    )
+    assert isinstance(submitted.payload, CommandResponseV2)
+    assert submitted.payload.frame.frame_index == 1
+
+    finished = coordinator.apply_command(
+        _live_request(
+            "finish-random-recording",
+            base_revision=2,
+            command=FinishAndReviewCommandV1(),
+        )
+    )
+    installed = coordinator.router.snapshot()
+    viewer = cast(ReplayViewerService, installed.service)
+    assert finished.replay_handoff is viewer
+    assert installed.binding.mode == "replay"
+
+    loaded = load_replay_bundle_v1(
+        tmp_path / "coordinator-arena_5v5.marlbg-replay.json",
+        require_metric_report=True,
+    )
+    context = loaded.replay.header.context
+    aggregation = {row.name: row.value for row in context.aggregation_keys}
+    assert aggregation["action_source"] == "policy"
+    assigned = tuple(
+        row for row in context.policy_assignments if row.assignment_status == "assigned"
+    )
+    assert len(assigned) == 10
+    assert {row.policy_kind for row in assigned} == {"random_valid"}
+    assert {row.algorithm_id for row in assigned} == {"canonical-random-valid"}
+    assert loaded.replay.header.runtime_provenance.policy_execution_included is True
+    assert viewer.current_frame().cursor.frame_index == 0
+    assert viewer.current_presentation().outcome == "response"
 
 
 def test_recording_handoff_http_gets_use_actual_private_shared_roots(

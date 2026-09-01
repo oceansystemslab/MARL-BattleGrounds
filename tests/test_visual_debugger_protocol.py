@@ -126,6 +126,11 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
             team_b_controller="scripted_tdm",
             execution_information_mode="shared_obs",
         ),
+        SetCombatConfigurationCommandV1(
+            team_a_controller="random_valid",
+            team_b_controller="random_valid",
+            execution_information_mode="no_shared_obs",
+        ),
         FinishAndReviewCommandV1(),
         ReviewReplayCommandV1(),
         RetrySaveCommandV1(),
@@ -163,8 +168,8 @@ def test_command_request_round_trips_every_discriminated_variant(
 
 def test_combat_configuration_requires_both_symmetric_controller_values() -> None:
     configuration = CombatConfigurationV1(
-        team_a_controller="scripted_tdm",
-        team_b_controller="manual",
+        team_a_controller="random_valid",
+        team_b_controller="scripted_tdm",
         execution_information_mode="shared_obs",
     )
 

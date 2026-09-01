@@ -2191,6 +2191,29 @@ test("live presentation authority is exact and audience-scoped", () => {
   }
 });
 
+test("live combat configuration accepts Random independently for either team", () => {
+  for (const [teamAController, teamBController, source] of [
+    ["random_valid", "manual", researcherFrame()],
+    ["scripted_tdm", "random_valid", povFrame()],
+    ["random_valid", "random_valid", researcherFrame()],
+  ]) {
+    source.combat_configuration.team_a_controller = teamAController;
+    source.combat_configuration.team_b_controller = teamBController;
+    assert.deepEqual(normalizeLiveDebuggerFrameV2(source).combat_configuration, {
+      team_a_controller: teamAController,
+      team_b_controller: teamBController,
+      execution_information_mode: "no_shared_obs",
+    });
+  }
+
+  const malformed = researcherFrame();
+  malformed.combat_configuration.team_b_controller = "unknown_policy";
+  assert.throws(
+    () => normalizeLiveDebuggerFrameV2(malformed),
+    /combat configuration is invalid/u,
+  );
+});
+
 test("raw researcher ScenarioMetadata is exact, typed, and never coerced", () => {
   const integerScale = researcherFrame();
   integerScale.scenario.ordinary_movement_distance_scale = 1;

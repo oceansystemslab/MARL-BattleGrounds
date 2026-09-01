@@ -90,10 +90,6 @@ class DevPointV1(_AuthoringModel):
 class DevWallV1(_AuthoringModel):
     kind: Literal["wall"] = "wall"
     object_id: ObjectId
-    name: Annotated[
-        str,
-        StringConstraints(strip_whitespace=True, max_length=_MAX_NAME_LENGTH),
-    ] = ""
     center_x: float
     center_y: float
     width: float
@@ -104,10 +100,6 @@ class DevWallV1(_AuthoringModel):
 class DevPillarV1(_AuthoringModel):
     kind: Literal["pillar"] = "pillar"
     object_id: ObjectId
-    name: Annotated[
-        str,
-        StringConstraints(strip_whitespace=True, max_length=_MAX_NAME_LENGTH),
-    ] = ""
     center_x: float
     center_y: float
     radius: float

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from scripts.dev.visual_debugger.scenarios import DebuggerScenario
 
 type _ViewMode = Literal["researcher", "pov"]
-type _ActionSourceKind = Literal["manual", "scripted", "mixed"]
+type _ActionSourceKind = Literal["manual", "scripted", "mixed", "policy"]
 type _ExecutionInformationMode = Literal["shared_obs", "no_shared_obs"]
 
 _REPLAY_LAUNCHER = "scripts/dev/run_replay_viewer.sh"
@@ -292,11 +292,25 @@ def _recording_action_source_kind(session: object) -> _ActionSourceKind:
         for row in aggregation_keys
         if getattr(row, "name", None) == "action_source"
     )
-    if len(rows) != 1 or rows[0] not in ("manual", "scripted", "mixed"):
+    if len(rows) != 1 or rows[0] not in ("manual", "scripted", "mixed", "policy"):
         raise ValueError(
             "recording sessions require one canonical action-source contract."
         )
     return rows[0]
+
+
+def _recording_policy_execution_included(session: object) -> bool:
+    """Report whether either interactive team is owned by a policy."""
+    controllers = (
+        getattr(session, "team_a_controller", None),
+        getattr(session, "team_b_controller", None),
+    )
+    if any(
+        controller not in ("manual", "scripted_tdm", "random_valid")
+        for controller in controllers
+    ):
+        raise ValueError("recording sessions require exact team controllers.")
+    return any(controller != "manual" for controller in controllers)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -443,10 +457,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             runtime_provenance = capture_debugger_runtime_provenance_v1(
                 code_revision,
-                policy_execution_included=(
-                    "scripted_tdm"
-                    in (session.team_a_controller, session.team_b_controller)
-                ),
+                policy_execution_included=_recording_policy_execution_included(session),
             )
         except RuntimeError as exc:
             raise ValueError(

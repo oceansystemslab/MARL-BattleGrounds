@@ -22,7 +22,9 @@ visible paths, validate them through the existing simulator authorities, and
 delete unwanted saved assets after confirmation. Saved scenarios load
 directly; saved maps can be opened as clearly labelled deterministic
 default-5v5-TDM previews without modifying the map. Either team can remain
-manual or use the scripted Team Deathmatch controller for same-start testing.
+manual, use the scripted Team Deathmatch controller, or use the built-in Random
+controller for same-start testing. Random samples only the current valid action
+support and is available under both SharedObs and NoSharedObs.
 Existing replay artifacts remain outside the DevClient.
 
 Record one manual episode to a canonical replay and adjacent metric sidecar:

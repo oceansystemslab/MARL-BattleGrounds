@@ -66,12 +66,6 @@ export function mapContent(draft) {
   return map;
 }
 
-/** @param {Record<string, any>} obstacle */
-export function authoringObstacleDisplayName(obstacle) {
-  const name = typeof obstacle.name === "string" ? obstacle.name.trim() : "";
-  return name || obstacle.object_id;
-}
-
 /** @param {number} value @param {number} step @param {boolean} bypass */
 export function snapAuthoringCoordinate(value, step, bypass = false) {
   const coordinate = finiteNumber(value, "coordinate");
@@ -119,7 +113,7 @@ export function authoringObjects(draft) {
       Object.freeze({
         object_id: obstacle.object_id,
         kind: obstacle.kind,
-        label: authoringObstacleDisplayName(obstacle),
+        label: obstacle.object_id,
         x: obstacle.center_x,
         y: obstacle.center_y,
         obstacle,
@@ -321,6 +315,54 @@ export function setAgentAlive(draft, objectId, alive) {
   return next;
 }
 
+const OBJECT_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$/u;
+
+/**
+ * Rename one obstacle's structural identity without changing map semantics.
+ * Spawn-pad and roster identities deliberately remain immutable.
+ *
+ * @param {any} draft
+ * @param {string} oldId
+ * @param {unknown} requestedId
+ */
+export function renameAuthoringObstacleId(draft, oldId, requestedId) {
+  if (typeof requestedId !== "string") {
+    throw new TypeError("Obstacle ID must be text.");
+  }
+  const objectId = requestedId.trim();
+  if (!OBJECT_ID_PATTERN.test(objectId)) {
+    throw new RangeError(
+      "Obstacle IDs must be 1–64 characters, start and end with a letter or number, and use only letters, numbers, periods, underscores, or hyphens.",
+    );
+  }
+
+  const map = mapContent(draft);
+  const obstacleIndex = map.obstacles.findIndex(
+    (/** @type {any} */ obstacle) => obstacle.object_id === oldId,
+  );
+  if (obstacleIndex < 0) {
+    throw new TypeError("Only obstacle IDs may be renamed.");
+  }
+  if (objectId === oldId) {
+    return Object.freeze({ draft, object_id: objectId });
+  }
+
+  const occupied = new Set([
+    ...map.obstacles.map((/** @type {any} */ obstacle) => obstacle.object_id),
+    ...map.spawn_pads.map((/** @type {any} */ pad) => pad.object_id),
+    ...(authoringKind(draft) === "scenario"
+      ? draft.content.roster.map((/** @type {any} */ row) => row.object_id)
+      : []),
+  ]);
+  if (occupied.has(objectId)) {
+    throw new RangeError(`Authoring object ID ${objectId} is already in use.`);
+  }
+
+  const next = cloneAuthoringValue(draft);
+  mapContent(next).obstacles[obstacleIndex].object_id = objectId;
+  return Object.freeze({ draft: next, object_id: objectId });
+}
+
 /** @param {any} draft */
 function nextObstacleObjectId(draft) {
   const map = mapContent(draft);
@@ -352,7 +394,6 @@ export function addAuthoringObstacle(draft, kind, maximumObstacles) {
   const common = {
     kind,
     object_id: objectId,
-    name: objectId,
     center_x: map.width / 2,
     center_y: map.height / 2,
   };
@@ -388,7 +429,6 @@ export function duplicateAuthoringObstacle(draft, objectId, maximumObstacles, of
   const duplicateId = nextObstacleObjectId(next);
   const duplicate = cloneAuthoringValue(original);
   duplicate.object_id = duplicateId;
-  duplicate.name = duplicateId;
   duplicate.center_x += duplicateOffset;
   duplicate.center_y += duplicateOffset;
   map.obstacles.push(duplicate);

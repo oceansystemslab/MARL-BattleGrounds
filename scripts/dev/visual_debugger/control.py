@@ -41,6 +41,7 @@ from marl_battlegrounds.policies.actor import (
 from marl_battlegrounds.policies.no_shared_obs import (
     execute_no_shared_obs_team_policy,
 )
+from marl_battlegrounds.policies.random_valid import random_policy
 from marl_battlegrounds.policies.scripted.no_shared_obs import (
     team_deathmatch_no_shared_obs_policy,
 )
@@ -48,6 +49,7 @@ from marl_battlegrounds.policies.scripted.shared_obs import (
     team_deathmatch_shared_obs_policy,
 )
 from marl_battlegrounds.policies.shared_obs import (
+    SharedObsSensorSourceBankV1,
     build_default_shared_obs_information_availability,
     build_shared_obs_sensor_source_bank,
     execute_shared_obs_team_policy,
@@ -64,6 +66,7 @@ from scripts.dev.visual_debugger.evaluation_bridge import (
     debugger_action_source_kind_v1,
 )
 from scripts.dev.visual_debugger.model import (
+    SUPPORTED_TEAM_CONTROLLERS,
     DebuggerScenario,
     DebuggerSession,
     Lane,
@@ -82,6 +85,7 @@ type DebuggerTransitionFailureStageV1 = Literal[
 ]
 type DebuggerTransitionFailureCodeV1 = Literal[
     "interactive_action_build_failed",
+    "policy_action_build_failed",
     "scripted_action_build_failed",
     "invalid_submitted_action",
     "simulator_step_failed",
@@ -107,6 +111,7 @@ class DebuggerTransitionFailureV1(RuntimeError):  # noqa: N818 - frozen protocol
             raise ValueError("unknown debugger transition failure stage")
         if stable_code not in (
             "interactive_action_build_failed",
+            "policy_action_build_failed",
             "scripted_action_build_failed",
             "invalid_submitted_action",
             "simulator_step_failed",
@@ -256,7 +261,7 @@ def _replace_controlled_pending_action(
         if controlled_row.configured_team_id == TEAM_A_ID
         else session.team_b_controller
     )
-    if controller == "scripted_tdm":
+    if controller != "manual":
         return session
     pending_actions = list(session.pending_actions)
     pending_actions[session.controlled_global_slot] = pending_action
@@ -324,7 +329,7 @@ def _team_actor_action(action: Action, team_identity: int) -> ActorAction:
     )
 
 
-def _scripted_policy_keys(session: DebuggerSession) -> Array:
+def _policy_keys(session: DebuggerSession) -> Array:
     """Derive role-correct actor keys without consuming the environment stream."""
     context = session.evaluation_context
     seeds = context.seed_protocol
@@ -332,7 +337,7 @@ def _scripted_policy_keys(session: DebuggerSession) -> Array:
 
     def keys_for_seed(seed: object, *, role: str) -> Array:
         if type(seed) is not int:
-            raise ValueError(f"scripted {role} actors require a policy seed")
+            raise ValueError(f"{role} actors require a policy seed")
         decision_key = jax.random.fold_in(jax.random.key(seed), frame_index)
         return jax.random.split(decision_key, num=MAX_AGENT_SLOTS)
 
@@ -363,14 +368,92 @@ def _scripted_policy_keys(session: DebuggerSession) -> Array:
     return actor_keys
 
 
+def _random_shared_obs_policy(
+    recipient_observation: Observation,
+    recipient_action_mask: ActionMask,
+    key: Array,
+    source_bank: SharedObsSensorSourceBankV1,
+    recipient_source_availability: Array,
+    recipient_global_slot: Array,
+) -> ActorAction:
+    """Expose Random through the SharedObs ABI without changing its semantics."""
+    del source_bank, recipient_source_availability, recipient_global_slot
+    return random_policy(recipient_observation, recipient_action_mask, key)
+
+
+def _resolve_team_controller_action(
+    session: DebuggerSession,
+    *,
+    team_identity: int,
+    controller: TeamController,
+    policy_keys: Array,
+    source_bank: SharedObsSensorSourceBankV1 | None,
+    information_availability: Array | None,
+) -> ActorAction:
+    """Resolve one explicit team controller from the current decision epoch."""
+    if controller == "manual":
+        team_slots = tuple(
+            row.global_slot
+            for row in session.evaluation_context.roster
+            if row.configured_active and row.configured_team_id == team_identity
+        )
+        manual_action = build_interactive_joint_action(
+            session.evaluation_context,
+            session.pending_actions,
+            actor_global_slots=team_slots,
+        )
+        return _team_actor_action(manual_action, team_identity)
+
+    mode = session.evaluation_context.execution_information_mode
+    if mode == "shared_obs":
+        if source_bank is None or information_availability is None:
+            raise ValueError("SharedObs policy execution requires its source inputs")
+        if controller == "scripted_tdm":
+            policy = team_deathmatch_shared_obs_policy
+        elif controller == "random_valid":
+            policy = _random_shared_obs_policy
+        else:
+            raise ValueError("unsupported team controller")
+        return cast(
+            ActorAction,
+            execute_shared_obs_team_policy(
+                session.observation,
+                session.action_mask,
+                policy_keys,
+                source_bank,
+                information_availability,
+                policy=policy,
+                team_identity=team_identity,
+            ),
+        )
+    if mode != "no_shared_obs":
+        raise ValueError("unsupported execution information mode")
+    if controller == "scripted_tdm":
+        policy = team_deathmatch_no_shared_obs_policy
+    elif controller == "random_valid":
+        policy = random_policy
+    else:
+        raise ValueError("unsupported team controller")
+    return cast(
+        ActorAction,
+        execute_no_shared_obs_team_policy(
+            session.observation,
+            session.action_mask,
+            policy_keys,
+            policy=policy,
+            team_identity=team_identity,
+        ),
+    )
+
+
 def _build_configured_joint_action(session: DebuggerSession) -> Action:
     """Resolve both team controllers from one current decision epoch."""
-    controllers = (
+    controllers: tuple[tuple[int, TeamController], ...] = (
         (TEAM_A_ID, session.team_a_controller),
         (TEAM_B_ID, session.team_b_controller),
     )
     if all(controller == "manual" for _team_id, controller in controllers):
-        raise ValueError("configured policy assembly requires one scripted team")
+        raise ValueError("configured policy assembly requires one policy team")
 
     mode = session.evaluation_context.execution_information_mode
     information_availability: Array | None = None
@@ -385,51 +468,18 @@ def _build_configured_joint_action(session: DebuggerSession) -> Action:
     else:
         raise ValueError("unsupported execution information mode")
 
-    policy_keys = _scripted_policy_keys(session)
-    team_actions: list[ActorAction] = []
-    for team_identity, controller in controllers:
-        if controller == "manual":
-            team_slots = tuple(
-                row.global_slot
-                for row in session.evaluation_context.roster
-                if row.configured_active and row.configured_team_id == team_identity
-            )
-            manual_action = build_interactive_joint_action(
-                session.evaluation_context,
-                session.pending_actions,
-                actor_global_slots=team_slots,
-            )
-            team_actions.append(_team_actor_action(manual_action, team_identity))
-        elif mode == "shared_obs":
-            assert source_bank is not None
-            assert information_availability is not None
-            team_actions.append(
-                cast(
-                    ActorAction,
-                    execute_shared_obs_team_policy(
-                        session.observation,
-                        session.action_mask,
-                        policy_keys,
-                        source_bank,
-                        information_availability,
-                        policy=team_deathmatch_shared_obs_policy,
-                        team_identity=team_identity,
-                    ),
-                )
-            )
-        else:
-            team_actions.append(
-                cast(
-                    ActorAction,
-                    execute_no_shared_obs_team_policy(
-                        session.observation,
-                        session.action_mask,
-                        policy_keys,
-                        policy=team_deathmatch_no_shared_obs_policy,
-                        team_identity=team_identity,
-                    ),
-                )
-            )
+    policy_keys = _policy_keys(session)
+    team_actions = [
+        _resolve_team_controller_action(
+            session,
+            team_identity=team_identity,
+            controller=controller,
+            policy_keys=policy_keys,
+            source_bank=source_bank,
+            information_availability=information_availability,
+        )
+        for team_identity, controller in controllers
+    ]
     return build_joint_action_from_actor_actions(
         team_actions[0],
         team_actions[1],
@@ -945,16 +995,19 @@ def submit_interactive(
     actor_global_slots: tuple[int, ...] | None = None,
 ) -> DebuggerSession:
     """Submit one authorized collection of same-epoch pending actor rows."""
-    if "scripted_tdm" in (
-        session.team_a_controller,
-        session.team_b_controller,
+    if any(
+        controller != "manual"
+        for controller in (
+            session.team_a_controller,
+            session.team_b_controller,
+        )
     ):
         try:
             action = _build_configured_joint_action(session)
         except Exception as error:
             raise _transition_failure(
                 "action_build",
-                "scripted_action_build_failed",
+                "policy_action_build_failed",
                 error,
             ) from error
         return submit_joint_action(
@@ -1156,10 +1209,14 @@ def set_combat_configuration(
     execution_information_mode: ExecutionInformationMode,
 ) -> DebuggerSession:
     """Replace the episode only when its controller or information mode changes."""
-    if team_a_controller not in ("manual", "scripted_tdm"):
-        raise ValueError("team_a_controller must be manual or scripted_tdm")
-    if team_b_controller not in ("manual", "scripted_tdm"):
-        raise ValueError("team_b_controller must be manual or scripted_tdm")
+    if team_a_controller not in SUPPORTED_TEAM_CONTROLLERS:
+        raise ValueError(
+            "team_a_controller must be manual, scripted_tdm, or random_valid"
+        )
+    if team_b_controller not in SUPPORTED_TEAM_CONTROLLERS:
+        raise ValueError(
+            "team_b_controller must be manual, scripted_tdm, or random_valid"
+        )
     if execution_information_mode not in ("shared_obs", "no_shared_obs"):
         raise ValueError(
             "execution_information_mode must be shared_obs or no_shared_obs"

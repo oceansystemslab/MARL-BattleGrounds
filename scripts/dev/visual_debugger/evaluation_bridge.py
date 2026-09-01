@@ -49,9 +49,12 @@ from marl_battlegrounds.evaluation.models import (
     canonical_json_bytes,
 )
 from scripts.dev.visual_debugger.model import (
+    SUPPORTED_TEAM_CONTROLLERS,
     DebuggerScenario,
     ScenarioMode,
     TeamController,
+    TeamControllerActionSource,
+    team_controller_action_source,
 )
 
 DEBUGGER_EVALUATION_BRIDGE_SCHEMA_VERSION: Literal[1] = 1
@@ -60,7 +63,7 @@ DEBUGGER_EVALUATION_LAUNCH_SPECIFICATION_SCHEMA_ID = (
 )
 DEBUGGER_PUBLIC_AGENT_IDS_V1 = tuple(str(slot) for slot in range(MAX_AGENT_SLOTS))
 
-type DebuggerActionSourceKindV1 = Literal["manual", "scripted", "mixed"]
+type DebuggerActionSourceKindV1 = TeamControllerActionSource
 type DebuggerCaptureProfileV1 = Literal["debug", "evaluation_metric_complete"]
 
 _Sha256Hex = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -215,27 +218,57 @@ def _action_source_contract_payload(
     execution_information_mode: ExecutionInformationMode,
     scenario_contract_digest: str,
 ) -> dict[str, object]:
-    if action_source_kind not in ("manual", "scripted", "mixed"):
-        raise ValueError("action_source_kind must be manual, scripted, or mixed")
+    if action_source_kind not in ("manual", "scripted", "mixed", "policy"):
+        raise ValueError(
+            "action_source_kind must be manual, scripted, mixed, or policy"
+        )
+    random_policy_execution_included = "random_valid" in (
+        team_a_controller,
+        team_b_controller,
+    )
+    if not random_policy_execution_included:
+        # Preserve every established non-Random action-source identity. V2 is
+        # needed only when the new Random controller must be distinguished.
+        payload: dict[str, object] = {
+            "schema_id": ("marl_battlegrounds.visual_debugger.action_source_contract"),
+            "schema_version": 1,
+            "action_source_kind": action_source_kind,
+            "team_b_controller": team_b_controller,
+            "execution_information_mode": execution_information_mode,
+            "manual_submission_included": action_source_kind in ("manual", "mixed"),
+            "scripted_submission_included": action_source_kind in ("scripted", "mixed"),
+            "scenario_contract_digest_sha256": scenario_contract_digest,
+            "policy_execution_included": (
+                scenario_mode == "interactive"
+                and "scripted_tdm" in (team_a_controller, team_b_controller)
+            ),
+        }
+        if scenario_mode == "interactive":
+            payload["team_a_controller"] = team_a_controller
+        return payload
+    manual_submission_included = "manual" in (
+        team_a_controller,
+        team_b_controller,
+    )
+    scripted_tdm_execution_included = "scripted_tdm" in (
+        team_a_controller,
+        team_b_controller,
+    )
     payload: dict[str, object] = {
         "schema_id": "marl_battlegrounds.visual_debugger.action_source_contract",
-        "schema_version": 1,
+        "schema_version": 2,
         "action_source_kind": action_source_kind,
+        "team_a_controller": team_a_controller,
         "team_b_controller": team_b_controller,
         "execution_information_mode": execution_information_mode,
-        "manual_submission_included": action_source_kind in ("manual", "mixed"),
-        "scripted_submission_included": action_source_kind in ("scripted", "mixed"),
+        "manual_submission_included": manual_submission_included,
+        "scripted_tdm_execution_included": scripted_tdm_execution_included,
+        "random_policy_execution_included": random_policy_execution_included,
         "scenario_contract_digest_sha256": scenario_contract_digest,
         "policy_execution_included": (
-            scenario_mode == "interactive"
-            and "scripted_tdm" in (team_a_controller, team_b_controller)
+            scripted_tdm_execution_included or random_policy_execution_included
         ),
     }
-    # Registered scripted diagnostics use their own fixed-frame execution path;
-    # interactive controller selectors cannot affect them. Preserve their V1
-    # action-source identity (and checked Replay bytes) exactly.
-    if scenario_mode == "interactive":
-        payload["team_a_controller"] = team_a_controller
     return payload
 
 
@@ -274,7 +307,15 @@ def _policy_assignments(
             policy_kind = (
                 team_a_controller if team_id == TEAM_A_ID else team_b_controller
             )
-        scripted_tdm = policy_kind == "scripted_tdm"
+        if policy_kind == "scripted_tdm":
+            algorithm_id = "canonical-scripted-team-deathmatch"
+            execution_mode = "stochastic"
+        elif policy_kind == "random_valid":
+            algorithm_id = "canonical-random-valid"
+            execution_mode = "stochastic"
+        else:
+            algorithm_id = "not_applicable"
+            execution_mode = "deterministic"
         rows.append(
             AssignedPolicySlotV1(
                 global_slot=slot,
@@ -283,11 +324,7 @@ def _policy_assignments(
                 policy_id=f"debugger-action-source:{policy_kind}:slot:{slot}",
                 policy_content_digest=action_contract_digest,
                 checkpoint_digest=None,
-                algorithm_id=(
-                    "canonical-scripted-team-deathmatch"
-                    if scripted_tdm
-                    else "not_applicable"
-                ),
+                algorithm_id=algorithm_id,
                 training_run_id="not_applicable",
                 training_step=0,
                 population_member_id=None,
@@ -302,7 +339,7 @@ def _policy_assignments(
                 # Manual input is not a sampled policy; deterministic records
                 # the lack of policy RNG rather than repeatable human choices.
                 # Scripted TDM samples from its seeded action distribution.
-                execution_mode="stochastic" if scripted_tdm else "deterministic",
+                execution_mode=execution_mode,
             )
         )
     return tuple(rows)
@@ -316,11 +353,7 @@ def debugger_action_source_kind_v1(
     """Classify one scenario and controller pair for truthful provenance."""
     if scenario.mode == "scripted":
         return "scripted"
-    if team_a_controller == team_b_controller == "manual":
-        return "manual"
-    if team_a_controller == team_b_controller == "scripted_tdm":
-        return "scripted"
-    return "mixed"
+    return team_controller_action_source(team_a_controller, team_b_controller)
 
 
 def build_debugger_evaluation_context_v1(
@@ -354,10 +387,14 @@ def build_debugger_evaluation_context_v1(
         raise ValueError("run_generation must be a nonnegative exact integer")
     if type(config) is not EnvConfig:
         raise TypeError("config must be the exact EnvConfig type")
-    if team_a_controller not in ("manual", "scripted_tdm"):
-        raise ValueError("team_a_controller must be manual or scripted_tdm")
-    if team_b_controller not in ("manual", "scripted_tdm"):
-        raise ValueError("team_b_controller must be manual or scripted_tdm")
+    if team_a_controller not in SUPPORTED_TEAM_CONTROLLERS:
+        raise ValueError(
+            "team_a_controller must be manual, scripted_tdm, or random_valid"
+        )
+    if team_b_controller not in SUPPORTED_TEAM_CONTROLLERS:
+        raise ValueError(
+            "team_b_controller must be manual, scripted_tdm, or random_valid"
+        )
     if execution_information_mode not in ("shared_obs", "no_shared_obs"):
         raise ValueError(
             "execution_information_mode must be shared_obs or no_shared_obs"

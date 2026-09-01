@@ -8,9 +8,14 @@ import sys
 from collections.abc import Callable
 from importlib.util import find_spec
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from scripts.dev.debug_renderer import (
+    _recording_action_source_kind,  # pyright: ignore[reportPrivateUsage]
+    _recording_policy_execution_included,  # pyright: ignore[reportPrivateUsage]
+)
 from scripts.dev.debug_renderer import (
     build_parser as build_debugger_parser,
 )
@@ -47,6 +52,19 @@ _OLD_PYTHON_ENTRYPOINT = (
 _OLD_SHELL_LAUNCHER = _REPOSITORY_ROOT / "scripts" / "dev" / "run_geometry_renderer.sh"
 _HAS_MATPLOTLIB = find_spec("matplotlib") is not None
 _HAS_PYPLOT = _HAS_MATPLOTLIB and find_spec("matplotlib.pyplot") is not None
+
+
+def test_recording_launch_metadata_accepts_random_policy_execution() -> None:
+    session = SimpleNamespace(
+        evaluation_context=SimpleNamespace(
+            aggregation_keys=(SimpleNamespace(name="action_source", value="policy"),)
+        ),
+        team_a_controller="random_valid",
+        team_b_controller="manual",
+    )
+
+    assert _recording_action_source_kind(session) == "policy"
+    assert _recording_policy_execution_included(session)
 
 
 def _write_valid_replay(tmp_path: Path) -> Path:

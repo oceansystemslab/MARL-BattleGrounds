@@ -13,12 +13,12 @@ import {
   addAuthoringObstacle,
   authoringContentSnapshot,
   authoringObjects,
-  authoringObstacleDisplayName,
   deleteAuthoringObstacle,
   duplicateAuthoringObstacle,
   mapContent,
   moveAuthoringObject,
   moveAuthoringObjectWithSnap,
+  renameAuthoringObstacleId,
   reorderAuthoringObstacle,
   restoreAuthoringContent,
   setAgentAlive,
@@ -237,59 +237,80 @@ test("scenario obstacle edits share the allocator without renaming existing obje
   );
 });
 
-test("obstacle display names are editable without changing stable object identity", () => {
+test("obstacle IDs are directly editable in maps and allocate the lowest free ID", () => {
   const added = addAuthoringObstacle(
     mapDraft(),
     "wall",
     AUTHORING_CATALOG.maximum_obstacle_slots,
   );
-  assert.equal(mapContent(added.draft).obstacles[0].name, "obstacle-0");
-
-  const renamed = setAuthoringField(
+  const second = addAuthoringObstacle(
     added.draft,
-    ["content", "obstacles", 0, "name"],
-    "North gate",
-  );
-  const renamedObject = authoringObjects(renamed).find(
-    (object) => object.object_id === "obstacle-0",
-  );
-  assert.equal(renamedObject?.label, "North gate");
-  assert.equal(renamedObject?.object_id, "obstacle-0");
-
-  const duplicate = duplicateAuthoringObstacle(
-    renamed,
-    "obstacle-0",
+    "pillar",
     AUTHORING_CATALOG.maximum_obstacle_slots,
-    AUTHORING_CATALOG.fixed_snap_world_units,
   );
-  assert.deepEqual(
-    mapContent(duplicate.draft).obstacles.map((/** @type {any} */ obstacle) => [
-      obstacle.object_id,
-      obstacle.name,
-    ]),
-    [
-      ["obstacle-0", "North gate"],
-      ["obstacle-1", "obstacle-1"],
-    ],
+  const third = addAuthoringObstacle(
+    second.draft,
+    "wall",
+    AUTHORING_CATALOG.maximum_obstacle_slots,
+  );
+  const deleted = deleteAuthoringObstacle(third.draft, "obstacle-1");
+  const renamed = renameAuthoringObstacleId(deleted, "obstacle-2", " obstacle-1 ");
+  const next = addAuthoringObstacle(
+    renamed.draft,
+    "pillar",
+    AUTHORING_CATALOG.maximum_obstacle_slots,
   );
 
-  const legacyObject = authoringObjects(scenarioDraft()).find(
-    (object) => object.object_id === "wall-1",
+  assert.deepEqual(
+    mapContent(next.draft).obstacles.map(
+      (/** @type {any} */ obstacle) => obstacle.object_id,
+    ),
+    ["obstacle-0", "obstacle-1", "obstacle-2"],
   );
-  assert.equal(legacyObject?.label, "wall-1");
-  const blankName = setAuthoringField(
-    added.draft,
-    ["content", "obstacles", 0, "name"],
-    " \t ",
-  );
+  assert.equal(renamed.object_id, "obstacle-1");
   assert.equal(
-    authoringObjects(blankName).find((object) => object.object_id === "obstacle-0")
+    authoringObjects(renamed.draft).find((object) => object.object_id === "obstacle-1")
       ?.label,
-    "obstacle-0",
+    "obstacle-1",
   );
-  assert.equal(
-    authoringObstacleDisplayName(mapContent(blankName).obstacles[0]),
+  assert.equal(Object.hasOwn(mapContent(next.draft).obstacles[0], "name"), false);
+});
+
+test("scenario obstacle ID renames reject every identity collision atomically", () => {
+  const original = scenarioDraft();
+  const renamed = renameAuthoringObstacleId(original, "wall-1", "north_gate.1");
+  assert.equal(renamed.object_id, "north_gate.1");
+  assert.equal(mapContent(renamed.draft).obstacles[0].object_id, "north_gate.1");
+  assert.equal(mapContent(original).obstacles[0].object_id, "wall-1");
+
+  const withSecondObstacle = addAuthoringObstacle(
+    original,
+    "pillar",
+    AUTHORING_CATALOG.maximum_obstacle_slots,
+  );
+  const before = structuredClone(withSecondObstacle.draft);
+  for (const invalid of [
+    "",
+    "-leading",
+    "trailing-",
+    "contains space",
+    "x".repeat(65),
     "obstacle-0",
+    "pad-a1",
+    "agent-a5",
+  ]) {
+    assert.throws(
+      () => renameAuthoringObstacleId(withSecondObstacle.draft, "wall-1", invalid),
+      /Obstacle ID|already in use/u,
+    );
+    assert.deepEqual(withSecondObstacle.draft, before);
+  }
+
+  const noOp = renameAuthoringObstacleId(original, "wall-1", " wall-1 ");
+  assert.equal(noOp.draft, original);
+  assert.throws(
+    () => renameAuthoringObstacleId(original, "pad-a1", "renamed-pad"),
+    /Only obstacle IDs/u,
   );
 });
 

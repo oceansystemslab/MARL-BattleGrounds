@@ -40,11 +40,32 @@ type ArmOrigin = Literal["automatic", "explicit"]
 type ScenarioMode = Literal["interactive", "scripted"]
 type ScenarioAudience = Literal["researcher", "stress"]
 type SubmissionKind = Literal["interactive", "scripted"]
-type TeamController = Literal["manual", "scripted_tdm"]
+type TeamController = Literal["manual", "scripted_tdm", "random_valid"]
+type TeamControllerActionSource = Literal["manual", "scripted", "mixed", "policy"]
 type ScenarioSourceKind = Literal[
     "current_buffer",
     "saved_draft",
 ]
+
+SUPPORTED_TEAM_CONTROLLERS: tuple[TeamController, ...] = (
+    "manual",
+    "scripted_tdm",
+    "random_valid",
+)
+
+
+def team_controller_action_source(
+    team_a_controller: TeamController,
+    team_b_controller: TeamController,
+) -> TeamControllerActionSource:
+    """Classify one interactive pair without hiding either controller identity."""
+    if team_a_controller == team_b_controller == "manual":
+        return "manual"
+    if team_a_controller == team_b_controller == "scripted_tdm":
+        return "scripted"
+    if team_a_controller != "manual" and team_b_controller != "manual":
+        return "policy"
+    return "mixed"
 
 
 def _validate_slot(global_slot: int, *, name: str) -> None:
@@ -382,10 +403,14 @@ class DebuggerSession:
             _validate_slot(actor_slot, name="last_report_actor_slot")
             if not self.evaluation_context.roster[actor_slot].configured_active:
                 raise ValueError("last report actor slots must be configured active.")
-        if self.team_a_controller not in ("manual", "scripted_tdm"):
-            raise ValueError("team_a_controller must be manual or scripted_tdm.")
-        if self.team_b_controller not in ("manual", "scripted_tdm"):
-            raise ValueError("team_b_controller must be manual or scripted_tdm.")
+        if self.team_a_controller not in SUPPORTED_TEAM_CONTROLLERS:
+            raise ValueError(
+                "team_a_controller must be manual, scripted_tdm, or random_valid."
+            )
+        if self.team_b_controller not in SUPPORTED_TEAM_CONTROLLERS:
+            raise ValueError(
+                "team_b_controller must be manual, scripted_tdm, or random_valid."
+            )
         if self.scenario.mode == "scripted":
             if self.team_a_controller != "manual" or self.team_b_controller != "manual":
                 raise ValueError(
@@ -393,12 +418,9 @@ class DebuggerSession:
                     "controllers."
                 )
         else:
-            expected_action_source = (
-                "manual"
-                if self.team_a_controller == self.team_b_controller == "manual"
-                else "scripted"
-                if self.team_a_controller == self.team_b_controller == "scripted_tdm"
-                else "mixed"
+            expected_action_source = team_controller_action_source(
+                self.team_a_controller,
+                self.team_b_controller,
             )
             expected_aggregation = {
                 "action_source": expected_action_source,

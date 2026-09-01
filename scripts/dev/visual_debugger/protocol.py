@@ -44,7 +44,7 @@ type PendingSubmissionScope = Literal[
     "joint_turn",
     "scripted_playback",
 ]
-type TeamController = Literal["manual", "scripted_tdm"]
+type TeamController = Literal["manual", "scripted_tdm", "random_valid"]
 type ExecutionInformationMode = Literal["shared_obs", "no_shared_obs"]
 type CommandResult = Literal[
     "applied",

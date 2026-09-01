@@ -2017,6 +2017,30 @@ test("all six exact raw/presentation pairs join identity-first and timelines sta
   }
 });
 
+test("live transport identity accepts Random independently for either team", async () => {
+  for (const [kind, teamAController, teamBController] of [
+    ["live_oracle", "random_valid", "manual"],
+    ["live_shared_obs_agent_pov", "scripted_tdm", "random_valid"],
+    ["live_no_shared_obs_agent_pov", "random_valid", "random_valid"],
+  ]) {
+    const pair = clone(fixture.pairs[kind]);
+    pair.transport.combat_configuration.team_a_controller = teamAController;
+    pair.transport.combat_configuration.team_b_controller = teamBController;
+    const joined = await joinTransportAndAuthorizedPresentationV1(
+      pair.transport,
+      pair.presentation,
+    );
+    assert.equal(
+      joined.transport.combat_configuration.team_a_controller,
+      teamAController,
+    );
+    assert.equal(
+      joined.transport.combat_configuration.team_b_controller,
+      teamBController,
+    );
+  }
+});
+
 test("every coherent raw identity tuple mismatch is a retryable race before endpoint reads", async () => {
   /** @type {Record<string, string>} */
   const modePeer = {

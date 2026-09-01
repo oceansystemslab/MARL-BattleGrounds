@@ -241,7 +241,6 @@ def normalize_map_content(
             normalized_obstacles.append(
                 DevWallV1(
                     object_id=obstacle.object_id,
-                    name=obstacle.name,
                     center_x=_normalized_float32(
                         obstacle.center_x,
                         f"{obstacle_prefix}.center_x",
@@ -273,7 +272,6 @@ def normalize_map_content(
             normalized_obstacles.append(
                 DevPillarV1(
                     object_id=obstacle.object_id,
-                    name=obstacle.name,
                     center_x=_normalized_float32(
                         obstacle.center_x,
                         f"{obstacle_prefix}.center_x",

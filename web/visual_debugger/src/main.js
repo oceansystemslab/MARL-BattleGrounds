@@ -524,12 +524,12 @@ const CONTROL_HELP = Object.freeze([
   [
     "#devclient-team-a-controller",
     "Team A controller",
-    "Choose manual control or the scripted Team Deathmatch policy, then restart from the same snapshot.",
+    "Choose manual control, the scripted Team Deathmatch policy, or Random, then restart from the same snapshot.",
   ],
   [
     "#devclient-team-b-controller",
     "Team B controller",
-    "Choose manual control or the scripted Team Deathmatch policy, then restart from the same snapshot.",
+    "Choose manual control, the scripted Team Deathmatch policy, or Random, then restart from the same snapshot.",
   ],
   [
     "#devclient-information-mode",
@@ -1916,6 +1916,22 @@ function isReplayMode() {
   return productIdentity?.product_kind === "replay_viewer";
 }
 
+/** @param {unknown} value */
+function isTeamController(value) {
+  return value === "manual" || value === "scripted_tdm" || value === "random_valid";
+}
+
+/** @param {unknown} controller */
+function combatControllerLabel(controller) {
+  if (controller === "scripted_tdm") {
+    return "Scripted TDM";
+  }
+  if (controller === "random_valid") {
+    return "Random";
+  }
+  return "Manual";
+}
+
 /** @param {unknown} frame */
 function combatConfigurationFromFrame(frame) {
   if (!isRecord(frame)) {
@@ -1924,10 +1940,8 @@ function combatConfigurationFromFrame(frame) {
   const candidate = frame.combat_configuration;
   if (
     !isRecord(candidate) ||
-    (candidate.team_a_controller !== "manual" &&
-      candidate.team_a_controller !== "scripted_tdm") ||
-    (candidate.team_b_controller !== "manual" &&
-      candidate.team_b_controller !== "scripted_tdm") ||
+    !isTeamController(candidate.team_a_controller) ||
+    !isTeamController(candidate.team_b_controller) ||
     (candidate.execution_information_mode !== "shared_obs" &&
       candidate.execution_information_mode !== "no_shared_obs")
   ) {
@@ -3134,7 +3148,7 @@ const DEFERRED_SUBMIT_PREPARATION_COMMAND_TYPES = new Set([
   "roster_selection",
 ]);
 
-function scriptedControlledActorTeam() {
+function policyControlledActor() {
   const configuration = combatConfigurationFromFrame(state.frame);
   if (configuration === null) {
     return null;
@@ -3158,18 +3172,23 @@ function scriptedControlledActorTeam() {
   if (actor === null || actor.public_agent_id !== inspection.actor_public_agent_id) {
     return null;
   }
-  if (actor.team_id === 1 && configuration.team_a_controller === "scripted_tdm") {
-    return "Team A";
+  let team;
+  let controller;
+  if (actor.team_id === 1) {
+    team = "Team A";
+    controller = configuration.team_a_controller;
+  } else if (actor.team_id === 2) {
+    team = "Team B";
+    controller = configuration.team_b_controller;
+  } else {
+    return null;
   }
-  if (actor.team_id === 2 && configuration.team_b_controller === "scripted_tdm") {
-    return "Team B";
-  }
-  return null;
+  return controller === "manual" ? null : Object.freeze({ team, controller });
 }
 
 /** @param {Record<string, unknown>} command */
-function scriptedControllerBlocksActionEdit(command) {
-  if (scriptedControlledActorTeam() === null) {
+function policyControllerBlocksActionEdit(command) {
+  if (policyControlledActor() === null) {
     return false;
   }
   if (command.command_type === "battlefield_pointer") {
@@ -3813,17 +3832,18 @@ function renderCommandAvailability() {
     option.textContent = "No authorized targets";
     elements.commandTargetSelect.replaceChildren(option);
   }
-  const scriptedTeam = scriptedControlledActorTeam();
-  const scriptedControllerReadOnly = scriptedTeam !== null;
+  const policyControlled = policyControlledActor();
+  const policyControllerReadOnly = policyControlled !== null;
   elements.commandDeck?.setAttribute(
-    "data-scripted-controller-read-only",
-    String(scriptedControllerReadOnly),
+    "data-policy-controller-read-only",
+    String(policyControllerReadOnly),
   );
-  if (scriptedControllerReadOnly) {
-    elements.commandControlledActor.textContent += " · Scripted TDM (read-only)";
+  if (policyControlled !== null) {
+    const controllerLabel = combatControllerLabel(policyControlled.controller);
+    elements.commandControlledActor.textContent += ` · ${controllerLabel} (read-only)`;
     elements.commandControlledActor.setAttribute(
       "aria-label",
-      `${elements.commandControlledActor.getAttribute("aria-label") ?? `Controlled ${scriptedTeam} actor`}. Scripted TDM supplies this actor's action.`,
+      `${elements.commandControlledActor.getAttribute("aria-label") ?? `Controlled ${policyControlled.team} actor`}. ${controllerLabel} supplies this actor's action.`,
     );
   }
   elements.commandTargetSelect.disabled =
@@ -3831,7 +3851,7 @@ function renderCommandAvailability() {
     !editableDraft ||
     scientificFenced ||
     isTerminal(state.frame) ||
-    scriptedControllerReadOnly;
+    policyControllerReadOnly;
   if (elements.commandDeck) {
     const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (
       elements.commandDeck.querySelectorAll("button[data-key]")
@@ -3848,7 +3868,7 @@ function renderCommandAvailability() {
         disabled ||
         scientificFenced ||
         !enabledByInspection ||
-        scriptedControllerBlocksActionEdit(command) ||
+        policyControllerBlocksActionEdit(command) ||
         (scriptedAdvance && isTerminal(state.frame)) ||
         recordingDecision.action === "block" ||
         !mode.allowed;
@@ -4305,10 +4325,8 @@ function recordingReplacementLabel(replacement) {
     return `Switch to scenario ${String(replacement.scenario_name)}`;
   }
   if (replacement.command_type === "set_combat_configuration") {
-    const teamAController =
-      replacement.team_a_controller === "scripted_tdm" ? "Scripted TDM" : "Manual";
-    const teamBController =
-      replacement.team_b_controller === "scripted_tdm" ? "Scripted TDM" : "Manual";
+    const teamAController = combatControllerLabel(replacement.team_a_controller);
+    const teamBController = combatControllerLabel(replacement.team_b_controller);
     const information =
       replacement.execution_information_mode === "shared_obs"
         ? "SharedObs"
@@ -4683,10 +4701,12 @@ async function dispatchCommand(command, { deferredSubmit = null } = {}) {
       return;
     }
   }
-  const scriptedTeam = scriptedControlledActorTeam();
-  if (scriptedControllerBlocksActionEdit(command)) {
+  const policyControlled = policyControlledActor();
+  if (policyControllerBlocksActionEdit(command)) {
+    const team = policyControlled?.team ?? "This team";
+    const controller = combatControllerLabel(policyControlled?.controller);
     setNotice(
-      `${scriptedTeam ?? "This team"} is controlled by Scripted TDM. Its actions are read-only; Submit remains available.`,
+      `${team} is controlled by ${controller}. Its actions are read-only; Submit remains available.`,
       "warning",
     );
     renderConnection();

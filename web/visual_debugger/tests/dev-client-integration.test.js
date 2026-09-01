@@ -316,13 +316,13 @@ test("Combat configuration remains authoritative until one requested successor i
     }),
     true,
   );
-  teamAController.value = "scripted_tdm";
+  teamAController.value = "random_valid";
   teamBController.value = "scripted_tdm";
   informationMode.value = "no_shared_obs";
   assert.equal(controller.request(), true);
   assert.deepEqual(emitted, [
     {
-      team_a_controller: "scripted_tdm",
+      team_a_controller: "random_valid",
       team_b_controller: "scripted_tdm",
       execution_information_mode: "no_shared_obs",
     },
@@ -334,10 +334,10 @@ test("Combat configuration remains authoritative until one requested successor i
   controller.install(emitted[0]);
   assert.equal(controller.request(), false);
   assert.equal(emitted.length, 1);
-  assert.equal(teamAController.value, "scripted_tdm");
+  assert.equal(teamAController.value, "random_valid");
   assert.equal(teamBController.value, "scripted_tdm");
   assert.equal(informationMode.value, "no_shared_obs");
-  assert.equal(root.dataset.teamAController, "scripted_tdm");
+  assert.equal(root.dataset.teamAController, "random_valid");
   assert.equal(root.dataset.teamBController, "scripted_tdm");
   assert.equal(root.dataset.executionInformationMode, "no_shared_obs");
 });
@@ -383,5 +383,5 @@ test("successful Debug loads emit one event into the existing frame reload path"
     /command_type: "set_combat_configuration",\s*team_a_controller: requested\.team_a_controller,\s*team_b_controller: requested\.team_b_controller,\s*execution_information_mode: requested\.execution_information_mode/u,
   );
   assert.match(main, /publishInstalledCombatConfiguration\(joined\.transport\);/u);
-  assert.match(main, /scriptedControllerBlocksActionEdit\(command\)/u);
+  assert.match(main, /policyControllerBlocksActionEdit\(command\)/u);
 });

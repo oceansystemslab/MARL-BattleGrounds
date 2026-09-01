@@ -528,8 +528,12 @@ function normalizeCombatConfigurationV1(value) {
     "Live combat configuration has unknown or missing fields.",
   );
   if (
-    !["manual", "scripted_tdm"].includes(configuration.team_a_controller) ||
-    !["manual", "scripted_tdm"].includes(configuration.team_b_controller) ||
+    !["manual", "scripted_tdm", "random_valid"].includes(
+      configuration.team_a_controller,
+    ) ||
+    !["manual", "scripted_tdm", "random_valid"].includes(
+      configuration.team_b_controller,
+    ) ||
     !["shared_obs", "no_shared_obs"].includes(configuration.execution_information_mode)
   ) {
     throw new TypeError("Live combat configuration is invalid.");

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
+import scripts.dev.visual_debugger.evaluation_bridge as evaluation_bridge
+import scripts.dev.visual_debugger.recording as debugger_recording
 from pydantic import ValidationError
 from scripts.dev.visual_debugger.evaluation_bridge import (
     DEBUGGER_PUBLIC_AGENT_IDS_V1,
@@ -240,6 +242,31 @@ def test_mixed_action_source_assigns_manual_team_a_and_scripted_tdm_team_b() -> 
             ("manual",) * 5 + ("scripted_tdm",) * 5,
         ),
         ("scripted_tdm", "scripted_tdm", "scripted", ("scripted_tdm",) * 10),
+        (
+            "random_valid",
+            "manual",
+            "mixed",
+            ("random_valid",) * 5 + ("manual",) * 5,
+        ),
+        (
+            "manual",
+            "random_valid",
+            "mixed",
+            ("manual",) * 5 + ("random_valid",) * 5,
+        ),
+        ("random_valid", "random_valid", "policy", ("random_valid",) * 10),
+        (
+            "random_valid",
+            "scripted_tdm",
+            "policy",
+            ("random_valid",) * 5 + ("scripted_tdm",) * 5,
+        ),
+        (
+            "scripted_tdm",
+            "random_valid",
+            "policy",
+            ("scripted_tdm",) * 5 + ("random_valid",) * 5,
+        ),
     ),
 )
 def test_interactive_controller_pairs_have_truthful_per_slot_provenance(
@@ -267,13 +294,68 @@ def test_interactive_controller_pairs_have_truthful_per_slot_provenance(
     assert tuple(row.algorithm_id for row in assigned) == tuple(
         "canonical-scripted-team-deathmatch"
         if policy_kind == "scripted_tdm"
+        else "canonical-random-valid"
+        if policy_kind == "random_valid"
         else "not_applicable"
         for policy_kind in expected_policy_kinds
     )
     assert tuple(row.execution_mode for row in assigned) == tuple(
-        "stochastic" if policy_kind == "scripted_tdm" else "deterministic"
+        "stochastic"
+        if policy_kind in ("scripted_tdm", "random_valid")
+        else "deterministic"
         for policy_kind in expected_policy_kinds
     )
+
+
+def test_random_action_source_v2_and_recording_policy_are_truthful() -> None:
+    scenario = get_scenario("arena_5v5")
+    payload = evaluation_bridge._action_source_contract_payload(  # pyright: ignore[reportPrivateUsage]
+        action_source_kind="mixed",
+        scenario_mode=scenario.mode,
+        team_a_controller="random_valid",
+        team_b_controller="manual",
+        execution_information_mode="shared_obs",
+        scenario_contract_digest="a" * 64,
+    )
+
+    assert payload["schema_version"] == 2
+    assert payload["team_a_controller"] == "random_valid"
+    assert payload["team_b_controller"] == "manual"
+    assert payload["manual_submission_included"] is True
+    assert payload["scripted_tdm_execution_included"] is False
+    assert payload["random_policy_execution_included"] is True
+    assert payload["policy_execution_included"] is True
+
+    random_context = _context(
+        action_source_kind="mixed",
+        team_a_controller="random_valid",
+        team_b_controller="manual",
+    )
+    manual_context = _context()
+    policy_execution_included = debugger_recording._context_policy_execution_included  # pyright: ignore[reportPrivateUsage]
+    assert policy_execution_included(random_context)
+    assert not policy_execution_included(manual_context)
+    nonrandom_payload = evaluation_bridge._action_source_contract_payload(  # pyright: ignore[reportPrivateUsage]
+        action_source_kind="mixed",
+        scenario_mode=scenario.mode,
+        team_a_controller="scripted_tdm",
+        team_b_controller="manual",
+        execution_information_mode="shared_obs",
+        scenario_contract_digest="a" * 64,
+    )
+
+    assert nonrandom_payload == {
+        "schema_id": "marl_battlegrounds.visual_debugger.action_source_contract",
+        "schema_version": 1,
+        "action_source_kind": "mixed",
+        "team_a_controller": "scripted_tdm",
+        "team_b_controller": "manual",
+        "execution_information_mode": "shared_obs",
+        "manual_submission_included": True,
+        "scripted_submission_included": True,
+        "scenario_contract_digest_sha256": "a" * 64,
+        "policy_execution_included": True,
+    }
 
 
 def test_scripted_team_identity_changes_the_action_contract_identity() -> None:

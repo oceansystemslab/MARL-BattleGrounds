@@ -198,7 +198,6 @@ def test_map_normalization_padding_order_and_semantic_digest_contract() -> None:
         obstacles=(
             DevWallV1(
                 object_id="wall-browser-a",
-                name="North divider",
                 center_x=8.0,
                 center_y=5.0,
                 width=2.0,
@@ -207,7 +206,6 @@ def test_map_normalization_padding_order_and_semantic_digest_contract() -> None:
             ),
             DevPillarV1(
                 object_id="pillar-browser-a",
-                name="Center cover",
                 center_x=12.0,
                 center_y=5.0,
                 radius=0.75,
@@ -225,7 +223,6 @@ def test_map_normalization_padding_order_and_semantic_digest_contract() -> None:
     assert host_obstacles[1, 7] == 1.0
     normalized_wall = compiled.content.obstacles[0]
     assert isinstance(normalized_wall, DevWallV1)
-    assert normalized_wall.name == "North divider"
     assert normalized_wall.rotation_degrees == pytest.approx(90.0)
 
     replacement_pads = tuple(
@@ -244,15 +241,22 @@ def test_map_normalization_padding_order_and_semantic_digest_contract() -> None:
         }
     )
     assert map_semantic_digest(map_a) == map_semantic_digest(map_b)
-    renamed_obstacles = tuple(
-        obstacle.model_copy(update={"name": f"Renamed {index}"})
-        for index, obstacle in enumerate(map_a.obstacles)
-    )
-    renamed_map = map_a.model_copy(update={"obstacles": renamed_obstacles})
-    assert map_semantic_digest(map_a) == map_semantic_digest(renamed_map)
     assert np.array_equal(
         np.asarray(compile_dev_map(map_a).obstacles),
-        np.asarray(compile_dev_map(renamed_map).obstacles),
+        np.asarray(compile_dev_map(map_b).obstacles),
+    )
+    source_a = new_map_draft("identity-a").model_copy(update={"content": map_a})
+    source_b = new_map_draft("identity-b").model_copy(update={"content": map_b})
+    scenario_a = compile_dev_scenario(new_scenario_draft(source_map=source_a))
+    scenario_b = compile_dev_scenario(new_scenario_draft(source_map=source_b))
+    assert scenario_a.semantic_digest == scenario_b.semantic_digest
+    assert (
+        scenario_a.resolved_configuration_digest
+        == scenario_b.resolved_configuration_digest
+    )
+    assert (
+        scenario_a.resolved_initial_state_digest
+        == scenario_b.resolved_initial_state_digest
     )
     assert map_semantic_digest(map_a) != map_semantic_digest(
         map_a.model_copy(update={"obstacles": tuple(reversed(map_a.obstacles))})
@@ -277,16 +281,15 @@ def test_map_normalization_padding_order_and_semantic_digest_contract() -> None:
     assert map_semantic_digest(half_turn) == map_semantic_digest(equivalent_half_turn)
 
 
-def test_obstacle_names_are_trimmed_bounded_and_survive_independent_map_copy() -> None:
-    legacy = DevPillarV1(
-        object_id="legacy-pillar",
+def test_obstacle_ids_survive_independent_map_copy_and_obsolete_names_fail() -> None:
+    pillar = DevPillarV1(
+        object_id="center-pillar",
         center_x=10.0,
         center_y=5.0,
         radius=0.5,
     )
-    named = DevWallV1(
-        object_id="stable-wall-id",
-        name="  Flanking wall  ",
+    wall = DevWallV1(
+        object_id="flanking-wall",
         center_x=8.0,
         center_y=5.0,
         width=2.0,
@@ -295,25 +298,30 @@ def test_obstacle_names_are_trimmed_bounded_and_survive_independent_map_copy() -
     source = new_map_draft("named-source")
     source = source.model_copy(
         update={
-            "content": source.content.model_copy(update={"obstacles": (legacy, named)})
+            "content": source.content.model_copy(update={"obstacles": (pillar, wall)})
         }
     )
     normalized = compile_dev_map(source).content
 
-    assert normalized.obstacles[0].name == ""
-    assert normalized.obstacles[1].name == "Flanking wall"
+    assert tuple(obstacle.object_id for obstacle in normalized.obstacles) == (
+        "center-pillar",
+        "flanking-wall",
+    )
     copied = new_scenario_draft("named-copy", source_map=source)
     assert copied.content.embedded_map.obstacles == source.content.obstacles
     assert copied.content.embedded_map.obstacles is not source.content.obstacles
 
-    with pytest.raises(ValidationError, match="at most 120 characters"):
-        DevPillarV1(
-            object_id="too-long",
-            name="x" * 121,
-            center_x=10.0,
-            center_y=5.0,
-            radius=0.5,
-        )
+    obsolete_map = source.model_dump(mode="json", by_alias=True)
+    obsolete_map["content"]["obstacles"][0]["name"] = "obsolete display name"
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        DevMapDraftV1.model_validate_json(json.dumps(obsolete_map))
+
+    obsolete_scenario = copied.model_dump(mode="json", by_alias=True)
+    obsolete_scenario["content"]["embedded_map"]["obstacles"][1]["name"] = (
+        "obsolete display name"
+    )
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        DevScenarioDraftV1.model_validate_json(json.dumps(obsolete_scenario))
 
 
 def test_map_validation_links_pad_errors_and_keeps_permitted_geometry_as_warning() -> (
