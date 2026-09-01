@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPOSITORY_ROOT = resolve(HERE, "../../../..");
-export const DEBUGGER_STOP_TIMEOUT_MS = 5_000;
+export const DEBUGGER_STOP_TIMEOUT_MS = 30_000;
 export const COMBAT_DEBUGGER_ENTRYPOINT = "scripts/dev/debug_renderer.py";
 export const SCRIPTED_DEBUGGER_HARNESS =
   "tests/visual_debugger_scripted_browser_harness.py";
