@@ -61,10 +61,12 @@ html body [hidden] {
  * defense against a stale or pending frame exposing the opposite product IA.
  */
 html:not([data-product-kind]) [data-live-only],
+html:not([data-product-kind]) [data-devclient-only],
 html:not([data-product-kind]) [data-replay-only],
 html:not([data-product-kind]) #battlefield-instructions,
 html[data-product-kind="combat_debugger"] [data-replay-only],
-html[data-product-kind="replay_viewer"] [data-live-only] {
+html[data-product-kind="replay_viewer"] [data-live-only],
+html[data-product-kind="replay_viewer"] [data-devclient-only] {
   display: none;
 }
 

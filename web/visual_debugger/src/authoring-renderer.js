@@ -316,11 +316,6 @@ export function renderAuthoringSvg(
     }
     shape.setAttribute("aria-selected", String(object.object_id === selectedId));
     shape.setAttribute("tabindex", "-1");
-    const title = svgElement("title");
-    title.textContent = agentVisual
-      ? `${object.label} · ${agentVisual.alive ? "alive" : "dead"}`
-      : object.label;
-    shape.append(title);
     objectLayer.append(shape);
 
     if (agentVisual) {

@@ -201,6 +201,8 @@ function installDevClient() {
     objectCount: required("authoring-object-count"),
     canvas: required("authoring-canvas"),
     inspector: required("authoring-inspector-form"),
+    resetButton: required("authoring-reset"),
+    recenterButton: required("authoring-recenter"),
     undoButton: required("authoring-undo"),
     redoButton: required("authoring-redo"),
     duplicateButton: required("authoring-duplicate"),
@@ -210,19 +212,32 @@ function installDevClient() {
     problemList: required("authoring-problem-list"),
     problemCount: required("authoring-problem-count"),
   };
+
+  function createEditorState() {
+    return {
+      draft: null,
+      baseline: null,
+      selectedId: null,
+      problems: [],
+      validation: null,
+      past: [],
+      future: [],
+      camera: null,
+    };
+  }
+
+  const editors = {
+    maps: createEditorState(),
+    scenarios: createEditorState(),
+  };
   /** @type {any} */
   const state = {
     token: acquireCapabilityToken(),
     area: "combat",
-    draft: null,
-    selectedId: null,
-    problems: [],
+    editors,
+    editor: editors.maps,
     assets: [],
-    validation: null,
     catalog: null,
-    past: [],
-    future: [],
-    camera: null,
     pointer: null,
     spacePressed: false,
     busy: false,
@@ -260,13 +275,13 @@ function installDevClient() {
   }
 
   /** @param {string} message */
-  function showLocalError(message) {
-    state.problems = [
+  function showLocalError(message, editor = state.editor) {
+    editor.problems = [
       {
         severity: "error",
         stable_code: "browser-authoring-operation",
         message,
-        object_id: state.selectedId,
+        object_id: editor.selectedId,
         field_path: "browser",
       },
     ];
@@ -274,35 +289,48 @@ function installDevClient() {
   }
 
   /** @param {Record<string, any>} response */
-  function installResponse(response) {
-    const nextDraft = draftAfterAuthoringResponse(state.draft, response);
-    if (nextDraft !== state.draft) {
+  function installResponse(response, editor = state.editor) {
+    const nextDraft = draftAfterAuthoringResponse(editor.draft, response);
+    if (nextDraft !== editor.draft) {
       const newDocument = ["new_map", "new_scenario", "open"].includes(
         response.command_type,
       );
-      state.draft = nextDraft;
+      editor.draft = nextDraft;
       if (newDocument) {
-        state.selectedId = null;
-        state.past = [];
-        state.future = [];
-        state.camera = null;
+        editor.selectedId = null;
+        editor.past = [];
+        editor.future = [];
+        editor.camera = null;
+      }
+      if (
+        newDocument ||
+        response.command_type === "save" ||
+        response.command_type === "save_as"
+      ) {
+        editor.baseline = authoringContentSnapshot(nextDraft);
       }
     }
     if (response.command_type === "list" && Array.isArray(response.assets)) {
       state.assets = response.assets;
     }
     if (response.validation) {
-      state.validation = response.validation;
+      editor.validation = response.validation;
     }
     state.catalog = response.catalog ?? state.catalog;
-    state.problems = normalizeAuthoringProblems(
-      response.validation?.problems ?? response.problems ?? [],
-    );
+    if (
+      response.validation ||
+      response.ok === false ||
+      (Array.isArray(response.problems) && response.problems.length > 0)
+    ) {
+      editor.problems = normalizeAuthoringProblems(
+        response.validation?.problems ?? response.problems ?? [],
+      );
+    }
     renderAll();
   }
 
   /** @param {Record<string, any>} command */
-  async function send(command) {
+  async function send(command, editor = state.editor) {
     if (state.busy) {
       return null;
     }
@@ -310,13 +338,14 @@ function installDevClient() {
     renderAvailability();
     try {
       const response = await postAuthoringCommand(state.token, command);
-      installResponse(response);
+      installResponse(response, editor);
       return response;
     } catch (error) {
       showLocalError(
         error instanceof DebuggerApiError || error instanceof Error
           ? error.message
           : "The authoring command failed.",
+        editor,
       );
       return null;
     } finally {
@@ -397,27 +426,31 @@ function installDevClient() {
     return candidates.find((asset) => identity(asset) === requested) ?? null;
   }
 
+  /** @param {string} promptText @param {string} defaultId */
+  function promptAssetId(promptText, defaultId) {
+    const requested = window.prompt(promptText, defaultId);
+    if (requested === null) {
+      return null;
+    }
+    if (
+      requested.length > 64 ||
+      !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(requested)
+    ) {
+      showLocalError(
+        "Asset IDs use lowercase letters, digits, and internal hyphens only.",
+      );
+      return null;
+    }
+    return requested;
+  }
+
   /** @param {"map" | "scenario"} kind */
   async function createDraft(kind) {
     if (state.busy) {
       return;
     }
-    const defaultId = kind === "map" ? "untitled-map" : "untitled-scenario";
-    const assetId = window.prompt(
-      `${kind === "map" ? "Map" : "Scenario"} asset ID`,
-      defaultId,
-    );
-    if (assetId === null) {
-      return;
-    }
-    if (assetId.length > 64 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(assetId)) {
-      showLocalError(
-        "Asset IDs use lowercase letters, digits, and internal hyphens only.",
-      );
-      return;
-    }
     if (kind === "map") {
-      await send({ command_type: "new_map", asset_id: assetId });
+      await send({ command_type: "new_map" });
       return;
     }
     const creationMode = elements.newScenarioMode.value;
@@ -444,7 +477,6 @@ function installDevClient() {
     /** @type {Record<string, any>} */
     const command = {
       command_type: "new_scenario",
-      asset_id: assetId,
       creation_mode: creationMode,
     };
     if (source !== null) {
@@ -468,13 +500,15 @@ function installDevClient() {
         button.getAttribute("data-devclient-area") === area ? "page" : "false",
       );
     }
+    elements.combatConfig.hidden = area !== "combat";
     elements.shell.hidden = area === "combat";
     if (area === "combat") {
       await refreshAssets();
       return;
     }
+    state.editor = state.editors[area];
     const kind = area === "maps" ? "map" : "scenario";
-    if (state.draft === null || authoringKind(state.draft) !== kind) {
+    if (state.editor.draft === null) {
       await createDraft(kind);
     } else {
       renderAll();
@@ -482,22 +516,50 @@ function installDevClient() {
   }
 
   /** @param {Record<string, any>} next @param {Record<string, any>} [before] */
-  function commit(next, before = state.draft) {
+  function commit(next, before = state.editor.draft) {
     if (state.busy || before === null) {
       return;
     }
-    state.past.push(authoringContentSnapshot(before));
-    state.past = state.past.slice(-50);
-    state.future = [];
-    state.draft = next;
-    state.validation = null;
+    state.editor.past.push(authoringContentSnapshot(before));
+    state.editor.past = state.editor.past.slice(-50);
+    state.editor.future = [];
+    state.editor.draft = next;
+    state.editor.validation = null;
     renderAll();
     void validateDraft();
   }
 
-  async function validateDraft() {
-    if (state.draft !== null) {
-      await send({ command_type: "validate", draft: state.draft });
+  function recenterAuthoringView() {
+    if (state.busy || state.editor.draft === null) {
+      return;
+    }
+    state.editor.camera = null;
+    renderCanvas();
+  }
+
+  function resetAuthoringDraft() {
+    const editor = state.editor;
+    if (state.busy || editor.draft === null || editor.baseline === null) {
+      return;
+    }
+    editor.camera = null;
+    if (JSON.stringify(editor.draft.content) === JSON.stringify(editor.baseline)) {
+      renderCanvas();
+      return;
+    }
+    editor.past.push(authoringContentSnapshot(editor.draft));
+    editor.past = editor.past.slice(-50);
+    editor.future = [];
+    editor.draft = restoreAuthoringContent(editor.draft, editor.baseline);
+    editor.selectedId = null;
+    editor.validation = null;
+    renderAll();
+    void validateDraft(editor);
+  }
+
+  async function validateDraft(editor = state.editor) {
+    if (editor.draft !== null) {
+      await send({ command_type: "validate", draft: editor.draft }, editor);
     }
   }
 
@@ -525,13 +587,13 @@ function installDevClient() {
 
   function renderObjectList() {
     elements.objectList.replaceChildren();
-    if (state.draft === null) {
+    if (state.editor.draft === null) {
       elements.objectCount.textContent = "0";
       return;
     }
-    const objects = authoringObjects(state.draft);
+    const objects = authoringObjects(state.editor.draft);
     const rows = [
-      { object_id: "", label: `${authoringKind(state.draft)} document` },
+      { object_id: "", label: `${authoringKind(state.editor.draft)} document` },
       ...objects,
     ];
     for (const object of rows) {
@@ -540,7 +602,7 @@ function installDevClient() {
       button.dataset.objectId = object.object_id;
       button.setAttribute(
         "aria-current",
-        String((object.object_id || null) === state.selectedId),
+        String((object.object_id || null) === state.editor.selectedId),
       );
       button.textContent = object.label;
       if (object.kind === "agent") {
@@ -557,19 +619,19 @@ function installDevClient() {
 
   function renderProblems() {
     elements.problemList.replaceChildren();
-    elements.problemCount.textContent = String(state.problems.length);
-    if (state.problems.length === 0) {
+    elements.problemCount.textContent = String(state.editor.problems.length);
+    if (state.editor.problems.length === 0) {
       const row = document.createElement("li");
       row.className = "empty-copy";
-      row.textContent = state.validation?.freeze_qualified
+      row.textContent = state.editor.validation?.freeze_qualified
         ? "Freeze-qualified."
-        : state.validation?.execution_valid
+        : state.editor.validation?.execution_valid
           ? "Execution-valid. Complete the study contract to freeze."
           : "Validate to inspect host-authoritative errors and warnings.";
       elements.problemList.append(row);
       return;
     }
-    for (const problem of state.problems) {
+    for (const problem of state.editor.problems) {
       const button = document.createElement("button");
       button.type = "button";
       button.dataset.severity = problem.severity;
@@ -584,16 +646,16 @@ function installDevClient() {
   }
 
   function renderCanvas() {
-    if (state.draft === null) {
+    if (state.editor.draft === null) {
       elements.canvas.replaceChildren();
       return;
     }
-    const map = mapContent(state.draft);
-    state.camera = renderAuthoringSvg(
+    const map = mapContent(state.editor.draft);
+    state.editor.camera = renderAuthoringSvg(
       elements.canvas,
-      state.draft,
-      state.selectedId,
-      normalizeAuthoringCamera(state.camera, map.width, map.height),
+      state.editor.draft,
+      state.editor.selectedId,
+      normalizeAuthoringCamera(state.editor.camera, map.width, map.height),
       catalogNumber("fixed_grid_world_units"),
       state.catalog,
     );
@@ -601,17 +663,17 @@ function installDevClient() {
 
   /** @param {number} clientX @param {number} clientY */
   function authoringWorldPoint(clientX, clientY) {
-    if (state.draft === null) {
+    if (state.editor.draft === null) {
       return null;
     }
-    const map = mapContent(state.draft);
+    const map = mapContent(state.editor.draft);
     const dimensions = authoringMapDimensions(map.width, map.height);
     if (dimensions === null) {
       return null;
     }
     return authoringClientPointToWorld(
       elements.canvas.getBoundingClientRect(),
-      state.camera,
+      state.editor.camera,
       dimensions.height,
       clientX,
       clientY,
@@ -620,7 +682,8 @@ function installDevClient() {
 
   function renderAvailability() {
     const selected =
-      state.draft && selectedAuthoringObject(state.draft, state.selectedId);
+      state.editor.draft &&
+      selectedAuthoringObject(state.editor.draft, state.editor.selectedId);
     const obstacle = selected?.kind === "wall" || selected?.kind === "pillar";
     elements.shell.inert = state.busy;
     elements.shell.setAttribute("aria-busy", String(state.busy));
@@ -631,38 +694,42 @@ function installDevClient() {
     elements.scenarioLoad.disabled = state.busy || !elements.scenarioSelect.value;
     elements.newButton.disabled = state.busy;
     elements.openButton.disabled = state.busy;
-    elements.saveButton.disabled = state.busy || !state.draft;
-    elements.saveAsButton.disabled = state.busy || !state.draft;
-    elements.validateButton.disabled = state.busy || !state.draft;
-    elements.undoButton.disabled = state.busy || state.past.length === 0;
-    elements.redoButton.disabled = state.busy || state.future.length === 0;
+    elements.saveButton.disabled = state.busy || !state.editor.draft;
+    elements.saveAsButton.disabled = state.busy || !state.editor.draft;
+    elements.validateButton.disabled = state.busy || !state.editor.draft;
+    elements.resetButton.disabled =
+      state.busy || !state.editor.draft || !state.editor.baseline;
+    elements.recenterButton.disabled = state.busy || !state.editor.draft;
+    elements.undoButton.disabled = state.busy || state.editor.past.length === 0;
+    elements.redoButton.disabled = state.busy || state.editor.future.length === 0;
     elements.duplicateButton.disabled = state.busy || !obstacle;
     elements.deleteButton.disabled = state.busy || !obstacle;
     elements.orderUpButton.disabled = state.busy || !obstacle;
     elements.orderDownButton.disabled = state.busy || !obstacle;
-    elements.freezeButton.disabled = state.busy || !state.validation?.freeze_qualified;
+    elements.freezeButton.disabled =
+      state.busy || !state.editor.validation?.freeze_qualified;
     elements.openDebugButton.disabled =
       state.busy ||
-      !state.draft ||
-      authoringKind(state.draft) !== "scenario" ||
-      !state.validation?.execution_valid;
+      !state.editor.draft ||
+      authoringKind(state.editor.draft) !== "scenario" ||
+      !state.editor.validation?.execution_valid;
   }
 
   function renderAll() {
     renderScenarioOptions();
-    if (state.draft) {
-      const kind = authoringKind(state.draft);
+    if (state.editor.draft) {
+      const kind = authoringKind(state.editor.draft);
       elements.eyebrow.textContent = kind === "map" ? "Map Author" : "Scenario Author";
-      elements.title.textContent = state.draft.content.name;
+      elements.title.textContent = state.editor.draft.content.name;
     }
     renderObjectList();
     renderCanvas();
     renderAuthoringInspector(
       elements.inspector,
-      state.draft,
-      state.selectedId,
+      state.editor.draft,
+      state.editor.selectedId,
       state.catalog,
-      state.validation,
+      state.editor.validation,
     );
     renderProblems();
     renderAvailability();
@@ -724,21 +791,31 @@ function installDevClient() {
     }
   });
   elements.saveButton.addEventListener("click", () => {
-    if (!state.busy && state.draft) {
-      void send({
-        command_type: "save",
-        draft: state.draft,
-        expected_revision: state.draft.revision,
-      });
-    }
-  });
-  elements.saveAsButton.addEventListener("click", () => {
-    if (state.busy || !state.draft) {
+    const draft = state.editor.draft;
+    if (state.busy || !draft) {
       return;
     }
-    const assetId = window.prompt("New asset ID", `${state.draft.asset_id}-copy`);
-    if (assetId) {
-      void send({ command_type: "save_as", draft: state.draft, asset_id: assetId });
+    if (draft.revision === 0) {
+      const assetId = promptAssetId("New asset ID", draft.asset_id);
+      if (assetId !== null) {
+        void send({ command_type: "save_as", draft, asset_id: assetId });
+      }
+      return;
+    }
+    void send({
+      command_type: "save",
+      draft,
+      expected_revision: draft.revision,
+    });
+  });
+  elements.saveAsButton.addEventListener("click", () => {
+    const draft = state.editor.draft;
+    if (state.busy || !draft) {
+      return;
+    }
+    const assetId = promptAssetId("New asset ID", `${draft.asset_id}-copy`);
+    if (assetId !== null) {
+      void send({ command_type: "save_as", draft, asset_id: assetId });
     }
   });
   elements.validateButton.addEventListener("click", () => {
@@ -747,23 +824,29 @@ function installDevClient() {
     }
   });
   elements.freezeButton.addEventListener("click", () => {
-    if (!state.busy && state.draft) {
-      void send({ command_type: "freeze", draft: state.draft });
+    if (!state.busy && state.editor.draft) {
+      void send({ command_type: "freeze", draft: state.editor.draft });
     }
   });
   elements.openDebugButton.addEventListener("click", async () => {
-    if (state.busy || !state.draft) {
+    if (state.busy || !state.editor.draft) {
       return;
     }
-    await openInDebug({ source_kind: "current_buffer", draft: state.draft }, true);
+    await openInDebug(
+      { source_kind: "current_buffer", draft: state.editor.draft },
+      true,
+    );
   });
+
+  elements.resetButton.addEventListener("click", resetAuthoringDraft);
+  elements.recenterButton.addEventListener("click", recenterAuthoringView);
 
   elements.palette.addEventListener("click", (/** @type {Event} */ event) => {
     if (authoringInteractionBlocked(event)) {
       return;
     }
     const button = closest(event, "[data-authoring-add]");
-    if (!button || !state.draft) {
+    if (!button || !state.editor.draft) {
       return;
     }
     try {
@@ -772,11 +855,11 @@ function installDevClient() {
         return;
       }
       const result = addAuthoringObstacle(
-        state.draft,
+        state.editor.draft,
         obstacleKind,
         catalogNumber("maximum_obstacle_slots"),
       );
-      state.selectedId = result.object_id;
+      state.editor.selectedId = result.object_id;
       commit(result.draft);
     } catch (error) {
       showLocalError(
@@ -790,19 +873,25 @@ function installDevClient() {
     }
     const button = closest(event, "[data-object-id]");
     if (button) {
-      state.selectedId = button.getAttribute("data-object-id") || null;
+      state.editor.selectedId = button.getAttribute("data-object-id") || null;
       renderAll();
     }
   });
   elements.objectList.addEventListener(
     "dragstart",
     (/** @type {DragEvent} */ event) => {
-      if (authoringInteractionBlocked(event) || !event.dataTransfer || !state.draft) {
+      if (
+        authoringInteractionBlocked(event) ||
+        !event.dataTransfer ||
+        !state.editor.draft
+      ) {
         return;
       }
       const row = closest(event, '[data-authoring-roster-agent="true"]');
       const objectId = row?.getAttribute("data-object-id");
-      const object = objectId ? selectedAuthoringObject(state.draft, objectId) : null;
+      const object = objectId
+        ? selectedAuthoringObject(state.editor.draft, objectId)
+        : null;
       if (!objectId || object?.kind !== "agent") {
         event.preventDefault();
         return;
@@ -818,7 +907,7 @@ function installDevClient() {
     }
     const button = closest(event, "[data-object-id]");
     if (button) {
-      state.selectedId = button.getAttribute("data-object-id") || null;
+      state.editor.selectedId = button.getAttribute("data-object-id") || null;
       const fieldPath = button.getAttribute("data-field-path") ?? "";
       renderAll();
       focusAuthoringProblemField(elements.inspector, fieldPath);
@@ -829,81 +918,85 @@ function installDevClient() {
       return;
     }
     const edit = readAuthoringFieldEdit(event.target);
-    if (!edit || !state.draft) {
+    if (!edit || !state.editor.draft) {
       return;
     }
-    const alive = edit.path.at(-1) === "alive" && state.selectedId;
+    const alive = edit.path.at(-1) === "alive" && state.editor.selectedId;
     const teamSize =
       edit.path.length === 2 &&
       edit.path[0] === "content" &&
       ["team_a_size", "team_b_size"].includes(edit.path[1]);
     commit(
       alive
-        ? setAgentAlive(state.draft, state.selectedId, Boolean(edit.value))
+        ? setAgentAlive(
+            state.editor.draft,
+            state.editor.selectedId,
+            Boolean(edit.value),
+          )
         : teamSize
           ? setScenarioTeamSize(
-              state.draft,
+              state.editor.draft,
               edit.path[1] === "team_a_size" ? "A" : "B",
               edit.value,
               state.catalog,
             )
-          : setAuthoringField(state.draft, edit.path, edit.value),
+          : setAuthoringField(state.editor.draft, edit.path, edit.value),
     );
   });
 
   elements.undoButton.addEventListener("click", () => {
-    const previousContent = state.busy ? null : state.past.pop();
-    if (previousContent && state.draft) {
-      state.future.push(authoringContentSnapshot(state.draft));
-      state.draft = restoreAuthoringContent(state.draft, previousContent);
+    const previousContent = state.busy ? null : state.editor.past.pop();
+    if (previousContent && state.editor.draft) {
+      state.editor.future.push(authoringContentSnapshot(state.editor.draft));
+      state.editor.draft = restoreAuthoringContent(state.editor.draft, previousContent);
       renderAll();
       void validateDraft();
     }
   });
   elements.redoButton.addEventListener("click", () => {
-    const nextContent = state.busy ? null : state.future.pop();
-    if (nextContent && state.draft) {
-      state.past.push(authoringContentSnapshot(state.draft));
-      state.draft = restoreAuthoringContent(state.draft, nextContent);
+    const nextContent = state.busy ? null : state.editor.future.pop();
+    if (nextContent && state.editor.draft) {
+      state.editor.past.push(authoringContentSnapshot(state.editor.draft));
+      state.editor.draft = restoreAuthoringContent(state.editor.draft, nextContent);
       renderAll();
       void validateDraft();
     }
   });
   elements.duplicateButton.addEventListener("click", () => {
-    if (!state.busy && state.draft && state.selectedId) {
+    if (!state.busy && state.editor.draft && state.editor.selectedId) {
       const result = duplicateAuthoringObstacle(
-        state.draft,
-        state.selectedId,
+        state.editor.draft,
+        state.editor.selectedId,
         catalogNumber("maximum_obstacle_slots"),
         catalogNumber("fixed_snap_world_units"),
       );
-      state.selectedId = result.object_id;
+      state.editor.selectedId = result.object_id;
       commit(result.draft);
     }
   });
   elements.deleteButton.addEventListener("click", () => {
-    if (!state.busy && state.draft && state.selectedId) {
-      const next = deleteAuthoringObstacle(state.draft, state.selectedId);
-      state.selectedId = null;
+    if (!state.busy && state.editor.draft && state.editor.selectedId) {
+      const next = deleteAuthoringObstacle(state.editor.draft, state.editor.selectedId);
+      state.editor.selectedId = null;
       commit(next);
     }
   });
   elements.orderUpButton.addEventListener("click", () => {
-    if (!state.busy && state.draft && state.selectedId) {
-      commit(reorderAuthoringObstacle(state.draft, state.selectedId, -1));
+    if (!state.busy && state.editor.draft && state.editor.selectedId) {
+      commit(reorderAuthoringObstacle(state.editor.draft, state.editor.selectedId, -1));
     }
   });
   elements.orderDownButton.addEventListener("click", () => {
-    if (!state.busy && state.draft && state.selectedId) {
-      commit(reorderAuthoringObstacle(state.draft, state.selectedId, 1));
+    if (!state.busy && state.editor.draft && state.editor.selectedId) {
+      commit(reorderAuthoringObstacle(state.editor.draft, state.editor.selectedId, 1));
     }
   });
 
   elements.canvas.addEventListener("dragover", (/** @type {DragEvent} */ event) => {
     if (
       !state.busy &&
-      state.draft !== null &&
-      authoringKind(state.draft) === "scenario"
+      state.editor.draft !== null &&
+      authoringKind(state.editor.draft) === "scenario"
     ) {
       event.preventDefault();
       if (event.dataTransfer) {
@@ -912,22 +1005,26 @@ function installDevClient() {
     }
   });
   elements.canvas.addEventListener("drop", (/** @type {DragEvent} */ event) => {
-    if (authoringInteractionBlocked(event) || !state.draft || !event.dataTransfer) {
+    if (
+      authoringInteractionBlocked(event) ||
+      !state.editor.draft ||
+      !event.dataTransfer
+    ) {
       return;
     }
     const objectId =
       event.dataTransfer.getData(AUTHORING_AGENT_DRAG_TYPE) ||
       event.dataTransfer.getData("text/plain");
-    const object = selectedAuthoringObject(state.draft, objectId);
+    const object = selectedAuthoringObject(state.editor.draft, objectId);
     const world = authoringWorldPoint(event.clientX, event.clientY);
     if (object?.kind !== "agent" || world === null) {
       return;
     }
     event.preventDefault();
-    state.selectedId = objectId;
+    state.editor.selectedId = objectId;
     commit(
       moveAuthoringObjectWithSnap(
-        state.draft,
+        state.editor.draft,
         objectId,
         world.x,
         world.y,
@@ -940,7 +1037,7 @@ function installDevClient() {
   elements.canvas.addEventListener(
     "pointerdown",
     (/** @type {PointerEvent} */ event) => {
-      if (authoringInteractionBlocked(event) || !state.draft) {
+      if (authoringInteractionBlocked(event) || !state.editor.draft) {
         return;
       }
       const object = closest(event, "[data-object-id]");
@@ -952,12 +1049,12 @@ function installDevClient() {
           y: event.clientY,
         };
       } else if (event.button === 0 && object) {
-        state.selectedId = object.getAttribute("data-object-id");
+        state.editor.selectedId = object.getAttribute("data-object-id");
         state.pointer = {
           kind: "drag",
           pointerId: event.pointerId,
-          objectId: state.selectedId,
-          before: cloneAuthoringValue(state.draft),
+          objectId: state.editor.selectedId,
+          before: cloneAuthoringValue(state.editor.draft),
         };
         renderAll();
       } else {
@@ -974,16 +1071,18 @@ function installDevClient() {
         state.busy ||
         !state.pointer ||
         state.pointer.pointerId !== event.pointerId ||
-        !state.draft
+        !state.editor.draft
       ) {
         return;
       }
       if (state.pointer.kind === "pan") {
         const bounds = elements.canvas.getBoundingClientRect();
-        state.camera = panAuthoringCamera(
-          state.camera,
-          -((event.clientX - state.pointer.x) * state.camera.width) / bounds.width,
-          -((event.clientY - state.pointer.y) * state.camera.height) / bounds.height,
+        state.editor.camera = panAuthoringCamera(
+          state.editor.camera,
+          -((event.clientX - state.pointer.x) * state.editor.camera.width) /
+            bounds.width,
+          -((event.clientY - state.pointer.y) * state.editor.camera.height) /
+            bounds.height,
         );
         state.pointer.x = event.clientX;
         state.pointer.y = event.clientY;
@@ -994,8 +1093,8 @@ function installDevClient() {
       if (world === null) {
         return;
       }
-      state.draft = moveAuthoringObjectWithSnap(
-        state.draft,
+      state.editor.draft = moveAuthoringObjectWithSnap(
+        state.editor.draft,
         state.pointer.objectId,
         world.x,
         world.y,
@@ -1005,10 +1104,10 @@ function installDevClient() {
       renderCanvas();
       renderAuthoringInspector(
         elements.inspector,
-        state.draft,
-        state.selectedId,
+        state.editor.draft,
+        state.editor.selectedId,
         state.catalog,
-        state.validation,
+        state.editor.validation,
       );
     },
   );
@@ -1022,8 +1121,8 @@ function installDevClient() {
     if (elements.canvas.hasPointerCapture(event.pointerId)) {
       elements.canvas.releasePointerCapture(event.pointerId);
     }
-    if (!state.busy && pointer.kind === "drag" && state.draft) {
-      commit(state.draft, pointer.before);
+    if (!state.busy && pointer.kind === "drag" && state.editor.draft) {
+      commit(state.editor.draft, pointer.before);
     }
   }
   elements.canvas.addEventListener("pointerup", finishPointer);
@@ -1031,24 +1130,24 @@ function installDevClient() {
   elements.canvas.addEventListener(
     "wheel",
     (/** @type {WheelEvent} */ event) => {
-      if (authoringInteractionBlocked(event) || !state.draft) {
+      event.preventDefault();
+      if (authoringInteractionBlocked(event) || !state.editor.draft) {
         return;
       }
-      const map = mapContent(state.draft);
+      const map = mapContent(state.editor.draft);
       const dimensions = authoringMapDimensions(map.width, map.height);
       const world = authoringWorldPoint(event.clientX, event.clientY);
       if (dimensions === null || world === null) {
         return;
       }
-      state.camera = zoomAuthoringCamera(
-        state.camera,
+      state.editor.camera = zoomAuthoringCamera(
+        state.editor.camera,
         dimensions.width,
         dimensions.height,
         world,
         event.deltaY > 0 ? 1.15 : 1 / 1.15,
       );
       renderCanvas();
-      event.preventDefault();
     },
     { passive: false },
   );
@@ -1062,7 +1161,8 @@ function installDevClient() {
       return;
     }
     const object =
-      state.draft && selectedAuthoringObject(state.draft, state.selectedId);
+      state.editor.draft &&
+      selectedAuthoringObject(state.editor.draft, state.editor.selectedId);
     const snapStep = catalogNumber("fixed_snap_world_units");
     const step = event.altKey ? snapStep / 5 : snapStep;
     /** @type {Record<string, number[]>} */
@@ -1076,8 +1176,8 @@ function installDevClient() {
     if (object && delta) {
       commit(
         moveAuthoringObjectWithSnap(
-          state.draft,
-          state.selectedId,
+          state.editor.draft,
+          state.editor.selectedId,
           object.x + delta[0],
           object.y + delta[1],
           snapStep,
@@ -1091,6 +1191,28 @@ function installDevClient() {
     if (event.key === " ") {
       state.spacePressed = false;
     }
+  });
+  document.addEventListener("keydown", (/** @type {KeyboardEvent} */ event) => {
+    const target = event.target;
+    const editing =
+      target instanceof Element &&
+      target.closest("input, textarea, select, button, [contenteditable]") !== null;
+    if (
+      state.area === "combat" ||
+      elements.shell.hidden ||
+      editing ||
+      document.querySelector("dialog[open]") !== null ||
+      event.repeat ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey ||
+      event.key.toLowerCase() !== "r"
+    ) {
+      return;
+    }
+    event.preventDefault();
+    resetAuthoringDraft();
   });
 
   renderAll();

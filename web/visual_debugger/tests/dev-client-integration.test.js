@@ -26,6 +26,32 @@ test("Replay startup cannot load the DevClient authoring module", async () => {
   );
 });
 
+test("DevClient surfaces are fail-closed and authoring hover stays unregistered", async () => {
+  const [markup, main, devClient, renderer] = await Promise.all([
+    readFile(indexUrl, "utf8"),
+    readFile(mainUrl, "utf8"),
+    readFile(devClientUrl, "utf8"),
+    readFile(authoringRendererUrl, "utf8"),
+  ]);
+
+  for (const id of ["devclient-nav", "devclient-combat-config", "authoring-shell"]) {
+    assert.match(
+      markup,
+      new RegExp(`<[^>]+id="${id}"[^>]+data-devclient-only[^>]*>`, "u"),
+    );
+    assert.doesNotMatch(
+      markup,
+      new RegExp(`<[^>]+id="${id}"[^>]+data-live-only[^>]*>`, "u"),
+    );
+  }
+  assert.match(markup, /id="authoring-reset"[^>]*>Reset \(R\)<\/button>/u);
+  assert.match(markup, /id="authoring-recenter"[^>]*>Recenter<\/button>/u);
+  assert.doesNotMatch(main, /\[\s*"#authoring-canvas"/u);
+  assert.doesNotMatch(renderer, /svgElement\("title"/u);
+  assert.match(devClient, /resetButton:\s*required\("authoring-reset"\)/u);
+  assert.match(devClient, /recenterButton:\s*required\("authoring-recenter"\)/u);
+});
+
 test("general Open lists mutable saved drafts and excludes frozen candidates", () => {
   const savedMap = {
     source_kind: "saved_draft",
@@ -128,7 +154,7 @@ test("authoring requests make navigation and mutation surfaces inert", async () 
   );
   assert.match(
     devClient,
-    /function commit\(next, before = state\.draft\) \{\s*if \(state\.busy/u,
+    /function commit\(next, before = state\.editor\.draft\) \{\s*if \(state\.busy/u,
   );
   assert.match(
     devClient,

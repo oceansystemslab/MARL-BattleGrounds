@@ -63,11 +63,18 @@ launcher named in the error.
 
 The Maps and Scenarios areas share one small authoring surface: an object or
 roster list, the SVG map, an exact numeric inspector, and linked host problems.
-Drag centers for quick placement, hold Alt to bypass the fixed 0.5-world-unit
-snap, use arrow keys for exact nudging, and use the inspector for dimensions,
-wall size/rotation, roster, episode, current state, and controlled-study fields.
-Ten spawn pads are fixed identities; obstacles have explicit duplicate, delete,
-and up/down order controls.
+Opening either area immediately creates its prompt-free untitled draft. Choose
+a safe durable asset ID on the first Save; later Saves update that exact asset
+under its revision fence. Drag centers for quick placement, hold Alt to bypass
+the fixed 0.5-world-unit snap, use arrow keys for exact nudging, and use the
+inspector for dimensions, wall size/rotation, roster, episode, current state,
+and controlled-study fields. The mouse wheel zooms only the authoring canvas;
+Space-drag or middle-button drag pans it. **Recenter** restores the complete-map
+view without changing the draft. **Reset (R)** restores the latest New, Open,
+or successfully saved baseline and can be undone immediately. The `R` shortcut
+does not fire while typing in a form control. Ten spawn pads are fixed
+identities; obstacles have explicit duplicate, delete, and up/down order
+controls.
 
 Drafts are local files under ignored `artifacts/dev_client/` storage. Save uses
 an exact revision fence, so an older browser cannot overwrite a newer revision.

@@ -21,7 +21,13 @@
         <p class="eyebrow">MARL-BattleGrounds</p>
         <h1 id="app-title">MARL-BattleGrounds</h1>
       </div>
-      <nav id="devclient-nav" class="devclient-nav" aria-label="DevClient areas" data-live-only hidden>
+      <nav
+        id="devclient-nav"
+        class="devclient-nav"
+        aria-label="DevClient areas"
+        data-devclient-only
+        hidden
+      >
         <button type="button" data-devclient-area="combat" aria-current="page">
           Combat Debugger
         </button>
@@ -60,7 +66,7 @@
         id="devclient-combat-config"
         class="devclient-combat-config"
         aria-label="DevClient combat configuration"
-        data-live-only
+        data-devclient-only
         hidden
       >
         <label>
@@ -579,7 +585,7 @@
       </aside>
     </main>
 
-    <section id="authoring-shell" class="authoring-shell" data-live-only hidden>
+    <section id="authoring-shell" class="authoring-shell" data-devclient-only hidden>
       <header class="authoring-toolbar">
         <div>
           <p id="authoring-eyebrow" class="eyebrow">Map Author</p>
@@ -629,7 +635,7 @@
               <h3 id="authoring-canvas-heading">Map</h3>
             </div>
             <p class="authoring-hint">
-              Drag centers · 0.5-unit snap · hold Alt for exact placement
+              Drag centers · wheel zoom · Space/middle-drag pan · Alt bypasses snap
             </p>
           </div>
           <div class="authoring-canvas-shell">
@@ -642,6 +648,8 @@
             ></svg>
           </div>
           <div class="authoring-canvas-actions">
+            <button id="authoring-reset" type="button">Reset (R)</button>
+            <button id="authoring-recenter" type="button">Recenter</button>
             <button id="authoring-undo" type="button" disabled>Undo</button>
             <button id="authoring-redo" type="button" disabled>Redo</button>
             <button id="authoring-duplicate" type="button" disabled>Duplicate</button>

@@ -574,10 +574,14 @@ const CONTROL_HELP = Object.freeze([
     "Append a wall or pillar to the map's ordered active obstacle prefix.",
   ],
   [
-    "#authoring-canvas",
-    "Authoring canvas",
-    "Select and drag centers, pan with Space or the middle button, zoom with the wheel, and nudge with arrow keys.",
-    "composite",
+    "#authoring-reset",
+    "Reset draft",
+    "Restore the latest new, opened, or successfully saved draft baseline. The reset is undoable.",
+  ],
+  [
+    "#authoring-recenter",
+    "Recenter map",
+    "Fit the complete authored map in the canvas without changing draft content.",
   ],
   ["#authoring-undo", "Undo", "Undo the most recent browser-local edit."],
   ["#authoring-redo", "Redo", "Redo the most recently undone browser-local edit."],
