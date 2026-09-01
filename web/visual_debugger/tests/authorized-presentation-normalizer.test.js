@@ -27,6 +27,7 @@ const fixture = JSON.parse(
 const kinds = [
   "live_oracle",
   "live_no_shared_obs_agent_pov",
+  "live_shared_obs_agent_pov",
   "replay_oracle",
   "replay_no_shared_obs_agent_pov",
   "replay_shared_obs_agent_pov",
@@ -246,7 +247,7 @@ async function assertProtocolPoisonBeforeEndpoint(pair, transport, label) {
   assert.equal(readCount(), 0, label);
 }
 
-test("all five exact Python presentation leaves normalize repeatably and freeze", async () => {
+test("all six exact Python presentation leaves normalize repeatably and freeze", async () => {
   assert.deepEqual(Object.keys(fixture.presentations).sort(), [...kinds].sort());
   for (const kind of kinds) {
     const source = fixture.presentations[kind];
@@ -269,9 +270,39 @@ test("all five exact Python presentation leaves normalize repeatably and freeze"
   assertRecursivelyFrozen(AUTHORIZED_PRESENTATION_SCHEMA_V1);
 });
 
+test("live SharedObs uses distinct live authorities without replay lifecycle", async () => {
+  const source = fixture.presentations.live_shared_obs_agent_pov;
+  const normalized = await normalizeAuthorizedPresentationFrameV1(source);
+
+  assert.equal(normalized.source.source_kind, "live_shared_obs_visual_union_frame");
+  assert.equal(normalized.authority.observation_mode, "shared_obs_visual_union");
+  assert.equal(normalized.authority.exact_actor_input_export_available, false);
+  assert.equal(
+    normalized.technical_frame.technical_kind,
+    "live_shared_obs_technical_frame",
+  );
+  assert.equal(
+    normalized.live_inspection.envelope_kind,
+    "live_shared_obs_source_bound_inspection",
+  );
+  for (const replayOnlyOrMaterializedName of [
+    "source_artifact_id",
+    "source_timeline_id",
+    "playback_state",
+    "source_bank",
+    "source_material",
+  ]) {
+    assert.equal(
+      JSON.stringify(normalized).includes(replayOnlyOrMaterializedName),
+      false,
+    );
+  }
+});
+
 test("Agent presentations require a digest-bound local-Oracle corpse overlay", async () => {
   for (const kind of [
     "live_no_shared_obs_agent_pov",
+    "live_shared_obs_agent_pov",
     "replay_no_shared_obs_agent_pov",
     "replay_shared_obs_agent_pov",
   ]) {
@@ -1954,7 +1985,7 @@ test("Python custom incoming, history, and inspection validators stay closed", a
   }
 });
 
-test("all five exact raw/presentation pairs join identity-first and timelines stay transport-only", async () => {
+test("all six exact raw/presentation pairs join identity-first and timelines stay transport-only", async () => {
   for (const kind of kinds) {
     const pair = fixture.pairs[kind];
     const before = JSON.stringify(pair);
@@ -1986,11 +2017,36 @@ test("all five exact raw/presentation pairs join identity-first and timelines st
   }
 });
 
+test("live transport identity accepts Random independently for either team", async () => {
+  for (const [kind, teamAController, teamBController] of [
+    ["live_oracle", "random_valid", "manual"],
+    ["live_shared_obs_agent_pov", "scripted_tdm", "random_valid"],
+    ["live_no_shared_obs_agent_pov", "random_valid", "random_valid"],
+  ]) {
+    const pair = clone(fixture.pairs[kind]);
+    pair.transport.combat_configuration.team_a_controller = teamAController;
+    pair.transport.combat_configuration.team_b_controller = teamBController;
+    const joined = await joinTransportAndAuthorizedPresentationV1(
+      pair.transport,
+      pair.presentation,
+    );
+    assert.equal(
+      joined.transport.combat_configuration.team_a_controller,
+      teamAController,
+    );
+    assert.equal(
+      joined.transport.combat_configuration.team_b_controller,
+      teamBController,
+    );
+  }
+});
+
 test("every coherent raw identity tuple mismatch is a retryable race before endpoint reads", async () => {
   /** @type {Record<string, string>} */
   const modePeer = {
     live_oracle: "live_no_shared_obs_agent_pov",
     live_no_shared_obs_agent_pov: "live_oracle",
+    live_shared_obs_agent_pov: "live_no_shared_obs_agent_pov",
     replay_oracle: "replay_no_shared_obs_agent_pov",
     replay_no_shared_obs_agent_pov: "replay_shared_obs_agent_pov",
     replay_shared_obs_agent_pov: "replay_no_shared_obs_agent_pov",
@@ -1999,6 +2055,7 @@ test("every coherent raw identity tuple mismatch is a retryable race before endp
   const productPeer = {
     live_oracle: "replay_oracle",
     live_no_shared_obs_agent_pov: "replay_no_shared_obs_agent_pov",
+    live_shared_obs_agent_pov: "replay_shared_obs_agent_pov",
     replay_oracle: "live_oracle",
     replay_no_shared_obs_agent_pov: "live_no_shared_obs_agent_pov",
     replay_shared_obs_agent_pov: "live_no_shared_obs_agent_pov",
@@ -2007,6 +2064,7 @@ test("every coherent raw identity tuple mismatch is a retryable race before endp
   for (const kind of kinds) {
     const pair = fixture.pairs[kind];
     const live = kind.startsWith("live_");
+    const liveShared = kind === "live_shared_obs_agent_pov";
     const oracle = kind.endsWith("oracle");
     const shared = kind === "replay_shared_obs_agent_pov";
     const sessionKey = live ? "session_id" : "viewer_session_id";
@@ -2082,8 +2140,9 @@ test("every coherent raw identity tuple mismatch is a retryable race before endp
           transport.run_generation += 1;
         }),
         identityMutation("submission scope", (transport) => {
-          transport.hud.pending_submission_scope =
-            transport.hud.pending_submission_scope === "scripted_playback"
+          const owner = liveShared ? transport : transport.hud;
+          owner.pending_submission_scope =
+            owner.pending_submission_scope === "scripted_playback"
               ? "joint_turn"
               : "scripted_playback";
         }),
@@ -2101,7 +2160,9 @@ test("every coherent raw identity tuple mismatch is a retryable race before endp
         label: "recipient and recipient-local projection identity",
         makeTransport(transport) {
           const recipient = live
-            ? transport.hud.controlled_public_agent_id
+            ? liveShared
+              ? transport.recipient_public_agent_id
+              : transport.hud.controlled_public_agent_id
             : transport.public_agent_id;
           const replacement = `${recipient}-race`;
           return transformStrings(transport, (text) => {
@@ -2159,7 +2220,11 @@ test("every coherent raw identity tuple mismatch is a retryable race before endp
     );
     if (live) {
       const retiredControlledActorScope = clone(pair.transport);
-      retiredControlledActorScope.hud.pending_submission_scope = "controlled_actor";
+      if (liveShared) {
+        retiredControlledActorScope.pending_submission_scope = "controlled_actor";
+      } else {
+        retiredControlledActorScope.hud.pending_submission_scope = "controlled_actor";
+      }
       await assertProtocolPoisonBeforeEndpoint(
         pair,
         retiredControlledActorScope,
@@ -2572,6 +2637,7 @@ test("Agent local branches stay private while live and Replay researcher facts r
 
   for (const kind of [
     "live_no_shared_obs_agent_pov",
+    "live_shared_obs_agent_pov",
     "replay_no_shared_obs_agent_pov",
     "replay_shared_obs_agent_pov",
   ]) {

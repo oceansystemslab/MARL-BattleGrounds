@@ -112,7 +112,7 @@ export async function startRecordingDebugger({ stem = "episode" } = {}) {
       child.stdout?.on("data", (chunk) => {
         stdout += String(chunk);
         const match = stdout.match(
-          /MARL-BattleGrounds Combat Debugger: (http:\/\/127\.0\.0\.1:\d+\/#token=[A-Za-z0-9_-]+)/,
+          /MARL-BattleGrounds DevClient: (http:\/\/127\.0\.0\.1:\d+\/#token=[A-Za-z0-9_-]+)/,
         );
         if (match) {
           finish(() => resolveUrl(match[1]));

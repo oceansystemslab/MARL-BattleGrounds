@@ -20,6 +20,7 @@ from marl_battlegrounds.evaluation.metrics import (
     RolloutFailureOrigin,
 )
 from marl_battlegrounds.evaluation.models import (
+    AssignedPolicySlotV1,
     EvaluationEpisodeContextV1,
     EvaluationFrameV1,
     EvaluationModel,
@@ -226,6 +227,15 @@ def _context_action_source(context: EvaluationEpisodeContextV1) -> str:
     return rows[0]
 
 
+def _context_policy_execution_included(context: EvaluationEpisodeContextV1) -> bool:
+    """Derive actual policy execution from exact per-slot assignments."""
+    return any(
+        isinstance(row, AssignedPolicySlotV1)
+        and row.policy_kind in ("scripted_tdm", "random_valid")
+        for row in context.policy_assignments
+    )
+
+
 def _persistence_error_code(
     error: ReplaySaveError | ReplayLoadError,
 ) -> RecordingPersistenceErrorCodeV1:
@@ -324,6 +334,11 @@ class DebuggerReplayRecorderV1:
             raise ValueError("debugger recording requires metric-complete capture")
         if _context_action_source(context) != specification.action_source_kind:
             raise ValueError("recording action source must match episode context")
+        if (
+            specification.runtime_provenance.policy_execution_included
+            != _context_policy_execution_included(context)
+        ):
+            raise ValueError("recording policy provenance must match episode context")
         if (
             context.code_revision.package_version
             != specification.runtime_provenance.package_version
@@ -538,11 +553,17 @@ class DebuggerReplayRecorderV1:
         if self._lifecycle not in ("recording", "sealed") or self._bundle is not None:
             raise RuntimeError("only an unfinalized recorder may build a replacement")
         action_source = _context_action_source(context)
-        if action_source not in ("manual", "scripted", "mixed"):
+        if action_source not in ("manual", "scripted", "mixed", "policy"):
             raise ValueError("replacement context has an unsupported action source")
         replacement_specification = build_debugger_recording_specification_v1(
             action_source_kind=action_source,
-            runtime_provenance=self._specification.runtime_provenance,
+            runtime_provenance=self._specification.runtime_provenance.model_copy(
+                update={
+                    "policy_execution_included": (
+                        _context_policy_execution_included(context)
+                    )
+                }
+            ),
             wrapper_stack=self._specification.wrapper_stack,
         )
         return DebuggerReplayRecorderV1(

@@ -71,6 +71,25 @@ test("production-captured live projections replace the synthetic registry seam",
   }
 });
 
+test("production-captured live SharedObs transport stays projection-free", async () => {
+  const fixture = await authorizedFixture();
+  const raw = structuredClone(fixture.pairs.live_shared_obs_agent_pov.transport);
+  const serializedBefore = JSON.stringify(raw);
+  const normalized = normalizeLiveDebuggerFrameV2(raw);
+
+  assert.equal(normalized.frame_kind, "shared_obs_agent_pov_live_debugger");
+  assert.equal(normalized.view_mode, "pov");
+  assert.equal(normalized.pending_submission_scope, "joint_turn");
+  assert.equal(Object.hasOwn(normalized, "scene"), false);
+  assert.equal(Object.hasOwn(normalized, "projection"), false);
+  assert.equal(Object.hasOwn(normalized, "hud"), false);
+  assert.equal(JSON.stringify(raw), serializedBefore);
+  assert.equal(Object.isFrozen(normalized), true);
+  const extracted = extractFrame({ schema_version: 2, frame: raw });
+  assert.ok(extracted);
+  assert.equal(extracted.recipient_frame_id, normalized.recipient_frame_id);
+});
+
 /** @param {any} event */
 function eventId(event) {
   return event.event_id;
@@ -420,6 +439,11 @@ function researcherFrame() {
     episode_id: episodeId,
     frame_index: 1,
     recording: null,
+    combat_configuration: {
+      team_a_controller: "manual",
+      team_b_controller: "manual",
+      execution_information_mode: "no_shared_obs",
+    },
     frame_id: `${episodeId}:frame:1`,
     simulator_step_count: 1,
     incoming_transition_index: 0,
@@ -1719,6 +1743,11 @@ function povFrame() {
     episode_id: episodeId,
     frame_index: 1,
     recording: null,
+    combat_configuration: {
+      team_a_controller: "manual",
+      team_b_controller: "manual",
+      execution_information_mode: "no_shared_obs",
+    },
     frame_id: `${episodeId}:frame:1`,
     simulator_step_count: 1,
     incoming_pov_transition_id: povTransitionId,
@@ -2162,6 +2191,29 @@ test("live presentation authority is exact and audience-scoped", () => {
   }
 });
 
+test("live combat configuration accepts Random independently for either team", () => {
+  for (const [teamAController, teamBController, source] of [
+    ["random_valid", "manual", researcherFrame()],
+    ["scripted_tdm", "random_valid", povFrame()],
+    ["random_valid", "random_valid", researcherFrame()],
+  ]) {
+    source.combat_configuration.team_a_controller = teamAController;
+    source.combat_configuration.team_b_controller = teamBController;
+    assert.deepEqual(normalizeLiveDebuggerFrameV2(source).combat_configuration, {
+      team_a_controller: teamAController,
+      team_b_controller: teamBController,
+      execution_information_mode: "no_shared_obs",
+    });
+  }
+
+  const malformed = researcherFrame();
+  malformed.combat_configuration.team_b_controller = "unknown_policy";
+  assert.throws(
+    () => normalizeLiveDebuggerFrameV2(malformed),
+    /combat configuration is invalid/u,
+  );
+});
+
 test("raw researcher ScenarioMetadata is exact, typed, and never coerced", () => {
   const integerScale = researcherFrame();
   integerScale.scenario.ordinary_movement_distance_scale = 1;
@@ -2571,6 +2623,20 @@ test("scripted authority comes from the audience-owned live envelope", () => {
       frame_kind: "actor_pov_live_debugger",
       hud: { pending_submission_scope: "joint_turn" },
       scenario: { mode: "scripted" },
+    }),
+    false,
+  );
+  assert.equal(
+    liveDebuggerFrameIsScripted({
+      frame_kind: "shared_obs_agent_pov_live_debugger",
+      pending_submission_scope: "scripted_playback",
+    }),
+    true,
+  );
+  assert.equal(
+    liveDebuggerFrameIsScripted({
+      frame_kind: "shared_obs_agent_pov_live_debugger",
+      pending_submission_scope: "joint_turn",
     }),
     false,
   );

@@ -61,10 +61,23 @@ html body [hidden] {
  * defense against a stale or pending frame exposing the opposite product IA.
  */
 html:not([data-product-kind]) [data-live-only],
+html:not([data-product-kind]) [data-devclient-only],
 html:not([data-product-kind]) [data-replay-only],
 html:not([data-product-kind]) #battlefield-instructions,
 html[data-product-kind="combat_debugger"] [data-replay-only],
-html[data-product-kind="replay_viewer"] [data-live-only] {
+html[data-product-kind="replay_viewer"] [data-live-only],
+html[data-product-kind="replay_viewer"] [data-devclient-only] {
+  display: none;
+}
+
+html[data-product-kind="combat_debugger"][data-devclient-area="authoring"]
+  .session-toolbar,
+html[data-product-kind="combat_debugger"][data-devclient-area="authoring"]
+  .recording-panel,
+html[data-product-kind="combat_debugger"][data-devclient-area="authoring"]
+  .replay-timeline,
+html[data-product-kind="combat_debugger"][data-devclient-area="authoring"] #notice,
+html[data-product-kind="combat_debugger"][data-devclient-area="authoring"] #workspace {
   display: none;
 }
 
@@ -144,6 +157,7 @@ select {
 .recording-panel,
 .replay-timeline,
 .workspace,
+.authoring-shell,
 .notice {
   width: min(100% - 2rem, 112rem);
   margin-inline: auto;
@@ -191,6 +205,28 @@ select {
 .header-status {
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.devclient-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  background: rgb(16 24 39 / 78%);
+}
+
+.devclient-nav button {
+  min-height: 2rem;
+  border-color: transparent;
+  background: transparent;
+}
+
+.devclient-nav button[aria-current="page"] {
+  border-color: rgb(34 211 238 / 55%);
+  color: #a5f3fc;
+  background: rgb(34 211 238 / 10%);
 }
 
 .status-pill,
@@ -273,6 +309,31 @@ select {
   border-radius: var(--radius);
   background: rgb(16 24 39 / 88%);
   box-shadow: var(--shadow);
+}
+
+.devclient-combat-config {
+  display: flex;
+  flex: 1 1 50rem;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.55rem;
+  min-inline-size: 0;
+  padding: 0;
+  border: 0;
+  margin: 0;
+}
+
+.devclient-combat-config label {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.devclient-combat-config label > span {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 .recording-panel {
@@ -658,6 +719,301 @@ select {
   grid-template-columns: minmax(0, 1.55fr) minmax(21rem, 0.65fr);
   gap: 0.85rem;
   padding-block: 0.85rem 1.5rem;
+}
+
+.authoring-shell {
+  padding-block: 0.85rem 1.5rem;
+}
+
+.authoring-shell[aria-busy="true"] {
+  cursor: progress;
+}
+
+.authoring-toolbar,
+.authoring-panel,
+.authoring-canvas-panel,
+.authoring-problems {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgb(16 24 39 / 92%);
+  box-shadow: var(--shadow);
+}
+
+.authoring-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem;
+}
+
+.authoring-toolbar h2,
+.authoring-panel h3,
+.authoring-canvas-panel h3,
+.authoring-problems h3 {
+  margin: 0;
+}
+
+.authoring-toolbar__actions,
+.authoring-palette,
+.authoring-canvas-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.authoring-toolbar__actions label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.authoring-grid {
+  display: grid;
+  grid-template-columns: minmax(12rem, 0.45fr) minmax(28rem, 1.5fr) minmax(
+      16rem,
+      0.62fr
+    );
+  gap: 0.8rem;
+  margin-top: 0.8rem;
+}
+
+.authoring-panel,
+.authoring-canvas-panel,
+.authoring-problems {
+  min-width: 0;
+  padding: 0.75rem;
+}
+
+.authoring-object-list,
+.authoring-problem-list {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0;
+  margin: 0.7rem 0 0;
+  list-style: none;
+}
+
+.authoring-object-list button,
+.authoring-problem-list button {
+  width: 100%;
+  text-align: left;
+}
+
+.authoring-object-list button[aria-current="true"] {
+  border-color: rgb(244 114 182 / 62%);
+  background: rgb(244 114 182 / 10%);
+}
+
+.authoring-object-list button[data-authoring-roster-agent="true"] {
+  cursor: grab;
+}
+
+.authoring-canvas-panel .section-heading {
+  justify-content: space-between;
+}
+
+.authoring-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.authoring-canvas-shell {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  background: var(--battlefield);
+}
+
+.authoring-canvas {
+  display: block;
+  width: 100%;
+  height: clamp(28rem, calc(100vh - 18rem), 52rem);
+  touch-action: none;
+  user-select: none;
+}
+
+.authoring-canvas-actions {
+  margin-top: 0.55rem;
+}
+
+.authoring-inspector form {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.authoring-field {
+  display: grid;
+  min-width: 0;
+  gap: 0.2rem;
+}
+
+.authoring-field > span,
+.authoring-fieldset legend {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  overflow-wrap: anywhere;
+  text-transform: uppercase;
+}
+
+.authoring-field input,
+.authoring-field textarea {
+  min-width: 0;
+  min-height: 2.25rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  color: var(--text);
+  background: var(--surface-raised);
+  font: inherit;
+}
+
+.authoring-field select {
+  width: 100%;
+  min-width: 0;
+}
+
+.authoring-field input:focus-visible,
+.authoring-field textarea:focus-visible,
+.authoring-canvas:focus-visible {
+  outline: 3px solid rgb(34 211 238 / 62%);
+  outline-offset: 2px;
+}
+
+.authoring-fieldset {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
+  gap: 0.55rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  margin: 0;
+}
+
+.authoring-problems {
+  margin-top: 0.8rem;
+}
+
+.authoring-problem-list button[data-severity="error"] {
+  border-color: rgb(251 113 133 / 45%);
+  color: #fecdd3;
+}
+
+.authoring-problem-list button[data-severity="warning"] {
+  border-color: rgb(250 204 21 / 42%);
+  color: #fde68a;
+}
+
+.authoring-svg-map {
+  fill: var(--battlefield);
+  stroke: var(--border-bright);
+  stroke-width: 0.04;
+}
+
+.authoring-svg-grid {
+  pointer-events: none;
+}
+
+.authoring-svg-grid-line {
+  fill: none;
+  stroke: rgb(148 163 184 / 18%);
+  stroke-width: 0.02;
+}
+
+.authoring-svg-invalid {
+  fill: rgb(15 23 42 / 95%);
+  stroke: rgb(251 113 133 / 65%);
+  stroke-width: 0.08;
+}
+
+.authoring-svg-invalid-message {
+  fill: #fecdd3;
+  font-size: 0.62px;
+  font-weight: 700;
+}
+
+.authoring-svg-object {
+  cursor: grab;
+  vector-effect: non-scaling-stroke;
+}
+
+.authoring-svg-object:active {
+  cursor: grabbing;
+}
+
+.authoring-svg-object[data-kind="wall"],
+.authoring-svg-object[data-kind="pillar"] {
+  fill: #334155;
+  stroke: #94a3b8;
+  stroke-width: 2px;
+}
+
+.authoring-svg-object[data-kind="spawn_pad"] {
+  fill: rgb(15 23 42 / 75%);
+  stroke-width: 2px;
+}
+
+.authoring-svg-object[data-team="0"] {
+  stroke: var(--team-a);
+}
+
+.authoring-svg-object[data-team="1"] {
+  stroke: var(--team-b);
+}
+
+.authoring-svg-object[data-kind="agent"] {
+  fill: rgb(15 23 42 / 95%);
+  stroke-width: 3px;
+}
+
+.authoring-svg-object[data-kind="agent"][data-alive="false"] {
+  fill: #0f172a;
+  opacity: 0.72;
+}
+
+.authoring-svg-agent-class {
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.authoring-svg-agent-class[data-class="mage"] {
+  color: var(--class-mage);
+}
+
+.authoring-svg-agent-class[data-class="warrior"] {
+  color: var(--class-warrior);
+}
+
+.authoring-svg-agent-class[data-class="hunter"] {
+  color: var(--class-hunter);
+}
+
+.authoring-svg-agent-class[data-class="rogue"] {
+  color: var(--class-rogue);
+}
+
+.authoring-svg-agent-class[data-class="priest"] {
+  color: var(--class-priest);
+}
+
+.authoring-svg-agent-dead-mark {
+  fill: none;
+  stroke: var(--danger);
+  stroke-width: 3px;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+.authoring-svg-object[aria-selected="true"] {
+  filter: drop-shadow(0 0 0.3rem rgb(244 114 182 / 85%));
+  stroke: var(--target);
 }
 
 .battlefield-panel,
@@ -2167,6 +2523,11 @@ select {
   background: rgb(16 24 39 / 72%);
 }
 
+.command-deck[data-policy-controller-read-only="true"] .command-group--compose {
+  border-color: rgb(248 113 113 / 32%);
+  opacity: 0.68;
+}
+
 .command-group__heading {
   gap: 0.42rem;
   min-height: 1.7rem;
@@ -2512,6 +2873,18 @@ select {
 
 .roster-row[data-team="team-b"] {
   border-left-color: var(--team-b);
+}
+
+html[data-team-b-controller="scripted_tdm"] .roster-row[data-team="team-b"],
+html[data-team-b-controller="random_valid"] .roster-row[data-team="team-b"] {
+  background: rgb(127 29 29 / 10%);
+  box-shadow: inset 0 0 0 1px rgb(248 113 113 / 12%);
+}
+
+html[data-team-a-controller="scripted_tdm"] .roster-row[data-team="team-a"],
+html[data-team-a-controller="random_valid"] .roster-row[data-team="team-a"] {
+  background: rgb(8 145 178 / 10%);
+  box-shadow: inset 0 0 0 1px rgb(34 211 238 / 12%);
 }
 
 .roster-row[data-selected="true"] {
@@ -3116,6 +3489,10 @@ select {
   }
 
   .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .authoring-grid {
     grid-template-columns: 1fr;
   }
 

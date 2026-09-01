@@ -836,7 +836,8 @@ const FORBIDDEN_TECHNICAL_FACT_IDS = Object.freeze([
  */
 async function expectTechnicalFrameDom(page, presentation) {
   const liveResearcherTechnical =
-    presentation.presentation_kind === "live_no_shared_obs_agent_pov"
+    presentation.presentation_kind === "live_no_shared_obs_agent_pov" ||
+    presentation.presentation_kind === "live_shared_obs_agent_pov"
       ? presentation.researcher_space?.technical_frame
       : null;
   const technical = liveResearcherTechnical ?? presentation.technical_frame;
@@ -2572,8 +2573,8 @@ test("all five real service leaves install with safe pending continuity", async 
 
   const liveAgent = await expectInstalledLeaf(
     page,
-    "actor_pov_live_debugger",
-    "live_no_shared_obs_agent_pov",
+    "shared_obs_agent_pov_live_debugger",
+    "live_shared_obs_agent_pov",
   );
   await expectTechnicalFrameDom(page, liveAgent.presentation);
   await expectLatestTransitionDom(page, liveAgent.presentation);
@@ -2781,8 +2782,8 @@ test("all five real service leaves install with safe pending continuity", async 
   await page.unroute("**/api/presentation/frame");
   let switchedAgent = await expectInstalledLeaf(
     page,
-    "actor_pov_live_debugger",
-    "live_no_shared_obs_agent_pov",
+    "shared_obs_agent_pov_live_debugger",
+    "live_shared_obs_agent_pov",
   );
   expect(switchedAgent.presentation.authority.recipient_public_agent_id).toBe(
     hiddenAgent.public_agent_id,
@@ -2824,8 +2825,8 @@ test("all five real service leaves install with safe pending continuity", async 
   await expectBattlefieldRootCommandFocus(page);
   switchedAgent = await expectInstalledLeaf(
     page,
-    "actor_pov_live_debugger",
-    "live_no_shared_obs_agent_pov",
+    "shared_obs_agent_pov_live_debugger",
+    "live_shared_obs_agent_pov",
   );
   expect(switchedAgent.presentation.authority.recipient_public_agent_id).toBe(
     visibleControl.public_agent_id,
@@ -2862,8 +2863,8 @@ test("all five real service leaves install with safe pending continuity", async 
   );
   switchedAgent = await expectInstalledLeaf(
     page,
-    "actor_pov_live_debugger",
-    "live_no_shared_obs_agent_pov",
+    "shared_obs_agent_pov_live_debugger",
+    "live_shared_obs_agent_pov",
   );
 
   const targetScene =
@@ -2898,8 +2899,8 @@ test("all five real service leaves install with safe pending continuity", async 
 
   switchedAgent = await expectInstalledLeaf(
     page,
-    "actor_pov_live_debugger",
-    "live_no_shared_obs_agent_pov",
+    "shared_obs_agent_pov_live_debugger",
+    "live_shared_obs_agent_pov",
   );
   const selectedTargetScene =
     switchedAgent.presentation.current_endpoint.scene ??
@@ -2958,8 +2959,8 @@ test("all five real service leaves install with safe pending continuity", async 
   );
   switchedAgent = await expectInstalledLeaf(
     page,
-    "actor_pov_live_debugger",
-    "live_no_shared_obs_agent_pov",
+    "shared_obs_agent_pov_live_debugger",
+    "live_shared_obs_agent_pov",
   );
   const parityStep = switchedAgent.presentation.source.source_simulator_step_count;
   const parityActor = switchedAgent.presentation.authority.recipient_public_agent_id;
@@ -3006,8 +3007,8 @@ test("all five real service leaves install with safe pending continuity", async 
     await page.locator("#view-select").selectOption("pov");
     const cycleAgent = await expectInstalledLeaf(
       page,
-      "actor_pov_live_debugger",
-      "live_no_shared_obs_agent_pov",
+      "shared_obs_agent_pov_live_debugger",
+      "live_shared_obs_agent_pov",
     );
     expect(cycleAgent.presentation.source.source_simulator_step_count).toBe(parityStep);
     expect(cycleAgent.presentation.authority.recipient_public_agent_id).toBe(

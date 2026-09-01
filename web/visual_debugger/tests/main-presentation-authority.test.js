@@ -9,6 +9,7 @@ import {
 
 const mainUrl = new URL("../src/main.js", import.meta.url);
 const indexUrl = new URL("../index.html", import.meta.url);
+const stylesUrl = new URL("../styles.css", import.meta.url);
 const controlsUrl = new URL("../src/controls.js", import.meta.url);
 const panelsUrl = new URL("../src/panels.js", import.meta.url);
 const fixtureUrl = new URL(
@@ -579,7 +580,7 @@ test("main shares the Agent Details latch and rejects stale local keys and focus
   );
   assert.match(
     source,
-    /function isLiveAgentRecipientRotation\([\s\S]*left\[0\] === "combat_debugger"[\s\S]*right\[1\] === left\[1\][\s\S]*right\[2\] === left\[2\][\s\S]*left\[3\] === "live_no_shared_obs_agent_pov"[\s\S]*right\[8\] !== left\[8\]/u,
+    /function isLiveAgentRecipientRotation\([\s\S]*sameLiveAgentMode[\s\S]*live_no_shared_obs_agent_pov[\s\S]*live_shared_obs_agent_pov[\s\S]*left\[0\] === "combat_debugger"[\s\S]*right\[1\] === left\[1\][\s\S]*right\[2\] === left\[2\][\s\S]*right\[8\] !== left\[8\]/u,
   );
   assert.match(
     source,
@@ -1418,6 +1419,28 @@ test("main leaves the battlefield to visible instructions rather than a tooltip 
   assert.match(utilitySource, /#replay-clear-reference-button/u);
   assert.match(utilitySource, /sends no (?:replay )?command/u);
   assert.match(utilitySource, /Oracle View range presentation/u);
+});
+
+test("main labels Random explicitly and fences every policy-controlled actor", async () => {
+  const [source, styles] = await Promise.all([
+    readFile(mainUrl, "utf8"),
+    readFile(stylesUrl, "utf8"),
+  ]);
+
+  assert.match(
+    source,
+    /value === "manual" \|\| value === "scripted_tdm" \|\| value === "random_valid"/u,
+  );
+  assert.match(source, /controller === "random_valid"[\s\S]*return "Random"/u);
+  assert.match(
+    source,
+    /controller === "manual"[\s\S]*Object\.freeze\(\{ team, controller \}\)/u,
+  );
+  assert.match(source, /function policyControllerBlocksActionEdit\(command\)/u);
+  assert.match(source, /data-policy-controller-read-only/u);
+  assert.match(styles, /data-policy-controller-read-only="true"/u);
+  assert.doesNotMatch(source, /scriptedControlledActorTeam|scriptedControllerBlocks/u);
+  assert.doesNotMatch(styles, /data-scripted-controller-read-only/u);
 });
 
 test("main reuses only Submit for coherent scripted-live advancement", async () => {

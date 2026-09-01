@@ -19,12 +19,16 @@ from scripts.dev.visual_debugger.control import (
 )
 from scripts.dev.visual_debugger.frame import LiveDebuggerFrame, build_debugger_frame
 from scripts.dev.visual_debugger.model import DebuggerSession
+from scripts.dev.visual_debugger.no_shared_visual import (
+    build_live_no_shared_obs_visual_current_slice_v1,
+)
 from scripts.dev.visual_debugger.protocol import (
     ActorPovLiveDebuggerFrameV2,
     ApiErrorV2,
     CommandResponseV2,
     RecordingStatusV1,
     ResearcherLiveDebuggerFrameV2,
+    SharedObsAgentPovLiveDebuggerFrameV2,
     ViewMode,
 )
 from scripts.dev.visual_debugger.scenarios import (
@@ -36,6 +40,9 @@ from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.core.types import MOVE_EAST, MOVE_NORTH, NUM_MOVE_ACTIONS
+from marl_battlegrounds.evaluation.actor_projection import (
+    NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+)
 
 
 def _session(
@@ -50,6 +57,18 @@ def _session(
         controlled_global_slot=controlled_global_slot,
         show_ranges=True,
         verbose_logging=False,
+    )
+
+
+def _shared_obs_session() -> DebuggerSession:
+    return create_session(
+        get_scenario("arena_5v5"),
+        seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(0),
+        controlled_global_slot=0,
+        show_ranges=True,
+        verbose_logging=False,
+        execution_information_mode="shared_obs",
     )
 
 
@@ -70,6 +89,53 @@ def _frame(
         include_stress=include_stress,
         recording_status=recording_status,
     )
+
+
+def test_shared_obs_pov_frame_is_projection_free_and_identity_bound() -> None:
+    session = _shared_obs_session()
+    frame = _frame(session, view_mode="pov")
+
+    assert type(frame) is SharedObsAgentPovLiveDebuggerFrameV2
+    recipient = session.evaluation_context.roster[0]
+    local_prefix = (
+        f"{session.evaluation_context.identity.episode_id}:"
+        f"shared-obs-visual-union:{recipient.public_agent_id}"
+    )
+    assert frame.recipient_public_agent_id == recipient.public_agent_id
+    assert frame.recipient_frame_id == f"{local_prefix}:frame:0"
+    assert frame.incoming_recipient_transition_id is None
+    assert frame.pending_submission_scope == "joint_turn"
+    assert frame.combat_configuration.team_a_controller == "manual"
+    assert frame.combat_configuration.team_b_controller == "manual"
+    assert frame.combat_configuration.execution_information_mode == "shared_obs"
+    payload = frame.model_dump(mode="json")
+    assert "projection" not in payload
+    assert "hud" not in payload
+    assert "source_bank" not in _recursive_keys(payload)
+    assert "information_availability" not in _recursive_keys(payload)
+
+
+def test_no_shared_policy_projection_stays_v2_across_visual_v1_adapter() -> None:
+    session = _session()
+    context = session.evaluation_context
+    assert context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V2
+
+    visual = build_live_no_shared_obs_visual_current_slice_v1(
+        context,
+        session.current_evaluation_frame,
+        global_slot=session.controlled_global_slot,
+    )
+    frame = _frame(session, view_mode="pov")
+
+    assert visual.axis_mapping.actor_projection_version == 1
+    assert session.evaluation_context is context
+    assert (
+        session.evaluation_context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V2
+    )
+    assert type(frame) is ActorPovLiveDebuggerFrameV2
+    assert frame.combat_configuration.team_a_controller == "manual"
+    assert frame.combat_configuration.team_b_controller == "manual"
+    assert frame.combat_configuration.execution_information_mode == "no_shared_obs"
 
 
 def _recursive_keys(value: object) -> set[str]:

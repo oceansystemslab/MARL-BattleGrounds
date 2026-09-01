@@ -5,31 +5,39 @@ heterogeneous adversarial multi-agent reinforcement learning.
 
 The project is currently under development.
 
-## Combat Debugger
+## DevClient
 
-Use the Combat Debugger for manual work in the live 20×10 `arena_5v5`
-laboratory:
+Use the DevClient as the developer workspace for live combat debugging and
+minimal reusable map and Team Deathmatch scenario authoring:
 
 ```bash
-./scripts/dev/run_debug_renderer.sh
+./scripts/dev/run_dev_client.sh
 ```
 
-It provides staged simultaneous actions, exact legality, Oracle and authorized
-agent-POV views, browser-local visual filters, and optional replay recording.
-The product always uses the fixed Analysis presentation and does not host
-scripted demonstrations or existing replay artifacts.
+Its three areas are Combat Debugger, Maps, and Scenarios. The Combat Debugger
+provides staged simultaneous actions, exact legality, Oracle and authorized
+agent-POV views, saved-scenario loading, browser-local visual filters, and
+optional replay recording. Maps and Scenarios save revisioned local drafts with
+visible paths, validate them through the existing simulator authorities, and
+delete unwanted saved assets after confirmation. Saved scenarios load
+directly; saved maps can be opened as clearly labelled deterministic
+default-5v5-TDM previews without modifying the map. Either team can remain
+manual, use the scripted Team Deathmatch controller, or use the built-in Random
+controller for same-start testing. Random samples only the current valid action
+support and is available under both SharedObs and NoSharedObs.
+Existing replay artifacts remain outside the DevClient.
 
 Record one manual episode to a canonical replay and adjacent metric sidecar:
 
 ```bash
 mkdir -p recordings
-./scripts/dev/run_debug_renderer.sh \
+./scripts/dev/run_dev_client.sh \
   --record-replay recordings/episode.marlbg-replay.json
 ```
 
-See the [Combat Debugger guide](docs/dev/combat_debugger.md) for launch
-options, input, authority, recording/recovery, static reset snapshots, visual
-filters, and troubleshooting.
+See the [DevClient and Combat Debugger guide](docs/dev/combat_debugger.md) for
+launch options, authoring, saved-scenario loading, input, authority,
+recording/recovery, static reset snapshots, visual filters, and troubleshooting.
 
 ## Replay Viewer
 
@@ -56,9 +64,9 @@ audience boundaries, export, static rendering, and troubleshooting. If you
 used the historical combined command surface, start with the concise
 [browser-tools migration page](docs/dev/visual_debugger.md).
 
-Both browser products use tracked native HTML, CSS, SVG, and JavaScript served
-by base Python dependencies. Researchers need neither Node.js nor npm. The
-browser installs only Python-authorized presentation data; the rendering-only
+The DevClient and Replay Viewer use tracked native HTML, CSS, SVG, and
+JavaScript served by base Python dependencies. Researchers need neither Node.js
+nor npm. The browser installs only Python-authorized presentation data; the rendering-only
 SharedObs visual-union boundary is recorded in
 [specification amendment A17](docs/design/specification_amendments.md#a17-sharedobs-recorded-visual-union-presentation).
 
@@ -86,7 +94,7 @@ launcher when `--static` is present:
 
 ```bash
 # One manual arena reset snapshot.
-./scripts/dev/run_debug_renderer.sh --static
+./scripts/dev/run_dev_client.sh --static
 
 # One exact frame from an immutable replay.
 ./scripts/dev/run_replay_viewer.sh \

@@ -20,6 +20,9 @@ from scripts.dev.visual_debugger.local_oracle_corpse_overlay import (
     build_local_oracle_corpse_overlay_v1,
     validate_local_oracle_corpse_overlay_against_source_v1,
 )
+from scripts.dev.visual_debugger.no_shared_visual import (
+    build_live_no_shared_obs_visual_current_slice_v1,
+)
 from scripts.dev.visual_debugger.presentation_protocol import (
     LocalOracleCorpseObservationV1,
     LocalOracleCorpseOverlayV1,
@@ -256,7 +259,7 @@ def test_no_shared_corpse_projection_respects_static_line_of_sight() -> None:
         coherent_observation,
         coherent_mask,
     )
-    current = build_actor_pov_current_slice_v1(
+    current = build_live_no_shared_obs_visual_current_slice_v1(
         session.evaluation_context,
         frame,
         global_slot=0,

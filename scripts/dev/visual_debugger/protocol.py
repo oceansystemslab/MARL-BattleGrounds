@@ -44,6 +44,8 @@ type PendingSubmissionScope = Literal[
     "joint_turn",
     "scripted_playback",
 ]
+type TeamController = Literal["manual", "scripted_tdm", "random_valid"]
+type ExecutionInformationMode = Literal["shared_obs", "no_shared_obs"]
 type CommandResult = Literal[
     "applied",
     "duplicate",
@@ -197,6 +199,18 @@ class SetPresetCommandV1(_ProtocolModel):
         )
 
 
+class CombatConfigurationV1(_ProtocolModel):
+    """Authoritative live execution settings that replace an episode."""
+
+    team_a_controller: TeamController
+    team_b_controller: TeamController
+    execution_information_mode: ExecutionInformationMode
+
+
+class SetCombatConfigurationCommandV1(CombatConfigurationV1):
+    command_type: Literal["set_combat_configuration"] = "set_combat_configuration"
+
+
 class ExitCommandV1(_ProtocolModel):
     command_type: Literal["exit"] = "exit"
 
@@ -226,7 +240,7 @@ class SaveAsCommandV1(_ProtocolModel):
 
 
 type RecordingReplacementCommandV1 = Annotated[
-    ResetCommandV1 | ScenarioSwitchCommandV1,
+    ResetCommandV1 | ScenarioSwitchCommandV1 | SetCombatConfigurationCommandV1,
     Field(discriminator="command_type"),
 ]
 
@@ -245,6 +259,7 @@ type DebuggerCommandV1 = Annotated[
     | ResetCommandV1
     | SetViewCommandV1
     | SetPresetCommandV1
+    | SetCombatConfigurationCommandV1
     | FinishAndReviewCommandV1
     | ReviewReplayCommandV1
     | RetrySaveCommandV1
@@ -894,6 +909,7 @@ class _LiveDebuggerEnvelopeV2(_ProtocolModel):
     frame_index: _NonNegativeInt
     frame_id: _CanonicalScientificId
     simulator_step_count: _NonNegativeInt
+    combat_configuration: CombatConfigurationV1
     preset: Preset
     verbose: Literal[False] = False
     terminal: TerminalStateV2
@@ -1017,7 +1033,44 @@ class ActorPovLiveDebuggerFrameV2(_LiveDebuggerEnvelopeV2):
         return self
 
 
-type LiveDebuggerFrame = ResearcherLiveDebuggerFrameV2 | ActorPovLiveDebuggerFrameV2
+class SharedObsAgentPovLiveDebuggerFrameV2(_LiveDebuggerEnvelopeV2):
+    """Projection-free live transport identity for one SharedObs recipient."""
+
+    frame_kind: Literal["shared_obs_agent_pov_live_debugger"] = (
+        "shared_obs_agent_pov_live_debugger"
+    )
+    schema_version: Literal[2] = LIVE_FRAME_SCHEMA_VERSION
+    view_mode: Literal["pov"] = "pov"
+    recipient_public_agent_id: _CanonicalScientificId
+    recipient_frame_id: _CanonicalScientificId
+    incoming_recipient_transition_id: _CanonicalScientificId | None
+    pending_submission_scope: PendingSubmissionScope
+
+    @model_validator(mode="after")
+    def _validate_shared_obs_frame(self) -> Self:
+        prefix = (
+            f"{self.episode_id}:shared-obs-visual-union:"
+            f"{self.recipient_public_agent_id}"
+        )
+        if self.recipient_frame_id != f"{prefix}:frame:{self.frame_index}":
+            raise ValueError("SharedObs recipient frame ID is not canonical.")
+        expected_transition_id = (
+            None
+            if self.frame_index == 0
+            else f"{prefix}:transition:{self.frame_index - 1}"
+        )
+        if self.incoming_recipient_transition_id != expected_transition_id:
+            raise ValueError(
+                "SharedObs incoming recipient transition ID is not canonical."
+            )
+        return self
+
+
+type LiveDebuggerFrame = (
+    ResearcherLiveDebuggerFrameV2
+    | ActorPovLiveDebuggerFrameV2
+    | SharedObsAgentPovLiveDebuggerFrameV2
+)
 
 
 class CommandResponseV2(_ProtocolModel):

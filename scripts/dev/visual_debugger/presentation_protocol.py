@@ -1,6 +1,6 @@
 """Strict additive contracts for authority-filtered presentation frames.
 
-This module is deliberately transport- and service-neutral.  Its five final
+This module is deliberately transport- and service-neutral. Its six final
 leaves bind an authority-local current endpoint to one source epoch while
 keeping incoming history and outgoing inspection in separate branches.
 """
@@ -26,7 +26,13 @@ from pydantic import (
     model_validator,
 )
 
-from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV1
+from marl_battlegrounds.evaluation.models import (
+    ActionAcceptanceFactsV1,
+    EvaluationEpisodeContextV1,
+    EvaluationTransitionV1,
+    JointActionV1,
+    TransitionFactsV1,
+)
 from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
     ActorPovAxisMappingV1,
@@ -206,6 +212,34 @@ class LiveNoSharedObsPresentationSourceIdentityV1(_PresentationProtocolModel):
         return self
 
 
+class LiveSharedObsPresentationSourceIdentityV1(_PresentationProtocolModel):
+    source_kind: Literal["live_shared_obs_visual_union_frame"]
+    source_session_id: _OpaqueId
+    source_run_generation: _NonNegativeInt
+    source_revision: _NonNegativeInt
+    source_authority_epoch: _NonNegativeInt
+    episode_id: _ScientificId
+    source_frame_index: _NonNegativeInt
+    source_recipient_public_agent_id: _ScientificId
+    source_recipient_frame_id: _ScientificId
+    source_simulator_step_count: _NonNegativeInt
+    source_submission_scope: Literal["joint_turn", "scripted_playback"]
+    source_authorized_endpoint_digest_sha256: _Sha256Hex
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> Self:
+        if self.source_authority_epoch != self.source_revision:
+            raise ValueError("source authority epoch must equal source revision.")
+        expected = (
+            f"{self.episode_id}:shared-obs-visual-union:"
+            f"{self.source_recipient_public_agent_id}:frame:"
+            f"{self.source_frame_index}"
+        )
+        if self.source_recipient_frame_id != expected:
+            raise ValueError("live SharedObs source frame ID is not canonical.")
+        return self
+
+
 class ReplayOraclePresentationSourceIdentityV1(_PresentationProtocolModel):
     source_kind: Literal["replay_oracle_frame"]
     source_session_id: _OpaqueId
@@ -325,7 +359,7 @@ class NoSharedObsPresentationAuthorityV1(_PresentationProtocolModel):
     recipient_public_agent_id: _ScientificId
     recipient_presentation_key: _ScientificId
     projection_basis: Literal["recipient_own_recorded_observation"]
-    exact_actor_input_export_available: Literal[True]
+    exact_actor_input_export_available: bool
 
 
 class SharedObsPresentationAuthorityV1(_PresentationProtocolModel):
@@ -1995,6 +2029,125 @@ class SharedObsLatestTransitionV1(_LatestTransitionBaseV1):
         return self
 
 
+def build_shared_obs_latest_transition_v1(
+    incoming_transition: EvaluationTransitionV1 | None,
+    *,
+    successor: SharedObsAuthorizedScenePartsV1,
+    action_axis: AgentPovActionAxisV1,
+    authorized_recipient_global_slot: int,
+) -> SharedObsLatestTransitionV1 | None:
+    """Project one recipient-local SharedObs incoming action row."""
+    if type(authorized_recipient_global_slot) is not int or not (
+        0 <= authorized_recipient_global_slot < 10
+    ):
+        raise ValueError(
+            "authorized_recipient_global_slot must be an exact V1 actor slot."
+        )
+    frame_index = successor.source_frame_index
+    if frame_index == 0:
+        if incoming_transition is not None:
+            raise ValueError("SharedObs frame zero cannot receive incoming T_(n-1).")
+        return None
+    if type(incoming_transition) is not EvaluationTransitionV1:
+        raise TypeError("non-initial SharedObs presentation requires exact T_(n-1).")
+    transition = incoming_transition
+    if (
+        type(transition.schema_id) is not str
+        or transition.schema_id != "marl_battlegrounds.evaluation.transition"
+        or type(transition.schema_version) is not int
+        or transition.schema_version != 1
+    ):
+        raise ValueError("incoming transition must retain its exact V1 schema.")
+    for name in (
+        "episode_id",
+        "transition_id",
+        "start_frame_id",
+        "successor_frame_id",
+    ):
+        value = getattr(transition, name)
+        if type(value) is not str or not value.strip():
+            raise TypeError(f"incoming transition {name} must be a nonempty string.")
+    if type(transition.transition_index) is not int:
+        raise TypeError("incoming transition index must be an exact Python int.")
+    if type(transition.facts) is not TransitionFactsV1:
+        raise TypeError("incoming transition facts must use their exact V1 root.")
+    facts = transition.facts
+    if (
+        type(facts.schema_id) is not str
+        or facts.schema_id != "marl_battlegrounds.evaluation.transition_facts"
+        or type(facts.schema_version) is not int
+        or facts.schema_version != 1
+        or facts.has_transition is not True
+        or type(facts.transition_start_step_count) is not int
+    ):
+        raise ValueError("incoming transition facts must retain exact used headers.")
+    expected_index = frame_index - 1
+    episode_id = successor.source_episode_id
+    if (
+        transition.episode_id != episode_id
+        or transition.transition_index != expected_index
+        or transition.transition_id != f"{episode_id}:transition:{expected_index}"
+        or transition.start_frame_id != f"{episode_id}:frame:{expected_index}"
+        or transition.successor_frame_id != f"{episode_id}:frame:{frame_index}"
+        or facts.transition_start_step_count + 1
+        != successor.source_simulator_step_count
+    ):
+        raise ValueError("incoming transition must be exact T_(n-1).")
+    if type(facts.action_acceptance_facts) is not ActionAcceptanceFactsV1:
+        raise TypeError("incoming action acceptance must use its exact V1 root.")
+    acceptance = facts.action_acceptance_facts
+    submitted = acceptance.submitted_joint_action
+    accepted = acceptance.accepted_joint_action
+    if type(submitted) is not JointActionV1 or type(accepted) is not JointActionV1:
+        raise TypeError("incoming actions must use exact joint-action roots.")
+    for owner, name in ((submitted, "submitted"), (accepted, "accepted")):
+        for values, field_name in (
+            (owner.move, "move"),
+            (owner.select_target, "select_target"),
+            (owner.use_ultimate, "use_ultimate"),
+        ):
+            if type(values) is not tuple or len(values) != 10:
+                raise ValueError(
+                    f"incoming {name} {field_name} must retain ten actor rows."
+                )
+    submitted_row = SubmittedActionTupleV1(
+        move_action=submitted.move[authorized_recipient_global_slot],
+        target_action=submitted.select_target[authorized_recipient_global_slot],
+        use_ultimate_action=submitted.use_ultimate[authorized_recipient_global_slot],
+    )
+    accepted_row = AcceptedActionTupleV1(
+        move_action=accepted.move[authorized_recipient_global_slot],
+        target_action=accepted.select_target[authorized_recipient_global_slot],
+        use_ultimate_action=accepted.use_ultimate[authorized_recipient_global_slot],
+    )
+    prefix = (
+        f"{episode_id}:shared-obs-visual-union:{successor.recipient_public_agent_id}"
+    )
+    return SharedObsLatestTransitionV1(
+        transition_kind="shared_obs_incoming_submitted_accepted",
+        episode_id=episode_id,
+        incoming_transition_index=expected_index,
+        incoming_transition_id=f"{prefix}:transition:{expected_index}",
+        incoming_start_frame_id=f"{prefix}:frame:{expected_index}",
+        incoming_successor_frame_id=f"{prefix}:frame:{frame_index}",
+        incoming_start_simulator_step_count=facts.transition_start_step_count,
+        incoming_successor_simulator_step_count=(successor.source_simulator_step_count),
+        action_rows=(
+            LatestTransitionActionRowV1(
+                actor_presentation_key=action_axis.owner_presentation_key,
+                actor_public_agent_id=action_axis.owner_public_agent_id,
+                target_action_recipient_public_agent_id_by_id=(
+                    action_axis.target_public_agent_id_by_action
+                ),
+                submitted_action=submitted_row,
+                accepted_action=accepted_row,
+            ),
+        ),
+        recipient_public_agent_id=successor.recipient_public_agent_id,
+        recipient_presentation_key=successor.recipient_presentation_key,
+    )
+
+
 class _UpcomingTransitionBaseV1(_PresentationProtocolModel):
     episode_id: _ScientificId
     outgoing_transition_index: _NonNegativeInt
@@ -2273,6 +2426,14 @@ class LiveNoSharedObsTechnicalFrameV1(_PresentationProtocolModel):
     incoming_recipient_transition_id: _ScientificId | None
 
 
+class LiveSharedObsTechnicalFrameV1(_PresentationProtocolModel):
+    technical_kind: Literal["live_shared_obs_technical_frame"]
+    episode_id: _ScientificId
+    recipient_frame_index: _NonNegativeInt
+    simulator_step_count: _NonNegativeInt
+    incoming_recipient_transition_id: _ScientificId | None
+
+
 class ReplayOracleTechnicalFrameV1(_PresentationProtocolModel):
     technical_kind: Literal["replay_oracle_technical_frame"]
     artifact_digest_prefix: _Sha256Prefix
@@ -2527,6 +2688,7 @@ def _validate_recursive_presentation_keys(
 def _validate_source_endpoint_join(
     source: LiveOraclePresentationSourceIdentityV1
     | LiveNoSharedObsPresentationSourceIdentityV1
+    | LiveSharedObsPresentationSourceIdentityV1
     | ReplayOraclePresentationSourceIdentityV1
     | ReplayNoSharedObsPresentationSourceIdentityV1
     | ReplaySharedObsPresentationSourceIdentityV1,
@@ -2736,6 +2898,7 @@ def _validate_oracle_incoming(
 def _validate_agent_incoming(
     *,
     source: LiveNoSharedObsPresentationSourceIdentityV1
+    | LiveSharedObsPresentationSourceIdentityV1
     | ReplayNoSharedObsPresentationSourceIdentityV1
     | ReplaySharedObsPresentationSourceIdentityV1,
     endpoint: NoSharedObsAuthorizedCurrentEndpointV1
@@ -3120,6 +3283,7 @@ def _validate_oracle_inspection(
 def _validate_agent_inspection(
     *,
     source: LiveNoSharedObsPresentationSourceIdentityV1
+    | LiveSharedObsPresentationSourceIdentityV1
     | ReplayNoSharedObsPresentationSourceIdentityV1
     | ReplaySharedObsPresentationSourceIdentityV1,
     endpoint: NoSharedObsAuthorizedCurrentEndpointV1
@@ -3561,6 +3725,29 @@ class LiveNoSharedObsInspectionEnvelopeV1(_PresentationProtocolModel):
         return self
 
 
+class LiveSharedObsInspectionEnvelopeV1(_PresentationProtocolModel):
+    envelope_kind: Literal["live_shared_obs_source_bound_inspection"]
+    source_session_id: _OpaqueId
+    source_run_generation: _NonNegativeInt
+    source_revision: _NonNegativeInt
+    source_authority_epoch: _NonNegativeInt
+    episode_id: _ScientificId
+    source_frame_index: _NonNegativeInt
+    source_recipient_public_agent_id: _ScientificId
+    source_recipient_frame_id: _ScientificId
+    source_simulator_step_count: _NonNegativeInt
+    inspection: LiveInputInspectionV1
+
+    @model_validator(mode="after")
+    def _validate_inspection(self) -> Self:
+        if type(self.inspection) not in (
+            LiveEditableDraftInspectionV1,
+            LiveScriptedPlaybackInspectionV1,
+        ):
+            raise ValueError("live SharedObs inspection uses an unknown variant.")
+        return self
+
+
 class LiveOracleAuthorizedPresentationFrameV1(_PresentationProtocolModel):
     schema_version: Literal[1]
     presentation_kind: Literal["live_oracle"]
@@ -3682,6 +3869,62 @@ class LiveNoSharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
         _validate_agent_common(self, shared=False)
         _validate_live_agent_technical(self)
         _validate_live_no_shared_inspection_envelope(
+            self.source,
+            self.current_endpoint,
+            self.live_inspection,
+        )
+        if type(self.live_inspection.inspection) is LiveEditableDraftInspectionV1:
+            _validate_agent_inspection(
+                source=self.source,
+                endpoint=self.current_endpoint,
+                inspection=self.live_inspection.inspection.draft,
+                replay=False,
+            )
+        _validate_live_researcher_space(self)
+        return self
+
+
+class LiveSharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
+    schema_version: Literal[1]
+    presentation_kind: Literal["live_shared_obs_agent_pov"]
+    product_kind: Literal["combat_debugger"]
+    source: LiveSharedObsPresentationSourceIdentityV1
+    authority: SharedObsPresentationAuthorityV1
+    analysis_mode: Literal["analysis"]
+    current_endpoint: SharedObsAuthorizedCurrentEndpointV1
+    local_oracle_corpse_overlay: LocalOracleCorpseOverlayV1
+    latest_events: SharedObsIncomingSummaryV1 | None
+    visual_events: AgentPovVisualIncomingSummaryV1 | None
+    latest_transition: SharedObsLatestTransitionV1 | None
+    technical_frame: LiveSharedObsTechnicalFrameV1
+    live_inspection: LiveSharedObsInspectionEnvelopeV1
+    researcher_space: LiveResearcherSpaceV1
+
+    @model_validator(mode="after")
+    def _validate_frame(self) -> Self:
+        _require_exact_type(
+            self.source,
+            LiveSharedObsPresentationSourceIdentityV1,
+            name="source",
+        )
+        _require_exact_type(
+            self.authority,
+            SharedObsPresentationAuthorityV1,
+            name="authority",
+        )
+        _require_exact_type(
+            self.current_endpoint,
+            SharedObsAuthorizedCurrentEndpointV1,
+            name="current_endpoint",
+        )
+        _require_exact_type(
+            self.technical_frame,
+            LiveSharedObsTechnicalFrameV1,
+            name="technical_frame",
+        )
+        _validate_agent_common(self, shared=True)
+        _validate_live_agent_technical(self)
+        _validate_live_shared_inspection_envelope(
             self.source,
             self.current_endpoint,
             self.live_inspection,
@@ -3890,6 +4133,7 @@ def _validate_no_shared_agent_types(
 
 def _validate_agent_visual_events(
     frame: LiveNoSharedObsAuthorizedPresentationFrameV1
+    | LiveSharedObsAuthorizedPresentationFrameV1
     | ReplayNoSharedObsAuthorizedPresentationFrameV1
     | ReplaySharedObsAuthorizedPresentationFrameV1,
 ) -> None:
@@ -4040,6 +4284,7 @@ def _validate_agent_visual_events(
 
 def _validate_agent_common(
     frame: LiveNoSharedObsAuthorizedPresentationFrameV1
+    | LiveSharedObsAuthorizedPresentationFrameV1
     | ReplayNoSharedObsAuthorizedPresentationFrameV1
     | ReplaySharedObsAuthorizedPresentationFrameV1,
     *,
@@ -4080,6 +4325,7 @@ def _validate_agent_common(
 
 def _validate_local_oracle_corpse_overlay(
     frame: LiveNoSharedObsAuthorizedPresentationFrameV1
+    | LiveSharedObsAuthorizedPresentationFrameV1
     | ReplayNoSharedObsAuthorizedPresentationFrameV1
     | ReplaySharedObsAuthorizedPresentationFrameV1,
     *,
@@ -4282,7 +4528,8 @@ def _aura_semantics_match(
 
 
 def _validate_live_researcher_space(
-    frame: LiveNoSharedObsAuthorizedPresentationFrameV1,
+    frame: LiveNoSharedObsAuthorizedPresentationFrameV1
+    | LiveSharedObsAuthorizedPresentationFrameV1,
 ) -> None:
     researcher = frame.researcher_space
     _require_exact_type(
@@ -4618,6 +4865,46 @@ def _validate_live_no_shared_inspection_envelope(
         raise ValueError("unknown live Agent inspection variant.")
 
 
+def _validate_live_shared_inspection_envelope(
+    source: LiveSharedObsPresentationSourceIdentityV1,
+    endpoint: SharedObsAuthorizedCurrentEndpointV1,
+    envelope: LiveSharedObsInspectionEnvelopeV1,
+) -> None:
+    _require_exact_type(
+        envelope,
+        LiveSharedObsInspectionEnvelopeV1,
+        name="live_inspection",
+    )
+    parts = endpoint.parts
+    if (
+        envelope.source_session_id != source.source_session_id
+        or envelope.source_run_generation != source.source_run_generation
+        or envelope.source_revision != source.source_revision
+        or envelope.source_authority_epoch != source.source_authority_epoch
+        or envelope.episode_id != source.episode_id
+        or envelope.source_frame_index != source.source_frame_index
+        or envelope.source_recipient_public_agent_id
+        != source.source_recipient_public_agent_id
+        or envelope.source_recipient_public_agent_id != parts.recipient_public_agent_id
+        or envelope.source_recipient_frame_id != source.source_recipient_frame_id
+        or envelope.source_simulator_step_count != source.source_simulator_step_count
+    ):
+        raise ValueError(
+            "live SharedObs inspection envelope does not join its source epoch."
+        )
+    inspection = envelope.inspection
+    if inspection.submission_scope != source.source_submission_scope:
+        raise ValueError("live SharedObs inspection scope does not join its source.")
+    if type(inspection) is LiveEditableDraftInspectionV1:
+        if (
+            inspection.submission_scope != "joint_turn"
+            or inspection.draft.actor_public_agent_id != parts.recipient_public_agent_id
+        ):
+            raise ValueError("editable SharedObs draft does not join its joint scope.")
+    elif type(inspection) is not LiveScriptedPlaybackInspectionV1:
+        raise ValueError("unknown live SharedObs inspection variant.")
+
+
 def _validate_live_oracle_technical(
     frame: LiveOracleAuthorizedPresentationFrameV1,
 ) -> None:
@@ -4637,7 +4924,8 @@ def _validate_live_oracle_technical(
 
 
 def _validate_live_agent_technical(
-    frame: LiveNoSharedObsAuthorizedPresentationFrameV1,
+    frame: LiveNoSharedObsAuthorizedPresentationFrameV1
+    | LiveSharedObsAuthorizedPresentationFrameV1,
 ) -> None:
     technical = frame.technical_frame
     incoming_id = (
@@ -4863,6 +5151,7 @@ def _validate_replay_agent_inspection_state(
 type _AuthorizedPresentationFrameConcreteV1 = (
     LiveOracleAuthorizedPresentationFrameV1
     | LiveNoSharedObsAuthorizedPresentationFrameV1
+    | LiveSharedObsAuthorizedPresentationFrameV1
     | ReplayOracleAuthorizedPresentationFrameV1
     | ReplayNoSharedObsAuthorizedPresentationFrameV1
     | ReplaySharedObsAuthorizedPresentationFrameV1
@@ -4878,6 +5167,7 @@ _AUTHORIZED_PRESENTATION_FRAME_ADAPTER: TypeAdapter[AuthorizedPresentationFrameV
 _FINAL_PRESENTATION_TYPES = (
     LiveOracleAuthorizedPresentationFrameV1,
     LiveNoSharedObsAuthorizedPresentationFrameV1,
+    LiveSharedObsAuthorizedPresentationFrameV1,
     ReplayOracleAuthorizedPresentationFrameV1,
     ReplayNoSharedObsAuthorizedPresentationFrameV1,
     ReplaySharedObsAuthorizedPresentationFrameV1,
@@ -4969,6 +5259,10 @@ __all__ = [
     "LiveResearcherInputInspectionV1",
     "LiveResearcherSpaceV1",
     "LiveScriptedPlaybackInspectionV1",
+    "LiveSharedObsAuthorizedPresentationFrameV1",
+    "LiveSharedObsInspectionEnvelopeV1",
+    "LiveSharedObsPresentationSourceIdentityV1",
+    "LiveSharedObsTechnicalFrameV1",
     "LocalOracleCorpseObservationV1",
     "LocalOracleCorpseOverlayV1",
     "LocalOracleCorpsePublicFactsV1",
@@ -5010,6 +5304,7 @@ __all__ = [
     "build_no_shared_obs_authorized_current_endpoint_v1",
     "build_oracle_authorized_current_endpoint_v1",
     "build_shared_obs_authorized_current_endpoint_v1",
+    "build_shared_obs_latest_transition_v1",
     "canonical_authorized_endpoint_digest_sha256",
     "canonical_local_oracle_corpse_overlay_digest_sha256",
     "seal_local_oracle_corpse_overlay_v1",

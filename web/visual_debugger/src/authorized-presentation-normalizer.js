@@ -13,6 +13,7 @@ import { CANONICAL_STATUS_ORDER, statusTokenIdFromCatalogId } from "./vocabulary
 const PRESENTATION_KINDS = new Set([
   "live_oracle",
   "live_no_shared_obs_agent_pov",
+  "live_shared_obs_agent_pov",
   "replay_oracle",
   "replay_no_shared_obs_agent_pov",
   "replay_shared_obs_agent_pov",
@@ -21,6 +22,7 @@ const PRESENTATION_KINDS = new Set([
 const RAW_FRAME_KEYS = Object.freeze({
   researcher_live_debugger: [
     "available_scenarios",
+    "combat_configuration",
     "episode_id",
     "frame_id",
     "frame_index",
@@ -43,6 +45,7 @@ const RAW_FRAME_KEYS = Object.freeze({
     "view_mode",
   ],
   actor_pov_live_debugger: [
+    "combat_configuration",
     "episode_id",
     "frame_id",
     "frame_index",
@@ -51,6 +54,27 @@ const RAW_FRAME_KEYS = Object.freeze({
     "incoming_pov_transition_id",
     "preset",
     "projection",
+    "recording",
+    "revision",
+    "run_generation",
+    "schema_version",
+    "session_id",
+    "simulator_step_count",
+    "terminal",
+    "verbose",
+    "view_mode",
+  ],
+  shared_obs_agent_pov_live_debugger: [
+    "combat_configuration",
+    "episode_id",
+    "frame_id",
+    "frame_index",
+    "frame_kind",
+    "incoming_recipient_transition_id",
+    "pending_submission_scope",
+    "preset",
+    "recipient_frame_id",
+    "recipient_public_agent_id",
     "recording",
     "revision",
     "run_generation",
@@ -4390,6 +4414,7 @@ function validateSemanticFrame(frame) {
   const expectedSourceKind = /** @type {Readonly<Record<string, string>>} */ ({
     live_oracle: "live_oracle_frame",
     live_no_shared_obs_agent_pov: "live_no_shared_obs_frame",
+    live_shared_obs_agent_pov: "live_shared_obs_visual_union_frame",
     replay_oracle: "replay_oracle_frame",
     replay_no_shared_obs_agent_pov: "replay_no_shared_obs_frame",
     replay_shared_obs_agent_pov: "replay_shared_obs_visual_union_frame",
@@ -4814,7 +4839,7 @@ function validateSemanticFrame(frame) {
 }
 
 /**
- * Strictly normalize one of the five Python-owned authorized presentation
+ * Strictly normalize one of the six Python-owned authorized presentation
  * leaves. The result contains the exact wire branches plus authority-neutral
  * aliases used by browser consumers.
  *
@@ -5464,6 +5489,7 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
   const expectedFrameKind = /** @type {Readonly<Record<string, string>>} */ ({
     live_oracle: "researcher_live_debugger",
     live_no_shared_obs_agent_pov: "actor_pov_live_debugger",
+    live_shared_obs_agent_pov: "shared_obs_agent_pov_live_debugger",
     replay_oracle: "researcher_replay_viewer",
     replay_no_shared_obs_agent_pov: "actor_pov_replay_viewer",
     replay_shared_obs_agent_pov: "shared_obs_agent_pov_replay_viewer",
@@ -5492,10 +5518,13 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
   );
   const live = presentation.presentation_kind.startsWith("live_");
   const oracle = presentation.presentation_kind.endsWith("oracle");
-  const shared = presentation.presentation_kind === "replay_shared_obs_agent_pov";
+  const shared =
+    presentation.presentation_kind === "live_shared_obs_agent_pov" ||
+    presentation.presentation_kind === "replay_shared_obs_agent_pov";
   const expectedSourceKind = /** @type {Readonly<Record<string, string>>} */ ({
     live_oracle: "live_oracle_frame",
     live_no_shared_obs_agent_pov: "live_no_shared_obs_frame",
+    live_shared_obs_agent_pov: "live_shared_obs_visual_union_frame",
     replay_oracle: "replay_oracle_frame",
     replay_no_shared_obs_agent_pov: "replay_no_shared_obs_frame",
     replay_shared_obs_agent_pov: "replay_shared_obs_visual_union_frame",
@@ -5552,8 +5581,36 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
     "Raw/presentation authority epoch",
   );
   if (live) {
-    const hud = snapshotRecord(raw.hud, "Live transport HUD identity");
-    if (!["joint_turn", "scripted_playback"].includes(hud.pending_submission_scope)) {
+    const configuration = snapshotRecord(
+      raw.combat_configuration,
+      "Live combat configuration identity",
+    );
+    requireExactSnapshotKeys(
+      configuration,
+      ["execution_information_mode", "team_a_controller", "team_b_controller"],
+      "Live combat configuration identity",
+    );
+    if (
+      !["manual", "scripted_tdm", "random_valid"].includes(
+        configuration.team_a_controller,
+      ) ||
+      !["manual", "scripted_tdm", "random_valid"].includes(
+        configuration.team_b_controller,
+      ) ||
+      !["shared_obs", "no_shared_obs"].includes(
+        configuration.execution_information_mode,
+      ) ||
+      (!oracle &&
+        configuration.execution_information_mode !==
+          (shared ? "shared_obs" : "no_shared_obs"))
+    ) {
+      invalid("Live combat configuration identity is inconsistent.");
+    }
+    const hud = shared ? null : snapshotRecord(raw.hud, "Live transport HUD identity");
+    const submissionScope = shared
+      ? raw.pending_submission_scope
+      : /** @type {Record<string, any>} */ (hud).pending_submission_scope;
+    if (!["joint_turn", "scripted_playback"].includes(submissionScope)) {
       invalid("Live raw pending submission scope is malformed.");
     }
     exactNonnegativeInteger(raw.run_generation, "run_generation");
@@ -5579,7 +5636,7 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
     );
     requireJoinEqual(
       source.source_submission_scope,
-      hud.pending_submission_scope,
+      submissionScope,
       "Live pending submission scope",
     );
     if (presentation.presentation_kind === "live_oracle") {
@@ -5591,10 +5648,13 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
       }
       requireJoinEqual(source.source_frame_id, raw.frame_id, "Live Oracle frame ID");
     } else {
-      const recipient = hud.controlled_public_agent_id;
+      const recipient = shared
+        ? raw.recipient_public_agent_id
+        : /** @type {Record<string, any>} */ (hud).controlled_public_agent_id;
+      const localMode = shared ? "shared-obs-visual-union" : "actor-pov";
       if (
         source.source_recipient_frame_id !==
-        `${source.episode_id}:actor-pov:${source.source_recipient_public_agent_id}:frame:${source.source_frame_index}`
+        `${source.episode_id}:${localMode}:${source.source_recipient_public_agent_id}:frame:${source.source_frame_index}`
       ) {
         invalid("Live Agent presentation source frame ID is not canonical.");
       }
@@ -5609,6 +5669,13 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
         recipient,
         "Live Agent authority recipient",
       );
+      if (shared) {
+        requireJoinEqual(
+          source.source_recipient_frame_id,
+          raw.recipient_frame_id,
+          "Live SharedObs recipient frame ID",
+        );
+      }
     }
     return raw.frame_kind;
   }

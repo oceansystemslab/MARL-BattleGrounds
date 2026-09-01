@@ -32,6 +32,7 @@
       "files": [
         "recording-handoff.spec.js",
         "authorized-presentation-renderer.spec.js",
+        "dev-client-authoring.spec.js",
         "resize.spec.js"
       ]
     },

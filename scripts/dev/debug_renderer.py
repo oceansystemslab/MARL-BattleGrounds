@@ -1,4 +1,4 @@
-"""CLI entry point for the manual MARL-BattleGrounds Combat Debugger."""
+"""CLI entry point for the MARL-BattleGrounds DevClient."""
 
 from __future__ import annotations
 
@@ -17,7 +17,8 @@ if TYPE_CHECKING:
     from scripts.dev.visual_debugger.scenarios import DebuggerScenario
 
 type _ViewMode = Literal["researcher", "pov"]
-type _ActionSourceKind = Literal["manual", "scripted", "mixed"]
+type _ActionSourceKind = Literal["manual", "scripted", "mixed", "policy"]
+type _ExecutionInformationMode = Literal["shared_obs", "no_shared_obs"]
 
 _REPLAY_LAUNCHER = "scripts/dev/run_replay_viewer.sh"
 _MOVED_OPTION_LABELS = (
@@ -44,6 +45,7 @@ class _LaunchOptions:
     port: int
     view: _ViewMode
     ranges: bool
+    execution_information_mode: _ExecutionInformationMode
     supplied: frozenset[str]
 
 
@@ -59,14 +61,14 @@ battlefield controls (while the battlefield has focus):
   arrow keys            cardinal movement aliases
   X                     select Stay movement
   Space / Enter         submit every staged action as one joint turn
-  R                     reset the manual 20x10 arena deterministically
+  R                     reset the loaded combat scenario deterministically
   G                     toggle controlled-actor ranges
   ?                     open browser controls/help
 
 browser controls:
   View                   switch between Oracle and authorized agent POV
   Reconnect              fetch the current authoritative frame
-  Exit / Ctrl-C          stop the local Combat Debugger
+  Exit / Ctrl-C          stop the local DevClient
 
 live selected-target inspector:
   SELECTED TARGET        identity, relation, distance, and public geometry
@@ -75,8 +77,8 @@ live selected-target inspector:
                          Episode or Artifact digest prefix; Frame; Simulator step;
                          conditional Incoming transition; replay-only movement scale
 
-The Combat Debugger always opens the manual arena in fixed Analysis
-presentation. Replay artifacts and scripted demonstrations now use:
+The DevClient opens Combat Debugger, Maps, and Scenarios in one local product.
+Replay artifacts and scripted demonstrations remain separate through:
   scripts/dev/run_replay_viewer.sh
 """
 
@@ -101,8 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the live-only debugger CLI without importing runtime backends."""
     parser = argparse.ArgumentParser(
         description=(
-            "Open the manual 20x10 MARL-BattleGrounds Combat Debugger in fixed "
-            "Analysis presentation."
+            "Open the MARL-BattleGrounds DevClient for combat debugging and "
+            "map/scenario authoring in fixed Analysis presentation."
         ),
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -163,6 +165,12 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=argparse.SUPPRESS,
         help="show or hide controlled-actor ranges (default: show)",
+    )
+    parser.add_argument(
+        "--execution-information-mode",
+        choices=("shared_obs", "no_shared_obs"),
+        default=argparse.SUPPRESS,
+        help="policy information regime (default: shared_obs)",
     )
 
     # Compatibility-only inputs remain accepted but are absent from public help.
@@ -239,6 +247,10 @@ def _resolve_launch_options(namespace: argparse.Namespace) -> _LaunchOptions:
         port=cast(int, getattr(namespace, "port", 0)),
         view=cast(_ViewMode, getattr(namespace, "view", "researcher")),
         ranges=cast(bool, getattr(namespace, "ranges", True)),
+        execution_information_mode=cast(
+            _ExecutionInformationMode,
+            getattr(namespace, "execution_information_mode", "shared_obs"),
+        ),
         supplied=supplied,
     )
 
@@ -280,11 +292,25 @@ def _recording_action_source_kind(session: object) -> _ActionSourceKind:
         for row in aggregation_keys
         if getattr(row, "name", None) == "action_source"
     )
-    if len(rows) != 1 or rows[0] not in ("manual", "scripted", "mixed"):
+    if len(rows) != 1 or rows[0] not in ("manual", "scripted", "mixed", "policy"):
         raise ValueError(
             "recording sessions require one canonical action-source contract."
         )
     return rows[0]
+
+
+def _recording_policy_execution_included(session: object) -> bool:
+    """Report whether either interactive team is owned by a policy."""
+    controllers = (
+        getattr(session, "team_a_controller", None),
+        getattr(session, "team_b_controller", None),
+    )
+    if any(
+        controller not in ("manual", "scripted_tdm", "random_valid")
+        for controller in controllers
+    ):
+        raise ValueError("recording sessions require exact team controllers.")
+    return any(controller != "manual" for controller in controllers)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -349,18 +375,58 @@ def main(argv: Sequence[str] | None = None) -> int:
                 show_ranges=options.ranges,
             )
 
+        from scripts.dev.visual_debugger.authoring_service import (
+            DevAuthoringCommandRequestV1,
+            DevAuthoringCommandResponseV1,
+            DevClientAuthoringBinding,
+            DevScenarioLoadService,
+            LoadedDevScenarioSnapshotV1,
+            debugger_scenario_from_snapshot,
+        )
+        from scripts.dev.visual_debugger.authoring_store import DevAssetStore
         from scripts.dev.visual_debugger.control import create_session
-        from scripts.dev.visual_debugger.server import serve_browser_debugger
+        from scripts.dev.visual_debugger.server import (
+            HttpAuthoringBinding,
+            serve_browser_debugger,
+        )
         from scripts.dev.visual_debugger.service import DebuggerService
 
         session = create_session(
             scenario,
             seed=options.seed,
             evaluation_launch_specification=evaluation_launch_specification,
+            team_a_controller="manual",
+            team_b_controller="manual",
+            execution_information_mode=options.execution_information_mode,
             controlled_global_slot=options.controlled_slot,
             show_ranges=options.ranges,
             verbose_logging=False,
         )
+
+        def authoring_http_for(service: DebuggerService) -> HttpAuthoringBinding:
+            store = DevAssetStore(_REPOSITORY_ROOT)
+
+            def install(snapshot: LoadedDevScenarioSnapshotV1) -> None:
+                service.load_scenario(debugger_scenario_from_snapshot(snapshot))
+
+            authoring_service = DevClientAuthoringBinding(
+                store,
+                scenario_loader=DevScenarioLoadService(
+                    store,
+                    install_snapshot=install,
+                ),
+            )
+
+            def apply(request: object) -> DevAuthoringCommandResponseV1:
+                if type(request) is not DevAuthoringCommandRequestV1:
+                    raise TypeError("unexpected DevClient authoring request type")
+                return authoring_service.apply_command(request)
+
+            return HttpAuthoringBinding(
+                request_model=DevAuthoringCommandRequestV1,
+                apply_command=apply,
+            )
+
         if recording_destination is None:
             service = DebuggerService(
                 session,
@@ -368,11 +434,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 preset="analysis",
                 include_stress=False,
             )
+            authoring_http = authoring_http_for(service)
             return serve_browser_debugger(
                 service,
                 asset_root=_REPOSITORY_ROOT / "web" / "visual_debugger",
                 port=options.port,
                 open_browser=not options.no_open,
+                authoring=authoring_http,
             )
 
         from scripts.dev.visual_debugger.recording import (
@@ -387,7 +455,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
         try:
-            runtime_provenance = capture_debugger_runtime_provenance_v1(code_revision)
+            runtime_provenance = capture_debugger_runtime_provenance_v1(
+                code_revision,
+                policy_execution_included=_recording_policy_execution_included(session),
+            )
         except RuntimeError as exc:
             raise ValueError(
                 "Replay recording runtime provenance is unavailable; verify the "
@@ -410,7 +481,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             include_stress=False,
             recorder=recorder,
         )
-        recording_coordinator = RecordingDebuggerCoordinator(service)
+        authoring_http = authoring_http_for(service)
+        recording_coordinator = RecordingDebuggerCoordinator(
+            service,
+            authoring=authoring_http,
+        )
         return serve_browser_debugger(
             asset_root=_REPOSITORY_ROOT / "web" / "visual_debugger",
             port=options.port,
@@ -422,7 +497,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except OSError as exc:
-        print(f"error: Combat Debugger could not start: {exc}", file=sys.stderr)
+        print(f"error: DevClient could not start: {exc}", file=sys.stderr)
         return 2
     except ValueError as exc:
         parser.error(str(exc))

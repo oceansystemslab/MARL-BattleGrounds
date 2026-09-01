@@ -11,14 +11,14 @@ environment.
 
 | Group | Purpose |
 | --- | --- |
-| Base | JAX environment, arrays, validation, and the two native browser products: the live Combat Debugger and read-only Replay Viewer. |
+| Base | JAX environment, arrays, validation, and the two native browser products: the live DevClient and read-only Replay Viewer. |
 | `cuda13` | CUDA 13 JAX execution. |
 | `training` | Learner, optimizer, and checkpoint tooling. |
 | `interop` | Gymnasium and PettingZoo adapters. |
 | `viz` | Optional Matplotlib adapters for static/headless Combat Debugger snapshots and Replay Viewer frames. |
 | `dev` | Pytest, Ruff, Pyright, and pre-commit. |
 
-The [Combat Debugger](combat_debugger.md) and
+The [DevClient](combat_debugger.md) and
 [Replay Viewer](replay_viewer.md) share base Python dependencies and the
 tracked native browser renderer. The replay launcher remains import-light for
 listing and existing-artifact validation; scripted scenario materialization
@@ -36,9 +36,9 @@ the simulator core to avoid an optional dependency.
 
 Both products serve the same tracked HTML, CSS, SVG, WOFF2, and JavaScript
 modules through Python's standard-library HTTP server. Product identity and
-route authority remain separate: the Combat Debugger receives live manual
-commands, while the Replay Viewer receives read-only artifact navigation and
-authorized export/metric operations.
+route authority remain separate: the DevClient receives live Combat Debugger
+commands and local map/scenario authoring commands, while the Replay Viewer
+receives read-only artifact navigation and authorized export/metric operations.
 
 There is:
 

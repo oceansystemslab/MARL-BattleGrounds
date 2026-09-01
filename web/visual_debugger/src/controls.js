@@ -135,6 +135,11 @@ export function targetSelectionCommand(value) {
   };
 }
 
+/** @param {unknown} value */
+function isTeamController(value) {
+  return value === "manual" || value === "scripted_tdm" || value === "random_valid";
+}
+
 /**
  * Resolve only effective episode replacements to the exact non-keyboard
  * command accepted by ConfirmDiscardAndReplaceCommandV1. This is advisory UX;
@@ -147,6 +152,31 @@ export function targetSelectionCommand(value) {
 export function recordingReplacementCommand(frame, command) {
   if (command.command_type === "reset") {
     return Object.freeze({ command_type: "reset" });
+  }
+  if (command.command_type === "set_combat_configuration") {
+    const installed = frame.combat_configuration;
+    const teamAController = command.team_a_controller;
+    const teamBController = command.team_b_controller;
+    const informationMode = command.execution_information_mode;
+    if (
+      !installed ||
+      typeof installed !== "object" ||
+      Array.isArray(installed) ||
+      !isTeamController(teamAController) ||
+      !isTeamController(teamBController) ||
+      (informationMode !== "shared_obs" && informationMode !== "no_shared_obs") ||
+      (installed.team_a_controller === teamAController &&
+        installed.team_b_controller === teamBController &&
+        installed.execution_information_mode === informationMode)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      command_type: "set_combat_configuration",
+      team_a_controller: teamAController,
+      team_b_controller: teamBController,
+      execution_information_mode: informationMode,
+    });
   }
   if (command.command_type === "scenario_switch") {
     const scenarioName = command.scenario_name;

@@ -193,10 +193,16 @@ def test_recording_specification_is_frozen_content_addressed_and_path_free(
     )
     manual = _specification(wrapper_stack=(wrapper,))
     scripted = _specification(action_source_kind="scripted", wrapper_stack=(wrapper,))
+    policy = _specification(action_source_kind="policy", wrapper_stack=(wrapper,))
 
     assert manual.capture_profile == "evaluation_metric_complete"
     assert manual.recording_content_digest_sha256 != (
         scripted.recording_content_digest_sha256
+    )
+    assert policy.action_source_kind == "policy"
+    assert policy.recording_content_digest_sha256 not in (
+        manual.recording_content_digest_sha256,
+        scripted.recording_content_digest_sha256,
     )
     assert manual == DebuggerRecordingSpecificationV1.model_validate_json(
         manual.model_dump_json()

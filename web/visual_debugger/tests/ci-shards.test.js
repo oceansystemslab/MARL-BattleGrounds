@@ -90,6 +90,7 @@ test("CI browser manifest is nonempty, exact, and eight-way", () => {
   assert.deepEqual(manifest.shards[4].files, [
     "recording-handoff.spec.js",
     "authorized-presentation-renderer.spec.js",
+    "dev-client-authoring.spec.js",
     "resize.spec.js",
   ]);
   assert.deepEqual(

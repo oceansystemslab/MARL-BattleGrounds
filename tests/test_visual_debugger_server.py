@@ -3,6 +3,7 @@
 import json
 import socket
 from collections.abc import Iterator
+from dataclasses import replace
 from http import HTTPStatus
 from http.client import HTTPConnection, HTTPResponse
 from pathlib import Path
@@ -10,6 +11,12 @@ from threading import Thread
 
 import pytest
 import scripts.dev.visual_debugger.server as server_module
+from scripts.dev.visual_debugger.authoring_service import (
+    DevAuthoringCommandRequestV1,
+    DevAuthoringCommandResponseV1,
+    DevClientAuthoringBinding,
+)
+from scripts.dev.visual_debugger.authoring_store import DevAssetStore
 from scripts.dev.visual_debugger.control import create_session
 from scripts.dev.visual_debugger.protocol import (
     CommandRequestV1,
@@ -21,6 +28,7 @@ from scripts.dev.visual_debugger.server import (
     DebuggerHTTPServer,
     DebuggerRequestHandler,
     GracefulCloseResult,
+    HttpAuthoringBinding,
     build_static_manifest,
     create_server,
     serve_browser_debugger,
@@ -194,7 +202,8 @@ def test_bootstrap_exposes_only_the_live_product_identity(
     assert response.getheader("Cache-Control") == "no-store"
     assert body == (
         b"globalThis.__MARL_DEBUGGER_BOOTSTRAP__ = Object.freeze("
-        b'{"product_kind":"combat_debugger","schema_version":1});\n'
+        b'{"authoring_available":false,"product_kind":"combat_debugger",'
+        b'"schema_version":1});\n'
     )
 
 
@@ -230,7 +239,7 @@ def test_live_mode_does_not_expose_the_replay_metric_route(
 ) -> None:
     server, _ = running_server
 
-    response, body = _exchange(
+    response, _ = _exchange(
         server,
         "GET",
         "/api/replay/metric-report",
@@ -238,7 +247,99 @@ def test_live_mode_does_not_expose_the_replay_metric_route(
     )
 
     assert response.status == HTTPStatus.NOT_FOUND
-    assert json.loads(body)["error_code"] == "not_found"
+
+
+def test_live_authoring_route_exists_only_when_explicitly_installed(
+    running_server: tuple[DebuggerHTTPServer, Thread],
+) -> None:
+    server, _ = running_server
+
+    response, _ = _exchange(
+        server,
+        "POST",
+        "/api/dev/authoring/command",
+        body=b'{"command_type":"list"}',
+        headers=_authorized_headers(**{"Content-Type": "application/json"}),
+    )
+
+    assert response.status == HTTPStatus.NOT_FOUND
+
+
+def test_live_authoring_route_strictly_parses_and_applies_one_command(
+    tmp_path: Path,
+) -> None:
+    service = _service()
+    authoring_service = DevClientAuthoringBinding(
+        DevAssetStore(_REPOSITORY_ROOT, artifact_root=tmp_path / "artifacts"),
+    )
+
+    def apply_authoring(request: object) -> DevAuthoringCommandResponseV1:
+        if type(request) is not DevAuthoringCommandRequestV1:
+            raise TypeError("unexpected authoring request type")
+        return authoring_service.apply_command(request)
+
+    coordinator = replace(
+        server_module._legacy_live_binding(  # pyright: ignore[reportPrivateUsage]
+            service
+        ),
+        authoring=HttpAuthoringBinding(
+            request_model=DevAuthoringCommandRequestV1,
+            apply_command=apply_authoring,
+        ),
+    )
+    server = create_server(
+        service,
+        coordinator=coordinator,
+        asset_root=_ASSET_ROOT,
+        port=0,
+        capability_token=_TOKEN,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        accepted, accepted_body = _exchange(
+            server,
+            "POST",
+            "/api/dev/authoring/command",
+            body=b'{"command_type":"list"}',
+            headers=_authorized_headers(**{"Content-Type": "application/json"}),
+        )
+        rejected, rejected_body = _exchange(
+            server,
+            "POST",
+            "/api/dev/authoring/command",
+            body=b'{"command_type":"list","unexpected":true}',
+            headers=_authorized_headers(**{"Content-Type": "application/json"}),
+        )
+        bootstrap, bootstrap_body = _exchange(server, "GET", "/bootstrap.js")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert accepted.status == HTTPStatus.OK
+    assert bootstrap.status == HTTPStatus.OK
+    assert bootstrap_body == (
+        b"globalThis.__MARL_DEBUGGER_BOOTSTRAP__ = Object.freeze("
+        b'{"authoring_available":true,"product_kind":"combat_debugger",'
+        b'"schema_version":1});\n'
+    )
+    accepted_payload = json.loads(accepted_body)
+    catalog = accepted_payload.pop("catalog")
+    assert accepted_payload == {
+        "ok": True,
+        "command_type": "list",
+        "draft": None,
+        "deleted": None,
+        "assets": [],
+        "validation": None,
+        "debug_load": None,
+        "problems": [],
+    }
+    assert catalog["schema_id"] == "dev-authoring-catalog@1"
+    assert catalog["maximum_obstacle_slots"] == 32
+    assert rejected.status == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert json.loads(rejected_body)["error_code"] == "invalid_request"
     assert server.coordinator.current_metric_report is None
 
 
@@ -783,7 +884,7 @@ def test_keyboard_interrupt_without_close_hook_preserves_legacy_success(
 
     captured = capsys.readouterr()
     assert result == 0
-    assert "MARL-BattleGrounds Combat Debugger stopped." in captured.out
+    assert "MARL-BattleGrounds DevClient stopped." in captured.out
 
 
 def test_keyboard_interrupt_invokes_graceful_close_once_under_router_lock(

@@ -40,6 +40,32 @@ type ArmOrigin = Literal["automatic", "explicit"]
 type ScenarioMode = Literal["interactive", "scripted"]
 type ScenarioAudience = Literal["researcher", "stress"]
 type SubmissionKind = Literal["interactive", "scripted"]
+type TeamController = Literal["manual", "scripted_tdm", "random_valid"]
+type TeamControllerActionSource = Literal["manual", "scripted", "mixed", "policy"]
+type ScenarioSourceKind = Literal[
+    "current_buffer",
+    "saved_draft",
+]
+
+SUPPORTED_TEAM_CONTROLLERS: tuple[TeamController, ...] = (
+    "manual",
+    "scripted_tdm",
+    "random_valid",
+)
+
+
+def team_controller_action_source(
+    team_a_controller: TeamController,
+    team_b_controller: TeamController,
+) -> TeamControllerActionSource:
+    """Classify one interactive pair without hiding either controller identity."""
+    if team_a_controller == team_b_controller == "manual":
+        return "manual"
+    if team_a_controller == team_b_controller == "scripted_tdm":
+        return "scripted"
+    if team_a_controller != "manual" and team_b_controller != "manual":
+        return "policy"
+    return "mixed"
 
 
 def _validate_slot(global_slot: int, *, name: str) -> None:
@@ -141,6 +167,34 @@ class ScenarioFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class DebuggerScenarioProvenance:
+    """Exact authored-source identities retained by diagnostic captures."""
+
+    source_kind: ScenarioSourceKind
+    source_identity: str
+    scenario_semantic_digest: str
+    map_semantic_digest: str
+    resolved_configuration_digest: str
+    resolved_initial_state_digest: str
+
+    def __post_init__(self) -> None:
+        if self.source_kind not in ("current_buffer", "saved_draft"):
+            raise ValueError("unknown authored scenario source kind.")
+        if not self.source_identity:
+            raise ValueError("source_identity must be nonempty.")
+        for name, value in (
+            ("scenario_semantic_digest", self.scenario_semantic_digest),
+            ("map_semantic_digest", self.map_semantic_digest),
+            ("resolved_configuration_digest", self.resolved_configuration_digest),
+            ("resolved_initial_state_digest", self.resolved_initial_state_digest),
+        ):
+            if len(value) != 64 or any(
+                character not in "0123456789abcdef" for character in value
+            ):
+                raise ValueError(f"{name} must be lowercase SHA-256 hex.")
+
+
+@dataclass(frozen=True, slots=True)
 class DebuggerScenario:
     name: str
     title: str
@@ -150,6 +204,7 @@ class DebuggerScenario:
     frames: tuple[ScenarioFrame, ...]
     default_controlled_slot: int
     audience: ScenarioAudience = "researcher"
+    provenance: DebuggerScenarioProvenance | None = None
 
     def __post_init__(self) -> None:
         _validate_slot(self.default_controlled_slot, name="default_controlled_slot")
@@ -192,7 +247,7 @@ class RawContinuationIdentity:
 
 @dataclass(frozen=True, slots=True)
 class DebuggerSession:
-    scenario_name: str
+    scenario: DebuggerScenario
     seed: int
     run_generation: int
     scenario_default_movement_scale: float
@@ -207,6 +262,8 @@ class DebuggerSession:
     status_source_evidence_state: StatusSourceEvidenceStateV2
     last_submission_kind: SubmissionKind | None
     last_report_actor_slots: tuple[int, ...]
+    team_a_controller: TeamController
+    team_b_controller: TeamController
     controlled_global_slot: int
     pending_actions: tuple[PendingAction, ...]
     next_script_frame_index: int
@@ -214,14 +271,22 @@ class DebuggerSession:
     verbose_logging: bool
     raw_continuation_identity: RawContinuationIdentity | None = None
 
+    @property
+    def scenario_name(self) -> str:
+        """Return the owned scenario's stable display and provenance name."""
+        return self.scenario.name
+
     def __post_init__(self) -> None:
         from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
         from marl_battlegrounds.evaluation.models import (
+            AssignedPolicySlotV1,
             EvaluationEpisodeContextV1,
             EvaluationFrameV1,
         )
         from marl_battlegrounds.rendering.scene import StatusSourceEvidenceStateV2
 
+        if type(self.scenario) is not DebuggerScenario:
+            raise TypeError("scenario must be the exact DebuggerScenario type.")
         continuation = self.raw_continuation_identity
         if continuation is None:
             continuation = RawContinuationIdentity(
@@ -338,6 +403,58 @@ class DebuggerSession:
             _validate_slot(actor_slot, name="last_report_actor_slot")
             if not self.evaluation_context.roster[actor_slot].configured_active:
                 raise ValueError("last report actor slots must be configured active.")
+        if self.team_a_controller not in SUPPORTED_TEAM_CONTROLLERS:
+            raise ValueError(
+                "team_a_controller must be manual, scripted_tdm, or random_valid."
+            )
+        if self.team_b_controller not in SUPPORTED_TEAM_CONTROLLERS:
+            raise ValueError(
+                "team_b_controller must be manual, scripted_tdm, or random_valid."
+            )
+        if self.scenario.mode == "scripted":
+            if self.team_a_controller != "manual" or self.team_b_controller != "manual":
+                raise ValueError(
+                    "registered scripted scenarios do not use interactive team "
+                    "controllers."
+                )
+        else:
+            expected_action_source = team_controller_action_source(
+                self.team_a_controller,
+                self.team_b_controller,
+            )
+            expected_aggregation = {
+                "action_source": expected_action_source,
+                "team_a_controller": self.team_a_controller,
+                "team_b_controller": self.team_b_controller,
+            }
+            for name, expected in expected_aggregation.items():
+                values = tuple(
+                    row.value
+                    for row in self.evaluation_context.aggregation_keys
+                    if row.name == name
+                )
+                if values != (expected,):
+                    raise ValueError(
+                        f"session {name} must join its evaluation context."
+                    )
+            team_a_id = roster[0].configured_team_id
+            for slot, roster_row in enumerate(roster):
+                if not roster_row.configured_active:
+                    continue
+                assignment = self.evaluation_context.policy_assignments[slot]
+                expected_policy_kind = (
+                    self.team_a_controller
+                    if roster_row.configured_team_id == team_a_id
+                    else self.team_b_controller
+                )
+                if (
+                    not isinstance(assignment, AssignedPolicySlotV1)
+                    or assignment.policy_kind != expected_policy_kind
+                ):
+                    raise ValueError(
+                        "session team controllers must join every active policy "
+                        "assignment."
+                    )
         evidence_state = self.status_source_evidence_state
         if type(evidence_state) is not StatusSourceEvidenceStateV2:
             raise TypeError("status_source_evidence_state must be the exact V2 state.")

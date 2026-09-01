@@ -17,10 +17,13 @@ from marl_battlegrounds.core.types import (
     MOVE_WEST,
 )
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
-from marl_battlegrounds.evaluation.pov import build_actor_pov_current_slice_v1
+from marl_battlegrounds.rendering.authorized_pov_scene import (
+    build_shared_obs_authorized_scene_v1,
+)
 from marl_battlegrounds.rendering.evaluation_adapter import (
     EvaluationScenePresentationStateV1,
     build_researcher_analyzer_projection_v2,
+    build_shared_obs_authority_source_material_projection_v1,
 )
 from marl_battlegrounds.rendering.pov_scene import (
     build_actor_pov_analyzer_projection_v1,
@@ -36,11 +39,15 @@ from scripts.dev.visual_debugger.control import (
     select_clicked_target,
     select_controlled_actor,
     select_no_combat,
+    set_combat_configuration,
     set_pending_movement,
     submit_interactive,
     submit_next_script_frame,
 )
 from scripts.dev.visual_debugger.model import DebuggerSession, RawContinuationIdentity
+from scripts.dev.visual_debugger.no_shared_visual import (
+    build_live_no_shared_obs_visual_current_slice_v1,
+)
 from scripts.dev.visual_debugger.protocol import (
     ActorPovTargetActionCommandV1,
     BattlefieldPointerCommandV1,
@@ -51,11 +58,11 @@ from scripts.dev.visual_debugger.protocol import (
     ResetCommandV1,
     RosterSelectionCommandV1,
     ScenarioSwitchCommandV1,
+    SetCombatConfigurationCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
     ViewMode,
 )
-from scripts.dev.visual_debugger.scenarios import get_scenario
 
 _MOVEMENT_KEYS = {
     "w": MOVE_NORTH,
@@ -73,7 +80,7 @@ _MOVEMENT_KEYS = {
     "arrowleft": MOVE_WEST,
 }
 
-type RecordingRestartIntentV1 = Literal["reset"]
+type RecordingRestartIntentV1 = Literal["reset", "combat_configuration"]
 
 
 def recording_restart_intent_v1(
@@ -84,7 +91,16 @@ def recording_restart_intent_v1(
     include_stress: bool,
 ) -> RecordingRestartIntentV1 | None:
     """Classify the sole public episode replacement before dispatch constructs it."""
-    del session, view_mode, include_stress
+    del view_mode, include_stress
+    if isinstance(command, SetCombatConfigurationCommandV1):
+        if (
+            command.team_a_controller == session.team_a_controller
+            and command.team_b_controller == session.team_b_controller
+            and command.execution_information_mode
+            == session.evaluation_context.execution_information_mode
+        ):
+            return None
+        return "combat_configuration"
     if isinstance(command, KeyboardCommandV1):
         if command.ctrl_key or command.alt_key or command.meta_key:
             return None
@@ -380,7 +396,45 @@ def _authorized_pointer_rows(
             (agent.global_slot, agent.position, agent.radius, True)
             for agent in projection.scene.agents
         )
-    slice_ = build_actor_pov_current_slice_v1(
+    if session.evaluation_context.execution_information_mode == "shared_obs":
+        context = session.evaluation_context
+        frame = session.current_evaluation_frame
+        sources = tuple(
+            build_shared_obs_authority_source_material_projection_v1(
+                context,
+                frame,
+                selected_global_slot=row.global_slot,
+            )
+            for row in context.roster
+            if row.configured_active
+        )
+        recipient = next(
+            source
+            for source in sources
+            if source.base_sensor_scene.self_actor.global_slot
+            == session.controlled_global_slot
+        )
+        authorized = build_shared_obs_authorized_scene_v1(
+            recipient,
+            all_active_nonrecipient_source_material=tuple(
+                source for source in sources if source is not recipient
+            ),
+            public_catalog=context.static_mechanics_catalog,
+            authority_session_id="pointer-hit-test",
+        )
+        slot_by_public_id = {
+            row.public_agent_id: row.global_slot for row in context.roster
+        }
+        return tuple(
+            (
+                slot_by_public_id[agent.public_agent_id],
+                agent.position,
+                agent.radius,
+                True,
+            )
+            for agent in authorized.scene.agents
+        )
+    slice_ = build_live_no_shared_obs_visual_current_slice_v1(
         session.evaluation_context,
         session.current_evaluation_frame,
         global_slot=session.controlled_global_slot,
@@ -471,7 +525,7 @@ def _dispatch_keyboard(
             preset=preset,
         )
 
-    scenario = get_scenario(session.scenario_name)
+    scenario = session.scenario
     terminal = _is_terminal(session)
     if scenario.mode == "scripted" and (
         key in _MOVEMENT_KEYS or key in ("0", "1", "2", "space", "enter")
@@ -834,7 +888,7 @@ def dispatch_command(
     include_stress: bool,
 ) -> InputDispatchResult:
     """Apply one validated input without owning RNG or simulator semantics."""
-    scripted_inspection = get_scenario(session.scenario_name).mode == "scripted"
+    scripted_inspection = session.scenario.mode == "scripted"
     if scripted_inspection and not _scripted_inspection_command_is_allowed(command):
         return _result(
             session,
@@ -891,6 +945,22 @@ def dispatch_command(
             handled=True,
             changed=True,
             episode_restarted=True,
+        )
+    if isinstance(command, SetCombatConfigurationCommandV1):
+        edited = set_combat_configuration(
+            session,
+            team_a_controller=command.team_a_controller,
+            team_b_controller=command.team_b_controller,
+            execution_information_mode=command.execution_information_mode,
+        )
+        changed = edited is not session
+        return _result(
+            edited,
+            view_mode=view_mode,
+            preset=preset,
+            handled=True,
+            changed=changed,
+            episode_restarted=changed,
         )
     if isinstance(command, SetViewCommandV1):
         edited = session

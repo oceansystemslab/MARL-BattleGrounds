@@ -80,7 +80,7 @@ async function openRecording(page, url) {
   await expect(page.locator("#connection-status")).toHaveText("Online", {
     timeout: 30_000,
   });
-  await expect(page).toHaveTitle("MARL-BattleGrounds Combat Debugger");
+  await expect(page).toHaveTitle("MARL-BattleGrounds DevClient");
   await expect(page.locator("html")).toHaveAttribute(
     "data-product-kind",
     "combat_debugger",
@@ -211,8 +211,16 @@ function captureOneTransition(page) {
   return captureNextTransition(page, 1);
 }
 
-/** @param {import("@playwright/test").Page} page */
-async function expectSettledReplayHandoff(page, audience = "researcher") {
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {"researcher" | "pov"} audience
+ * @param {"shared_obs" | "no_shared_obs"} informationMode
+ */
+async function expectSettledReplayHandoff(
+  page,
+  audience = "researcher",
+  informationMode = "shared_obs",
+) {
   await expect(page.locator("html")).toHaveAttribute("data-viewer-mode", "replay", {
     timeout: 120_000,
   });
@@ -269,9 +277,14 @@ async function expectSettledReplayHandoff(page, audience = "researcher") {
     }),
   ]);
   const researcher = audience === "researcher";
+  const sharedPov = !researcher && informationMode === "shared_obs";
   expect(frame).toMatchObject({
     schema_version: 1,
-    frame_kind: researcher ? "researcher_replay_viewer" : "actor_pov_replay_viewer",
+    frame_kind: researcher
+      ? "researcher_replay_viewer"
+      : sharedPov
+        ? "shared_obs_agent_pov_replay_viewer"
+        : "actor_pov_replay_viewer",
     view_mode: researcher ? "researcher" : "pov",
     cursor: { frame_index: 0 },
     timeline_id: timeline.timeline_id,
@@ -283,6 +296,13 @@ async function expectSettledReplayHandoff(page, audience = "researcher") {
     });
     expect(timeline).toMatchObject({ timeline_kind: "researcher" });
     expect(timeline.rows[0].frame_id).toBe(frame.frame_id);
+  } else if (sharedPov) {
+    expect(frame).toMatchObject({ incoming_recipient_transition_id: null });
+    expect(timeline).toMatchObject({
+      timeline_kind: "shared_obs_agent_pov",
+      artifact_summary: { public_agent_id: frame.public_agent_id },
+    });
+    expect(timeline.rows[0].recipient_frame_id).toBe(frame.recipient_frame_id);
   } else {
     expect(frame).toMatchObject({ incoming_pov_transition_id: null });
     expect(timeline).toMatchObject({
@@ -296,6 +316,22 @@ async function expectSettledReplayHandoff(page, audience = "researcher") {
     everyLiveRootHidden: true,
     focusableInsideLiveRoot: [],
   });
+  const token = await page.evaluate(() =>
+    window.sessionStorage.getItem("marl-battlegrounds.debugger-token"),
+  );
+  if (!token) {
+    throw new Error("Debugger capability token is unavailable.");
+  }
+  const authoringResponse = await page.request.post(
+    new URL("/api/dev/authoring/command", page.url()).href,
+    {
+      data: { command_type: "list", asset_kind: "all" },
+      failOnStatusCode: false,
+      headers: { "X-MARL-Debugger-Token": token },
+      maxRedirects: 0,
+    },
+  );
+  expect(authoringResponse.status()).toBe(404);
   const transientPresentation = await page
     .locator("#battlefield")
     .evaluate((battlefield) => ({
@@ -384,7 +420,7 @@ test("confirmed prefix discard restarts capture and Finish opens settled frame-z
   const pov = await currentFrame(page);
   expect(pov).toMatchObject({
     schema_version: 2,
-    frame_kind: "actor_pov_live_debugger",
+    frame_kind: "shared_obs_agent_pov_live_debugger",
     view_mode: "pov",
   });
   expectExactWireRecording(pov, 0);
@@ -557,7 +593,7 @@ test("actor POV handoff retains battlefield fog and artifact-wide facts", async 
   const initialPov = await currentFrame(page);
   expect(initialPov).toMatchObject({
     schema_version: 2,
-    frame_kind: "actor_pov_live_debugger",
+    frame_kind: "shared_obs_agent_pov_live_debugger",
     view_mode: "pov",
   });
   expectExactWireRecording(initialPov, 0);
@@ -584,9 +620,10 @@ test("actor POV handoff retains battlefield fog and artifact-wide facts", async 
   const { frame, timeline } = await expectSettledReplayHandoff(page, "pov");
   expect(frame).toMatchObject({
     artifact_summary: {
-      metric_report_availability: "not_available_in_actor_pov",
+      public_agent_id: frame.public_agent_id,
+      captured_transition_count: 1,
+      captured_frame_count: 2,
     },
-    processing_disclosure: { disclosure: "not_available_in_actor_pov" },
     artifact_facts: {
       schema_version: 1,
       artifact_summary: {
@@ -601,9 +638,7 @@ test("actor POV handoff retains battlefield fog and artifact-wide facts", async 
       },
     },
   });
-  expect(frame.artifact_facts.artifact_summary.replay_reference).toEqual(
-    frame.artifact_summary.replay_reference,
-  );
+  expect(frame.artifact_summary).not.toHaveProperty("replay_reference");
   await expect(page.locator("#replay-artifact-reference")).toHaveText(
     frame.artifact_facts.artifact_summary.replay_reference.artifact_id,
   );

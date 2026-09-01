@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
+import scripts.dev.visual_debugger.evaluation_bridge as evaluation_bridge
+import scripts.dev.visual_debugger.recording as debugger_recording
 from pydantic import ValidationError
 from scripts.dev.visual_debugger.evaluation_bridge import (
     DEBUGGER_PUBLIC_AGENT_IDS_V1,
@@ -13,6 +15,10 @@ from scripts.dev.visual_debugger.evaluation_bridge import (
     DebuggerEvaluationLaunchSpecificationV1,
     build_debugger_evaluation_context_v1,
     build_debugger_evaluation_launch_specification_v1,
+)
+from scripts.dev.visual_debugger.model import (
+    DebuggerScenarioProvenance,
+    TeamController,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
 
@@ -25,6 +31,7 @@ from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV1,
     CodeRevisionV1,
     EvaluationEpisodeContextV1,
+    ExecutionInformationMode,
     NotApplicablePolicySlotV1,
     canonical_json_bytes,
 )
@@ -56,10 +63,14 @@ def _context(
     *,
     root_seed: int = 7,
     run_generation: int = 0,
-    action_source_kind: DebuggerActionSourceKindV1 = "mixed",
+    action_source_kind: DebuggerActionSourceKindV1 = "manual",
     capture_profile: DebuggerCaptureProfileV1 = "debug",
+    team_a_controller: TeamController = "manual",
+    team_b_controller: TeamController = "manual",
+    execution_information_mode: ExecutionInformationMode = "no_shared_obs",
+    scenario_name: str = "arena_5v5",
 ) -> EvaluationEpisodeContextV1:
-    scenario = get_scenario("basic_support")
+    scenario = get_scenario(scenario_name)
     config, _state = scenario.build_scenario()
     return build_debugger_evaluation_context_v1(
         _launch(root_seed=root_seed, capture_profile=capture_profile),
@@ -67,6 +78,9 @@ def _context(
         config=config,
         run_generation=run_generation,
         action_source_kind=action_source_kind,
+        team_a_controller=team_a_controller,
+        team_b_controller=team_b_controller,
+        execution_information_mode=execution_information_mode,
     )
 
 
@@ -152,19 +166,21 @@ def test_context_is_custom_debug_no_shared_and_keeps_exact_cp2_bindings() -> Non
         sorted(row.name for row in context.aggregation_keys)
     )
     assert dict((row.name, row.value) for row in context.aggregation_keys) == {
-        "action_source": "mixed",
+        "action_source": "manual",
         "information_regime": "no_shared_obs",
-        "scenario": "basic_support",
+        "scenario": "arena_5v5",
         "scenario_kind": "custom",
+        "team_a_controller": "manual",
+        "team_b_controller": "manual",
         "tool": "visual_debugger",
     }
 
 
-@pytest.mark.parametrize("action_source_kind", ["manual", "scripted", "mixed"])
-def test_action_source_vocabulary_is_truthful_not_a_fake_policy(
-    action_source_kind: DebuggerActionSourceKindV1,
-) -> None:
-    context = _context(action_source_kind=action_source_kind)
+def test_mixed_action_source_assigns_manual_team_a_and_scripted_tdm_team_b() -> None:
+    context = _context(
+        action_source_kind="mixed",
+        team_b_controller="scripted_tdm",
+    )
     assigned = tuple(
         row
         for row in context.policy_assignments
@@ -176,26 +192,193 @@ def test_action_source_vocabulary_is_truthful_not_a_fake_policy(
         if isinstance(row, NotApplicablePolicySlotV1)
     )
 
-    assert tuple(row.global_slot for row in assigned) == (0, 1, 2, 5, 6, 7)
-    assert tuple(row.global_slot for row in inactive) == (3, 4, 8, 9)
+    assert tuple(row.global_slot for row in assigned) == tuple(range(10))
+    assert not inactive
     assert tuple(row.evaluation_role for row in assigned) == (
         "focal",
         "cooperative_partner",
         "cooperative_partner",
+        "cooperative_partner",
+        "cooperative_partner",
+        "adversarial_opponent",
+        "adversarial_opponent",
         "adversarial_opponent",
         "adversarial_opponent",
         "adversarial_opponent",
     )
-    assert {row.policy_kind for row in assigned} == {action_source_kind}
-    assert {row.algorithm_id for row in assigned} == {"not_applicable"}
+    assert tuple(row.policy_kind for row in assigned) == (
+        *("manual" for _ in range(5)),
+        *("scripted_tdm" for _ in range(5)),
+    )
+    assert tuple(row.algorithm_id for row in assigned) == (
+        *("not_applicable" for _ in range(5)),
+        *("canonical-scripted-team-deathmatch" for _ in range(5)),
+    )
     assert {row.training_run_id for row in assigned} == {"not_applicable"}
     assert {row.training_step for row in assigned} == {0}
     assert {row.checkpoint_digest for row in assigned} == {None}
     assert {row.population_member_id for row in assigned} == {None}
 
 
+@pytest.mark.parametrize(
+    (
+        "team_a_controller",
+        "team_b_controller",
+        "action_source_kind",
+        "expected_policy_kinds",
+    ),
+    (
+        ("manual", "manual", "manual", ("manual",) * 10),
+        (
+            "scripted_tdm",
+            "manual",
+            "mixed",
+            ("scripted_tdm",) * 5 + ("manual",) * 5,
+        ),
+        (
+            "manual",
+            "scripted_tdm",
+            "mixed",
+            ("manual",) * 5 + ("scripted_tdm",) * 5,
+        ),
+        ("scripted_tdm", "scripted_tdm", "scripted", ("scripted_tdm",) * 10),
+        (
+            "random_valid",
+            "manual",
+            "mixed",
+            ("random_valid",) * 5 + ("manual",) * 5,
+        ),
+        (
+            "manual",
+            "random_valid",
+            "mixed",
+            ("manual",) * 5 + ("random_valid",) * 5,
+        ),
+        ("random_valid", "random_valid", "policy", ("random_valid",) * 10),
+        (
+            "random_valid",
+            "scripted_tdm",
+            "policy",
+            ("random_valid",) * 5 + ("scripted_tdm",) * 5,
+        ),
+        (
+            "scripted_tdm",
+            "random_valid",
+            "policy",
+            ("scripted_tdm",) * 5 + ("random_valid",) * 5,
+        ),
+    ),
+)
+def test_interactive_controller_pairs_have_truthful_per_slot_provenance(
+    team_a_controller: TeamController,
+    team_b_controller: TeamController,
+    action_source_kind: DebuggerActionSourceKindV1,
+    expected_policy_kinds: tuple[str, ...],
+) -> None:
+    context = _context(
+        action_source_kind=action_source_kind,
+        team_a_controller=team_a_controller,
+        team_b_controller=team_b_controller,
+    )
+    assigned = tuple(
+        row
+        for row in context.policy_assignments
+        if isinstance(row, AssignedPolicySlotV1)
+    )
+    aggregation = {row.name: row.value for row in context.aggregation_keys}
+
+    assert tuple(row.policy_kind for row in assigned) == expected_policy_kinds
+    assert aggregation["action_source"] == action_source_kind
+    assert aggregation["team_a_controller"] == team_a_controller
+    assert aggregation["team_b_controller"] == team_b_controller
+    assert tuple(row.algorithm_id for row in assigned) == tuple(
+        "canonical-scripted-team-deathmatch"
+        if policy_kind == "scripted_tdm"
+        else "canonical-random-valid"
+        if policy_kind == "random_valid"
+        else "not_applicable"
+        for policy_kind in expected_policy_kinds
+    )
+    assert tuple(row.execution_mode for row in assigned) == tuple(
+        "stochastic"
+        if policy_kind in ("scripted_tdm", "random_valid")
+        else "deterministic"
+        for policy_kind in expected_policy_kinds
+    )
+
+
+def test_random_action_source_v2_and_recording_policy_are_truthful() -> None:
+    scenario = get_scenario("arena_5v5")
+    payload = evaluation_bridge._action_source_contract_payload(  # pyright: ignore[reportPrivateUsage]
+        action_source_kind="mixed",
+        scenario_mode=scenario.mode,
+        team_a_controller="random_valid",
+        team_b_controller="manual",
+        execution_information_mode="shared_obs",
+        scenario_contract_digest="a" * 64,
+    )
+
+    assert payload["schema_version"] == 2
+    assert payload["team_a_controller"] == "random_valid"
+    assert payload["team_b_controller"] == "manual"
+    assert payload["manual_submission_included"] is True
+    assert payload["scripted_tdm_execution_included"] is False
+    assert payload["random_policy_execution_included"] is True
+    assert payload["policy_execution_included"] is True
+
+    random_context = _context(
+        action_source_kind="mixed",
+        team_a_controller="random_valid",
+        team_b_controller="manual",
+    )
+    manual_context = _context()
+    policy_execution_included = debugger_recording._context_policy_execution_included  # pyright: ignore[reportPrivateUsage]
+    assert policy_execution_included(random_context)
+    assert not policy_execution_included(manual_context)
+    nonrandom_payload = evaluation_bridge._action_source_contract_payload(  # pyright: ignore[reportPrivateUsage]
+        action_source_kind="mixed",
+        scenario_mode=scenario.mode,
+        team_a_controller="scripted_tdm",
+        team_b_controller="manual",
+        execution_information_mode="shared_obs",
+        scenario_contract_digest="a" * 64,
+    )
+
+    assert nonrandom_payload == {
+        "schema_id": "marl_battlegrounds.visual_debugger.action_source_contract",
+        "schema_version": 1,
+        "action_source_kind": "mixed",
+        "team_a_controller": "scripted_tdm",
+        "team_b_controller": "manual",
+        "execution_information_mode": "shared_obs",
+        "manual_submission_included": True,
+        "scripted_submission_included": True,
+        "scenario_contract_digest_sha256": "a" * 64,
+        "policy_execution_included": True,
+    }
+
+
+def test_scripted_team_identity_changes_the_action_contract_identity() -> None:
+    scripted_team_a = _context(
+        action_source_kind="mixed",
+        team_a_controller="scripted_tdm",
+        team_b_controller="manual",
+    )
+    scripted_team_b = _context(
+        action_source_kind="mixed",
+        team_a_controller="manual",
+        team_b_controller="scripted_tdm",
+    )
+
+    assert scripted_team_a.identity.evaluation_id != (
+        scripted_team_b.identity.evaluation_id
+    )
+    assert scripted_team_a.identity.matchup_id != scripted_team_b.identity.matchup_id
+    assert scripted_team_a.identity.episode_id != scripted_team_b.identity.episode_id
+
+
 def test_context_identities_join_config_scenario_action_code_and_generation() -> None:
-    scenario = get_scenario("basic_support")
+    scenario = get_scenario("arena_5v5")
     config, _state = scenario.build_scenario()
     launch = _launch()
     first = build_debugger_evaluation_context_v1(
@@ -204,6 +387,9 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         config=config,
         run_generation=0,
         action_source_kind="mixed",
+        team_a_controller="manual",
+        team_b_controller="scripted_tdm",
+        execution_information_mode="no_shared_obs",
     )
     same = build_debugger_evaluation_context_v1(
         launch,
@@ -211,6 +397,9 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         config=config,
         run_generation=0,
         action_source_kind="mixed",
+        team_a_controller="manual",
+        team_b_controller="scripted_tdm",
+        execution_information_mode="no_shared_obs",
     )
     next_generation = build_debugger_evaluation_context_v1(
         launch,
@@ -218,6 +407,9 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         config=config,
         run_generation=1,
         action_source_kind="mixed",
+        team_a_controller="manual",
+        team_b_controller="scripted_tdm",
+        execution_information_mode="no_shared_obs",
     )
     manual = build_debugger_evaluation_context_v1(
         launch,
@@ -225,6 +417,9 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         config=config,
         run_generation=0,
         action_source_kind="manual",
+        team_a_controller="manual",
+        team_b_controller="manual",
+        execution_information_mode="no_shared_obs",
     )
     scaled_config = config._replace(ordinary_movement_distance_scale=0.5)
     scaled = build_debugger_evaluation_context_v1(
@@ -233,6 +428,9 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         config=scaled_config,
         run_generation=0,
         action_source_kind="mixed",
+        team_a_controller="manual",
+        team_b_controller="scripted_tdm",
+        execution_information_mode="no_shared_obs",
     )
     other_scenario = get_scenario("ultimate_showcase")
     other_config, _other_state = other_scenario.build_scenario()
@@ -241,7 +439,10 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         scenario=other_scenario,
         config=other_config,
         run_generation=0,
-        action_source_kind="mixed",
+        action_source_kind="scripted",
+        team_a_controller="manual",
+        team_b_controller="manual",
+        execution_information_mode="no_shared_obs",
     )
 
     assert first == same
@@ -265,13 +466,13 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
     assert first_policy.policy_content_digest != manual_policy.policy_content_digest
 
 
-def test_named_seeds_are_deterministic_bounded_and_generation_specific() -> None:
+def test_named_seeds_are_deterministic_bounded_and_generation_stable() -> None:
     first = _context(root_seed=123, run_generation=0)
     same = _context(root_seed=123, run_generation=0)
     restarted = _context(root_seed=123, run_generation=1)
 
     assert first.seed_protocol == same.seed_protocol
-    assert first.seed_protocol != restarted.seed_protocol
+    assert first.seed_protocol == restarted.seed_protocol
     values = (
         first.seed_protocol.root_seed,
         first.seed_protocol.episode_seed,
@@ -286,6 +487,62 @@ def test_named_seeds_are_deterministic_bounded_and_generation_specific() -> None
     assert all(type(value) is int and 0 <= value <= 2**32 - 1 for value in values)
 
 
+def test_information_mode_changes_projection_and_identity_but_not_named_seeds() -> None:
+    no_shared = _context(execution_information_mode="no_shared_obs")
+    shared = _context(execution_information_mode="shared_obs")
+
+    assert shared.execution_information_mode == "shared_obs"
+    assert shared.actor_projection.identifier == (
+        "base-observation-plus-authorized-sensor-source-bank"
+    )
+    assert shared.actor_projection.version == 1
+    assert no_shared.actor_projection.version == 2
+    assert shared.identity.episode_id != no_shared.identity.episode_id
+    assert shared.identity.evaluation_id != no_shared.identity.evaluation_id
+    assert shared.seed_protocol == no_shared.seed_protocol
+
+
+def test_authored_team_deathmatch_uses_independent_task_map_and_scenario_identity() -> (
+    None
+):
+    source = get_scenario("arena_5v5")
+    neutral_config, state = source.build_scenario()
+    tdm_config = neutral_config._replace(
+        task_mode=1,
+        team_deathmatch_score_threshold=5,
+    )
+    authored = replace(
+        source,
+        name="authored-tdm",
+        build_scenario=lambda: (tdm_config, state),
+        provenance=DebuggerScenarioProvenance(
+            source_kind="saved_draft",
+            source_identity="saved_draft:scenario:arena:r1",
+            scenario_semantic_digest="b" * 64,
+            map_semantic_digest="c" * 64,
+            resolved_configuration_digest="d" * 64,
+            resolved_initial_state_digest="e" * 64,
+        ),
+    )
+    context = build_debugger_evaluation_context_v1(
+        _launch(),
+        scenario=authored,
+        config=tdm_config,
+        run_generation=0,
+        action_source_kind="mixed",
+        team_a_controller="manual",
+        team_b_controller="scripted_tdm",
+        execution_information_mode="shared_obs",
+    )
+
+    assert context.identity.task.identifier == "team_deathmatch"
+    assert context.identity.layout.identifier == "authored-map"
+    assert context.identity.layout.canonical_digest == "c" * 64
+    assert context.identity.scenario is not None
+    assert context.identity.scenario.identifier == "authored-team-deathmatch-scenario"
+    assert context.identity.scenario.canonical_digest == "b" * 64
+
+
 def test_context_captures_the_authored_initial_frame_through_public_cp2_api() -> None:
     scenario = get_scenario("basic_support")
     config, authored_state = scenario.build_scenario()
@@ -295,6 +552,9 @@ def test_context_captures_the_authored_initial_frame_through_public_cp2_api() ->
         config=config,
         run_generation=0,
         action_source_kind="scripted",
+        team_a_controller="manual",
+        team_b_controller="manual",
+        execution_information_mode="no_shared_obs",
     )
     state, observation, action_mask, _info = initialize_scenario_state(
         authored_state,
@@ -314,7 +574,7 @@ def test_context_captures_the_authored_initial_frame_through_public_cp2_api() ->
 
 
 def test_context_rejects_invalid_horizon_generation_source_and_focal_slot() -> None:
-    scenario = get_scenario("basic_support")
+    scenario = get_scenario("arena_5v5")
     config, _state = scenario.build_scenario()
     launch = _launch()
 
@@ -325,6 +585,9 @@ def test_context_rejects_invalid_horizon_generation_source_and_focal_slot() -> N
             config=config,
             run_generation=True,  # type: ignore[arg-type]
             action_source_kind="mixed",
+            team_a_controller="manual",
+            team_b_controller="scripted_tdm",
+            execution_information_mode="no_shared_obs",
         )
     with pytest.raises(ValueError, match="expected_horizon"):
         build_debugger_evaluation_context_v1(
@@ -333,6 +596,9 @@ def test_context_rejects_invalid_horizon_generation_source_and_focal_slot() -> N
             config=config,
             run_generation=0,
             action_source_kind="mixed",
+            team_a_controller="manual",
+            team_b_controller="scripted_tdm",
+            execution_information_mode="no_shared_obs",
             expected_horizon=config.max_steps + 1,
         )
     with pytest.raises(ValueError, match="action_source_kind"):
@@ -342,15 +608,23 @@ def test_context_rejects_invalid_horizon_generation_source_and_focal_slot() -> N
             config=config,
             run_generation=0,
             action_source_kind="policy",  # type: ignore[arg-type]
+            team_a_controller="manual",
+            team_b_controller="scripted_tdm",
+            execution_information_mode="no_shared_obs",
         )
-    inactive_default = replace(scenario, default_controlled_slot=3)
+    sparse_scenario = get_scenario("basic_support")
+    sparse_config, _sparse_state = sparse_scenario.build_scenario()
+    inactive_default = replace(sparse_scenario, default_controlled_slot=3)
     with pytest.raises(ValueError, match="default actor"):
         build_debugger_evaluation_context_v1(
             launch,
             scenario=inactive_default,
-            config=config,
+            config=sparse_config,
             run_generation=0,
-            action_source_kind="mixed",
+            action_source_kind="scripted",
+            team_a_controller="manual",
+            team_b_controller="manual",
+            execution_information_mode="no_shared_obs",
         )
 
 

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 type _ViewMode = Literal["researcher", "pov"]
 
-_DEBUGGER_LAUNCHER = "scripts/dev/run_debug_renderer.sh"
+_DEBUGGER_LAUNCHER = "scripts/dev/run_dev_client.sh"
 _PRIVATE_MATERIALIZE_OPTION = "--_materialize-scripted-scenario"
 _RATE_SUFFIX = "\N{MULTIPLICATION SIGN}"
 
@@ -73,8 +73,8 @@ read-only replay controls:
   Tick current / final  show the exact captured cursor and terminal tick
 
 The Replay Viewer is read-only and always uses fixed Analysis presentation.
-The manual 20x10 combat laboratory remains available through:
-  scripts/dev/run_debug_renderer.sh
+The DevClient developer workspace and Combat Debugger remain available through:
+  scripts/dev/run_dev_client.sh
 """
 
 
@@ -519,6 +519,8 @@ def _materializer_main(argv: Sequence[str]) -> int:
             scenario,
             seed=options.seed,
             evaluation_launch_specification=launch,
+            team_b_controller="manual",
+            execution_information_mode="no_shared_obs",
             controlled_global_slot=None,
             show_ranges=True,
             verbose_logging=False,
@@ -526,7 +528,10 @@ def _materializer_main(argv: Sequence[str]) -> int:
         recorder = DebuggerReplayRecorderV1(
             specification=build_debugger_recording_specification_v1(
                 action_source_kind="scripted",
-                runtime_provenance=capture_debugger_runtime_provenance_v1(revision),
+                runtime_provenance=capture_debugger_runtime_provenance_v1(
+                    revision,
+                    policy_execution_included=False,
+                ),
             ),
             destination=preflight_replay_bundle_destination_v1(options.destination),
             context=session.evaluation_context,

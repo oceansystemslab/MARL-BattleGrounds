@@ -633,7 +633,8 @@ def test_replay_bootstrap_exposes_only_the_replay_product_identity(
     assert response.getheader("Cache-Control") == "no-store"
     assert body == (
         b"globalThis.__MARL_DEBUGGER_BOOTSTRAP__ = Object.freeze("
-        b'{"product_kind":"replay_viewer","schema_version":1});\n'
+        b'{"authoring_available":false,"product_kind":"replay_viewer",'
+        b'"schema_version":1});\n'
     )
     assert service.frame_calls == 0
     assert service.timeline_calls == 0
@@ -1146,7 +1147,8 @@ def test_live_request_and_replay_replacement_are_serialized_and_coherent() -> No
         assert replay_bootstrap.status == HTTPStatus.OK
         assert replay_bootstrap_body == (
             b"globalThis.__MARL_DEBUGGER_BOOTSTRAP__ = Object.freeze("
-            b'{"product_kind":"replay_viewer","schema_version":1});\n'
+            b'{"authoring_available":false,"product_kind":"replay_viewer",'
+            b'"schema_version":1});\n'
         )
         assert json.loads(replay_frame_body)["schema_version"] == 1
         assert removed_live_route.status == HTTPStatus.NOT_FOUND
@@ -1442,7 +1444,7 @@ def test_shutdown_title_uses_the_active_product_after_live_to_replay_handoff(
 
     output = capsys.readouterr().out
     assert result == 0
-    assert "MARL-BattleGrounds Combat Debugger: http://127.0.0.1:" in output
+    assert "MARL-BattleGrounds DevClient: http://127.0.0.1:" in output
     assert "MARL-BattleGrounds Replay Viewer stopped." in output
 
 
@@ -2130,6 +2132,13 @@ def test_live_and_replay_routes_are_mode_isolated(
         "/api/replay/frame",
         headers=_authorized_headers(),
     )
+    replay_authoring, _ = _exchange(
+        replay_server,
+        "POST",
+        "/api/dev/authoring/command",
+        body=b'{"command_type":"list"}',
+        headers=_authorized_headers(**{"Content-Type": "application/json"}),
+    )
 
     live_service = _FakeReplayService()
     live_server = create_server(
@@ -2168,6 +2177,7 @@ def test_live_and_replay_routes_are_mode_isolated(
 
     assert replay_live_command.status == HTTPStatus.NOT_FOUND
     assert invented_replay_frame.status == HTTPStatus.NOT_FOUND
+    assert replay_authoring.status == HTTPStatus.NOT_FOUND
     assert replay_timeline.status == replay_command.status == HTTPStatus.NOT_FOUND
     assert live_presentation.status == HTTPStatus.OK
     assert json.loads(live_presentation_body)["presentation_kind"] == "live_oracle"

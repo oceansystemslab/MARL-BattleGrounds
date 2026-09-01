@@ -10,6 +10,7 @@ from scripts.dev.visual_debugger.protocol import (
     ActorPovTargetActionCommandV1,
     BattlefieldPointerCommandV1,
     CandidateLegalityCardV1,
+    CombatConfigurationV1,
     CommandRequestV1,
     ConfirmDiscardAndReplaceCommandV1,
     DebuggerCommandV1,
@@ -28,6 +29,7 @@ from scripts.dev.visual_debugger.protocol import (
     SaveAsCommandV1,
     ScenarioMetadataV1,
     ScenarioSwitchCommandV1,
+    SetCombatConfigurationCommandV1,
     SetPresetCommandV1,
     SetViewCommandV1,
     TargetReferenceV1,
@@ -119,6 +121,16 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
         ResetCommandV1(),
         SetViewCommandV1(view_mode="pov"),
         SetPresetCommandV1(preset="analysis"),
+        SetCombatConfigurationCommandV1(
+            team_a_controller="manual",
+            team_b_controller="scripted_tdm",
+            execution_information_mode="shared_obs",
+        ),
+        SetCombatConfigurationCommandV1(
+            team_a_controller="random_valid",
+            team_b_controller="random_valid",
+            execution_information_mode="no_shared_obs",
+        ),
         FinishAndReviewCommandV1(),
         ReviewReplayCommandV1(),
         RetrySaveCommandV1(),
@@ -126,6 +138,13 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
         ConfirmDiscardAndReplaceCommandV1(replacement=ResetCommandV1()),
         ConfirmDiscardAndReplaceCommandV1(
             replacement=ScenarioSwitchCommandV1(scenario_name="basic_support")
+        ),
+        ConfirmDiscardAndReplaceCommandV1(
+            replacement=SetCombatConfigurationCommandV1(
+                team_a_controller="scripted_tdm",
+                team_b_controller="scripted_tdm",
+                execution_information_mode="no_shared_obs",
+            )
         ),
         ExitCommandV1(),
     ),
@@ -145,6 +164,24 @@ def test_command_request_round_trips_every_discriminated_variant(
 
     assert decoded == request
     assert json.loads(encoded)["command"]["command_type"] == command.command_type
+
+
+def test_combat_configuration_requires_both_symmetric_controller_values() -> None:
+    configuration = CombatConfigurationV1(
+        team_a_controller="random_valid",
+        team_b_controller="scripted_tdm",
+        execution_information_mode="shared_obs",
+    )
+
+    assert (
+        CombatConfigurationV1.model_validate_json(configuration.model_dump_json())
+        == configuration
+    )
+    for missing in ("team_a_controller", "team_b_controller"):
+        payload = configuration.model_dump(mode="json")
+        del payload[missing]
+        with pytest.raises(ValidationError):
+            CombatConfigurationV1.model_validate(payload)
 
 
 def test_recording_status_enforces_exact_lifecycle_availability() -> None:

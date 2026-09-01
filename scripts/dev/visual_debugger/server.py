@@ -9,7 +9,7 @@ import sys
 import webbrowser
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from inspect import Parameter, Signature, signature
@@ -24,6 +24,7 @@ _TOKEN_HEADER = "X-MARL-Debugger-Token"
 _MAX_COMMAND_BODY_BYTES = 64 * 1024
 _CLIENT_SOCKET_TIMEOUT_SECONDS = 2.0
 _METRIC_REPORT_ROUTE = "/api/replay/metric-report"
+_AUTHORING_COMMAND_ROUTE = "/api/dev/authoring/command"
 _METRIC_REPORT_SUFFIX = ".marlbg-metrics.json"
 _METRIC_REPORT_CONTENT_TYPE = "application/json; charset=utf-8"
 _SAFE_METRIC_REPORT_STEM = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}")
@@ -91,7 +92,7 @@ _PRODUCT_KIND_BY_MODE: dict[DebuggerServerMode, DebuggerProductKind] = {
     "replay": "replay_viewer",
 }
 _PRODUCT_TITLE_BY_KIND: dict[DebuggerProductKind, str] = {
-    "combat_debugger": "MARL-BattleGrounds Combat Debugger",
+    "combat_debugger": "MARL-BattleGrounds DevClient",
     "replay_viewer": "MARL-BattleGrounds Replay Viewer",
 }
 
@@ -202,6 +203,25 @@ def _require_http_status(value: object) -> HTTPStatus:
     return value
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HttpAuthoringBinding:
+    """Strict live-only command boundary for DevClient authoring operations."""
+
+    request_model: type[BaseModel]
+    apply_command: Callable[[BaseModel], BaseModel]
+
+    def __post_init__(self) -> None:
+        request_model = cast(object, self.request_model)
+        if not isinstance(request_model, type) or not issubclass(
+            request_model, BaseModel
+        ):
+            raise TypeError(
+                "authoring request_model must be an exact Pydantic model class."
+            )
+        if not callable(self.apply_command):
+            raise TypeError("authoring apply_command must be callable.")
+
+
 def _validate_metric_report_filename(filename: object) -> str:
     """Validate the complete ASCII attachment basename at the HTTP boundary."""
     if type(filename) is not str or not filename.isascii():
@@ -280,6 +300,7 @@ class HttpCoordinatorBinding:
     current_timeline: Callable[[], object] | None = None
     current_metric_report: Callable[[], HttpMetricReportResult] | None = None
     result_status: Callable[[HttpCommandResult], HTTPStatus] = _default_result_status
+    authoring: HttpAuthoringBinding | None = None
 
     @property
     def product_kind(self) -> DebuggerProductKind:
@@ -319,6 +340,11 @@ class HttpCoordinatorBinding:
             raise ValueError("live debugger mode cannot expose replay metrics.")
         if self.mode == "replay" and not callable(self.current_metric_report):
             raise ValueError("replay debugger mode requires a metric-report operation.")
+        if self.mode == "replay" and self.authoring is not None:
+            raise ValueError("replay debugger mode cannot expose DevClient authoring.")
+        authoring = cast(object, self.authoring)
+        if authoring is not None and not isinstance(authoring, HttpAuthoringBinding):
+            raise TypeError("authoring must be an exact HttpAuthoringBinding.")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -714,6 +740,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
                 "globalThis.__MARL_DEBUGGER_BOOTSTRAP__ = Object.freeze("
                 + json.dumps(
                     {
+                        "authoring_available": coordinator.authoring is not None,
                         "schema_version": 1,
                         "product_kind": coordinator.product_kind,
                     },
@@ -862,6 +889,9 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
                 message="Method is not supported by this debugger.",
             )
             return
+        if route == _AUTHORING_COMMAND_ROUTE:
+            self._handle_authoring_post(coordinator)
+            return
         if route != coordinator.routes.command:
             self._send_api_error(
                 coordinator,
@@ -922,6 +952,52 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         finally:
             if shutdown_requested:
                 self.debugger_server.request_shutdown()
+
+    def _handle_authoring_post(self, coordinator: HttpCoordinatorBinding) -> None:
+        """Apply one whole-draft command only for an installed live binding."""
+        authoring = coordinator.authoring
+        if coordinator.mode != "live" or authoring is None:
+            self._send_api_error(
+                coordinator,
+                HTTPStatus.NOT_FOUND,
+                error_code="not_found",
+                message="No such debugger route.",
+            )
+            return
+        if not self._authenticated(coordinator):
+            return
+        body = self._read_command_body(coordinator)
+        if body is None:
+            return
+        try:
+            request = authoring.request_model.model_validate_json(body)
+        except ValidationError as error:
+            malformed_json = any(
+                detail.get("type") == "json_invalid" for detail in error.errors()
+            )
+            self._send_api_error(
+                coordinator,
+                HTTPStatus.BAD_REQUEST
+                if malformed_json
+                else HTTPStatus.UNPROCESSABLE_ENTITY,
+                error_code="invalid_request",
+                message=(
+                    "Request body is not valid JSON."
+                    if malformed_json
+                    else (
+                        "Request body does not match "
+                        f"{authoring.request_model.__name__}."
+                    )
+                ),
+            )
+            return
+        try:
+            response = authoring.apply_command(request)
+            self._send_model(HTTPStatus.OK, response)
+        except BrokenPipeError, ConnectionError, TimeoutError:
+            self.close_connection = True
+        except Exception:
+            self._send_internal_error(coordinator)
 
     def do_OPTIONS(self) -> None:
         self._method_not_allowed()
@@ -1192,9 +1268,22 @@ def serve_browser_debugger(
     open_browser: bool,
     coordinator: HttpCoordinatorBinding | None = None,
     coordinator_router: HttpCoordinatorRouter | None = None,
+    authoring: HttpAuthoringBinding | None = None,
     graceful_close: GracefulCloseCallback | None = None,
 ) -> int:
     """Bind, announce, optionally open, serve, and always close cleanly."""
+    if authoring is not None:
+        if coordinator_router is not None:
+            raise ValueError(
+                "router-backed servers must install authoring on their live binding."
+            )
+        if coordinator is None:
+            if service is None:
+                raise TypeError("authoring requires a live debugger service.")
+            coordinator = _legacy_live_binding(service)
+        if coordinator.mode != "live" or coordinator.authoring is not None:
+            raise ValueError("authoring can be installed once on a live binding.")
+        coordinator = replace(coordinator, authoring=authoring)
     server = create_server(
         service,
         asset_root=asset_root,

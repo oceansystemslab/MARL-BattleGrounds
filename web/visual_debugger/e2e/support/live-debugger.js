@@ -4,10 +4,12 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPOSITORY_ROOT = resolve(HERE, "../../../..");
-export const DEBUGGER_STOP_TIMEOUT_MS = 5_000;
+export const DEBUGGER_STOP_TIMEOUT_MS = 30_000;
 export const COMBAT_DEBUGGER_ENTRYPOINT = "scripts/dev/debug_renderer.py";
 export const SCRIPTED_DEBUGGER_HARNESS =
   "tests/visual_debugger_scripted_browser_harness.py";
+export const DEVCLIENT_BROWSER_HARNESS =
+  "tests/visual_debugger_dev_client_browser_harness.py";
 
 /** @param {string[]} extraArgs */
 export function combatDebuggerArguments(extraArgs = []) {
@@ -96,6 +98,29 @@ export function startScriptedDebugger({ scenario = "aura_crossfire" } = {}) {
 }
 
 /**
+ * Start the public DevClient launcher path with saved drafts isolated in
+ * one caller-owned temporary directory. Reusing the directory across process
+ * restarts proves persisted discovery without touching developer assets.
+ *
+ * @param {{artifactRoot: string}} options
+ */
+export function startIsolatedDevClient({ artifactRoot }) {
+  if (typeof artifactRoot !== "string" || artifactRoot.length === 0) {
+    throw new TypeError("Isolated DevClient tests require an artifact root.");
+  }
+  return startDebuggerProcess([
+    "run",
+    "python",
+    "-u",
+    DEVCLIENT_BROWSER_HARNESS,
+    "--artifact-root",
+    artifactRoot,
+    "--port",
+    "0",
+  ]);
+}
+
+/**
  * @param {string[]} arguments_
  * @returns {Promise<{
  *   process: import("node:child_process").ChildProcess,
@@ -133,7 +158,7 @@ function startDebuggerProcess(arguments_) {
     child.stdout?.on("data", (chunk) => {
       stdout += String(chunk);
       const match = stdout.match(
-        /MARL-BattleGrounds Combat Debugger: (http:\/\/127\.0\.0\.1:\d+\/#token=[A-Za-z0-9_-]+)/,
+        /MARL-BattleGrounds DevClient: (http:\/\/127\.0\.0\.1:\d+\/#token=[A-Za-z0-9_-]+)/,
       );
       if (!match || settled) {
         return;

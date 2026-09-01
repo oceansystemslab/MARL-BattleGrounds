@@ -1,41 +1,46 @@
-# Combat Debugger
+# DevClient and Combat Debugger
 
-The Combat Debugger is the live, manual MARL-BattleGrounds laboratory. It
-always opens `arena_5v5`, whose map is 20×10, and always uses the fixed Analysis
-presentation. Use it to inspect same-epoch authority, compose simultaneous
-actions, submit transitions, and optionally record one manual episode.
+The DevClient is the local developer workspace for MARL-BattleGrounds. It has
+three deliberately small areas: Combat Debugger, Maps, and Scenarios. Use the
+Combat Debugger to inspect same-epoch authority, compose simultaneous actions,
+load an execution-valid saved scenario, submit transitions, and optionally
+record one manual episode. Use Maps and Scenarios to author local reusable maps
+and complete Team Deathmatch starting states without creating a second
+simulator in the browser.
 
-Scripted demonstrations, checked samples, and existing artifacts belong to the
-[Replay Viewer](replay_viewer.md). The debugger has no public scenario or
-replay selector.
+Scripted demonstrations, checked samples, and existing replay artifacts belong
+to the separate [Replay Viewer](replay_viewer.md). It receives no DevClient
+navigation or authoring authority.
 
 ## Launch
 
 Open the default Oracle view:
 
 ```bash
-./scripts/dev/run_debug_renderer.sh
+./scripts/dev/run_dev_client.sh
 ```
 
 Useful launch variants:
 
 ```bash
 # Start with one active global slot selected and hide ranges.
-./scripts/dev/run_debug_renderer.sh --controlled-slot 5 --no-ranges
+./scripts/dev/run_dev_client.sh --controlled-slot 5 --no-ranges
 
 # Start in the selected actor's authorized POV.
-./scripts/dev/run_debug_renderer.sh --view pov --controlled-slot 5
+./scripts/dev/run_dev_client.sh --view pov --controlled-slot 5
 
 # Print the loopback URL without asking the operating system to open it.
-./scripts/dev/run_debug_renderer.sh --no-open --port 8123
+./scripts/dev/run_dev_client.sh --no-open --port 8123
 
 # Show the executable CLI contract.
-./scripts/dev/run_debug_renderer.sh --help
+./scripts/dev/run_dev_client.sh --help
 ```
 
 The launcher resolves the repository from its own location, binds only to
 `127.0.0.1`, chooses an ephemeral port by default, prints the URL, and attempts
 to open a modern browser. Node.js and npm are not runtime requirements.
+
+`run_debug_renderer.sh` remains a thin compatibility redirect to this launcher.
 
 The public options are:
 
@@ -53,6 +58,72 @@ The public options are:
 Option abbreviations are rejected. Replay, sample, scripted-scenario,
 frame-index, and replay-POV-slot options are rejected with the Replay Viewer
 launcher named in the error.
+
+## Maps and scenarios
+
+The Maps and Scenarios areas share one small authoring surface: an object or
+roster list, the SVG map, an exact numeric inspector, and linked host problems.
+Opening either area immediately creates its prompt-free untitled draft. Choose
+a safe durable asset ID on the first Save; later Saves update that exact asset
+under its revision fence. Drag centers for quick placement, hold Alt to bypass
+the fixed 0.5-world-unit snap, use arrow keys for exact nudging, and use the
+inspector for dimensions, wall size/rotation, roster, episode, current state,
+name, description, and ordinary notes. Experiment hypotheses, evidence roles,
+seed schedules, and measurements belong to a separate future evaluation
+definition, not the physical scenario document. The mouse wheel zooms only the authoring canvas;
+Space-drag or middle-button drag pans it. **Recenter** restores the complete-map
+view without changing the draft. **Reset (R)** restores the latest New, Open,
+or successfully saved baseline and can be undone immediately. The `R` shortcut
+does not fire while typing in a form control. Ten spawn pads are fixed
+identities. Wall and pillar IDs are editable directly; deletion does not
+renumber survivors, so an author may explicitly close a numbering gap.
+Obstacles also have duplicate, delete, and up/down order controls.
+
+Drafts are local files under ignored `artifacts/dev_client/` storage. A compact
+selector opens saved revisions for the active tab. The status line names the
+exact saved revision and repository-relative path, for example
+`artifacts/dev_client/drafts/maps/arena/r2.json`, and reports unsaved changes
+without hiding the last truthful location. Save uses an exact revision fence,
+so an older browser cannot overwrite a newer revision. **Delete Saved** removes
+the selected map or scenario identity and all of its saved revisions only after
+an explicit confirmation. A stale revision cannot delete newer work. If the
+deleted asset is open, its current browser content remains as an unsaved copy
+that may be saved again; deletion does not interrupt an already loaded Combat
+snapshot.
+
+A new scenario can start blank, copy a saved map, or duplicate a saved
+scenario. The adjacent source selector carries the exact saved revision, and
+successful Save, Save As, and Delete refresh discovery immediately. Copied map
+content is independent: later changes never propagate in either direction. The
+browser edits JSON-shaped fields only. Python compiles the whole draft into
+existing `EnvConfig` and `EnvState` authorities and runs the existing
+validators before any scenario can enter the Combat Debugger. Save is the only
+way the DevClient persists asset content, and Delete Saved is its only removal
+operation. Experiment and evaluation manifests own any later approval,
+partition, or normalized scientific identity.
+
+## Loading saved scenarios and map previews
+
+The Combat Debugger selector lists the latest execution-valid saved map and
+scenario revisions. Scenario rows load the authored starting state. Map rows
+are explicitly labelled as default 5v5 TDM previews:
+the host independently copies the exact map into the ordinary default scenario,
+compiles it, and validates it without modifying or saving the map. `Open in
+Debug` in either authoring area calls this same loading service for its current
+buffer. Every path strictly parses and revalidates before the current session
+changes; failure leaves the current session untouched and returns linked
+problems. Reset restores the immutable loaded snapshot and seed, including its
+map, roster, scores, timers, and current timestep.
+
+Team A and Team B may each remain manual, use the scripted Team Deathmatch
+policy, or use the built-in Random policy. Random samples only the exact current
+valid action support and deliberately ignores observation features; under the
+same key and mask it therefore produces the same action in SharedObs and
+NoSharedObs. The selectors share one controller boundary without introducing a
+generic policy registry or checkpoint loader. SharedObs is the default
+information regime, while NoSharedObs remains a first-class selectable regime.
+Changing either controller or the information regime resets the exact loaded
+scenario and seed before comparison.
 
 ## Authority and views
 
@@ -183,7 +254,7 @@ Create the destination parent, then opt into recording:
 
 ```bash
 mkdir -p recordings
-./scripts/dev/run_debug_renderer.sh \
+./scripts/dev/run_dev_client.sh \
   --record-replay recordings/episode.marlbg-replay.json
 ```
 
@@ -220,8 +291,8 @@ remain available. Closing a browser tab alone neither saves nor stops Python.
 Render the manual arena's authorized reset state without a browser server:
 
 ```bash
-./scripts/dev/run_debug_renderer.sh --static
-./scripts/dev/run_debug_renderer.sh \
+./scripts/dev/run_dev_client.sh --static
+./scripts/dev/run_dev_client.sh \
   --static --seed 7 --controlled-slot 5 --no-ranges
 ```
 

@@ -21,6 +21,7 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     ReplayNoSharedObsAuthorizedPresentationFrameV1,
     _seal_oracle_authorized_current_endpoint_v1,
 )
+from scripts.dev.visual_debugger.protocol import CommandRequestV1, KeyboardCommandV1
 from scripts.dev.visual_debugger.replay_service import ReplayViewerService
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.service import DebuggerService
@@ -91,6 +92,36 @@ def _live_pov_service() -> DebuggerService:
         include_stress=False,
         session_id="cp2-7-live-pov-fixture",
     )
+
+
+def _live_shared_pov_service() -> DebuggerService:
+    session = create_session(
+        get_scenario("arena_5v5"),
+        seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
+        controlled_global_slot=0,
+        show_ranges=True,
+        verbose_logging=False,
+        execution_information_mode="shared_obs",
+    )
+    service = DebuggerService(
+        session,
+        view_mode="pov",
+        preset="analysis",
+        include_stress=False,
+        session_id="cp2-7-live-shared-pov-fixture",
+    )
+    result = service.apply_command(
+        CommandRequestV1(
+            client_id="fixture-client",
+            command_id="submit-live-shared-turn",
+            base_revision=0,
+            command=KeyboardCommandV1(key="Enter"),
+        )
+    )
+    if result.outcome != "response":
+        raise RuntimeError("live SharedObs fixture could not submit one turn")
+    return service
 
 
 def _live_corpse_overlay_frame() -> LiveNoSharedObsAuthorizedPresentationFrameV1:
@@ -475,9 +506,11 @@ def render_fixture() -> str:
         persistent_corpse_overlay_frame,
         corpse_overlay_negative_digests,
     ) = _corpse_overlay_browser_cases()
+    live_shared_service = _live_shared_pov_service()
     pair_services = {
         "live_oracle": _service(),
         "live_no_shared_obs_agent_pov": _live_pov_service(),
+        "live_shared_obs_agent_pov": live_shared_service,
         "replay_oracle": _presentation_service(
             replay_cases,
             "oracle",
@@ -576,8 +609,13 @@ def render_fixture() -> str:
     payload = {
         "schema_version": 1,
         "presentations": {
-            frame.presentation_kind: frame.model_dump(mode="json")
-            for frame in frames.rows
+            **{
+                frame.presentation_kind: frame.model_dump(mode="json")
+                for frame in frames.rows
+            },
+            "live_shared_obs_agent_pov": pairs["live_shared_obs_agent_pov"][
+                "presentation"
+            ],
         },
         "pairs": pairs,
         "continuity_pairs": continuity_pairs,

@@ -20,7 +20,7 @@ function isRecord(value) {
 }
 
 /**
- * Identify only the already-normalized five-leaf presentation root. Validation
+ * Identify only the already-normalized six-leaf presentation root. Validation
  * remains owned by `authorized-presentation-normalizer.js`; this adapter never
  * accepts an untrusted wire payload directly.
  *
@@ -454,7 +454,7 @@ function statusView(rawStatus) {
  * presentation without changing the scientific status schema.
  *
  * The production caller invokes this pure projection only after the containing
- * presentation has passed the five-leaf authority brand.
+ * presentation has passed the six-leaf authority brand.
  *
  * @param {unknown} rawAgent
  * @returns {Readonly<Record<string, any>> | null}
@@ -555,7 +555,7 @@ export function authorizedPresentationInspection(value) {
  * outgoing inspection. The raw lane values remain the canonical joint-mask
  * evidence, while Basic availability excludes the canonical target-none no-op.
  * This helper does not authorize input; the production caller invokes it only
- * after the five-leaf presentation brand has passed. Keeping the projection
+ * after the six-leaf presentation brand has passed. Keeping the projection
  * pure makes the target-disclosure/lane cross-product testable without forging
  * a presentation root.
  *
@@ -1182,6 +1182,27 @@ const TECHNICAL_FACT_SPECIFICATIONS = Object.freeze({
     ),
   ]),
   live_no_shared_obs_technical_frame: Object.freeze([
+    technicalFactSpecification("episode", "Episode", "episode_id", "scientific_id"),
+    technicalFactSpecification(
+      "frame",
+      "Frame",
+      "recipient_frame_index",
+      "nonnegative_integer",
+    ),
+    technicalFactSpecification(
+      "simulator_step",
+      "Simulator Step",
+      "simulator_step_count",
+      "nonnegative_integer",
+    ),
+    technicalFactSpecification(
+      "incoming_transition",
+      "Incoming Transition",
+      "incoming_recipient_transition_id",
+      "optional_scientific_id",
+    ),
+  ]),
+  live_shared_obs_technical_frame: Object.freeze([
     technicalFactSpecification("episode", "Episode", "episode_id", "scientific_id"),
     technicalFactSpecification(
       "frame",

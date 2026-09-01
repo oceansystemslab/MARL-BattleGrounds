@@ -105,9 +105,15 @@ def controlled_revision(
     return code_revision
 
 
-def controlled_runtime(revision: CodeRevisionV1) -> RuntimeProvenanceV1:
+def controlled_runtime(
+    revision: CodeRevisionV1,
+    *,
+    policy_execution_included: bool,
+) -> RuntimeProvenanceV1:
     if revision != code_revision:
         raise RuntimeError("controlled runtime received a different revision")
+    if policy_execution_included:
+        raise RuntimeError("sample generation unexpectedly included policy execution")
     return runtime_provenance
 
 
@@ -247,7 +253,12 @@ def _stub_truthful_provenance_capture(
         assert package_version == "0.0.0"
         return loaded.replay.header.context.code_revision
 
-    def fake_runtime(_revision: CodeRevisionV1) -> RuntimeProvenanceV1:
+    def fake_runtime(
+        _revision: CodeRevisionV1,
+        *,
+        policy_execution_included: bool,
+    ) -> RuntimeProvenanceV1:
+        assert not policy_execution_included
         return loaded.replay.header.runtime_provenance
 
     monkeypatch.setattr(
@@ -411,8 +422,13 @@ def test_generator_captures_truthful_provenance_before_creating_output_parent(
         events.append("source")
         return loaded.replay.header.context.code_revision
 
-    def fake_runtime(revision: CodeRevisionV1) -> RuntimeProvenanceV1:
+    def fake_runtime(
+        revision: CodeRevisionV1,
+        *,
+        policy_execution_included: bool,
+    ) -> RuntimeProvenanceV1:
         assert revision == loaded.replay.header.context.code_revision
+        assert not policy_execution_included
         assert not destination.parent.exists()
         events.append("runtime")
         return loaded.replay.header.runtime_provenance
