@@ -77,8 +77,8 @@ selected-slot-specific: a NoSharedObs slot derives from its own base-observation
 row under its recorded projection, while a SharedObs slot uses the recorded
 same-epoch source material, that recipient's availability row, the stable
 source mapping, and its recorded compositor/projection versions. Exact
-SharedObs actor-input reconstruction still fails closed until the Milestone 12
-compositor contract exists.
+structured SharedObs source-bank reconstruction uses the A19 policy projection;
+learned tensor/encoder materialization remains a Milestone 12 contract.
 
 The V2 homogeneous/mixed episode profile is derived from configured-active
 slot assignments and is never a competing stored authority. An explicit
@@ -245,8 +245,11 @@ Actor POV artifacts use dedicated recipient-sliced records. They do not reuse
 the privileged replay context, world snapshot, transition, or canonical CP2
 event tuple. Exact actor-input export is supported for `no_shared_obs`. Under
 `shared_obs`, Milestone 6 may expose a labelled base-sensor/source-availability
-view, but exact materialized input export fails closed until the Milestone 12
-compositor exists. Those alternatives are episode-global in V1. A future
+view. A19 additionally permits exact on-demand reconstruction of the structured
+policy source bank from recorded base rows, source mapping, lifecycle, and the
+exact availability matrix; replay still stores no materialized bank. Learned
+encoder/tensor export remains unavailable until Milestone 12. Those
+alternatives are episode-global in V1. A future
 mixed-capable V2 selects the branch from the chosen actor's slot assignment;
 another actor's regime never authorizes or blocks that selected slot's export.
 

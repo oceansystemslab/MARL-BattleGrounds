@@ -60,10 +60,23 @@ def test_replay_modules_import_without_array_or_capture_dependencies(
 ) -> None:
     """A fresh artifact reader must not initialize simulator capture dependencies."""
     script = f"""
+import annotationlib
 import importlib
 import sys
 
-importlib.import_module({module_name!r})
+module = importlib.import_module({module_name!r})
+
+if {module_name!r} == "marl_battlegrounds.evaluation.actor_projection":
+    reconstruction = module.reconstruct_shared_obs_sensor_source_bank_v1
+    annotations = reconstruction.__annotations__
+    if annotations.get("return") != "SharedObsSensorSourceBankV1":
+        raise SystemExit("SharedObs reconstruction return annotation did not resolve")
+    string_annotations = annotationlib.get_annotations(
+        reconstruction,
+        format=annotationlib.Format.STRING,
+    )
+    if string_annotations.get("return") != "SharedObsSensorSourceBankV1":
+        raise SystemExit("SharedObs reconstruction annotation is not introspectable")
 
 for loaded_name in sys.modules:
     if loaded_name in {_FORBIDDEN_DIRECT_MODULES!r}:

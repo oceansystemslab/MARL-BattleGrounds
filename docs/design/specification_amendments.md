@@ -1164,3 +1164,78 @@ the observation change is only the added canonical zero tail and consequent
 artifact identities. Obstacle geometry, overlap, ordering, collision, movement,
 visibility, line-of-sight, observation-redaction, and rendering semantics do not
 otherwise change.
+
+## A19. SharedObs structured runtime advancement
+
+**Classification:** accepted milestone-ownership advancement without a core
+observation or simulator change.
+**Supersedes:** the timing clauses in A1, A12, A13, and A17 that defer the
+entire SharedObs compositor and every executable SharedObs policy path to
+Milestone 12. It does not supersede their information boundaries,
+homogeneous-episode requirement, or separate-reporting requirement.
+
+The Milestone 7 interlude activates the canonical structured SharedObs source
+bank for scripted/reference policy execution. SharedObs is the
+researcher-facing default information regime. NoSharedObs remains an equally
+legitimate, first-class regime selected by the same high-level
+`execution_information_mode` setting and reported in a separate stratum. It
+is not reduced to an ablation label, and results from the two regimes remain
+ineligible for pooling.
+
+At each decision epoch, the runtime factors the already-authored base
+observation into exactly one source bank:
+
+```text
+SharedObsSensorSourceBankV1
+  unit_features_by_sensor_source_and_global_slot   float32[10, 10, 58]
+  unit_visibility_by_sensor_source_and_global_slot bool[10, 10]
+  objective_features_by_sensor_source              float32[10, 8, 12]
+```
+
+The source bank is a stable global-slot remapping of ordinary, same-epoch,
+visibility-redacted base-sensor rows. It does not recompute geometry,
+visibility, line of sight, lifecycle redaction, or any simulator mechanic.
+Configured-active dead sources remain present in the static authorization
+topology but contribute no ordinary unit or objective sensor material. The
+recipient's own complete base observation remains separate and authoritative.
+
+The default recipient-by-source availability matrix has shape `(10, 10)` and
+authorizes only configured-active, same-team, off-diagonal sources. Its
+diagonal, cross-team, inactive-recipient, and inactive-source cells are false.
+The bank contains no teammate action mask, prior-action/history field, reward,
+transition or successor fact, raw state, critic state, policy memory, or
+renderer data. A SharedObs scalar policy receives the recipient base
+observation, recipient action mask, actor key, source bank, recipient
+availability row, and recipient global slot. The focal action mask remains the
+sole action-legality authority.
+
+The versioned SharedObs actor projection is
+`base-observation-plus-authorized-sensor-source-bank@1`. Evaluation and replay
+records retain base observations, exact availability, execution mode,
+projection identity, and stable source/global-slot mapping. They never persist
+a second materialized SharedObs tensor; exact structured source-bank material
+is reconstructed on demand from those authorities.
+
+The existing reference rollout owns one statically selected, homogeneous
+episode mode. Both teams use that mode and choose all actions from the same
+decision epoch before one unchanged joint-action assembly and one unchanged
+core step. SharedObs and NoSharedObs share reset, actor/environment key
+protocol, scan, done padding, capture, replay, metric, and failure semantics.
+Researcher-facing launch surfaces default to SharedObs, while the low-level
+reference rollout requires the mode explicitly and rejects an opposite scalar
+policy ABI before JIT. Its result carries the exact availability consumed by
+the episode (`None` for NoSharedObs), which is the authority passed to capture.
+Before any scalar SharedObs callable runs, every unavailable source row is
+zeroed across all three bank fields. The compiled NoSharedObs branch bypasses
+source-bank and availability construction. V1 still cannot represent mixed
+SharedObs/NoSharedObs actors in one episode; A12's future mixed-regime V2 gate
+remains unchanged.
+
+Milestone 12 continues to own learned neural input front ends, encoders,
+critics, trainers, updates, learned-policy integration, checkpoint
+compatibility, and baseline training. It must provide two compatible neural
+front ends behind the same high-level regime setting while retaining the
+common trainer, trunk, heads, masking, rollout lifecycle, and update loop.
+Checkpoints remain regime-tagged rather than switching regime in place. This
+amendment changes no `EnvConfig`, `EnvState`, `Observation`, `Action`, mask,
+reset, transition, reward, termination, geometry, or task semantic.

@@ -62,6 +62,23 @@ browser installs only Python-authorized presentation data; the rendering-only
 SharedObs visual-union boundary is recorded in
 [specification amendment A17](docs/design/specification_amendments.md#a17-sharedobs-recorded-visual-union-presentation).
 
+## Actor information regimes
+
+The policy/evaluation layer supports homogeneous `shared_obs` and
+`no_shared_obs` execution through one reference-rollout lifecycle. NoSharedObs
+remains a first-class mode selected with the same
+`execution_information_mode` setting and reported separately. The current
+low-level rollout requires that setting explicitly; the DevClient introduced
+under A20 activates SharedObs as the first researcher-facing default.
+SharedObs composes already-authored teammate sensor rows without changing the
+simulator, and evaluation records store base observations plus exact source
+availability rather than a second materialized tensor. See
+[specification amendment A19](docs/design/specification_amendments.md#a19-sharedobs-structured-runtime-advancement)
+for the runtime and Milestone 12 ownership boundary. Every researcher-facing
+launch surface must default to SharedObs, while requiring an explicit mode at
+the low-level API prevents an old caller from silently changing scientific
+regime.
+
 ## Static snapshots
 
 The optional `viz` dependency is activated automatically by either shell

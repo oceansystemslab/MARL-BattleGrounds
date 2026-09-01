@@ -1,4 +1,4 @@
-"""Fixed-shape M7 reference rollout for two NoSharedObs team policies.
+"""Fixed-shape M7 reference rollout for one homogeneous information regime.
 
 Each epoch key splits into disjoint environment and ten globally ordered actor
 keys. A real row stores ``s_t / m_t / a_t`` beside the complete successor
@@ -7,7 +7,9 @@ transition. After ``done_t``, canonical rows repeat the terminal successor with
 validity vector and its sum is the number of real transitions.
 """
 
-from typing import cast
+from annotationlib import Format
+from inspect import Parameter, signature
+from typing import NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -29,6 +31,7 @@ from marl_battlegrounds.core.types import (
     Observation,
     Reward,
 )
+from marl_battlegrounds.evaluation.models import ExecutionInformationMode
 from marl_battlegrounds.policies.actor import (
     ActorAction,
     build_joint_action_from_actor_actions,
@@ -37,6 +40,95 @@ from marl_battlegrounds.policies.no_shared_obs import (
     NoSharedObsPolicy,
     execute_no_shared_obs_team_policy,
 )
+from marl_battlegrounds.policies.shared_obs import (
+    SharedObsPolicy,
+    build_default_shared_obs_information_availability,
+    build_shared_obs_sensor_source_bank,
+    execute_shared_obs_team_policy,
+)
+
+type ReferenceTeamPolicy = NoSharedObsPolicy | SharedObsPolicy
+type ReferenceSuccessorHistory = tuple[
+    EnvState,
+    Observation,
+    Reward,
+    DoneFlags,
+    ActionMask,
+    Info,
+]
+type ReferenceCurrentHistory = tuple[EnvState, ActionMask, Action]
+
+
+class ReferenceRolloutResult(NamedTuple):
+    """Fixed histories plus the exact information topology consumed at runtime."""
+
+    successors: ReferenceSuccessorHistory
+    currents: ReferenceCurrentHistory
+    information_availability: Array | None
+
+
+def _require_scalar_policy_abi(
+    policy: ReferenceTeamPolicy,
+    execution_information_mode: ExecutionInformationMode,
+    *,
+    name: str,
+) -> None:
+    """Reject the opposite scalar ABI before entering JAX compilation."""
+    expected_positional_count = 6 if execution_information_mode == "shared_obs" else 3
+    try:
+        parameters = tuple(
+            signature(policy, annotation_format=Format.STRING).parameters.values()
+        )
+    except (TypeError, ValueError) as error:
+        raise TypeError(
+            f"{name} must expose an inspectable scalar policy ABI"
+        ) from error
+    positional = tuple(
+        parameter
+        for parameter in parameters
+        if parameter.kind
+        in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+    )
+    has_variadic_positionals = any(
+        parameter.kind == Parameter.VAR_POSITIONAL for parameter in parameters
+    )
+    required_keyword_only = tuple(
+        parameter
+        for parameter in parameters
+        if parameter.kind == Parameter.KEYWORD_ONLY
+        and parameter.default is Parameter.empty
+    )
+    if (
+        has_variadic_positionals
+        or required_keyword_only
+        or len(positional) != expected_positional_count
+    ):
+        raise TypeError(
+            f"{name} does not implement the {execution_information_mode} scalar "
+            f"policy ABI ({expected_positional_count} positional arguments)"
+        )
+
+
+def build_rollout_information_availability(
+    config: EnvConfig,
+    execution_information_mode: ExecutionInformationMode,
+) -> Array | None:
+    """Return the exact episode-wide availability consumed by SharedObs.
+
+    NoSharedObs returns ``None`` and therefore has no source-bank or matrix
+    materialization contract. Callers pass this same SharedObs matrix to frame
+    capture rather than materializing or storing a second actor-input tensor.
+    """
+    if execution_information_mode == "shared_obs":
+        return build_default_shared_obs_information_availability(
+            config.agent_profile.active_mask,
+            config.agent_profile.team_ids,
+        )
+    if execution_information_mode == "no_shared_obs":
+        return None
+    raise ValueError(
+        "execution_information_mode must be 'shared_obs' or 'no_shared_obs'"
+    )
 
 
 def rollout(
@@ -45,12 +137,11 @@ def rollout(
     initial_observation: Observation,
     initial_action_mask: ActionMask,
     environment_root_key: Array,
-    team_a_policy: NoSharedObsPolicy,
-    team_b_policy: NoSharedObsPolicy,
-) -> tuple[
-    tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
-    tuple[EnvState, ActionMask, Action],
-]:
+    team_a_policy: ReferenceTeamPolicy,
+    team_b_policy: ReferenceTeamPolicy,
+    *,
+    execution_information_mode: ExecutionInformationMode,
+) -> ReferenceRolloutResult:
     """Run one bounded episode and return fixed-length transition history.
 
     ``initial_observation`` and ``initial_action_mask`` must describe
@@ -58,13 +149,25 @@ def rollout(
     separate fixed five-slot batches and choose all ten actions before the
     environment advances. The returned first tuple contains successor data;
     the second contains the corresponding current state, mask, and submitted
-    action.
+    action. The information mode is one required static episode contract for
+    both teams; high-level launch surfaces choose ``shared_obs`` by default.
     """
+    if execution_information_mode not in ("shared_obs", "no_shared_obs"):
+        raise ValueError(
+            "execution_information_mode must be 'shared_obs' or 'no_shared_obs'"
+        )
+    _require_scalar_policy_abi(
+        team_a_policy,
+        execution_information_mode,
+        name="team_a_policy",
+    )
+    _require_scalar_policy_abi(
+        team_b_policy,
+        execution_information_mode,
+        name="team_b_policy",
+    )
     return cast(
-        tuple[
-            tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
-            tuple[EnvState, ActionMask, Action],
-        ],
+        ReferenceRolloutResult,
         _rollout_jit(
             config,
             initial_state,
@@ -73,26 +176,35 @@ def rollout(
             environment_root_key,
             team_a_policy,
             team_b_policy,
+            execution_information_mode,
             config.max_steps,
         ),
     )
 
 
-@jax.jit(static_argnums=(5, 6, 7))
+@jax.jit(static_argnums=(5, 6, 7, 8))
 def _rollout_jit(
     config: EnvConfig,
     initial_state: EnvState,
     initial_observation: Observation,
     initial_action_mask: ActionMask,
     environment_root_key: Array,
-    team_a_policy: NoSharedObsPolicy,
-    team_b_policy: NoSharedObsPolicy,
+    team_a_policy: ReferenceTeamPolicy,
+    team_b_policy: ReferenceTeamPolicy,
+    execution_information_mode: ExecutionInformationMode,
     max_steps: int,
-) -> tuple[
-    tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
-    tuple[EnvState, ActionMask, Action],
-]:
+) -> ReferenceRolloutResult:
     """Compile one static-horizon scan while keeping configuration data dynamic."""
+    shared_information_availability: Array | None
+    if execution_information_mode == "shared_obs":
+        shared_information_availability = (
+            build_default_shared_obs_information_availability(
+                config.agent_profile.active_mask,
+                config.agent_profile.team_ids,
+            )
+        )
+    else:
+        shared_information_availability = None
 
     def _scanned_rollout(
         carry: tuple[EnvState, Observation, ActionMask, Array], episode_key: Array
@@ -120,26 +232,54 @@ def _rollout_jit(
         ]:
             """Choose all actor actions, assemble them, and advance the core once."""
 
-            team_a_action = cast(
-                ActorAction,
-                execute_no_shared_obs_team_policy(
-                    current_observation,
-                    current_action_mask,
-                    team_keys,
-                    policy=team_a_policy,
-                    team_identity=TEAM_A_ID,
-                ),
-            )
-            team_b_action = cast(
-                ActorAction,
-                execute_no_shared_obs_team_policy(
-                    current_observation,
-                    current_action_mask,
-                    team_keys,
-                    policy=team_b_policy,
-                    team_identity=TEAM_B_ID,
-                ),
-            )
+            if execution_information_mode == "shared_obs":
+                source_bank = build_shared_obs_sensor_source_bank(current_observation)
+                assert shared_information_availability is not None
+                team_a_action = cast(
+                    ActorAction,
+                    execute_shared_obs_team_policy(
+                        current_observation,
+                        current_action_mask,
+                        team_keys,
+                        source_bank,
+                        shared_information_availability,
+                        policy=cast(SharedObsPolicy, team_a_policy),
+                        team_identity=TEAM_A_ID,
+                    ),
+                )
+                team_b_action = cast(
+                    ActorAction,
+                    execute_shared_obs_team_policy(
+                        current_observation,
+                        current_action_mask,
+                        team_keys,
+                        source_bank,
+                        shared_information_availability,
+                        policy=cast(SharedObsPolicy, team_b_policy),
+                        team_identity=TEAM_B_ID,
+                    ),
+                )
+            else:
+                team_a_action = cast(
+                    ActorAction,
+                    execute_no_shared_obs_team_policy(
+                        current_observation,
+                        current_action_mask,
+                        team_keys,
+                        policy=cast(NoSharedObsPolicy, team_a_policy),
+                        team_identity=TEAM_A_ID,
+                    ),
+                )
+                team_b_action = cast(
+                    ActorAction,
+                    execute_no_shared_obs_team_policy(
+                        current_observation,
+                        current_action_mask,
+                        team_keys,
+                        policy=cast(NoSharedObsPolicy, team_b_policy),
+                        team_identity=TEAM_B_ID,
+                    ),
+                )
 
             current_joint_action = build_joint_action_from_actor_actions(
                 team_a_action, team_b_action
@@ -287,4 +427,17 @@ def _rollout_jit(
         episode_keys,
     )
 
-    return episode_history
+    successors, currents = episode_history
+    return ReferenceRolloutResult(
+        successors=successors,
+        currents=currents,
+        information_availability=shared_information_availability,
+    )
+
+
+__all__ = (
+    "ReferenceRolloutResult",
+    "ReferenceTeamPolicy",
+    "build_rollout_information_availability",
+    "rollout",
+)

@@ -6,6 +6,12 @@ from marl_battlegrounds.policies.scripted.no_shared_obs import (
     decide_team_deathmatch_no_shared_obs,
     team_deathmatch_no_shared_obs_policy,
 )
+from marl_battlegrounds.policies.scripted.shared_obs import (
+    SHARED_OBS_ADAPTER_ID,
+    SHARED_OBS_ADAPTER_VERSION,
+    decide_team_deathmatch_shared_obs,
+    team_deathmatch_shared_obs_policy,
+)
 from marl_battlegrounds.policies.scripted.team_deathmatch import (
     NUMERIC_PROFILE_ID,
     POLICY_ID,
@@ -16,7 +22,7 @@ from marl_battlegrounds.policies.scripted.team_deathmatch import (
     TRACE_ONTOLOGY_VERSION,
 )
 
-# Keep unsupported regimes and future task modules outside the public surface.
+# Keep unsupported future task modules outside the public surface.
 __all__ = (
     "NO_SHARED_OBS_ADAPTER_ID",
     "NO_SHARED_OBS_ADAPTER_VERSION",
@@ -24,9 +30,13 @@ __all__ = (
     "POLICY_ID",
     "POLICY_SEMANTIC_VERSION",
     "SEMANTIC_PROFILE_ID",
+    "SHARED_OBS_ADAPTER_ID",
+    "SHARED_OBS_ADAPTER_VERSION",
     "TASK_HEAD_VERSION",
     "TEAM_DEATHMATCH_PROFILE",
     "TRACE_ONTOLOGY_VERSION",
     "decide_team_deathmatch_no_shared_obs",
+    "decide_team_deathmatch_shared_obs",
     "team_deathmatch_no_shared_obs_policy",
+    "team_deathmatch_shared_obs_policy",
 )

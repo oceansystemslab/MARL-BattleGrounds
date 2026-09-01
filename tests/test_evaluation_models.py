@@ -556,6 +556,7 @@ def test_package_exports_only_the_approved_step_6_3_public_functions() -> None:
         "load_scenario_evaluation_record_v2",
         "reconstruct_actor_class_ids_by_team_v2",
         "reconstruct_class_ids_by_agent_by_team_v2",
+        "reconstruct_shared_obs_sensor_source_bank_v1",
         "resolved_initial_state_digest_sha256_v2",
         "save_actor_pov_replay_artifact_v1",
         "save_replay_bundle_v1",
