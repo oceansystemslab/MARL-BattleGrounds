@@ -651,12 +651,6 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
             5,
             2,
         ),
-        (
-            tdm_prefix
-            + "test_dormant_task_history_and_lifecycle_fields_do_not_change_the_policy",
-            6,
-            4,
-        ),
         ("residual:tests/test_visual_debugger_service.py", 6, 10),
         (
             tdm_prefix + "test_invalid_damage_modifier_never_suppresses_an_aged_trap",

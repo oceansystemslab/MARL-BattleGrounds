@@ -1,9 +1,10 @@
 """Frozen dimensions owned by the version-1 evaluation wire contract.
 
-These values describe already-published evaluation records.  They intentionally
-do not import the live simulator type module: a future simulator shape change
-must introduce an explicit evaluation schema migration rather than silently
-changing V1 artifact validation.
+These values describe the refrozen pre-alpha V1 evaluation records. They
+intentionally do not import the live simulator type module. Amendment A18 is
+the one approved in-place exception that expanded the obstacle axis from 16 to
+32 before alpha; every later incompatible shape change requires an explicit
+schema migration rather than silently changing V1 artifact validation.
 """
 
 from typing import Final
@@ -13,7 +14,7 @@ ENVIRONMENT_DIMENSIONS_V1: Final = 2
 MAX_AGENT_SLOTS_V1: Final = 10
 MAX_AGENTS_PER_TEAM_V1: Final = 5
 MAX_OBJECTIVE_SLOTS_V1: Final = 8
-MAX_OBSTACLE_SLOTS_V1: Final = 16
+MAX_OBSTACLE_SLOTS_V1: Final = 32
 NUM_CLASSES_V1: Final = 6
 NUM_MOVE_ACTIONS_V1: Final = 9
 NUM_SLOW_CHANNELS_V1: Final = 3

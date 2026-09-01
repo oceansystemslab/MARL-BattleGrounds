@@ -101,6 +101,7 @@ from marl_battlegrounds.evaluation.models import (
     canonical_digest_sha256,
     canonical_json_bytes,
 )
+from marl_battlegrounds.evaluation.wire_shapes import MAX_OBSTACLE_SLOTS_V1
 
 
 def _json_payload(
@@ -233,7 +234,7 @@ def _valid_base_observation() -> BaseObservationV1:
         ),
         map_obstacle_features=cast(
             tuple[tuple[tuple[float, ...], ...], ...],
-            _filled_tuple((10, 16, 8), 0.0),
+            _filled_tuple((10, MAX_OBSTACLE_SLOTS_V1, 8), 0.0),
         ),
         objective_features=cast(
             tuple[tuple[tuple[float, ...], ...], ...],

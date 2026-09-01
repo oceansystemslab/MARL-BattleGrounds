@@ -1807,7 +1807,7 @@ def test_map_obstacle_features_remain_globally_observed_after_candidate_masking(
     obstacles = _obstacle_array_with_rows(
         (0, _pillar_obstacle(x=2.0, y=2.0, radius=0.5, active=True)),
         (
-            1,
+            MAX_OBSTACLE_SLOTS - 1,
             _wall_obstacle(
                 x=5.0,
                 y=5.0,
@@ -1847,6 +1847,33 @@ def test_map_obstacle_features_remain_globally_observed_after_candidate_masking(
             atol=0.0,
             rtol=0.0,
         )
+    )
+
+
+def test_legacy_obstacle_prefix_gains_only_canonical_zero_tail() -> None:
+    """A pre-expansion 16-row layout keeps its prefix and gains zero padding."""
+    legacy_last_slot = 15
+    obstacles = _obstacle_array_with_rows(
+        (
+            legacy_last_slot,
+            _pillar_obstacle(x=8.0, y=6.0, radius=0.75, active=True),
+        )
+    )
+    config = _deterministic_config(obstacles=obstacles)
+
+    _, observation, _, _ = reset(config, jax.random.key(42))
+
+    assert bool(
+        jnp.array_equal(
+            observation.map_obstacle_features[:, : legacy_last_slot + 1, :],
+            jnp.broadcast_to(
+                obstacles[None, : legacy_last_slot + 1, :],
+                (MAX_AGENT_SLOTS, legacy_last_slot + 1, OBSTACLE_FEATURES),
+            ),
+        )
+    )
+    assert bool(
+        jnp.all(observation.map_obstacle_features[:, legacy_last_slot + 1 :, :] == 0.0)
     )
 
 

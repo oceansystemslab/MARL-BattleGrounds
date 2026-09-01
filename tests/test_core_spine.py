@@ -661,7 +661,7 @@ def test_static_shape_constants_are_consistent() -> None:
     assert NUM_ULTIMATE_ACTIONS == 2
     assert ENVIRONMENT_DIMENSIONS == 2
 
-    assert MAX_OBSTACLE_SLOTS == 16
+    assert MAX_OBSTACLE_SLOTS == 32
     assert OBSTACLE_FEATURES == 8
     assert OBSTACLE_TYPE_NONE == 0
     assert OBSTACLE_TYPE_PILLAR == 1

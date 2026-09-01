@@ -565,7 +565,7 @@ function sourceProjection() {
   allyFeatures[1] = sourceUnitFeatures(1, 2, 2);
   const enemyFeatures = numberMatrix(5, 58);
   enemyFeatures[0] = sourceUnitFeatures(2, 3, 7);
-  const obstacleFeatures = numberMatrix(16, 8);
+  const obstacleFeatures = numberMatrix(32, 8);
   obstacleFeatures[0] = [1, 4, 3, 1, 0, 0, 0, 1];
   obstacleFeatures[1] = [2, 6, 3, 0, 1, 2, 0.5, 1];
   const contextFeatures = Array(19).fill(0);
