@@ -94,7 +94,8 @@ def recording_restart_intent_v1(
     del view_mode, include_stress
     if isinstance(command, SetCombatConfigurationCommandV1):
         if (
-            command.team_b_controller == session.team_b_controller
+            command.team_a_controller == session.team_a_controller
+            and command.team_b_controller == session.team_b_controller
             and command.execution_information_mode
             == session.evaluation_context.execution_information_mode
         ):
@@ -948,6 +949,7 @@ def dispatch_command(
     if isinstance(command, SetCombatConfigurationCommandV1):
         edited = set_combat_configuration(
             session,
+            team_a_controller=command.team_a_controller,
             team_b_controller=command.team_b_controller,
             execution_information_mode=command.execution_information_mode,
         )

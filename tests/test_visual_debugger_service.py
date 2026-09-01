@@ -1537,11 +1537,13 @@ def test_recording_configuration_change_requires_exact_discard_and_restarts(
     )
     assert isinstance(submitted.payload, CommandResponseV2)
     replacement = SetCombatConfigurationCommandV1(
-        team_b_controller="scripted_tdm",
+        team_a_controller="scripted_tdm",
+        team_b_controller="manual",
         execution_information_mode="shared_obs",
     )
     replacement_session = set_combat_configuration(
         service.session,
+        team_a_controller=replacement.team_a_controller,
         team_b_controller=replacement.team_b_controller,
         execution_information_mode=replacement.execution_information_mode,
     )
@@ -1575,8 +1577,13 @@ def test_recording_configuration_change_requires_exact_discard_and_restarts(
     assert isinstance(confirmed.payload, CommandResponseV2)
     assert confirmed.payload.result == "applied"
     assert old_recorder.lifecycle == "discarded"
-    assert service.session.team_b_controller == "scripted_tdm"
+    assert service.session.team_a_controller == "scripted_tdm"
+    assert service.session.team_b_controller == "manual"
     assert service.session.evaluation_context.execution_information_mode == "shared_obs"
+    assert (
+        confirmed.payload.frame.combat_configuration.team_a_controller
+        == replacement.team_a_controller
+    )
     assert (
         confirmed.payload.frame.combat_configuration.team_b_controller
         == replacement.team_b_controller

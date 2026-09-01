@@ -66,6 +66,12 @@ export function mapContent(draft) {
   return map;
 }
 
+/** @param {Record<string, any>} obstacle */
+export function authoringObstacleDisplayName(obstacle) {
+  const name = typeof obstacle.name === "string" ? obstacle.name.trim() : "";
+  return name || obstacle.object_id;
+}
+
 /** @param {number} value @param {number} step @param {boolean} bypass */
 export function snapAuthoringCoordinate(value, step, bypass = false) {
   const coordinate = finiteNumber(value, "coordinate");
@@ -113,7 +119,7 @@ export function authoringObjects(draft) {
       Object.freeze({
         object_id: obstacle.object_id,
         kind: obstacle.kind,
-        label: obstacle.object_id,
+        label: authoringObstacleDisplayName(obstacle),
         x: obstacle.center_x,
         y: obstacle.center_y,
         obstacle,
@@ -346,6 +352,7 @@ export function addAuthoringObstacle(draft, kind, maximumObstacles) {
   const common = {
     kind,
     object_id: objectId,
+    name: objectId,
     center_x: map.width / 2,
     center_y: map.height / 2,
   };
@@ -381,6 +388,7 @@ export function duplicateAuthoringObstacle(draft, objectId, maximumObstacles, of
   const duplicateId = nextObstacleObjectId(next);
   const duplicate = cloneAuthoringValue(original);
   duplicate.object_id = duplicateId;
+  duplicate.name = duplicateId;
   duplicate.center_x += duplicateOffset;
   duplicate.center_y += duplicateOffset;
   map.obstacles.push(duplicate);

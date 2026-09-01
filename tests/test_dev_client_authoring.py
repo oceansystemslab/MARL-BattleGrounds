@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
 
 import numpy as np
 import pytest
-import scripts.dev.visual_debugger.authoring_store as authoring_store_module
+import scripts.dev.visual_debugger.authoring_store as authoring_store
 from pydantic import ValidationError
-from scripts.dev.promote_dev_asset import main as promote_dev_asset_main
 from scripts.dev.visual_debugger.authoring_compiler import (
     DevAuthoringValidationError,
     apply_alive_edit,
@@ -28,7 +25,6 @@ from scripts.dev.visual_debugger.authoring_compiler import (
 )
 from scripts.dev.visual_debugger.authoring_models import (
     MAX_DEV_ASSET_SEQUENCE,
-    DevAuthoringProblemV1,
     DevMapContentV1,
     DevMapDraftV1,
     DevPillarV1,
@@ -43,7 +39,6 @@ from scripts.dev.visual_debugger.authoring_models import (
 )
 from scripts.dev.visual_debugger.authoring_service import (
     DevAuthoringCommandRequestV1,
-    DevCandidateSourceV1,
     DevClientAuthoringBinding,
     DevCurrentBufferSourceV1,
     DevSavedDraftSourceV1,
@@ -52,8 +47,8 @@ from scripts.dev.visual_debugger.authoring_service import (
     debugger_scenario_from_snapshot,
 )
 from scripts.dev.visual_debugger.authoring_store import (
-    DevAssetAlreadyExistsError,
     DevAssetIntegrityError,
+    DevAssetNotFoundError,
     DevAssetStore,
     DevDraftRevisionConflictError,
 )
@@ -68,23 +63,12 @@ from scripts.dev.visual_debugger.service import DebuggerService
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.core.types import MAX_OBSTACLE_SLOTS
-from marl_battlegrounds.evaluation.models import CodeRevisionV1
 
 
 def _store(tmp_path: Path) -> DevAssetStore:
     return DevAssetStore(
         Path.cwd(),
         artifact_root=tmp_path / "artifacts" / "dev_client",
-        configs_root=tmp_path / "configs",
-    )
-
-
-def _code_revision() -> CodeRevisionV1:
-    return CodeRevisionV1(
-        package_version="0.0.0",
-        commit_sha="a" * 40,
-        source_tree_digest="b" * 64,
-        is_dirty=False,
     )
 
 
@@ -214,6 +198,7 @@ def test_map_normalization_padding_order_and_semantic_digest_contract() -> None:
         obstacles=(
             DevWallV1(
                 object_id="wall-browser-a",
+                name="North divider",
                 center_x=8.0,
                 center_y=5.0,
                 width=2.0,
@@ -222,6 +207,7 @@ def test_map_normalization_padding_order_and_semantic_digest_contract() -> None:
             ),
             DevPillarV1(
                 object_id="pillar-browser-a",
+                name="Center cover",
                 center_x=12.0,
                 center_y=5.0,
                 radius=0.75,
@@ -239,6 +225,7 @@ def test_map_normalization_padding_order_and_semantic_digest_contract() -> None:
     assert host_obstacles[1, 7] == 1.0
     normalized_wall = compiled.content.obstacles[0]
     assert isinstance(normalized_wall, DevWallV1)
+    assert normalized_wall.name == "North divider"
     assert normalized_wall.rotation_degrees == pytest.approx(90.0)
 
     replacement_pads = tuple(
@@ -257,6 +244,16 @@ def test_map_normalization_padding_order_and_semantic_digest_contract() -> None:
         }
     )
     assert map_semantic_digest(map_a) == map_semantic_digest(map_b)
+    renamed_obstacles = tuple(
+        obstacle.model_copy(update={"name": f"Renamed {index}"})
+        for index, obstacle in enumerate(map_a.obstacles)
+    )
+    renamed_map = map_a.model_copy(update={"obstacles": renamed_obstacles})
+    assert map_semantic_digest(map_a) == map_semantic_digest(renamed_map)
+    assert np.array_equal(
+        np.asarray(compile_dev_map(map_a).obstacles),
+        np.asarray(compile_dev_map(renamed_map).obstacles),
+    )
     assert map_semantic_digest(map_a) != map_semantic_digest(
         map_a.model_copy(update={"obstacles": tuple(reversed(map_a.obstacles))})
     )
@@ -278,6 +275,45 @@ def test_map_normalization_padding_order_and_semantic_digest_contract() -> None:
         }
     )
     assert map_semantic_digest(half_turn) == map_semantic_digest(equivalent_half_turn)
+
+
+def test_obstacle_names_are_trimmed_bounded_and_survive_independent_map_copy() -> None:
+    legacy = DevPillarV1(
+        object_id="legacy-pillar",
+        center_x=10.0,
+        center_y=5.0,
+        radius=0.5,
+    )
+    named = DevWallV1(
+        object_id="stable-wall-id",
+        name="  Flanking wall  ",
+        center_x=8.0,
+        center_y=5.0,
+        width=2.0,
+        height=0.5,
+    )
+    source = new_map_draft("named-source")
+    source = source.model_copy(
+        update={
+            "content": source.content.model_copy(update={"obstacles": (legacy, named)})
+        }
+    )
+    normalized = compile_dev_map(source).content
+
+    assert normalized.obstacles[0].name == ""
+    assert normalized.obstacles[1].name == "Flanking wall"
+    copied = new_scenario_draft("named-copy", source_map=source)
+    assert copied.content.embedded_map.obstacles == source.content.obstacles
+    assert copied.content.embedded_map.obstacles is not source.content.obstacles
+
+    with pytest.raises(ValidationError, match="at most 120 characters"):
+        DevPillarV1(
+            object_id="too-long",
+            name="x" * 121,
+            center_x=10.0,
+            center_y=5.0,
+            radius=0.5,
+        )
 
 
 def test_map_validation_links_pad_errors_and_keeps_permitted_geometry_as_warning() -> (
@@ -452,7 +488,7 @@ def test_invalid_numeric_draft_saves_reopens_and_stays_out_of_debug_discovery(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
-    binding = DevClientAuthoringBinding(store, code_revision=_code_revision())
+    binding = DevClientAuthoringBinding(store)
     payload = new_scenario_draft("invalid-numeric").model_dump(
         mode="json", by_alias=True
     )
@@ -543,11 +579,11 @@ def test_compile_map_wraps_float32_normalization_as_a_linked_problem() -> None:
     assert raised.value.problems[0].field_path == "width"
 
 
-def test_execution_valid_scenario_is_freeze_qualified() -> None:
+def test_execution_valid_scenario_has_one_validation_level() -> None:
     draft = new_scenario_draft()
 
     assert validate_dev_scenario(draft) == ()
-    assert compile_dev_scenario(draft).freeze_qualified
+    assert not hasattr(compile_dev_scenario(draft), "freeze_qualified")
 
 
 def test_scenario_digest_excludes_display_prose_provenance_and_browser_ids() -> None:
@@ -568,7 +604,6 @@ def test_scenario_digest_excludes_display_prose_provenance_and_browser_ids() -> 
             "source_map_provenance": DevSourceMapProvenanceV1(
                 asset_id="some-map",
                 revision=7,
-                semantic_digest="a" * 64,
             ),
             "roster": roster,
             "agent_states": states,
@@ -666,155 +701,317 @@ def test_store_rejects_symlinks_before_draft_writes_and_reads(tmp_path: Path) ->
         store.load_draft("map", saved.asset_id, revision=saved.revision)
 
 
-def test_candidate_freeze_is_content_addressed_and_tampering_fails_closed(
+def test_store_delete_removes_all_revisions_and_allows_identity_reuse(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
-    draft = new_map_draft("candidate-map")
-    candidate = store.freeze_map(draft, code_revision=_code_revision())
-
-    assert store.load_candidate("map", candidate.candidate_id) == candidate
-    assert store.freeze_map(draft, code_revision=_code_revision()) == candidate
-    renamed = draft.model_copy(
-        update={"content": draft.content.model_copy(update={"name": "Other name"})}
-    )
-    renamed_candidate = store.freeze_map(renamed, code_revision=_code_revision())
-    assert renamed_candidate.candidate_id != candidate.candidate_id
-    assert (
-        renamed_candidate.evidence.semantic_digest == candidate.evidence.semantic_digest
+    revision_one = store.save_draft(new_map_draft("deletable-map"), expected_revision=0)
+    revision_two = store.save_draft(
+        revision_one.model_copy(
+            update={
+                "content": revision_one.content.model_copy(update={"name": "Second"})
+            }
+        ),
+        expected_revision=1,
     )
 
-    candidate_path = (
-        store.artifact_root / "candidates" / f"map-{candidate.candidate_id}.json"
+    deleted = store.delete_draft(
+        "map",
+        "deletable-map",
+        expected_revision=revision_two.revision,
     )
-    payload = json.loads(candidate_path.read_text(encoding="utf-8"))
-    payload["content"]["width"] = 21.0
-    candidate_path.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(DevAssetIntegrityError, match="content digest mismatch"):
-        store.load_candidate("map", candidate.candidate_id)
+    assert [reference.revision for reference in deleted] == [1, 2]
+    assert not (store.artifact_root / "drafts" / "maps" / "deletable-map").exists()
+
+    recreated = store.save_draft_as(new_map_draft(), asset_id="deletable-map")
+    assert recreated.revision == 3
+    with pytest.raises(DevDraftRevisionConflictError, match="stale"):
+        store.delete_draft(
+            "map",
+            "deletable-map",
+            expected_revision=revision_two.revision,
+        )
+    assert store.load_draft("map", "deletable-map") == recreated
 
 
-def test_qualified_candidate_promotion_revalidates_and_never_overwrites(
+def test_store_delete_revision_fence_survives_another_live_store_instance(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "dev-artifacts"
+    first_store = DevAssetStore(tmp_path, artifact_root=artifact_root)
+    second_store = DevAssetStore(tmp_path, artifact_root=artifact_root)
+    original = first_store.save_draft(
+        new_map_draft("shared-store-map"),
+        expected_revision=0,
+    )
+    first_store.delete_draft(
+        "map",
+        original.asset_id,
+        expected_revision=original.revision,
+    )
+    with pytest.raises(DevDraftRevisionConflictError, match="through Save As"):
+        second_store.save_draft(
+            original,
+            expected_revision=original.revision,
+        )
+
+    recreated = second_store.save_draft_as(
+        new_map_draft(),
+        asset_id=original.asset_id,
+    )
+
+    assert recreated.revision == original.revision + 1
+    with pytest.raises(DevDraftRevisionConflictError, match="stale"):
+        first_store.delete_draft(
+            "map",
+            original.asset_id,
+            expected_revision=original.revision,
+        )
+    assert second_store.load_draft("map", original.asset_id) == recreated
+
+
+def test_store_delete_failures_leave_every_saved_byte_untouched(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
-    candidate = store.freeze_scenario(
-        new_scenario_draft("qualified-scenario"),
-        code_revision=_code_revision(),
+    revision_one = store.save_draft(
+        new_scenario_draft("guarded-scenario"), expected_revision=0
     )
-    destination = store.promote_candidate(
-        candidate.candidate_id,
-        asset_id="tdm-controlled-one",
-        version=1,
-        approval_provenance="owner-test",
+    revision_two = store.save_draft(
+        revision_one,
+        expected_revision=revision_one.revision,
     )
+    directory = store.artifact_root / "drafts" / "scenarios" / "guarded-scenario"
 
-    payload = json.loads(destination.read_text(encoding="utf-8"))
-    assert destination == (
-        tmp_path / "configs" / "scenarios" / "tdm-controlled-one" / "v1.json"
-    )
-    assert payload["semantic_digest"] == candidate.evidence.semantic_digest
-    assert payload["approval_provenance"] == "owner-test"
-    assert "partition" not in payload
+    def saved_bytes() -> dict[str, bytes]:
+        return {
+            path.name: path.read_bytes()
+            for path in directory.iterdir()
+            if path.is_file() and not path.is_symlink()
+        }
 
-    loader = DevScenarioLoadService(store)
-    attempt = loader.load(
-        DevCandidateSourceV1(
-            asset_kind="scenario",
-            candidate_id=candidate.candidate_id,
+    original = saved_bytes()
+    with pytest.raises(DevDraftRevisionConflictError, match="stale"):
+        store.delete_draft("scenario", "guarded-scenario", expected_revision=1)
+    assert saved_bytes() == original
+
+    unexpected = directory / "notes.txt"
+    unexpected.write_text("do not delete", encoding="utf-8")
+    with pytest.raises(DevAssetIntegrityError, match="unexpected entry"):
+        store.delete_draft(
+            "scenario",
+            "guarded-scenario",
+            expected_revision=revision_two.revision,
         )
-    )
-    assert attempt.ok
-    assert attempt.summary is not None
-    assert attempt.summary.candidate_id == candidate.candidate_id
-    with pytest.raises(DevAssetAlreadyExistsError):
-        store.promote_candidate(
-            candidate.candidate_id,
-            asset_id="tdm-controlled-one",
-            version=1,
-            approval_provenance="owner-test",
+    assert saved_bytes() == {**original, "notes.txt": b"do not delete"}
+    unexpected.unlink()
+
+    outside = tmp_path / "outside-delete.json"
+    outside.write_text("outside", encoding="utf-8")
+    symlink = directory / "r3.json"
+    symlink.symlink_to(outside)
+    with pytest.raises(DevAssetIntegrityError, match="must not contain symlinks"):
+        store.delete_draft(
+            "scenario",
+            "guarded-scenario",
+            expected_revision=revision_two.revision,
         )
+    assert saved_bytes() == original
+    assert outside.read_text(encoding="utf-8") == "outside"
+    symlink.unlink()
+
+    revision_one_path = directory / "r1.json"
+    revision_one_path.write_bytes(b"not-json")
+    malformed = saved_bytes()
+    with pytest.raises(DevAssetIntegrityError, match="strict parsing"):
+        store.delete_draft(
+            "scenario",
+            "guarded-scenario",
+            expected_revision=revision_two.revision,
+        )
+    assert saved_bytes() == malformed
+
+    revision_one_path.write_bytes(original["r1.json"])
+    mismatched_payload = json.loads(revision_one_path.read_text(encoding="utf-8"))
+    mismatched_payload["asset_id"] = "different-scenario"
+    revision_one_path.write_text(json.dumps(mismatched_payload), encoding="utf-8")
+    mismatched = saved_bytes()
+    with pytest.raises(DevAssetIntegrityError, match="identity does not match"):
+        store.delete_draft(
+            "scenario",
+            "guarded-scenario",
+            expected_revision=revision_two.revision,
+        )
+    assert saved_bytes() == mismatched
+
+    with pytest.raises(ValueError, match="safe lowercase"):
+        store.delete_draft("map", "../escape", expected_revision=1)
+    with pytest.raises(DevAssetNotFoundError, match="was not found"):
+        store.delete_draft("map", "missing-map", expected_revision=1)
 
 
-def test_candidate_revalidation_preserves_linked_problems_and_current_snapshot(
+def test_store_delete_recovers_from_interruption_and_post_effect_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _store(tmp_path)
-    candidate = store.freeze_scenario(
-        new_scenario_draft("linked-candidate"),
-        code_revision=_code_revision(),
+    first = store.save_draft(new_map_draft("rollback-map"), expected_revision=0)
+    second = store.save_draft(first, expected_revision=first.revision)
+    directory = store.artifact_root / "drafts" / "maps" / first.asset_id
+    expected = {
+        path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()
+    }
+    real_unlink = authoring_store.os.unlink
+    calls = 0
+
+    def fail_second_unlink(
+        name: str,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected unlink failure")
+        real_unlink(name, dir_fd=dir_fd)
+
+    monkeypatch.setattr(authoring_store.os, "unlink", fail_second_unlink)
+
+    with pytest.raises(
+        DevAssetIntegrityError, match="original revisions were restored"
+    ):
+        store.delete_draft(
+            "map",
+            first.asset_id,
+            expected_revision=second.revision,
+        )
+
+    assert {
+        path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()
+    } == expected
+
+    calls = 0
+
+    def interrupt_second_unlink(
+        name: str,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise KeyboardInterrupt
+        real_unlink(name, dir_fd=dir_fd)
+
+    monkeypatch.setattr(authoring_store.os, "unlink", interrupt_second_unlink)
+    with pytest.raises(KeyboardInterrupt):
+        store.delete_draft(
+            "map",
+            first.asset_id,
+            expected_revision=second.revision,
+        )
+    assert {
+        path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()
+    } == expected
+
+    monkeypatch.setattr(authoring_store.os, "unlink", real_unlink)
+    real_rmdir = authoring_store.os.rmdir
+
+    def fail_after_rmdir(
+        name: str,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        real_rmdir(name, dir_fd=dir_fd)
+        raise OSError("injected post-effect rmdir failure")
+
+    monkeypatch.setattr(authoring_store.os, "rmdir", fail_after_rmdir)
+    with pytest.raises(
+        DevAssetIntegrityError, match="original revisions were restored"
+    ):
+        store.delete_draft(
+            "map",
+            first.asset_id,
+            expected_revision=second.revision,
+        )
+    assert {
+        path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()
+    } == expected
+
+    monkeypatch.setattr(authoring_store.os, "rmdir", real_rmdir)
+    real_close = authoring_store.os.close
+    close_calls = 0
+
+    def fail_after_first_close(descriptor: int) -> None:
+        nonlocal close_calls
+        close_calls += 1
+        real_close(descriptor)
+        if close_calls == 1:
+            raise OSError("injected post-effect close failure")
+
+    monkeypatch.setattr(authoring_store.os, "close", fail_after_first_close)
+    deleted = store.delete_draft(
+        "map",
+        first.asset_id,
+        expected_revision=second.revision,
     )
-    loader = DevScenarioLoadService(store)
-    source = DevCandidateSourceV1(
-        asset_kind="scenario",
-        candidate_id=candidate.candidate_id,
-    )
-    assert loader.load(source).ok
-    original_snapshot = loader.current_snapshot
-    linked_problem = DevAuthoringProblemV1(
-        severity="error",
-        stable_code="scenario-core-state-invalid",
-        message="Current health is no longer valid.",
-        object_id="agent-a1",
-        field_path="agent_states.0.current_health",
-    )
-
-    def reject_candidate(*_args: object, **_kwargs: object) -> object:
-        raise DevAuthoringValidationError((linked_problem,))
-
-    monkeypatch.setattr(
-        authoring_store_module,
-        "compile_dev_scenario",
-        reject_candidate,
-    )
-    failed = loader.load(source)
-
-    assert not failed.ok
-    assert failed.problems == (linked_problem,)
-    assert loader.current_snapshot is original_snapshot
+    assert [reference.revision for reference in deleted] == [1, 2]
+    assert not directory.exists()
 
 
-def test_owner_promotion_cli_uses_candidate_asset_and_version_flags(
+def test_authoring_delete_refreshes_assets_and_obsolete_sources_fail_strictly(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    store = DevAssetStore(tmp_path)
-    candidate = store.freeze_map(
-        new_map_draft("cli-source"),
-        code_revision=_code_revision(),
+    binding = DevClientAuthoringBinding(_store(tmp_path))
+    saved = binding.apply_command(
+        _request(
+            {
+                "command_type": "save",
+                "draft": new_map_draft("delete-through-binding").model_dump(
+                    mode="json", by_alias=True
+                ),
+                "expected_revision": 0,
+            }
+        )
     )
+    assert saved.ok
 
-    result = promote_dev_asset_main(
-        [
-            "--candidate",
-            candidate.candidate_id,
-            "--asset-id",
-            "promoted-map",
-            "--version",
-            "1",
-            "--repository-root",
-            str(tmp_path),
-        ]
+    deleted = binding.apply_command(
+        _request(
+            {
+                "command_type": "delete",
+                "source": {
+                    "source_kind": "saved_draft",
+                    "asset_kind": "map",
+                    "asset_id": "delete-through-binding",
+                    "revision": 1,
+                },
+            }
+        )
     )
+    assert deleted.ok
+    assert deleted.deleted is not None
+    assert deleted.deleted.deleted_revision_count == 1
+    assert deleted.assets == ()
 
-    assert result == 0
-    assert (tmp_path / "configs" / "maps" / "promoted-map" / "v1.json").is_file()
-    assert "Promoted candidate" in capsys.readouterr().out
-
-    direct_help = subprocess.run(
-        [
-            sys.executable,
-            str(Path.cwd() / "scripts" / "dev" / "promote_dev_asset.py"),
-            "--help",
-        ],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert direct_help.returncode == 0, direct_help.stderr
-    assert "--candidate" in direct_help.stdout
+    with pytest.raises(ValidationError):
+        _request(
+            {
+                "command_type": "freeze",
+                "draft": new_map_draft().model_dump(mode="json", by_alias=True),
+            }
+        )
+    with pytest.raises(ValidationError):
+        _request(
+            {
+                "command_type": "open",
+                "source": {
+                    "source_kind": "candidate",
+                    "asset_kind": "map",
+                    "candidate_id": "a" * 64,
+                },
+            }
+        )
 
 
 def test_saved_scenario_discovery_and_restart_load_exact_revision(
@@ -847,7 +1044,53 @@ def test_saved_scenario_discovery_and_restart_load_exact_revision(
     )
 
 
-def test_current_saved_and_candidate_maps_use_the_exact_default_preview_path(
+def test_loaded_combat_snapshot_and_embedded_map_survive_source_deletion(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    saved_map = store.save_draft(new_map_draft("source-arena"), expected_revision=0)
+    assert isinstance(saved_map, DevMapDraftV1)
+    scenario = new_scenario_draft("embedded-arena", source_map=saved_map)
+    saved_scenario = store.save_draft(scenario, expected_revision=0)
+    assert isinstance(saved_scenario, DevScenarioDraftV1)
+    loader = DevScenarioLoadService(store)
+    source = DevSavedDraftSourceV1(
+        asset_kind="scenario",
+        asset_id=saved_scenario.asset_id,
+        revision=saved_scenario.revision,
+    )
+    assert loader.load(source).ok
+    installed_snapshot = loader.current_snapshot
+    assert installed_snapshot is not None
+
+    store.delete_draft(
+        "map",
+        saved_map.asset_id,
+        expected_revision=saved_map.revision,
+    )
+    assert loader.load(source).ok
+    assert loader.current_snapshot is not None
+    assert loader.current_snapshot.compiled.content.embedded_map == saved_map.content
+
+    store.delete_draft(
+        "scenario",
+        saved_scenario.asset_id,
+        expected_revision=saved_scenario.revision,
+    )
+    retained_snapshot = loader.current_snapshot
+    assert retained_snapshot is not None
+    retained_scenario = debugger_scenario_from_snapshot(retained_snapshot)
+    first_config, first_state = retained_scenario.build_scenario()
+    second_config, second_state = retained_scenario.build_scenario()
+    assert first_config.map_width == second_config.map_width == 20.0
+    assert np.array_equal(
+        np.asarray(first_state.agent_positions),
+        np.asarray(second_state.agent_positions),
+    )
+    assert loader.discover() == ()
+
+
+def test_current_and_saved_maps_use_the_exact_default_preview_path(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -860,8 +1103,7 @@ def test_current_saved_and_candidate_maps_use_the_exact_default_preview_path(
     )
     saved_map = store.save_draft(current_map, expected_revision=0)
     assert isinstance(saved_map, DevMapDraftV1)
-    candidate = store.freeze_map(current_map, code_revision=_code_revision())
-    binding = DevClientAuthoringBinding(store, code_revision=_code_revision())
+    binding = DevClientAuthoringBinding(store)
     files_before = {
         path.relative_to(tmp_path): path.read_bytes()
         for path in tmp_path.rglob("*")
@@ -885,14 +1127,6 @@ def test_current_saved_and_candidate_maps_use_the_exact_default_preview_path(
                 "revision": saved_map.revision,
             },
             saved_map,
-        ),
-        (
-            {
-                "source_kind": "candidate",
-                "asset_kind": "map",
-                "candidate_id": candidate.candidate_id,
-            },
-            candidate,
         ),
     )
     for source, exact_map in sources_and_maps:
@@ -923,7 +1157,7 @@ def test_current_saved_and_candidate_maps_use_the_exact_default_preview_path(
     assert scenario.default_controlled_slot == 0
     assert scenario.provenance is not None
     assert scenario.provenance.source_identity == (
-        f"map:candidate:{candidate.candidate_id}:profile:default-tdm-map-preview@1"
+        "map:saved_draft:preview-map:revision:1:profile:default-tdm-map-preview@1"
     )
     files_after = {
         path.relative_to(tmp_path): path.read_bytes()
@@ -958,10 +1192,7 @@ def test_current_saved_and_candidate_maps_use_the_exact_default_preview_path(
 
 
 def test_failed_map_preview_preserves_current_debug_snapshot(tmp_path: Path) -> None:
-    binding = DevClientAuthoringBinding(
-        _store(tmp_path),
-        code_revision=_code_revision(),
-    )
+    binding = DevClientAuthoringBinding(_store(tmp_path))
     valid_scenario = new_scenario_draft("existing-debug-session")
     installed = binding.apply_command(
         _request(
@@ -1141,6 +1372,7 @@ def test_loaded_snapshot_replaces_and_resets_the_exact_debugger_scenario(
             command_id="scripted-shared",
             base_revision=debugger.revision,
             command=SetCombatConfigurationCommandV1(
+                team_a_controller="manual",
                 team_b_controller="scripted_tdm",
                 execution_information_mode="shared_obs",
             ),
@@ -1155,7 +1387,7 @@ def test_single_authoring_binding_parses_whole_commands_and_shares_loader(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
-    binding = DevClientAuthoringBinding(store, code_revision=_code_revision())
+    binding = DevClientAuthoringBinding(store)
     created = binding.apply_command(
         _request(
             {
@@ -1171,6 +1403,8 @@ def test_single_authoring_binding_parses_whole_commands_and_shares_loader(
     serialized_created = json.loads(created.model_dump_json())
     assert serialized_created["draft"]["schema"] == "dev-scenario-draft@1"
     assert "schema_id" not in serialized_created["draft"]
+    assert "freeze_qualified" not in serialized_created["validation"]
+    assert "candidate" not in serialized_created
 
     saved = binding.apply_command(
         _request(
@@ -1213,10 +1447,7 @@ def test_authoring_binding_serializes_threaded_host_commands(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    binding = DevClientAuthoringBinding(
-        _store(tmp_path),
-        code_revision=_code_revision(),
-    )
+    binding = DevClientAuthoringBinding(_store(tmp_path))
     first_entered = Event()
     release_first = Event()
     second_entered = Event()
@@ -1246,9 +1477,7 @@ def test_authoring_binding_serializes_threaded_host_commands(
 
 
 def test_validate_returns_linked_capacity_and_float32_problems(tmp_path: Path) -> None:
-    binding = DevClientAuthoringBinding(
-        _store(tmp_path), code_revision=_code_revision()
-    )
+    binding = DevClientAuthoringBinding(_store(tmp_path))
     map_draft = new_map_draft("too-many-obstacles")
     obstacles = tuple(
         DevPillarV1(
@@ -1376,7 +1605,7 @@ def test_validate_returns_linked_capacity_and_float32_problems(tmp_path: Path) -
 
 def test_binding_copies_saved_map_and_duplicates_saved_scenario(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    binding = DevClientAuthoringBinding(store, code_revision=_code_revision())
+    binding = DevClientAuthoringBinding(store)
     saved_map = store.save_draft(new_map_draft("source-map"), expected_revision=0)
     saved_scenario = store.save_draft(
         new_scenario_draft("source-scenario"), expected_revision=0

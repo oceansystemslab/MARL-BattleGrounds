@@ -18,10 +18,6 @@ from pydantic import (
     model_validator,
 )
 
-from marl_battlegrounds.evaluation.models import (
-    CodeRevisionV1,
-)
-
 _MAX_NAME_LENGTH = 120
 _MAX_DESCRIPTION_LENGTH = 2_000
 _MAX_NOTES_LENGTH = 8_000
@@ -94,6 +90,10 @@ class DevPointV1(_AuthoringModel):
 class DevWallV1(_AuthoringModel):
     kind: Literal["wall"] = "wall"
     object_id: ObjectId
+    name: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, max_length=_MAX_NAME_LENGTH),
+    ] = ""
     center_x: float
     center_y: float
     width: float
@@ -104,6 +104,10 @@ class DevWallV1(_AuthoringModel):
 class DevPillarV1(_AuthoringModel):
     kind: Literal["pillar"] = "pillar"
     object_id: ObjectId
+    name: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, max_length=_MAX_NAME_LENGTH),
+    ] = ""
     center_x: float
     center_y: float
     radius: float
@@ -185,7 +189,6 @@ class DevMapDraftV1(_AuthoringModel):
 class DevSourceMapProvenanceV1(_AuthoringModel):
     asset_id: SafeAssetId | None = None
     revision: DevDraftRevision | None = None
-    semantic_digest: SemanticDigest | None = None
 
 
 class DevTeamDeathmatchTaskV1(_AuthoringModel):
@@ -314,64 +317,6 @@ class DevScenarioDraftV1(_AuthoringModel):
     content: DevScenarioContentV1
 
 
-class DevCandidateCompileEvidenceV1(_AuthoringModel):
-    compiler_validator_identity: Literal["dev-client-compiler-validator@1"] = (
-        "dev-client-compiler-validator@1"
-    )
-    semantic_digest: SemanticDigest
-    resolved_configuration_digest: SemanticDigest | None = None
-    resolved_initial_state_digest: SemanticDigest | None = None
-    code_revision: CodeRevisionV1
-    validation_result: Literal["freeze_qualified"] = "freeze_qualified"
-
-
-class DevMapCandidateV1(_AuthoringModel):
-    schema_id: Literal["dev-map-candidate@1"] = Field(
-        default="dev-map-candidate@1",
-        alias="schema",
-        serialization_alias="schema",
-    )
-    candidate_id: SemanticDigest
-    content: DevMapContentV1
-    evidence: DevCandidateCompileEvidenceV1
-
-
-class DevScenarioCandidateV1(_AuthoringModel):
-    schema_id: Literal["dev-scenario-candidate@1"] = Field(
-        default="dev-scenario-candidate@1",
-        alias="schema",
-        serialization_alias="schema",
-    )
-    candidate_id: SemanticDigest
-    content: DevScenarioContentV1
-    evidence: DevCandidateCompileEvidenceV1
-
-    @model_validator(mode="after")
-    def _require_resolved_evidence(self) -> DevScenarioCandidateV1:
-        if (
-            self.evidence.resolved_configuration_digest is None
-            or self.evidence.resolved_initial_state_digest is None
-        ):
-            raise ValueError("scenario candidate evidence requires resolved digests")
-        return self
-
-
-class DevPromotedAssetV1(_AuthoringModel):
-    """Normalized tracked wrapper written only by the owner promotion command."""
-
-    schema_id: Literal["dev-promoted-asset@1"] = Field(
-        default="dev-promoted-asset@1",
-        alias="schema",
-        serialization_alias="schema",
-    )
-    asset_kind: Literal["map", "scenario"]
-    asset_id: SafeAssetId
-    version: DevSavedRevision
-    semantic_digest: SemanticDigest
-    approved_candidate: DevMapCandidateV1 | DevScenarioCandidateV1
-    approval_provenance: ShortText
-
-
 def default_spawn_pads(
     *, width: float = 20.0, height: float = 10.0
 ) -> tuple[DevSpawnPadV1, ...]:
@@ -430,20 +375,20 @@ def _new_agent_object_ids(embedded_map: DevMapContentV1) -> tuple[str, ...]:
     for team in ("a", "b"):
         for local_slot in range(1, 6):
             base = f"agent-{team}{local_slot}"
-            candidate = base
+            object_id = base
             suffix = 2
-            while candidate in reserved:
-                candidate = f"{base}-{suffix}"
+            while object_id in reserved:
+                object_id = f"{base}-{suffix}"
                 suffix += 1
-            reserved.add(candidate)
-            object_ids.append(candidate)
+            reserved.add(object_id)
+            object_ids.append(object_id)
     return tuple(object_ids)
 
 
 def new_scenario_draft(
     asset_id: SafeAssetId = "untitled-scenario",
     *,
-    source_map: DevMapDraftV1 | DevMapCandidateV1 | None = None,
+    source_map: DevMapDraftV1 | None = None,
 ) -> DevScenarioDraftV1:
     """Create the canonical ergonomic blank TDM draft or independent map copy."""
     if source_map is None:
@@ -454,15 +399,10 @@ def new_scenario_draft(
         source_provenance = None
     else:
         embedded_map = source_map.content.model_copy(deep=True)
-        if isinstance(source_map, DevMapDraftV1):
-            source_provenance = DevSourceMapProvenanceV1(
-                asset_id=source_map.asset_id,
-                revision=source_map.revision,
-            )
-        else:
-            source_provenance = DevSourceMapProvenanceV1(
-                semantic_digest=source_map.evidence.semantic_digest,
-            )
+        source_provenance = DevSourceMapProvenanceV1(
+            asset_id=source_map.asset_id,
+            revision=source_map.revision,
+        )
 
     pads = embedded_map.spawn_pads
     agent_object_ids = _new_agent_object_ids(embedded_map)
@@ -499,7 +439,7 @@ def new_scenario_draft(
 
 
 def duplicate_scenario_draft(
-    source: DevScenarioDraftV1 | DevScenarioCandidateV1,
+    source: DevScenarioDraftV1,
     *,
     asset_id: SafeAssetId,
 ) -> DevScenarioDraftV1:

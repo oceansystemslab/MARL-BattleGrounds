@@ -5587,10 +5587,11 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
     );
     requireExactSnapshotKeys(
       configuration,
-      ["execution_information_mode", "team_b_controller"],
+      ["execution_information_mode", "team_a_controller", "team_b_controller"],
       "Live combat configuration identity",
     );
     if (
+      !["manual", "scripted_tdm"].includes(configuration.team_a_controller) ||
       !["manual", "scripted_tdm"].includes(configuration.team_b_controller) ||
       !["shared_obs", "no_shared_obs"].includes(
         configuration.execution_information_mode,

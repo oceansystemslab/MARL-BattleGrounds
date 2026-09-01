@@ -271,7 +271,6 @@ def test_live_authoring_route_strictly_parses_and_applies_one_command(
     service = _service()
     authoring_service = DevClientAuthoringBinding(
         DevAssetStore(_REPOSITORY_ROOT, artifact_root=tmp_path / "artifacts"),
-        code_revision=debugger_test_launch_specification().code_revision,
     )
 
     def apply_authoring(request: object) -> DevAuthoringCommandResponseV1:
@@ -331,7 +330,7 @@ def test_live_authoring_route_strictly_parses_and_applies_one_command(
         "ok": True,
         "command_type": "list",
         "draft": None,
-        "candidate": None,
+        "deleted": None,
         "assets": [],
         "validation": None,
         "debug_load": None,

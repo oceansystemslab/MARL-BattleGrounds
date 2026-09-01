@@ -13,6 +13,7 @@ import {
   addAuthoringObstacle,
   authoringContentSnapshot,
   authoringObjects,
+  authoringObstacleDisplayName,
   deleteAuthoringObstacle,
   duplicateAuthoringObstacle,
   mapContent,
@@ -233,6 +234,62 @@ test("scenario obstacle edits share the allocator without renaming existing obje
       (/** @type {any} */ obstacle) => obstacle.object_id,
     ),
     ["wall-1", "obstacle-0", "obstacle-1"],
+  );
+});
+
+test("obstacle display names are editable without changing stable object identity", () => {
+  const added = addAuthoringObstacle(
+    mapDraft(),
+    "wall",
+    AUTHORING_CATALOG.maximum_obstacle_slots,
+  );
+  assert.equal(mapContent(added.draft).obstacles[0].name, "obstacle-0");
+
+  const renamed = setAuthoringField(
+    added.draft,
+    ["content", "obstacles", 0, "name"],
+    "North gate",
+  );
+  const renamedObject = authoringObjects(renamed).find(
+    (object) => object.object_id === "obstacle-0",
+  );
+  assert.equal(renamedObject?.label, "North gate");
+  assert.equal(renamedObject?.object_id, "obstacle-0");
+
+  const duplicate = duplicateAuthoringObstacle(
+    renamed,
+    "obstacle-0",
+    AUTHORING_CATALOG.maximum_obstacle_slots,
+    AUTHORING_CATALOG.fixed_snap_world_units,
+  );
+  assert.deepEqual(
+    mapContent(duplicate.draft).obstacles.map((/** @type {any} */ obstacle) => [
+      obstacle.object_id,
+      obstacle.name,
+    ]),
+    [
+      ["obstacle-0", "North gate"],
+      ["obstacle-1", "obstacle-1"],
+    ],
+  );
+
+  const legacyObject = authoringObjects(scenarioDraft()).find(
+    (object) => object.object_id === "wall-1",
+  );
+  assert.equal(legacyObject?.label, "wall-1");
+  const blankName = setAuthoringField(
+    added.draft,
+    ["content", "obstacles", 0, "name"],
+    " \t ",
+  );
+  assert.equal(
+    authoringObjects(blankName).find((object) => object.object_id === "obstacle-0")
+      ?.label,
+    "obstacle-0",
+  );
+  assert.equal(
+    authoringObstacleDisplayName(mapContent(blankName).obstacles[0]),
+    "obstacle-0",
   );
 });
 

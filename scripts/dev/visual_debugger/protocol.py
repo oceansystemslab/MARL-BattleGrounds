@@ -44,7 +44,7 @@ type PendingSubmissionScope = Literal[
     "joint_turn",
     "scripted_playback",
 ]
-type TeamBController = Literal["manual", "scripted_tdm"]
+type TeamController = Literal["manual", "scripted_tdm"]
 type ExecutionInformationMode = Literal["shared_obs", "no_shared_obs"]
 type CommandResult = Literal[
     "applied",
@@ -202,7 +202,8 @@ class SetPresetCommandV1(_ProtocolModel):
 class CombatConfigurationV1(_ProtocolModel):
     """Authoritative live execution settings that replace an episode."""
 
-    team_b_controller: TeamBController
+    team_a_controller: TeamController
+    team_b_controller: TeamController
     execution_information_mode: ExecutionInformationMode
 
 

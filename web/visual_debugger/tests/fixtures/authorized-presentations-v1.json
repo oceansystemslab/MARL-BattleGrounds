@@ -6090,7 +6090,7 @@
               }
             ]
           },
-          "authorized_endpoint_digest_sha256": "a11b4a7ea0aad3d61ed6bd60dcaac2462e5f54eb4c6f8157e18011bd676f9d49",
+          "authorized_endpoint_digest_sha256": "b77e08fc43f2c3c239d5f526fb238ce926859f42f3f9595158a80ba99ff5f9b6",
           "endpoint_kind": "no_shared_obs_authorized_current",
           "parts": {
             "next_decision_action_mask": {
@@ -6747,9 +6747,9 @@
                 "visibility_effect": "concealed_from_opponents"
               }
             },
-            "source_episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+            "source_episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
             "source_frame_index": 0,
-            "source_recipient_frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:actor-pov:0:frame:0",
+            "source_recipient_frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:actor-pov:0:frame:0",
             "source_simulator_step_count": 0
           }
         },
@@ -6757,7 +6757,7 @@
         "latest_transition": null,
         "live_inspection": {
           "envelope_kind": "live_no_shared_obs_source_bound_inspection",
-          "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+          "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
           "inspection": {
             "draft": {
               "actor_anchor": [
@@ -6973,7 +6973,7 @@
           },
           "source_authority_epoch": 0,
           "source_frame_index": 0,
-          "source_recipient_frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:actor-pov:0:frame:0",
+          "source_recipient_frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:actor-pov:0:frame:0",
           "source_recipient_public_agent_id": "0",
           "source_revision": 0,
           "source_run_generation": 0,
@@ -6981,7 +6981,7 @@
           "source_simulator_step_count": 0
         },
         "local_oracle_corpse_overlay": {
-          "authorized_overlay_digest_sha256": "7efbf153f49a4878a9fb3ecebd4963ddbee73b124016977b00b915225be59d44",
+          "authorized_overlay_digest_sha256": "0048a7714af60e743de9924ca6e2624cb625c9b77274dd0809a4e6dbd2b6dbfa",
           "corpse_observations": [],
           "living_sensor_public_agent_ids": [
             "0"
@@ -6991,8 +6991,8 @@
           "recipient_presentation_key": "pov_3b73c1f8efdac8f9d6b10fa4bd4e82ae42cf17e703ae5f611d1dba7377b68163",
           "recipient_public_agent_id": "0",
           "source_authority_epoch": 0,
-          "source_episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
-          "source_frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:frame:0",
+          "source_episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
+          "source_frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:frame:0",
           "source_frame_index": 0,
           "source_simulator_step_count": 0
         },
@@ -7244,7 +7244,7 @@
               "ultimate_target_mode": "ally"
             }
           ],
-          "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+          "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
           "frame_index": 0,
           "identity_directory": {
             "directory_kind": "oracle_public_identity_directory",
@@ -7851,7 +7851,7 @@
           "source_run_generation": 0,
           "source_session_id": "cp2-7-live-pov-fixture",
           "technical_frame": {
-            "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+            "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
             "evaluation_frame_index": 0,
             "incoming_transition_id": null,
             "simulator_step_count": 0,
@@ -7860,12 +7860,12 @@
         },
         "schema_version": 1,
         "source": {
-          "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+          "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
           "source_authority_epoch": 0,
-          "source_authorized_endpoint_digest_sha256": "a11b4a7ea0aad3d61ed6bd60dcaac2462e5f54eb4c6f8157e18011bd676f9d49",
+          "source_authorized_endpoint_digest_sha256": "b77e08fc43f2c3c239d5f526fb238ce926859f42f3f9595158a80ba99ff5f9b6",
           "source_frame_index": 0,
           "source_kind": "live_no_shared_obs_frame",
-          "source_recipient_frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:actor-pov:0:frame:0",
+          "source_recipient_frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:actor-pov:0:frame:0",
           "source_recipient_public_agent_id": "0",
           "source_revision": 0,
           "source_run_generation": 0,
@@ -7874,7 +7874,7 @@
           "source_submission_scope": "joint_turn"
         },
         "technical_frame": {
-          "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+          "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
           "incoming_recipient_transition_id": null,
           "recipient_frame_index": 0,
           "simulator_step_count": 0,
@@ -7885,10 +7885,11 @@
       "transport": {
         "combat_configuration": {
           "execution_information_mode": "no_shared_obs",
+          "team_a_controller": "manual",
           "team_b_controller": "manual"
         },
-        "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
-        "frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:frame:0",
+        "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
+        "frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:frame:0",
         "frame_index": 0,
         "frame_kind": "actor_pov_live_debugger",
         "hud": {
@@ -8171,7 +8172,7 @@
           },
           "scene": {
             "audience_badge": "AGENT POV \u00b7 0",
-            "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+            "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
             "frame_index": 0,
             "map": {
               "height": 10.0,
@@ -8204,7 +8205,7 @@
               "width": 20.0
             },
             "observation_materialization": "exact_no_shared_obs_actor_input",
-            "pov_frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:actor-pov:0:frame:0",
+            "pov_frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:actor-pov:0:frame:0",
             "respawn_waves": [
               {
                 "actor_relative_team_index": 0,
@@ -8258,7 +8259,7 @@
               "ultimate_cooldown_remaining": 0
             },
             "simulator_step_count": 0,
-            "source_frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:frame:0",
+            "source_frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:frame:0",
             "spawn_pads": [
               {
                 "actor_relative_team_index": 0,
@@ -8686,10 +8687,10 @@
               }
             ]
           },
-          "authorized_endpoint_digest_sha256": "446056315d6f1fb33d00664b4ef58e032a3f3abc87c3fe772e2fa5e94b88cf85",
+          "authorized_endpoint_digest_sha256": "8075ba00a75d98c9de8440a17e65ae9196b68f7b4f16ae52bf1e7dc2f7adf83c",
           "endpoint_kind": "oracle_authorized_current",
-          "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
-          "frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:frame:0",
+          "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
+          "frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:frame:0",
           "frame_index": 0,
           "identity_directory": {
             "directory_kind": "oracle_public_identity_directory",
@@ -9620,7 +9621,7 @@
         "latest_transition": null,
         "live_inspection": {
           "envelope_kind": "live_oracle_source_bound_inspection",
-          "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+          "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
           "inspection": {
             "draft": {
               "actor_anchor": [
@@ -9865,7 +9866,7 @@
             "submission_scope": "joint_turn"
           },
           "source_authority_epoch": 0,
-          "source_frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:frame:0",
+          "source_frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:frame:0",
           "source_frame_index": 0,
           "source_revision": 0,
           "source_run_generation": 0,
@@ -9971,10 +9972,10 @@
         "product_kind": "combat_debugger",
         "schema_version": 1,
         "source": {
-          "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+          "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
           "source_authority_epoch": 0,
-          "source_authorized_endpoint_digest_sha256": "446056315d6f1fb33d00664b4ef58e032a3f3abc87c3fe772e2fa5e94b88cf85",
-          "source_frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:frame:0",
+          "source_authorized_endpoint_digest_sha256": "8075ba00a75d98c9de8440a17e65ae9196b68f7b4f16ae52bf1e7dc2f7adf83c",
+          "source_frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:frame:0",
           "source_frame_index": 0,
           "source_kind": "live_oracle_frame",
           "source_revision": 0,
@@ -9984,7 +9985,7 @@
           "source_submission_scope": "joint_turn"
         },
         "technical_frame": {
-          "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+          "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
           "evaluation_frame_index": 0,
           "incoming_transition_id": null,
           "simulator_step_count": 0,
@@ -10066,10 +10067,11 @@
         ],
         "combat_configuration": {
           "execution_information_mode": "no_shared_obs",
+          "team_a_controller": "manual",
           "team_b_controller": "manual"
         },
-        "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
-        "frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:frame:0",
+        "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
+        "frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:frame:0",
         "frame_index": 0,
         "frame_kind": "researcher_live_debugger",
         "hud": {
@@ -10226,7 +10228,7 @@
               "fact_id": "episode_id",
               "label": "Evaluation episode",
               "technical": true,
-              "value": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37"
+              "value": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28"
             }
           ],
           "latest_transition": null,
@@ -11074,8 +11076,8 @@
                 "ultimate_target_mode": "ally"
               }
             ],
-            "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
-            "frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:frame:0",
+            "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
+            "frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:frame:0",
             "frame_index": 0,
             "incoming_event_ids": [],
             "incoming_transition_id": null,
@@ -11325,8 +11327,8 @@
           "schema_version": 2,
           "status_source_evidence": {
             "active_statuses": [],
-            "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
-            "frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:frame:0",
+            "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
+            "frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:frame:0",
             "frame_index": 0,
             "schema_version": 2
           }
@@ -11505,7 +11507,7 @@
               }
             ]
           },
-          "authorized_endpoint_digest_sha256": "274438fee20edc95324570cb4cfd64ef04fa81fb7ae35d02beee05096b1fdf3c",
+          "authorized_endpoint_digest_sha256": "3d96da5b5b653d2ebadacde90d5a04a9b7733e5103a0c479d3c270ebf71f82a0",
           "endpoint_kind": "shared_obs_authorized_current",
           "parts": {
             "agent_observation_provenance": [
@@ -12401,25 +12403,25 @@
                 "visibility_effect": "concealed_from_opponents"
               }
             },
-            "source_episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
+            "source_episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
             "source_frame_index": 1,
-            "source_recipient_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:1",
+            "source_recipient_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:1",
             "source_simulator_step_count": 1
           }
         },
         "latest_events": {
           "delta_count": 0,
           "deltas": [],
-          "incoming_recipient_transition_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:transition:0",
-          "incoming_start_recipient_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:0",
+          "incoming_recipient_transition_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:transition:0",
+          "incoming_start_recipient_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:0",
           "incoming_start_simulator_step_count": 0,
-          "incoming_successor_recipient_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:1",
+          "incoming_successor_recipient_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:1",
           "incoming_successor_simulator_step_count": 1,
           "incoming_transition_index": 0,
           "recipient_presentation_key": "pov_9a745e87052adaf9d052f69a204257c47473be5fa268e1eb2fa3f8749925d1d1",
           "recipient_public_agent_id": "0",
           "schema_version": 1,
-          "source_episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
+          "source_episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
           "summary_kind": "shared_obs_recipient_observation_deltas"
         },
         "latest_transition": {
@@ -12452,12 +12454,12 @@
               ]
             }
           ],
-          "episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
-          "incoming_start_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:0",
+          "episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
+          "incoming_start_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:0",
           "incoming_start_simulator_step_count": 0,
-          "incoming_successor_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:1",
+          "incoming_successor_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:1",
           "incoming_successor_simulator_step_count": 1,
-          "incoming_transition_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:transition:0",
+          "incoming_transition_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:transition:0",
           "incoming_transition_index": 0,
           "recipient_presentation_key": "pov_9a745e87052adaf9d052f69a204257c47473be5fa268e1eb2fa3f8749925d1d1",
           "recipient_public_agent_id": "0",
@@ -12465,7 +12467,7 @@
         },
         "live_inspection": {
           "envelope_kind": "live_shared_obs_source_bound_inspection",
-          "episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
+          "episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
           "inspection": {
             "draft": {
               "actor_anchor": [
@@ -12686,7 +12688,7 @@
           },
           "source_authority_epoch": 1,
           "source_frame_index": 1,
-          "source_recipient_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:1",
+          "source_recipient_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:1",
           "source_recipient_public_agent_id": "0",
           "source_revision": 1,
           "source_run_generation": 0,
@@ -12694,7 +12696,7 @@
           "source_simulator_step_count": 1
         },
         "local_oracle_corpse_overlay": {
-          "authorized_overlay_digest_sha256": "a87c3f9e9ae2a056e559b7e0e95db528d8be4f53680a7b8080a7c030c45f23e7",
+          "authorized_overlay_digest_sha256": "0277f7bfb7ba220f29b2ecd818a08ff511ee43e7866b5466baa8284009a61ca3",
           "corpse_observations": [],
           "living_sensor_public_agent_ids": [
             "0",
@@ -12708,8 +12710,8 @@
           "recipient_presentation_key": "pov_9a745e87052adaf9d052f69a204257c47473be5fa268e1eb2fa3f8749925d1d1",
           "recipient_public_agent_id": "0",
           "source_authority_epoch": 1,
-          "source_episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
-          "source_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:frame:1",
+          "source_episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
+          "source_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:frame:1",
           "source_frame_index": 1,
           "source_simulator_step_count": 1
         },
@@ -12961,7 +12963,7 @@
               "ultimate_target_mode": "ally"
             }
           ],
-          "episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
+          "episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
           "frame_index": 1,
           "identity_directory": {
             "directory_kind": "oracle_public_identity_directory",
@@ -13321,12 +13323,12 @@
                 ]
               }
             ],
-            "episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
-            "incoming_start_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:frame:0",
+            "episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
+            "incoming_start_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:frame:0",
             "incoming_start_simulator_step_count": 0,
-            "incoming_successor_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:frame:1",
+            "incoming_successor_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:frame:1",
             "incoming_successor_simulator_step_count": 1,
-            "incoming_transition_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:transition:0",
+            "incoming_transition_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:transition:0",
             "incoming_transition_index": 0,
             "transition_kind": "oracle_incoming_submitted_accepted"
           },
@@ -13849,21 +13851,21 @@
           "source_run_generation": 0,
           "source_session_id": "cp2-7-live-shared-pov-fixture",
           "technical_frame": {
-            "episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
+            "episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
             "evaluation_frame_index": 1,
-            "incoming_transition_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:transition:0",
+            "incoming_transition_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:transition:0",
             "simulator_step_count": 1,
             "technical_kind": "live_oracle_technical_frame"
           }
         },
         "schema_version": 1,
         "source": {
-          "episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
+          "episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
           "source_authority_epoch": 1,
-          "source_authorized_endpoint_digest_sha256": "274438fee20edc95324570cb4cfd64ef04fa81fb7ae35d02beee05096b1fdf3c",
+          "source_authorized_endpoint_digest_sha256": "3d96da5b5b653d2ebadacde90d5a04a9b7733e5103a0c479d3c270ebf71f82a0",
           "source_frame_index": 1,
           "source_kind": "live_shared_obs_visual_union_frame",
-          "source_recipient_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:1",
+          "source_recipient_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:1",
           "source_recipient_public_agent_id": "0",
           "source_revision": 1,
           "source_run_generation": 0,
@@ -13872,8 +13874,8 @@
           "source_submission_scope": "joint_turn"
         },
         "technical_frame": {
-          "episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
-          "incoming_recipient_transition_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:transition:0",
+          "episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
+          "incoming_recipient_transition_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:transition:0",
           "recipient_frame_index": 1,
           "simulator_step_count": 1,
           "technical_kind": "live_shared_obs_technical_frame"
@@ -13998,10 +14000,10 @@
           ],
           "event_count": 0,
           "events": [],
-          "incoming_recipient_transition_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:transition:0",
-          "incoming_start_recipient_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:0",
+          "incoming_recipient_transition_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:transition:0",
+          "incoming_start_recipient_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:0",
           "incoming_start_simulator_step_count": 0,
-          "incoming_successor_recipient_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:1",
+          "incoming_successor_recipient_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:1",
           "incoming_successor_simulator_step_count": 1,
           "incoming_transition_index": 0,
           "ordered_event_ids": [],
@@ -14009,23 +14011,24 @@
           "recipient_presentation_key": "pov_9a745e87052adaf9d052f69a204257c47473be5fa268e1eb2fa3f8749925d1d1",
           "recipient_public_agent_id": "0",
           "schema_version": 1,
-          "source_episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
+          "source_episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
           "summary_kind": "agent_pov_fog_filtered_visual_events"
         }
       },
       "transport": {
         "combat_configuration": {
           "execution_information_mode": "shared_obs",
+          "team_a_controller": "manual",
           "team_b_controller": "manual"
         },
-        "episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
-        "frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:frame:1",
+        "episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
+        "frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:frame:1",
         "frame_index": 1,
         "frame_kind": "shared_obs_agent_pov_live_debugger",
-        "incoming_recipient_transition_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:transition:0",
+        "incoming_recipient_transition_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:transition:0",
         "pending_submission_scope": "joint_turn",
         "preset": "analysis",
-        "recipient_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:1",
+        "recipient_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:1",
         "recipient_public_agent_id": "0",
         "recording": null,
         "revision": 1,
@@ -24335,7 +24338,7 @@
             }
           ]
         },
-        "authorized_endpoint_digest_sha256": "274438fee20edc95324570cb4cfd64ef04fa81fb7ae35d02beee05096b1fdf3c",
+        "authorized_endpoint_digest_sha256": "3d96da5b5b653d2ebadacde90d5a04a9b7733e5103a0c479d3c270ebf71f82a0",
         "endpoint_kind": "shared_obs_authorized_current",
         "parts": {
           "agent_observation_provenance": [
@@ -25231,25 +25234,25 @@
               "visibility_effect": "concealed_from_opponents"
             }
           },
-          "source_episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
+          "source_episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
           "source_frame_index": 1,
-          "source_recipient_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:1",
+          "source_recipient_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:1",
           "source_simulator_step_count": 1
         }
       },
       "latest_events": {
         "delta_count": 0,
         "deltas": [],
-        "incoming_recipient_transition_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:transition:0",
-        "incoming_start_recipient_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:0",
+        "incoming_recipient_transition_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:transition:0",
+        "incoming_start_recipient_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:0",
         "incoming_start_simulator_step_count": 0,
-        "incoming_successor_recipient_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:1",
+        "incoming_successor_recipient_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:1",
         "incoming_successor_simulator_step_count": 1,
         "incoming_transition_index": 0,
         "recipient_presentation_key": "pov_9a745e87052adaf9d052f69a204257c47473be5fa268e1eb2fa3f8749925d1d1",
         "recipient_public_agent_id": "0",
         "schema_version": 1,
-        "source_episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
+        "source_episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
         "summary_kind": "shared_obs_recipient_observation_deltas"
       },
       "latest_transition": {
@@ -25282,12 +25285,12 @@
             ]
           }
         ],
-        "episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
-        "incoming_start_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:0",
+        "episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
+        "incoming_start_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:0",
         "incoming_start_simulator_step_count": 0,
-        "incoming_successor_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:1",
+        "incoming_successor_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:1",
         "incoming_successor_simulator_step_count": 1,
-        "incoming_transition_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:transition:0",
+        "incoming_transition_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:transition:0",
         "incoming_transition_index": 0,
         "recipient_presentation_key": "pov_9a745e87052adaf9d052f69a204257c47473be5fa268e1eb2fa3f8749925d1d1",
         "recipient_public_agent_id": "0",
@@ -25295,7 +25298,7 @@
       },
       "live_inspection": {
         "envelope_kind": "live_shared_obs_source_bound_inspection",
-        "episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
+        "episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
         "inspection": {
           "draft": {
             "actor_anchor": [
@@ -25516,7 +25519,7 @@
         },
         "source_authority_epoch": 1,
         "source_frame_index": 1,
-        "source_recipient_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:1",
+        "source_recipient_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:1",
         "source_recipient_public_agent_id": "0",
         "source_revision": 1,
         "source_run_generation": 0,
@@ -25524,7 +25527,7 @@
         "source_simulator_step_count": 1
       },
       "local_oracle_corpse_overlay": {
-        "authorized_overlay_digest_sha256": "a87c3f9e9ae2a056e559b7e0e95db528d8be4f53680a7b8080a7c030c45f23e7",
+        "authorized_overlay_digest_sha256": "0277f7bfb7ba220f29b2ecd818a08ff511ee43e7866b5466baa8284009a61ca3",
         "corpse_observations": [],
         "living_sensor_public_agent_ids": [
           "0",
@@ -25538,8 +25541,8 @@
         "recipient_presentation_key": "pov_9a745e87052adaf9d052f69a204257c47473be5fa268e1eb2fa3f8749925d1d1",
         "recipient_public_agent_id": "0",
         "source_authority_epoch": 1,
-        "source_episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
-        "source_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:frame:1",
+        "source_episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
+        "source_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:frame:1",
         "source_frame_index": 1,
         "source_simulator_step_count": 1
       },
@@ -25791,7 +25794,7 @@
             "ultimate_target_mode": "ally"
           }
         ],
-        "episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
+        "episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
         "frame_index": 1,
         "identity_directory": {
           "directory_kind": "oracle_public_identity_directory",
@@ -26151,12 +26154,12 @@
               ]
             }
           ],
-          "episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
-          "incoming_start_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:frame:0",
+          "episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
+          "incoming_start_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:frame:0",
           "incoming_start_simulator_step_count": 0,
-          "incoming_successor_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:frame:1",
+          "incoming_successor_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:frame:1",
           "incoming_successor_simulator_step_count": 1,
-          "incoming_transition_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:transition:0",
+          "incoming_transition_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:transition:0",
           "incoming_transition_index": 0,
           "transition_kind": "oracle_incoming_submitted_accepted"
         },
@@ -26679,21 +26682,21 @@
         "source_run_generation": 0,
         "source_session_id": "cp2-7-live-shared-pov-fixture",
         "technical_frame": {
-          "episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
+          "episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
           "evaluation_frame_index": 1,
-          "incoming_transition_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:transition:0",
+          "incoming_transition_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:transition:0",
           "simulator_step_count": 1,
           "technical_kind": "live_oracle_technical_frame"
         }
       },
       "schema_version": 1,
       "source": {
-        "episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
+        "episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
         "source_authority_epoch": 1,
-        "source_authorized_endpoint_digest_sha256": "274438fee20edc95324570cb4cfd64ef04fa81fb7ae35d02beee05096b1fdf3c",
+        "source_authorized_endpoint_digest_sha256": "3d96da5b5b653d2ebadacde90d5a04a9b7733e5103a0c479d3c270ebf71f82a0",
         "source_frame_index": 1,
         "source_kind": "live_shared_obs_visual_union_frame",
-        "source_recipient_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:1",
+        "source_recipient_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:1",
         "source_recipient_public_agent_id": "0",
         "source_revision": 1,
         "source_run_generation": 0,
@@ -26702,8 +26705,8 @@
         "source_submission_scope": "joint_turn"
       },
       "technical_frame": {
-        "episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
-        "incoming_recipient_transition_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:transition:0",
+        "episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
+        "incoming_recipient_transition_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:transition:0",
         "recipient_frame_index": 1,
         "simulator_step_count": 1,
         "technical_kind": "live_shared_obs_technical_frame"
@@ -26828,10 +26831,10 @@
         ],
         "event_count": 0,
         "events": [],
-        "incoming_recipient_transition_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:transition:0",
-        "incoming_start_recipient_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:0",
+        "incoming_recipient_transition_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:transition:0",
+        "incoming_start_recipient_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:0",
         "incoming_start_simulator_step_count": 0,
-        "incoming_successor_recipient_frame_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2:shared-obs-visual-union:0:frame:1",
+        "incoming_successor_recipient_frame_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501:shared-obs-visual-union:0:frame:1",
         "incoming_successor_simulator_step_count": 1,
         "incoming_transition_index": 0,
         "ordered_event_ids": [],
@@ -26839,7 +26842,7 @@
         "recipient_presentation_key": "pov_9a745e87052adaf9d052f69a204257c47473be5fa268e1eb2fa3f8749925d1d1",
         "recipient_public_agent_id": "0",
         "schema_version": 1,
-        "source_episode_id": "debugger-episode:9b02994718b0e3115fe85cb188758b2d604a15e0dc80e4401bafa999129e4eb2",
+        "source_episode_id": "debugger-episode:e1fa2ab95ec1370c3043db19ca68580131d3b0c662e533d16f3ebbf9548aa501",
         "summary_kind": "agent_pov_fog_filtered_visual_events"
       }
     },
@@ -32782,7 +32785,7 @@
             }
           ]
         },
-        "authorized_endpoint_digest_sha256": "099cea4b74f205e1d357396e6e18bda8dd8324938461f988df4016eb2559eb35",
+        "authorized_endpoint_digest_sha256": "276bbf53982ff64e87bb36bd529dd5ab29e1965e532638f31f1179533a098d49",
         "endpoint_kind": "no_shared_obs_authorized_current",
         "parts": {
           "next_decision_action_mask": {
@@ -33439,9 +33442,9 @@
               "visibility_effect": "concealed_from_opponents"
             }
           },
-          "source_episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+          "source_episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
           "source_frame_index": 0,
-          "source_recipient_frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:actor-pov:0:frame:0",
+          "source_recipient_frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:actor-pov:0:frame:0",
           "source_simulator_step_count": 0
         }
       },
@@ -33449,7 +33452,7 @@
       "latest_transition": null,
       "live_inspection": {
         "envelope_kind": "live_no_shared_obs_source_bound_inspection",
-        "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+        "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
         "inspection": {
           "draft": {
             "actor_anchor": [
@@ -33665,7 +33668,7 @@
         },
         "source_authority_epoch": 0,
         "source_frame_index": 0,
-        "source_recipient_frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:actor-pov:0:frame:0",
+        "source_recipient_frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:actor-pov:0:frame:0",
         "source_recipient_public_agent_id": "0",
         "source_revision": 0,
         "source_run_generation": 0,
@@ -33673,7 +33676,7 @@
         "source_simulator_step_count": 0
       },
       "local_oracle_corpse_overlay": {
-        "authorized_overlay_digest_sha256": "2d325a497171a28ff783ed71288ebc6ba72eca3c9c7c9218db5b5b55d4db656c",
+        "authorized_overlay_digest_sha256": "2565f9600e32ef3f7b22a37223602137e4e21c01980d38c1f621b1a02d93cb8e",
         "corpse_observations": [
           {
             "corpse": {
@@ -33743,8 +33746,8 @@
         "recipient_presentation_key": "pov_caa99a5cec43bd9cfa0e23d7b17d05e3481a8cbe43437060d416d3048de07a4f",
         "recipient_public_agent_id": "0",
         "source_authority_epoch": 0,
-        "source_episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
-        "source_frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:frame:0",
+        "source_episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
+        "source_frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:frame:0",
         "source_frame_index": 0,
         "source_simulator_step_count": 0
       },
@@ -33996,7 +33999,7 @@
             "ultimate_target_mode": "ally"
           }
         ],
-        "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+        "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
         "frame_index": 0,
         "identity_directory": {
           "directory_kind": "oracle_public_identity_directory",
@@ -34590,7 +34593,7 @@
         "source_run_generation": 0,
         "source_session_id": "browser-live-no-shared-corpse-overlay",
         "technical_frame": {
-          "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+          "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
           "evaluation_frame_index": 0,
           "incoming_transition_id": null,
           "simulator_step_count": 0,
@@ -34599,12 +34602,12 @@
       },
       "schema_version": 1,
       "source": {
-        "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+        "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
         "source_authority_epoch": 0,
-        "source_authorized_endpoint_digest_sha256": "099cea4b74f205e1d357396e6e18bda8dd8324938461f988df4016eb2559eb35",
+        "source_authorized_endpoint_digest_sha256": "276bbf53982ff64e87bb36bd529dd5ab29e1965e532638f31f1179533a098d49",
         "source_frame_index": 0,
         "source_kind": "live_no_shared_obs_frame",
-        "source_recipient_frame_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37:actor-pov:0:frame:0",
+        "source_recipient_frame_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28:actor-pov:0:frame:0",
         "source_recipient_public_agent_id": "0",
         "source_revision": 0,
         "source_run_generation": 0,
@@ -34613,7 +34616,7 @@
         "source_submission_scope": "joint_turn"
       },
       "technical_frame": {
-        "episode_id": "debugger-episode:6107277a58f95237cf14d2f93bf738e0e9c3630d178c43395bd19bc4aa373b37",
+        "episode_id": "debugger-episode:5fb0645c375a5ce519e6c567720113573e7aabeb16267e319a46bae7a9ff1d28",
         "incoming_recipient_transition_id": null,
         "recipient_frame_index": 0,
         "simulator_step_count": 0,

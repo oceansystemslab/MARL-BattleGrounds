@@ -381,6 +381,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             scenario,
             seed=options.seed,
             evaluation_launch_specification=evaluation_launch_specification,
+            team_a_controller="manual",
             team_b_controller="manual",
             execution_information_mode=options.execution_information_mode,
             controlled_global_slot=options.controlled_slot,
@@ -396,7 +397,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             authoring_service = DevClientAuthoringBinding(
                 store,
-                code_revision=code_revision,
                 scenario_loader=DevScenarioLoadService(
                     store,
                     install_snapshot=install,
@@ -443,7 +443,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             runtime_provenance = capture_debugger_runtime_provenance_v1(
                 code_revision,
-                policy_execution_included=(session.team_b_controller == "scripted_tdm"),
+                policy_execution_included=(
+                    "scripted_tdm"
+                    in (session.team_a_controller, session.team_b_controller)
+                ),
             )
         except RuntimeError as exc:
             raise ValueError(

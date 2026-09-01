@@ -150,21 +150,25 @@ export function recordingReplacementCommand(frame, command) {
   }
   if (command.command_type === "set_combat_configuration") {
     const installed = frame.combat_configuration;
+    const teamAController = command.team_a_controller;
     const teamBController = command.team_b_controller;
     const informationMode = command.execution_information_mode;
     if (
       !installed ||
       typeof installed !== "object" ||
       Array.isArray(installed) ||
+      (teamAController !== "manual" && teamAController !== "scripted_tdm") ||
       (teamBController !== "manual" && teamBController !== "scripted_tdm") ||
       (informationMode !== "shared_obs" && informationMode !== "no_shared_obs") ||
-      (installed.team_b_controller === teamBController &&
+      (installed.team_a_controller === teamAController &&
+        installed.team_b_controller === teamBController &&
         installed.execution_information_mode === informationMode)
     ) {
       return null;
     }
     return Object.freeze({
       command_type: "set_combat_configuration",
+      team_a_controller: teamAController,
       team_b_controller: teamBController,
       execution_information_mode: informationMode,
     });

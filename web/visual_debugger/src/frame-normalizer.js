@@ -102,6 +102,7 @@ const SCENARIO_METADATA_KEYS_V1 = Object.freeze([
 
 const COMBAT_CONFIGURATION_KEYS_V1 = Object.freeze([
   "execution_information_mode",
+  "team_a_controller",
   "team_b_controller",
 ]);
 
@@ -527,12 +528,14 @@ function normalizeCombatConfigurationV1(value) {
     "Live combat configuration has unknown or missing fields.",
   );
   if (
+    !["manual", "scripted_tdm"].includes(configuration.team_a_controller) ||
     !["manual", "scripted_tdm"].includes(configuration.team_b_controller) ||
     !["shared_obs", "no_shared_obs"].includes(configuration.execution_information_mode)
   ) {
     throw new TypeError("Live combat configuration is invalid.");
   }
   return Object.freeze({
+    team_a_controller: configuration.team_a_controller,
     team_b_controller: configuration.team_b_controller,
     execution_information_mode: configuration.execution_information_mode,
   });

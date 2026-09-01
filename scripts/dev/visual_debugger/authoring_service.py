@@ -25,7 +25,6 @@ from marl_battlegrounds.evaluation.catalog import build_static_mechanics_catalog
 from marl_battlegrounds.evaluation.models import (
     AuraMechanicV1,
     ClassMechanicsV1,
-    CodeRevisionV1,
     StatusMechanicV1,
 )
 from scripts.dev.visual_debugger.authoring_compiler import (
@@ -38,10 +37,8 @@ from scripts.dev.visual_debugger.authoring_compiler import (
 from scripts.dev.visual_debugger.authoring_models import (
     DevAuthoringProblemV1,
     DevDraftRevision,
-    DevMapCandidateV1,
     DevMapDraftV1,
     DevSavedRevision,
-    DevScenarioCandidateV1,
     DevScenarioDraftV1,
     SafeAssetId,
     SemanticDigest,
@@ -64,7 +61,6 @@ from scripts.dev.visual_debugger.model import (
 )
 
 type DevDraftPayload = DevMapDraftV1 | DevScenarioDraftV1
-type DevCandidatePayload = DevMapCandidateV1 | DevScenarioCandidateV1
 type CommandType = Literal[
     "list",
     "new_map",
@@ -73,7 +69,7 @@ type CommandType = Literal[
     "save",
     "save_as",
     "validate",
-    "freeze",
+    "delete",
     "open_in_debug",
 ]
 
@@ -95,16 +91,7 @@ class DevSavedDraftSourceV1(_ServiceModel):
     revision: DevSavedRevision
 
 
-class DevCandidateSourceV1(_ServiceModel):
-    source_kind: Literal["candidate"] = "candidate"
-    asset_kind: DevAssetKind
-    candidate_id: SemanticDigest
-
-
-type DevPersistedSourceV1 = Annotated[
-    DevSavedDraftSourceV1 | DevCandidateSourceV1,
-    Field(discriminator="source_kind"),
-]
+type DevPersistedSourceV1 = DevSavedDraftSourceV1
 
 
 class DevCurrentBufferSourceV1(_ServiceModel):
@@ -123,7 +110,7 @@ class DevCurrentBufferSourceV1(_ServiceModel):
 
 
 type DevDebugAssetSourceV1 = Annotated[
-    DevCurrentBufferSourceV1 | DevSavedDraftSourceV1 | DevCandidateSourceV1,
+    DevCurrentBufferSourceV1 | DevSavedDraftSourceV1,
     Field(discriminator="source_kind"),
 ]
 
@@ -184,9 +171,9 @@ class DevValidateCommandV1(_ServiceModel):
     draft: DevDraftPayload
 
 
-class DevFreezeCommandV1(_ServiceModel):
-    command_type: Literal["freeze"] = "freeze"
-    draft: DevDraftPayload
+class DevDeleteCommandV1(_ServiceModel):
+    command_type: Literal["delete"] = "delete"
+    source: DevSavedDraftSourceV1
 
 
 class DevOpenInDebugCommandV1(_ServiceModel):
@@ -202,7 +189,7 @@ type DevAuthoringCommandV1 = Annotated[
     | DevSaveCommandV1
     | DevSaveAsCommandV1
     | DevValidateCommandV1
-    | DevFreezeCommandV1
+    | DevDeleteCommandV1
     | DevOpenInDebugCommandV1,
     Field(discriminator="command_type"),
 ]
@@ -217,7 +204,6 @@ class DevAuthoringCommandRequestV1(RootModel[DevAuthoringCommandV1]):
 class DevValidationSummaryV1(_ServiceModel):
     asset_kind: DevAssetKind
     execution_valid: bool
-    freeze_qualified: bool
     semantic_digest: SemanticDigest | None = None
     map_semantic_digest: SemanticDigest | None = None
     resolved_configuration_digest: SemanticDigest | None = None
@@ -234,10 +220,9 @@ class DevValidationSummaryV1(_ServiceModel):
 
 class DevAssetSummaryV1(_ServiceModel):
     asset_kind: DevAssetKind
-    source_kind: Literal["saved_draft", "candidate"]
-    asset_id: SafeAssetId | None = None
-    revision: DevSavedRevision | None = None
-    candidate_id: SemanticDigest | None = None
+    source_kind: Literal["saved_draft"] = "saved_draft"
+    asset_id: SafeAssetId
+    revision: DevSavedRevision
     name: Annotated[
         str,
         StringConstraints(strip_whitespace=True, min_length=1, max_length=120),
@@ -245,16 +230,21 @@ class DevAssetSummaryV1(_ServiceModel):
     map_width: float
     map_height: float
     execution_valid: bool
-    freeze_qualified: bool
+
+
+class DevDeletedAssetSummaryV1(_ServiceModel):
+    asset_kind: DevAssetKind
+    asset_id: SafeAssetId
+    latest_revision: DevSavedRevision
+    deleted_revision_count: Annotated[int, Field(ge=1)]
 
 
 class DevDebugLoadSummaryV1(_ServiceModel):
-    source_kind: Literal["current_buffer", "saved_draft", "candidate"]
+    source_kind: Literal["current_buffer", "saved_draft"]
     asset_kind: DevAssetKind
     debug_profile: Literal["authored_scenario", "default_tdm_map_preview"]
     asset_id: SafeAssetId | None = None
     revision: DevDraftRevision | None = None
-    candidate_id: SemanticDigest | None = None
     source_name: Annotated[
         str,
         StringConstraints(strip_whitespace=True, min_length=1, max_length=120),
@@ -306,7 +296,7 @@ class DevAuthoringCommandResponseV1(_ServiceModel):
     ok: bool
     command_type: CommandType
     draft: DevDraftPayload | None = None
-    candidate: DevCandidatePayload | None = None
+    deleted: DevDeletedAssetSummaryV1 | None = None
     assets: tuple[DevAssetSummaryV1, ...] = ()
     validation: DevValidationSummaryV1 | None = None
     debug_load: DevDebugLoadSummaryV1 | None = None
@@ -334,13 +324,11 @@ def debugger_scenario_from_snapshot(
             f"{source.asset_kind}:current_buffer:{source.draft.asset_id}:"
             f"revision:{source.draft.revision}"
         )
-    elif isinstance(source, DevSavedDraftSourceV1):
+    else:
         source_identity = (
             f"{source.asset_kind}:saved_draft:{source.asset_id}:"
             f"revision:{source.revision}"
         )
-    else:
-        source_identity = f"{source.asset_kind}:candidate:{source.candidate_id}"
     if snapshot.summary.debug_profile == "default_tdm_map_preview":
         source_identity += ":profile:default-tdm-map-preview@1"
 
@@ -405,7 +393,6 @@ def _validation_summary(draft: DevDraftPayload) -> DevValidationSummaryV1:
         return DevValidationSummaryV1(
             asset_kind="map",
             execution_valid=valid,
-            freeze_qualified=valid,
             semantic_digest=digest,
             map_semantic_digest=digest,
             problems=problems,
@@ -416,7 +403,6 @@ def _validation_summary(draft: DevDraftPayload) -> DevValidationSummaryV1:
         return DevValidationSummaryV1(
             asset_kind="scenario",
             execution_valid=False,
-            freeze_qualified=False,
             problems=error.problems,
         )
     problems = compiled.problems
@@ -440,7 +426,6 @@ def _validation_summary(draft: DevDraftPayload) -> DevValidationSummaryV1:
     return DevValidationSummaryV1(
         asset_kind="scenario",
         execution_valid=True,
-        freeze_qualified=compiled.freeze_qualified,
         semantic_digest=compiled.semantic_digest,
         map_semantic_digest=compiled.map_semantic_digest,
         resolved_configuration_digest=compiled.resolved_configuration_digest,
@@ -470,28 +455,26 @@ class DevScenarioLoadService:
     def _open_source(
         self,
         source: DevDebugAssetSourceV1,
-    ) -> DevDraftPayload | DevCandidatePayload:
+    ) -> DevDraftPayload:
         if isinstance(source, DevCurrentBufferSourceV1):
             return source.draft.model_copy(deep=True)
-        if isinstance(source, DevSavedDraftSourceV1):
-            return self._store.load_draft(
-                source.asset_kind,
-                source.asset_id,
-                revision=source.revision,
-            )
-        return self._store.load_candidate(source.asset_kind, source.candidate_id)
+        return self._store.load_draft(
+            source.asset_kind,
+            source.asset_id,
+            revision=source.revision,
+        )
 
     @staticmethod
     def _compile_source(
         source: DevDebugAssetSourceV1,
-        opened: DevDraftPayload | DevCandidatePayload,
+        opened: DevDraftPayload,
     ) -> tuple[
         CompiledDevScenarioV1,
         str,
         Literal["authored_scenario", "default_tdm_map_preview"],
     ]:
         if source.asset_kind == "scenario":
-            if not isinstance(opened, (DevScenarioDraftV1, DevScenarioCandidateV1)):
+            if not isinstance(opened, DevScenarioDraftV1):
                 raise TypeError("scenario Debug source resolved a non-scenario asset")
             return (
                 compile_dev_scenario(opened),
@@ -499,7 +482,7 @@ class DevScenarioLoadService:
                 "authored_scenario",
             )
 
-        if not isinstance(opened, (DevMapDraftV1, DevMapCandidateV1)):
+        if not isinstance(opened, DevMapDraftV1):
             raise TypeError("map Debug source resolved a non-map asset")
         map_problems = validate_map_content(opened.content)
         if any(problem.severity == "error" for problem in map_problems):
@@ -538,22 +521,18 @@ class DevScenarioLoadService:
     ) -> DevDebugLoadSummaryV1:
         asset_id: str | None = None
         revision: int | None = None
-        candidate_id: str | None = None
         if isinstance(source, DevCurrentBufferSourceV1):
             asset_id = source.draft.asset_id
             revision = source.draft.revision
-        elif isinstance(source, DevSavedDraftSourceV1):
+        else:
             asset_id = source.asset_id
             revision = source.revision
-        else:
-            candidate_id = source.candidate_id
         return DevDebugLoadSummaryV1(
             source_kind=source.source_kind,
             asset_kind=source.asset_kind,
             debug_profile=debug_profile,
             asset_id=asset_id,
             revision=revision,
-            candidate_id=candidate_id,
             source_name=source_name,
             scenario_name=compiled.content.name,
             map_width=compiled.config.map_width,
@@ -664,40 +643,12 @@ class DevScenarioLoadService:
                         else draft.content.embedded_map.height
                     ),
                     execution_valid=validation.execution_valid,
-                    freeze_qualified=validation.freeze_qualified,
-                )
-            )
-        for reference in self._store.iter_candidate_references(asset_kind):
-            try:
-                candidate = self._store.load_candidate(
-                    asset_kind,
-                    reference.candidate_id,
-                )
-                if isinstance(candidate, DevScenarioCandidateV1):
-                    compiled = compile_dev_scenario(candidate)
-                    width = compiled.config.map_width
-                    height = compiled.config.map_height
-                else:
-                    width = candidate.content.width
-                    height = candidate.content.height
-            except DevAssetStoreError, DevAuthoringValidationError, ValueError:
-                continue
-            summaries.append(
-                DevAssetSummaryV1(
-                    asset_kind=asset_kind,
-                    source_kind="candidate",
-                    candidate_id=reference.candidate_id,
-                    name=candidate.content.name,
-                    map_width=width,
-                    map_height=height,
-                    execution_valid=True,
-                    freeze_qualified=True,
                 )
             )
         return tuple(summaries)
 
     def discover(self) -> tuple[DevAssetSummaryV1, ...]:
-        """Return exact valid saved/candidate maps and scenarios for Combat."""
+        """Return exact valid saved maps and scenarios for Combat."""
         return self.list_persisted("scenario") + self.list_persisted("map")
 
 
@@ -708,11 +659,9 @@ class DevClientAuthoringBinding:
         self,
         store: DevAssetStore,
         *,
-        code_revision: CodeRevisionV1,
         scenario_loader: DevScenarioLoadService | None = None,
     ) -> None:
         self._store = store
-        self._code_revision = code_revision
         self._lock = Lock()
         self._scenario_loader = (
             DevScenarioLoadService(store)
@@ -727,14 +676,12 @@ class DevClientAuthoringBinding:
     def _load_persisted(
         self,
         source: DevPersistedSourceV1,
-    ) -> DevDraftPayload | DevCandidatePayload:
-        if isinstance(source, DevSavedDraftSourceV1):
-            return self._store.load_draft(
-                source.asset_kind,
-                source.asset_id,
-                revision=source.revision,
-            )
-        return self._store.load_candidate(source.asset_kind, source.candidate_id)
+    ) -> DevDraftPayload:
+        return self._store.load_draft(
+            source.asset_kind,
+            source.asset_id,
+            revision=source.revision,
+        )
 
     def _list_assets(
         self,
@@ -764,10 +711,10 @@ class DevClientAuthoringBinding:
             raise AssertionError("validated nonblank creation requires a source")
         source = self._load_persisted(command.source)
         if command.creation_mode == "copy_saved_map":
-            if not isinstance(source, (DevMapDraftV1, DevMapCandidateV1)):
+            if not isinstance(source, DevMapDraftV1):
                 raise TypeError("copy_saved_map resolved a non-map source")
             return new_scenario_draft(command.asset_id, source_map=source)
-        if not isinstance(source, (DevScenarioDraftV1, DevScenarioCandidateV1)):
+        if not isinstance(source, DevScenarioDraftV1):
             raise TypeError("duplicate_saved_scenario resolved a non-scenario source")
         return duplicate_scenario_draft(source, asset_id=command.asset_id)
 
@@ -809,17 +756,11 @@ class DevClientAuthoringBinding:
                 )
             if isinstance(command, DevOpenCommandV1):
                 opened = self._load_persisted(command.source)
-                if isinstance(opened, (DevMapDraftV1, DevScenarioDraftV1)):
-                    return DevAuthoringCommandResponseV1(
-                        ok=True,
-                        command_type=command.command_type,
-                        draft=opened,
-                        validation=_validation_summary(opened),
-                    )
                 return DevAuthoringCommandResponseV1(
                     ok=True,
                     command_type=command.command_type,
-                    candidate=opened,
+                    draft=opened,
+                    validation=_validation_summary(opened),
                 )
             if isinstance(command, DevSaveCommandV1):
                 saved = self._store.save_draft(
@@ -852,22 +793,21 @@ class DevClientAuthoringBinding:
                     validation=validation,
                     problems=validation.problems,
                 )
-            if isinstance(command, DevFreezeCommandV1):
-                candidate: DevCandidatePayload
-                if isinstance(command.draft, DevMapDraftV1):
-                    candidate = self._store.freeze_map(
-                        command.draft,
-                        code_revision=self._code_revision,
-                    )
-                else:
-                    candidate = self._store.freeze_scenario(
-                        command.draft,
-                        code_revision=self._code_revision,
-                    )
+            if isinstance(command, DevDeleteCommandV1):
+                deleted = self._store.delete_draft(
+                    command.source.asset_kind,
+                    command.source.asset_id,
+                    expected_revision=command.source.revision,
+                )
                 return DevAuthoringCommandResponseV1(
                     ok=True,
                     command_type=command.command_type,
-                    candidate=candidate,
+                    deleted=DevDeletedAssetSummaryV1(
+                        asset_kind=command.source.asset_kind,
+                        asset_id=command.source.asset_id,
+                        latest_revision=command.source.revision,
+                        deleted_revision_count=len(deleted),
+                    ),
                 )
             attempt = self._scenario_loader.load(command.source)
             return DevAuthoringCommandResponseV1(
@@ -886,7 +826,11 @@ class DevClientAuthoringBinding:
             problem = _service_problem(
                 "draft-revision-conflict",
                 str(error),
-                field_path="expected_revision",
+                field_path=(
+                    "source.revision"
+                    if isinstance(command, DevDeleteCommandV1)
+                    else "expected_revision"
+                ),
             )
         except DevAssetAlreadyExistsError as error:
             problem = _service_problem("asset-already-exists", str(error))
@@ -919,12 +863,12 @@ __all__ = [
     "DevAuthoringCommandRequestV1",
     "DevAuthoringCommandResponseV1",
     "DevAuthoringCommandV1",
-    "DevCandidateSourceV1",
     "DevClientAuthoringBinding",
     "DevCurrentBufferSourceV1",
     "DevDebugAssetSourceV1",
     "DevDebugLoadSummaryV1",
-    "DevFreezeCommandV1",
+    "DevDeleteCommandV1",
+    "DevDeletedAssetSummaryV1",
     "DevListCommandV1",
     "DevNewMapCommandV1",
     "DevNewScenarioCommandV1",

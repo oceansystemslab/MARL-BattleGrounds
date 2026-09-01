@@ -118,6 +118,7 @@ def _authorized_pov_slots(session: DebuggerSession) -> set[int]:
         (ScenarioSwitchCommandV1(scenario_name="basic_support"), None),
         (
             SetCombatConfigurationCommandV1(
+                team_a_controller="scripted_tdm",
                 team_b_controller="scripted_tdm",
                 execution_information_mode="shared_obs",
             ),
@@ -163,6 +164,7 @@ def test_combat_configuration_command_is_exact_no_op_or_fresh_episode() -> None:
     unchanged = dispatch_command(
         session,
         SetCombatConfigurationCommandV1(
+            team_a_controller="manual",
             team_b_controller="manual",
             execution_information_mode="no_shared_obs",
         ),
@@ -173,7 +175,8 @@ def test_combat_configuration_command_is_exact_no_op_or_fresh_episode() -> None:
     changed = dispatch_command(
         session,
         SetCombatConfigurationCommandV1(
-            team_b_controller="scripted_tdm",
+            team_a_controller="scripted_tdm",
+            team_b_controller="manual",
             execution_information_mode="shared_obs",
         ),
         view_mode="researcher",
@@ -187,7 +190,8 @@ def test_combat_configuration_command_is_exact_no_op_or_fresh_episode() -> None:
     assert changed.changed
     assert changed.episode_restarted
     assert changed.session.run_generation == session.run_generation + 1
-    assert changed.session.team_b_controller == "scripted_tdm"
+    assert changed.session.team_a_controller == "scripted_tdm"
+    assert changed.session.team_b_controller == "manual"
     assert changed.session.evaluation_context.execution_information_mode == "shared_obs"
 
 

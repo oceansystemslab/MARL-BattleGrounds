@@ -16,7 +16,7 @@ from scripts.dev.visual_debugger.evaluation_bridge import (
 )
 from scripts.dev.visual_debugger.model import (
     DebuggerScenarioProvenance,
-    TeamBController,
+    TeamController,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
 
@@ -63,7 +63,8 @@ def _context(
     run_generation: int = 0,
     action_source_kind: DebuggerActionSourceKindV1 = "manual",
     capture_profile: DebuggerCaptureProfileV1 = "debug",
-    team_b_controller: TeamBController = "manual",
+    team_a_controller: TeamController = "manual",
+    team_b_controller: TeamController = "manual",
     execution_information_mode: ExecutionInformationMode = "no_shared_obs",
     scenario_name: str = "arena_5v5",
 ) -> EvaluationEpisodeContextV1:
@@ -75,6 +76,7 @@ def _context(
         config=config,
         run_generation=run_generation,
         action_source_kind=action_source_kind,
+        team_a_controller=team_a_controller,
         team_b_controller=team_b_controller,
         execution_information_mode=execution_information_mode,
     )
@@ -166,6 +168,7 @@ def test_context_is_custom_debug_no_shared_and_keeps_exact_cp2_bindings() -> Non
         "information_regime": "no_shared_obs",
         "scenario": "arena_5v5",
         "scenario_kind": "custom",
+        "team_a_controller": "manual",
         "team_b_controller": "manual",
         "tool": "visual_debugger",
     }
@@ -215,6 +218,83 @@ def test_mixed_action_source_assigns_manual_team_a_and_scripted_tdm_team_b() -> 
     assert {row.population_member_id for row in assigned} == {None}
 
 
+@pytest.mark.parametrize(
+    (
+        "team_a_controller",
+        "team_b_controller",
+        "action_source_kind",
+        "expected_policy_kinds",
+    ),
+    (
+        ("manual", "manual", "manual", ("manual",) * 10),
+        (
+            "scripted_tdm",
+            "manual",
+            "mixed",
+            ("scripted_tdm",) * 5 + ("manual",) * 5,
+        ),
+        (
+            "manual",
+            "scripted_tdm",
+            "mixed",
+            ("manual",) * 5 + ("scripted_tdm",) * 5,
+        ),
+        ("scripted_tdm", "scripted_tdm", "scripted", ("scripted_tdm",) * 10),
+    ),
+)
+def test_interactive_controller_pairs_have_truthful_per_slot_provenance(
+    team_a_controller: TeamController,
+    team_b_controller: TeamController,
+    action_source_kind: DebuggerActionSourceKindV1,
+    expected_policy_kinds: tuple[str, ...],
+) -> None:
+    context = _context(
+        action_source_kind=action_source_kind,
+        team_a_controller=team_a_controller,
+        team_b_controller=team_b_controller,
+    )
+    assigned = tuple(
+        row
+        for row in context.policy_assignments
+        if isinstance(row, AssignedPolicySlotV1)
+    )
+    aggregation = {row.name: row.value for row in context.aggregation_keys}
+
+    assert tuple(row.policy_kind for row in assigned) == expected_policy_kinds
+    assert aggregation["action_source"] == action_source_kind
+    assert aggregation["team_a_controller"] == team_a_controller
+    assert aggregation["team_b_controller"] == team_b_controller
+    assert tuple(row.algorithm_id for row in assigned) == tuple(
+        "canonical-scripted-team-deathmatch"
+        if policy_kind == "scripted_tdm"
+        else "not_applicable"
+        for policy_kind in expected_policy_kinds
+    )
+    assert tuple(row.execution_mode for row in assigned) == tuple(
+        "stochastic" if policy_kind == "scripted_tdm" else "deterministic"
+        for policy_kind in expected_policy_kinds
+    )
+
+
+def test_scripted_team_identity_changes_the_action_contract_identity() -> None:
+    scripted_team_a = _context(
+        action_source_kind="mixed",
+        team_a_controller="scripted_tdm",
+        team_b_controller="manual",
+    )
+    scripted_team_b = _context(
+        action_source_kind="mixed",
+        team_a_controller="manual",
+        team_b_controller="scripted_tdm",
+    )
+
+    assert scripted_team_a.identity.evaluation_id != (
+        scripted_team_b.identity.evaluation_id
+    )
+    assert scripted_team_a.identity.matchup_id != scripted_team_b.identity.matchup_id
+    assert scripted_team_a.identity.episode_id != scripted_team_b.identity.episode_id
+
+
 def test_context_identities_join_config_scenario_action_code_and_generation() -> None:
     scenario = get_scenario("arena_5v5")
     config, _state = scenario.build_scenario()
@@ -225,6 +305,7 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         config=config,
         run_generation=0,
         action_source_kind="mixed",
+        team_a_controller="manual",
         team_b_controller="scripted_tdm",
         execution_information_mode="no_shared_obs",
     )
@@ -234,6 +315,7 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         config=config,
         run_generation=0,
         action_source_kind="mixed",
+        team_a_controller="manual",
         team_b_controller="scripted_tdm",
         execution_information_mode="no_shared_obs",
     )
@@ -243,6 +325,7 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         config=config,
         run_generation=1,
         action_source_kind="mixed",
+        team_a_controller="manual",
         team_b_controller="scripted_tdm",
         execution_information_mode="no_shared_obs",
     )
@@ -252,6 +335,7 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         config=config,
         run_generation=0,
         action_source_kind="manual",
+        team_a_controller="manual",
         team_b_controller="manual",
         execution_information_mode="no_shared_obs",
     )
@@ -262,6 +346,7 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         config=scaled_config,
         run_generation=0,
         action_source_kind="mixed",
+        team_a_controller="manual",
         team_b_controller="scripted_tdm",
         execution_information_mode="no_shared_obs",
     )
@@ -273,6 +358,7 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         config=other_config,
         run_generation=0,
         action_source_kind="scripted",
+        team_a_controller="manual",
         team_b_controller="manual",
         execution_information_mode="no_shared_obs",
     )
@@ -348,8 +434,8 @@ def test_authored_team_deathmatch_uses_independent_task_map_and_scenario_identit
         name="authored-tdm",
         build_scenario=lambda: (tdm_config, state),
         provenance=DebuggerScenarioProvenance(
-            source_kind="candidate",
-            source_identity="candidate:" + "a" * 64,
+            source_kind="saved_draft",
+            source_identity="saved_draft:scenario:arena:r1",
             scenario_semantic_digest="b" * 64,
             map_semantic_digest="c" * 64,
             resolved_configuration_digest="d" * 64,
@@ -362,6 +448,7 @@ def test_authored_team_deathmatch_uses_independent_task_map_and_scenario_identit
         config=tdm_config,
         run_generation=0,
         action_source_kind="mixed",
+        team_a_controller="manual",
         team_b_controller="scripted_tdm",
         execution_information_mode="shared_obs",
     )
@@ -383,6 +470,7 @@ def test_context_captures_the_authored_initial_frame_through_public_cp2_api() ->
         config=config,
         run_generation=0,
         action_source_kind="scripted",
+        team_a_controller="manual",
         team_b_controller="manual",
         execution_information_mode="no_shared_obs",
     )
@@ -415,6 +503,7 @@ def test_context_rejects_invalid_horizon_generation_source_and_focal_slot() -> N
             config=config,
             run_generation=True,  # type: ignore[arg-type]
             action_source_kind="mixed",
+            team_a_controller="manual",
             team_b_controller="scripted_tdm",
             execution_information_mode="no_shared_obs",
         )
@@ -425,6 +514,7 @@ def test_context_rejects_invalid_horizon_generation_source_and_focal_slot() -> N
             config=config,
             run_generation=0,
             action_source_kind="mixed",
+            team_a_controller="manual",
             team_b_controller="scripted_tdm",
             execution_information_mode="no_shared_obs",
             expected_horizon=config.max_steps + 1,
@@ -436,6 +526,7 @@ def test_context_rejects_invalid_horizon_generation_source_and_focal_slot() -> N
             config=config,
             run_generation=0,
             action_source_kind="policy",  # type: ignore[arg-type]
+            team_a_controller="manual",
             team_b_controller="scripted_tdm",
             execution_information_mode="no_shared_obs",
         )
@@ -449,6 +540,7 @@ def test_context_rejects_invalid_horizon_generation_source_and_focal_slot() -> N
             config=sparse_config,
             run_generation=0,
             action_source_kind="scripted",
+            team_a_controller="manual",
             team_b_controller="manual",
             execution_information_mode="no_shared_obs",
         )

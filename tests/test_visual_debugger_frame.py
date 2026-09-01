@@ -105,6 +105,7 @@ def test_shared_obs_pov_frame_is_projection_free_and_identity_bound() -> None:
     assert frame.recipient_frame_id == f"{local_prefix}:frame:0"
     assert frame.incoming_recipient_transition_id is None
     assert frame.pending_submission_scope == "joint_turn"
+    assert frame.combat_configuration.team_a_controller == "manual"
     assert frame.combat_configuration.team_b_controller == "manual"
     assert frame.combat_configuration.execution_information_mode == "shared_obs"
     payload = frame.model_dump(mode="json")
@@ -132,6 +133,7 @@ def test_no_shared_policy_projection_stays_v2_across_visual_v1_adapter() -> None
         session.evaluation_context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V2
     )
     assert type(frame) is ActorPovLiveDebuggerFrameV2
+    assert frame.combat_configuration.team_a_controller == "manual"
     assert frame.combat_configuration.team_b_controller == "manual"
     assert frame.combat_configuration.execution_information_mode == "no_shared_obs"
 

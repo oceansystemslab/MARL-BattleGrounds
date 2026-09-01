@@ -40,11 +40,10 @@ type ArmOrigin = Literal["automatic", "explicit"]
 type ScenarioMode = Literal["interactive", "scripted"]
 type ScenarioAudience = Literal["researcher", "stress"]
 type SubmissionKind = Literal["interactive", "scripted"]
-type TeamBController = Literal["manual", "scripted_tdm"]
+type TeamController = Literal["manual", "scripted_tdm"]
 type ScenarioSourceKind = Literal[
     "current_buffer",
     "saved_draft",
-    "candidate",
 ]
 
 
@@ -158,7 +157,7 @@ class DebuggerScenarioProvenance:
     resolved_initial_state_digest: str
 
     def __post_init__(self) -> None:
-        if self.source_kind not in ("current_buffer", "saved_draft", "candidate"):
+        if self.source_kind not in ("current_buffer", "saved_draft"):
             raise ValueError("unknown authored scenario source kind.")
         if not self.source_identity:
             raise ValueError("source_identity must be nonempty.")
@@ -242,7 +241,8 @@ class DebuggerSession:
     status_source_evidence_state: StatusSourceEvidenceStateV2
     last_submission_kind: SubmissionKind | None
     last_report_actor_slots: tuple[int, ...]
-    team_b_controller: TeamBController
+    team_a_controller: TeamController
+    team_b_controller: TeamController
     controlled_global_slot: int
     pending_actions: tuple[PendingAction, ...]
     next_script_frame_index: int
@@ -258,6 +258,7 @@ class DebuggerSession:
     def __post_init__(self) -> None:
         from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
         from marl_battlegrounds.evaluation.models import (
+            AssignedPolicySlotV1,
             EvaluationEpisodeContextV1,
             EvaluationFrameV1,
         )
@@ -381,8 +382,57 @@ class DebuggerSession:
             _validate_slot(actor_slot, name="last_report_actor_slot")
             if not self.evaluation_context.roster[actor_slot].configured_active:
                 raise ValueError("last report actor slots must be configured active.")
+        if self.team_a_controller not in ("manual", "scripted_tdm"):
+            raise ValueError("team_a_controller must be manual or scripted_tdm.")
         if self.team_b_controller not in ("manual", "scripted_tdm"):
             raise ValueError("team_b_controller must be manual or scripted_tdm.")
+        if self.scenario.mode == "scripted":
+            if self.team_a_controller != "manual" or self.team_b_controller != "manual":
+                raise ValueError(
+                    "registered scripted scenarios do not use interactive team "
+                    "controllers."
+                )
+        else:
+            expected_action_source = (
+                "manual"
+                if self.team_a_controller == self.team_b_controller == "manual"
+                else "scripted"
+                if self.team_a_controller == self.team_b_controller == "scripted_tdm"
+                else "mixed"
+            )
+            expected_aggregation = {
+                "action_source": expected_action_source,
+                "team_a_controller": self.team_a_controller,
+                "team_b_controller": self.team_b_controller,
+            }
+            for name, expected in expected_aggregation.items():
+                values = tuple(
+                    row.value
+                    for row in self.evaluation_context.aggregation_keys
+                    if row.name == name
+                )
+                if values != (expected,):
+                    raise ValueError(
+                        f"session {name} must join its evaluation context."
+                    )
+            team_a_id = roster[0].configured_team_id
+            for slot, roster_row in enumerate(roster):
+                if not roster_row.configured_active:
+                    continue
+                assignment = self.evaluation_context.policy_assignments[slot]
+                expected_policy_kind = (
+                    self.team_a_controller
+                    if roster_row.configured_team_id == team_a_id
+                    else self.team_b_controller
+                )
+                if (
+                    not isinstance(assignment, AssignedPolicySlotV1)
+                    or assignment.policy_kind != expected_policy_kind
+                ):
+                    raise ValueError(
+                        "session team controllers must join every active policy "
+                        "assignment."
+                    )
         evidence_state = self.status_source_evidence_state
         if type(evidence_state) is not StatusSourceEvidenceStateV2:
             raise TypeError("status_source_evidence_state must be the exact V2 state.")

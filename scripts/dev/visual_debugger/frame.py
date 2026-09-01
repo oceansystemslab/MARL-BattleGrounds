@@ -145,8 +145,9 @@ def _terminal_state(session: DebuggerSession) -> TerminalStateV2:
 
 
 def _combat_configuration(session: DebuggerSession) -> CombatConfigurationV1:
-    """Expose the two episode-replacing settings from their sole authorities."""
+    """Expose the episode-replacing settings from their sole authorities."""
     return CombatConfigurationV1(
+        team_a_controller=session.team_a_controller,
         team_b_controller=session.team_b_controller,
         execution_information_mode=(
             session.evaluation_context.execution_information_mode

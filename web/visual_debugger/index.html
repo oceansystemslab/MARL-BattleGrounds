@@ -78,8 +78,9 @@
         <button id="devclient-scenario-load" type="button" disabled>Load</button>
         <label>
           <span>Team A controller</span>
-          <select id="devclient-team-a-controller" disabled>
-            <option value="manual">Manual</option>
+          <select id="devclient-team-a-controller">
+            <option value="manual" selected>Manual</option>
+            <option value="scripted_tdm">Scripted TDM</option>
           </select>
         </label>
         <label>
@@ -601,6 +602,14 @@
               <option value="">No saved map drafts</option>
             </select>
           </label>
+          <button
+            id="authoring-delete-saved"
+            class="button--danger"
+            type="button"
+            disabled
+          >
+            Delete Saved
+          </button>
           <label id="authoring-new-scenario-choice" hidden>
             <span>New scenario from</span>
             <select id="authoring-new-scenario-mode">
@@ -620,7 +629,6 @@
           <button id="authoring-save" type="button">Save</button>
           <button id="authoring-save-as" type="button">Save As</button>
           <button id="authoring-validate" type="button">Validate</button>
-          <button id="authoring-freeze" type="button">Freeze Candidate</button>
           <button id="authoring-open-debug" class="button--primary" type="button">
             Open in Debug
           </button>

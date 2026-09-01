@@ -1,5 +1,6 @@
 import {
   authoringKind,
+  authoringObstacleDisplayName,
   mapContent,
   selectedAuthoringObject,
 } from "./authoring-model.js";
@@ -340,6 +341,7 @@ function renderObject(form, draft, object, catalog, validation) {
     );
     const path = [...mapPath, "obstacles", index];
     const fields = [
+      field("Name", [...path, "name"], authoringObstacleDisplayName(object.obstacle)),
       field("Object ID", null, object.object_id, { readonly: true }),
       field("Center X", [...path, "center_x"], object.x, {
         type: "number",

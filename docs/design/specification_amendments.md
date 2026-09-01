@@ -1402,3 +1402,60 @@ saved-asset selectors, and save/freeze location feedback are browser
 presentation and workflow concerns only. Editable numeric values, persisted
 content, simulator mechanics, Replay behavior, and evaluation semantics remain
 exact and unchanged.
+
+## A22. Minimal saved-asset and symmetric-controller workflow
+
+**Classification:** approved private pre-alpha product-workflow simplification.
+**Supersedes:** A16, A20, and A21 only where they require a DevClient candidate,
+Freeze, freeze qualification, owner-promotion stage, promoted source, or
+Team-A-manual-only Combat configuration. It preserves their authoring/compiler,
+map-copy, scenario-content, in-memory snapshot, Replay-separation, and future
+evaluation boundaries.
+
+An exact revisioned Save is the sole DevClient content-persistence operation.
+Save and Save As atomically create immutable numbered revisions under the
+existing ignored map or scenario asset identity; an exact revision may be
+reopened, copied into a scenario, loaded into Combat, or supplied as a
+deterministic map preview source immediately. The revision fence remains an
+invisible concurrency guard so stale browser state cannot overwrite or delete
+newer work.
+The DevClient has no Freeze command, freeze-qualified state, candidate schema,
+candidate storage, candidate source, promotion command, promotion wrapper, or
+tracked-configuration publication path. No renamed or hidden equivalent is
+authorized.
+
+Both authoring areas expose one confirmed saved-asset deletion. Deletion names
+the exact map or scenario identity and expected latest revision, then removes
+all saved revisions for that identity. Cancellation changes nothing; a missing,
+stale, unsafe, symlinked, or malformed target fails closed. Successful deletion
+refreshes Map, Scenario, scenario-source, and Combat discovery. If the deleted
+asset is open, its current browser content remains an unsaved recovery copy;
+an already loaded immutable Combat snapshot remains runnable and resettable.
+Deletion never reaches outside the fixed ignored DevClient draft roots.
+
+Each obstacle retains one immutable, unique structural object ID for joins,
+selection, ordering, dragging, and linked validation. Its separate display name
+is editable, need not be unique, and falls back visually to that object ID when
+blank. Renaming changes neither semantic identity nor the obstacle's ordered
+fixed-slot position or geometry. Maps and embedded scenario maps use the same
+editor and validation behavior.
+
+Team A and Team B each select a controller from the same run-configuration
+boundary. V1 exposes `manual` and the existing scripted Team Deathmatch policy
+for either team. Both scripted teams choose actions from the same current
+decision epoch and still enter one joint action and one unchanged simulator
+step. Switching either team controller or SharedObs/NoSharedObs resets the exact
+loaded snapshot and seed. Scenario documents remain controller- and
+information-regime-independent. The selector contract may later admit real
+saved policy/controller identities, but this amendment does not invent policy
+storage, a plugin system, learned-policy loading, checkpoint semantics, or a
+generic controller registry now.
+
+Future training, experiment, or evaluation contracts may import an exact saved
+DevClient revision. Their owning manifest or pipeline must independently
+reopen, normalize, validate, content-address, approve, partition, and bind that
+content to its resolved scientific identities. A moving latest-revision alias,
+mutable browser buffer, filename, or successful Combat preview remains
+insufficient scientific evidence. This later lifecycle is not reintroduced as
+a DevClient promotion stage. Public evaluation roles and Replay contracts are
+unchanged.

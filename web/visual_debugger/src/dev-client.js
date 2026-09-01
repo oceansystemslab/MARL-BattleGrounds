@@ -44,13 +44,7 @@ if (
   installDevClient();
 }
 
-/**
- * General Open resumes mutable work. Frozen candidates remain available as
- * scenario-creation sources and through the Combat Debugger loader.
- *
- * @param {ReadonlyArray<Record<string, any>>} assets
- * @param {"map" | "scenario"} kind
- */
+/** @param {ReadonlyArray<Record<string, any>>} assets @param {"map" | "scenario"} kind */
 export function openableDraftAssets(assets, kind) {
   return assets.filter(
     (asset) => asset.asset_kind === kind && asset.source_kind === "saved_draft",
@@ -74,18 +68,15 @@ export function draftAfterAuthoringResponse(currentDraft, response) {
 
 /** @param {Readonly<Record<string, any>>} asset */
 export function persistedAuthoringSource(asset) {
-  return asset.source_kind === "candidate"
-    ? {
-        source_kind: "candidate",
-        asset_kind: asset.asset_kind,
-        candidate_id: asset.candidate_id,
-      }
-    : {
-        source_kind: "saved_draft",
-        asset_kind: asset.asset_kind,
-        asset_id: asset.asset_id,
-        revision: asset.revision,
-      };
+  if (asset.source_kind !== "saved_draft") {
+    throw new TypeError("DevClient sources must identify a saved draft revision.");
+  }
+  return {
+    source_kind: "saved_draft",
+    asset_kind: asset.asset_kind,
+    asset_id: asset.asset_id,
+    revision: asset.revision,
+  };
 }
 
 /** @param {Readonly<Record<string, any>>} asset */
@@ -106,38 +97,28 @@ export function newScenarioSourceAssets(assets, creationMode) {
         : null;
   return sourceKind === null
     ? []
-    : assets.filter((asset) => asset.asset_kind === sourceKind);
+    : assets.filter(
+        (asset) =>
+          asset.source_kind === "saved_draft" && asset.asset_kind === sourceKind,
+      );
 }
 
 /** @param {Readonly<Record<string, any>>} asset */
 export function authoringSourceOptionLabel(asset) {
-  const lifecycle =
-    asset.source_kind === "candidate"
-      ? `frozen candidate ${asset.candidate_id}`
-      : `saved ${asset.asset_id} revision ${asset.revision}`;
   const status = asset.execution_valid ? "execution-valid" : "needs validation fixes";
-  return `${asset.name} · ${lifecycle} · ${asset.map_width} × ${asset.map_height} · ${status}`;
+  return `${asset.name} · saved ${asset.asset_id} revision ${asset.revision} · ${asset.map_width} × ${asset.map_height} · ${status}`;
 }
 
 /** @param {Readonly<Record<string, any>>} asset */
 export function debugAssetOptionLabel(asset) {
-  const identity =
-    asset.source_kind === "candidate"
-      ? `candidate ${asset.candidate_id}`
-      : `saved ${asset.asset_id} revision ${asset.revision}`;
-  const status =
-    asset.source_kind === "candidate" ? "frozen · execution-valid" : "execution-valid";
+  const identity = `saved ${asset.asset_id} revision ${asset.revision}`;
   return asset.asset_kind === "map"
-    ? `Map preview · ${asset.name} · ${identity} · ${asset.map_width} × ${asset.map_height} · ${status} · default 5v5 TDM`
-    : `Scenario · ${asset.name} · ${identity} · ${asset.map_width} × ${asset.map_height} · ${status}`;
+    ? `Map preview · ${asset.name} · ${identity} · ${asset.map_width} × ${asset.map_height} · execution-valid · default 5v5 TDM`
+    : `Scenario · ${asset.name} · ${identity} · ${asset.map_width} × ${asset.map_height} · execution-valid`;
 }
 
-/**
- * @param {Record<string, any> | null} draft
- * @param {Record<string, any> | null} baseline
- * @param {{candidateId: string, content: Record<string, any>} | null} frozen
- */
-export function authoringPersistenceMessage(draft, baseline, frozen) {
+/** @param {Record<string, any> | null} draft @param {Record<string, any> | null} baseline */
+export function authoringPersistenceMessage(draft, baseline) {
   if (draft === null) {
     return "No authoring draft is open.";
   }
@@ -146,47 +127,50 @@ export function authoringPersistenceMessage(draft, baseline, frozen) {
   const currentContent = JSON.stringify(draft.content);
   const savedContent = baseline === null ? null : JSON.stringify(baseline);
   const savedPath = `artifacts/dev_client/drafts/${collection}/${draft.asset_id}/r${draft.revision}.json`;
-  let message;
   if (draft.revision === 0) {
-    message = `Unsaved ${kind} draft`;
-  } else if (savedContent !== currentContent) {
-    message = `Unsaved changes · last saved ${kind} ${draft.asset_id} revision ${draft.revision}`;
-  } else {
-    message = `Saved ${kind} ${draft.asset_id} · revision ${draft.revision} · ${savedPath}`;
+    return `Unsaved ${kind} draft`;
   }
-  if (frozen === null) {
-    return message;
+  if (savedContent !== currentContent) {
+    return `Unsaved changes · last saved ${kind} ${draft.asset_id} revision ${draft.revision}`;
   }
-  const candidatePath = `artifacts/dev_client/candidates/${kind}-${frozen.candidateId}.json`;
-  return JSON.stringify(frozen.content) === currentContent
-    ? `Frozen candidate ${frozen.candidateId} · ${candidatePath}`
-    : `${message} · Frozen candidate ${frozen.candidateId} · ${candidatePath} · preserves an earlier snapshot; current edits are not frozen`;
+  return `Saved ${kind} ${draft.asset_id} · revision ${draft.revision} · ${savedPath}`;
 }
 
 /**
- * Bind Freeze feedback to the exact browser snapshot submitted to the host.
- * The candidate content may be canonically float32-normalized, which does not
- * mean that the user edited the draft after freezing it.
+ * Preserve an open deleted asset as an ordinary unsaved recovery buffer.
+ * Deleting any other selected identity must not disturb the current editor.
  *
- * @param {Readonly<Record<string, any>> | null} response
- * @param {Record<string, any>} submittedContent
+ * @param {Record<string, any> | null} draft
+ * @param {Readonly<Record<string, any>>} source
  */
-export function frozenAuthoringRecord(response, submittedContent) {
-  const candidateId = response?.candidate?.candidate_id;
-  return response?.ok === true && typeof candidateId === "string"
-    ? {
-        candidateId,
-        content: cloneAuthoringValue(submittedContent),
-      }
-    : null;
+export function draftAfterSavedAssetDeletion(draft, source) {
+  if (
+    draft === null ||
+    source.source_kind !== "saved_draft" ||
+    source.asset_kind !== authoringKind(draft) ||
+    source.asset_id !== draft.asset_id
+  ) {
+    return draft;
+  }
+  const recovery = cloneAuthoringValue(draft);
+  recovery.asset_id =
+    source.asset_kind === "map" ? "untitled-map" : "untitled-scenario";
+  recovery.revision = 0;
+  return recovery;
+}
+
+/** @param {Readonly<Record<string, any>>} asset */
+export function savedAssetDeletionPrompt(asset) {
+  return `Permanently delete saved ${asset.asset_kind} "${asset.name}" (asset ID: ${asset.asset_id}) and all of its revisions? This cannot be undone.`;
 }
 
 /**
- * Keep the two Combat selectors as projections of installed host authority.
+ * Keep the Combat selectors as projections of installed host authority.
  * A browser change is an intent only: the controls snap back immediately and
  * move only after a successor frame confirms the requested configuration.
  *
  * @param {{
+ *   teamAController: {value: string, disabled: boolean},
  *   teamBController: {value: string, disabled: boolean},
  *   informationMode: {value: string, disabled: boolean},
  *   root: {dataset: Record<string, string | undefined>},
@@ -204,6 +188,8 @@ export function createCombatConfigurationController(bindings) {
     }
     const candidate = /** @type {Record<string, unknown>} */ (value);
     if (
+      (candidate.team_a_controller !== "manual" &&
+        candidate.team_a_controller !== "scripted_tdm") ||
       (candidate.team_b_controller !== "manual" &&
         candidate.team_b_controller !== "scripted_tdm") ||
       (candidate.execution_information_mode !== "shared_obs" &&
@@ -212,6 +198,7 @@ export function createCombatConfigurationController(bindings) {
       return null;
     }
     return Object.freeze({
+      team_a_controller: candidate.team_a_controller,
       team_b_controller: candidate.team_b_controller,
       execution_information_mode: candidate.execution_information_mode,
     });
@@ -219,13 +206,16 @@ export function createCombatConfigurationController(bindings) {
 
   function render() {
     const configuration = authoritative;
+    bindings.teamAController.disabled = configuration === null;
     bindings.teamBController.disabled = configuration === null;
     bindings.informationMode.disabled = configuration === null;
     if (configuration === null) {
       return;
     }
+    bindings.teamAController.value = configuration.team_a_controller;
     bindings.teamBController.value = configuration.team_b_controller;
     bindings.informationMode.value = configuration.execution_information_mode;
+    bindings.root.dataset.teamAController = configuration.team_a_controller;
     bindings.root.dataset.teamBController = configuration.team_b_controller;
     bindings.root.dataset.executionInformationMode =
       configuration.execution_information_mode;
@@ -244,6 +234,7 @@ export function createCombatConfigurationController(bindings) {
     },
     request() {
       const requested = normalize({
+        team_a_controller: bindings.teamAController.value,
         team_b_controller: bindings.teamBController.value,
         execution_information_mode: bindings.informationMode.value,
       });
@@ -251,7 +242,8 @@ export function createCombatConfigurationController(bindings) {
       if (
         requested === null ||
         authoritative === null ||
-        (requested.team_b_controller === authoritative.team_b_controller &&
+        (requested.team_a_controller === authoritative.team_a_controller &&
+          requested.team_b_controller === authoritative.team_b_controller &&
           requested.execution_information_mode ===
             authoritative.execution_information_mode)
       ) {
@@ -280,6 +272,7 @@ function installDevClient() {
     combatConfig: required("devclient-combat-config"),
     scenarioSelect: required("devclient-scenario-select"),
     scenarioLoad: required("devclient-scenario-load"),
+    teamAController: required("devclient-team-a-controller"),
     teamBController: required("devclient-team-b-controller"),
     informationMode: required("devclient-information-mode"),
     shell: required("authoring-shell"),
@@ -288,6 +281,7 @@ function installDevClient() {
     persistenceStatus: required("authoring-persistence-status"),
     savedDraftChoice: required("authoring-saved-draft-choice"),
     savedDraftSelect: required("authoring-saved-draft-select"),
+    deleteSavedButton: required("authoring-delete-saved"),
     newScenarioChoice: required("authoring-new-scenario-choice"),
     newScenarioMode: required("authoring-new-scenario-mode"),
     newScenarioSourceChoice: required("authoring-new-scenario-source-choice"),
@@ -297,7 +291,6 @@ function installDevClient() {
     saveButton: required("authoring-save"),
     saveAsButton: required("authoring-save-as"),
     validateButton: required("authoring-validate"),
-    freezeButton: required("authoring-freeze"),
     openDebugButton: required("authoring-open-debug"),
     palette: required("authoring-palette"),
     objectList: required("authoring-object-list"),
@@ -327,7 +320,6 @@ function installDevClient() {
       future: [],
       camera: null,
       openSourceValue: "",
-      frozen: null,
     };
   }
 
@@ -352,6 +344,7 @@ function installDevClient() {
     },
   };
   const combatConfiguration = createCombatConfigurationController({
+    teamAController: elements.teamAController,
     teamBController: elements.teamBController,
     informationMode: elements.informationMode,
     root: document.documentElement,
@@ -410,7 +403,6 @@ function installDevClient() {
         editor.past = [];
         editor.future = [];
         editor.camera = null;
-        editor.frozen = null;
       }
       if (
         newDocument ||
@@ -553,7 +545,7 @@ function installDevClient() {
     let source = null;
     if (creationMode !== "blank") {
       if (!elements.newScenarioSource.value) {
-        showLocalError("Choose a saved or frozen source for the new scenario.");
+        showLocalError("Choose a saved source for the new scenario.");
         return;
       }
       source = JSON.parse(elements.newScenarioSource.value);
@@ -653,7 +645,8 @@ function installDevClient() {
     const selected = elements.scenarioSelect.value;
     elements.scenarioSelect.replaceChildren(new Option("Built-in arena", ""));
     for (const asset of state.assets.filter(
-      (/** @type {any} */ candidate) => candidate.execution_valid,
+      (/** @type {any} */ candidate) =>
+        candidate.source_kind === "saved_draft" && candidate.execution_valid,
     )) {
       elements.scenarioSelect.append(
         new Option(
@@ -742,7 +735,6 @@ function installDevClient() {
     elements.persistenceStatus.textContent = authoringPersistenceMessage(
       state.editor.draft,
       state.editor.baseline,
-      state.editor.frozen,
     );
   }
 
@@ -784,11 +776,9 @@ function installDevClient() {
     if (state.editor.problems.length === 0) {
       const row = document.createElement("li");
       row.className = "empty-copy";
-      row.textContent = state.editor.validation?.freeze_qualified
-        ? "Execution-valid and freeze-qualified."
-        : state.editor.validation?.execution_valid
-          ? "Execution-valid."
-          : "Validate to inspect host-authoritative errors and warnings.";
+      row.textContent = state.editor.validation?.execution_valid
+        ? "Execution-valid."
+        : "Validate to inspect host-authoritative errors and warnings.";
       elements.problemList.append(row);
       return;
     }
@@ -854,6 +844,8 @@ function installDevClient() {
     elements.scenarioSelect.disabled = state.busy;
     elements.scenarioLoad.disabled = state.busy || !elements.scenarioSelect.value;
     elements.savedDraftSelect.disabled = state.busy || !elements.savedDraftSelect.value;
+    elements.deleteSavedButton.disabled =
+      state.busy || !elements.savedDraftSelect.value;
     elements.newScenarioMode.disabled = state.busy;
     elements.newScenarioSource.disabled =
       state.busy ||
@@ -873,8 +865,6 @@ function installDevClient() {
     elements.deleteButton.disabled = state.busy || !obstacle;
     elements.orderUpButton.disabled = state.busy || !obstacle;
     elements.orderDownButton.disabled = state.busy || !obstacle;
-    elements.freezeButton.disabled =
-      state.busy || !state.editor.validation?.freeze_qualified;
     elements.openDebugButton.disabled =
       state.busy || !state.editor.draft || !state.editor.validation?.execution_valid;
   }
@@ -941,7 +931,11 @@ function installDevClient() {
       void openInDebug(JSON.parse(elements.scenarioSelect.value));
     }
   });
-  for (const selector of [elements.teamBController, elements.informationMode]) {
+  for (const selector of [
+    elements.teamAController,
+    elements.teamBController,
+    elements.informationMode,
+  ]) {
     selector.addEventListener("change", () => {
       combatConfiguration.request();
     });
@@ -967,6 +961,46 @@ function installDevClient() {
       command_type: "open",
       source: JSON.parse(elements.savedDraftSelect.value),
     });
+  });
+  elements.deleteSavedButton.addEventListener("click", async () => {
+    if (state.busy || !elements.savedDraftSelect.value) {
+      return;
+    }
+    const source = JSON.parse(elements.savedDraftSelect.value);
+    const asset = state.assets.find(
+      (/** @type {any} */ candidate) =>
+        candidate.source_kind === "saved_draft" &&
+        candidate.asset_kind === source.asset_kind &&
+        candidate.asset_id === source.asset_id &&
+        candidate.revision === source.revision,
+    );
+    if (!asset) {
+      showLocalError("The selected saved asset is no longer available.");
+      return;
+    }
+    if (!window.confirm(savedAssetDeletionPrompt(asset))) {
+      return;
+    }
+    const editor = state.editor;
+    const response = await send({ command_type: "delete", source }, editor);
+    if (!response?.ok) {
+      return;
+    }
+    state.assets = state.assets.filter(
+      (/** @type {any} */ candidate) =>
+        !(
+          candidate.source_kind === "saved_draft" &&
+          candidate.asset_kind === source.asset_kind &&
+          candidate.asset_id === source.asset_id
+        ),
+    );
+    const recovery = draftAfterSavedAssetDeletion(editor.draft, source);
+    if (recovery !== editor.draft) {
+      editor.draft = recovery;
+      editor.baseline = authoringContentSnapshot(recovery);
+      editor.openSourceValue = "";
+    }
+    renderAll();
   });
   elements.saveButton.addEventListener("click", async () => {
     const draft = state.editor.draft;
@@ -1003,22 +1037,6 @@ function installDevClient() {
   elements.validateButton.addEventListener("click", () => {
     if (!state.busy) {
       void validateDraft();
-    }
-  });
-  elements.freezeButton.addEventListener("click", async () => {
-    if (!state.busy && state.editor.draft) {
-      const editor = state.editor;
-      const submittedContent = authoringContentSnapshot(editor.draft);
-      const response = await send({
-        command_type: "freeze",
-        draft: editor.draft,
-      });
-      const frozen = frozenAuthoringRecord(response, submittedContent);
-      if (frozen !== null) {
-        editor.frozen = frozen;
-        renderAll();
-        await refreshAssets();
-      }
     }
   });
   elements.openDebugButton.addEventListener("click", async () => {

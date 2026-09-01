@@ -2,42 +2,31 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
+import stat
 import tempfile
+from collections.abc import Generator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ValidationError
 
-from marl_battlegrounds.evaluation.models import CodeRevisionV1, canonical_digest_sha256
-from scripts.dev.visual_debugger.authoring_compiler import (
-    DevAuthoringValidationError,
-    compile_dev_map,
-    compile_dev_scenario,
-    map_semantic_digest,
-    scenario_semantic_digest,
-)
 from scripts.dev.visual_debugger.authoring_models import (
     MAX_DEV_ASSET_SEQUENCE,
     DevAuthoringProblemV1,
-    DevCandidateCompileEvidenceV1,
-    DevMapCandidateV1,
     DevMapDraftV1,
-    DevPromotedAssetV1,
-    DevScenarioCandidateV1,
     DevScenarioDraftV1,
     SafeAssetId,
 )
 
-_DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _ASSET_ID_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 
 type DevAssetKind = Literal["map", "scenario"]
 type DevDraft = DevMapDraftV1 | DevScenarioDraftV1
-type DevCandidate = DevMapCandidateV1 | DevScenarioCandidateV1
-_ASSET_KINDS: tuple[DevAssetKind, ...] = ("map", "scenario")
 
 
 class DevAssetStoreError(ValueError):
@@ -53,7 +42,7 @@ class DevAssetNotFoundError(DevAssetStoreError):
 
 
 class DevAssetIntegrityError(DevAssetStoreError):
-    """Persisted content failed strict parsing, digest, or compile evidence."""
+    """Persisted content or its fixed-root storage failed strict validation."""
 
     def __init__(
         self,
@@ -76,12 +65,6 @@ class DevDraftReferenceV1:
     revision: int
 
 
-@dataclass(frozen=True, slots=True)
-class DevCandidateReferenceV1:
-    asset_kind: DevAssetKind
-    candidate_id: str
-
-
 def _validate_asset_id(value: str) -> str:
     if (
         type(value) is not str
@@ -89,12 +72,6 @@ def _validate_asset_id(value: str) -> str:
         or _ASSET_ID_PATTERN.fullmatch(value) is None
     ):
         raise ValueError("asset_id must be a safe lowercase kebab-case identifier")
-    return value
-
-
-def _validate_digest(value: str) -> str:
-    if type(value) is not str or _DIGEST_PATTERN.fullmatch(value) is None:
-        raise ValueError("candidate_id must be a lowercase SHA-256 digest")
     return value
 
 
@@ -121,20 +98,23 @@ def _serialized(model: BaseModel) -> bytes:
     ).encode("utf-8")
 
 
-def _candidate_content_digest(
-    kind: DevAssetKind,
-    *,
-    content: BaseModel,
-    evidence: DevCandidateCompileEvidenceV1,
-) -> str:
-    """Content-address candidate bytes independently from semantic identity."""
-    return canonical_digest_sha256(
-        {
-            "schema": f"dev-{kind}-candidate-content@1",
-            "content": content.model_dump(mode="json", by_alias=True),
-            "evidence": evidence.model_dump(mode="json", by_alias=True),
-        }
+def _write_no_clobber_at(
+    directory_descriptor: int,
+    name: str,
+    payload: bytes,
+) -> None:
+    """Restore one regular file through an already verified directory handle."""
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(
+        name,
+        flags,
+        0o600,
+        dir_fd=directory_descriptor,
     )
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 def _guard_store_path(root: Path, path: Path) -> Path:
@@ -196,14 +176,13 @@ def _atomic_no_clobber(root: Path, path: Path, payload: bytes) -> None:
 
 
 class DevAssetStore:
-    """Own ignored drafts/candidates and tracked promotion destinations."""
+    """Own revisioned ignored DevClient map and scenario drafts."""
 
     def __init__(
         self,
         repository_root: Path,
         *,
         artifact_root: Path | None = None,
-        configs_root: Path | None = None,
     ) -> None:
         root = repository_root.resolve(strict=True)
         if not root.is_dir():
@@ -214,19 +193,88 @@ class DevAssetStore:
             if artifact_root is None
             else artifact_root.resolve(strict=False)
         )
-        self._configs_root = (
-            root / "configs"
-            if configs_root is None
-            else configs_root.resolve(strict=False)
-        )
 
     @property
     def artifact_root(self) -> Path:
         return self._artifact_root
 
-    @property
-    def configs_root(self) -> Path:
-        return self._configs_root
+    @contextmanager
+    def _exclusive_store_lock(self) -> Generator[None]:
+        """Serialize mutating asset operations across live DevClient processes."""
+        path = _guard_store_path(
+            self._artifact_root,
+            self._artifact_root / "drafts" / ".store.lock",
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _guard_store_path(self._artifact_root, path)
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags, 0o600)
+        except OSError as error:
+            raise DevAssetIntegrityError(
+                "persistence lock could not be opened safely"
+            ) from error
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise DevAssetIntegrityError("persistence lock must be a regular file")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+    def _revision_fence_directory(
+        self,
+        kind: DevAssetKind,
+        asset_id: str,
+    ) -> Path:
+        safe_id = _validate_asset_id(asset_id)
+        collection = "maps" if kind == "map" else "scenarios"
+        return _guard_store_path(
+            self._artifact_root,
+            self._artifact_root / "drafts" / ".revision_fences" / collection / safe_id,
+        )
+
+    def _latest_revision_fence(
+        self,
+        kind: DevAssetKind,
+        asset_id: str,
+    ) -> int | None:
+        directory = self._revision_fence_directory(kind, asset_id)
+        if not directory.exists():
+            return None
+        if not directory.is_dir():
+            raise DevAssetIntegrityError(
+                "saved revision fence path must be a directory"
+            )
+        revisions: list[int] = []
+        for path in directory.iterdir():
+            _guard_store_path(self._artifact_root, path)
+            metadata = path.lstat()
+            match = re.fullmatch(r"r([1-9][0-9]*)\.fence", path.name)
+            if not stat.S_ISREG(metadata.st_mode) or match is None:
+                raise DevAssetIntegrityError(
+                    "saved revision fence contains an unexpected entry"
+                )
+            revision = int(match.group(1))
+            if revision > MAX_DEV_ASSET_SEQUENCE:
+                raise DevAssetIntegrityError(
+                    "saved revision fence exceeds the supported range"
+                )
+            revisions.append(revision)
+        return max(revisions, default=None)
+
+    def _record_revision_fence(
+        self,
+        kind: DevAssetKind,
+        asset_id: str,
+        revision: int,
+    ) -> None:
+        latest = self._latest_revision_fence(kind, asset_id)
+        if latest is not None and latest >= revision:
+            return
+        path = self._revision_fence_directory(kind, asset_id) / f"r{revision}.fence"
+        _atomic_no_clobber(self._artifact_root, path, b"")
 
     def _draft_directory(self, kind: DevAssetKind, asset_id: str) -> Path:
         safe_id = _validate_asset_id(asset_id)
@@ -245,28 +293,6 @@ class DevAssetStore:
         if type(revision) is not int or not 1 <= revision <= MAX_DEV_ASSET_SEQUENCE:
             raise ValueError("saved draft revision must be a positive 32-bit integer")
         return self._draft_directory(kind, asset_id) / f"r{revision}.json"
-
-    def _candidate_path(self, kind: DevAssetKind, candidate_id: str) -> Path:
-        digest = _validate_digest(candidate_id)
-        return _guard_store_path(
-            self._artifact_root,
-            self._artifact_root / "candidates" / f"{kind}-{digest}.json",
-        )
-
-    def _promotion_path(
-        self,
-        kind: DevAssetKind,
-        asset_id: str,
-        version: int,
-    ) -> Path:
-        safe_id = _validate_asset_id(asset_id)
-        if type(version) is not int or not 1 <= version <= MAX_DEV_ASSET_SEQUENCE:
-            raise ValueError("version must be a positive 32-bit integer")
-        collection = "maps" if kind == "map" else "scenarios"
-        return _guard_store_path(
-            self._configs_root,
-            self._configs_root / collection / safe_id / f"v{version}.json",
-        )
 
     @staticmethod
     def _latest_revision(root: Path, directory: Path) -> int | None:
@@ -288,6 +314,19 @@ class DevAssetStore:
         expected_revision: int,
     ) -> DevDraft:
         """Atomically save the next whole revision or fail on stale state."""
+        with self._exclusive_store_lock():
+            return self._save_draft_locked(
+                draft,
+                expected_revision=expected_revision,
+            )
+
+    def _save_draft_locked(
+        self,
+        draft: DevDraft,
+        *,
+        expected_revision: int,
+        allow_deleted_identity_reuse: bool = False,
+    ) -> DevDraft:
         if (
             type(expected_revision) is not int
             or not 0 <= expected_revision < MAX_DEV_ASSET_SEQUENCE
@@ -299,7 +338,17 @@ class DevAssetStore:
         kind: DevAssetKind = "map" if isinstance(draft, DevMapDraftV1) else "scenario"
         directory = self._draft_directory(kind, draft.asset_id)
         latest = self._latest_revision(self._artifact_root, directory)
-        observed_revision = 0 if latest is None else latest
+        fenced = self._latest_revision_fence(kind, draft.asset_id)
+        if latest is None and fenced is not None and not allow_deleted_identity_reuse:
+            raise DevDraftRevisionConflictError(
+                f"deleted {kind} draft {draft.asset_id!r} must be recreated "
+                "through Save As"
+            )
+        if latest is not None and fenced is not None and fenced > latest:
+            raise DevAssetIntegrityError(
+                "saved revision fence is newer than persisted asset content"
+            )
+        observed_revision = max(latest or 0, fenced or 0)
         if (
             observed_revision != expected_revision
             or draft.revision != expected_revision
@@ -311,6 +360,7 @@ class DevAssetStore:
         saved = draft.model_copy(update={"revision": expected_revision + 1})
         path = self._draft_path(kind, saved.asset_id, saved.revision)
         _atomic_no_clobber(self._artifact_root, path, _serialized(saved))
+        self._record_revision_fence(kind, saved.asset_id, saved.revision)
         return saved
 
     def save_draft_as(
@@ -319,21 +369,31 @@ class DevAssetStore:
         *,
         asset_id: SafeAssetId,
     ) -> DevDraft:
-        """Create revision one under a new safe identity without overwriting."""
-        _validate_asset_id(asset_id)
-        kind: DevAssetKind = "map" if isinstance(draft, DevMapDraftV1) else "scenario"
-        if (
-            self._latest_revision(
-                self._artifact_root,
-                self._draft_directory(kind, asset_id),
+        """Create the next safe revision under a new identity without overwriting."""
+        with self._exclusive_store_lock():
+            _validate_asset_id(asset_id)
+            kind: DevAssetKind = (
+                "map" if isinstance(draft, DevMapDraftV1) else "scenario"
             )
-            is not None
-        ):
-            raise DevAssetAlreadyExistsError(
-                f"{kind} draft {asset_id!r} already exists"
+            if (
+                self._latest_revision(
+                    self._artifact_root,
+                    self._draft_directory(kind, asset_id),
+                )
+                is not None
+            ):
+                raise DevAssetAlreadyExistsError(
+                    f"{kind} draft {asset_id!r} already exists"
+                )
+            previous_revision = self._latest_revision_fence(kind, asset_id) or 0
+            copied = draft.model_copy(
+                update={"asset_id": asset_id, "revision": previous_revision}
             )
-        copied = draft.model_copy(update={"asset_id": asset_id, "revision": 0})
-        return self.save_draft(copied, expected_revision=0)
+            return self._save_draft_locked(
+                copied,
+                expected_revision=previous_revision,
+                allow_deleted_identity_reuse=True,
+            )
 
     def load_draft(
         self,
@@ -404,196 +464,239 @@ class DevAssetStore:
             )
         return tuple(references)
 
-    def freeze_map(
-        self,
-        draft: DevMapDraftV1,
-        *,
-        code_revision: CodeRevisionV1,
-    ) -> DevMapCandidateV1:
-        compiled = compile_dev_map(draft)
-        evidence = DevCandidateCompileEvidenceV1(
-            semantic_digest=compiled.semantic_digest,
-            code_revision=code_revision,
-        )
-        candidate = DevMapCandidateV1(
-            candidate_id=_candidate_content_digest(
-                "map",
-                content=compiled.content,
-                evidence=evidence,
-            ),
-            content=compiled.content,
-            evidence=evidence,
-        )
-        self._publish_candidate("map", candidate)
-        return candidate
-
-    def freeze_scenario(
-        self,
-        draft: DevScenarioDraftV1,
-        *,
-        code_revision: CodeRevisionV1,
-    ) -> DevScenarioCandidateV1:
-        compiled = compile_dev_scenario(draft)
-        evidence = DevCandidateCompileEvidenceV1(
-            semantic_digest=compiled.semantic_digest,
-            resolved_configuration_digest=compiled.resolved_configuration_digest,
-            resolved_initial_state_digest=compiled.resolved_initial_state_digest,
-            code_revision=code_revision,
-        )
-        candidate = DevScenarioCandidateV1(
-            candidate_id=_candidate_content_digest(
-                "scenario",
-                content=compiled.content,
-                evidence=evidence,
-            ),
-            content=compiled.content,
-            evidence=evidence,
-        )
-        self._publish_candidate("scenario", candidate)
-        return candidate
-
-    def _publish_candidate(
+    def delete_draft(
         self,
         kind: DevAssetKind,
-        candidate: DevCandidate,
-    ) -> None:
-        path = self._candidate_path(kind, candidate.candidate_id)
-        payload = _serialized(candidate)
-        _guard_store_path(self._artifact_root, path)
-        if path.exists():
-            existing = self.load_candidate(kind, candidate.candidate_id)
-            if _serialized(existing) == payload:
-                return
-            raise DevAssetAlreadyExistsError(
-                "candidate semantic identity already exists with different bytes"
+        asset_id: str,
+        *,
+        expected_revision: int,
+    ) -> tuple[DevDraftReferenceV1, ...]:
+        """Delete one exact saved identity after a complete, fail-closed preflight."""
+        with self._exclusive_store_lock():
+            return self._delete_draft_locked(
+                kind,
+                asset_id,
+                expected_revision=expected_revision,
             )
-        _atomic_no_clobber(self._artifact_root, path, payload)
 
-    def load_candidate(
+    def _delete_draft_locked(
         self,
         kind: DevAssetKind,
-        candidate_id: str,
-    ) -> DevCandidate:
-        """Strictly reopen and recompile one immutable candidate."""
-        path = self._candidate_path(kind, candidate_id)
-        try:
-            _guard_store_path(self._artifact_root, path)
-            payload = path.read_bytes()
-        except FileNotFoundError as error:
-            raise DevAssetNotFoundError(
-                f"{kind} candidate {candidate_id!r} was not found"
-            ) from error
-        model_type = DevMapCandidateV1 if kind == "map" else DevScenarioCandidateV1
-        try:
-            candidate = model_type.model_validate_json(payload)
-        except ValidationError as error:
-            raise DevAssetIntegrityError(
-                f"stored {kind} candidate failed strict parsing"
-            ) from error
-        if candidate.candidate_id != candidate_id:
-            raise DevAssetIntegrityError("candidate identity does not match its path")
-        if candidate.candidate_id != _candidate_content_digest(
-            kind,
-            content=candidate.content,
-            evidence=candidate.evidence,
+        asset_id: str,
+        *,
+        expected_revision: int,
+    ) -> tuple[DevDraftReferenceV1, ...]:
+        if (
+            type(expected_revision) is not int
+            or not 1 <= expected_revision <= MAX_DEV_ASSET_SEQUENCE
         ):
-            raise DevAssetIntegrityError("candidate content digest mismatch")
-        try:
-            if isinstance(candidate, DevMapCandidateV1):
-                compiled_map = compile_dev_map(candidate.content)
-                if compiled_map.semantic_digest != candidate.evidence.semantic_digest:
-                    raise DevAssetIntegrityError(
-                        "map candidate semantic digest mismatch"
-                    )
-            else:
-                compiled_scenario = compile_dev_scenario(candidate.content)
-                if (
-                    compiled_scenario.semantic_digest
-                    != candidate.evidence.semantic_digest
-                ):
-                    raise DevAssetIntegrityError(
-                        "scenario candidate semantic digest mismatch"
-                    )
-                if (
-                    compiled_scenario.resolved_configuration_digest
-                    != candidate.evidence.resolved_configuration_digest
-                    or compiled_scenario.resolved_initial_state_digest
-                    != candidate.evidence.resolved_initial_state_digest
-                ):
-                    raise DevAssetIntegrityError(
-                        "scenario candidate compile evidence mismatch"
-                    )
-        except DevAuthoringValidationError as error:
-            raise DevAssetIntegrityError(
-                f"stored {kind} candidate no longer revalidates",
-                problems=error.problems,
-            ) from error
-        return candidate
+            raise ValueError("expected_revision must be a positive 32-bit integer")
 
-    def iter_candidate_references(
-        self,
-        kind: DevAssetKind,
-    ) -> tuple[DevCandidateReferenceV1, ...]:
-        root = _guard_store_path(
-            self._artifact_root,
-            self._artifact_root / "candidates",
-        )
-        if not root.is_dir():
-            return ()
-        pattern = re.compile(rf"^{kind}-([0-9a-f]{{64}})\.json$")
-        references: list[DevCandidateReferenceV1] = []
-        for path in sorted(root.iterdir(), key=lambda value: value.name):
-            _guard_store_path(self._artifact_root, path)
-            match = pattern.fullmatch(path.name)
-            if path.is_file() and match is not None:
-                references.append(DevCandidateReferenceV1(kind, match.group(1)))
-        return tuple(references)
+        directory = self._draft_directory(kind, asset_id)
+        _guard_store_path(self._artifact_root, directory)
+        if not directory.exists():
+            raise DevAssetNotFoundError(f"{kind} draft {asset_id!r} was not found")
+        if not directory.is_dir():
+            raise DevAssetIntegrityError("saved asset path must be a directory")
 
-    def resolve_candidate_kind(self, candidate_id: str) -> DevAssetKind:
-        digest = _validate_digest(candidate_id)
-        matches: list[DevAssetKind] = []
-        for kind in _ASSET_KINDS:
-            path = self._candidate_path(kind, digest)
+        revision_paths: list[tuple[int, Path]] = []
+        for path in sorted(directory.iterdir(), key=lambda value: value.name):
             _guard_store_path(self._artifact_root, path)
-            if path.is_file():
-                matches.append(kind)
-        if not matches:
-            raise DevAssetNotFoundError(f"candidate {digest!r} was not found")
-        if len(matches) != 1:
-            raise DevAssetIntegrityError(
-                "candidate digest resolves to both a map and a scenario"
+            try:
+                metadata = path.lstat()
+            except FileNotFoundError as error:
+                raise DevAssetIntegrityError(
+                    "saved asset changed during deletion preflight"
+                ) from error
+            match = re.fullmatch(r"r([1-9][0-9]*)\.json", path.name)
+            if not stat.S_ISREG(metadata.st_mode) or match is None:
+                raise DevAssetIntegrityError(
+                    "saved asset contains an unexpected entry; nothing was deleted"
+                )
+            revision = int(match.group(1))
+            if revision > MAX_DEV_ASSET_SEQUENCE:
+                raise DevAssetIntegrityError(
+                    "stored draft revision exceeds the supported range"
+                )
+            revision_paths.append((revision, path))
+        revision_paths.sort(key=lambda item: item[0])
+
+        if not revision_paths:
+            raise DevAssetNotFoundError(f"{kind} draft {asset_id!r} was not found")
+        latest_revision = max(revision for revision, _ in revision_paths)
+        if latest_revision != expected_revision:
+            raise DevDraftRevisionConflictError(
+                f"stale {kind} draft {asset_id!r}: expected revision "
+                f"{expected_revision}, current revision is {latest_revision}"
             )
-        return matches[0]
+        fenced_revision = self._latest_revision_fence(kind, asset_id)
+        if fenced_revision is not None and fenced_revision > latest_revision:
+            raise DevAssetIntegrityError(
+                "saved revision fence is newer than persisted asset content"
+            )
 
-    def promote_candidate(
-        self,
-        candidate_id: str,
-        *,
-        asset_id: SafeAssetId,
-        version: int,
-        approval_provenance: str,
-    ) -> Path:
-        """Revalidate and write one normalized tracked immutable asset version."""
-        kind = self.resolve_candidate_kind(candidate_id)
-        candidate = self.load_candidate(kind, candidate_id)
-        semantic_digest = (
-            map_semantic_digest(candidate.content)
-            if isinstance(candidate, DevMapCandidateV1)
-            else scenario_semantic_digest(candidate.content)
+        # Strict parsing is part of deletion preflight. A syntactically valid
+        # filename is insufficient: every payload must join back to the exact
+        # kind, asset ID, and revision encoded by its path.
+        validated_metadata: dict[int, tuple[int, int, int, int]] = {}
+        revision_payloads: dict[int, bytes] = {}
+        for revision, path in revision_paths:
+            before = path.lstat()
+            self.load_draft(kind, asset_id, revision=revision)
+            revision_payloads[revision] = path.read_bytes()
+            after = path.lstat()
+            before_identity = (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+            )
+            after_identity = (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+            )
+            if before_identity != after_identity:
+                raise DevAssetIntegrityError(
+                    "saved asset changed during deletion preflight; nothing was deleted"
+                )
+            validated_metadata[revision] = after_identity
+
+        # Recheck the complete directory immediately before the first unlink.
+        observed_names = tuple(
+            path.name
+            for path in sorted(directory.iterdir(), key=lambda value: value.name)
         )
-        if semantic_digest != candidate.evidence.semantic_digest:
-            raise DevAssetIntegrityError("candidate digest changed during promotion")
-        promoted = DevPromotedAssetV1(
-            asset_kind=kind,
-            asset_id=asset_id,
-            version=version,
-            semantic_digest=semantic_digest,
-            approved_candidate=candidate,
-            approval_provenance=approval_provenance,
+        expected_names = tuple(path.name for _, path in revision_paths)
+        if observed_names != expected_names:
+            raise DevAssetIntegrityError(
+                "saved asset changed during deletion preflight; nothing was deleted"
+            )
+        for revision, path in revision_paths:
+            metadata = path.lstat()
+            identity = (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+            )
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or identity != validated_metadata[revision]
+            ):
+                raise DevAssetIntegrityError(
+                    "saved asset changed during deletion preflight; nothing was deleted"
+                )
+
+        deleted = tuple(
+            DevDraftReferenceV1(kind, asset_id, revision)
+            for revision, _ in revision_paths
         )
-        path = self._promotion_path(kind, asset_id, version)
-        _atomic_no_clobber(self._configs_root, path, _serialized(promoted))
-        return path
+        # Persist the generation boundary before removing content so another
+        # live DevClient can never recreate this identity at an old revision.
+        self._record_revision_fence(kind, asset_id, latest_revision)
+        directory_identity = directory.lstat()
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        parent_descriptor = os.open(directory.parent, directory_flags | no_follow)
+        directory_descriptor = os.open(
+            directory.name,
+            directory_flags | no_follow,
+            dir_fd=parent_descriptor,
+        )
+        try:
+            opened_identity = os.fstat(directory_descriptor)
+            if (
+                opened_identity.st_dev != directory_identity.st_dev
+                or opened_identity.st_ino != directory_identity.st_ino
+            ):
+                raise DevAssetIntegrityError(
+                    "saved asset changed before deletion; nothing was deleted"
+                )
+            try:
+                for _, path in revision_paths:
+                    os.unlink(path.name, dir_fd=directory_descriptor)
+                os.fsync(directory_descriptor)
+                os.rmdir(directory.name, dir_fd=parent_descriptor)
+                os.fsync(parent_descriptor)
+            except BaseException as error:
+                rollback_errors: list[OSError] = []
+                rollback_descriptor = directory_descriptor
+                close_rollback_descriptor = False
+                try:
+                    try:
+                        rollback_directory = os.stat(
+                            directory.name,
+                            dir_fd=parent_descriptor,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        try:
+                            os.mkdir(
+                                directory.name,
+                                stat.S_IMODE(directory_identity.st_mode),
+                                dir_fd=parent_descriptor,
+                            )
+                            os.fsync(parent_descriptor)
+                            rollback_descriptor = os.open(
+                                directory.name,
+                                directory_flags | no_follow,
+                                dir_fd=parent_descriptor,
+                            )
+                            close_rollback_descriptor = True
+                        except OSError as rollback_error:
+                            rollback_errors.append(rollback_error)
+                    else:
+                        if (
+                            not stat.S_ISDIR(rollback_directory.st_mode)
+                            or rollback_directory.st_dev != directory_identity.st_dev
+                            or rollback_directory.st_ino != directory_identity.st_ino
+                        ):
+                            rollback_errors.append(
+                                OSError("saved asset directory changed during rollback")
+                            )
+                    if not rollback_errors:
+                        for revision, path in revision_paths:
+                            try:
+                                os.stat(
+                                    path.name,
+                                    dir_fd=rollback_descriptor,
+                                    follow_symlinks=False,
+                                )
+                            except FileNotFoundError:
+                                try:
+                                    _write_no_clobber_at(
+                                        rollback_descriptor,
+                                        path.name,
+                                        revision_payloads[revision],
+                                    )
+                                except OSError as rollback_error:
+                                    rollback_errors.append(rollback_error)
+                        if not rollback_errors:
+                            os.fsync(rollback_descriptor)
+                            os.fsync(parent_descriptor)
+                finally:
+                    if close_rollback_descriptor:
+                        os.close(rollback_descriptor)
+                if rollback_errors:
+                    raise DevAssetIntegrityError(
+                        "saved asset deletion failed and rollback was incomplete"
+                    ) from error
+                if isinstance(error, OSError):
+                    raise DevAssetIntegrityError(
+                        "saved asset deletion failed; original revisions were restored"
+                    ) from error
+                raise
+        finally:
+            # Both descriptors are read-only. The content commit or rollback
+            # and its directory-entry durability are complete before cleanup;
+            # a post-effect close error must not turn that settled result into
+            # a false operation failure.
+            for descriptor in (directory_descriptor, parent_descriptor):
+                with suppress(OSError):
+                    os.close(descriptor)
+        return deleted
 
 
 __all__ = [
@@ -603,8 +706,6 @@ __all__ = [
     "DevAssetNotFoundError",
     "DevAssetStore",
     "DevAssetStoreError",
-    "DevCandidate",
-    "DevCandidateReferenceV1",
     "DevDraft",
     "DevDraftReferenceV1",
     "DevDraftRevisionConflictError",

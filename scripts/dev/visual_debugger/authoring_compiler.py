@@ -69,14 +69,12 @@ from scripts.dev.visual_debugger.authoring_models import (
     DevPillarV1,
     DevPointV1,
     DevRosterSlotV1,
-    DevScenarioCandidateV1,
     DevScenarioContentV1,
     DevScenarioDraftV1,
     DevSpawnPadV1,
     DevWallV1,
 )
 
-_COMPILER_IDENTITY = "dev-client-compiler-validator@1"
 _INT32_MIN = int(np.iinfo(np.int32).min)
 _INT32_MAX = int(np.iinfo(np.int32).max)
 _CLASS_ID_BY_NAME = {
@@ -134,7 +132,6 @@ class CompiledDevScenarioV1:
     resolved_configuration_digest: str
     resolved_initial_state_digest: str
     problems: tuple[DevAuthoringProblemV1, ...]
-    freeze_qualified: bool
 
 
 def _problem(
@@ -244,6 +241,7 @@ def normalize_map_content(
             normalized_obstacles.append(
                 DevWallV1(
                     object_id=obstacle.object_id,
+                    name=obstacle.name,
                     center_x=_normalized_float32(
                         obstacle.center_x,
                         f"{obstacle_prefix}.center_x",
@@ -275,6 +273,7 @@ def normalize_map_content(
             normalized_obstacles.append(
                 DevPillarV1(
                     object_id=obstacle.object_id,
+                    name=obstacle.name,
                     center_x=_normalized_float32(
                         obstacle.center_x,
                         f"{obstacle_prefix}.center_x",
@@ -1395,7 +1394,7 @@ def _core_problem(
 
 
 def compile_dev_scenario(
-    source: DevScenarioDraftV1 | DevScenarioCandidateV1 | DevScenarioContentV1,
+    source: DevScenarioDraftV1 | DevScenarioContentV1,
 ) -> CompiledDevScenarioV1:
     """Compile, revalidate, and expose one immutable authored scenario snapshot."""
     raw_content = (
@@ -1460,12 +1459,11 @@ def compile_dev_scenario(
         resolved_configuration_digest=resolved_config.canonical_digest_sha256,
         resolved_initial_state_digest=_state_digest(initialized_state),
         problems=tuple(custom_problems),
-        freeze_qualified=True,
     )
 
 
 def validate_dev_scenario(
-    source: DevScenarioDraftV1 | DevScenarioCandidateV1 | DevScenarioContentV1,
+    source: DevScenarioDraftV1 | DevScenarioContentV1,
 ) -> tuple[DevAuthoringProblemV1, ...]:
     """Return execution problems without leaking partially compiled state."""
     try:

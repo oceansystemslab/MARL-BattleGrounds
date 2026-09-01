@@ -49,7 +49,8 @@ An `EvaluationSuiteV1`-equivalent declaration freezes:
   is represented by one homogeneous episode-wide pair;
 - critic-information regime, canonical reward mode, and shaping configuration;
 - primary, secondary, exploratory, and diagnostic metric IDs;
-- promoted content-addressed layouts/maps and authored initial conditions,
+- independently approved content-addressed layouts/maps and authored initial
+  conditions,
   scenarios, rosters/compositions, cooperative partners, adversarial
   opponents, sides, roles, and their joint target weights;
 - task/scenario configuration and static-mechanics catalog versions;
@@ -165,15 +166,14 @@ coordinate. Binding policy A to Team A and policy B to Team B, or binding
 policies per slot, fills the scenario's frozen roles; it cannot replace the
 roster or any other scenario-owned condition.
 
-Development scene-authoring drafts are mutable design inputs, not evaluation
-artifacts. A candidate becomes eligible for selection only after host-side
-normalization, product/scenario validation, content addressing, and an
-owner-approved promotion that assigns its permanent identity and version.
-Official evaluation and scenario records reference those promoted
-content-addressed layout and authored-initial-condition identities and join
-them independently to the resolved configuration and realized initial state. A
-filename, browser export, mutable draft ID, or successful preview is not an
-admissible identity or validity proof.
+DevClient scene-authoring assets are design inputs, not evaluation artifacts.
+A future evaluation owner may import an exact saved asset revision, but must
+independently reopen, normalize, validate, approve, and bind its
+content-addressed layout and authored-initial-condition identities to the
+resolved configuration and realized initial state. Those scientific lifecycle
+steps belong to the owning suite, scenario, or manifest rather than to the
+DevClient. A filename, moving latest-revision alias, mutable browser buffer, or
+successful preview is not an admissible identity or validity proof.
 
 The current `ResolvedScenarioSpecificationV1` does not yet bind an explicit
 fixed-slot roster, exact role template, or matched schedule identity and
@@ -184,8 +184,9 @@ that contract, validate exact roster/role joins to
 `EvaluationEpisodeContextV1`, prove that each realized seed record occupies
 exactly one declared schedule coordinate, and enforce the core structural and
 product config invariants on loaded context. The versioned specification must
-also freeze and join the promoted content-addressed layout and authored initial
-condition independently from the resolved-config digest. It must reject any
+also freeze and join the independently approved content-addressed layout and
+authored initial condition independently from the resolved-config digest. It
+must reject any
 policy binding that changes the layout, initial condition, resolved
 configuration, roster, configured-active slots, role template, schedule, or
 realized coordinate. Scenario identity plus a subset check over role names is
@@ -193,9 +194,10 @@ insufficient.
 
 The M7 V2 companion keeps semantic authored-content identity, compiled initial
 state, and attempt replay evidence distinct. The specification digest binds the
-promoted authored-initial-condition identity to a stable digest of simulator
-step count plus the dynamic global snapshot. Each record separately binds the
-complete frame-zero digest, including attempt identity and derived policy
+independently approved, content-addressed authored-initial-condition identity
+to a stable digest of simulator step count plus the dynamic global snapshot.
+Each record separately binds the complete frame-zero digest, including attempt
+identity and derived policy
 material. This prevents an attempt-specific frame hash from masquerading as the
 stable authored-state identity while still proving the exact captured frame.
 
@@ -224,20 +226,22 @@ and manifest/report stratum may differ by execution-information regime. A
 regime must not select a separate runner, trainer, evaluator, scenario
 lifecycle, RNG protocol, action realization, capture path, replay path, or
 metric implementation. Milestone 10 owns the versioned episode and
-policy-assignment contracts, semantic-asset promotion adapters, seed-schedule
-schema and named derivation protocol, evaluation/scenario host runner,
-capture/replay, and failure-semantics integration. Milestone 11 selects
-promoted partition-neutral maps into direct, custom-distribution, or
-curriculum training populations and feeds their resolved specifications into
-the common training spine. Milestone 12 consumes those selections through the
-common JAX rollout/update path. A19 advances structured source-bank
+policy-assignment contracts, exact-saved-revision import and independent
+normalization, validation, content-addressing, and approval adapters,
+seed-schedule schema and named derivation protocol, evaluation/scenario host
+runner, capture/replay, and failure-semantics integration. Milestone 11 selects
+independently approved, content-addressed partition-neutral maps into direct,
+custom-distribution, or curriculum training populations and feeds their
+resolved specifications into the common training spine. Milestone 12 consumes
+those selections through the common JAX rollout/update path. A19 advances
+structured source-bank
 composition, scripted/reference-policy adaptation, homogeneous runtime
 selection, and reconstruction into the Milestone 7 interlude. Milestone 12
 owns the compatible learned neural projections, compiled neural actor front
 ends, and trainer/checkpoint integration; it does not own a roster catalog,
-training-selection policy, promotion boundary, or mutable development-draft
-loader. M12 rejects held-out evaluation/scenario assets before training
-execution.
+training-selection policy, asset-approval boundary, or mutable
+development-draft loader. M12 rejects held-out evaluation/scenario assets
+before training execution.
 
 Every learned checkpoint is fixed to one `execution_information_mode`, one
 actor-input projection version, and one compatible compiled actor-front-end
@@ -461,9 +465,11 @@ Map assets themselves are partition-neutral. Training, development,
 validation, official/custom evaluation, controlled-scenario, and locked-test
 membership belongs to the selecting distribution, suite, scenario, or
 experiment manifest rather than to a split field, filename, or directory in
-the map document. Mutable development drafts are ineligible for every such
-population; manifests may reference only owner-promoted, versioned,
-content-addressed assets or their resolved contract representations.
+the map document. A manifest may use an exact saved DevClient revision as an
+import source, but may reference only the independently approved,
+content-addressed resolved contract representation in an evaluation
+population. Current browser buffers and moving latest-revision aliases are
+ineligible.
 
 An official evaluation suite or scenario is never a default training
 distribution. Assets designated locked for evaluation or scenario evidence
@@ -606,7 +612,8 @@ Context-sensitive tactical claims use controlled quantitative scenarios rather
 than episode-wide proxies. Each versioned scenario freezes:
 
 - the behavioral hypothesis and eligible policy roles;
-- promoted content-addressed layout and authored-initial-condition identities;
+- independently approved content-addressed layout and authored-initial-condition
+  identities;
 - its resolved episode configuration and exact fixed-slot roster;
 - initial state, role template, opponent or scripted pressure, horizon, and
   matched seed schedule;
@@ -946,13 +953,14 @@ Before a suite is used for an official claim, verify:
     `BLOCKED` verdict;
 12. official/custom ownership and canonical-condition status remain separate
     and appear truthfully in every report;
-13. each accepted scenario exactly joins promoted content-addressed layout and
-    authored-initial-condition identities, resolved configuration, explicit
-    roster, configured-active slots, fixed-slot role template, stable matched
-    seed schedule, one unique realized schedule coordinate, horizon, initial
-    state, and endpoints; loaded context passes core structural/product parity,
-    mutable drafts and unpromoted candidates are rejected, and policy binding
-    cannot replace those facts; and
+13. each accepted scenario exactly joins independently approved,
+    content-addressed layout and authored-initial-condition identities,
+    resolved configuration, explicit roster, configured-active slots,
+    fixed-slot role template, stable matched seed schedule, one unique realized
+    schedule coordinate, horizon, initial state, and endpoints; any DevClient
+    source identifies one exact saved revision, loaded context passes core
+    structural/product parity, current browser buffers and moving revision
+    aliases are rejected, and policy binding cannot replace those facts; and
 14. the permissive standard-layout factory accepts every structurally valid
     roster while the canonical factory resolves exactly the frozen mirrored
     five-class 5v5 evaluation configuration.

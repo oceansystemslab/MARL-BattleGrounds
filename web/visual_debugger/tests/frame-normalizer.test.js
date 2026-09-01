@@ -440,6 +440,7 @@ function researcherFrame() {
     frame_index: 1,
     recording: null,
     combat_configuration: {
+      team_a_controller: "manual",
       team_b_controller: "manual",
       execution_information_mode: "no_shared_obs",
     },
@@ -1743,6 +1744,7 @@ function povFrame() {
     frame_index: 1,
     recording: null,
     combat_configuration: {
+      team_a_controller: "manual",
       team_b_controller: "manual",
       execution_information_mode: "no_shared_obs",
     },

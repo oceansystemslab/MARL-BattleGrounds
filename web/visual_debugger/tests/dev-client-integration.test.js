@@ -7,10 +7,11 @@ import {
   createCombatConfigurationController,
   debugAssetOptionLabel,
   draftAfterAuthoringResponse,
-  frozenAuthoringRecord,
+  draftAfterSavedAssetDeletion,
   newScenarioSourceAssets,
   openableDraftAssets,
   persistedAuthoringSource,
+  savedAssetDeletionPrompt,
   savedDraftOptionLabel,
 } from "../src/dev-client.js";
 
@@ -52,13 +53,19 @@ test("DevClient surfaces are fail-closed and authoring hover stays unregistered"
   }
   assert.match(markup, /id="authoring-reset"[^>]*>Reset \(R\)<\/button>/u);
   assert.match(markup, /id="authoring-recenter"[^>]*>Recenter<\/button>/u);
+  assert.match(markup, /id="authoring-delete-saved"/u);
+  assert.doesNotMatch(markup, /authoring-freeze|Freeze Candidate/u);
   assert.doesNotMatch(main, /\[\s*"#authoring-canvas"/u);
   assert.doesNotMatch(renderer, /svgElement\("title"/u);
   assert.match(devClient, /resetButton:\s*required\("authoring-reset"\)/u);
   assert.match(devClient, /recenterButton:\s*required\("authoring-recenter"\)/u);
+  assert.match(
+    devClient,
+    /deleteSavedButton\.addEventListener\("click", async \(\) => \{[\s\S]*window\.confirm\(savedAssetDeletionPrompt\(asset\)\)[\s\S]*command_type: "delete", source[\s\S]*state\.assets = state\.assets\.filter[\s\S]*draftAfterSavedAssetDeletion/u,
+  );
 });
 
-test("general Open lists mutable saved drafts and excludes frozen candidates", () => {
+test("general Open lists only mutable saved drafts", () => {
   const savedMap = {
     source_kind: "saved_draft",
     asset_kind: "map",
@@ -66,16 +73,10 @@ test("general Open lists mutable saved drafts and excludes frozen candidates", (
   };
   const assets = [
     savedMap,
-    { source_kind: "candidate", asset_kind: "map", candidate_id: "map-digest" },
     {
       source_kind: "saved_draft",
       asset_kind: "scenario",
       asset_id: "crossfire",
-    },
-    {
-      source_kind: "candidate",
-      asset_kind: "scenario",
-      candidate_id: "scenario-digest",
     },
   ];
 
@@ -99,17 +100,17 @@ test("Combat asset options expose exact typed identity, status, and map preview 
     }),
     "Scenario · Crossfire · saved crossfire revision 7 · 20.5 × 10.25 · execution-valid",
   );
-  const candidateId = "a".repeat(64);
   assert.equal(
     debugAssetOptionLabel({
-      source_kind: "candidate",
+      source_kind: "saved_draft",
       asset_kind: "map",
       name: "Crossfire",
-      candidate_id: candidateId,
+      asset_id: "crossfire-map",
+      revision: 4,
       map_width: 20,
       map_height: 10,
     }),
-    `Map preview · Crossfire · candidate ${candidateId} · 20 × 10 · frozen · execution-valid · default 5v5 TDM`,
+    "Map preview · Crossfire · saved crossfire-map revision 4 · 20 × 10 · execution-valid · default 5v5 TDM",
   );
   assert.deepEqual(
     persistedAuthoringSource({
@@ -124,6 +125,10 @@ test("Combat asset options expose exact typed identity, status, and map preview 
       asset_id: "arena",
       revision: 3,
     },
+  );
+  assert.throws(
+    () => persistedAuthoringSource({ source_kind: "unsupported" }),
+    /must identify a saved draft revision/u,
   );
 });
 
@@ -156,38 +161,26 @@ test("active drafts and new scenarios use typed native asset selectors", async (
     map_height: 10,
     execution_valid: true,
   };
-  const candidateMap = {
-    source_kind: "candidate",
-    asset_kind: "map",
-    candidate_id: "a".repeat(64),
-    name: "Frozen arena",
-    map_width: 20,
-    map_height: 10,
-    execution_valid: true,
-  };
   const savedScenario = {
     ...savedMap,
     asset_kind: "scenario",
     asset_id: "crossfire",
     name: "Crossfire",
   };
-  const assets = [savedMap, candidateMap, savedScenario];
+  const assets = [savedMap, savedScenario];
   assert.deepEqual(newScenarioSourceAssets(assets, "blank"), []);
-  assert.deepEqual(newScenarioSourceAssets(assets, "copy_saved_map"), [
-    savedMap,
-    candidateMap,
-  ]);
+  assert.deepEqual(newScenarioSourceAssets(assets, "copy_saved_map"), [savedMap]);
   assert.deepEqual(newScenarioSourceAssets(assets, "duplicate_saved_scenario"), [
     savedScenario,
   ]);
   assert.equal(savedDraftOptionLabel(savedMap), "Arena · arena · revision 2 · 20 × 10");
   assert.equal(
-    authoringSourceOptionLabel(candidateMap),
-    `Frozen arena · frozen candidate ${"a".repeat(64)} · 20 × 10 · execution-valid`,
+    authoringSourceOptionLabel(savedMap),
+    "Arena · saved arena revision 2 · 20 × 10 · execution-valid",
   );
 });
 
-test("authoring persistence feedback distinguishes unsaved, saved, dirty, and frozen bytes", () => {
+test("authoring persistence feedback distinguishes unsaved, saved, and dirty bytes", () => {
   const draft = {
     schema: "dev-map-draft@1",
     asset_id: "arena",
@@ -195,57 +188,53 @@ test("authoring persistence feedback distinguishes unsaved, saved, dirty, and fr
     content: { name: "Arena" },
   };
   assert.equal(
-    authoringPersistenceMessage(draft, structuredClone(draft.content), null),
+    authoringPersistenceMessage(draft, structuredClone(draft.content)),
     "Unsaved map draft",
   );
   const saved = { ...draft, revision: 2 };
   const savedPath = "artifacts/dev_client/drafts/maps/arena/r2.json";
   assert.equal(
-    authoringPersistenceMessage(saved, structuredClone(saved.content), null),
+    authoringPersistenceMessage(saved, structuredClone(saved.content)),
     `Saved map arena · revision 2 · ${savedPath}`,
   );
   const dirty = { ...saved, content: { name: "Changed" } };
   assert.equal(
-    authoringPersistenceMessage(dirty, structuredClone(saved.content), null),
+    authoringPersistenceMessage(dirty, structuredClone(saved.content)),
     "Unsaved changes · last saved map arena revision 2",
   );
-  const candidateId = "b".repeat(64);
-  const candidatePath = `artifacts/dev_client/candidates/map-${candidateId}.json`;
-  assert.equal(
-    authoringPersistenceMessage(saved, structuredClone(saved.content), {
-      candidateId,
-      content: structuredClone(saved.content),
-    }),
-    `Frozen candidate ${candidateId} · ${candidatePath}`,
-  );
-  assert.equal(
-    authoringPersistenceMessage(dirty, structuredClone(saved.content), {
-      candidateId,
-      content: structuredClone(saved.content),
-    }),
-    `Unsaved changes · last saved map arena revision 2 · Frozen candidate ${candidateId} · ${candidatePath} · preserves an earlier snapshot; current edits are not frozen`,
-  );
+});
 
-  const normalizedCandidateResponse = {
-    ok: true,
-    candidate: {
-      candidate_id: candidateId,
-      content: { name: "Arena", width: 20.100000381469727 },
-    },
+test("deleting the open saved identity creates an exact unsaved recovery buffer", () => {
+  const draft = {
+    schema: "dev-map-draft@1",
+    asset_id: "arena",
+    revision: 7,
+    content: { name: "Arena with local edits", obstacles: [{ object_id: "one" }] },
   };
-  const submitted = { name: "Arena", width: 20.1 };
-  const normalizedFreeze = frozenAuthoringRecord(
-    normalizedCandidateResponse,
-    submitted,
-  );
-  assert.deepEqual(normalizedFreeze?.content, submitted);
+  const source = {
+    source_kind: "saved_draft",
+    asset_kind: "map",
+    asset_id: "arena",
+    revision: 7,
+  };
+  const recovery = draftAfterSavedAssetDeletion(draft, source);
+
+  assert.ok(recovery);
+  assert.notStrictEqual(recovery, draft);
+  assert.deepEqual(recovery.content, draft.content);
+  assert.equal(recovery.asset_id, "untitled-map");
+  assert.equal(recovery.revision, 0);
   assert.equal(
-    authoringPersistenceMessage(
-      { ...saved, content: submitted },
-      structuredClone(submitted),
-      normalizedFreeze,
-    ),
-    `Frozen candidate ${candidateId} · ${candidatePath}`,
+    authoringPersistenceMessage(recovery, structuredClone(recovery.content)),
+    "Unsaved map draft",
+  );
+  assert.strictEqual(
+    draftAfterSavedAssetDeletion(draft, { ...source, asset_id: "other" }),
+    draft,
+  );
+  assert.equal(
+    savedAssetDeletionPrompt({ ...source, name: "Arena" }),
+    'Permanently delete saved map "Arena" (asset ID: arena) and all of its revisions? This cannot be undone.',
   );
 });
 
@@ -298,6 +287,7 @@ test("the SVG grid uses one repeating pattern instead of dimension-sized nodes",
 });
 
 test("Combat configuration remains authoritative until one requested successor installs", () => {
+  const teamAController = { value: "manual", disabled: false };
   const teamBController = { value: "manual", disabled: false };
   const informationMode = { value: "shared_obs", disabled: false };
   /** @type {Record<string, string | undefined>} */
@@ -306,6 +296,7 @@ test("Combat configuration remains authoritative until one requested successor i
   /** @type {Readonly<Record<string, string>>[]} */
   const emitted = [];
   const controller = createCombatConfigurationController({
+    teamAController,
     teamBController,
     informationMode,
     root,
@@ -313,33 +304,40 @@ test("Combat configuration remains authoritative until one requested successor i
   });
 
   controller.render();
+  assert.equal(teamAController.disabled, true);
   assert.equal(teamBController.disabled, true);
   assert.equal(informationMode.disabled, true);
 
   assert.equal(
     controller.install({
+      team_a_controller: "manual",
       team_b_controller: "manual",
       execution_information_mode: "shared_obs",
     }),
     true,
   );
+  teamAController.value = "scripted_tdm";
   teamBController.value = "scripted_tdm";
   informationMode.value = "no_shared_obs";
   assert.equal(controller.request(), true);
   assert.deepEqual(emitted, [
     {
+      team_a_controller: "scripted_tdm",
       team_b_controller: "scripted_tdm",
       execution_information_mode: "no_shared_obs",
     },
   ]);
+  assert.equal(teamAController.value, "manual");
   assert.equal(teamBController.value, "manual");
   assert.equal(informationMode.value, "shared_obs");
 
   controller.install(emitted[0]);
   assert.equal(controller.request(), false);
   assert.equal(emitted.length, 1);
+  assert.equal(teamAController.value, "scripted_tdm");
   assert.equal(teamBController.value, "scripted_tdm");
   assert.equal(informationMode.value, "no_shared_obs");
+  assert.equal(root.dataset.teamAController, "scripted_tdm");
   assert.equal(root.dataset.teamBController, "scripted_tdm");
   assert.equal(root.dataset.executionInformationMode, "no_shared_obs");
 });
@@ -350,10 +348,7 @@ test("successful Debug loads emit one event into the existing frame reload path"
     readFile(mainUrl, "utf8"),
   ]);
 
-  assert.match(
-    main,
-    /Freeze creates an immutable, content-addressed snapshot of this valid draft in `artifacts\/dev_client\/candidates\/`\. It does not save later edits, promote the asset, or mark it as canonical, training, or evaluation content\./u,
-  );
+  assert.doesNotMatch(main, /Freeze candidate|dev_client\/candidates/u);
 
   assert.equal(
     [
@@ -385,8 +380,8 @@ test("successful Debug loads emit one event into the existing frame reload path"
   );
   assert.match(
     main,
-    /command_type: "set_combat_configuration",\s*team_b_controller: requested\.team_b_controller,\s*execution_information_mode: requested\.execution_information_mode/u,
+    /command_type: "set_combat_configuration",\s*team_a_controller: requested\.team_a_controller,\s*team_b_controller: requested\.team_b_controller,\s*execution_information_mode: requested\.execution_information_mode/u,
   );
   assert.match(main, /publishInstalledCombatConfiguration\(joined\.transport\);/u);
-  assert.match(main, /scriptedTeamBBlocksActionEdit\(command\)/u);
+  assert.match(main, /scriptedControllerBlocksActionEdit\(command\)/u);
 });

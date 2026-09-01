@@ -19,9 +19,10 @@ provides staged simultaneous actions, exact legality, Oracle and authorized
 agent-POV views, saved-scenario loading, browser-local visual filters, and
 optional replay recording. Maps and Scenarios save revisioned local drafts with
 visible paths, validate them through the existing simulator authorities, and
-freeze immutable candidates. Saved scenarios load directly; saved maps can be
-opened as clearly labelled deterministic default-5v5-TDM previews without
-modifying the map.
+delete unwanted saved assets after confirmation. Saved scenarios load
+directly; saved maps can be opened as clearly labelled deterministic
+default-5v5-TDM previews without modifying the map. Either team can remain
+manual or use the scripted Team Deathmatch controller for same-start testing.
 Existing replay artifacts remain outside the DevClient.
 
 Record one manual episode to a canonical replay and adjacent metric sidecar:

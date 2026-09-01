@@ -98,7 +98,7 @@ export function startScriptedDebugger({ scenario = "aura_crossfire" } = {}) {
 }
 
 /**
- * Start the public DevClient launcher path with drafts/candidates isolated in
+ * Start the public DevClient launcher path with saved drafts isolated in
  * one caller-owned temporary directory. Reusing the directory across process
  * restarts proves persisted discovery without touching developer assets.
  *
