@@ -2,10 +2,16 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
+  authoringPersistenceMessage,
+  authoringSourceOptionLabel,
   createCombatConfigurationController,
-  debugScenarioOptionLabel,
+  debugAssetOptionLabel,
   draftAfterAuthoringResponse,
+  frozenAuthoringRecord,
+  newScenarioSourceAssets,
   openableDraftAssets,
+  persistedAuthoringSource,
+  savedDraftOptionLabel,
 } from "../src/dev-client.js";
 
 const devClientUrl = new URL("../src/dev-client.js", import.meta.url);
@@ -80,38 +86,56 @@ test("general Open lists mutable saved drafts and excludes frozen candidates", (
   );
 });
 
-test("Combat scenario options expose exact persisted identity and status", () => {
+test("Combat asset options expose exact typed identity, status, and map preview semantics", () => {
   assert.equal(
-    debugScenarioOptionLabel({
+    debugAssetOptionLabel({
       source_kind: "saved_draft",
+      asset_kind: "scenario",
       name: "Crossfire",
       asset_id: "crossfire",
       revision: 7,
       map_width: 20.5,
       map_height: 10.25,
     }),
-    "Crossfire · saved crossfire revision 7 · 20.5 × 10.25 · execution-valid",
+    "Scenario · Crossfire · saved crossfire revision 7 · 20.5 × 10.25 · execution-valid",
   );
   const candidateId = "a".repeat(64);
   assert.equal(
-    debugScenarioOptionLabel({
+    debugAssetOptionLabel({
       source_kind: "candidate",
+      asset_kind: "map",
       name: "Crossfire",
       candidate_id: candidateId,
       map_width: 20,
       map_height: 10,
     }),
-    `Crossfire · candidate ${candidateId} · 20 × 10 · frozen · execution-valid`,
+    `Map preview · Crossfire · candidate ${candidateId} · 20 × 10 · frozen · execution-valid · default 5v5 TDM`,
+  );
+  assert.deepEqual(
+    persistedAuthoringSource({
+      source_kind: "saved_draft",
+      asset_kind: "map",
+      asset_id: "arena",
+      revision: 3,
+    }),
+    {
+      source_kind: "saved_draft",
+      asset_kind: "map",
+      asset_id: "arena",
+      revision: 3,
+    },
   );
 });
 
-test("new scenarios use one native source selector instead of wire-literal prompts", async () => {
+test("active drafts and new scenarios use typed native asset selectors", async () => {
   const [markup, devClient] = await Promise.all([
     readFile(indexUrl, "utf8"),
     readFile(devClientUrl, "utf8"),
   ]);
 
   assert.match(markup, /id="authoring-new-scenario-mode"/u);
+  assert.match(markup, /id="authoring-new-scenario-source"/u);
+  assert.match(markup, /id="authoring-saved-draft-select"/u);
   assert.match(markup, />Blank scenario</u);
   assert.match(markup, />Copy saved map</u);
   assert.match(markup, />Duplicate saved scenario</u);
@@ -121,6 +145,108 @@ test("new scenarios use one native source selector instead of wire-literal promp
   );
   assert.match(devClient, /const creationMode = elements\.newScenarioMode\.value/u);
   assert.doesNotMatch(devClient, /Creation mode:/u);
+
+  const savedMap = {
+    source_kind: "saved_draft",
+    asset_kind: "map",
+    asset_id: "arena",
+    revision: 2,
+    name: "Arena",
+    map_width: 20,
+    map_height: 10,
+    execution_valid: true,
+  };
+  const candidateMap = {
+    source_kind: "candidate",
+    asset_kind: "map",
+    candidate_id: "a".repeat(64),
+    name: "Frozen arena",
+    map_width: 20,
+    map_height: 10,
+    execution_valid: true,
+  };
+  const savedScenario = {
+    ...savedMap,
+    asset_kind: "scenario",
+    asset_id: "crossfire",
+    name: "Crossfire",
+  };
+  const assets = [savedMap, candidateMap, savedScenario];
+  assert.deepEqual(newScenarioSourceAssets(assets, "blank"), []);
+  assert.deepEqual(newScenarioSourceAssets(assets, "copy_saved_map"), [
+    savedMap,
+    candidateMap,
+  ]);
+  assert.deepEqual(newScenarioSourceAssets(assets, "duplicate_saved_scenario"), [
+    savedScenario,
+  ]);
+  assert.equal(savedDraftOptionLabel(savedMap), "Arena · arena · revision 2 · 20 × 10");
+  assert.equal(
+    authoringSourceOptionLabel(candidateMap),
+    `Frozen arena · frozen candidate ${"a".repeat(64)} · 20 × 10 · execution-valid`,
+  );
+});
+
+test("authoring persistence feedback distinguishes unsaved, saved, dirty, and frozen bytes", () => {
+  const draft = {
+    schema: "dev-map-draft@1",
+    asset_id: "arena",
+    revision: 0,
+    content: { name: "Arena" },
+  };
+  assert.equal(
+    authoringPersistenceMessage(draft, structuredClone(draft.content), null),
+    "Unsaved map draft",
+  );
+  const saved = { ...draft, revision: 2 };
+  const savedPath = "artifacts/dev_client/drafts/maps/arena/r2.json";
+  assert.equal(
+    authoringPersistenceMessage(saved, structuredClone(saved.content), null),
+    `Saved map arena · revision 2 · ${savedPath}`,
+  );
+  const dirty = { ...saved, content: { name: "Changed" } };
+  assert.equal(
+    authoringPersistenceMessage(dirty, structuredClone(saved.content), null),
+    "Unsaved changes · last saved map arena revision 2",
+  );
+  const candidateId = "b".repeat(64);
+  const candidatePath = `artifacts/dev_client/candidates/map-${candidateId}.json`;
+  assert.equal(
+    authoringPersistenceMessage(saved, structuredClone(saved.content), {
+      candidateId,
+      content: structuredClone(saved.content),
+    }),
+    `Frozen candidate ${candidateId} · ${candidatePath}`,
+  );
+  assert.equal(
+    authoringPersistenceMessage(dirty, structuredClone(saved.content), {
+      candidateId,
+      content: structuredClone(saved.content),
+    }),
+    `Unsaved changes · last saved map arena revision 2 · Frozen candidate ${candidateId} · ${candidatePath} · preserves an earlier snapshot; current edits are not frozen`,
+  );
+
+  const normalizedCandidateResponse = {
+    ok: true,
+    candidate: {
+      candidate_id: candidateId,
+      content: { name: "Arena", width: 20.100000381469727 },
+    },
+  };
+  const submitted = { name: "Arena", width: 20.1 };
+  const normalizedFreeze = frozenAuthoringRecord(
+    normalizedCandidateResponse,
+    submitted,
+  );
+  assert.deepEqual(normalizedFreeze?.content, submitted);
+  assert.equal(
+    authoringPersistenceMessage(
+      { ...saved, content: submitted },
+      structuredClone(submitted),
+      normalizedFreeze,
+    ),
+    `Frozen candidate ${candidateId} · ${candidatePath}`,
+  );
 });
 
 test("a deferred validation response cannot replace newer local edits", () => {
@@ -223,6 +349,11 @@ test("successful Debug loads emit one event into the existing frame reload path"
     readFile(devClientUrl, "utf8"),
     readFile(mainUrl, "utf8"),
   ]);
+
+  assert.match(
+    main,
+    /Freeze creates an immutable, content-addressed snapshot of this valid draft in `artifacts\/dev_client\/candidates\/`\. It does not save later edits, promote the asset, or mark it as canonical, training, or evaluation content\./u,
+  );
 
   assert.equal(
     [

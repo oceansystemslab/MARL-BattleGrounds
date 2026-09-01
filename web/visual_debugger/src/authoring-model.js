@@ -258,7 +258,6 @@ export function setScenarioTeamSize(draft, team, size, catalog) {
     const state = content.agent_states[index];
     if (roster.team_local_slot > size) {
       roster.class_name = "not_applicable";
-      roster.role = "not_applicable";
       state.position = { x: 0, y: 0 };
       state.alive = false;
       for (const key of Object.keys(state)) {
@@ -283,12 +282,6 @@ export function setScenarioTeamSize(draft, team, size, catalog) {
       throw new Error("The host catalog or embedded spawn pads are incomplete.");
     }
     roster.class_name = className;
-    roster.role =
-      team === "B"
-        ? "adversarial_opponent"
-        : roster.team_local_slot === 1
-          ? "focal"
-          : "cooperative_partner";
     state.position = { ...pad.position };
     state.alive = true;
     state.current_health = mechanics.maximum_health;
@@ -322,6 +315,23 @@ export function setAgentAlive(draft, objectId, alive) {
   return next;
 }
 
+/** @param {any} draft */
+function nextObstacleObjectId(draft) {
+  const map = mapContent(draft);
+  const occupied = new Set([
+    ...map.obstacles.map((/** @type {any} */ obstacle) => obstacle.object_id),
+    ...map.spawn_pads.map((/** @type {any} */ pad) => pad.object_id),
+    ...(authoringKind(draft) === "scenario"
+      ? draft.content.roster.map((/** @type {any} */ row) => row.object_id)
+      : []),
+  ]);
+  let ordinal = 0;
+  while (occupied.has(`obstacle-${ordinal}`)) {
+    ordinal += 1;
+  }
+  return `obstacle-${ordinal}`;
+}
+
 /** @param {any} draft @param {"wall" | "pillar"} kind @param {number} maximumObstacles */
 export function addAuthoringObstacle(draft, kind, maximumObstacles) {
   const next = cloneAuthoringValue(draft);
@@ -332,15 +342,7 @@ export function addAuthoringObstacle(draft, kind, maximumObstacles) {
   if (map.obstacles.length >= maximumObstacles) {
     throw new RangeError(`Maps support at most ${maximumObstacles} obstacles.`);
   }
-  const occupied = new Set(
-    map.obstacles.map((/** @type {any} */ obstacle) => obstacle.object_id),
-  );
-  let ordinal = map.obstacles.length + 1;
-  let objectId = `${kind}-${ordinal}`;
-  while (occupied.has(objectId)) {
-    ordinal += 1;
-    objectId = `${kind}-${ordinal}`;
-  }
+  const objectId = nextObstacleObjectId(next);
   const common = {
     kind,
     object_id: objectId,
@@ -376,15 +378,7 @@ export function duplicateAuthoringObstacle(draft, objectId, maximumObstacles, of
     throw new TypeError("Only obstacles may be duplicated.");
   }
   const original = map.obstacles[index];
-  const occupied = new Set(
-    map.obstacles.map((/** @type {any} */ obstacle) => obstacle.object_id),
-  );
-  let ordinal = 2;
-  let duplicateId = `${original.object_id}-copy`;
-  while (occupied.has(duplicateId)) {
-    duplicateId = `${original.object_id}-copy-${ordinal}`;
-    ordinal += 1;
-  }
+  const duplicateId = nextObstacleObjectId(next);
   const duplicate = cloneAuthoringValue(original);
   duplicate.object_id = duplicateId;
   duplicate.center_x += duplicateOffset;

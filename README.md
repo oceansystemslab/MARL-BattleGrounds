@@ -17,8 +17,11 @@ minimal reusable map and Team Deathmatch scenario authoring:
 Its three areas are Combat Debugger, Maps, and Scenarios. The Combat Debugger
 provides staged simultaneous actions, exact legality, Oracle and authorized
 agent-POV views, saved-scenario loading, browser-local visual filters, and
-optional replay recording. Maps and Scenarios save local drafts, validate them
-through the existing simulator authorities, and freeze immutable candidates.
+optional replay recording. Maps and Scenarios save revisioned local drafts with
+visible paths, validate them through the existing simulator authorities, and
+freeze immutable candidates. Saved scenarios load directly; saved maps can be
+opened as clearly labelled deterministic default-5v5-TDM previews without
+modifying the map.
 Existing replay artifacts remain outside the DevClient.
 
 Record one manual episode to a canonical replay and adjacent metric sidecar:

@@ -15,19 +15,15 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
-    field_validator,
     model_validator,
 )
 
 from marl_battlegrounds.evaluation.models import (
     CodeRevisionV1,
-    ContentAddressedIdentityV1,
-    VersionedIdentityV1,
 )
 
 _MAX_NAME_LENGTH = 120
 _MAX_DESCRIPTION_LENGTH = 2_000
-_MAX_STUDY_TEXT_LENGTH = 4_000
 _MAX_NOTES_LENGTH = 8_000
 _MAX_ID_LENGTH = 64
 _MAX_AGENT_SLOTS = 10
@@ -65,17 +61,7 @@ type ShortText = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=256),
 ]
-type OptionalShortText = Annotated[
-    str,
-    StringConstraints(strip_whitespace=True, max_length=256),
-]
 type ClassName = Literal["mage", "warrior", "hunter", "rogue", "priest"]
-type AgentRole = Literal[
-    "focal",
-    "cooperative_partner",
-    "adversarial_opponent",
-    "not_applicable",
-]
 
 
 class _AuthoringModel(BaseModel):
@@ -229,7 +215,6 @@ class DevRosterSlotV1(_AuthoringModel):
     team_local_slot: Annotated[int, Field(ge=1, le=5)]
     global_slot: Annotated[int, Field(ge=0, le=9)]
     class_name: ClassName | Literal["not_applicable"]
-    role: AgentRole
 
 
 class DevAgentStateV1(_AuthoringModel):
@@ -251,77 +236,6 @@ class DevAgentStateV1(_AuthoringModel):
     priest_blessing_of_freedom_duration: int = 0
 
 
-class DevVersionedIdentityDraftV1(_AuthoringModel):
-    """Incrementally editable draft form of a canonical versioned identity."""
-
-    identifier: OptionalShortText | None = None
-    version: int | None = None
-
-
-class DevContentAddressedIdentityDraftV1(DevVersionedIdentityDraftV1):
-    """Incrementally editable draft form of a content-addressed identity."""
-
-    canonical_digest: (
-        Annotated[
-            str,
-            StringConstraints(strip_whitespace=True, max_length=256),
-        ]
-        | None
-    ) = None
-
-
-class DevStudyContractV1(_AuthoringModel):
-    """Bounded controlled-study metadata; deliberately no executable DSL."""
-
-    purpose_or_research_question: Annotated[
-        str,
-        StringConstraints(strip_whitespace=True, max_length=_MAX_STUDY_TEXT_LENGTH),
-    ] = ""
-    hypothesis: Annotated[
-        str,
-        StringConstraints(strip_whitespace=True, max_length=_MAX_STUDY_TEXT_LENGTH),
-    ] = ""
-    intent: Literal["diagnostic", "canonical_candidate"] = "diagnostic"
-    expected_public_behavior: Annotated[
-        str,
-        StringConstraints(strip_whitespace=True, max_length=_MAX_STUDY_TEXT_LENGTH),
-    ] = ""
-    focal_role_template: OptionalShortText = ""
-    cooperative_role_template: OptionalShortText = ""
-    adversarial_role_template: OptionalShortText = ""
-    matched_seed_schedule: Annotated[tuple[int, ...], Field(max_length=256)] = ()
-    primary_measurement: OptionalShortText = ""
-    secondary_measurements: Annotated[tuple[ShortText, ...], Field(max_length=2)] = ()
-    violation_declarations: Annotated[tuple[ShortText, ...], Field(max_length=32)] = ()
-    completion_and_right_censoring_treatment: Annotated[
-        str,
-        StringConstraints(strip_whitespace=True, max_length=_MAX_STUDY_TEXT_LENGTH),
-    ] = ""
-    success_policy_identity: DevVersionedIdentityDraftV1 | None = None
-    completion_policy_identity: DevVersionedIdentityDraftV1 | None = None
-    partial_result_policy_identity: DevVersionedIdentityDraftV1 | None = None
-    scripted_team_b_pressure_protocol_identity: (
-        DevContentAddressedIdentityDraftV1 | None
-    ) = None
-    notes_and_confounds: Annotated[
-        str,
-        StringConstraints(strip_whitespace=True, max_length=_MAX_NOTES_LENGTH),
-    ] = ""
-
-    @field_validator(
-        "success_policy_identity",
-        "completion_policy_identity",
-        "partial_result_policy_identity",
-        "scripted_team_b_pressure_protocol_identity",
-        mode="before",
-    )
-    @classmethod
-    def _accept_canonical_identity_models(cls, value: object) -> object:
-        if isinstance(value, (VersionedIdentityV1, ContentAddressedIdentityV1)):
-            return value.model_dump(mode="json")
-        return value
-
-
 class DevScenarioContentV1(_AuthoringModel):
     schema_id: Literal["dev-scenario-content@1"] = Field(
         default="dev-scenario-content@1",
@@ -340,6 +254,10 @@ class DevScenarioContentV1(_AuthoringModel):
         str,
         StringConstraints(strip_whitespace=True, max_length=_MAX_DESCRIPTION_LENGTH),
     ] = ""
+    notes: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, max_length=_MAX_NOTES_LENGTH),
+    ] = ""
     embedded_map: DevMapContentV1
     source_map_provenance: DevSourceMapProvenanceV1 | None = None
     task: DevTeamDeathmatchTaskV1 = DevTeamDeathmatchTaskV1()
@@ -355,7 +273,6 @@ class DevScenarioContentV1(_AuthoringModel):
         tuple[DevAgentStateV1, ...],
         Field(min_length=_MAX_AGENT_SLOTS, max_length=_MAX_AGENT_SLOTS),
     ]
-    study: DevStudyContractV1 = DevStudyContractV1()
 
     @model_validator(mode="after")
     def _validate_fixed_slot_topology(self) -> DevScenarioContentV1:
@@ -556,13 +473,6 @@ def new_scenario_draft(
             team_local_slot=local_slot,
             global_slot=(0 if team == "A" else 5) + local_slot - 1,
             class_name=_DEFAULT_CLASSES[local_slot - 1],
-            role=(
-                "focal"
-                if team == "A" and local_slot == 1
-                else "cooperative_partner"
-                if team == "A"
-                else "adversarial_opponent"
-            ),
         )
         for team in ("A", "B")
         for local_slot in range(1, 6)

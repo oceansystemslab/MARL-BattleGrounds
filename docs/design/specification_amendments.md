@@ -1336,3 +1336,69 @@ with SharedObs the researcher-facing default and NoSharedObs a separately
 reported first-class regime. Changing controller or information regime resets
 the exact loaded scenario snapshot and seed. Manual runs are diagnostic and do
 not become official policy-evaluation evidence.
+
+## A21. Minimal DevClient scenario and asset-workflow correction
+
+**Classification:** approved private pre-alpha authoring-contract cutover and
+product-workflow clarification.
+**Supersedes:** only A16 and A20 clauses that require authored agent-role labels,
+controlled-study metadata, or a study contract in DevClient scenario content or
+semantic identity. It does not supersede the separate controlled-evaluation,
+policy-assignment, evidence-role, seed-schedule, endpoint, Replay, or promotion
+contracts owned by later evaluation milestones.
+
+The DevClient Scenario Author defines executable episode content: name,
+description, optional ordinary notes, an embedded map snapshot, task
+configuration, fixed-slot roster and classes, per-slot initial state, episode
+configuration, and current global state. It does not author a privileged focal
+agent, cooperative/adversarial evidence roles, hypotheses, seed schedules,
+measurements, endpoint policies, pressure protocols, versioned predicates, or
+other controlled-study declarations. A future experiment or evaluation
+definition may reference a promoted scenario and independently assign those
+run- and evidence-level facts.
+
+The private authoring V1 contract therefore removes `role` from roster rows and
+removes the complete `study` member. It adds optional plain `notes`, bounded to
+8,000 characters. The strict parser rejects obsolete authoring documents that
+still contain `role` or `study`; no compatibility shim, silent migration, or
+dual-read path is authorized. This is an in-place pre-alpha cutover because no
+scenario draft or candidate has entered durable use. Existing map drafts and
+candidates remain compatible and unchanged.
+
+Scenario semantic identity excludes name, description, notes, browser object
+identities, timestamps, draft revision, and source-map provenance. It continues
+to include the ordered embedded map, roster topology and classes, task and
+episode configuration, initial state, and current global state. Successful
+authoritative compilation and existing validation are sufficient for both
+execution validity and candidate freeze qualification. Freezing creates an
+immutable content-addressed snapshot only; it does not promote, partition,
+canonize, train on, or evaluate the asset.
+
+The Combat Debugger initially controls the first active Team A slot selected by
+the fixed physical roster topology. That selection is not persisted as an
+authored role. Existing evaluation and Replay layers may continue to derive
+their independent focal/cooperative/adversarial evidence vocabulary from the
+controlled slot and policy assignments; this amendment changes none of those
+public contracts or recorded bytes.
+
+Maps may be inspected in Combat through an explicit **Default TDM map preview**.
+The authoritative host reopens the exact current buffer, saved revision, or
+frozen candidate; independently copies its map content into the ordinary
+default Team Deathmatch scenario factory; and compiles and validates the
+result before atomically replacing the current Debug session. The transient
+preview uses mirrored Mage/Warrior/Hunter/Rogue/Priest five-agent teams at the
+authored pads, full catalog health, threshold 5, 300 maximum steps, spawn
+shield duration 3 at speed 2.0, respawn periods 5 with countdowns 4, zero
+scores/step/status/cooldown state, and neutral previous-action history. It is
+identified by `default-tdm-map-preview@1`, is visibly distinguished from an
+authored scenario, never mutates or implicitly saves the source map, and leaves
+the current Debug session untouched on any resolution or validation failure.
+
+Spawn pads remain simulator coordinate points with no core radius. DevClient
+authoring renders their validation footprint using the maximum positive body
+radius in the live catalog, with a defensive `0.5` fallback. Humanized
+mechanics labels, rounded read-only presentation, obstacle display identities,
+saved-asset selectors, and save/freeze location feedback are browser
+presentation and workflow concerns only. Editable numeric values, persisted
+content, simulator mechanics, Replay behavior, and evaluation semantics remain
+exact and unchanged.

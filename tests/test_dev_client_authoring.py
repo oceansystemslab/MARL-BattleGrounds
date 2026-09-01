@@ -29,7 +29,6 @@ from scripts.dev.visual_debugger.authoring_compiler import (
 from scripts.dev.visual_debugger.authoring_models import (
     MAX_DEV_ASSET_SEQUENCE,
     DevAuthoringProblemV1,
-    DevContentAddressedIdentityDraftV1,
     DevMapContentV1,
     DevMapDraftV1,
     DevPillarV1,
@@ -37,8 +36,6 @@ from scripts.dev.visual_debugger.authoring_models import (
     DevScenarioDraftV1,
     DevScenarioGlobalStateV1,
     DevSourceMapProvenanceV1,
-    DevStudyContractV1,
-    DevVersionedIdentityDraftV1,
     DevWallV1,
     default_spawn_pads,
     new_map_draft,
@@ -46,10 +43,10 @@ from scripts.dev.visual_debugger.authoring_models import (
 )
 from scripts.dev.visual_debugger.authoring_service import (
     DevAuthoringCommandRequestV1,
+    DevCandidateSourceV1,
     DevClientAuthoringBinding,
-    DevCurrentScenarioBufferSourceV1,
-    DevSavedScenarioSourceV1,
-    DevScenarioCandidateSourceV1,
+    DevCurrentBufferSourceV1,
+    DevSavedDraftSourceV1,
     DevScenarioLoadService,
     LoadedDevScenarioSnapshotV1,
     debugger_scenario_from_snapshot,
@@ -91,46 +88,6 @@ def _code_revision() -> CodeRevisionV1:
     )
 
 
-def _qualified_scenario(
-    asset_id: str = "qualified-scenario",
-) -> DevScenarioDraftV1:
-    draft = new_scenario_draft(asset_id)
-    study = DevStudyContractV1(
-        purpose_or_research_question="Can Team A execute the authored tactic?",
-        hypothesis="The focal agent reaches the intended public endpoint.",
-        intent="canonical_candidate",
-        expected_public_behavior="A1 advances while partners preserve pressure.",
-        focal_role_template="initiator@1",
-        cooperative_role_template="support@1",
-        adversarial_role_template="pressure@1",
-        matched_seed_schedule=(1, 7, 23),
-        primary_measurement="completion-rate@1",
-        secondary_measurements=("time-to-completion@1",),
-        violation_declarations=("none",),
-        completion_and_right_censoring_treatment="right-censor-at-horizon@1",
-        success_policy_identity=DevVersionedIdentityDraftV1(
-            identifier="success-policy",
-            version=1,
-        ),
-        completion_policy_identity=DevVersionedIdentityDraftV1(
-            identifier="completion-policy",
-            version=1,
-        ),
-        partial_result_policy_identity=DevVersionedIdentityDraftV1(
-            identifier="partial-result-policy",
-            version=1,
-        ),
-        scripted_team_b_pressure_protocol_identity=DevContentAddressedIdentityDraftV1(
-            identifier="scripted-tdm-pressure",
-            version=1,
-            canonical_digest="d" * 64,
-        ),
-    )
-    return draft.model_copy(
-        update={"content": draft.content.model_copy(update={"study": study})}
-    )
-
-
 def _request(payload: dict[str, object]) -> DevAuthoringCommandRequestV1:
     return DevAuthoringCommandRequestV1.model_validate_json(json.dumps(payload))
 
@@ -164,6 +121,16 @@ def test_strict_models_reject_extra_fields_and_preserve_wire_schema_alias() -> N
     with pytest.raises(ValidationError, match="unique across map and agent objects"):
         DevScenarioDraftV1.model_validate_json(json.dumps(scenario_payload))
 
+    obsolete_role_payload = new_scenario_draft().model_dump(mode="json", by_alias=True)
+    obsolete_role_payload["content"]["roster"][0]["role"] = "focal"
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        DevScenarioDraftV1.model_validate_json(json.dumps(obsolete_role_payload))
+
+    obsolete_study_payload = new_scenario_draft().model_dump(mode="json", by_alias=True)
+    obsolete_study_payload["content"]["study"] = {}
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        DevScenarioDraftV1.model_validate_json(json.dumps(obsolete_study_payload))
+
     oversized_revision = draft.model_dump(mode="json", by_alias=True)
     oversized_revision["revision"] = MAX_DEV_ASSET_SEQUENCE + 1
     with pytest.raises(ValidationError, match="less than or equal"):
@@ -181,6 +148,12 @@ def test_blank_defaults_are_exact_and_map_copy_is_independent() -> None:
         f"{pad.team}{pad.team_local_slot}" for pad in map_draft.content.spawn_pads
     ) == tuple(f"{team}{slot}" for team in ("A", "B") for slot in range(1, 6))
     assert scenario.content.team_a_size == scenario.content.team_b_size == 5
+    assert scenario.content.task.score_threshold == 5
+    assert scenario.content.episode.max_steps == 300
+    assert scenario.content.episode.spawn_shield_duration_steps == 3
+    assert scenario.content.episode.spawn_shield_movement_speed == 2.0
+    assert scenario.content.episode.team_a_respawn_wave_period_steps == 5
+    assert scenario.content.episode.team_b_respawn_wave_period_steps == 5
     assert tuple(slot.class_name for slot in scenario.content.roster[:5]) == (
         "mage",
         "warrior",
@@ -372,7 +345,6 @@ def test_scenario_compiler_uses_reset_overlay_and_neutral_history() -> None:
     assert np.asarray(state.ultimate_cooldowns)[5] == 0
     assert not np.asarray(state.has_previous_timestep_joint_action).item()
     assert np.count_nonzero(np.asarray(state.previous_timestep_move_actions)) == 0
-    assert compiled.remaining_evidence_horizon == 290
     assert compiled.resolved_configuration_digest
     assert compiled.resolved_initial_state_digest
 
@@ -536,113 +508,6 @@ def test_invalid_numeric_draft_saves_reopens_and_stays_out_of_debug_discovery(
     assert binding.scenario_loader.discover() == ()
 
 
-def test_partial_study_identities_save_reopen_and_block_only_freeze(
-    tmp_path: Path,
-) -> None:
-    store = _store(tmp_path)
-    binding = DevClientAuthoringBinding(store, code_revision=_code_revision())
-    payload = _qualified_scenario("partial-identities").model_dump(
-        mode="json",
-        by_alias=True,
-    )
-    payload["content"]["study"]["success_policy_identity"] = {
-        "identifier": "success-policy"
-    }
-    payload["content"]["study"]["scripted_team_b_pressure_protocol_identity"] = {
-        "identifier": "scripted-tdm-pressure",
-        "version": 1,
-    }
-
-    saved = binding.apply_command(
-        _request(
-            {
-                "command_type": "save",
-                "draft": payload,
-                "expected_revision": 0,
-            }
-        )
-    )
-
-    assert saved.ok
-    assert isinstance(saved.draft, DevScenarioDraftV1)
-    assert saved.validation is not None
-    assert saved.validation.execution_valid
-    assert not saved.validation.freeze_qualified
-    assert saved.draft.content.study.success_policy_identity is not None
-    assert saved.draft.content.study.success_policy_identity.version is None
-    reopened = binding.apply_command(
-        _request(
-            {
-                "command_type": "open",
-                "source": {
-                    "source_kind": "saved_draft",
-                    "asset_kind": "scenario",
-                    "asset_id": "partial-identities",
-                    "revision": 1,
-                },
-            }
-        )
-    )
-    assert reopened.ok
-    assert isinstance(reopened.draft, DevScenarioDraftV1)
-    assert reopened.draft.content.study.success_policy_identity is not None
-    assert reopened.draft.content.study.success_policy_identity.version is None
-    pressure_identity = (
-        reopened.draft.content.study.scripted_team_b_pressure_protocol_identity
-    )
-    assert pressure_identity is not None
-    assert pressure_identity.canonical_digest is None
-
-    failed_freeze = binding.apply_command(
-        _request(
-            {
-                "command_type": "freeze",
-                "draft": reopened.draft.model_dump(mode="json", by_alias=True),
-            }
-        )
-    )
-    assert not failed_freeze.ok
-    assert {
-        (problem.stable_code, problem.field_path) for problem in failed_freeze.problems
-    } >= {
-        (
-            "scenario-freeze-success-policy-invalid",
-            "study.success_policy_identity.version",
-        ),
-        (
-            "scenario-freeze-pressure-protocol-invalid",
-            "study.scripted_team_b_pressure_protocol_identity.canonical_digest",
-        ),
-    }
-
-    completed_payload = reopened.draft.model_dump(mode="json", by_alias=True)
-    completed_payload["content"]["study"]["success_policy_identity"]["version"] = 1
-    completed_payload["content"]["study"]["scripted_team_b_pressure_protocol_identity"][
-        "canonical_digest"
-    ] = "d" * 64
-    completed = binding.apply_command(
-        _request(
-            {
-                "command_type": "save",
-                "draft": completed_payload,
-                "expected_revision": 1,
-            }
-        )
-    )
-    assert completed.ok
-    assert isinstance(completed.draft, DevScenarioDraftV1)
-    frozen = binding.apply_command(
-        _request(
-            {
-                "command_type": "freeze",
-                "draft": completed.draft.model_dump(mode="json", by_alias=True),
-            }
-        )
-    )
-    assert frozen.ok
-    assert frozen.candidate is not None
-
-
 def test_core_state_failure_links_the_exact_agent_inspector_field() -> None:
     draft = new_scenario_draft("linked-core-state")
     states = list(draft.content.agent_states)
@@ -678,23 +543,14 @@ def test_compile_map_wraps_float32_normalization_as_a_linked_problem() -> None:
     assert raised.value.problems[0].field_path == "width"
 
 
-def test_execution_valid_and_freeze_qualified_are_distinct() -> None:
+def test_execution_valid_scenario_is_freeze_qualified() -> None:
     draft = new_scenario_draft()
-    execution_problems = validate_dev_scenario(draft)
-    qualified = _qualified_scenario()
 
-    assert execution_problems
-    assert all(
-        problem.stable_code.startswith("scenario-freeze-")
-        for problem in execution_problems
-    )
-    assert compile_dev_scenario(draft).freeze_qualified is False
-    assert compile_dev_scenario(
-        qualified, require_freeze_qualified=True
-    ).freeze_qualified
+    assert validate_dev_scenario(draft) == ()
+    assert compile_dev_scenario(draft).freeze_qualified
 
 
-def test_scenario_digest_excludes_names_source_provenance_and_browser_ids() -> None:
+def test_scenario_digest_excludes_display_prose_provenance_and_browser_ids() -> None:
     draft = new_scenario_draft()
     roster = tuple(
         slot.model_copy(update={"object_id": f"replacement-agent-{index}"})
@@ -708,6 +564,7 @@ def test_scenario_digest_excludes_names_source_provenance_and_browser_ids() -> N
         update={
             "name": "Renamed scenario",
             "description": "Display-only prose",
+            "notes": "Private author notes",
             "source_map_provenance": DevSourceMapProvenanceV1(
                 asset_id="some-map",
                 revision=7,
@@ -719,6 +576,19 @@ def test_scenario_digest_excludes_names_source_provenance_and_browser_ids() -> N
     )
 
     assert scenario_semantic_digest(draft.content) == scenario_semantic_digest(changed)
+
+
+def test_scenario_notes_are_optional_and_bounded() -> None:
+    payload = new_scenario_draft().model_dump(mode="json", by_alias=True)
+
+    assert payload["content"]["notes"] == ""
+    payload["content"]["notes"] = "x" * 8_000
+    parsed = DevScenarioDraftV1.model_validate_json(json.dumps(payload))
+    assert len(parsed.content.notes) == 8_000
+
+    payload["content"]["notes"] = "x" * 8_001
+    with pytest.raises(ValidationError, match="at most 8000 characters"):
+        DevScenarioDraftV1.model_validate_json(json.dumps(payload))
 
 
 def test_scenario_normalization_matches_float32_runtime_storage() -> None:
@@ -829,7 +699,7 @@ def test_qualified_candidate_promotion_revalidates_and_never_overwrites(
 ) -> None:
     store = _store(tmp_path)
     candidate = store.freeze_scenario(
-        _qualified_scenario(),
+        new_scenario_draft("qualified-scenario"),
         code_revision=_code_revision(),
     )
     destination = store.promote_candidate(
@@ -849,7 +719,10 @@ def test_qualified_candidate_promotion_revalidates_and_never_overwrites(
 
     loader = DevScenarioLoadService(store)
     attempt = loader.load(
-        DevScenarioCandidateSourceV1(candidate_id=candidate.candidate_id)
+        DevCandidateSourceV1(
+            asset_kind="scenario",
+            candidate_id=candidate.candidate_id,
+        )
     )
     assert attempt.ok
     assert attempt.summary is not None
@@ -869,11 +742,14 @@ def test_candidate_revalidation_preserves_linked_problems_and_current_snapshot(
 ) -> None:
     store = _store(tmp_path)
     candidate = store.freeze_scenario(
-        _qualified_scenario("linked-candidate"),
+        new_scenario_draft("linked-candidate"),
         code_revision=_code_revision(),
     )
     loader = DevScenarioLoadService(store)
-    source = DevScenarioCandidateSourceV1(candidate_id=candidate.candidate_id)
+    source = DevCandidateSourceV1(
+        asset_kind="scenario",
+        candidate_id=candidate.candidate_id,
+    )
     assert loader.load(source).ok
     original_snapshot = loader.current_snapshot
     linked_problem = DevAuthoringProblemV1(
@@ -956,7 +832,11 @@ def test_saved_scenario_discovery_and_restart_load_exact_revision(
     ]
 
     attempt = second_process.load(
-        DevSavedScenarioSourceV1(asset_id=saved.asset_id, revision=saved.revision)
+        DevSavedDraftSourceV1(
+            asset_kind="scenario",
+            asset_id=saved.asset_id,
+            revision=saved.revision,
+        )
     )
     assert attempt.ok
     assert attempt.summary is not None
@@ -967,13 +847,177 @@ def test_saved_scenario_discovery_and_restart_load_exact_revision(
     )
 
 
+def test_current_saved_and_candidate_maps_use_the_exact_default_preview_path(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    current_map = new_map_draft("preview-map").model_copy(
+        update={
+            "content": new_map_draft("preview-map").content.model_copy(
+                update={"name": "Preview arena"}
+            )
+        }
+    )
+    saved_map = store.save_draft(current_map, expected_revision=0)
+    assert isinstance(saved_map, DevMapDraftV1)
+    candidate = store.freeze_map(current_map, code_revision=_code_revision())
+    binding = DevClientAuthoringBinding(store, code_revision=_code_revision())
+    files_before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    sources_and_maps = (
+        (
+            {
+                "source_kind": "current_buffer",
+                "asset_kind": "map",
+                "draft": current_map.model_dump(mode="json", by_alias=True),
+            },
+            current_map,
+        ),
+        (
+            {
+                "source_kind": "saved_draft",
+                "asset_kind": "map",
+                "asset_id": saved_map.asset_id,
+                "revision": saved_map.revision,
+            },
+            saved_map,
+        ),
+        (
+            {
+                "source_kind": "candidate",
+                "asset_kind": "map",
+                "candidate_id": candidate.candidate_id,
+            },
+            candidate,
+        ),
+    )
+    for source, exact_map in sources_and_maps:
+        expected = compile_dev_scenario(
+            new_scenario_draft("explicit-map-copy", source_map=exact_map)
+        )
+        response = binding.apply_command(
+            _request({"command_type": "open_in_debug", "source": source})
+        )
+
+        assert response.ok
+        assert response.debug_load is not None
+        assert response.debug_load.asset_kind == "map"
+        assert response.debug_load.debug_profile == "default_tdm_map_preview"
+        assert response.debug_load.source_name == "Preview arena"
+        assert response.debug_load.scenario_name == "Default TDM map preview"
+        assert response.debug_load.resolved_configuration_digest == (
+            expected.resolved_configuration_digest
+        )
+        assert response.debug_load.resolved_initial_state_digest == (
+            expected.resolved_initial_state_digest
+        )
+
+    snapshot = binding.scenario_loader.current_snapshot
+    assert snapshot is not None
+    scenario = debugger_scenario_from_snapshot(snapshot)
+    assert scenario.title == "Default TDM map preview"
+    assert scenario.default_controlled_slot == 0
+    assert scenario.provenance is not None
+    assert scenario.provenance.source_identity == (
+        f"map:candidate:{candidate.candidate_id}:profile:default-tdm-map-preview@1"
+    )
+    files_after = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert files_after == files_before
+
+    maximum_name = "M" * 120
+    long_name_map = new_map_draft("long-preview-name")
+    long_name_map = long_name_map.model_copy(
+        update={
+            "content": long_name_map.content.model_copy(update={"name": maximum_name})
+        }
+    )
+    long_name_response = binding.apply_command(
+        _request(
+            {
+                "command_type": "open_in_debug",
+                "source": {
+                    "source_kind": "current_buffer",
+                    "asset_kind": "map",
+                    "draft": long_name_map.model_dump(mode="json", by_alias=True),
+                },
+            }
+        )
+    )
+    assert long_name_response.ok
+    assert long_name_response.debug_load is not None
+    assert long_name_response.debug_load.source_name == maximum_name
+    assert long_name_response.debug_load.scenario_name == "Default TDM map preview"
+
+
+def test_failed_map_preview_preserves_current_debug_snapshot(tmp_path: Path) -> None:
+    binding = DevClientAuthoringBinding(
+        _store(tmp_path),
+        code_revision=_code_revision(),
+    )
+    valid_scenario = new_scenario_draft("existing-debug-session")
+    installed = binding.apply_command(
+        _request(
+            {
+                "command_type": "open_in_debug",
+                "source": {
+                    "source_kind": "current_buffer",
+                    "asset_kind": "scenario",
+                    "draft": valid_scenario.model_dump(mode="json", by_alias=True),
+                },
+            }
+        )
+    )
+    assert installed.ok
+    original_snapshot = binding.scenario_loader.current_snapshot
+
+    invalid_map = new_map_draft("invalid-preview")
+    invalid_map = invalid_map.model_copy(
+        update={
+            "content": invalid_map.content.model_copy(
+                update={"width": 2.0, "height": 2.0}
+            )
+        }
+    )
+    failed = binding.apply_command(
+        _request(
+            {
+                "command_type": "open_in_debug",
+                "source": {
+                    "source_kind": "current_buffer",
+                    "asset_kind": "map",
+                    "draft": invalid_map.model_dump(mode="json", by_alias=True),
+                },
+            }
+        )
+    )
+
+    assert not failed.ok
+    assert any(
+        problem.stable_code == "map-spawn-pad-out-of-bounds"
+        for problem in failed.problems
+    )
+    assert binding.scenario_loader.current_snapshot is original_snapshot
+
+
 def test_failed_revalidation_preserves_current_debug_snapshot(tmp_path: Path) -> None:
     store = _store(tmp_path)
     valid = store.save_draft(new_scenario_draft("load-guard"), expected_revision=0)
     assert isinstance(valid, DevScenarioDraftV1)
     loader = DevScenarioLoadService(store)
     first = loader.load(
-        DevSavedScenarioSourceV1(asset_id=valid.asset_id, revision=valid.revision)
+        DevSavedDraftSourceV1(
+            asset_kind="scenario",
+            asset_id=valid.asset_id,
+            revision=valid.revision,
+        )
     )
     assert first.ok
     original_snapshot = loader.current_snapshot
@@ -986,7 +1030,8 @@ def test_failed_revalidation_preserves_current_debug_snapshot(tmp_path: Path) ->
     )
     invalid_saved = store.save_draft(invalid, expected_revision=1)
     failed = loader.load(
-        DevSavedScenarioSourceV1(
+        DevSavedDraftSourceV1(
+            asset_kind="scenario",
             asset_id=invalid_saved.asset_id,
             revision=invalid_saved.revision,
         )
@@ -1004,7 +1049,9 @@ def test_failed_revalidation_preserves_current_debug_snapshot(tmp_path: Path) ->
 def test_current_buffer_and_saved_loader_use_one_snapshot_path(tmp_path: Path) -> None:
     loader = DevScenarioLoadService(_store(tmp_path))
     draft = new_scenario_draft("current-buffer")
-    attempt = loader.load(DevCurrentScenarioBufferSourceV1(draft=draft))
+    with pytest.raises(ValidationError, match="asset_kind must match"):
+        DevCurrentBufferSourceV1(asset_kind="map", draft=draft)
+    attempt = loader.load(DevCurrentBufferSourceV1(asset_kind="scenario", draft=draft))
 
     assert attempt.ok
     assert attempt.summary is not None
@@ -1053,7 +1100,8 @@ def test_loaded_snapshot_replaces_and_resets_the_exact_debugger_scenario(
     )
 
     attempt = loader.load(
-        DevSavedScenarioSourceV1(
+        DevSavedDraftSourceV1(
+            asset_kind="scenario",
             asset_id=saved.asset_id,
             revision=saved.revision,
         )
@@ -1065,8 +1113,9 @@ def test_loaded_snapshot_replaces_and_resets_the_exact_debugger_scenario(
     assert int(debugger.session.state.step_count) == 7
     assert debugger.session.scenario.provenance is not None
     assert debugger.session.scenario.provenance.source_identity == (
-        "saved_draft:debugger-load:revision:1"
+        "scenario:saved_draft:debugger-load:revision:1"
     )
+    assert debugger.session.scenario.default_controlled_slot == 0
     aggregation = {
         row.name: row.value
         for row in debugger.session.evaluation_context.aggregation_keys
@@ -1140,6 +1189,7 @@ def test_single_authoring_binding_parses_whole_commands_and_shares_loader(
                 "command_type": "open_in_debug",
                 "source": {
                     "source_kind": "saved_draft",
+                    "asset_kind": "scenario",
                     "asset_id": "binding-scenario",
                     "revision": 1,
                 },

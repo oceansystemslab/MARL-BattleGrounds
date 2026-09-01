@@ -181,27 +181,43 @@ async function editField(page, label, value) {
   });
 }
 
-/** @param {import("@playwright/test").Page} page @param {string} assetId */
-async function selectPersistedScenario(page, assetId) {
-  const value = await page
-    .locator("#devclient-scenario-select")
-    .evaluate((select, requestedAssetId) => {
-      if (!(select instanceof HTMLSelectElement)) {
-        return null;
-      }
-      for (const option of select.options) {
-        try {
-          if (JSON.parse(option.value).asset_id === requestedAssetId) {
-            return option.value;
-          }
-        } catch {
-          // The built-in arena has an intentionally empty non-JSON value.
-        }
-      }
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {string} selector
+ * @param {string} assetId
+ */
+async function selectPersistedAsset(page, selector, assetId) {
+  const value = await page.locator(selector).evaluate((select, requestedAssetId) => {
+    if (!(select instanceof HTMLSelectElement)) {
       return null;
-    }, assetId);
+    }
+    for (const option of select.options) {
+      try {
+        if (JSON.parse(option.value).asset_id === requestedAssetId) {
+          return option.value;
+        }
+      } catch {
+        // The built-in arena has an intentionally empty non-JSON value.
+      }
+    }
+    return null;
+  }, assetId);
   expect(value).not.toBeNull();
-  await page.locator("#devclient-scenario-select").selectOption(value);
+  await page.locator(selector).selectOption(value);
+}
+
+/** @param {import("@playwright/test").Page} page */
+async function expectAuthoringIdle(page) {
+  await expect(page.locator("#authoring-shell")).toHaveAttribute("aria-busy", "false");
+}
+
+/** @param {import("@playwright/test").Page} page */
+async function expectSpawnPadRadius(page) {
+  const radii = await page
+    .locator('#authoring-canvas circle[data-kind="spawn_pad"]')
+    .evaluateAll((circles) => circles.map((circle) => circle.getAttribute("r")));
+  expect(radii.length).toBeGreaterThan(0);
+  expect(new Set(radii)).toEqual(new Set(["0.5"]));
 }
 
 test("authoring persists through restart and drives same-start Combat comparisons", async ({
@@ -246,6 +262,10 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     expect(freshMap.draft.asset_id).toBe("untitled-map");
     expect(freshMap.draft.revision).toBe(0);
+    await expect(page.locator("#authoring-persistence-status")).toHaveText(
+      "Unsaved map draft",
+    );
+    await expectSpawnPadRadius(page);
 
     await page.getByRole("button", { name: "map document", exact: true }).click();
     const mapName = page.getByLabel("Name", { exact: true });
@@ -264,7 +284,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     await editField(page, "Center X", 9.5);
     await editField(page, "Center Y", 5.5);
-    const wall = page.locator('.authoring-svg-object[data-object-id="wall-1"]');
+    const wall = page.locator('.authoring-svg-object[data-object-id="obstacle-0"]');
     await expect(wall.locator("title")).toHaveCount(0);
     await wall.hover();
     await expect(page.locator("#visual-tooltip")).toBeHidden();
@@ -276,8 +296,21 @@ test("authoring persists through restart and drives same-start Combat comparison
       page.locator("#authoring-undo").click(),
     );
     await expect(wall).toBeVisible();
-    await page.getByRole("button", { name: "wall-1", exact: true }).click();
+    await page.getByRole("button", { name: "obstacle-0", exact: true }).click();
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("9.5");
+    await applyAuthoringCommand(page, "validate", () =>
+      page.locator("#authoring-duplicate").click(),
+    );
+    await expect(
+      page.getByRole("button", { name: "obstacle-1", exact: true }),
+    ).toBeVisible();
+    await applyAuthoringCommand(page, "validate", () =>
+      page.locator("#authoring-undo").click(),
+    );
+    await expect(
+      page.getByRole("button", { name: "obstacle-1", exact: true }),
+    ).toHaveCount(0);
+    await page.getByRole("button", { name: "obstacle-0", exact: true }).click();
 
     await expectNoAuthoringCommands(page, () =>
       dismissOnePrompt(page, () => page.locator("#authoring-save").click()),
@@ -294,7 +327,30 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     expect(savedMap.draft.asset_id).toBe(mapId);
     expect(savedMap.draft.revision).toBe(1);
+    await expectAuthoringIdle(page);
+    await expect(page.locator("#authoring-persistence-status")).toHaveText(
+      `Saved map ${mapId} · revision 1 · artifacts/dev_client/drafts/maps/${mapId}/r1.json`,
+    );
     await editField(page, "Center X", 10.5);
+    await expect(page.locator("#authoring-persistence-status")).toHaveText(
+      `Unsaved changes · last saved map ${mapId} revision 1`,
+    );
+    await page.route(
+      "**/api/dev/authoring/command",
+      async (route) => {
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "simulated stale revision" }),
+        });
+      },
+      { times: 1 },
+    );
+    await page.locator("#authoring-save").click();
+    await expectAuthoringIdle(page);
+    await expect(page.locator("#authoring-persistence-status")).toHaveText(
+      `Unsaved changes · last saved map ${mapId} revision 1`,
+    );
     const updatedMap = await expectNoPrompts(page, () =>
       applyAuthoringCommand(page, "save", () =>
         page.locator("#authoring-save").click(),
@@ -302,6 +358,10 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     expect(updatedMap.draft.asset_id).toBe(mapId);
     expect(updatedMap.draft.revision).toBe(2);
+    await expectAuthoringIdle(page);
+    await expect(page.locator("#authoring-persistence-status")).toHaveText(
+      `Saved map ${mapId} · revision 2 · artifacts/dev_client/drafts/maps/${mapId}/r2.json`,
+    );
 
     const fullMapViewBox = await authoringViewBox(page);
     const selectedCenter = await page
@@ -333,7 +393,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     expect(await authoringViewBox(page)).toBe(fullMapViewBox);
     await expect(page.getByLabel("Center X", { exact: true })).toHaveCount(0);
-    await page.getByRole("button", { name: "wall-1", exact: true }).click();
+    await page.getByRole("button", { name: "obstacle-0", exact: true }).click();
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("10.5");
     await applyAuthoringCommand(page, "validate", () =>
       page.locator("#authoring-undo").click(),
@@ -341,7 +401,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("13.5");
     await canvas.focus();
     await applyAuthoringCommand(page, "validate", () => page.keyboard.press("r"));
-    await page.getByRole("button", { name: "wall-1", exact: true }).click();
+    await page.getByRole("button", { name: "obstacle-0", exact: true }).click();
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("10.5");
     await canvas.hover({ position: { x: 240, y: 160 } });
     await page.mouse.wheel(0, 360);
@@ -358,31 +418,54 @@ test("authoring persists through restart and drives same-start Combat comparison
       page.locator("#authoring-freeze").click(),
     );
     expect(frozenMap.candidate.candidate_id).toMatch(/^[a-f0-9]{64}$/u);
-
-    await applyAuthoringCommand(page, "list", () =>
-      page.getByRole("button", { name: "Combat Debugger", exact: true }).click(),
+    await expectAuthoringIdle(page);
+    await expect(page.locator("#authoring-persistence-status")).toHaveText(
+      `Frozen candidate ${frozenMap.candidate.candidate_id} · artifacts/dev_client/candidates/map-${frozenMap.candidate.candidate_id}.json`,
     );
+
+    const mapPreviewRequest = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        new URL(request.url()).pathname === "/api/dev/authoring/command" &&
+        request.postDataJSON()?.command_type === "open_in_debug",
+    );
+    await applyAuthoringCommand(page, "open_in_debug", () =>
+      page.locator("#authoring-open-debug").click(),
+    );
+    expect((await mapPreviewRequest).postDataJSON()?.source).toMatchObject({
+      source_kind: "current_buffer",
+      asset_kind: "map",
+    });
     await expect(page.locator("#authoring-shell")).toBeHidden();
     await expect(page.locator("#workspace")).toBeVisible();
     await expect(page.locator("#devclient-combat-config")).toBeVisible();
-    await expectNoAuthoringCommands(page, () =>
+    await expect(
+      page
+        .locator("#devclient-scenario-select option")
+        .filter({ hasText: "Map preview" })
+        .first(),
+    ).toContainText("default 5v5 TDM");
+    await applyAuthoringCommand(page, "list", () =>
       page.getByRole("button", { name: "Maps", exact: true }).click(),
     );
     expect(await authoringViewBox(page)).toBe(retainedMapViewBox);
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("10.5");
-    await applyAuthoringCommand(page, "open", () =>
-      answerPrompts(page, [mapId], () => page.locator("#authoring-open").click()),
+    await selectPersistedAsset(page, "#authoring-saved-draft-select", mapId);
+    await expectNoPrompts(page, () =>
+      applyAuthoringCommand(page, "open", () =>
+        page.locator("#authoring-open").click(),
+      ),
     );
     await expect(page.locator("#authoring-title")).toHaveText("Untitled map");
     await expect(
-      page.locator('.authoring-svg-object[data-object-id="wall-1"]'),
+      page.locator('.authoring-svg-object[data-object-id="obstacle-0"]'),
     ).toBeVisible();
-    await page.getByRole("button", { name: "wall-1", exact: true }).click();
+    await page.getByRole("button", { name: "obstacle-0", exact: true }).click();
     await editField(page, "Center X", 14.5);
     await applyAuthoringCommand(page, "validate", () =>
       page.locator("#authoring-reset").click(),
     );
-    await page.getByRole("button", { name: "wall-1", exact: true }).click();
+    await page.getByRole("button", { name: "obstacle-0", exact: true }).click();
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("10.5");
     await canvas.hover({ position: { x: 240, y: 160 } });
     await page.mouse.wheel(0, -360);
@@ -413,59 +496,91 @@ test("authoring persists through restart and drives same-start Combat comparison
     expect(freshScenario.draft.asset_id).toBe("untitled-scenario");
     expect(freshScenario.draft.revision).toBe(0);
     await page.locator("#authoring-new-scenario-mode").selectOption("copy_saved_map");
-    await applyAuthoringCommand(page, "new_scenario", () =>
-      answerPrompts(page, [mapId], () => page.locator("#authoring-new").click()),
+    await selectPersistedAsset(page, "#authoring-new-scenario-source", mapId);
+    const copiedScenario = await expectNoPrompts(page, () =>
+      applyAuthoringCommand(page, "new_scenario", () =>
+        page.locator("#authoring-new").click(),
+      ),
     );
+    expect(copiedScenario.draft.content.source_map_provenance).toMatchObject({
+      asset_id: mapId,
+      revision: 2,
+    });
     await expect(
-      page.locator('.authoring-svg-object[data-object-id="wall-1"]'),
+      page.locator('.authoring-svg-object[data-object-id="obstacle-0"]'),
     ).toBeVisible();
+    await expectSpawnPadRadius(page);
+    await page.getByRole("button", { name: "scenario document", exact: true }).click();
+    await expect(page.getByLabel("Notes", { exact: true })).toBeVisible();
+    await expect(page.getByText("Role", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Controlled Study", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Study Identities", { exact: true })).toHaveCount(0);
     await editField(page, "Step count", 7);
     await editField(page, "Team A score", 1);
-    await editField(page, "Team B score", 2);
-
-    /** @type {ReadonlyArray<readonly [string, string | number]>} */
-    const studyFields = [
-      ["Purpose / research question", "Exercise authored TDM pressure."],
-      ["Hypothesis", "The scripted opponent reproduces the staged pressure."],
-      ["Expected public behavior", "Team B advances while Team A holds."],
-      ["Focal role template", "Hold the center lane."],
-      ["Cooperative role template", "Protect the focal agent."],
-      ["Adversarial role template", "Apply deterministic TDM pressure."],
-      ["Matched seeds", "7, 11"],
-      ["Primary measurement", "focal survival"],
-      ["Violation declarations", "none"],
-      ["Completion / censoring", "Complete at terminal; otherwise right-censor."],
-      ["Success policy ID", "tdm-success"],
-      ["Success policy version", 1],
-      ["Completion policy ID", "tdm-completion"],
-      ["Completion policy version", 1],
-      ["Partial-result policy ID", "tdm-partial"],
-      ["Partial-result policy version", 1],
-      ["Team B pressure protocol ID", "scripted-tdm-pressure"],
-      ["Team B pressure protocol version", 1],
-      [
-        "Team B pressure protocol digest",
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      ],
-    ];
-    let finalValidation = null;
-    for (const [label, value] of studyFields) {
-      finalValidation = await editField(page, label, value);
-    }
+    const finalValidation = await editField(page, "Team B score", 2);
     expect(finalValidation.validation.execution_valid).toBe(true);
     expect(finalValidation.validation.freeze_qualified).toBe(true);
-    const focalEffectiveSpeed = finalValidation.validation.effective_movement_speeds[0];
-    expect(focalEffectiveSpeed).toEqual(expect.any(Number));
+    const firstAgentEffectiveSpeed =
+      finalValidation.validation.effective_movement_speeds[0];
+    expect(firstAgentEffectiveSpeed).toEqual(expect.any(Number));
     await page.getByRole("button", { name: "A1 · mage", exact: true }).click();
-    await expect(
-      page.getByLabel("Current effective speed", { exact: true }),
-    ).toHaveValue(String(focalEffectiveSpeed));
+    const effectiveSpeedField = page.getByLabel("Current effective speed", {
+      exact: true,
+    });
+    const displayedEffectiveSpeed = await effectiveSpeedField.inputValue();
+    expect(displayedEffectiveSpeed).toMatch(/^-?\d+(?:\.\d{1,2})?$/u);
+    expect(Number(displayedEffectiveSpeed)).toBeCloseTo(firstAgentEffectiveSpeed, 2);
+    const [inspectorBox, effectiveSpeedBox] = await Promise.all([
+      page.locator("#authoring-inspector-form").boundingBox(),
+      effectiveSpeedField.boundingBox(),
+    ]);
+    if (inspectorBox === null || effectiveSpeedBox === null) {
+      throw new Error("The effective-speed field must have measurable layout boxes.");
+    }
+    expect(effectiveSpeedBox.x).toBeGreaterThanOrEqual(inspectorBox.x);
+    expect(effectiveSpeedBox.x + effectiveSpeedBox.width).toBeLessThanOrEqual(
+      inspectorBox.x + inspectorBox.width + 0.5,
+    );
+    const mechanicsPresentation = await page
+      .locator("#authoring-inspector-form")
+      .evaluate((form) =>
+        [...form.querySelectorAll("fieldset")]
+          .filter((fieldset) =>
+            fieldset.querySelector("legend")?.textContent?.includes("mechanics"),
+          )
+          .flatMap((fieldset) => [
+            fieldset.textContent ?? "",
+            ...[...fieldset.querySelectorAll("input, select, textarea")].map(
+              (control) =>
+                control instanceof HTMLInputElement ||
+                control instanceof HTMLSelectElement ||
+                control instanceof HTMLTextAreaElement
+                  ? control.value
+                  : "",
+            ),
+          ])
+          .join(" "),
+      );
+    expect(mechanicsPresentation).not.toContain("_");
+    const inspectorOverflow = await page
+      .locator("#authoring-inspector-form")
+      .evaluate((form) => ({
+        scrollWidth: form.scrollWidth,
+        clientWidth: form.clientWidth,
+      }));
+    expect(inspectorOverflow.scrollWidth).toBeLessThanOrEqual(
+      inspectorOverflow.clientWidth,
+    );
 
     const savedScenario = await applyAuthoringCommand(page, "save_as", () =>
       answerPrompts(page, [scenarioId], () => page.locator("#authoring-save").click()),
     );
     expect(savedScenario.draft.asset_id).toBe(scenarioId);
     expect(savedScenario.draft.revision).toBe(1);
+    await expectAuthoringIdle(page);
+    await expect(page.locator("#authoring-persistence-status")).toHaveText(
+      `Saved scenario ${scenarioId} · revision 1 · artifacts/dev_client/drafts/scenarios/${scenarioId}/r1.json`,
+    );
     const updatedScenario = await expectNoPrompts(page, () =>
       applyAuthoringCommand(page, "save", () =>
         page.locator("#authoring-save").click(),
@@ -473,6 +588,31 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     expect(updatedScenario.draft.asset_id).toBe(scenarioId);
     expect(updatedScenario.draft.revision).toBe(2);
+    await expectAuthoringIdle(page);
+    await expect(page.locator("#authoring-persistence-status")).toHaveText(
+      `Saved scenario ${scenarioId} · revision 2 · artifacts/dev_client/drafts/scenarios/${scenarioId}/r2.json`,
+    );
+
+    await page
+      .locator("#authoring-new-scenario-mode")
+      .selectOption("duplicate_saved_scenario");
+    await selectPersistedAsset(page, "#authoring-new-scenario-source", scenarioId);
+    const duplicatedScenario = await expectNoPrompts(page, () =>
+      applyAuthoringCommand(page, "new_scenario", () =>
+        page.locator("#authoring-new").click(),
+      ),
+    );
+    expect(duplicatedScenario.draft.asset_id).toBe("untitled-scenario");
+    expect(duplicatedScenario.draft.revision).toBe(0);
+    expect(duplicatedScenario.draft.content.global_state).toEqual(
+      updatedScenario.draft.content.global_state,
+    );
+    await selectPersistedAsset(page, "#authoring-saved-draft-select", scenarioId);
+    await expectNoPrompts(page, () =>
+      applyAuthoringCommand(page, "open", () =>
+        page.locator("#authoring-open").click(),
+      ),
+    );
 
     await page.getByRole("button", { name: "scenario document", exact: true }).click();
     await editField(page, "Team B score", 3);
@@ -512,7 +652,7 @@ test("authoring persists through restart and drives same-start Combat comparison
       .locator("#authoring-problem-list")
       .innerText();
 
-    await expectNoAuthoringCommands(page, () =>
+    await applyAuthoringCommand(page, "list", () =>
       page.getByRole("button", { name: "Maps", exact: true }).click(),
     );
     expect(await authoringViewBox(page)).toBe(contextualMapViewBox);
@@ -520,7 +660,7 @@ test("authoring persists through restart and drives same-start Combat comparison
       mapValidationEvidence,
     );
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("10.5");
-    await expectNoAuthoringCommands(page, () =>
+    await applyAuthoringCommand(page, "list", () =>
       page.getByRole("button", { name: "Scenarios", exact: true }).click(),
     );
     expect(await authoringViewBox(page)).toBe(retainedScenarioViewBox);
@@ -532,13 +672,13 @@ test("authoring persists through restart and drives same-start Combat comparison
     ).toHaveAttribute("aria-current", "true");
     await expect(
       page.getByLabel("Current effective speed", { exact: true }),
-    ).toHaveValue(String(focalEffectiveSpeed));
+    ).toHaveValue(displayedEffectiveSpeed);
 
     await applyAuthoringCommand(page, "list", () =>
       page.getByRole("button", { name: "Combat Debugger", exact: true }).click(),
     );
     await expect(page.locator("#authoring-shell")).toBeHidden();
-    await expectNoAuthoringCommands(page, () =>
+    await applyAuthoringCommand(page, "list", () =>
       page.getByRole("button", { name: "Scenarios", exact: true }).click(),
     );
     await expect(page.locator("#devclient-combat-config")).toBeHidden();
@@ -551,6 +691,10 @@ test("authoring persists through restart and drives same-start Combat comparison
       page.locator("#authoring-freeze").click(),
     );
     expect(frozenScenario.candidate.candidate_id).toMatch(/^[a-f0-9]{64}$/u);
+    await expectAuthoringIdle(page);
+    await expect(page.locator("#authoring-persistence-status")).toHaveText(
+      `Frozen candidate ${frozenScenario.candidate.candidate_id} · artifacts/dev_client/candidates/scenario-${frozenScenario.candidate.candidate_id}.json`,
+    );
 
     await applyAuthoringCommand(page, "open_in_debug", () =>
       page.locator("#authoring-open-debug").click(),
@@ -616,7 +760,7 @@ test("authoring persists through restart and drives same-start Combat comparison
         ),
       )
       .toBe(true);
-    await selectPersistedScenario(page, scenarioId);
+    await selectPersistedAsset(page, "#devclient-scenario-select", scenarioId);
     await applyAuthoringCommand(page, "open_in_debug", () =>
       page.locator("#devclient-scenario-load").click(),
     );

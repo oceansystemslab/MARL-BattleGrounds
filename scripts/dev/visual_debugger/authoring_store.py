@@ -433,7 +433,7 @@ class DevAssetStore:
         *,
         code_revision: CodeRevisionV1,
     ) -> DevScenarioCandidateV1:
-        compiled = compile_dev_scenario(draft, require_freeze_qualified=True)
+        compiled = compile_dev_scenario(draft)
         evidence = DevCandidateCompileEvidenceV1(
             semantic_digest=compiled.semantic_digest,
             resolved_configuration_digest=compiled.resolved_configuration_digest,
@@ -506,10 +506,7 @@ class DevAssetStore:
                         "map candidate semantic digest mismatch"
                     )
             else:
-                compiled_scenario = compile_dev_scenario(
-                    candidate.content,
-                    require_freeze_qualified=True,
-                )
+                compiled_scenario = compile_dev_scenario(candidate.content)
                 if (
                     compiled_scenario.semantic_digest
                     != candidate.evidence.semantic_digest

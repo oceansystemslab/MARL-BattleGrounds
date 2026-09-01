@@ -68,7 +68,9 @@ a safe durable asset ID on the first Save; later Saves update that exact asset
 under its revision fence. Drag centers for quick placement, hold Alt to bypass
 the fixed 0.5-world-unit snap, use arrow keys for exact nudging, and use the
 inspector for dimensions, wall size/rotation, roster, episode, current state,
-and controlled-study fields. The mouse wheel zooms only the authoring canvas;
+name, description, and ordinary notes. Experiment hypotheses, evidence roles,
+seed schedules, and measurements belong to a separate future evaluation
+definition, not the physical scenario document. The mouse wheel zooms only the authoring canvas;
 Space-drag or middle-button drag pans it. **Recenter** restores the complete-map
 view without changing the draft. **Reset (R)** restores the latest New, Open,
 or successfully saved baseline and can be undone immediately. The `R` shortcut
@@ -76,15 +78,22 @@ does not fire while typing in a form control. Ten spawn pads are fixed
 identities; obstacles have explicit duplicate, delete, and up/down order
 controls.
 
-Drafts are local files under ignored `artifacts/dev_client/` storage. Save uses
-an exact revision fence, so an older browser cannot overwrite a newer revision.
-Validate distinguishes execution-valid scenarios from freeze-qualified study
-candidates. Freeze writes an immutable content-addressed candidate; it does not
-promote the asset into tracked scientific configuration.
+Drafts are local files under ignored `artifacts/dev_client/` storage. A compact
+selector opens saved revisions for the active tab. The status line names the
+exact saved revision and repository-relative path, for example
+`artifacts/dev_client/drafts/maps/arena/r2.json`, and reports unsaved changes
+without hiding the last truthful location. Save uses an exact revision fence,
+so an older browser cannot overwrite a newer revision. Every execution-valid
+map or scenario is also eligible to freeze. Freeze writes an immutable,
+content-addressed snapshot under `artifacts/dev_client/candidates/`; it does not
+save later edits, promote the asset, or mark it as canonical, training, or
+evaluation content.
 
 A new scenario can start blank, copy a saved map, or duplicate a saved
-scenario. Copied map content is independent: later changes never propagate in
-either direction. The browser edits JSON-shaped fields only. Python compiles
+scenario. The adjacent source selector carries the exact saved revision or
+candidate identity, and successful Save, Save As, and Freeze refresh discovery
+immediately. Copied map content is independent: later changes never propagate
+in either direction. The browser edits JSON-shaped fields only. Python compiles
 the whole draft into existing `EnvConfig` and `EnvState` authorities and runs
 the existing validators before any scenario can enter the Combat Debugger.
 
@@ -104,15 +113,18 @@ digest, records owner approval provenance, and writes either
 `configs/scenarios/<asset-id>/v<version>.json`. It never overwrites an existing
 ID/version and does not assign a map to a training or evaluation partition.
 
-## Loading a saved scenario
+## Loading saved scenarios and map previews
 
-The Combat Debugger scenario selector lists the latest execution-valid saved
-scenario revisions and frozen scenario candidates. Load reopens the exact
-persisted source, strictly parses it, recompiles it, and revalidates it before
-the current session changes. Failure leaves the current session untouched and
-returns linked problems. `Open in Debug` in the Scenarios area is a shortcut to
-the same loading service. Reset restores the loaded authored state and seed,
-including its map, roster, scores, timers, and current timestep.
+The Combat Debugger selector lists the latest execution-valid saved map and
+scenario revisions plus frozen candidates. Scenario rows load the authored
+starting state. Map rows are explicitly labelled as default 5v5 TDM previews:
+the host independently copies the exact map into the ordinary default scenario,
+compiles it, and validates it without modifying or saving the map. `Open in
+Debug` in either authoring area calls this same loading service for its current
+buffer. Every path strictly parses and revalidates before the current session
+changes; failure leaves the current session untouched and returns linked
+problems. Reset restores the immutable loaded snapshot and seed, including its
+map, roster, scores, timers, and current timestep.
 
 Team A remains manual. Team B may be manual or use the scripted Team
 Deathmatch policy. SharedObs is the default information regime, while

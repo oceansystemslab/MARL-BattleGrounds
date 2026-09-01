@@ -513,13 +513,13 @@ const CONTROL_HELP = Object.freeze([
   ],
   [
     "#devclient-scenario-select",
-    "Saved scenario",
-    "Choose a persisted execution-valid scenario draft or frozen candidate.",
+    "Saved Debug asset",
+    "Choose an execution-valid scenario or a map to inspect through the explicit default 5v5 TDM preview.",
   ],
   [
     "#devclient-scenario-load",
-    "Load scenario",
-    "Reopen, compile, and revalidate the selected scenario before replacing the current Debug session.",
+    "Load Debug asset",
+    "Reopen, compile, and revalidate the selected scenario or map preview before replacing the current Debug session.",
   ],
   [
     "#devclient-team-a-controller",
@@ -537,9 +537,19 @@ const CONTROL_HELP = Object.freeze([
     "Choose SharedObs or NoSharedObs, then restart from the same scenario snapshot and seed.",
   ],
   [
+    "#authoring-saved-draft-select",
+    "Saved draft",
+    "Choose an exact saved revision for the active Map or Scenario Author tab.",
+  ],
+  [
     "#authoring-new-scenario-mode",
     "Scenario starting point",
     "Start blank, copy a saved map, or duplicate a saved scenario.",
+  ],
+  [
+    "#authoring-new-scenario-source",
+    "Scenario source asset",
+    "Choose the exact saved revision or frozen candidate to copy into a new independent scenario draft.",
   ],
   ["#authoring-new", "New draft", "Create a new local map or scenario draft."],
   ["#authoring-open", "Open draft", "Open an exact saved draft revision."],
@@ -561,12 +571,12 @@ const CONTROL_HELP = Object.freeze([
   [
     "#authoring-freeze",
     "Freeze candidate",
-    "Create an immutable candidate only when the draft is freeze-qualified.",
+    "Freeze creates an immutable, content-addressed snapshot of this valid draft in `artifacts/dev_client/candidates/`. It does not save later edits, promote the asset, or mark it as canonical, training, or evaluation content.",
   ],
   [
     "#authoring-open-debug",
     "Open in Debug",
-    "Compile and revalidate an immutable snapshot, then load it through the Combat Debugger scenario path.",
+    "Compile and revalidate an immutable scenario snapshot or an explicit default 5v5 TDM map preview, then atomically replace the Combat Debugger session.",
   ],
   [
     "[data-authoring-add]",

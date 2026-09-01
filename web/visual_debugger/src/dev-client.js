@@ -73,14 +73,112 @@ export function draftAfterAuthoringResponse(currentDraft, response) {
 }
 
 /** @param {Readonly<Record<string, any>>} asset */
-export function debugScenarioOptionLabel(asset) {
+export function persistedAuthoringSource(asset) {
+  return asset.source_kind === "candidate"
+    ? {
+        source_kind: "candidate",
+        asset_kind: asset.asset_kind,
+        candidate_id: asset.candidate_id,
+      }
+    : {
+        source_kind: "saved_draft",
+        asset_kind: asset.asset_kind,
+        asset_id: asset.asset_id,
+        revision: asset.revision,
+      };
+}
+
+/** @param {Readonly<Record<string, any>>} asset */
+export function savedDraftOptionLabel(asset) {
+  return `${asset.name} · ${asset.asset_id} · revision ${asset.revision} · ${asset.map_width} × ${asset.map_height}`;
+}
+
+/**
+ * @param {ReadonlyArray<Record<string, any>>} assets
+ * @param {string} creationMode
+ */
+export function newScenarioSourceAssets(assets, creationMode) {
+  const sourceKind =
+    creationMode === "copy_saved_map"
+      ? "map"
+      : creationMode === "duplicate_saved_scenario"
+        ? "scenario"
+        : null;
+  return sourceKind === null
+    ? []
+    : assets.filter((asset) => asset.asset_kind === sourceKind);
+}
+
+/** @param {Readonly<Record<string, any>>} asset */
+export function authoringSourceOptionLabel(asset) {
+  const lifecycle =
+    asset.source_kind === "candidate"
+      ? `frozen candidate ${asset.candidate_id}`
+      : `saved ${asset.asset_id} revision ${asset.revision}`;
+  const status = asset.execution_valid ? "execution-valid" : "needs validation fixes";
+  return `${asset.name} · ${lifecycle} · ${asset.map_width} × ${asset.map_height} · ${status}`;
+}
+
+/** @param {Readonly<Record<string, any>>} asset */
+export function debugAssetOptionLabel(asset) {
   const identity =
     asset.source_kind === "candidate"
       ? `candidate ${asset.candidate_id}`
       : `saved ${asset.asset_id} revision ${asset.revision}`;
   const status =
     asset.source_kind === "candidate" ? "frozen · execution-valid" : "execution-valid";
-  return `${asset.name} · ${identity} · ${asset.map_width} × ${asset.map_height} · ${status}`;
+  return asset.asset_kind === "map"
+    ? `Map preview · ${asset.name} · ${identity} · ${asset.map_width} × ${asset.map_height} · ${status} · default 5v5 TDM`
+    : `Scenario · ${asset.name} · ${identity} · ${asset.map_width} × ${asset.map_height} · ${status}`;
+}
+
+/**
+ * @param {Record<string, any> | null} draft
+ * @param {Record<string, any> | null} baseline
+ * @param {{candidateId: string, content: Record<string, any>} | null} frozen
+ */
+export function authoringPersistenceMessage(draft, baseline, frozen) {
+  if (draft === null) {
+    return "No authoring draft is open.";
+  }
+  const kind = authoringKind(draft);
+  const collection = kind === "map" ? "maps" : "scenarios";
+  const currentContent = JSON.stringify(draft.content);
+  const savedContent = baseline === null ? null : JSON.stringify(baseline);
+  const savedPath = `artifacts/dev_client/drafts/${collection}/${draft.asset_id}/r${draft.revision}.json`;
+  let message;
+  if (draft.revision === 0) {
+    message = `Unsaved ${kind} draft`;
+  } else if (savedContent !== currentContent) {
+    message = `Unsaved changes · last saved ${kind} ${draft.asset_id} revision ${draft.revision}`;
+  } else {
+    message = `Saved ${kind} ${draft.asset_id} · revision ${draft.revision} · ${savedPath}`;
+  }
+  if (frozen === null) {
+    return message;
+  }
+  const candidatePath = `artifacts/dev_client/candidates/${kind}-${frozen.candidateId}.json`;
+  return JSON.stringify(frozen.content) === currentContent
+    ? `Frozen candidate ${frozen.candidateId} · ${candidatePath}`
+    : `${message} · Frozen candidate ${frozen.candidateId} · ${candidatePath} · preserves an earlier snapshot; current edits are not frozen`;
+}
+
+/**
+ * Bind Freeze feedback to the exact browser snapshot submitted to the host.
+ * The candidate content may be canonically float32-normalized, which does not
+ * mean that the user edited the draft after freezing it.
+ *
+ * @param {Readonly<Record<string, any>> | null} response
+ * @param {Record<string, any>} submittedContent
+ */
+export function frozenAuthoringRecord(response, submittedContent) {
+  const candidateId = response?.candidate?.candidate_id;
+  return response?.ok === true && typeof candidateId === "string"
+    ? {
+        candidateId,
+        content: cloneAuthoringValue(submittedContent),
+      }
+    : null;
 }
 
 /**
@@ -187,8 +285,13 @@ function installDevClient() {
     shell: required("authoring-shell"),
     eyebrow: required("authoring-eyebrow"),
     title: required("authoring-title"),
+    persistenceStatus: required("authoring-persistence-status"),
+    savedDraftChoice: required("authoring-saved-draft-choice"),
+    savedDraftSelect: required("authoring-saved-draft-select"),
     newScenarioChoice: required("authoring-new-scenario-choice"),
     newScenarioMode: required("authoring-new-scenario-mode"),
+    newScenarioSourceChoice: required("authoring-new-scenario-source-choice"),
+    newScenarioSource: required("authoring-new-scenario-source"),
     newButton: required("authoring-new"),
     openButton: required("authoring-open"),
     saveButton: required("authoring-save"),
@@ -223,6 +326,8 @@ function installDevClient() {
       past: [],
       future: [],
       camera: null,
+      openSourceValue: "",
+      frozen: null,
     };
   }
 
@@ -241,6 +346,10 @@ function installDevClient() {
     pointer: null,
     spacePressed: false,
     busy: false,
+    newScenarioSourceValues: {
+      copy_saved_map: "",
+      duplicate_saved_scenario: "",
+    },
   };
   const combatConfiguration = createCombatConfigurationController({
     teamBController: elements.teamBController,
@@ -301,6 +410,7 @@ function installDevClient() {
         editor.past = [];
         editor.future = [];
         editor.camera = null;
+        editor.frozen = null;
       }
       if (
         newDocument ||
@@ -308,6 +418,20 @@ function installDevClient() {
         response.command_type === "save_as"
       ) {
         editor.baseline = authoringContentSnapshot(nextDraft);
+      }
+      if (
+        response.command_type === "open" ||
+        response.command_type === "save" ||
+        response.command_type === "save_as"
+      ) {
+        editor.openSourceValue = JSON.stringify({
+          source_kind: "saved_draft",
+          asset_kind: authoringKind(nextDraft),
+          asset_id: nextDraft.asset_id,
+          revision: nextDraft.revision,
+        });
+      } else if (newDocument) {
+        editor.openSourceValue = "";
       }
     }
     if (response.command_type === "list" && Array.isArray(response.assets)) {
@@ -358,6 +482,15 @@ function installDevClient() {
     await send({ command_type: "list", asset_kind: "all" });
   }
 
+  /** @param {Record<string, any>} command */
+  async function sendAndRefreshAssets(command) {
+    const response = await send(command);
+    if (response?.ok) {
+      await refreshAssets();
+    }
+    return response;
+  }
+
   function notifyDebugSessionReplaced() {
     document.dispatchEvent(new CustomEvent("marl-devclient-debug-session-replaced"));
   }
@@ -381,49 +514,6 @@ function installDevClient() {
       throw new TypeError(`Authoring catalog is missing ${key}.`);
     }
     return value;
-  }
-
-  /** @param {Record<string, any>} asset */
-  function persistedSource(asset) {
-    return asset.source_kind === "candidate"
-      ? {
-          source_kind: "candidate",
-          asset_kind: asset.asset_kind,
-          candidate_id: asset.candidate_id,
-        }
-      : {
-          source_kind: "saved_draft",
-          asset_kind: asset.asset_kind,
-          asset_id: asset.asset_id,
-          revision: asset.revision,
-        };
-  }
-
-  /** @param {Record<string, any>} asset */
-  function debugScenarioSource(asset) {
-    return asset.source_kind === "candidate"
-      ? {
-          source_kind: "candidate",
-          candidate_id: asset.candidate_id,
-        }
-      : {
-          source_kind: "saved_draft",
-          asset_id: asset.asset_id,
-          revision: asset.revision,
-        };
-  }
-
-  /** @param {string} promptText @param {Record<string, any>[]} candidates */
-  function chooseAsset(promptText, candidates) {
-    if (candidates.length === 0) {
-      showLocalError("No compatible saved assets are available.");
-      return null;
-    }
-    /** @param {Record<string, any>} asset */
-    const identity = (asset) =>
-      asset.source_kind === "candidate" ? asset.candidate_id : asset.asset_id;
-    const requested = window.prompt(promptText, identity(candidates[0]));
-    return candidates.find((asset) => identity(asset) === requested) ?? null;
   }
 
   /** @param {string} promptText @param {string} defaultId */
@@ -462,17 +552,11 @@ function installDevClient() {
     }
     let source = null;
     if (creationMode !== "blank") {
-      const sourceKind = creationMode === "copy_saved_map" ? "map" : "scenario";
-      const asset = chooseAsset(
-        `Saved ${sourceKind} asset ID or candidate digest`,
-        state.assets.filter(
-          (/** @type {any} */ candidate) => candidate.asset_kind === sourceKind,
-        ),
-      );
-      if (asset === null) {
+      if (!elements.newScenarioSource.value) {
+        showLocalError("Choose a saved or frozen source for the new scenario.");
         return;
       }
-      source = persistedSource(asset);
+      source = JSON.parse(elements.newScenarioSource.value);
     }
     /** @type {Record<string, any>} */
     const command = {
@@ -502,11 +586,13 @@ function installDevClient() {
     }
     elements.combatConfig.hidden = area !== "combat";
     elements.shell.hidden = area === "combat";
+    if (area !== "combat") {
+      state.editor = state.editors[area];
+    }
+    await refreshAssets();
     if (area === "combat") {
-      await refreshAssets();
       return;
     }
-    state.editor = state.editors[area];
     const kind = area === "maps" ? "map" : "scenario";
     if (state.editor.draft === null) {
       await createDraft(kind);
@@ -563,17 +649,16 @@ function installDevClient() {
     }
   }
 
-  function renderScenarioOptions() {
+  function renderCombatOptions() {
     const selected = elements.scenarioSelect.value;
     elements.scenarioSelect.replaceChildren(new Option("Built-in arena", ""));
     for (const asset of state.assets.filter(
-      (/** @type {any} */ candidate) =>
-        candidate.asset_kind === "scenario" && candidate.execution_valid,
+      (/** @type {any} */ candidate) => candidate.execution_valid,
     )) {
       elements.scenarioSelect.append(
         new Option(
-          debugScenarioOptionLabel(asset),
-          JSON.stringify(debugScenarioSource(asset)),
+          debugAssetOptionLabel(asset),
+          JSON.stringify(persistedAuthoringSource(asset)),
         ),
       );
     }
@@ -583,6 +668,82 @@ function installDevClient() {
       elements.scenarioSelect.value = selected;
     }
     elements.scenarioLoad.disabled = !elements.scenarioSelect.value;
+  }
+
+  function renderSavedDraftOptions() {
+    const kind = state.area === "scenarios" ? "scenario" : "map";
+    const assets = openableDraftAssets(state.assets, kind);
+    elements.savedDraftSelect.replaceChildren(
+      new Option(`No saved ${kind} drafts`, ""),
+    );
+    for (const asset of assets) {
+      elements.savedDraftSelect.append(
+        new Option(
+          savedDraftOptionLabel(asset),
+          JSON.stringify(persistedAuthoringSource(asset)),
+        ),
+      );
+    }
+    const retained = state.editor.openSourceValue;
+    if (
+      retained &&
+      [...elements.savedDraftSelect.options].some((option) => option.value === retained)
+    ) {
+      elements.savedDraftSelect.value = retained;
+    } else if (assets.length > 0) {
+      elements.savedDraftSelect.selectedIndex = 1;
+      state.editor.openSourceValue = elements.savedDraftSelect.value;
+    } else {
+      state.editor.openSourceValue = "";
+    }
+    elements.savedDraftSelect.setAttribute("aria-label", `Saved ${kind} draft`);
+  }
+
+  function renderNewScenarioSourceOptions() {
+    const mode = elements.newScenarioMode.value;
+    const candidates = newScenarioSourceAssets(state.assets, mode);
+    const sourceRequired = mode !== "blank";
+    elements.newScenarioSourceChoice.hidden =
+      state.area !== "scenarios" || !sourceRequired;
+    elements.newScenarioSource.replaceChildren(
+      new Option(
+        sourceRequired ? "No compatible source assets" : "No source required",
+        "",
+      ),
+    );
+    for (const asset of candidates) {
+      elements.newScenarioSource.append(
+        new Option(
+          authoringSourceOptionLabel(asset),
+          JSON.stringify(persistedAuthoringSource(asset)),
+        ),
+      );
+    }
+    if (!sourceRequired) {
+      return;
+    }
+    const retained = state.newScenarioSourceValues[mode] ?? "";
+    if (
+      retained &&
+      [...elements.newScenarioSource.options].some(
+        (option) => option.value === retained,
+      )
+    ) {
+      elements.newScenarioSource.value = retained;
+    } else if (candidates.length > 0) {
+      elements.newScenarioSource.selectedIndex = 1;
+      state.newScenarioSourceValues[mode] = elements.newScenarioSource.value;
+    } else {
+      state.newScenarioSourceValues[mode] = "";
+    }
+  }
+
+  function renderPersistenceStatus() {
+    elements.persistenceStatus.textContent = authoringPersistenceMessage(
+      state.editor.draft,
+      state.editor.baseline,
+      state.editor.frozen,
+    );
   }
 
   function renderObjectList() {
@@ -624,9 +785,9 @@ function installDevClient() {
       const row = document.createElement("li");
       row.className = "empty-copy";
       row.textContent = state.editor.validation?.freeze_qualified
-        ? "Freeze-qualified."
+        ? "Execution-valid and freeze-qualified."
         : state.editor.validation?.execution_valid
-          ? "Execution-valid. Complete the study contract to freeze."
+          ? "Execution-valid."
           : "Validate to inspect host-authoritative errors and warnings.";
       elements.problemList.append(row);
       return;
@@ -692,8 +853,14 @@ function installDevClient() {
     }
     elements.scenarioSelect.disabled = state.busy;
     elements.scenarioLoad.disabled = state.busy || !elements.scenarioSelect.value;
+    elements.savedDraftSelect.disabled = state.busy || !elements.savedDraftSelect.value;
+    elements.newScenarioMode.disabled = state.busy;
+    elements.newScenarioSource.disabled =
+      state.busy ||
+      elements.newScenarioMode.value === "blank" ||
+      !elements.newScenarioSource.value;
     elements.newButton.disabled = state.busy;
-    elements.openButton.disabled = state.busy;
+    elements.openButton.disabled = state.busy || !elements.savedDraftSelect.value;
     elements.saveButton.disabled = state.busy || !state.editor.draft;
     elements.saveAsButton.disabled = state.busy || !state.editor.draft;
     elements.validateButton.disabled = state.busy || !state.editor.draft;
@@ -709,19 +876,21 @@ function installDevClient() {
     elements.freezeButton.disabled =
       state.busy || !state.editor.validation?.freeze_qualified;
     elements.openDebugButton.disabled =
-      state.busy ||
-      !state.editor.draft ||
-      authoringKind(state.editor.draft) !== "scenario" ||
-      !state.editor.validation?.execution_valid;
+      state.busy || !state.editor.draft || !state.editor.validation?.execution_valid;
   }
 
   function renderAll() {
-    renderScenarioOptions();
+    renderCombatOptions();
+    renderSavedDraftOptions();
+    renderNewScenarioSourceOptions();
     if (state.editor.draft) {
       const kind = authoringKind(state.editor.draft);
       elements.eyebrow.textContent = kind === "map" ? "Map Author" : "Scenario Author";
       elements.title.textContent = state.editor.draft.content.name;
+      elements.openDebugButton.textContent =
+        kind === "map" ? "Preview Map in Debug" : "Open Scenario in Debug";
     }
+    renderPersistenceStatus();
     renderObjectList();
     renderCanvas();
     renderAuthoringInspector(
@@ -753,6 +922,20 @@ function installDevClient() {
     }
     elements.scenarioLoad.disabled = !elements.scenarioSelect.value;
   });
+  elements.savedDraftSelect.addEventListener("change", () => {
+    state.editor.openSourceValue = elements.savedDraftSelect.value;
+    renderAvailability();
+  });
+  elements.newScenarioMode.addEventListener("change", () => {
+    renderAll();
+  });
+  elements.newScenarioSource.addEventListener("change", () => {
+    const mode = elements.newScenarioMode.value;
+    if (mode === "copy_saved_map" || mode === "duplicate_saved_scenario") {
+      state.newScenarioSourceValues[mode] = elements.newScenarioSource.value;
+    }
+    renderAvailability();
+  });
   elements.scenarioLoad.addEventListener("click", () => {
     if (!state.busy && elements.scenarioSelect.value) {
       void openInDebug(JSON.parse(elements.scenarioSelect.value));
@@ -777,20 +960,15 @@ function installDevClient() {
     () => void createDraft(state.area === "maps" ? "map" : "scenario"),
   );
   elements.openButton.addEventListener("click", async () => {
-    if (state.busy) {
+    if (state.busy || !elements.savedDraftSelect.value) {
       return;
     }
-    await refreshAssets();
-    const kind = state.area === "maps" ? "map" : "scenario";
-    const asset = chooseAsset(
-      `Saved ${kind} asset ID`,
-      openableDraftAssets(state.assets, kind),
-    );
-    if (asset) {
-      await send({ command_type: "open", source: persistedSource(asset) });
-    }
+    await send({
+      command_type: "open",
+      source: JSON.parse(elements.savedDraftSelect.value),
+    });
   });
-  elements.saveButton.addEventListener("click", () => {
+  elements.saveButton.addEventListener("click", async () => {
     const draft = state.editor.draft;
     if (state.busy || !draft) {
       return;
@@ -798,24 +976,28 @@ function installDevClient() {
     if (draft.revision === 0) {
       const assetId = promptAssetId("New asset ID", draft.asset_id);
       if (assetId !== null) {
-        void send({ command_type: "save_as", draft, asset_id: assetId });
+        await sendAndRefreshAssets({
+          command_type: "save_as",
+          draft,
+          asset_id: assetId,
+        });
       }
       return;
     }
-    void send({
+    await sendAndRefreshAssets({
       command_type: "save",
       draft,
       expected_revision: draft.revision,
     });
   });
-  elements.saveAsButton.addEventListener("click", () => {
+  elements.saveAsButton.addEventListener("click", async () => {
     const draft = state.editor.draft;
     if (state.busy || !draft) {
       return;
     }
     const assetId = promptAssetId("New asset ID", `${draft.asset_id}-copy`);
     if (assetId !== null) {
-      void send({ command_type: "save_as", draft, asset_id: assetId });
+      await sendAndRefreshAssets({ command_type: "save_as", draft, asset_id: assetId });
     }
   });
   elements.validateButton.addEventListener("click", () => {
@@ -823,9 +1005,20 @@ function installDevClient() {
       void validateDraft();
     }
   });
-  elements.freezeButton.addEventListener("click", () => {
+  elements.freezeButton.addEventListener("click", async () => {
     if (!state.busy && state.editor.draft) {
-      void send({ command_type: "freeze", draft: state.editor.draft });
+      const editor = state.editor;
+      const submittedContent = authoringContentSnapshot(editor.draft);
+      const response = await send({
+        command_type: "freeze",
+        draft: editor.draft,
+      });
+      const frozen = frozenAuthoringRecord(response, submittedContent);
+      if (frozen !== null) {
+        editor.frozen = frozen;
+        renderAll();
+        await refreshAssets();
+      }
     }
   });
   elements.openDebugButton.addEventListener("click", async () => {
@@ -833,7 +1026,11 @@ function installDevClient() {
       return;
     }
     await openInDebug(
-      { source_kind: "current_buffer", draft: state.editor.draft },
+      {
+        source_kind: "current_buffer",
+        asset_kind: authoringKind(state.editor.draft),
+        draft: state.editor.draft,
+      },
       true,
     );
   });

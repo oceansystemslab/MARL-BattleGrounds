@@ -5,6 +5,7 @@ const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const DEFAULT_MAP_WIDTH = 20;
 const DEFAULT_MAP_HEIGHT = 10;
 const DEFAULT_AGENT_BODY_RADIUS = 0.45;
+const DEFAULT_SPAWN_PAD_RADIUS = 0.5;
 const AUTHORING_AGENT_CLASSES = Object.freeze(
   new Set(["mage", "warrior", "hunter", "rogue", "priest"]),
 );
@@ -65,6 +66,16 @@ export function authoringAgentBodyRadius(object, catalog) {
     : null;
   const radius = Number(mechanics?.body_radius);
   return Number.isFinite(radius) && radius > 0 ? radius : DEFAULT_AGENT_BODY_RADIUS;
+}
+
+/** @param {any} catalog */
+export function authoringSpawnPadRadius(catalog) {
+  const radii = Array.isArray(catalog?.class_mechanics)
+    ? catalog.class_mechanics
+        .map((/** @type {any} */ mechanics) => Number(mechanics?.body_radius))
+        .filter((/** @type {number} */ radius) => Number.isFinite(radius) && radius > 0)
+    : [];
+  return radii.length > 0 ? Math.max(...radii) : DEFAULT_SPAWN_PAD_RADIUS;
 }
 
 /** @param {any} object */
@@ -296,7 +307,11 @@ export function renderAuthoringSvg(
         r: object.obstacle.radius,
       });
     } else if (object.kind === "spawn_pad") {
-      shape = svgElement("circle", { cx: object.x, cy: visualY, r: 0.36 });
+      shape = svgElement("circle", {
+        cx: object.x,
+        cy: visualY,
+        r: authoringSpawnPadRadius(catalog),
+      });
     } else {
       shape = svgElement("circle", {
         cx: object.x,

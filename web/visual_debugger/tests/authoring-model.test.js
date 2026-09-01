@@ -4,8 +4,10 @@ import {
   authoringClassAuraMechanics,
   authoringClassMechanics,
   authoringClassStatusMechanics,
+  authoringFieldDisplayValue,
   authoringPathMatchesProblem,
   focusAuthoringProblemField,
+  humanizeAuthoringIdentifier,
 } from "../src/authoring-inspector.js";
 import {
   addAuthoringObstacle,
@@ -30,6 +32,7 @@ import {
   authoringGridPattern,
   authoringMapDimensions,
   authoringPaintObjects,
+  authoringSpawnPadRadius,
   zoomAuthoringCamera,
 } from "../src/authoring-renderer.js";
 
@@ -69,7 +72,6 @@ function scenarioDraft() {
       team_local_slot: index + 1,
       global_slot: teamIndex * 5 + index,
       class_name: "mage",
-      role: team === "A" ? "focal" : "adversarial_opponent",
     })),
   );
   const embeddedMap = /** @type {any} */ (mapDraft().content);
@@ -181,20 +183,56 @@ test("obstacle edits preserve ordered fixed-slot semantics", () => {
     mapContent(duplicate.draft).obstacles.map(
       (/** @type {any} */ obstacle) => obstacle.object_id,
     ),
-    ["wall-1", "pillar-2", "wall-1-copy"],
+    ["obstacle-0", "obstacle-1", "obstacle-2"],
   );
-  const moved = reorderAuthoringObstacle(duplicate.draft, "wall-1-copy", -1);
+  const repeated = duplicateAuthoringObstacle(
+    duplicate.draft,
+    duplicate.object_id,
+    AUTHORING_CATALOG.maximum_obstacle_slots,
+    AUTHORING_CATALOG.fixed_snap_world_units,
+  );
+  assert.equal(repeated.object_id, "obstacle-3");
+  const moved = reorderAuthoringObstacle(repeated.draft, "obstacle-2", -1);
   assert.deepEqual(
     mapContent(moved).obstacles.map(
       (/** @type {any} */ obstacle) => obstacle.object_id,
     ),
-    ["wall-1", "wall-1-copy", "pillar-2"],
+    ["obstacle-0", "obstacle-2", "obstacle-1", "obstacle-3"],
   );
+  const deleted = deleteAuthoringObstacle(moved, "obstacle-0");
   assert.deepEqual(
-    mapContent(deleteAuthoringObstacle(moved, "wall-1")).obstacles.map(
+    mapContent(deleted).obstacles.map(
       (/** @type {any} */ obstacle) => obstacle.object_id,
     ),
-    ["wall-1-copy", "pillar-2"],
+    ["obstacle-2", "obstacle-1", "obstacle-3"],
+  );
+  const reused = addAuthoringObstacle(
+    deleted,
+    "wall",
+    AUTHORING_CATALOG.maximum_obstacle_slots,
+  );
+  assert.equal(reused.object_id, "obstacle-0");
+});
+
+test("scenario obstacle edits share the allocator without renaming existing objects", () => {
+  const draft = scenarioDraft();
+  const duplicate = duplicateAuthoringObstacle(
+    draft,
+    "wall-1",
+    AUTHORING_CATALOG.maximum_obstacle_slots,
+    AUTHORING_CATALOG.fixed_snap_world_units,
+  );
+  const added = addAuthoringObstacle(
+    duplicate.draft,
+    "pillar",
+    AUTHORING_CATALOG.maximum_obstacle_slots,
+  );
+
+  assert.deepEqual(
+    mapContent(added.draft).obstacles.map(
+      (/** @type {any} */ obstacle) => obstacle.object_id,
+    ),
+    ["wall-1", "obstacle-0", "obstacle-1"],
   );
 });
 
@@ -262,6 +300,23 @@ test("agent rendering resolves body radius from the mechanics catalog", () => {
   assert.equal(authoringAgentBodyRadius(agent, null), 0.45);
 });
 
+test("spawn pads use the largest supported body radius with a stable fallback", () => {
+  assert.equal(authoringSpawnPadRadius(AUTHORING_CATALOG), 0.5);
+  assert.equal(
+    authoringSpawnPadRadius({
+      class_mechanics: [
+        { body_radius: 0.35 },
+        { body_radius: 0.75 },
+        { body_radius: 0 },
+        { body_radius: Number.NaN },
+      ],
+    }),
+    0.75,
+  );
+  assert.equal(authoringSpawnPadRadius(null), 0.5);
+  assert.equal(authoringSpawnPadRadius({ class_mechanics: [] }), 0.5);
+});
+
 test("agent rendering uses the shared class vocabulary and explicit life state", () => {
   const draft = scenarioDraft();
   draft.content.roster[0].class_name = "warrior";
@@ -313,28 +368,18 @@ test("catalog class mechanics join by class instead of browser object identity",
   );
 });
 
-test("typed study identities can be completed from a null draft field", () => {
-  const draft = {
-    ...mapDraft(),
-    content: {
-      ...mapDraft().content,
-      study: { success_policy_identity: null },
-    },
-  };
-  const withIdentifier = setAuthoringField(
-    draft,
-    ["content", "study", "success_policy_identity", "identifier"],
-    "tdm-success",
+test("derived inspector values are human-facing without rounding authored numbers", () => {
+  assert.equal(
+    humanizeAuthoringIdentifier("mage_burst_damage_amplification"),
+    "Mage burst damage amplification",
   );
-  const completed = setAuthoringField(
-    withIdentifier,
-    ["content", "study", "success_policy_identity", "version"],
-    1,
+  assert.equal(humanizeAuthoringIdentifier(" target_none "), "Target none");
+  assert.equal(authoringFieldDisplayValue(1.149999976158142, true), "1.15");
+  assert.equal(authoringFieldDisplayValue(-0, true), "0");
+  assert.equal(
+    authoringFieldDisplayValue(1.149999976158142, false),
+    "1.149999976158142",
   );
-  assert.deepEqual(completed.content.study.success_policy_identity, {
-    identifier: "tdm-success",
-    version: 1,
-  });
 });
 
 test("Alive to Dead is one explicit clearing transaction", () => {
@@ -345,12 +390,6 @@ test("Alive to Dead is one explicit clearing transaction", () => {
       team_local_slot: index + 1,
       global_slot: teamIndex * 5 + index,
       class_name: "mage",
-      role:
-        team === "A"
-          ? index === 0
-            ? "focal"
-            : "cooperative_partner"
-          : "adversarial_opponent",
     })),
   );
   const states = roster.map((slot) => ({
@@ -407,12 +446,6 @@ test("team size edits canonicalize inactive rows and restore one active prefix",
       team_local_slot: index + 1,
       global_slot: teamIndex * 5 + index,
       class_name: ["mage", "warrior", "hunter", "rogue", "priest"][index],
-      role:
-        team === "A"
-          ? index === 0
-            ? "focal"
-            : "cooperative_partner"
-          : "adversarial_opponent",
     })),
   );
   const draft = {
@@ -436,13 +469,13 @@ test("team size edits canonicalize inactive rows and restore one active prefix",
 
   const reduced = setScenarioTeamSize(draft, "B", 2, AUTHORING_CATALOG);
   assert.equal(reduced.content.roster[7].class_name, "not_applicable");
-  assert.equal(reduced.content.roster[7].role, "not_applicable");
+  assert.equal(Object.hasOwn(reduced.content.roster[7], "role"), false);
   assert.deepEqual(reduced.content.agent_states[7].position, { x: 0, y: 0 });
   assert.equal(reduced.content.agent_states[7].ultimate_cooldown_remaining, 0);
 
   const restored = setScenarioTeamSize(reduced, "B", 3, AUTHORING_CATALOG);
   assert.equal(restored.content.roster[7].class_name, "hunter");
-  assert.equal(restored.content.roster[7].role, "adversarial_opponent");
+  assert.equal(Object.hasOwn(restored.content.roster[7], "role"), false);
   assert.deepEqual(
     restored.content.agent_states[7].position,
     mapDraft().content.spawn_pads[7].position,

@@ -70,8 +70,8 @@
         hidden
       >
         <label>
-          <span>Scenario</span>
-          <select id="devclient-scenario-select" aria-label="Saved valid scenario">
+          <span>Saved asset</span>
+          <select id="devclient-scenario-select" aria-label="Saved valid map or scenario">
             <option value="">Built-in arena</option>
           </select>
         </label>
@@ -590,14 +590,29 @@
         <div>
           <p id="authoring-eyebrow" class="eyebrow">Map Author</p>
           <h2 id="authoring-title">Untitled map</h2>
+          <p id="authoring-persistence-status" class="eyebrow" aria-live="polite">
+            Unsaved map draft
+          </p>
         </div>
         <div class="authoring-toolbar__actions">
+          <label id="authoring-saved-draft-choice">
+            <span>Saved draft</span>
+            <select id="authoring-saved-draft-select" aria-label="Saved map draft">
+              <option value="">No saved map drafts</option>
+            </select>
+          </label>
           <label id="authoring-new-scenario-choice" hidden>
             <span>New scenario from</span>
             <select id="authoring-new-scenario-mode">
               <option value="blank">Blank scenario</option>
               <option value="copy_saved_map">Copy saved map</option>
               <option value="duplicate_saved_scenario">Duplicate saved scenario</option>
+            </select>
+          </label>
+          <label id="authoring-new-scenario-source-choice" hidden>
+            <span>Source asset</span>
+            <select id="authoring-new-scenario-source" aria-label="New scenario source">
+              <option value="">No source required</option>
             </select>
           </label>
           <button id="authoring-new" type="button">New</button>

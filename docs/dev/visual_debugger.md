@@ -25,10 +25,12 @@ assets and submit live actions, while the Replay Viewer is read-only.
 | List replay scenarios or samples | `./scripts/dev/run_replay_viewer.sh --list-scenarios` or `./scripts/dev/run_replay_viewer.sh --list-sample-replays` |
 | Render an exact replay frame | `./scripts/dev/run_replay_viewer.sh --replay PATH --static --frame-index N` |
 
-The Combat Debugger lists execution-valid saved scenario drafts and frozen
-candidates. The Scenario Author's `Open in Debug` shortcut calls that same
-loader. The Replay Viewer intentionally has no authoring route, action composer,
-manual submission, reset, or recording destination. The historical
+The Combat Debugger lists execution-valid saved map and scenario drafts plus
+frozen candidates. Scenario assets load their authored state; maps are clearly
+identified deterministic default-5v5-TDM previews. Both authoring areas call the
+same strict compile/revalidate loader through `Open in Debug`. The Replay Viewer
+intentionally has no authoring route, action composer, manual submission, reset,
+or recording destination. The historical
 `run_debug_renderer.sh` launcher remains a compatibility redirect only.
 
 ## Shared boundaries

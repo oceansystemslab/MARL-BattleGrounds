@@ -3,12 +3,30 @@ import {
   mapContent,
   selectedAuthoringObject,
 } from "./authoring-model.js";
+import { formatDisplayNumber } from "./display.js";
 
 /** @typedef {Record<string, any>} JsonRecord */
 
 /** @param {string} label @param {readonly (string | number)[] | null} path @param {unknown} value @param {Record<string, any>} [options] */
 function field(label, path, value, options = {}) {
   return { label, path, value, ...options };
+}
+
+/** @param {unknown} value @param {boolean} readonly */
+export function authoringFieldDisplayValue(value, readonly = false) {
+  return readonly && typeof value === "number"
+    ? formatDisplayNumber(value)
+    : String(value ?? "");
+}
+
+/** @param {unknown} value */
+export function humanizeAuthoringIdentifier(value) {
+  const normalized = String(value ?? "")
+    .replaceAll("_", " ")
+    .trim();
+  return normalized
+    ? `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}`
+    : "";
 }
 
 /** @param {HTMLElement} owner @param {Record<string, any>} descriptor */
@@ -37,7 +55,10 @@ function appendField(owner, descriptor) {
     if (input.type === "checkbox") {
       input.checked = Boolean(descriptor.value);
     } else {
-      input.value = String(descriptor.value ?? "");
+      input.value = authoringFieldDisplayValue(
+        descriptor.value,
+        Boolean(descriptor.readonly),
+      );
     }
     if (descriptor.min !== undefined) {
       input.min = String(descriptor.min);
@@ -110,13 +131,6 @@ function appendGroup(form, legendText, fields) {
   form.append(fieldset);
 }
 
-const TEAM_A_ROLE_OPTIONS = [
-  { value: "focal", label: "Focal" },
-  { value: "cooperative_partner", label: "Cooperative partner" },
-];
-const TEAM_B_ROLE_OPTIONS = [
-  { value: "adversarial_opponent", label: "Adversarial opponent" },
-];
 const AGENT_TIMER_FIELDS = [
   "ultimate_cooldown_remaining",
   "spawn_shield_duration_remaining",
@@ -182,29 +196,6 @@ function classOptions(catalog) {
   }));
 }
 
-/** @param {string} label @param {string} key @param {JsonRecord | null} identity @param {boolean} contentAddressed */
-function identityFields(label, key, identity, contentAddressed = false) {
-  const path = ["content", "study", key];
-  const fields = [
-    field(`${label} ID`, [...path, "identifier"], identity?.identifier ?? ""),
-    field(`${label} version`, [...path, "version"], identity?.version ?? "", {
-      type: "number",
-      min: 1,
-      step: "1",
-    }),
-  ];
-  if (contentAddressed) {
-    fields.push(
-      field(
-        `${label} digest`,
-        [...path, "canonical_digest"],
-        identity?.canonical_digest ?? "",
-      ),
-    );
-  }
-  return fields;
-}
-
 /** @param {HTMLElement} form @param {JsonRecord} draft */
 function renderDocument(form, draft) {
   const kind = authoringKind(draft);
@@ -233,7 +224,10 @@ function renderDocument(form, draft) {
     ]);
     return;
   }
-  appendGroup(form, "Scenario", documentIdentityFields);
+  appendGroup(form, "Scenario", [
+    ...documentIdentityFields,
+    field("Notes", ["content", "notes"], content.notes, { type: "textarea" }),
+  ]);
   appendGroup(form, "Embedded map", [
     field("Map name", [...mapPath, "name"], map.name),
     field("Map description", [...mapPath, "description"], map.description, {
@@ -332,106 +326,6 @@ function renderDocument(form, draft) {
       content.global_state.team_b_respawn_countdown,
       { type: "number", min: 0, step: "1" },
     ),
-    field(
-      "Evidence horizon",
-      null,
-      content.episode.max_steps - content.global_state.step_count,
-      { type: "number", readonly: true },
-    ),
-  ]);
-  const study = content.study;
-  appendGroup(form, "Controlled study", [
-    field(
-      "Purpose / research question",
-      ["content", "study", "purpose_or_research_question"],
-      study.purpose_or_research_question,
-      { type: "textarea" },
-    ),
-    field("Hypothesis", ["content", "study", "hypothesis"], study.hypothesis, {
-      type: "textarea",
-    }),
-    field("Intent", ["content", "study", "intent"], study.intent, {
-      options: [
-        { value: "diagnostic", label: "Diagnostic" },
-        { value: "canonical_candidate", label: "Canonical candidate" },
-      ],
-    }),
-    field(
-      "Expected public behavior",
-      ["content", "study", "expected_public_behavior"],
-      study.expected_public_behavior,
-      { type: "textarea" },
-    ),
-    field(
-      "Focal role template",
-      ["content", "study", "focal_role_template"],
-      study.focal_role_template,
-    ),
-    field(
-      "Cooperative role template",
-      ["content", "study", "cooperative_role_template"],
-      study.cooperative_role_template,
-    ),
-    field(
-      "Adversarial role template",
-      ["content", "study", "adversarial_role_template"],
-      study.adversarial_role_template,
-    ),
-    field(
-      "Matched seeds",
-      ["content", "study", "matched_seed_schedule"],
-      study.matched_seed_schedule.join(", "),
-    ),
-    field(
-      "Primary measurement",
-      ["content", "study", "primary_measurement"],
-      study.primary_measurement,
-    ),
-    field(
-      "Secondary measurements",
-      ["content", "study", "secondary_measurements"],
-      study.secondary_measurements.join(", "),
-    ),
-    field(
-      "Violation declarations",
-      ["content", "study", "violation_declarations"],
-      study.violation_declarations.join(", "),
-    ),
-    field(
-      "Completion / censoring",
-      ["content", "study", "completion_and_right_censoring_treatment"],
-      study.completion_and_right_censoring_treatment,
-      { type: "textarea" },
-    ),
-    field(
-      "Notes / confounds",
-      ["content", "study", "notes_and_confounds"],
-      study.notes_and_confounds,
-      { type: "textarea" },
-    ),
-  ]);
-  appendGroup(form, "Study identities", [
-    ...identityFields(
-      "Success policy",
-      "success_policy_identity",
-      study.success_policy_identity,
-    ),
-    ...identityFields(
-      "Completion policy",
-      "completion_policy_identity",
-      study.completion_policy_identity,
-    ),
-    ...identityFields(
-      "Partial-result policy",
-      "partial_result_policy_identity",
-      study.partial_result_policy_identity,
-    ),
-    ...identityFields(
-      "Team B pressure protocol",
-      "scripted_team_b_pressure_protocol_identity",
-      study.scripted_team_b_pressure_protocol_identity,
-      true,
-    ),
   ]);
 }
 
@@ -517,10 +411,6 @@ function renderObject(form, draft, object, catalog, validation) {
       object.roster.class_name,
       { options: classOptions(catalog) },
     ),
-    field("Role", ["content", "roster", rosterIndex, "role"], object.roster.role, {
-      options: object.roster.team === "A" ? TEAM_A_ROLE_OPTIONS : TEAM_B_ROLE_OPTIONS,
-      readonly: object.roster.team === "B",
-    }),
   ]);
   const statePath = ["content", "agent_states", stateIndex];
   const fields = [
@@ -540,7 +430,7 @@ function renderObject(form, draft, object, catalog, validation) {
       { type: "number", min: 0, step: "any" },
     ),
     ...AGENT_TIMER_FIELDS.map((key) =>
-      field(key.replaceAll("_", " "), [...statePath, key], object.state[key], {
+      field(humanizeAuthoringIdentifier(key), [...statePath, key], object.state[key], {
         type: "number",
         min: 0,
         step: "1",
@@ -571,7 +461,16 @@ function renderObject(form, draft, object, catalog, validation) {
         "Recovery fraction per step",
         "out_of_combat_health_regeneration_fraction_per_step",
       ],
-    ].map(([label, key]) => field(label, null, mechanics[key], { readonly: true }));
+    ].map(([label, key]) =>
+      field(
+        label,
+        null,
+        typeof mechanics[key] === "string"
+          ? humanizeAuthoringIdentifier(mechanics[key])
+          : mechanics[key],
+        { readonly: true },
+      ),
+    );
     mechanicFields.splice(
       3,
       0,
@@ -589,15 +488,18 @@ function renderObject(form, draft, object, catalog, validation) {
         form,
         "Status mechanics",
         statusMechanics.flatMap((status) => [
-          field(`${status.status_id} duration`, null, status.duration_steps, {
-            readonly: true,
-          }),
           field(
-            `${status.status_id} magnitude`,
+            `${humanizeAuthoringIdentifier(status.status_id)} duration`,
+            null,
+            status.duration_steps,
+            { readonly: true },
+          ),
+          field(
+            `${humanizeAuthoringIdentifier(status.status_id)} magnitude`,
             null,
             status.magnitude === null
-              ? status.magnitude_kind
-              : `${status.magnitude_kind}: ${status.magnitude}`,
+              ? humanizeAuthoringIdentifier(status.magnitude_kind)
+              : `${humanizeAuthoringIdentifier(status.magnitude_kind)}: ${formatDisplayNumber(status.magnitude)}`,
             { readonly: true },
           ),
         ]),
@@ -609,14 +511,24 @@ function renderObject(form, draft, object, catalog, validation) {
         form,
         "Aura mechanics",
         auraMechanics.flatMap((aura) => [
-          field(`${aura.aura_id} radius`, null, aura.radius, { readonly: true }),
-          field(`${aura.aura_id} multiplier`, null, aura.per_emitter_multiplier, {
-            readonly: true,
-          }),
           field(
-            `${aura.aura_id} clamp`,
+            `${humanizeAuthoringIdentifier(aura.aura_id)} radius`,
             null,
-            `${aura.stacking_rule}; ${aura.clamp_kind} ${aura.clamp_value}`,
+            aura.radius,
+            {
+              readonly: true,
+            },
+          ),
+          field(
+            `${humanizeAuthoringIdentifier(aura.aura_id)} multiplier`,
+            null,
+            aura.per_emitter_multiplier,
+            { readonly: true },
+          ),
+          field(
+            `${humanizeAuthoringIdentifier(aura.aura_id)} clamp`,
+            null,
+            `${humanizeAuthoringIdentifier(aura.stacking_rule)}; ${humanizeAuthoringIdentifier(aura.clamp_kind)} ${formatDisplayNumber(aura.clamp_value)}`,
             { readonly: true },
           ),
         ]),
@@ -676,19 +588,6 @@ export function readAuthoringFieldEdit(target) {
     value = target.checked;
   } else if (target instanceof HTMLInputElement && target.type === "number") {
     value = target.value === "" ? null : Number(target.value);
-  } else if (path.at(-1) === "matched_seed_schedule") {
-    value =
-      target.value === ""
-        ? []
-        : target.value.split(",").map((part) => {
-            const item = part.trim();
-            return /^\d+$/u.test(item) ? Number(item) : item;
-          });
-  } else if (
-    ["secondary_measurements", "violation_declarations"].includes(path.at(-1))
-  ) {
-    value =
-      target.value === "" ? [] : target.value.split(",").map((part) => part.trim());
   }
   return { path, value };
 }
