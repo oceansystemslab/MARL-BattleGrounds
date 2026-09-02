@@ -29,10 +29,15 @@ The Combat Debugger lists execution-valid saved map and scenario revisions.
 Scenario assets load their authored state; maps are clearly identified
 deterministic default-5v5-TDM previews. Both authoring areas call the same strict
 compile/revalidate loader through `Open in Debug`, and either team can use
-manual control or the scripted Team Deathmatch controller. Save is the only way
-the DevClient persists asset content; confirmed deletion removes an unwanted
-saved asset. The Replay Viewer intentionally has no authoring route, action
-composer, manual submission, reset, or recording destination. The historical
+manual control, the scripted Team Deathmatch controller, or the built-in Random
+controller. Save is the only way the DevClient persists asset content; it
+creates durable numbered local revisions and never autosaves. Every applicable
+selector exposes every latest revision in numeric-aware asset-ID order through
+its native scrolling control. New Map and Scenario asset IDs use lowercase
+snake case, and generated obstacle IDs use `obstacle_N`; visible content names
+remain free-form. Confirmed deletion removes an unwanted saved asset. The
+Replay Viewer intentionally has no authoring route, action composer, manual
+submission, reset, or recording destination. The historical
 `run_debug_renderer.sh` launcher remains a compatibility redirect only.
 
 ## Shared boundaries

@@ -64,32 +64,39 @@ launcher named in the error.
 The Maps and Scenarios areas share one small authoring surface: an object or
 roster list, the SVG map, an exact numeric inspector, and linked host problems.
 Opening either area immediately creates its prompt-free untitled draft. Choose
-a safe durable asset ID on the first Save; later Saves update that exact asset
-under its revision fence. Drag centers for quick placement, hold Alt to bypass
-the fixed 0.5-world-unit snap, use arrow keys for exact nudging, and use the
-inspector for dimensions, wall size/rotation, roster, episode, current state,
-name, description, and ordinary notes. Experiment hypotheses, evidence roles,
-seed schedules, and measurements belong to a separate future evaluation
-definition, not the physical scenario document. The mouse wheel zooms only the authoring canvas;
-Space-drag or middle-button drag pans it. **Recenter** restores the complete-map
-view without changing the draft. **Reset (R)** restores the latest New, Open,
-or successfully saved baseline and can be undone immediately. The `R` shortcut
-does not fire while typing in a form control. Ten spawn pads are fixed
-identities. Wall and pillar IDs are editable directly; deletion does not
-renumber survivors, so an author may explicitly close a numbering gap.
-Obstacles also have duplicate, delete, and up/down order controls.
+a lowercase snake-case durable asset ID, such as `training_map_10`, on the first
+Save; later Saves update that exact asset under its revision fence. The visible
+Name field remains free-form. Drag centers for quick placement, hold Alt to
+bypass the fixed 0.5-world-unit snap, use arrow keys for exact nudging, and use
+the inspector for dimensions, wall size/rotation, roster, episode, current
+state, name, description, and ordinary notes. Experiment hypotheses, evidence
+roles, seed schedules, and measurements belong to a separate future evaluation
+definition, not the physical scenario document. The mouse wheel zooms only the
+authoring canvas; Space-drag or middle-button drag pans it. **Recenter** restores
+the complete-map view without changing the draft. **Reset (R)** restores the
+latest New, Open, or successfully saved baseline and can be undone immediately.
+The `R` shortcut does not fire while typing in a form control. Ten spawn pads
+are fixed identities. New walls and pillars receive `obstacle_0`, `obstacle_1`,
+and so on. Their IDs are editable directly under the general safe Object ID
+rules; deletion does not renumber survivors, so an author may explicitly close
+a numbering gap. Obstacles also have duplicate, delete, and up/down order
+controls.
 
-Drafts are local files under ignored `artifacts/dev_client/` storage. A compact
-selector opens saved revisions for the active tab. The status line names the
-exact saved revision and repository-relative path, for example
-`artifacts/dev_client/drafts/maps/arena/r2.json`, and reports unsaved changes
-without hiding the last truthful location. Save uses an exact revision fence,
-so an older browser cannot overwrite a newer revision. **Delete Saved** removes
-the selected map or scenario identity and all of its saved revisions only after
-an explicit confirmation. A stale revision cannot delete newer work. If the
-deleted asset is open, its current browser content remains as an unsaved copy
-that may be saved again; deletion does not interrupt an already loaded Combat
-snapshot.
+Drafts are local files under ignored `artifacts/dev_client/` storage. Each
+compact selector includes every applicable latest saved revision, orders exact
+asset IDs numerically (`map_9` before `map_10`), and uses the native browser
+control for scrolling and keyboard navigation. The status line names the exact
+saved revision and repository-relative path, for example
+`artifacts/dev_client/drafts/maps/training_arena/r2.json`, and reports unsaved
+changes without hiding the last truthful location. Save is explicit; there is
+no autosave. A successful Save persists through DevClient shutdown and restart
+and refreshes every applicable selector immediately. Save uses an exact
+revision fence, so an older browser cannot overwrite a newer revision.
+**Delete Saved** removes the selected map or scenario identity and all of its
+saved revisions only after an explicit confirmation. A stale revision cannot
+delete newer work. If the deleted asset is open, its current browser content
+remains as an unsaved copy that may be saved again; deletion does not interrupt
+an already loaded Combat snapshot.
 
 A new scenario can start blank, copy a saved map, or duplicate a saved
 scenario. The adjacent source selector carries the exact saved revision, and
@@ -104,9 +111,10 @@ partition, or normalized scientific identity.
 
 ## Loading saved scenarios and map previews
 
-The Combat Debugger selector lists the latest execution-valid saved map and
-scenario revisions. Scenario rows load the authored starting state. Map rows
-are explicitly labelled as default 5v5 TDM previews:
+The Combat Debugger selector lists every latest execution-valid saved map and
+scenario revision in numeric-aware asset-ID order. Scenario rows load the
+authored starting state. Map rows are explicitly labelled as default 5v5 TDM
+previews:
 the host independently copies the exact map into the ordinary default scenario,
 compiles it, and validates it without modifying or saving the map. `Open in
 Debug` in either authoring area calls this same loading service for its current

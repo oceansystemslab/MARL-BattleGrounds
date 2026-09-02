@@ -122,12 +122,12 @@ class DevListCommandV1(_ServiceModel):
 
 class DevNewMapCommandV1(_ServiceModel):
     command_type: Literal["new_map"] = "new_map"
-    asset_id: SafeAssetId = "untitled-map"
+    asset_id: SafeAssetId = "untitled_map"
 
 
 class DevNewScenarioCommandV1(_ServiceModel):
     command_type: Literal["new_scenario"] = "new_scenario"
-    asset_id: SafeAssetId = "untitled-scenario"
+    asset_id: SafeAssetId = "untitled_scenario"
     creation_mode: Literal[
         "blank",
         "copy_saved_map",
@@ -488,7 +488,7 @@ class DevScenarioLoadService:
         if any(problem.severity == "error" for problem in map_problems):
             raise DevAuthoringValidationError(map_problems)
         preview = new_scenario_draft(
-            "default-tdm-map-preview",
+            "default_tdm_map_preview",
             source_map=opened,
         )
         preview = preview.model_copy(

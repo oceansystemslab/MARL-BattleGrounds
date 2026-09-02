@@ -45,10 +45,43 @@ if (
   installDevClient();
 }
 
+const ASSET_ID_COLLATOR = new Intl.Collator("en", {
+  numeric: true,
+  sensitivity: "base",
+});
+
+/**
+ * Project persisted assets into a deterministic human order without mutating
+ * the host-owned discovery response.
+ *
+ * @param {ReadonlyArray<Record<string, any>>} assets
+ */
+export function orderedAuthoringAssets(assets) {
+  return [...assets].sort((left, right) => {
+    const identityOrder = ASSET_ID_COLLATOR.compare(left.asset_id, right.asset_id);
+    if (identityOrder !== 0) {
+      return identityOrder;
+    }
+    const kindOrder = String(left.asset_kind).localeCompare(String(right.asset_kind));
+    return kindOrder !== 0 ? kindOrder : Number(left.revision) - Number(right.revision);
+  });
+}
+
 /** @param {ReadonlyArray<Record<string, any>>} assets @param {"map" | "scenario"} kind */
 export function openableDraftAssets(assets, kind) {
-  return assets.filter(
-    (asset) => asset.asset_kind === kind && asset.source_kind === "saved_draft",
+  return orderedAuthoringAssets(
+    assets.filter(
+      (asset) => asset.asset_kind === kind && asset.source_kind === "saved_draft",
+    ),
+  );
+}
+
+/** @param {ReadonlyArray<Record<string, any>>} assets */
+export function debuggableAuthoringAssets(assets) {
+  return orderedAuthoringAssets(
+    assets.filter(
+      (asset) => asset.source_kind === "saved_draft" && asset.execution_valid,
+    ),
   );
 }
 
@@ -82,7 +115,7 @@ export function persistedAuthoringSource(asset) {
 
 /** @param {Readonly<Record<string, any>>} asset */
 export function savedDraftOptionLabel(asset) {
-  return `${asset.name} · ${asset.asset_id} · revision ${asset.revision} · ${asset.map_width} × ${asset.map_height}`;
+  return `${asset.asset_id} · ${asset.name} · revision ${asset.revision} · ${asset.map_width} × ${asset.map_height}`;
 }
 
 /**
@@ -98,24 +131,26 @@ export function newScenarioSourceAssets(assets, creationMode) {
         : null;
   return sourceKind === null
     ? []
-    : assets.filter(
-        (asset) =>
-          asset.source_kind === "saved_draft" && asset.asset_kind === sourceKind,
+    : orderedAuthoringAssets(
+        assets.filter(
+          (asset) =>
+            asset.source_kind === "saved_draft" && asset.asset_kind === sourceKind,
+        ),
       );
 }
 
 /** @param {Readonly<Record<string, any>>} asset */
 export function authoringSourceOptionLabel(asset) {
   const status = asset.execution_valid ? "execution-valid" : "needs validation fixes";
-  return `${asset.name} · saved ${asset.asset_id} revision ${asset.revision} · ${asset.map_width} × ${asset.map_height} · ${status}`;
+  return `${asset.asset_id} · ${asset.name} · revision ${asset.revision} · ${asset.map_width} × ${asset.map_height} · ${status}`;
 }
 
 /** @param {Readonly<Record<string, any>>} asset */
 export function debugAssetOptionLabel(asset) {
-  const identity = `saved ${asset.asset_id} revision ${asset.revision}`;
+  const identity = `${asset.asset_id} · revision ${asset.revision}`;
   return asset.asset_kind === "map"
-    ? `Map preview · ${asset.name} · ${identity} · ${asset.map_width} × ${asset.map_height} · execution-valid · default 5v5 TDM`
-    : `Scenario · ${asset.name} · ${identity} · ${asset.map_width} × ${asset.map_height} · execution-valid`;
+    ? `${identity} · Map preview · ${asset.name} · ${asset.map_width} × ${asset.map_height} · execution-valid · default 5v5 TDM`
+    : `${identity} · Scenario · ${asset.name} · ${asset.map_width} × ${asset.map_height} · execution-valid`;
 }
 
 /** @param {Record<string, any> | null} draft @param {Record<string, any> | null} baseline */
@@ -155,7 +190,7 @@ export function draftAfterSavedAssetDeletion(draft, source) {
   }
   const recovery = cloneAuthoringValue(draft);
   recovery.asset_id =
-    source.asset_kind === "map" ? "untitled-map" : "untitled-scenario";
+    source.asset_kind === "map" ? "untitled_map" : "untitled_scenario";
   recovery.revision = 0;
   return recovery;
 }
@@ -163,6 +198,15 @@ export function draftAfterSavedAssetDeletion(draft, source) {
 /** @param {Readonly<Record<string, any>>} asset */
 export function savedAssetDeletionPrompt(asset) {
   return `Permanently delete saved ${asset.asset_kind} "${asset.name}" (asset ID: ${asset.asset_id}) and all of its revisions? This cannot be undone.`;
+}
+
+/** @param {unknown} value */
+export function isValidAuthoringAssetId(value) {
+  return (
+    typeof value === "string" &&
+    value.length <= 64 &&
+    /^[a-z0-9]+(?:_[a-z0-9]+)*$/u.test(value)
+  );
 }
 
 /**
@@ -518,12 +562,9 @@ function installDevClient() {
     if (requested === null) {
       return null;
     }
-    if (
-      requested.length > 64 ||
-      !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(requested)
-    ) {
+    if (!isValidAuthoringAssetId(requested)) {
       showLocalError(
-        "Asset IDs use lowercase letters, digits, and internal hyphens only.",
+        "Asset IDs use lowercase snake_case: lowercase letters and digits separated by single underscores.",
       );
       return null;
     }
@@ -659,10 +700,7 @@ function installDevClient() {
   function renderCombatOptions() {
     const selected = elements.scenarioSelect.value;
     elements.scenarioSelect.replaceChildren(new Option("Built-in arena", ""));
-    for (const asset of state.assets.filter(
-      (/** @type {any} */ candidate) =>
-        candidate.source_kind === "saved_draft" && candidate.execution_valid,
-    )) {
+    for (const asset of debuggableAuthoringAssets(state.assets)) {
       elements.scenarioSelect.append(
         new Option(
           debugAssetOptionLabel(asset),
@@ -1044,7 +1082,7 @@ function installDevClient() {
     if (state.busy || !draft) {
       return;
     }
-    const assetId = promptAssetId("New asset ID", `${draft.asset_id}-copy`);
+    const assetId = promptAssetId("New asset ID", `${draft.asset_id}_copy`);
     if (assetId !== null) {
       await sendAndRefreshAssets({ command_type: "save_as", draft, asset_id: assetId });
     }

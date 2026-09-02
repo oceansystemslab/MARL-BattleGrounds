@@ -95,7 +95,7 @@ required-check names; twenty implementation jobs may run concurrently under
 the current GitHub-hosted account limit. Local validation may use the developer
 workstation's additional CPU concurrency.
 
-The nine-minute Python and six-minute browser matrix-job timeouts are runaway-
+The twelve-minute Python and eight-minute browser matrix-job timeouts are runaway-
 job safety ceilings, not performance targets. Downstream aggregates
 necessarily run after their dependencies. Hosted runs `33329934258`,
 `33330400572`, and `33330879589` showed that repeatedly expiring an unchanged
@@ -125,6 +125,21 @@ Rebalance intact work units first; if one test file is the irreducible hotspot,
 split that file mechanically into coherent test-family files without weakening
 or changing its assertions. Keep parameterized families and fixture-affinity
 boundaries intact.
+
+Hosted main run `33541558614` established why the safety ceilings require
+headroom. Across three attempts, browser profile 5 completed all 30 assertions
+in about 5.5 minutes but crossed the former six-minute whole-job ceiling during
+process shutdown, while Python shard 4 repeatedly reached 97 percent before
+crossing the former nine-minute ceiling. The DevClient authoring file moved
+intact from browser profile 5 to the lighter profile 4; exact-cover tests still
+forbid omission or duplication. The 12/8-minute ceilings leave ordinary runner,
+setup, and teardown variance outside the six-minute performance target instead
+of terminating otherwise valid work.
+
+Main-branch CI runs use `github.run_id` in their concurrency key, so consecutive
+merges cannot replace an older pending or running main check. Non-main refs
+remain grouped by ref with `cancel-in-progress: true`, preserving deliberate
+supersession of stale branch and pull-request work.
 
 If measured evidence proves the current six-minute target unattainable after
 safe balancing at the twelve-plus-eight, twenty-job ceiling, increase the

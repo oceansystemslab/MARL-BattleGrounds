@@ -102,11 +102,21 @@ export function startScriptedDebugger({ scenario = "aura_crossfire" } = {}) {
  * one caller-owned temporary directory. Reusing the directory across process
  * restarts proves persisted discovery without touching developer assets.
  *
- * @param {{artifactRoot: string}} options
+ * @param {{artifactRoot: string, seedMapCount?: number, seedScenarioCount?: number}} options
  */
-export function startIsolatedDevClient({ artifactRoot }) {
+export function startIsolatedDevClient({
+  artifactRoot,
+  seedMapCount = 0,
+  seedScenarioCount = 0,
+}) {
   if (typeof artifactRoot !== "string" || artifactRoot.length === 0) {
     throw new TypeError("Isolated DevClient tests require an artifact root.");
+  }
+  if (!Number.isSafeInteger(seedMapCount) || seedMapCount < 0) {
+    throw new TypeError("seedMapCount must be a nonnegative safe integer.");
+  }
+  if (!Number.isSafeInteger(seedScenarioCount) || seedScenarioCount < 0) {
+    throw new TypeError("seedScenarioCount must be a nonnegative safe integer.");
   }
   return startDebuggerProcess([
     "run",
@@ -115,6 +125,10 @@ export function startIsolatedDevClient({ artifactRoot }) {
     DEVCLIENT_BROWSER_HARNESS,
     "--artifact-root",
     artifactRoot,
+    "--seed-map-count",
+    String(seedMapCount),
+    "--seed-scenario-count",
+    String(seedScenarioCount),
     "--port",
     "0",
   ]);

@@ -184,7 +184,7 @@ test("obstacle edits preserve ordered fixed-slot semantics", () => {
     mapContent(duplicate.draft).obstacles.map(
       (/** @type {any} */ obstacle) => obstacle.object_id,
     ),
-    ["obstacle-0", "obstacle-1", "obstacle-2"],
+    ["obstacle_0", "obstacle_1", "obstacle_2"],
   );
   const repeated = duplicateAuthoringObstacle(
     duplicate.draft,
@@ -192,27 +192,27 @@ test("obstacle edits preserve ordered fixed-slot semantics", () => {
     AUTHORING_CATALOG.maximum_obstacle_slots,
     AUTHORING_CATALOG.fixed_snap_world_units,
   );
-  assert.equal(repeated.object_id, "obstacle-3");
-  const moved = reorderAuthoringObstacle(repeated.draft, "obstacle-2", -1);
+  assert.equal(repeated.object_id, "obstacle_3");
+  const moved = reorderAuthoringObstacle(repeated.draft, "obstacle_2", -1);
   assert.deepEqual(
     mapContent(moved).obstacles.map(
       (/** @type {any} */ obstacle) => obstacle.object_id,
     ),
-    ["obstacle-0", "obstacle-2", "obstacle-1", "obstacle-3"],
+    ["obstacle_0", "obstacle_2", "obstacle_1", "obstacle_3"],
   );
-  const deleted = deleteAuthoringObstacle(moved, "obstacle-0");
+  const deleted = deleteAuthoringObstacle(moved, "obstacle_0");
   assert.deepEqual(
     mapContent(deleted).obstacles.map(
       (/** @type {any} */ obstacle) => obstacle.object_id,
     ),
-    ["obstacle-2", "obstacle-1", "obstacle-3"],
+    ["obstacle_2", "obstacle_1", "obstacle_3"],
   );
   const reused = addAuthoringObstacle(
     deleted,
     "wall",
     AUTHORING_CATALOG.maximum_obstacle_slots,
   );
-  assert.equal(reused.object_id, "obstacle-0");
+  assert.equal(reused.object_id, "obstacle_0");
 });
 
 test("scenario obstacle edits share the allocator without renaming existing objects", () => {
@@ -233,7 +233,7 @@ test("scenario obstacle edits share the allocator without renaming existing obje
     mapContent(added.draft).obstacles.map(
       (/** @type {any} */ obstacle) => obstacle.object_id,
     ),
-    ["wall-1", "obstacle-0", "obstacle-1"],
+    ["wall-1", "obstacle_0", "obstacle_1"],
   );
 });
 
@@ -253,8 +253,8 @@ test("obstacle IDs are directly editable in maps and allocate the lowest free ID
     "wall",
     AUTHORING_CATALOG.maximum_obstacle_slots,
   );
-  const deleted = deleteAuthoringObstacle(third.draft, "obstacle-1");
-  const renamed = renameAuthoringObstacleId(deleted, "obstacle-2", " obstacle-1 ");
+  const deleted = deleteAuthoringObstacle(third.draft, "obstacle_1");
+  const renamed = renameAuthoringObstacleId(deleted, "obstacle_2", " obstacle_1 ");
   const next = addAuthoringObstacle(
     renamed.draft,
     "pillar",
@@ -265,13 +265,13 @@ test("obstacle IDs are directly editable in maps and allocate the lowest free ID
     mapContent(next.draft).obstacles.map(
       (/** @type {any} */ obstacle) => obstacle.object_id,
     ),
-    ["obstacle-0", "obstacle-1", "obstacle-2"],
+    ["obstacle_0", "obstacle_1", "obstacle_2"],
   );
-  assert.equal(renamed.object_id, "obstacle-1");
+  assert.equal(renamed.object_id, "obstacle_1");
   assert.equal(
-    authoringObjects(renamed.draft).find((object) => object.object_id === "obstacle-1")
+    authoringObjects(renamed.draft).find((object) => object.object_id === "obstacle_1")
       ?.label,
-    "obstacle-1",
+    "obstacle_1",
   );
   assert.equal(Object.hasOwn(mapContent(next.draft).obstacles[0], "name"), false);
 });
@@ -295,7 +295,7 @@ test("scenario obstacle ID renames reject every identity collision atomically", 
     "trailing-",
     "contains space",
     "x".repeat(65),
-    "obstacle-0",
+    "obstacle_0",
     "pad-a1",
     "agent-a5",
   ]) {
@@ -332,14 +332,14 @@ test("drag snapping is explicit and exact entry remains available", () => {
 });
 
 test("undo content snapshots retain the latest persisted draft identity", () => {
-  const original = { ...mapDraft(), asset_id: "stable-map", revision: 3 };
+  const original = { ...mapDraft(), asset_id: "stable_map", revision: 3 };
   const snapshot = authoringContentSnapshot(original);
   const edited = setAuthoringField(original, ["content", "name"], "Edited map");
   const saved = { ...edited, revision: 4 };
 
   const restored = restoreAuthoringContent(saved, snapshot);
 
-  assert.equal(restored.asset_id, "stable-map");
+  assert.equal(restored.asset_id, "stable_map");
   assert.equal(restored.revision, 4);
   assert.equal(restored.content.name, "Map");
   assert.equal(Object.hasOwn(snapshot, "asset_id"), false);

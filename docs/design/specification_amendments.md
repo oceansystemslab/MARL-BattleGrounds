@@ -1505,3 +1505,52 @@ is true whenever either interactive controller is nonmanual. Existing Replay
 artifacts and Replay Viewer behavior remain unchanged; the strict shared live
 presentation and debugger-recording validators merely admit the new truthful
 controller and action-source identities.
+
+## A24. Complete saved-asset discovery and snake-case identities
+
+**Classification:** approved private pre-alpha identity cutover and authoring
+presentation correction.
+**Supersedes:** A22 and A23 only where they permit another Map or Scenario asset
+ID convention, generate hyphenated obstacle IDs, or leave saved-asset ordering
+lexicographic. It preserves revisioned Save/Delete, editable obstacle identity,
+authoritative compilation, Replay separation, and every simulator contract.
+
+The DevClient has no saved-asset list limit. Each Maps, Scenarios, scenario
+source, and Combat selector presents every discoverable latest saved revision
+for its applicable asset kind. Presentation uses stable numeric-aware asset-ID
+ordering, so `map_9` precedes `map_10`, and places the exact persistent asset ID
+first in each label. The existing native single-select control owns scrolling
+and keyboard navigation; no pagination, custom combobox, or asset-manager
+surface is introduced.
+
+Private Map and Scenario asset IDs now use lowercase snake case, with at most
+64 characters and grammar `[a-z0-9]+(?:_[a-z0-9]+)*`. Human-facing map and
+scenario names remain ordinary free-form prose. Newly allocated obstacle IDs
+use `obstacle_0`, `obstacle_1`, and so on. The general editable `ObjectId`
+contract remains unchanged, as do authored legacy-shaped obstacle identities,
+spawn-pad IDs, and agent IDs. This convention changes browser and persistence
+identity only; obstacle order continues to own compiled fixed-slot semantics.
+
+Save remains an explicit user operation and no autosave is authorized. A
+successful Save or Save As atomically persists an immutable numbered revision
+under ignored `artifacts/dev_client/` storage; shutting down or restarting the
+DevClient does not remove it. Every successful save refreshes complete asset
+discovery immediately.
+
+As a one-time pre-alpha exception to A22's byte-immutable local revisions, the
+existing ignored Map and Scenario revision histories may be migrated in place
+from hyphenated asset IDs to snake case, with generated `obstacle-N` identities
+converted to `obstacle_N`. The maintenance operation must stop the DevClient,
+hold the store lock, reject unsafe or colliding input, create an exact ignored
+backup and checksum manifest, construct and validate the complete replacement
+before an atomic swap, preserve every revision number and semantic field, and
+roll back wholly on failure. Any saved-map provenance in existing scenarios is
+migrated consistently. Post-migration strict parsing, compilation, validation,
+revision counts, and semantic digests must match the pre-migration authorities.
+No automatic startup migration, alias, dual-read path, or compatibility shim is
+created. The private authoring contract refreezes immediately after this
+single migration; deletion of its backup requires separate owner approval.
+
+This amendment changes no `core/` source or contract, simulator behavior,
+Replay Viewer production code, Replay schema, replay fixture, or replay
+artifact.

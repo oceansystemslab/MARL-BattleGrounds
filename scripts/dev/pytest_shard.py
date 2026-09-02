@@ -113,7 +113,7 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
             (
                 "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
                 "test_eager_jit_vmap_key_forms_and_x64_keep_exact_actions_and_dtypes",
-                7,
+                9,
                 1,
             ),
             (
@@ -131,7 +131,7 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
             (
                 "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
                 "test_dormant_task_history_and_lifecycle_fields_do_not_change_the_policy",
-                8,
+                7,
                 4,
             ),
             (
@@ -142,13 +142,13 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
             (
                 "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
                 "test_invalid_damage_modifier_never_suppresses_an_aged_trap",
-                8,
+                7,
                 11,
             ),
             (
                 "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
                 "test_mage_burst_uses_the_locked_configured_crowd_and_covering_boundaries",
-                8,
+                7,
                 4,
             ),
             (

@@ -25,6 +25,12 @@ default-5v5-TDM previews without modifying the map. Either team can remain
 manual, use the scripted Team Deathmatch controller, or use the built-in Random
 controller for same-start testing. Random samples only the current valid action
 support and is available under both SharedObs and NoSharedObs.
+Every applicable selector shows all latest saved revisions in numeric-aware
+asset-ID order, with native scrolling for longer lists. New Map and Scenario
+asset IDs use lowercase snake case, such as `tdm_map_10`, while their visible
+names remain free-form. Save is explicit and persists numbered local revisions
+under ignored `artifacts/dev_client/` storage across DevClient restarts; the
+DevClient does not autosave.
 Existing replay artifacts remain outside the DevClient.
 
 Record one manual episode to a canonical replay and adjacent metric sidecar:
