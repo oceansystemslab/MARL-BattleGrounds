@@ -87,10 +87,13 @@ test("CI browser manifest is nonempty, exact, and eight-way", () => {
     ],
     env: { MARL_CP5_SLICE_5_ONLY: "1" },
   });
+  assert.deepEqual(manifest.shards[3].files, [
+    "control-parity.spec.js",
+    "dev-client-authoring.spec.js",
+  ]);
   assert.deepEqual(manifest.shards[4].files, [
     "recording-handoff.spec.js",
     "authorized-presentation-renderer.spec.js",
-    "dev-client-authoring.spec.js",
     "resize.spec.js",
   ]);
   assert.deepEqual(

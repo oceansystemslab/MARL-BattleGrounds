@@ -23,7 +23,7 @@ from scripts.dev.visual_debugger.authoring_models import (
     SafeAssetId,
 )
 
-_ASSET_ID_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+_ASSET_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 
 type DevAssetKind = Literal["map", "scenario"]
 type DevDraft = DevMapDraftV1 | DevScenarioDraftV1
@@ -71,7 +71,7 @@ def _validate_asset_id(value: str) -> str:
         or len(value) > 64
         or _ASSET_ID_PATTERN.fullmatch(value) is None
     ):
-        raise ValueError("asset_id must be a safe lowercase kebab-case identifier")
+        raise ValueError("asset_id must be a safe lowercase snake_case identifier")
     return value
 
 

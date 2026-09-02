@@ -30,7 +30,7 @@ type SafeAssetId = Annotated[
     StringConstraints(
         min_length=1,
         max_length=_MAX_ID_LENGTH,
-        pattern=r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$",
+        pattern=r"^[a-z0-9]+(?:_[a-z0-9]+)*$",
     ),
 ]
 type ObjectId = Annotated[
@@ -330,7 +330,7 @@ def default_spawn_pads(
     )
 
 
-def new_map_draft(asset_id: SafeAssetId = "untitled-map") -> DevMapDraftV1:
+def new_map_draft(asset_id: SafeAssetId = "untitled_map") -> DevMapDraftV1:
     """Create the minimal ergonomic blank-map draft."""
     return DevMapDraftV1(
         asset_id=asset_id,
@@ -378,7 +378,7 @@ def _new_agent_object_ids(embedded_map: DevMapContentV1) -> tuple[str, ...]:
 
 
 def new_scenario_draft(
-    asset_id: SafeAssetId = "untitled-scenario",
+    asset_id: SafeAssetId = "untitled_scenario",
     *,
     source_map: DevMapDraftV1 | None = None,
 ) -> DevScenarioDraftV1:

@@ -5,11 +5,14 @@ import {
   authoringPersistenceMessage,
   authoringSourceOptionLabel,
   createCombatConfigurationController,
+  debuggableAuthoringAssets,
   debugAssetOptionLabel,
   draftAfterAuthoringResponse,
   draftAfterSavedAssetDeletion,
+  isValidAuthoringAssetId,
   newScenarioSourceAssets,
   openableDraftAssets,
+  orderedAuthoringAssets,
   persistedAuthoringSource,
   savedAssetDeletionPrompt,
   savedDraftOptionLabel,
@@ -87,6 +90,91 @@ test("general Open lists only mutable saved drafts", () => {
   );
 });
 
+test("every asset projection is complete, numeric-aware, and nonmutating", () => {
+  const maps = Array.from({ length: 41 }, (_, index) => ({
+    source_kind: "saved_draft",
+    asset_kind: "map",
+    asset_id: `map_${index}`,
+    revision: index + 1,
+    name: `Map ${index}`,
+    map_width: 20,
+    map_height: 10,
+    execution_valid: true,
+  }));
+  const scenarios = Array.from({ length: 13 }, (_, index) => ({
+    source_kind: "saved_draft",
+    asset_kind: "scenario",
+    asset_id: `scenario_${index}`,
+    revision: index + 1,
+    name: `Scenario ${index}`,
+    map_width: 20,
+    map_height: 10,
+    execution_valid: true,
+  }));
+  const assets = [...scenarios, ...maps].reverse();
+  const original = structuredClone(assets);
+
+  assert.deepEqual(
+    openableDraftAssets(assets, "map").map((asset) => asset.asset_id),
+    maps.map((asset) => asset.asset_id),
+  );
+  assert.deepEqual(
+    openableDraftAssets(assets, "scenario").map((asset) => asset.asset_id),
+    scenarios.map((asset) => asset.asset_id),
+  );
+  assert.deepEqual(
+    newScenarioSourceAssets(assets, "copy_saved_map").map((asset) => asset.asset_id),
+    maps.map((asset) => asset.asset_id),
+  );
+  assert.deepEqual(
+    newScenarioSourceAssets(assets, "duplicate_saved_scenario").map(
+      (asset) => asset.asset_id,
+    ),
+    scenarios.map((asset) => asset.asset_id),
+  );
+  assert.deepEqual(
+    debuggableAuthoringAssets(assets).map((asset) => asset.asset_id),
+    [...maps, ...scenarios].map((asset) => asset.asset_id),
+  );
+  assert.equal(orderedAuthoringAssets(assets).length, 54);
+  assert.deepEqual(assets, original);
+  assert.notStrictEqual(orderedAuthoringAssets(assets), assets);
+});
+
+test("browser asset IDs use strict lowercase snake_case", async () => {
+  for (const valid of [
+    "map",
+    "map_2",
+    "tdm_map_id_10_kawaii_training",
+    "a".repeat(64),
+  ]) {
+    assert.equal(isValidAuthoringAssetId(valid), true, valid);
+  }
+  for (const invalid of [
+    "",
+    "map-id",
+    "Map_1",
+    "_map",
+    "map_",
+    "map__one",
+    "map name",
+    "map.one",
+    "a".repeat(65),
+    null,
+  ]) {
+    assert.equal(isValidAuthoringAssetId(invalid), false, String(invalid));
+  }
+
+  const devClient = await readFile(devClientUrl, "utf8");
+  assert.match(devClient, /promptAssetId\("New asset ID", draft\.asset_id\)/u);
+  assert.match(
+    devClient,
+    /promptAssetId\("New asset ID", `\$\{draft\.asset_id\}_copy`\)/u,
+  );
+  assert.match(devClient, /Asset IDs use lowercase snake_case/u);
+  assert.doesNotMatch(devClient, /internal hyphens only/u);
+});
+
 test("Combat asset options expose exact typed identity, status, and map preview semantics", () => {
   assert.equal(
     debugAssetOptionLabel({
@@ -98,19 +186,19 @@ test("Combat asset options expose exact typed identity, status, and map preview 
       map_width: 20.5,
       map_height: 10.25,
     }),
-    "Scenario · Crossfire · saved crossfire revision 7 · 20.5 × 10.25 · execution-valid",
+    "crossfire · revision 7 · Scenario · Crossfire · 20.5 × 10.25 · execution-valid",
   );
   assert.equal(
     debugAssetOptionLabel({
       source_kind: "saved_draft",
       asset_kind: "map",
       name: "Crossfire",
-      asset_id: "crossfire-map",
+      asset_id: "crossfire_map",
       revision: 4,
       map_width: 20,
       map_height: 10,
     }),
-    "Map preview · Crossfire · saved crossfire-map revision 4 · 20 × 10 · execution-valid · default 5v5 TDM",
+    "crossfire_map · revision 4 · Map preview · Crossfire · 20 × 10 · execution-valid · default 5v5 TDM",
   );
   assert.deepEqual(
     persistedAuthoringSource({
@@ -173,10 +261,10 @@ test("active drafts and new scenarios use typed native asset selectors", async (
   assert.deepEqual(newScenarioSourceAssets(assets, "duplicate_saved_scenario"), [
     savedScenario,
   ]);
-  assert.equal(savedDraftOptionLabel(savedMap), "Arena · arena · revision 2 · 20 × 10");
+  assert.equal(savedDraftOptionLabel(savedMap), "arena · Arena · revision 2 · 20 × 10");
   assert.equal(
     authoringSourceOptionLabel(savedMap),
-    "Arena · saved arena revision 2 · 20 × 10 · execution-valid",
+    "arena · Arena · revision 2 · 20 × 10 · execution-valid",
   );
 });
 
@@ -222,7 +310,7 @@ test("deleting the open saved identity creates an exact unsaved recovery buffer"
   assert.ok(recovery);
   assert.notStrictEqual(recovery, draft);
   assert.deepEqual(recovery.content, draft.content);
-  assert.equal(recovery.asset_id, "untitled-map");
+  assert.equal(recovery.asset_id, "untitled_map");
   assert.equal(recovery.revision, 0);
   assert.equal(
     authoringPersistenceMessage(recovery, structuredClone(recovery.content)),

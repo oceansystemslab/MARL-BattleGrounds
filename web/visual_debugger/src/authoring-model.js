@@ -374,10 +374,10 @@ function nextObstacleObjectId(draft) {
       : []),
   ]);
   let ordinal = 0;
-  while (occupied.has(`obstacle-${ordinal}`)) {
+  while (occupied.has(`obstacle_${ordinal}`)) {
     ordinal += 1;
   }
-  return `obstacle-${ordinal}`;
+  return `obstacle_${ordinal}`;
 }
 
 /** @param {any} draft @param {"wall" | "pillar"} kind @param {number} maximumObstacles */

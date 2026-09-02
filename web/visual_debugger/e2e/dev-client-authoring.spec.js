@@ -231,6 +231,25 @@ async function selectPersistedAsset(page, selector, assetId) {
   await page.locator(selector).selectOption(value);
 }
 
+/**
+ * @param {import("@playwright/test").Page} page
+ * @param {string} selector
+ */
+async function persistedAssetIds(page, selector) {
+  return page.locator(`${selector} option`).evaluateAll((options) =>
+    options.flatMap((option) => {
+      if (!(option instanceof HTMLOptionElement) || !option.value) {
+        return [];
+      }
+      try {
+        return [JSON.parse(option.value).asset_id];
+      } catch {
+        return [];
+      }
+    }),
+  );
+}
+
 /** @param {import("@playwright/test").Page} page */
 async function expectAuthoringIdle(page) {
   await expect(page.locator("#authoring-shell")).toHaveAttribute("aria-busy", "false");
@@ -245,14 +264,98 @@ async function expectSpawnPadRadius(page) {
   expect(new Set(radii)).toEqual(new Set(["0.5"]));
 }
 
+test("saved asset selectors expose every naturally ordered identity beyond ten", async ({
+  page,
+}) => {
+  const artifactRoot = await mkdtemp(join(tmpdir(), "marl-devclient-inventory-"));
+  /** @type {Awaited<ReturnType<typeof startIsolatedDevClient>> | null} */
+  let devClient = null;
+
+  try {
+    devClient = await startIsolatedDevClient({
+      artifactRoot,
+      seedMapCount: 12,
+      seedScenarioCount: 11,
+    });
+    await page.goto(devClient.url);
+    await expect(page.locator("#connection-status")).toHaveText("Online");
+
+    await applyAuthoringCommand(page, "new_map", () =>
+      page.getByRole("button", { name: "Maps", exact: true }).click(),
+    );
+    await expectAuthoringIdle(page);
+    const mapSelector = page.locator("#authoring-saved-draft-select");
+    await expect(mapSelector.locator("option")).toHaveCount(13);
+    expect(await persistedAssetIds(page, "#authoring-saved-draft-select")).toEqual(
+      Array.from({ length: 12 }, (_, index) => `seed_map_${index}`),
+    );
+    await mapSelector.focus();
+    for (let index = 0; index < 11; index += 1) {
+      await page.keyboard.press("ArrowDown");
+    }
+    expect(JSON.parse(await mapSelector.inputValue()).asset_id).toBe("seed_map_11");
+    await applyAuthoringCommand(page, "open", () =>
+      page.locator("#authoring-open").click(),
+    );
+    await expect(page.locator("#authoring-title")).toHaveText("Seed map 11");
+
+    await applyAuthoringCommand(page, "new_scenario", () =>
+      page.getByRole("button", { name: "Scenarios", exact: true }).click(),
+    );
+    await expectAuthoringIdle(page);
+    const scenarioSelector = page.locator("#authoring-saved-draft-select");
+    await expect(scenarioSelector.locator("option")).toHaveCount(12);
+    expect(await persistedAssetIds(page, "#authoring-saved-draft-select")).toEqual(
+      Array.from({ length: 11 }, (_, index) => `seed_scenario_${index}`),
+    );
+    await scenarioSelector.focus();
+    for (let index = 0; index < 10; index += 1) {
+      await page.keyboard.press("ArrowDown");
+    }
+    expect(JSON.parse(await scenarioSelector.inputValue()).asset_id).toBe(
+      "seed_scenario_10",
+    );
+    await applyAuthoringCommand(page, "open", () =>
+      page.locator("#authoring-open").click(),
+    );
+    await expect(page.locator("#authoring-title")).toHaveText("Seed scenario 10");
+
+    await page.locator("#authoring-new-scenario-mode").selectOption("copy_saved_map");
+    expect(await persistedAssetIds(page, "#authoring-new-scenario-source")).toEqual(
+      Array.from({ length: 12 }, (_, index) => `seed_map_${index}`),
+    );
+    await page
+      .locator("#authoring-new-scenario-mode")
+      .selectOption("duplicate_saved_scenario");
+    expect(await persistedAssetIds(page, "#authoring-new-scenario-source")).toEqual(
+      Array.from({ length: 11 }, (_, index) => `seed_scenario_${index}`),
+    );
+
+    await applyAuthoringCommand(page, "list", () =>
+      page.getByRole("button", { name: "Combat Debugger", exact: true }).click(),
+    );
+    const combatIds = await persistedAssetIds(page, "#devclient-scenario-select");
+    expect(combatIds).toHaveLength(23);
+    expect(combatIds.slice(0, 12)).toEqual(
+      Array.from({ length: 12 }, (_, index) => `seed_map_${index}`),
+    );
+    expect(combatIds.slice(12)).toEqual(
+      Array.from({ length: 11 }, (_, index) => `seed_scenario_${index}`),
+    );
+  } finally {
+    await stopDebugger(devClient?.process ?? null);
+    await rm(artifactRoot, { recursive: true, force: true });
+  }
+});
+
 test("authoring persists through restart and drives same-start Combat comparisons", async ({
   page,
 }) => {
   const artifactRoot = await mkdtemp(join(tmpdir(), "marl-devclient-e2e-"));
-  const mapId = "e2e-authored-map";
-  const scenarioId = "e2e-authored-scenario";
-  const deletedScenarioId = "e2e-deleted-scenario";
-  const recoveryScenarioId = "e2e-recovery-scenario";
+  const mapId = "e2e_authored_map";
+  const scenarioId = "e2e_authored_scenario";
+  const deletedScenarioId = "e2e_deleted_scenario";
+  const recoveryScenarioId = "e2e_recovery_scenario";
   /** @type {Awaited<ReturnType<typeof startIsolatedDevClient>> | null} */
   let devClient = null;
 
@@ -277,7 +380,7 @@ test("authoring persists through restart and drives same-start Combat comparison
         page.getByRole("button", { name: "Maps", exact: true }).click(),
       ),
     );
-    expect(initialMap.draft.asset_id).toBe("untitled-map");
+    expect(initialMap.draft.asset_id).toBe("untitled_map");
     expect(initialMap.draft.revision).toBe(0);
     await expect(page.locator("#authoring-shell")).toBeVisible();
     await expect(page.locator("#workspace")).toBeHidden();
@@ -287,7 +390,7 @@ test("authoring persists through restart and drives same-start Combat comparison
         page.locator("#authoring-new").click(),
       ),
     );
-    expect(freshMap.draft.asset_id).toBe("untitled-map");
+    expect(freshMap.draft.asset_id).toBe("untitled_map");
     expect(freshMap.draft.revision).toBe(0);
     await expect(page.locator("#authoring-persistence-status")).toHaveText(
       "Unsaved map draft",
@@ -317,28 +420,28 @@ test("authoring persists through restart and drives same-start Combat comparison
       await objectId.press("Tab");
     });
     await expect(page.getByLabel("Object ID", { exact: true })).toHaveValue(
-      "obstacle-0",
+      "obstacle_0",
     );
     await expect(
-      page.getByRole("button", { name: "obstacle-0", exact: true }),
+      page.getByRole("button", { name: "obstacle_0", exact: true }),
     ).toBeVisible();
-    await editField(page, "Object ID", "north-gate");
-    const wall = page.locator('.authoring-svg-object[data-object-id="north-gate"]');
-    await expect(wall).toHaveAttribute("data-object-id", "north-gate");
+    await editField(page, "Object ID", "north_gate");
+    const wall = page.locator('.authoring-svg-object[data-object-id="north_gate"]');
+    await expect(wall).toHaveAttribute("data-object-id", "north_gate");
     await expect(
-      page.getByRole("button", { name: "north-gate", exact: true }),
+      page.getByRole("button", { name: "north_gate", exact: true }),
     ).toBeVisible();
     await applyAuthoringCommand(page, "validate", () =>
       page.locator("#authoring-undo").click(),
     );
     await expect(
-      page.getByRole("button", { name: "obstacle-0", exact: true }),
+      page.getByRole("button", { name: "obstacle_0", exact: true }),
     ).toHaveAttribute("aria-current", "false");
     await expect(page.getByLabel("Object ID", { exact: true })).toHaveCount(0);
     await applyAuthoringCommand(page, "validate", () =>
       page.locator("#authoring-redo").click(),
     );
-    await page.getByRole("button", { name: "north-gate", exact: true }).click();
+    await page.getByRole("button", { name: "north_gate", exact: true }).click();
     await expect(wall.locator("title")).toHaveCount(0);
     await wall.hover();
     await expect(page.locator("#visual-tooltip")).toBeHidden();
@@ -350,21 +453,21 @@ test("authoring persists through restart and drives same-start Combat comparison
       page.locator("#authoring-undo").click(),
     );
     await expect(wall).toBeVisible();
-    await page.getByRole("button", { name: "north-gate", exact: true }).click();
+    await page.getByRole("button", { name: "north_gate", exact: true }).click();
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("9.5");
     await applyAuthoringCommand(page, "validate", () =>
       page.locator("#authoring-duplicate").click(),
     );
     await expect(
-      page.getByRole("button", { name: "obstacle-0", exact: true }),
+      page.getByRole("button", { name: "obstacle_0", exact: true }),
     ).toBeVisible();
     await applyAuthoringCommand(page, "validate", () =>
       page.locator("#authoring-undo").click(),
     );
     await expect(
-      page.getByRole("button", { name: "obstacle-0", exact: true }),
+      page.getByRole("button", { name: "obstacle_0", exact: true }),
     ).toHaveCount(0);
-    await page.getByRole("button", { name: "north-gate", exact: true }).click();
+    await page.getByRole("button", { name: "north_gate", exact: true }).click();
 
     await expectNoAuthoringCommands(page, () =>
       dismissOnePrompt(page, () => page.locator("#authoring-save").click()),
@@ -447,7 +550,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     expect(await authoringViewBox(page)).toBe(fullMapViewBox);
     await expect(page.getByLabel("Center X", { exact: true })).toHaveCount(0);
-    await page.getByRole("button", { name: "north-gate", exact: true }).click();
+    await page.getByRole("button", { name: "north_gate", exact: true }).click();
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("10.5");
     await applyAuthoringCommand(page, "validate", () =>
       page.locator("#authoring-undo").click(),
@@ -455,7 +558,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("13.5");
     await canvas.focus();
     await applyAuthoringCommand(page, "validate", () => page.keyboard.press("r"));
-    await page.getByRole("button", { name: "north-gate", exact: true }).click();
+    await page.getByRole("button", { name: "north_gate", exact: true }).click();
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("10.5");
     await canvas.hover({ position: { x: 240, y: 160 } });
     await page.mouse.wheel(0, 360);
@@ -502,14 +605,14 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     await expect(page.locator("#authoring-title")).toHaveText("Untitled map");
     await expect(
-      page.locator('.authoring-svg-object[data-object-id="north-gate"]'),
+      page.locator('.authoring-svg-object[data-object-id="north_gate"]'),
     ).toBeVisible();
-    await page.getByRole("button", { name: "north-gate", exact: true }).click();
+    await page.getByRole("button", { name: "north_gate", exact: true }).click();
     await editField(page, "Center X", 14.5);
     await applyAuthoringCommand(page, "validate", () =>
       page.locator("#authoring-reset").click(),
     );
-    await page.getByRole("button", { name: "north-gate", exact: true }).click();
+    await page.getByRole("button", { name: "north_gate", exact: true }).click();
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("10.5");
     await canvas.hover({ position: { x: 240, y: 160 } });
     await page.mouse.wheel(0, -360);
@@ -529,7 +632,7 @@ test("authoring persists through restart and drives same-start Combat comparison
         page.getByRole("button", { name: "Scenarios", exact: true }).click(),
       ),
     );
-    expect(initialScenario.draft.asset_id).toBe("untitled-scenario");
+    expect(initialScenario.draft.asset_id).toBe("untitled_scenario");
     expect(initialScenario.draft.revision).toBe(0);
     await expect(page.locator("#devclient-combat-config")).toBeHidden();
     const freshScenario = await expectNoPrompts(page, () =>
@@ -537,7 +640,7 @@ test("authoring persists through restart and drives same-start Combat comparison
         page.locator("#authoring-new").click(),
       ),
     );
-    expect(freshScenario.draft.asset_id).toBe("untitled-scenario");
+    expect(freshScenario.draft.asset_id).toBe("untitled_scenario");
     expect(freshScenario.draft.revision).toBe(0);
     await page.locator("#authoring-new-scenario-mode").selectOption("copy_saved_map");
     await selectPersistedAsset(page, "#authoring-new-scenario-source", mapId);
@@ -551,17 +654,17 @@ test("authoring persists through restart and drives same-start Combat comparison
       revision: 2,
     });
     await expect(
-      page.locator('.authoring-svg-object[data-object-id="north-gate"]'),
+      page.locator('.authoring-svg-object[data-object-id="north_gate"]'),
     ).toBeVisible();
     await expectSpawnPadRadius(page);
-    await page.getByRole("button", { name: "north-gate", exact: true }).click();
-    await editField(page, "Object ID", "scenario-gate");
+    await page.getByRole("button", { name: "north_gate", exact: true }).click();
+    await editField(page, "Object ID", "scenario_gate");
     await expect(
-      page.getByRole("button", { name: "scenario-gate", exact: true }),
+      page.getByRole("button", { name: "scenario_gate", exact: true }),
     ).toBeVisible();
     await expect(
-      page.locator('.authoring-svg-object[data-object-id="scenario-gate"]'),
-    ).toHaveAttribute("data-object-id", "scenario-gate");
+      page.locator('.authoring-svg-object[data-object-id="scenario_gate"]'),
+    ).toHaveAttribute("data-object-id", "scenario_gate");
     await page.getByRole("button", { name: "scenario document", exact: true }).click();
     await expect(page.getByLabel("Notes", { exact: true })).toBeVisible();
     await expect(page.getByText("Role", { exact: true })).toHaveCount(0);
@@ -653,7 +756,7 @@ test("authoring persists through restart and drives same-start Combat comparison
         page.locator("#authoring-new").click(),
       ),
     );
-    expect(duplicatedScenario.draft.asset_id).toBe("untitled-scenario");
+    expect(duplicatedScenario.draft.asset_id).toBe("untitled_scenario");
     expect(duplicatedScenario.draft.revision).toBe(0);
     expect(duplicatedScenario.draft.content.global_state).toEqual(
       updatedScenario.draft.content.global_state,
@@ -712,7 +815,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     await expect(page.getByLabel("Center X", { exact: true })).toHaveValue("10.5");
     await expect(
-      page.getByRole("button", { name: "north-gate", exact: true }),
+      page.getByRole("button", { name: "north_gate", exact: true }),
     ).toHaveAttribute("aria-current", "true");
     await selectPersistedAsset(page, "#authoring-saved-draft-select", mapId);
     await expect(page.locator("#authoring-delete-saved")).toBeEnabled();
@@ -748,7 +851,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     expect(await authoringViewBox(page)).toBe(contextualMapViewBox);
     await expect(
-      page.getByRole("button", { name: "north-gate", exact: true }),
+      page.getByRole("button", { name: "north_gate", exact: true }),
     ).toHaveAttribute("aria-current", "true");
     await expect
       .poll(async () =>
@@ -987,7 +1090,7 @@ test("authoring persists through restart and drives same-start Combat comparison
               return false;
             }
             try {
-              return JSON.parse(option.value).asset_id === "e2e-authored-scenario";
+              return JSON.parse(option.value).asset_id === "e2e_authored_scenario";
             } catch {
               return false;
             }

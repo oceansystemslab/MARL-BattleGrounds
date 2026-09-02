@@ -5,14 +5,14 @@ on:
   pull_request:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
   python-test-gates:
     name: Python tests (${{ matrix.shard }}/12)
     runs-on: ubuntu-latest
-    timeout-minutes: 9
+    timeout-minutes: 12
     strategy:
       fail-fast: true
       max-parallel: 12
@@ -75,7 +75,7 @@ jobs:
   frontend-browser-gates:
     name: Browser gates (${{ matrix.shard }}/8)
     runs-on: ubuntu-24.04
-    timeout-minutes: 6
+    timeout-minutes: 8
     strategy:
       fail-fast: true
       max-parallel: 8

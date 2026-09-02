@@ -121,9 +121,36 @@ def test_strict_models_reject_extra_fields_and_preserve_wire_schema_alias() -> N
         DevMapDraftV1.model_validate_json(json.dumps(oversized_revision))
 
 
+@pytest.mark.parametrize(
+    "asset_id",
+    (
+        "legacy-kebab",
+        "Uppercase",
+        "leading_",
+        "_leading",
+        "double__underscore",
+        "x" * 65,
+    ),
+)
+def test_asset_ids_are_strict_lowercase_snake_case(asset_id: str) -> None:
+    payload = new_map_draft().model_dump(mode="json", by_alias=True)
+    payload["asset_id"] = asset_id
+
+    with pytest.raises(ValidationError):
+        DevMapDraftV1.model_validate_json(json.dumps(payload))
+
+
+def test_authoring_defaults_use_snake_case_asset_ids() -> None:
+    assert new_map_draft().asset_id == "untitled_map"
+    assert new_scenario_draft().asset_id == "untitled_scenario"
+    assert new_map_draft("tdm_map_id_10_kawaii_training").asset_id == (
+        "tdm_map_id_10_kawaii_training"
+    )
+
+
 def test_blank_defaults_are_exact_and_map_copy_is_independent() -> None:
-    map_draft = new_map_draft("source-map")
-    scenario = new_scenario_draft("copied-scenario", source_map=map_draft)
+    map_draft = new_map_draft("source_map")
+    scenario = new_scenario_draft("copied_scenario", source_map=map_draft)
 
     assert map_draft.content.width == 20.0
     assert map_draft.content.height == 10.0
@@ -171,7 +198,7 @@ def test_blank_defaults_are_exact_and_map_copy_is_independent() -> None:
             )
         }
     )
-    remapped = new_scenario_draft("collision-safe", source_map=colliding_map)
+    remapped = new_scenario_draft("collision_safe", source_map=colliding_map)
     assert remapped.content.embedded_map == colliding_map.content
     assert remapped.content.roster[0].object_id == "agent-a1-2"
     assert (
@@ -245,8 +272,8 @@ def test_map_normalization_padding_order_and_semantic_digest_contract() -> None:
         np.asarray(compile_dev_map(map_a).obstacles),
         np.asarray(compile_dev_map(map_b).obstacles),
     )
-    source_a = new_map_draft("identity-a").model_copy(update={"content": map_a})
-    source_b = new_map_draft("identity-b").model_copy(update={"content": map_b})
+    source_a = new_map_draft("identity_a").model_copy(update={"content": map_a})
+    source_b = new_map_draft("identity_b").model_copy(update={"content": map_b})
     scenario_a = compile_dev_scenario(new_scenario_draft(source_map=source_a))
     scenario_b = compile_dev_scenario(new_scenario_draft(source_map=source_b))
     assert scenario_a.semantic_digest == scenario_b.semantic_digest
@@ -295,7 +322,7 @@ def test_obstacle_ids_survive_independent_map_copy_and_obsolete_names_fail() -> 
         width=2.0,
         height=0.5,
     )
-    source = new_map_draft("named-source")
+    source = new_map_draft("named_source")
     source = source.model_copy(
         update={
             "content": source.content.model_copy(update={"obstacles": (pillar, wall)})
@@ -307,7 +334,7 @@ def test_obstacle_ids_survive_independent_map_copy_and_obsolete_names_fail() -> 
         "center-pillar",
         "flanking-wall",
     )
-    copied = new_scenario_draft("named-copy", source_map=source)
+    copied = new_scenario_draft("named_copy", source_map=source)
     assert copied.content.embedded_map.obstacles == source.content.obstacles
     assert copied.content.embedded_map.obstacles is not source.content.obstacles
 
@@ -497,7 +524,7 @@ def test_invalid_numeric_draft_saves_reopens_and_stays_out_of_debug_discovery(
 ) -> None:
     store = _store(tmp_path)
     binding = DevClientAuthoringBinding(store)
-    payload = new_scenario_draft("invalid-numeric").model_dump(
+    payload = new_scenario_draft("invalid_numeric").model_dump(
         mode="json", by_alias=True
     )
     payload["content"]["episode"]["max_steps"] = 0
@@ -534,7 +561,7 @@ def test_invalid_numeric_draft_saves_reopens_and_stays_out_of_debug_discovery(
                 "source": {
                     "source_kind": "saved_draft",
                     "asset_kind": "scenario",
-                    "asset_id": "invalid-numeric",
+                    "asset_id": "invalid_numeric",
                     "revision": 1,
                 },
             }
@@ -547,13 +574,13 @@ def test_invalid_numeric_draft_saves_reopens_and_stays_out_of_debug_discovery(
         _request({"command_type": "list", "asset_kind": "scenario"})
     )
     assert [(asset.asset_id, asset.execution_valid) for asset in listed.assets] == [
-        ("invalid-numeric", False)
+        ("invalid_numeric", False)
     ]
     assert binding.scenario_loader.discover() == ()
 
 
 def test_core_state_failure_links_the_exact_agent_inspector_field() -> None:
-    draft = new_scenario_draft("linked-core-state")
+    draft = new_scenario_draft("linked_core_state")
     states = list(draft.content.agent_states)
     states[0] = states[0].model_copy(update={"current_health": 81.0})
     invalid = draft.model_copy(
@@ -573,7 +600,7 @@ def test_core_state_failure_links_the_exact_agent_inspector_field() -> None:
 
 
 def test_compile_map_wraps_float32_normalization_as_a_linked_problem() -> None:
-    draft = new_map_draft("overflow-map")
+    draft = new_map_draft("overflow_map")
     invalid = draft.model_copy(
         update={"content": draft.content.model_copy(update={"width": 1e100})}
     )
@@ -610,7 +637,7 @@ def test_scenario_digest_excludes_display_prose_provenance_and_browser_ids() -> 
             "description": "Display-only prose",
             "notes": "Private author notes",
             "source_map_provenance": DevSourceMapProvenanceV1(
-                asset_id="some-map",
+                asset_id="some_map",
                 revision=7,
             ),
             "roster": roster,
@@ -657,7 +684,7 @@ def test_store_saves_exact_revisions_and_rejects_stale_or_unsafe_identity(
 ) -> None:
     store = _store(tmp_path)
     revision_one = store.save_draft(
-        new_map_draft("revisioned-map"), expected_revision=0
+        new_map_draft("revisioned_map"), expected_revision=0
     )
     revision_two = store.save_draft(
         revision_one.model_copy(
@@ -670,10 +697,10 @@ def test_store_saves_exact_revisions_and_rejects_stale_or_unsafe_identity(
 
     assert revision_one.revision == 1
     assert revision_two.revision == 2
-    assert store.load_draft("map", "revisioned-map", revision=1).content.name == (
+    assert store.load_draft("map", "revisioned_map", revision=1).content.name == (
         "Untitled map"
     )
-    assert store.load_draft("map", "revisioned-map").content.name == "Second"
+    assert store.load_draft("map", "revisioned_map").content.name == "Second"
     with pytest.raises(DevDraftRevisionConflictError, match="stale"):
         store.save_draft(revision_one, expected_revision=1)
     with pytest.raises(ValueError, match="safe lowercase"):
@@ -681,7 +708,7 @@ def test_store_saves_exact_revisions_and_rejects_stale_or_unsafe_identity(
     with pytest.raises(ValueError, match="positive 32-bit"):
         store.load_draft(
             "map",
-            "revisioned-map",
+            "revisioned_map",
             revision=MAX_DEV_ASSET_SEQUENCE + 1,
         )
 
@@ -692,14 +719,14 @@ def test_store_rejects_symlinks_before_draft_writes_and_reads(tmp_path: Path) ->
     outside.mkdir()
     map_collection = store.artifact_root / "drafts" / "maps"
     map_collection.mkdir(parents=True)
-    (map_collection / "linked-map").symlink_to(outside, target_is_directory=True)
+    (map_collection / "linked_map").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(DevAssetIntegrityError, match="must not contain symlinks"):
-        store.save_draft(new_map_draft("linked-map"), expected_revision=0)
+        store.save_draft(new_map_draft("linked_map"), expected_revision=0)
     assert tuple(outside.iterdir()) == ()
 
-    saved = store.save_draft(new_map_draft("read-map"), expected_revision=0)
-    saved_path = map_collection / "read-map" / "r1.json"
+    saved = store.save_draft(new_map_draft("read_map"), expected_revision=0)
+    saved_path = map_collection / "read_map" / "r1.json"
     external_payload = outside / "r1.json"
     external_payload.write_bytes(saved_path.read_bytes())
     saved_path.unlink()
@@ -713,7 +740,7 @@ def test_store_delete_removes_all_revisions_and_allows_identity_reuse(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
-    revision_one = store.save_draft(new_map_draft("deletable-map"), expected_revision=0)
+    revision_one = store.save_draft(new_map_draft("deletable_map"), expected_revision=0)
     revision_two = store.save_draft(
         revision_one.model_copy(
             update={
@@ -725,21 +752,63 @@ def test_store_delete_removes_all_revisions_and_allows_identity_reuse(
 
     deleted = store.delete_draft(
         "map",
-        "deletable-map",
+        "deletable_map",
         expected_revision=revision_two.revision,
     )
     assert [reference.revision for reference in deleted] == [1, 2]
-    assert not (store.artifact_root / "drafts" / "maps" / "deletable-map").exists()
+    assert not (store.artifact_root / "drafts" / "maps" / "deletable_map").exists()
 
-    recreated = store.save_draft_as(new_map_draft(), asset_id="deletable-map")
+    recreated = store.save_draft_as(new_map_draft(), asset_id="deletable_map")
     assert recreated.revision == 3
     with pytest.raises(DevDraftRevisionConflictError, match="stale"):
         store.delete_draft(
             "map",
-            "deletable-map",
+            "deletable_map",
             expected_revision=revision_two.revision,
         )
-    assert store.load_draft("map", "deletable-map") == recreated
+    assert store.load_draft("map", "deletable_map") == recreated
+
+
+def test_store_restart_discovers_every_latest_map_and_scenario(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    expected_map_ids = {f"map_{index}" for index in range(41)}
+    expected_scenario_ids = {f"scenario_{index}" for index in range(13)}
+    for asset_id in expected_map_ids:
+        store.save_draft(new_map_draft(asset_id), expected_revision=0)
+    for asset_id in expected_scenario_ids:
+        store.save_draft(new_scenario_draft(asset_id), expected_revision=0)
+
+    restarted = _store(tmp_path)
+    map_references = restarted.iter_draft_references("map", latest_only=True)
+    scenario_references = restarted.iter_draft_references(
+        "scenario",
+        latest_only=True,
+    )
+
+    assert len(map_references) == 41
+    assert {reference.asset_id for reference in map_references} == expected_map_ids
+    assert all(reference.revision == 1 for reference in map_references)
+    assert len(scenario_references) == 13
+    assert {
+        reference.asset_id for reference in scenario_references
+    } == expected_scenario_ids
+    assert all(reference.revision == 1 for reference in scenario_references)
+    assert restarted.load_draft("map", "map_40").content.name == "Untitled map"
+    assert (
+        restarted.load_draft("scenario", "scenario_12").content.name
+        == "Untitled TDM scenario"
+    )
+
+    loader = DevScenarioLoadService(restarted)
+    listed_maps = loader.list_persisted("map", include_invalid_drafts=True)
+    listed_scenarios = loader.list_persisted(
+        "scenario",
+        include_invalid_drafts=True,
+    )
+    assert {summary.asset_id for summary in listed_maps} == expected_map_ids
+    assert {summary.asset_id for summary in listed_scenarios} == expected_scenario_ids
 
 
 def test_store_delete_revision_fence_survives_another_live_store_instance(
@@ -749,7 +818,7 @@ def test_store_delete_revision_fence_survives_another_live_store_instance(
     first_store = DevAssetStore(tmp_path, artifact_root=artifact_root)
     second_store = DevAssetStore(tmp_path, artifact_root=artifact_root)
     original = first_store.save_draft(
-        new_map_draft("shared-store-map"),
+        new_map_draft("shared_store_map"),
         expected_revision=0,
     )
     first_store.delete_draft(
@@ -783,13 +852,13 @@ def test_store_delete_failures_leave_every_saved_byte_untouched(
 ) -> None:
     store = _store(tmp_path)
     revision_one = store.save_draft(
-        new_scenario_draft("guarded-scenario"), expected_revision=0
+        new_scenario_draft("guarded_scenario"), expected_revision=0
     )
     revision_two = store.save_draft(
         revision_one,
         expected_revision=revision_one.revision,
     )
-    directory = store.artifact_root / "drafts" / "scenarios" / "guarded-scenario"
+    directory = store.artifact_root / "drafts" / "scenarios" / "guarded_scenario"
 
     def saved_bytes() -> dict[str, bytes]:
         return {
@@ -800,7 +869,7 @@ def test_store_delete_failures_leave_every_saved_byte_untouched(
 
     original = saved_bytes()
     with pytest.raises(DevDraftRevisionConflictError, match="stale"):
-        store.delete_draft("scenario", "guarded-scenario", expected_revision=1)
+        store.delete_draft("scenario", "guarded_scenario", expected_revision=1)
     assert saved_bytes() == original
 
     unexpected = directory / "notes.txt"
@@ -808,7 +877,7 @@ def test_store_delete_failures_leave_every_saved_byte_untouched(
     with pytest.raises(DevAssetIntegrityError, match="unexpected entry"):
         store.delete_draft(
             "scenario",
-            "guarded-scenario",
+            "guarded_scenario",
             expected_revision=revision_two.revision,
         )
     assert saved_bytes() == {**original, "notes.txt": b"do not delete"}
@@ -821,7 +890,7 @@ def test_store_delete_failures_leave_every_saved_byte_untouched(
     with pytest.raises(DevAssetIntegrityError, match="must not contain symlinks"):
         store.delete_draft(
             "scenario",
-            "guarded-scenario",
+            "guarded_scenario",
             expected_revision=revision_two.revision,
         )
     assert saved_bytes() == original
@@ -834,20 +903,20 @@ def test_store_delete_failures_leave_every_saved_byte_untouched(
     with pytest.raises(DevAssetIntegrityError, match="strict parsing"):
         store.delete_draft(
             "scenario",
-            "guarded-scenario",
+            "guarded_scenario",
             expected_revision=revision_two.revision,
         )
     assert saved_bytes() == malformed
 
     revision_one_path.write_bytes(original["r1.json"])
     mismatched_payload = json.loads(revision_one_path.read_text(encoding="utf-8"))
-    mismatched_payload["asset_id"] = "different-scenario"
+    mismatched_payload["asset_id"] = "different_scenario"
     revision_one_path.write_text(json.dumps(mismatched_payload), encoding="utf-8")
     mismatched = saved_bytes()
     with pytest.raises(DevAssetIntegrityError, match="identity does not match"):
         store.delete_draft(
             "scenario",
-            "guarded-scenario",
+            "guarded_scenario",
             expected_revision=revision_two.revision,
         )
     assert saved_bytes() == mismatched
@@ -855,7 +924,7 @@ def test_store_delete_failures_leave_every_saved_byte_untouched(
     with pytest.raises(ValueError, match="safe lowercase"):
         store.delete_draft("map", "../escape", expected_revision=1)
     with pytest.raises(DevAssetNotFoundError, match="was not found"):
-        store.delete_draft("map", "missing-map", expected_revision=1)
+        store.delete_draft("map", "missing_map", expected_revision=1)
 
 
 def test_store_delete_recovers_from_interruption_and_post_effect_failures(
@@ -863,7 +932,7 @@ def test_store_delete_recovers_from_interruption_and_post_effect_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _store(tmp_path)
-    first = store.save_draft(new_map_draft("rollback-map"), expected_revision=0)
+    first = store.save_draft(new_map_draft("rollback_map"), expected_revision=0)
     second = store.save_draft(first, expected_revision=first.revision)
     directory = store.artifact_root / "drafts" / "maps" / first.asset_id
     expected = {
@@ -975,7 +1044,7 @@ def test_authoring_delete_refreshes_assets_and_obsolete_sources_fail_strictly(
         _request(
             {
                 "command_type": "save",
-                "draft": new_map_draft("delete-through-binding").model_dump(
+                "draft": new_map_draft("delete_through_binding").model_dump(
                     mode="json", by_alias=True
                 ),
                 "expected_revision": 0,
@@ -991,7 +1060,7 @@ def test_authoring_delete_refreshes_assets_and_obsolete_sources_fail_strictly(
                 "source": {
                     "source_kind": "saved_draft",
                     "asset_kind": "map",
-                    "asset_id": "delete-through-binding",
+                    "asset_id": "delete_through_binding",
                     "revision": 1,
                 },
             }
@@ -1026,14 +1095,14 @@ def test_saved_scenario_discovery_and_restart_load_exact_revision(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
-    saved = store.save_draft(new_scenario_draft("later-load"), expected_revision=0)
+    saved = store.save_draft(new_scenario_draft("later_load"), expected_revision=0)
 
     first_process = DevScenarioLoadService(store)
     assert first_process.current_snapshot is None
     second_process = DevScenarioLoadService(_store(tmp_path))
     summaries = second_process.discover()
     assert [(summary.asset_id, summary.revision) for summary in summaries] == [
-        ("later-load", 1)
+        ("later_load", 1)
     ]
 
     attempt = second_process.load(
@@ -1056,9 +1125,9 @@ def test_loaded_combat_snapshot_and_embedded_map_survive_source_deletion(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
-    saved_map = store.save_draft(new_map_draft("source-arena"), expected_revision=0)
+    saved_map = store.save_draft(new_map_draft("source_arena"), expected_revision=0)
     assert isinstance(saved_map, DevMapDraftV1)
-    scenario = new_scenario_draft("embedded-arena", source_map=saved_map)
+    scenario = new_scenario_draft("embedded_arena", source_map=saved_map)
     saved_scenario = store.save_draft(scenario, expected_revision=0)
     assert isinstance(saved_scenario, DevScenarioDraftV1)
     loader = DevScenarioLoadService(store)
@@ -1102,9 +1171,9 @@ def test_current_and_saved_maps_use_the_exact_default_preview_path(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
-    current_map = new_map_draft("preview-map").model_copy(
+    current_map = new_map_draft("preview_map").model_copy(
         update={
-            "content": new_map_draft("preview-map").content.model_copy(
+            "content": new_map_draft("preview_map").content.model_copy(
                 update={"name": "Preview arena"}
             )
         }
@@ -1139,7 +1208,7 @@ def test_current_and_saved_maps_use_the_exact_default_preview_path(
     )
     for source, exact_map in sources_and_maps:
         expected = compile_dev_scenario(
-            new_scenario_draft("explicit-map-copy", source_map=exact_map)
+            new_scenario_draft("explicit_map_copy", source_map=exact_map)
         )
         response = binding.apply_command(
             _request({"command_type": "open_in_debug", "source": source})
@@ -1165,7 +1234,7 @@ def test_current_and_saved_maps_use_the_exact_default_preview_path(
     assert scenario.default_controlled_slot == 0
     assert scenario.provenance is not None
     assert scenario.provenance.source_identity == (
-        "map:saved_draft:preview-map:revision:1:profile:default-tdm-map-preview@1"
+        "map:saved_draft:preview_map:revision:1:profile:default-tdm-map-preview@1"
     )
     files_after = {
         path.relative_to(tmp_path): path.read_bytes()
@@ -1175,7 +1244,7 @@ def test_current_and_saved_maps_use_the_exact_default_preview_path(
     assert files_after == files_before
 
     maximum_name = "M" * 120
-    long_name_map = new_map_draft("long-preview-name")
+    long_name_map = new_map_draft("long_preview_name")
     long_name_map = long_name_map.model_copy(
         update={
             "content": long_name_map.content.model_copy(update={"name": maximum_name})
@@ -1201,7 +1270,7 @@ def test_current_and_saved_maps_use_the_exact_default_preview_path(
 
 def test_failed_map_preview_preserves_current_debug_snapshot(tmp_path: Path) -> None:
     binding = DevClientAuthoringBinding(_store(tmp_path))
-    valid_scenario = new_scenario_draft("existing-debug-session")
+    valid_scenario = new_scenario_draft("existing_debug_session")
     installed = binding.apply_command(
         _request(
             {
@@ -1217,7 +1286,7 @@ def test_failed_map_preview_preserves_current_debug_snapshot(tmp_path: Path) -> 
     assert installed.ok
     original_snapshot = binding.scenario_loader.current_snapshot
 
-    invalid_map = new_map_draft("invalid-preview")
+    invalid_map = new_map_draft("invalid_preview")
     invalid_map = invalid_map.model_copy(
         update={
             "content": invalid_map.content.model_copy(
@@ -1248,7 +1317,7 @@ def test_failed_map_preview_preserves_current_debug_snapshot(tmp_path: Path) -> 
 
 def test_failed_revalidation_preserves_current_debug_snapshot(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    valid = store.save_draft(new_scenario_draft("load-guard"), expected_revision=0)
+    valid = store.save_draft(new_scenario_draft("load_guard"), expected_revision=0)
     assert isinstance(valid, DevScenarioDraftV1)
     loader = DevScenarioLoadService(store)
     first = loader.load(
@@ -1287,7 +1356,7 @@ def test_failed_revalidation_preserves_current_debug_snapshot(tmp_path: Path) ->
 
 def test_current_buffer_and_saved_loader_use_one_snapshot_path(tmp_path: Path) -> None:
     loader = DevScenarioLoadService(_store(tmp_path))
-    draft = new_scenario_draft("current-buffer")
+    draft = new_scenario_draft("current_buffer")
     with pytest.raises(ValidationError, match="asset_kind must match"):
         DevCurrentBufferSourceV1(asset_kind="map", draft=draft)
     attempt = loader.load(DevCurrentBufferSourceV1(asset_kind="scenario", draft=draft))
@@ -1303,7 +1372,7 @@ def test_loaded_snapshot_replaces_and_resets_the_exact_debugger_scenario(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
-    draft = new_scenario_draft("debugger-load")
+    draft = new_scenario_draft("debugger_load")
     global_state = draft.content.global_state.model_copy(update={"step_count": 7})
     saved = store.save_draft(
         draft.model_copy(
@@ -1352,7 +1421,7 @@ def test_loaded_snapshot_replaces_and_resets_the_exact_debugger_scenario(
     assert int(debugger.session.state.step_count) == 7
     assert debugger.session.scenario.provenance is not None
     assert debugger.session.scenario.provenance.source_identity == (
-        "scenario:saved_draft:debugger-load:revision:1"
+        "scenario:saved_draft:debugger_load:revision:1"
     )
     assert debugger.session.scenario.default_controlled_slot == 0
     aggregation = {
@@ -1400,7 +1469,7 @@ def test_single_authoring_binding_parses_whole_commands_and_shares_loader(
         _request(
             {
                 "command_type": "new_scenario",
-                "asset_id": "binding-scenario",
+                "asset_id": "binding_scenario",
             }
         )
     )
@@ -1432,7 +1501,7 @@ def test_single_authoring_binding_parses_whole_commands_and_shares_loader(
                 "source": {
                     "source_kind": "saved_draft",
                     "asset_kind": "scenario",
-                    "asset_id": "binding-scenario",
+                    "asset_id": "binding_scenario",
                     "revision": 1,
                 },
             }
@@ -1447,7 +1516,7 @@ def test_single_authoring_binding_parses_whole_commands_and_shares_loader(
     )
     assert listed.ok
     assert [(asset.asset_id, asset.revision) for asset in listed.assets] == [
-        ("binding-scenario", 1)
+        ("binding_scenario", 1)
     ]
 
 
@@ -1486,7 +1555,7 @@ def test_authoring_binding_serializes_threaded_host_commands(
 
 def test_validate_returns_linked_capacity_and_float32_problems(tmp_path: Path) -> None:
     binding = DevClientAuthoringBinding(_store(tmp_path))
-    map_draft = new_map_draft("too-many-obstacles")
+    map_draft = new_map_draft("too_many_obstacles")
     obstacles = tuple(
         DevPillarV1(
             object_id=f"pillar-{index}",
@@ -1511,7 +1580,7 @@ def test_validate_returns_linked_capacity_and_float32_problems(tmp_path: Path) -
         )
     )
 
-    scenario_draft = new_scenario_draft("float32-overflow")
+    scenario_draft = new_scenario_draft("float32_overflow")
     first_state = scenario_draft.content.agent_states[0].model_copy(
         update={
             "position": scenario_draft.content.agent_states[0].position.model_copy(
@@ -1538,7 +1607,7 @@ def test_validate_returns_linked_capacity_and_float32_problems(tmp_path: Path) -
             }
         )
     )
-    huge_integer_draft = new_scenario_draft("int32-overflow")
+    huge_integer_draft = new_scenario_draft("int32_overflow")
     huge_integer_response = binding.apply_command(
         _request(
             {
@@ -1559,7 +1628,7 @@ def test_validate_returns_linked_capacity_and_float32_problems(tmp_path: Path) -
             }
         )
     )
-    nested_capacity_draft = new_scenario_draft("nested-capacity")
+    nested_capacity_draft = new_scenario_draft("nested_capacity")
     nested_capacity_response = binding.apply_command(
         _request(
             {
@@ -1614,16 +1683,16 @@ def test_validate_returns_linked_capacity_and_float32_problems(tmp_path: Path) -
 def test_binding_copies_saved_map_and_duplicates_saved_scenario(tmp_path: Path) -> None:
     store = _store(tmp_path)
     binding = DevClientAuthoringBinding(store)
-    saved_map = store.save_draft(new_map_draft("source-map"), expected_revision=0)
+    saved_map = store.save_draft(new_map_draft("source_map"), expected_revision=0)
     saved_scenario = store.save_draft(
-        new_scenario_draft("source-scenario"), expected_revision=0
+        new_scenario_draft("source_scenario"), expected_revision=0
     )
 
     copied = binding.apply_command(
         _request(
             {
                 "command_type": "new_scenario",
-                "asset_id": "map-copy",
+                "asset_id": "map_copy",
                 "creation_mode": "copy_saved_map",
                 "source": {
                     "source_kind": "saved_draft",
@@ -1648,7 +1717,7 @@ def test_binding_copies_saved_map_and_duplicates_saved_scenario(tmp_path: Path) 
         _request(
             {
                 "command_type": "new_scenario",
-                "asset_id": "scenario-copy",
+                "asset_id": "scenario_copy",
                 "creation_mode": "duplicate_saved_scenario",
                 "source": {
                     "source_kind": "saved_draft",
@@ -1661,7 +1730,7 @@ def test_binding_copies_saved_map_and_duplicates_saved_scenario(tmp_path: Path) 
     )
     assert duplicated.ok
     assert isinstance(duplicated.draft, DevScenarioDraftV1)
-    assert duplicated.draft.asset_id == "scenario-copy"
+    assert duplicated.draft.asset_id == "scenario_copy"
     assert duplicated.draft.revision == 0
     assert duplicated.draft.content == saved_scenario.content
 

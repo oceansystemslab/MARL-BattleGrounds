@@ -27,12 +27,13 @@
       ],
       "env": { "MARL_CP5_SLICE_5_ONLY": "1" }
     },
-    { "files": ["control-parity.spec.js"] },
+    {
+      "files": ["control-parity.spec.js", "dev-client-authoring.spec.js"]
+    },
     {
       "files": [
         "recording-handoff.spec.js",
         "authorized-presentation-renderer.spec.js",
-        "dev-client-authoring.spec.js",
         "resize.spec.js"
       ]
     },
