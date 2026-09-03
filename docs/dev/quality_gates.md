@@ -190,10 +190,33 @@ test inventory executed on a passing candidate.
 
 ## Development selection
 
+[Amendment A25](../design/specification_amendments.md#a25-sharedobs-only-canonical-benchmark-execution)
+gives official benchmark and controlled-scenario evidence one actor-information
+qualification gate. The episode must record mode `shared_obs`, actor projection
+`base-observation-plus-authorized-sensor-source-bank@1`, and an availability
+matrix on every replay frame exactly equal to the configured-active, same-team,
+off-diagonal matrix derived from the frozen roster. Expected availability does
+not depend on living state, health, visibility, score, controller, or frame
+index; configured-but-dead sources remain authorized while their ordinary
+sensor material remains lifecycle-zeroed.
+
+`build_scenario_evaluation_record_v2()` and
+`validate_official_scenario_evaluation_record_v2()` must both reach the same
+replay-level gate. Required hostile proofs include a stable all-false or
+partially disabled multi-agent topology and a canonical frame zero followed by
+one changed permitted cell; generic validation must still accept each
+structurally permitted SharedObs subset while official validation rejects it
+with the offending frame index. A 1v1 all-false matrix must remain officially
+valid when it exactly matches the roster. Generic NoSharedObs validation and
+its tests remain compatibility protection, not official-baseline
+qualification. Random is likewise a diagnostic/quality-control policy, not an
+official baseline.
+
 | Change | Smallest justified proof |
 | --- | --- |
 | Core or Python semantics | Nearest Python unit/integration tests, then targeted Ruff/Pyright |
-| Team Deathmatch task semantics | Configuration/state validation, score/termination/reward transition tests, evaluation capture/replay/event tests, rollout tests, and scripted SharedObs/NoSharedObs policy integration |
+| Team Deathmatch task semantics | Configuration/state validation, score/termination/reward transition tests, evaluation capture/replay/event tests, rollout tests, canonical SharedObs policy integration, and NoSharedObs compatibility coverage |
+| Official scenario eligibility | Mode/projection rejection, exact configured-roster matrix acceptance, stable subset rejection, later-frame drift rejection, legitimate 1v1 all-false acceptance, generic compatibility, purity, and single semantic replay-scan proof |
 | DevClient map/scenario authoring | Strict draft parsing, compile/validation joins, digest/persistence/tamper tests, browser authoring units, and the smallest persisted reopen/load Playwright flow |
 | DevClient controller or information mode | Protocol/input/service/frame tests, same-start causal proofs, truthful capture/provenance tests, and the affected real-browser selector flow |
 | Actor projection version change | Projection/capture tests, explicit older-version rejection, exact actor-input export tests for the new version, and Oracle/Agent privacy parity before enabling that version in Replay Agent POV |

@@ -46,7 +46,7 @@ The public options are:
 
 | Option | Meaning |
 | --- | --- |
-| `--record-replay PATH` | Record one manual episode to a canonical replay and adjacent metric sidecar, then offer read-only review. |
+| `--record-replay PATH` | Record one manual episode to a canonical-format replay and adjacent metric sidecar, then offer read-only review. |
 | `--seed N` | Set the deterministic reset/step seed; default `0`. |
 | `--controlled-slot N` | Select an initially active global slot; otherwise use the arena default. |
 | `--static` | Render one stateless Matplotlib reset snapshot without a browser server. |
@@ -128,10 +128,22 @@ policy, or use the built-in Random policy. Random samples only the exact current
 valid action support and deliberately ignores observation features; under the
 same key and mask it therefore produces the same action in SharedObs and
 NoSharedObs. The selectors share one controller boundary without introducing a
-generic policy registry or checkpoint loader. SharedObs is the default
-information regime, while NoSharedObs remains a first-class selectable regime.
-Changing either controller or the information regime resets the exact loaded
-scenario and seed before comparison.
+generic policy registry or checkpoint loader. Random is a diagnostic and
+quality-control controller, not an official baseline. Under
+[amendment A25](../design/specification_amendments.md#a25-sharedobs-only-canonical-benchmark-execution),
+SharedObs is the default and the only evaluation-eligible information regime.
+NoSharedObs remains selectable for diagnostics, custom research, and
+compatibility checks. Changing either controller or the information regime
+resets the exact loaded scenario and seed before comparison.
+
+Saved maps and scenarios do not encode an information regime. Loading one
+preserves its authored bytes and binds the selected regime only for that run.
+New official evidence must bind `shared_obs`, actor projection
+`base-observation-plus-authorized-sensor-source-bank@1`, and the exact
+configured-active, same-team, off-diagonal availability matrix on every replay
+frame. A successful DevClient run or recording is not by itself official
+qualification; the evaluation owner applies the separate official evidence
+gate.
 
 ## Authority and views
 

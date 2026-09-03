@@ -13,6 +13,9 @@ import pytest
 from tests.evaluation_fixtures import captured_evaluation_trajectory
 
 import marl_battlegrounds.evaluation.replay_io as replay_io
+from marl_battlegrounds.evaluation.actor_projection import (
+    SHARED_OBS_ACTOR_PROJECTION_V1,
+)
 from marl_battlegrounds.evaluation.metrics import build_evaluation_observer_v1
 from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV1,
@@ -312,6 +315,8 @@ def _build_case_v2(episode_id: str) -> _V2CompanionCase:
     trajectory = captured_evaluation_trajectory(
         transition_count=1,
         capture_profile="scenario_metric_complete",
+        execution_information_mode="shared_obs",
+        actor_projection=SHARED_OBS_ACTOR_PROJECTION_V1,
         expected_horizon=1,
         with_scenario=True,
         episode_id=episode_id,

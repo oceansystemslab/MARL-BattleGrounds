@@ -227,6 +227,7 @@ def evaluation_seed_protocol(
 def evaluation_context(
     *,
     execution_information_mode: ExecutionInformationMode = "no_shared_obs",
+    actor_projection: VersionedIdentityV1 | None = None,
     with_scenario: bool = False,
     public_agent_id_prefix: str = "agent-slot",
     capture_profile: CaptureProfile | None = None,
@@ -281,9 +282,13 @@ def evaluation_context(
             )
         ),
         execution_information_mode=execution_information_mode,
-        actor_projection=VersionedIdentityV1(
-            identifier=f"actor-projection-{execution_information_mode}",
-            version=1,
+        actor_projection=(
+            actor_projection
+            if actor_projection is not None
+            else VersionedIdentityV1(
+                identifier=f"actor-projection-{execution_information_mode}",
+                version=1,
+            )
         ),
         critic_information_regime=VersionedIdentityV1(
             identifier="privileged-world-state",
@@ -353,6 +358,7 @@ def captured_evaluation_trajectory(
     transition_count: int = 2,
     capture_profile: CaptureProfile = "evaluation_metric_complete",
     execution_information_mode: ExecutionInformationMode = "no_shared_obs",
+    actor_projection: VersionedIdentityV1 | None = None,
     expected_horizon: int = 100,
     with_scenario: bool = False,
     episode_id: str = "episode-001",
@@ -371,6 +377,7 @@ def captured_evaluation_trajectory(
 
     context = evaluation_context(
         execution_information_mode=execution_information_mode,
+        actor_projection=actor_projection,
         with_scenario=with_scenario,
         capture_profile=capture_profile,
         expected_horizon=expected_horizon,
@@ -439,6 +446,9 @@ def captured_team_deathmatch_threshold_trajectory(
     at_horizon: bool = False,
     episode_id: str = "episode-001",
     aggregation_keys: tuple[AggregationKeyV1, ...] | None = None,
+    execution_information_mode: ExecutionInformationMode = "no_shared_obs",
+    actor_projection: VersionedIdentityV1 | None = None,
+    with_scenario: bool = False,
 ) -> CapturedEvaluationTrajectory:
     """Capture one authoritative Team A threshold win for host-side tests."""
     maximum_episode_steps = 1 if at_horizon else 100
@@ -451,7 +461,15 @@ def captured_team_deathmatch_threshold_trajectory(
         expected_horizon=maximum_episode_steps,
         episode_id=episode_id,
         aggregation_keys=aggregation_keys,
+        execution_information_mode=execution_information_mode,
+        actor_projection=actor_projection,
+        with_scenario=with_scenario,
         config=config,
+    )
+    availability = (
+        valid_shared_availability(context)
+        if execution_information_mode == "shared_obs"
+        else None
     )
     start_state, start_observation, start_action_mask, _reset_info = reset(
         config,
@@ -462,6 +480,7 @@ def captured_team_deathmatch_threshold_trajectory(
         start_state,
         start_observation,
         start_action_mask,
+        availability,
     )
     (
         successor_state,
@@ -546,6 +565,9 @@ def captured_team_deathmatch_threshold_trajectory(
         transition_facts,
         reward,
         done_flags,
+        successor_shared_obs_information_availability_by_recipient_and_sensor_source=(
+            availability
+        ),
     )
     return CapturedEvaluationTrajectory(
         context=context,

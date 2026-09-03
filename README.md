@@ -23,8 +23,9 @@ delete unwanted saved assets after confirmation. Saved scenarios load
 directly; saved maps can be opened as clearly labelled deterministic
 default-5v5-TDM previews without modifying the map. Either team can remain
 manual, use the scripted Team Deathmatch controller, or use the built-in Random
-controller for same-start testing. Random samples only the current valid action
-support and is available under both SharedObs and NoSharedObs.
+controller for same-start quality-control testing. Random samples only the
+current valid action support, is available under both SharedObs and
+NoSharedObs, and is a diagnostic controller rather than an official baseline.
 Every applicable selector shows all latest saved revisions in numeric-aware
 asset-ID order, with native scrolling for longer lists. New Map and Scenario
 asset IDs use lowercase snake case, such as `tdm_map_10`, while their visible
@@ -33,7 +34,8 @@ under ignored `artifacts/dev_client/` storage across DevClient restarts; the
 DevClient does not autosave.
 Existing replay artifacts remain outside the DevClient.
 
-Record one manual episode to a canonical replay and adjacent metric sidecar:
+Record one manual episode to a canonical-format replay and adjacent metric
+sidecar:
 
 ```bash
 mkdir -p recordings
@@ -78,20 +80,27 @@ SharedObs visual-union boundary is recorded in
 
 ## Actor information regimes
 
-The policy/evaluation layer supports homogeneous `shared_obs` and
-`no_shared_obs` execution through one reference-rollout lifecycle. NoSharedObs
-remains a first-class mode selected with the same
-`execution_information_mode` setting and reported separately. The current
-low-level rollout requires that setting explicitly; the DevClient introduced
-under A20 activates SharedObs as the first researcher-facing default.
+Paper 1 uses one canonical actor-information contract: `shared_obs` with actor
+projection `base-observation-plus-authorized-sensor-source-bank@1`. Every frame
+of official evidence must record exactly the configured-active, same-team,
+off-diagonal source-availability matrix derived from the frozen roster.
 SharedObs composes already-authored teammate sensor rows without changing the
-simulator, and evaluation records store base observations plus exact source
-availability rather than a second materialized tensor. See
-[specification amendment A19](docs/design/specification_amendments.md#a19-sharedobs-structured-runtime-advancement)
-for the runtime and Milestone 12 ownership boundary. Every researcher-facing
-launch surface must default to SharedObs, while requiring an explicit mode at
-the low-level API prevents an old caller from silently changing scientific
-regime.
+simulator; evaluation records store those base observations and the exact
+availability authority rather than a second materialized tensor.
+
+The generic policy/evaluation layer and replay readers continue to support
+homogeneous `no_shared_obs` execution through the same lifecycle for
+diagnostics, custom research, and historical compatibility. NoSharedObs is not
+an official baseline or Paper 1 comparison axis. Saved maps and scenarios are
+regime-independent; official execution binds canonical SharedObs only after an
+asset is loaded and validated. See
+[specification amendment A25](docs/design/specification_amendments.md#a25-sharedobs-only-canonical-benchmark-execution)
+for the full eligibility and compatibility boundary.
+
+The benchmark standardizes authorized actor inputs, categorical identities,
+domains, sentinel meanings, shapes, masks, slot/source identities, provenance,
+and reference-encoder conventions. It does not mandate one-hot encodings,
+embeddings, attention, or any other researcher neural architecture.
 
 ## Static snapshots
 
@@ -120,7 +129,7 @@ explicitly for direct Python use with `uv sync --extra viz`.
   candidate dispositions.
 - [Evaluation protocol](docs/evaluation/protocol.md) defines evaluation cells,
   aggregation, inference, cross-play, scenarios, failure handling, and
-  information-regime reporting.
+  canonical actor-information provenance.
 - [Standard replay format](docs/evaluation/replay_format.md) defines the
   versioned semantic replay normal form, whole-artifact validation boundary,
   companion artifacts, and canonical bounded local persistence.

@@ -160,8 +160,9 @@ eligibility, subject, direction, amount stage, or attribution semantics creates
 a new version. Display-text or formatting-only corrections do not.
 
 One semantic metric may carry long-form dimensions such as team, agent, class,
-ability, target class, status channel, task, map, information regime, and
-window. Identical slices do not become separate metric IDs.
+ability, target class, status channel, task, map, and window. Identical slices
+do not become separate metric IDs. Actor-information mode, projection, and
+availability remain evidence provenance rather than metric dimensions.
 
 Task mechanics that do not exist yet receive a `candidate.<task>.<name>` key,
 not a normative `.v1` metric ID. The owning task replaces that key with a
@@ -178,10 +179,10 @@ conceptually into four layers:
   stage, eligibility, sufficient components, reduction kind, zero-opportunity
   result, attribution, interpretation, gameability, shaping properties, and
   validation state.
-- **Evaluation suite:** task and information-regime strata, metric selection,
-  endpoint hierarchy, layouts, scenarios, rosters, cooperative partners,
-  adversarial opponents, sides, frozen joint weights, completion policy, and
-  artifact retention.
+- **Evaluation suite:** task, metric selection, endpoint hierarchy, layouts,
+  scenarios, rosters, cooperative partners, adversarial opponents, sides,
+  frozen joint weights, canonical SharedObs eligibility, completion policy,
+  and artifact retention.
 - **Experiment manifest:** evaluated algorithms/checkpoints, independent
   training runs, seed schedule, checkpoint selection, comparisons,
   uncertainty method, confidence level, multiplicity family, runtime protocol,
@@ -196,49 +197,40 @@ weighting, comparison, or inferential changes increment the suite or manifest
 version instead. These are documentation contracts in the current milestone,
 not a request for a universal production registry.
 
-### Execution-information assignment profiles
+### Execution-information provenance
 
-Execution information is directional matchup provenance, not one fungible
-match label. Every result identifies the focal subject's execution-information
-regime, the cooperative-partner execution-regime profile, and the
-adversarial-opponent execution-regime profile in addition to the existing
-side/role and policy coordinates. A profile retains the configured-active
-fixed-slot assignments needed to distinguish a homogeneous team from a
-heterogeneous one; an inactive slot remains not applicable rather than
-acquiring a regime. The episode's homogeneous/mixed profile is derived from
-those configured-active assignment records; it is not an independently
-editable metric or manifest coordinate.
+[Amendment A25](../design/specification_amendments.md#a25-sharedobs-only-canonical-benchmark-execution)
+makes execution information invariant provenance for the Paper 1 benchmark,
+not a comparison dimension. Every new official metric result is backed by an
+episode with mode `shared_obs`, actor projection
+`base-observation-plus-authorized-sensor-source-bank@1`, and the exact
+configured-active, same-team, off-diagonal availability matrix on every replay
+frame. This provenance is retained so consumers can prove eligibility; it does
+not create separate metric IDs, suite strata, cell weights, leaderboard rows,
+or matchup directions.
 
-`EvaluationEpisodeContextV1` has one episode-global
+The expected matrix comes from the frozen configured roster, not living state,
+health, visibility, policy identity, or frame index. Configured-but-dead sources
+remain authorized while their ordinary sensor material remains
+lifecycle-zeroed. Exact all-frame equality rejects an incomplete teammate
+topology and mid-episode drift; an all-false matrix is canonical only when the
+roster contains no same-team off-diagonal pair.
+
+`EvaluationEpisodeContextV1` retains one episode-global
 `execution_information_mode` and one episode-global `actor_projection`.
-Consequently, the current V1 evaluation/replay contract represents only
-homogeneous execution-information episodes. It cannot truthfully encode a
-SharedObs team against a NoSharedObs team, or any other mixed per-slot
-assignment, by overloading the global mode, the policy ID, or false
-availability rows.
-
-An explicit V1-to-V2 migration can only replicate the episode-global V1
-mode/projection pair across configured-active slots, mark inactive slots not
-applicable, and yield a homogeneous V2 assignment profile. It never manufactures
-a mixed profile or changes the original V1 artifact's identity or digest.
-
-Future mixed-regime suites keep assignment direction explicit. SharedObs focal
-subjects against NoSharedObs opponents and NoSharedObs focal subjects against
-SharedObs opponents are separate cells, as are their configured-side
-assignments. Results may be combined only by a suite/manifest estimator that
-declares the pairing and frozen weights, retains both component directions,
-and verifies the applicable side-swap symmetry. They are never pooled merely
-because they came from the same physical matchup or use the same metric
-formula. This additional provenance changes suite, manifest, and result
-coordinates; it does not change any metric formula or metric ID in this
-document.
+Generic/custom V1 evaluation and replay validation continue to support both
+homogeneous SharedObs and homogeneous NoSharedObs, and V1 still cannot encode a
+mixed per-slot assignment by overloading its global mode, policy ID, or false
+availability rows. NoSharedObs evidence remains valid for diagnostics, custom
+research, and historical replay compatibility, but it is ineligible as a new
+official metric result. The current roadmap contains no mixed-regime V2 work.
 
 ## Presentation budgets
 
 ### Primary team card
 
-Each task and declared execution-information assignment profile receives at
-most four endpoint blocks; this is a ceiling, not a quota:
+Each task receives at most four endpoint blocks under the canonical SharedObs
+eligibility contract; this is a ceiling, not a quota:
 
 1. win/draw/loss as one outcome distribution;
 2. terminal canonical score differential;
@@ -276,10 +268,10 @@ Every displayed metric exposes its ID/version, units or health-effect stage,
 subject, direction or descriptive label, opportunity and `N/A` behavior,
 aggregation protocol, defined/undefined counts, and concise allowed
 interpretation. Tooltips are reachable by hover, keyboard focus, and click.
-Sortable columns use one consistent interaction and preserve team/opponent and
-information-regime labels. CSV and JSON export tidy raw sufficient components,
-not only rounded dashboard values. UI/export code references this contract and
-does not own a second formula.
+Sortable columns use one consistent interaction and preserve team/opponent
+labels plus canonical mode/projection provenance. CSV and JSON export tidy raw
+sufficient components, not only rounded dashboard values. UI/export code
+references this contract and does not own a second formula.
 
 ## Raw sufficient-component defaults
 
@@ -582,7 +574,8 @@ JAX hot path and its known reward-hacking risks.
 
 The following classification covers every current retained family. It states
 what an experiment could access, not what MARL-BattleGrounds recommends as a
-default reward.
+default reward. In particular, `shared_obs_observable` remains a semantic
+information-availability classification; A25 does not rename or erase it.
 
 | Metric IDs | Availability | Information | Credit | Objective effect and principal risk |
 | --- | --- | --- | --- | --- |
@@ -664,9 +657,9 @@ Before a metric becomes active, its owner must provide:
 
 - hand-constructed neutral, positive, negative, and zero-opportunity traces;
 - team-swap and side-swap invariance where applicable;
-- for any future suite using mixed-regime assignments, both assignment
-  directions on both configured sides, with component cells retained and
-  side-swap equality checked where the suite claims that symmetry;
+- canonical SharedObs mode/projection checks and exact configured-roster
+  availability equality on every official replay frame, plus generic
+  NoSharedObs and permitted-subset SharedObs compatibility tests;
 - complete/partial/interrupted/failed rollout tests plus independent observed,
   right-censored, competing-event, unavailable, and not-applicable endpoint
   tests where relevant;

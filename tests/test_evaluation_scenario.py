@@ -9,11 +9,17 @@ from pydantic import ValidationError
 from tests.evaluation_fixtures import (
     CapturedEvaluationTrajectory,
     captured_evaluation_trajectory,
+    captured_team_deathmatch_threshold_trajectory,
     evaluation_env_config,
 )
 
 import marl_battlegrounds.evaluation.catalog as catalog_module
 import marl_battlegrounds.evaluation.scenario as scenario_module
+from marl_battlegrounds.core.types import MAX_AGENTS_PER_TEAM
+from marl_battlegrounds.evaluation.actor_projection import (
+    NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+    SHARED_OBS_ACTOR_PROJECTION_V1,
+)
 from marl_battlegrounds.evaluation.metrics import build_evaluation_observer_v1
 from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV1,
@@ -468,6 +474,8 @@ def scenario_artifacts_v2() -> _ScenarioArtifactsV2:
         captured_evaluation_trajectory(
             transition_count=1,
             capture_profile="scenario_metric_complete",
+            execution_information_mode="shared_obs",
+            actor_projection=SHARED_OBS_ACTOR_PROJECTION_V1,
             expected_horizon=1,
             with_scenario=True,
             episode_id="episode-v2-a",
@@ -475,6 +483,8 @@ def scenario_artifacts_v2() -> _ScenarioArtifactsV2:
         captured_evaluation_trajectory(
             transition_count=1,
             capture_profile="scenario_metric_complete",
+            execution_information_mode="shared_obs",
+            actor_projection=SHARED_OBS_ACTOR_PROJECTION_V1,
             expected_horizon=1,
             with_scenario=True,
             episode_id="episode-v2-b",
@@ -703,6 +713,222 @@ def _pure_v2_artifacts_for_context(
     return specification, bundle, record
 
 
+def _assert_official_v2_rejected(
+    specification: ResolvedScenarioSpecificationV2,
+    bundle: ReplayBundleV1,
+    record: ScenarioEvaluationRecordV2,
+    *,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        validate_official_scenario_evaluation_record_v2(
+            record,
+            bundle.replay,
+            bundle.metric_report_artifact,
+        )
+    with pytest.raises(ValueError, match=message):
+        _build_record_v2(specification, bundle, schedule_coordinate=0)
+
+
+def test_v2_official_gate_rejects_stable_incomplete_shared_obs_topology(
+    scenario_artifacts_v2: _ScenarioArtifactsV2,
+) -> None:
+    source = scenario_artifacts_v2.trajectories[0]
+    slot_count = len(source.context.roster)
+    all_false = tuple(
+        tuple(False for _ in range(slot_count)) for _ in range(slot_count)
+    )
+    assert (
+        source.frames[
+            0
+        ].shared_obs_information_availability_by_recipient_and_sensor_source
+        != all_false
+    )
+    availability_update = {
+        "shared_obs_information_availability_by_recipient_and_sensor_source": all_false
+    }
+    trajectory = CapturedEvaluationTrajectory(
+        context=source.context,
+        frames=tuple(
+            frame.model_copy(update=availability_update) for frame in source.frames
+        ),
+        transitions=source.transitions,
+    )
+    specification, bundle, record = _pure_v2_artifacts_for_context(
+        trajectory,
+        source.context,
+        _seed_schedule_v2((source.context.seed_protocol,)),
+    )
+
+    validate_scenario_evaluation_record_v2(
+        record,
+        bundle.replay,
+        bundle.metric_report_artifact,
+    )
+    _assert_official_v2_rejected(
+        specification,
+        bundle,
+        record,
+        message="canonical SharedObs availability at frame_index 0",
+    )
+
+
+def test_v2_official_gate_rejects_later_shared_obs_topology_drift(
+    scenario_artifacts_v2: _ScenarioArtifactsV2,
+) -> None:
+    source = scenario_artifacts_v2.trajectories[0]
+    initial_availability = source.frames[
+        0
+    ].shared_obs_information_availability_by_recipient_and_sensor_source
+    successor_availability = source.frames[
+        1
+    ].shared_obs_information_availability_by_recipient_and_sensor_source
+    assert initial_availability is not None
+    assert successor_availability is not None
+    changed_rows = [list(row) for row in successor_availability]
+    assert changed_rows[0][1]
+    changed_rows[0][1] = False
+    changed_successor = source.frames[1].model_copy(
+        update={
+            "shared_obs_information_availability_by_recipient_and_sensor_source": tuple(
+                tuple(row) for row in changed_rows
+            )
+        }
+    )
+    trajectory = CapturedEvaluationTrajectory(
+        context=source.context,
+        frames=(source.frames[0], changed_successor),
+        transitions=source.transitions,
+    )
+    specification, bundle, record = _pure_v2_artifacts_for_context(
+        trajectory,
+        source.context,
+        _seed_schedule_v2((source.context.seed_protocol,)),
+    )
+
+    assert (
+        bundle.replay.frames[
+            0
+        ].shared_obs_information_availability_by_recipient_and_sensor_source
+        == initial_availability
+    )
+    validate_scenario_evaluation_record_v2(
+        record,
+        bundle.replay,
+        bundle.metric_report_artifact,
+    )
+    _assert_official_v2_rejected(
+        specification,
+        bundle,
+        record,
+        message="canonical SharedObs availability at frame_index 1",
+    )
+
+
+def test_v2_official_gate_accepts_canonical_all_false_one_v_one_topology() -> None:
+    trajectory = captured_evaluation_trajectory(
+        transition_count=1,
+        capture_profile="scenario_metric_complete",
+        execution_information_mode="shared_obs",
+        actor_projection=SHARED_OBS_ACTOR_PROJECTION_V1,
+        expected_horizon=1,
+        with_scenario=True,
+        episode_id="episode-v2-one-v-one",
+        config=evaluation_env_config(team_sizes=(1, 1)),
+    )
+    for frame in trajectory.frames:
+        availability = (
+            frame.shared_obs_information_availability_by_recipient_and_sensor_source
+        )
+        assert availability is not None
+        assert not any(value for row in availability for value in row)
+    schedule = _seed_schedule_v2((trajectory.context.seed_protocol,))
+    specification = _specification_v2(
+        trajectory.context,
+        trajectory.frames[0],
+        schedule,
+    )
+    context = _context_with_specification_v2(
+        trajectory.context,
+        specification,
+        schedule_coordinate=0,
+    )
+    bundle = _bundle_for_context(trajectory, context)
+
+    record = _build_record_v2(specification, bundle, schedule_coordinate=0)
+    validate_official_scenario_evaluation_record_v2(
+        record,
+        bundle.replay,
+        bundle.metric_report_artifact,
+    )
+
+
+def test_v2_official_gate_rejects_no_shared_obs_but_generic_validation_accepts() -> (
+    None
+):
+    trajectory = captured_evaluation_trajectory(
+        transition_count=1,
+        capture_profile="scenario_metric_complete",
+        execution_information_mode="no_shared_obs",
+        actor_projection=NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+        expected_horizon=1,
+        with_scenario=True,
+        episode_id="episode-v2-no-shared-compatibility",
+    )
+    specification, bundle, record = _pure_v2_artifacts_for_context(
+        trajectory,
+        trajectory.context,
+        _seed_schedule_v2((trajectory.context.seed_protocol,)),
+    )
+
+    validate_scenario_evaluation_record_v2(
+        record,
+        bundle.replay,
+        bundle.metric_report_artifact,
+    )
+    _assert_official_v2_rejected(
+        specification,
+        bundle,
+        record,
+        message="official scenario evaluation requires shared_obs execution",
+    )
+
+
+def test_v2_official_gate_rejects_wrong_shared_obs_projection() -> None:
+    trajectory = captured_evaluation_trajectory(
+        transition_count=1,
+        capture_profile="scenario_metric_complete",
+        execution_information_mode="shared_obs",
+        actor_projection=VersionedIdentityV1(
+            identifier="wrong-shared-obs-projection",
+            version=1,
+        ),
+        expected_horizon=1,
+        with_scenario=True,
+        episode_id="episode-v2-wrong-shared-projection",
+    )
+    specification, bundle, record = _pure_v2_artifacts_for_context(
+        trajectory,
+        trajectory.context,
+        _seed_schedule_v2((trajectory.context.seed_protocol,)),
+    )
+
+    validate_scenario_evaluation_record_v2(
+        record,
+        bundle.replay,
+        bundle.metric_report_artifact,
+    )
+    _assert_official_v2_rejected(
+        specification,
+        bundle,
+        record,
+        message=(
+            "official scenario evaluation requires "
+            "base-observation-plus-authorized-sensor-source-bank version 1"
+        ),
+    )
+
+
 def test_v2_roots_round_trip_strictly_and_each_coordinate_selects_one_seed_row(
     scenario_artifacts_v2: _ScenarioArtifactsV2,
 ) -> None:
@@ -745,6 +971,85 @@ def test_v2_roots_round_trip_strictly_and_each_coordinate_selects_one_seed_row(
             bundle.replay,
             bundle.metric_report_artifact,
         )
+
+
+def test_v2_official_gate_is_pure_and_uses_configured_roster_topology(
+    scenario_artifacts_v2: _ScenarioArtifactsV2,
+) -> None:
+    context = scenario_artifacts_v2.contexts[0]
+    bundle = scenario_artifacts_v2.bundles[0]
+    record = scenario_artifacts_v2.records[0]
+    expected = tuple(
+        tuple(
+            recipient_slot != source_slot
+            and recipient.configured_active
+            and source.configured_active
+            and recipient.configured_team_id == source.configured_team_id
+            for source_slot, source in enumerate(context.roster)
+        )
+        for recipient_slot, recipient in enumerate(context.roster)
+    )
+    before = (
+        record.model_dump_json(),
+        bundle.replay.model_dump_json(),
+        bundle.metric_report_artifact.model_dump_json(),
+    )
+
+    for frame in bundle.replay.frames:
+        assert (
+            frame.shared_obs_information_availability_by_recipient_and_sensor_source
+            == expected
+        )
+    validate_official_scenario_evaluation_record_v2(
+        record,
+        bundle.replay,
+        bundle.metric_report_artifact,
+    )
+
+    assert before == (
+        record.model_dump_json(),
+        bundle.replay.model_dump_json(),
+        bundle.metric_report_artifact.model_dump_json(),
+    )
+
+
+def test_v2_official_gate_keeps_dead_configured_teammate_edges_authorized() -> None:
+    trajectory = captured_team_deathmatch_threshold_trajectory(
+        episode_id="episode-v2-dead-configured-source",
+        execution_information_mode="shared_obs",
+        actor_projection=SHARED_OBS_ACTOR_PROJECTION_V1,
+        with_scenario=True,
+    )
+    dead_slot = MAX_AGENTS_PER_TEAM
+    live_teammate_slot = dead_slot + 1
+    assert not trajectory.frames[1].snapshot.alive_mask[dead_slot]
+    for frame in trajectory.frames:
+        availability = (
+            frame.shared_obs_information_availability_by_recipient_and_sensor_source
+        )
+        assert availability is not None
+        assert availability[dead_slot][live_teammate_slot]
+        assert availability[live_teammate_slot][dead_slot]
+
+    schedule = _seed_schedule_v2((trajectory.context.seed_protocol,))
+    specification = _specification_v2(
+        trajectory.context,
+        trajectory.frames[0],
+        schedule,
+    )
+    context = _context_with_specification_v2(
+        trajectory.context,
+        specification,
+        schedule_coordinate=0,
+    )
+    bundle = _bundle_for_context(trajectory, context)
+
+    record = _build_record_v2(specification, bundle, schedule_coordinate=0)
+    validate_official_scenario_evaluation_record_v2(
+        record,
+        bundle.replay,
+        bundle.metric_report_artifact,
+    )
 
 
 def test_v2_resolved_state_digest_excludes_attempt_and_policy_material(
@@ -1551,6 +1856,8 @@ def test_v2_official_gate_accepts_non_float32_exact_python_scalar_dimensions(
     trajectory = captured_evaluation_trajectory(
         transition_count=1,
         capture_profile="scenario_metric_complete",
+        execution_information_mode="shared_obs",
+        actor_projection=SHARED_OBS_ACTOR_PROJECTION_V1,
         expected_horizon=1,
         with_scenario=True,
         episode_id="episode-v2-scalar-map-width",
@@ -1582,6 +1889,8 @@ def test_v2_official_gate_rejects_wire_valid_but_invalid_curated_state(
     source = captured_evaluation_trajectory(
         transition_count=0,
         capture_profile="scenario_metric_complete",
+        execution_information_mode="shared_obs",
+        actor_projection=SHARED_OBS_ACTOR_PROJECTION_V1,
         expected_horizon=1,
         with_scenario=True,
         episode_id="episode-v2-hostile-state",
