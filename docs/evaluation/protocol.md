@@ -167,7 +167,10 @@ and quantitative endpoints. The schedule is a stable multi-attempt definition;
 each episode's realized seed record joins to exactly one declared schedule
 coordinate. Binding policy A to Team A and policy B to Team B, or binding
 policies per slot, fills the scenario's frozen roles; it cannot replace the
-roster or any other scenario-owned condition.
+roster or any other scenario-owned condition. The owning evaluation definition,
+not the saved DevClient scenario, binds the behavioral claim, the compared full
+method and matched ablation, and any deterministic pressure-controller
+protocol. Saved scenarios remain controller-independent.
 
 DevClient scene-authoring assets are design inputs, not evaluation artifacts.
 A future evaluation owner may import an exact saved asset revision, but must
@@ -178,19 +181,17 @@ steps belong to the owning suite, scenario, or manifest rather than to the
 DevClient. A filename, moving latest-revision alias, mutable browser buffer, or
 successful preview is not an admissible identity or validity proof.
 
-The current `ResolvedScenarioSpecificationV1` does not yet bind an explicit
+Historical `ResolvedScenarioSpecificationV1` does not bind an explicit
 fixed-slot roster, exact role template, or matched schedule identity and
 membership rule. Its resolved-config digest contains no roster rows, and
 `EvaluationSeedProtocolV1` represents one realized episode rather than the
-schedule. Before an M7 scenario can be accepted as official, C2 must version
-that contract, validate exact roster/role joins to
-`EvaluationEpisodeContextV1`, prove that each realized seed record occupies
-exactly one declared schedule coordinate, and enforce the core structural and
-product config invariants on loaded context. The versioned specification must
-also freeze and join the independently approved content-addressed layout and
+schedule. M7 C2 therefore introduced the V2 contract, which validates exact
+roster/role joins to `EvaluationEpisodeContextV1`, proves that each realized
+seed record occupies exactly one declared schedule coordinate, and enforces the
+core structural and product config invariants on loaded context. V2 also
+freezes and joins the independently approved content-addressed layout and
 authored initial condition independently from the resolved-config digest. It
-must reject any
-policy binding that changes the layout, initial condition, resolved
+rejects any policy binding that changes the layout, initial condition, resolved
 configuration, roster, configured-active slots, role template, schedule, or
 realized coordinate. Scenario identity plus a subset check over role names is
 insufficient.
@@ -205,8 +206,16 @@ material. This prevents an attempt-specific frame hash from masquerading as the
 stable authored-state identity while still proving the exact captured frame.
 
 No training distribution is inferred from an evaluation suite or scenario.
-Locked evaluation and scenario maps, seeds, opponents, initial states, and
-other held-out material are ineligible for policy or curriculum updates.
+Accepted scenarios are public evaluation instruments; **locked** means that
+their protocol is frozen, not that their contents are secret. The protected
+scenario closure includes the embedded map, initial state, roster and episode
+configuration, pressure controller, seed schedule, endpoints, retained
+replays, and result feedback. None of it may influence any adaptive decision,
+including policy updates, curriculum or opponent adaptation, reward or
+heuristic design, architecture or hyperparameter choices, prompts or decoding,
+checkpoint selection, early stopping, repeated-submission selection, or
+population weighting. A map embedded in an official scenario is consequently
+ineligible for official training and validation populations.
 
 ## Common policy and evaluation lifecycle
 
@@ -268,6 +277,16 @@ authorized critic may consume training-only team or privileged information,
 but every evaluated actor selects its action from the canonical SharedObs
 contract. Critic inputs never become actor availability or evaluation-frame
 actor material.
+
+[Amendment A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
+classifies the existing generic Scripted TDM controller and Random as
+diagnostic tooling; the script's SharedObs configuration does not confer
+baseline status. Scenario evaluation instead binds a separately versioned,
+deterministic pressure protocol through the resolved evaluation definition.
+[Amendment A27](../design/specification_amendments.md#a27-rolling-big-12-and-baseline-library-governance)
+defines the planned rolling Big 12 and cumulative Baseline Library. Neither
+amendment changes the simulator, the generic cross-play contract, or the
+existing fixed-slot focal/cooperative/adversarial role vocabulary.
 
 ## Experimental units and terminology
 
@@ -431,8 +450,10 @@ task sampling are declared. They do not replace the underlying task results.
 Only blocks labeled `primary_confirmatory` define the default confirmatory
 family. A descriptive coordination block does not become confirmatory merely
 because it appears on the compact card. Key secondary endpoints form named
-families by scientific claim. Exploratory, diagnostic, scenario, and post-hoc
-slices are visibly labeled and cannot be promoted after looking at locked-test
+families by scientific claim. A predeclared matched scenario contrast may be
+primary for its one bounded behavioral claim, but it is not evidence of general
+strength and does not enter Elo. Exploratory, diagnostic, and post-hoc slices
+are visibly labeled and cannot be promoted after looking at locked-test
 results.
 
 ## Selection, splits, and leakage control
@@ -453,14 +474,27 @@ population. Current browser buffers and moving latest-revision aliases are
 ineligible.
 
 An official evaluation suite or scenario is never a default training
-distribution. Assets designated locked for evaluation or scenario evidence
-must not be sampled for policy updates, curriculum transitions, opponent
-adaptation, reward tuning, or checkpoint selection.
+distribution. Public availability does not authorize reuse for learning. The
+complete protocol-frozen scenario closure—embedded map, initial state,
+roster/configuration, pressure controller, seeds, endpoints, replays, and result
+feedback—must not influence gradients, online or offline learning, imitation,
+behavioral cloning, distillation, curricula, opponent adaptation, architecture,
+hyperparameters, reward or heuristic design, prompts, decoding, checkpoint
+selection, early stopping, repeated-submission selection, population weights,
+or any other adaptive decision.
+
+Training, validation, and evaluation manifests identify content by immutable
+digest and fail closed when their declared content closures intersect where
+disjointness is required. They never resolve a mutable latest-revision or
+`latest_big_12` alias. M11/M12 owns enforcement before training begins; full
+training, checkpoint, selection, and population provenance must remain
+available for maintainer reproduction.
 
 - Training data may update policies and curricula.
 - Development data may debug implementations and metric code.
 - Validation data may select checkpoints, tune hyperparameters, and validate
-  predeclared scenario thresholds or other analysis parameters.
+  predeclared analysis parameters, provided that data is disjoint from the
+  official scenario closure.
 - Locked-test data may evaluate a frozen decision only. It may not choose the
   metric, formula, threshold, opponent pool, checkpoint, reward shaping, or
   presentation cutoff.
@@ -469,6 +503,13 @@ The checkpoint-selection rule must be executable from validation information
 alone and must state tie-breaking. Best-of-many test selection is prohibited.
 When a locked-test defect requires rerunning, preserve the failed attempt,
 explain the defect, and revise the manifest rather than overwriting history.
+
+Intentional undisclosed use of official scenario material for adaptation is
+scientific misconduct. Open-source software cannot make that conduct
+universally impossible, so this benchmark uses proportionate controls:
+content-addressed manifest separation, complete provenance, and maintainer
+reproduction. Failure to reproduce makes a result ineligible under the frozen
+protocol, but non-reproduction alone is not proof of fraud.
 
 ## Completion, failure, missingness, and censoring
 
@@ -584,25 +625,44 @@ components remain exportable.
 ## Controlled-scenario protocol
 
 Context-sensitive tactical claims use controlled quantitative scenarios rather
-than episode-wide proxies. Each versioned scenario freezes:
+than episode-wide proxies. Their primary purpose is matched behavioral-ablation
+evaluation: a full method is compared with one declared ablation under the same
+frozen conditions. Each versioned evaluation definition freezes:
 
-- the behavioral hypothesis and eligible policy roles;
+- one bounded behavioral hypothesis and the eligible policy roles;
+- the full-method and matched-ablation identities;
 - independently approved content-addressed layout and authored-initial-condition
   identities;
 - its resolved episode configuration and exact fixed-slot roster;
-- initial state, role template, opponent or scripted pressure, horizon, and
-  matched seed schedule;
+- initial state, role template, horizon, and matched seed schedule;
+- one deterministic, content-addressed pressure-controller protocol;
 - one primary quantitative endpoint;
-- at most two secondary margins;
+- at most two supporting secondary margins;
 - explicit safety, role, or behavior violations;
 - success, failure, terminal, and censoring semantics; and
 - replay retention and blinded review sampling.
+
+The full method and ablation must use the same scenario revision, embedded map
+and initial state, pressure controller, canonical SharedObs contract,
+evaluation seeds and side assignments, training budget, checkpoint-selection
+rule, and primary endpoint. Differences outside the declared ablation invalidate
+the contrast.
 
 Policy assignment is an execution binding, not scenario construction. A
 Team A/Team B convenience binding and a lower-level per-slot binding must both
 respect the scenario's fixed roster, configured-active slots, and role
 template. Changing those facts creates a different versioned scenario rather
 than an override of the current one.
+
+Pressure controllers are evaluation fixtures, not general policies or action
+tapes. Each controller reacts deterministically to the current same-epoch
+canonical SharedObs inputs and authoritative action mask. Its versioned contract
+names the controlled slots, target-selection rule, deterministic tie-breaking,
+and legal fallback when an intended action is unavailable. The identical
+controller version and seed binding apply to every treatment/ablation policy in
+the comparison. Scenario-specific behavior is selected through the resolved
+`pressure_protocol`; it is never implemented by branching the generic TDM
+controller on a scenario name or ID.
 
 Every official scenario attempt binds canonical SharedObs after loading and
 validating that regime-independent scenario. Its mode, projection, and exact
@@ -618,6 +678,16 @@ a digest of one realized seed record does not establish those identities.
 “Single-shot” prohibits learning or adaptation across attempts. It does not
 reduce a stochastic evaluation to one episode. Policies are compared over the
 same frozen scenario seeds when possible.
+
+The current intended suite contains twelve scenarios with five-transition
+horizons. That is a property of this suite, not a global scenario-schema limit.
+Each treatment/control arm uses multiple independently trained, deliberately
+paired runs. The training run is the replication unit; agents, ticks, episodes,
+and the two teams within an episode are nested observations, not independent
+replicates. A result supports the predeclared behavior under the frozen
+scenario conditions. It does not prove a universal policy trait, contribute to
+Elo, select a checkpoint, or authorize the scenario endpoint as a curriculum or
+shaping objective.
 
 Peeling, kiting, flanking, body blocking, triage, regrouping, rotations,
 escort/interception, Trap discipline, Burst synchronization, and
@@ -679,6 +749,99 @@ fixed.
 
 Matched-partner metrics are `structurally_inapplicable` for a monolithic
 full-team policy without separable partner assignments.
+
+## Big 12 tournament and Baseline Library
+
+The planned Big 12 is one fixed-panel instantiation of the generic cross-play
+contract above. It always contains exactly twelve method-level entrants, each
+represented by one fixed executable system and one Elo value. Each numbered,
+versioned method/configuration row is one entrant, so distinct variants of a
+broad algorithm may occupy separate rows. Independent training runs and
+checkpoint histories provide selection, training-stability, and reproducibility
+evidence; they are not additional entrants or separately rated policies.
+
+The tentative Paper 1 roster is:
+
+1. RNN-IPPO with parameter sharing.
+2. RNN-MAPPO with parameter sharing.
+3. RNN-MAPPO with class-specific actors.
+4. RNN-HAPPO.
+5. HyperMARL-PPO.
+6. RNN-QMIX.
+7. RNN-PQN-VDN.
+8. MAPPO-PFSP League.
+9. MAPPO-PSRO.
+10. `S*-Curriculum`.
+11. `S*-Curriculum-Shaped`.
+12. Qwen-Five.
+
+For rows 1–11, three independently initialized runs retain their full eligible
+checkpoint histories. Within each run, one checkpoint is selected by a
+validation-only rule frozen before training. The validation-highest eligible
+checkpoint across those three runs becomes the method's one tournament system.
+The validation metric, evaluation cadence, checkpoint eligibility, and all
+tie-breaking are frozen in the manifest before training; scenario or
+tournament results may not influence selection. All run-level and selection
+evidence remains reportable even though only one system enters the tournament.
+
+Qwen-Five contributes one fixed system only after a measured throughput,
+latency, resource, reproducibility, and protocol-compatibility gate. It is a
+tentative cost-gated entrant, not an assumed fit for the JAX training loop. If
+it does not qualify, its roster position remains unresolved until an explicit
+governance decision; no substitute is invented silently.
+
+One frozen Big 12 tournament therefore contains:
+
+```text
+12 method entrants
+12 fixed tournament systems
+66 unordered pairings
+100 episodes per pairing
+6,600 tournament episodes
+1 Elo per method
+```
+
+Each pairing uses five maps, ten evaluation coordinates, and both side
+assignments. The complete win/draw/loss matrix is the authoritative result.
+The planned compact rating is one jointly fitted, draw-aware
+Bradley–Terry–Davidson model centred at 1000; it remains secondary to the raw
+matrix. Exact estimator parameterization, uncertainty, convergence and failure
+handling, software identity, and report rounding must pass explicit activation
+gates before the first tournament. No result may be labelled Elo merely because
+it applies an ad hoc pairwise update.
+
+Tournament-rating uncertainty is conditional on the twelve selected fixed
+systems and belongs to that separately qualified estimator. Across-run
+variability describes training stability and is reported separately; it does
+not become uncertainty for a tournament system that was never entered.
+
+After Paper 1, the active Big 12 is reviewed weekly. Each review publishes one
+immutable dated snapshot. A peer-reviewed, published method may challenge only
+after its compatible implementation, reproduction, qualification, and fixed
+system have passed the same gates. Promotion and relegation occur at method
+level, never checkpoint level; if no challenger qualifies, the roster does not
+change. The exact challenge schedule, multiple-challenger ordering, ties, and
+weekly rating refit are pre-launch governance decisions. Ratings centred within
+different weekly pools are not directly comparable over time without a
+separately specified longitudinal model. The Paper 1 snapshot and results
+remain permanently frozen.
+
+The cumulative Baseline Library is monotonic even when the active Big 12
+changes. It retains every current and former member's implementation, official
+configuration, provenance, designated retained checkpoints, selected final
+system, compatibility metadata, and historical membership and results. A
+legitimate training workflow may consume compatible library material only
+through an immutable manifest declaring exact identities and weights. It must
+never resolve a mutable `latest_big_12` population.
+
+Scenario pressure controllers, generic Scripted TDM, Random, privileged
+policies, intermediate unqualified checkpoints, and PSRO's internal population
+members are not Big 12 entrants. Scenario controllers are also outside the
+Baseline Library. Qwen artifacts may be retained after admission, but their use
+in training remains separately capability- and cost-gated. Maintainers must be
+able to reproduce every admitted fixed system under its frozen protocol; an
+unreproducible result is ineligible, without that failure alone constituting a
+fraud finding.
 
 ## Learning and sample efficiency
 
@@ -952,7 +1115,26 @@ Before a suite is used for an official claim, verify:
     aliases are rejected, and policy binding cannot replace those facts; and
 14. the permissive standard-layout factory accepts every structurally valid
     roster while the canonical factory resolves exactly the frozen mirrored
-    five-class 5v5 evaluation configuration.
+    five-class 5v5 evaluation configuration;
+15. each controlled contrast binds the same scenario, pressure-controller
+    version, SharedObs contract, seeds, sides, budget, selection rule, and
+    endpoint to a full method and its one declared ablation, with independently
+    trained paired runs as the replication unit;
+16. the complete public scenario closure is digest-disjoint from training and
+    validation manifests and has not influenced any adaptive decision;
+17. a frozen Big 12 snapshot contains exactly twelve methods, twelve fixed
+    systems, 66 unordered pairings, 100 episodes per pairing, and one Elo value
+    per method, while preserving outcome and failure accounting for all 6,600
+    scheduled episode coordinates alongside the raw win/draw/loss matrix;
+18. rows 1–11 retain three independent training runs and select one tournament
+    system using only the predeclared validation rule; Qwen-Five has separately
+    passed its measured cost and compatibility gate;
+19. the rating estimator, uncertainty, convergence/failure behavior, weekly
+    challenger rules, and immutable snapshot identities have passed their
+    explicit pre-activation gates; and
+20. every admitted system is reproducible from immutable implementation,
+    configuration, checkpoint, population, and selection provenance, and no
+    training consumer resolves a mutable `latest_big_12` alias.
 
 Partition status in this audit comes from the owning distribution, suite,
 scenario, or experiment manifest. It must never be inferred from a map asset's

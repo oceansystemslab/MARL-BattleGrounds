@@ -261,8 +261,10 @@ primary role fact.
 The advanced export preserves tidy long-form observations and raw sufficient
 statistics. It favors distributions, medians, and interquartile ranges over
 default min/max columns. Scenario cards contain one primary quantitative
-endpoint, at most two secondary margins, explicit violations, and replay.
-Diagnostics remain outside tactical leaderboards.
+matched full-method-versus-ablation contrast, at most two supporting secondary
+margins, explicit violations, and replay. Scenario cards describe controlled
+behavior under their frozen conditions; they are not general-strength scores
+and never contribute to Elo. Diagnostics remain outside tactical leaderboards.
 
 Every displayed metric exposes its ID/version, units or health-effect stage,
 subject, direction or descriptive label, opportunity and `N/A` behavior,
@@ -518,6 +520,14 @@ confirmatory families merely because all raw components are visible.
 
 ## Scenario-owned behavior matrix
 
+Scenario metrics are designed primarily for matched behavioral ablations. The
+evaluation definition binds one full method and one declared ablation to the
+same content-addressed scenario, deterministic pressure controller, canonical
+SharedObs contract, seeds, side assignments, training budget,
+checkpoint-selection rule, and endpoint. One predeclared primary behavioral
+contrast answers the claim; no more than two secondary margins may support it.
+Differences outside the declared ablation invalidate causal interpretation.
+
 | Behavior | Why no episode-wide quality scalar | Required scenario evidence |
 | --- | --- | --- |
 | Peeling / backline protection | Value depends on threat, protected ally, and resulting trade | protected-ally survival or health margin; threat displacement/control; violations |
@@ -533,7 +543,12 @@ confirmatory families merely because all raw components are visible.
 | Freedom-assisted movement | Exact counterfactual movement is not in the trajectory | fixed slowed traversal/rescue endpoint; completion/progress margin; status evidence |
 
 Every scenario must follow the scenario protocol. Replay is mandatory evidence
-but never substitutes for the quantitative endpoint.
+but never substitutes for the quantitative endpoint. Multiple independently
+trained, deliberately paired treatment/control runs support inference; the
+training run—not an agent, tick, episode, or team—is the replication unit.
+Scenario results provide bounded evidence under frozen conditions. They neither
+prove general competence nor enter ratings, checkpoint selection, reward
+shaping, curricula, population weights, or any other adaptive process.
 
 ## Population, learning, and runtime metrics
 
@@ -544,7 +559,7 @@ but never substitutes for the quantitative endpoint.
 | `marlbg.population.held_out_opponent_performance.v1` | The same task endpoint against a disjoint adversarial-opponent pool while holding the cooperative-partner distribution fixed. | `key_secondary` / cross-play population | evaluation harness |
 | `marlbg.population.partner_generalization_gap.v1` | Matched-partner minus held-out-partner performance under the same opponent panel and frozen joint cell weights; always report both absolute components. | `exploratory_descriptive` / cross-play population | evaluation harness |
 | `marlbg.population.lower_tail_performance.v1` | Predeclared lower quantile over one explicitly named partner or opponent population dimension, never an unstable unqualified minimum. | `key_secondary` / cross-play population | evaluation harness |
-| `marlbg.population.rating.v1` | Secondary rating with pool, protocol, side assignments, and rating-system version. | `exploratory_descriptive` / cross-play population | evaluation harness |
+| `marlbg.population.rating.v1` | Secondary rating with pool, protocol, side assignments, rating-system version, and a complete authoritative raw outcome matrix. | `exploratory_descriptive` / cross-play population | evaluation harness |
 | `marlbg.learning.fixed_budget_performance.v1` | Official evaluation endpoint at a predeclared budget; report both environment transitions and active-agent decision transitions. | `primary_confirmatory` / learning runtime | trainer/evaluation harness |
 | `marlbg.learning.curve_auc.v1` | Area under a predeclared held-out evaluation curve with fixed x-axis, horizon, checkpoint schedule, and interpolation rule. | `key_secondary` / learning runtime | trainer/evaluation harness |
 | `marlbg.learning.time_to_threshold.v1` | First predeclared evaluation checkpoint reaching a frozen threshold; non-reaching runs remain censored. | `exploratory_descriptive` / learning runtime | trainer/evaluation harness |
@@ -555,6 +570,25 @@ Cross-play summaries never discard the underlying focal-by-partner-by-opponent
 tensor. Matched, held-out, cooperative-partner, and adversarial-opponent
 experiments are distinct populations and cannot share an unlabeled
 “robustness” number.
+
+For the planned Big 12 instantiation, exactly twelve method entrants contribute
+one validation-selected fixed system and one Elo value each. The resulting 66
+unordered pairings contain 100 episodes apiece—five maps by ten evaluation
+coordinates by two side assignments—for 6,600 episodes total. The complete
+win/draw/loss matrix is authoritative. The planned compact estimator is one
+jointly fitted, draw-aware Bradley–Terry–Davidson model centred at 1000, and is
+secondary to that matrix. Its exact parameterization, uncertainty, convergence
+and failure rules, implementation identity, and rounding must be frozen and
+qualified before activation.
+
+Rows 1–11 each retain three independent training runs. A rule frozen before
+training first selects an eligible checkpoint within each run from validation
+information alone, then selects the validation-highest of those three as the
+method's sole tournament system. Locked scenarios and tournament outcomes may
+not participate. Qwen-Five remains tentative until it passes a measured cost,
+throughput, reproducibility, and compatibility gate. Weekly Big 12 ratings are
+identified by immutable roster snapshot and are not directly comparable across
+changing pools without a separately specified longitudinal model.
 
 ## Reward-shaping classification
 
@@ -590,7 +624,7 @@ information-availability classification; A25 does not rename or erase it.
 | Mage, Warrior, Hunter, Rogue, and Priest class IDs | `transition_local`; `wrapper_memory` for status episodes | `centralized_training_privileged` | agent or team | `objective_changing` or `unknown`; each requires its exposure and task outcome companions |
 | regeneration, respawn-wave, spawn-shield, action-rejection, and ally-distance IDs | `transition_local` | privileged facts/frames or `external_annotation` for QC | agent or team | `unsuitable` for canonical shaping; easily rewards stalling, dying, rejection suppression, or arbitrary spacing |
 | future TDM/KoTH/CTF candidate keys | task-owned after implementation | task-dependent | team, agent, or pair | `unknown` until task reward and opportunity semantics are authoritative |
-| scenario-owned behavior | `offline_only` | `external_annotation` plus replay | scenario subject | `unsuitable` for generic rollout shaping; may become a separately designed curriculum objective |
+| scenario-owned behavior | `offline_only` | `external_annotation` plus replay | scenario subject | `unsuitable`; official scenario material and results are prohibited from reward shaping, curriculum design, or any other adaptive use |
 | population, learning, and runtime IDs | `offline_only` | `external_annotation` | population | `unsuitable`; not transition credit signals |
 
 “Actor observable” means the actor legitimately receives the required
@@ -667,7 +701,13 @@ Before a metric becomes active, its owner must provide:
 - live-model and replay-loaded parity once file replay exists;
 - raw sufficient-statistic and presentation-roundtrip checks;
 - adversarial gaming/counterexample review;
-- construct validation for any coordination or scenario interpretation; and
+- construct validation for any coordination or scenario interpretation;
+- matched full-method/ablation scenario evidence with independently trained
+  pairs, one predeclared primary endpoint, and proof that no scenario content or
+  result entered training, selection, shaping, or curriculum decisions;
+- for a Big 12 rating, exact twelve-system cardinality, complete 6,600-episode
+  outcome/failure accounting, validation-only final-system selection, immutable
+  roster-snapshot identity, and a qualified draw-aware estimator; and
 - explicit Four-North-Star verdicts.
 
 No unresolved `blocked` or `validation_pending` row may appear as an official

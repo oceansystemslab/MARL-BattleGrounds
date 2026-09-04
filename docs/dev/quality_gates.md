@@ -213,6 +213,103 @@ its tests remain compatibility protection, not official-baseline
 qualification. Random is likewise a diagnostic/quality-control policy, not an
 official baseline.
 
+### Scenario-ablation activation gates
+
+[Amendment A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
+requires controlled scenarios to qualify as matched behavioral-ablation
+instruments before they support a scientific claim. These are future M7/M11/M12
+gates, not claims that the present debugger controller or unfinished scenario
+assets already satisfy them.
+
+Each scenario pressure controller must prove all of the following:
+
+- one immutable version and content digest binds through the resolved
+  `pressure_protocol`;
+- behavior is deterministic and reactive, not a recorded action tape;
+- every decision consumes only the current canonical SharedObs inputs and
+  authoritative action mask;
+- controlled slots, target selection, tie-breaking, and legal fallback are
+  explicit and deterministic;
+- the same controller identity, configuration, and seed binding are used for
+  the full method and matched ablation; and
+- scenario behavior does not enter the generic TDM controller through a branch
+  on scenario name or ID.
+
+The scenario definition must preserve its existing exact fixed-slot roster and
+focal/cooperative/adversarial role joins. Saved DevClient scenarios remain
+controller-independent. The current intended twelve-scenario suite uses
+five-transition horizons, but no validator may turn that suite choice into a
+global scenario-schema restriction.
+
+Each confirmatory scenario comparison predeclares one behavioral claim and
+primary endpoint, at most two supporting margins, the full method and one
+ablation, the same scenario revision, initial state, controller, SharedObs
+contract, evaluation seeds, sides, training budget, and checkpoint-selection
+rule. Multiple independently trained treatment/control pairs are required; the
+training run is the replication unit. Agents, ticks, episodes, and teams are
+nested observations. Scenario results cannot enter Elo or be reinterpreted as
+general-strength evidence.
+
+Accepted scenarios are public and protocol-frozen, not secret. Before training
+or validation starts, content-addressed manifests must fail closed if they
+intersect the protected scenario closure: embedded map, initial state,
+roster/configuration, controller, seeds, endpoints, replays, or result feedback.
+That closure may not influence gradients, online or offline learning,
+imitation, distillation, curricula, opponent adaptation, architecture,
+hyperparameters, rewards, heuristics, prompts, decoding, checkpoint selection,
+early stopping, repeated-submission selection, population weights, or any other
+adaptive decision. An embedded scenario map is therefore also excluded from
+official training and validation manifests.
+
+Maintainer reproduction, immutable manifests, and complete training and
+selection provenance are the proportionate integrity controls. A result that
+cannot be reproduced under the frozen protocol is ineligible. Non-reproduction
+alone is not proof of fraud, while intentional undisclosed evaluation training
+is misconduct; open-source code cannot make such conduct universally
+impossible.
+
+### Big 12 activation gates
+
+[Amendment A27](../design/specification_amendments.md#a27-rolling-big-12-and-baseline-library-governance)
+defines a planned tournament and governance contract. Before any snapshot is
+activated, automated inventory proof must show exactly twelve method entrants,
+twelve fixed executable systems, 66 unordered pairings, 100 episodes per
+pairing, all 6,600 scheduled episode coordinates, and one Elo value per method.
+
+For each learned method in tentative rows 1–11, retain three independent
+training runs and their checkpoint histories. A rule frozen before training
+must select one eligible checkpoint per run from validation information alone;
+the validation-highest of those three becomes the method's only tournament
+system. Freeze the validation metric, cadence, eligibility, and tie-breaking in
+advance, and prove that scenario and tournament evidence cannot affect the
+choice. Qwen-Five remains inactive until measured throughput, latency,
+resources, reproducibility, and protocol compatibility pass its explicit cost
+gate. A failed gate leaves the twelfth position unresolved; it does not silently
+activate a substitute.
+
+The complete win/draw/loss matrix is the tournament authority. Before the
+secondary compact rating activates, freeze and test the jointly fitted,
+draw-aware Bradley–Terry–Davidson estimator, 1000 centring, parameterization,
+uncertainty, convergence and failure behavior, software identity, and rounding.
+Test schedule construction independently from rating computation.
+
+Every weekly review publishes an immutable dated roster and result snapshot.
+No qualified challenger means no roster change. Before weekly operation,
+governance must settle challenge scheduling, ties, simultaneous challengers,
+promotion/relegation, and rating refits. Cross-snapshot pool-centred ratings may
+not be compared longitudinally without a separately qualified model, and the
+Paper 1 snapshot remains frozen.
+
+The cumulative Baseline Library must retain every current and former Big 12
+method's implementation, official configuration, provenance, designated
+checkpoints, selected system, compatibility metadata, and membership/results
+history. Training consumers use immutable manifests with exact identities and
+weights and must reject mutable `latest_big_12` resolution. Scenario pressure
+controllers, generic Scripted TDM, Random, privileged policies, unqualified
+intermediate checkpoints, and PSRO internal members are never counted as Big 12
+entrants. Each admitted fixed system must pass maintainer reproduction before
+publication.
+
 | Change | Smallest justified proof |
 | --- | --- |
 | Core or Python semantics | Nearest Python unit/integration tests, then targeted Ruff/Pyright |
@@ -224,6 +321,12 @@ official baseline.
 | Debugger scene/event schema | Scene/Event V2, live-frame, audience-boundary, and choreography tests |
 | Command/service/server behavior | Protocol, input, service, server, and affected real-browser case |
 | Scenario trajectory | Scenario preflight/reference tests |
+| Scenario pressure controller | Deterministic repeated execution, same-epoch SharedObs and exact-mask checks, target/tie/fallback cases, treatment/ablation identity equality, and proof that generic TDM has no scenario-ID branch |
+| Matched scenario ablation | Frozen one-variable contrast, paired independent-run accounting, one primary endpoint plus no more than two supporting margins, replay evidence, and rejection from Elo/training/selection inputs |
+| Training/evaluation manifest boundary | Content-digest closure expansion, fail-closed overlap tests including embedded maps and result feedback, immutable population identities, and restart/reproduction proof |
+| Big 12 final-system selection | Three independent runs for each learned method, validation-only per-run and cross-run selection, frozen cadence/eligibility/ties, and hostile locked-result noninterference |
+| Big 12 tournament | Exact twelve-system/66-pair/6,600-episode inventory, side/map/coordinate coverage, complete raw matrix, independently qualified rating estimator, and Qwen cost gate |
+| Weekly Big 12 and Baseline Library | Immutable dated snapshots, no-challenger no-op, promotion/relegation history, cross-pool comparability warning, monotonic retained artifacts, and rejection of mutable `latest_big_12` inputs |
 | Replay/POV/scenario artifact | Focused semantic, canonical-I/O, tamper, privacy, and import-isolation tests |
 | Read-only replay viewer | Replay protocol/service/server/launcher tests, strict browser normalizer/controller units, and a real canonical-artifact Playwright flow |
 | Live replay recording/handoff | Recording/replay-I/O/service/router/launcher tests, strict lifecycle controls, and real T0/prefix/endpoint/recovery/Exit/Ctrl-C/two-tab/POV Playwright flows |

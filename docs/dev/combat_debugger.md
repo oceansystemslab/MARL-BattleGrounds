@@ -128,13 +128,25 @@ policy, or use the built-in Random policy. Random samples only the exact current
 valid action support and deliberately ignores observation features; under the
 same key and mask it therefore produces the same action in SharedObs and
 NoSharedObs. The selectors share one controller boundary without introducing a
-generic policy registry or checkpoint loader. Random is a diagnostic and
-quality-control controller, not an official baseline. Under
+generic policy registry or checkpoint loader. The Scripted TDM choice invokes
+the existing generic team-agnostic controller; it is debugging and regression
+tooling, not an official baseline or Big 12 entrant. Random is likewise a
+diagnostic and quality-control controller. Under
 [amendment A25](../design/specification_amendments.md#a25-sharedobs-only-canonical-benchmark-execution),
 SharedObs is the default and the only evaluation-eligible information regime.
 NoSharedObs remains selectable for diagnostics, custom research, and
 compatibility checks. Changing either controller or the information regime
 resets the exact loaded scenario and seed before comparison.
+
+The current controller selectors are not a scenario-pressure-controller UI.
+Future official scenario evaluations will bind a versioned deterministic,
+reactive pressure controller through their separate evaluation definition and
+apply the same controller to every treatment and matched-ablation arm. Saved
+scenario assets remain controller-independent, and the DevClient does not
+silently install those future evaluation controllers when a scenario is
+loaded. See
+[amendment A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
+for that planned evaluation boundary.
 
 Saved maps and scenarios do not encode an information regime. Loading one
 preserves its authored bytes and binds the selected regime only for that run.

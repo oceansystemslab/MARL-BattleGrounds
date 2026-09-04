@@ -26,6 +26,9 @@ manual, use the scripted Team Deathmatch controller, or use the built-in Random
 controller for same-start quality-control testing. Random samples only the
 current valid action support, is available under both SharedObs and
 NoSharedObs, and is a diagnostic controller rather than an official baseline.
+The generic Scripted TDM controller is likewise debugging and regression
+tooling: neither controller is a Big 12 baseline or a deterministic scenario
+pressure controller.
 Every applicable selector shows all latest saved revisions in numeric-aware
 asset-ID order, with native scrolling for longer lists. New Map and Scenario
 asset IDs use lowercase snake case, such as `tdm_map_10`, while their visible
@@ -101,6 +104,67 @@ The benchmark standardizes authorized actor inputs, categorical identities,
 domains, sentinel meanings, shapes, masks, slot/source identities, provenance,
 and reference-encoder conventions. It does not mandate one-hot encodings,
 embeddings, attention, or any other researcher neural architecture.
+
+## Planned scenario evaluations and Big 12
+
+The planned public scenario suite is primarily a controlled behavioral-ablation
+instrument. Each official evaluation definition will compare a complete method
+with its matched ablation under the same scenario revision, embedded map and
+initial state, deterministic reactive pressure controller, canonical SharedObs
+contract, seeds and sides, training budget, checkpoint-selection rule, and
+primary endpoint. Scenario pressure controllers will follow versioned rules and
+authoritative action masks rather than replaying hard-coded action tapes. They
+remain separate from the saved, controller-independent DevClient scenario and
+from the generic Scripted TDM and Random diagnostic controls. Scenario results
+provide evidence for a specific behavioral claim under frozen conditions; they
+do not contribute to Elo or establish general strength. See
+[specification amendment A26](docs/design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations).
+
+Public evaluation scenarios and their complete content closure must not inform
+training, checkpoint selection, early stopping, hyperparameters, prompts,
+curricula, population weights, or any other adaptive choice. Future M11/M12
+pipelines will enforce content-addressed training, validation, and evaluation
+manifest separation, while official systems retain complete provenance for
+maintainer reproduction. This is a reproducibility and eligibility boundary,
+not a claim that open-source software can make deliberate misconduct
+impossible.
+
+The planned Big 12 is a rolling ladder of exactly twelve method-level entrants,
+each represented by one validation-selected fixed tournament system and one
+Elo. The tentative initial roster is:
+
+1. RNN-IPPO, parameter-shared
+2. RNN-MAPPO, parameter-shared
+3. RNN-MAPPO, class-specific actors
+4. RNN-HAPPO
+5. HyperMARL-PPO
+6. RNN-QMIX
+7. RNN-PQN-VDN
+8. MAPPO-PFSP League
+9. MAPPO-PSRO
+10. S\*-Curriculum
+11. S\*-Curriculum-Shaped
+12. Qwen-Five
+
+This roster and its training/evaluation pipeline are planned, not implemented.
+Rows 1–11 will each retain three independently trained runs and their checkpoint
+histories, but only the fixed checkpoint selected by the frozen validation-only
+rule enters the tournament. Qwen-Five remains tentative until a measured
+throughput and resource gate is passed. Twelve systems yield 66 unordered
+pairings and, at 100 episodes per pairing, 6,600 tournament episodes. The raw
+win/draw/loss matrix remains authoritative; rating implementation details must
+pass their own pre-tournament gate.
+
+Weekly Big 12 reviews will publish immutable dated snapshots. A qualified new
+method may enter by relegating the lowest method; a week without a qualified
+challenger changes nothing. The Paper 1 snapshot remains frozen, and
+pool-centred Elo values from different weekly pools are not directly
+longitudinally comparable. Current and former entrants remain reproducibly
+available in a cumulative Baseline Library through immutable manifests—never a
+mutable `latest_big_12` alias. Scenario pressure controllers, generic Scripted
+TDM, Random, and internal training-population members are not Big 12 entrants.
+See
+[specification amendment A27](docs/design/specification_amendments.md#a27-rolling-big-12-and-baseline-library-governance).
 
 ## Static snapshots
 

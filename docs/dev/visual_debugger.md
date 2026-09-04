@@ -30,7 +30,14 @@ Scenario assets load their authored state; maps are clearly identified
 deterministic default-5v5-TDM previews. Both authoring areas call the same strict
 compile/revalidate loader through `Open in Debug`, and either team can use
 manual control, the scripted Team Deathmatch controller, or the built-in Random
-controller. Save is the only way the DevClient persists asset content; it
+controller. Scripted TDM is the existing generic team-agnostic debugging and
+regression controller; Random is diagnostic quality-control tooling. Neither is
+an official baseline, Big 12 entrant, or scenario pressure controller. The
+current selectors do not expose the planned deterministic pressure controllers:
+future official scenario evaluations bind those through separate evaluation
+definitions while saved scenarios remain controller-independent. See
+[specification amendment A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations).
+Save is the only way the DevClient persists asset content; it
 creates durable numbered local revisions and never autosaves. Every applicable
 selector exposes every latest revision in numeric-aware asset-ID order through
 its native scrolling control. New Map and Scenario asset IDs use lowercase
