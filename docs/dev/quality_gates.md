@@ -95,9 +95,12 @@ required-check names; twenty implementation jobs may run concurrently under
 the current GitHub-hosted account limit. Local validation may use the developer
 workstation's additional CPU concurrency.
 
-The twelve-minute Python and eight-minute browser matrix-job timeouts are runaway-
-job safety ceilings, not performance targets. Downstream aggregates
-necessarily run after their dependencies. Hosted runs `33329934258`,
+CI jobs deliberately configure no explicit job timeout. Hosted runner setup,
+dependency installation, cache handling, and teardown are variable and count
+toward `timeout-minutes`; finite repository-configured ceilings repeatedly
+cancelled otherwise valid jobs without reporting a test failure. Omitting the
+key leaves GitHub's default and platform-enforced maximum in effect. Downstream
+aggregates necessarily run after their dependencies. Hosted runs `33329934258`,
 `33330400572`, and `33330879589` showed that repeatedly expiring an unchanged
 distribution at seven, eight, and nine minutes did not correct its load
 imbalance. The final run left only Python shards 1 and 6 unfinished, with no
@@ -112,10 +115,8 @@ candidate must still be checked against hosted timestamps. A material
 regression beyond the approximately six-minute target requires profiling and
 an actionable CI-only follow-up; ordinary timing variance does not. Rebalance
 intact work units within the current twelve-Python/eight-browser, twenty-job
-ceiling before changing a timeout. Once that split is exhausted, let valid
-work finish under a generous safety ceiling. Do not cancel and rerun unchanged
-work; adjust the ceiling only with measured headroom or another concrete
-correction. Never omit tests or weaken assertions to satisfy the timing target.
+ceiling while allowing valid work to finish. Do not cancel and rerun unchanged
+work. Never omit tests or weaken assertions to satisfy the timing target.
 
 The twelve Python shards and eight browser profiles are continuing ownership
 obligations, not a one-time optimization. Any change that adds, removes,
@@ -126,15 +127,15 @@ split that file mechanically into coherent test-family files without weakening
 or changing its assertions. Keep parameterized families and fixture-affinity
 boundaries intact.
 
-Hosted main run `33541558614` established why the safety ceilings require
-headroom. Across three attempts, browser profile 5 completed all 30 assertions
-in about 5.5 minutes but crossed the former six-minute whole-job ceiling during
-process shutdown, while Python shard 4 repeatedly reached 97 percent before
-crossing the former nine-minute ceiling. The DevClient authoring file moved
-intact from browser profile 5 to the lighter profile 4; exact-cover tests still
-forbid omission or duplication. The 12/8-minute ceilings leave ordinary runner,
-setup, and teardown variance outside the six-minute performance target instead
-of terminating otherwise valid work.
+Hosted main run `33541558614` established why workflow-level timeouts are an
+unsuitable performance control. Across three attempts, browser profile 5
+completed all 30 assertions in about 5.5 minutes but crossed the former
+six-minute whole-job ceiling during process shutdown, while Python shard 4
+repeatedly reached 97 percent before crossing the former nine-minute ceiling.
+The DevClient authoring file moved intact from browser profile 5 to the lighter
+profile 4; exact-cover tests still forbid omission or duplication. Current CI
+uses measured timings and shard balancing to enforce the performance target;
+it does not terminate jobs through repository-configured timeouts.
 
 Main-branch CI runs use `github.run_id` in their concurrency key, so consecutive
 merges cannot replace an older pending or running main check. Non-main refs
@@ -355,9 +356,8 @@ profiles and use the same setup-isolation flag. An executable list-only proof
 requires the eight profiles to be a disjoint, complete cover. Each profile
 retains one worker and file-local ordering.
 Required CI does not retry deterministic failures, stops a red shard after its
-first failure, and enforces matrix-job safety ceilings that are deliberately
-larger than the current performance target. Rebalance measured work before
-changing a ceiling, and never cancel unchanged valid work merely to enforce the
+first failure, and does not impose explicit job timeouts. Rebalance measured
+work instead of cancelling unchanged valid work merely to enforce the
 performance target. When safe balancing is exhausted, raise the target by one
 minute with recorded evidence rather than repeatedly terminating the same valid
 workload. The script does not install dependencies or update snapshots. Run it

@@ -13,7 +13,7 @@ _SCRIPT_DIRECTORY = _REPOSITORY_ROOT / "scripts" / "dev"
 _PARALLEL_SCRIPT = "validation_parallel.sh"
 
 
-def test_hosted_ci_preserves_main_runs_and_uses_runaway_timeout_headroom() -> None:
+def test_hosted_ci_preserves_main_runs_without_explicit_job_timeouts() -> None:
     workflow = (_REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
@@ -23,14 +23,8 @@ def test_hosted_ci_preserves_main_runs_and_uses_runaway_timeout_headroom() -> No
         "&& github.run_id || github.ref }}"
     ) in workflow
     assert "cancel-in-progress: true" in workflow
-    assert re.search(
-        r"(?ms)^  python-test-gates:.*?^    timeout-minutes: 12$",
-        workflow,
-    )
-    assert re.search(
-        r"(?ms)^  frontend-browser-gates:.*?^    timeout-minutes: 8$",
-        workflow,
-    )
+    assert workflow.count("fail-fast: true") == 2
+    assert "timeout-minutes:" not in workflow
 
 
 def _run(
