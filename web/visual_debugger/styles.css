@@ -2235,10 +2235,6 @@ select {
   color: var(--text-muted);
 }
 
-.required-dock-fallback[data-kind="cooldown"] {
-  color: var(--ultimate);
-}
-
 .required-dock-fallback__box {
   stroke-dasharray: 2 2;
 }
@@ -2249,11 +2245,6 @@ select {
   text-anchor: middle;
   dominant-baseline: central;
   pointer-events: none;
-}
-
-.required-dock-fallback__owner {
-  font-size: 7px;
-  letter-spacing: -0.02em;
 }
 
 .required-dock-fallback__value {

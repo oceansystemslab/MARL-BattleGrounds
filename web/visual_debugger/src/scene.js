@@ -1774,10 +1774,8 @@ export class BattlefieldRenderer {
               dockGap: 5,
             },
             fallbackDockOptions: {
-              cellWidth: 32,
-              cellHeight: 16,
-              cellGap: 0,
-              dockGap: 3,
+              ...COOLDOWN_DOCK_DIMENSIONS,
+              dockGap: 5,
             },
             priority: 1,
           },
@@ -1807,12 +1805,12 @@ export class BattlefieldRenderer {
       ({ compactFallback, layoutKey }) =>
         !compactFallback && layoutKey.startsWith("status:"),
     );
-    const cooldownDocks = requiredDockLayout.docks.filter(
-      ({ compactFallback, layoutKey }) =>
-        !compactFallback && layoutKey.startsWith("cooldown:"),
+    const cooldownDocks = requiredDockLayout.docks.filter(({ layoutKey }) =>
+      layoutKey.startsWith("cooldown:"),
     );
     const compactRequiredDocks = requiredDockLayout.docks.filter(
-      ({ compactFallback }) => compactFallback,
+      ({ compactFallback, layoutKey }) =>
+        compactFallback && layoutKey.startsWith("status:"),
     );
     const requiredDockRects = requiredDockLayout.docks.map(({ bounds }) => bounds);
     const optionalStatusLayout = layoutStatusDocks(
@@ -1930,11 +1928,12 @@ export class BattlefieldRenderer {
         policy.audience,
       ),
     );
-    const cooldownNodes = cooldownLayout.docks.map((placement) =>
-      this.#renderCooldownDock(placement),
-    );
+    const cooldownNodes = [
+      ...cooldownLayout.docks.filter(({ compactFallback }) => compactFallback),
+      ...cooldownLayout.docks.filter(({ compactFallback }) => !compactFallback),
+    ].map((placement) => this.#renderCooldownDock(placement));
     const compactRequiredNodes = compactRequiredDocks.map((placement) =>
-      this.#renderRequiredDockFallback(placement, policy.audience),
+      this.#renderRequiredStatusFallback(placement, policy.audience),
     );
     const usesPresentationKeys = projectedAgents.some(
       ({ presentationKey }) => presentationKey !== null,
@@ -2072,18 +2071,18 @@ export class BattlefieldRenderer {
         protectedDock("body", globalSlot, bounds, `body:${globalSlot}`),
     );
     const cooldownProtectedRegions = cooldownDocks.map(
-      ({ globalSlot, bounds, layoutKey }) =>
-        protectedDock("cooldown", globalSlot, bounds, layoutKey),
+      ({ globalSlot, bounds, layoutKey, compactFallback }) =>
+        protectedDock(
+          "cooldown",
+          globalSlot,
+          bounds,
+          compactFallback ? `compact:${layoutKey}` : layoutKey,
+        ),
     );
     const compactRequiredStatusRegions = compactRequiredDocks
       .filter(({ layoutKey }) => layoutKey.startsWith("status:"))
       .map(({ globalSlot, bounds, layoutKey }) =>
         protectedDock("status", globalSlot, bounds, `compact:${layoutKey}`),
-      );
-    const compactRequiredCooldownRegions = compactRequiredDocks
-      .filter(({ layoutKey }) => layoutKey.startsWith("cooldown:"))
-      .map(({ globalSlot, bounds, layoutKey }) =>
-        protectedDock("cooldown", globalSlot, bounds, `compact:${layoutKey}`),
       );
     const modifierProtectedRegions = modifierLayout.docks.map(
       ({ globalSlot, bounds }) =>
@@ -2103,7 +2102,6 @@ export class BattlefieldRenderer {
       base: Object.freeze([
         ...bodyProtectedRegions,
         ...cooldownProtectedRegions,
-        ...compactRequiredCooldownRegions,
         ...modifierProtectedRegions,
       ]),
       legality: Object.freeze(legalityRects),
@@ -2183,33 +2181,18 @@ export class BattlefieldRenderer {
 
   /**
    * Render one compact, explicitly associated marker when a complete required
-   * dock cannot fit. The marker never discards the authoritative payload:
-   * status fallbacks expose every item through the shared overflow explanation,
-   * while cooldown fallbacks retain the exact tick count.
+   * status dock cannot fit. The marker exposes every authoritative item through
+   * the shared overflow explanation.
    *
    * @param {ReturnType<typeof layoutRequiredDocks>["docks"][number]} placement
    * @param {"researcher" | "agent_pov"} audience
    * @returns {SVGElement}
    */
-  #renderRequiredDockFallback(placement, audience) {
-    const isCooldown = placement.layoutKey.startsWith("cooldown:");
-    const kind = isCooldown ? "cooldown" : "status";
+  #renderRequiredStatusFallback(placement, audience) {
     const rawItems = placement.hiddenStatuses;
-    const firstItem = isRecord(rawItems[0]) ? rawItems[0] : {};
-    const ticks =
-      isCooldown && Number.isInteger(firstItem.ticks) && firstItem.ticks > 0
-        ? Number(firstItem.ticks)
-        : null;
     const ownerAgent = this.agentByLayoutSlot.get(placement.globalSlot) ?? {};
-    const explanation = isCooldown
-      ? explainCooldown(
-          {
-            ...displayIdentityRecord(ownerAgent),
-            ultimate_cooldown: ticks,
-          },
-          ownerAgent,
-        )
-      : audience === "agent_pov"
+    const explanation =
+      audience === "agent_pov"
         ? this.#explainStatusOverflow(rawItems, ownerAgent, audience)
         : explainOverflow(rawItems, "status", ownerAgent, [
             ...this.agentByLayoutSlot.values(),
@@ -2217,14 +2200,14 @@ export class BattlefieldRenderer {
     if (explanation === null) {
       return svgElement("g", { "aria-hidden": "true" });
     }
-    const valueLabel = isCooldown ? `U${ticks ?? "?"}` : `+${placement.hiddenCount}`;
+    const valueLabel = `+${placement.hiddenCount}`;
     const group = svgElement("g", {
       class: "required-dock-fallback-dock",
       "data-zone": "required-dock-fallback-dock",
       ...displayIdentityAttributes(ownerAgent),
       "data-layout-key":
         typeof ownerAgent.presentation_key === "string" ? null : placement.layoutKey,
-      "data-kind": kind,
+      "data-kind": "status",
       "data-anchor": placement.anchor,
       "data-collision-free": placement.collisionFree,
     });
@@ -2245,34 +2228,24 @@ export class BattlefieldRenderer {
       "aria-label": `${explanation.title}. ${explanation.summary}. ${explanation.rows
         .map((row) => `${row.label}: ${row.value}`)
         .join(". ")}`,
-      "data-zone": isCooldown ? "ultimate-cooldown" : "status-overflow",
+      "data-zone": "status-overflow",
       ...displayIdentityAttributes(ownerAgent),
       "data-layout-key": placement.layoutKey,
-      "data-kind": kind,
+      "data-kind": "status",
       "data-hidden-count": placement.hiddenCount,
-      "data-ticks": ticks,
       "data-compact-fallback": "true",
       "data-owner-label": agentIdentity(ownerAgent),
     });
-    if (isCooldown) {
-      cell.dataset.class = classTokenFromId(firstItem.classId).cssKey;
-    }
     registerTooltipOwner(cell, explanation);
     const labelText = svgElement("text", {
       class: "required-dock-fallback__label",
       x: placement.bounds.left + placement.bounds.width / 2,
       y: placement.bounds.top + placement.bounds.height / 2,
     });
-    const ownerLine = svgElement("tspan", {
-      class: "required-dock-fallback__owner",
-      x: placement.bounds.left + placement.bounds.width / 2,
-      dy: "-0.34em",
-    });
-    ownerLine.textContent = agentIdentity(ownerAgent);
     const valueLine = svgElement("tspan", {
       class: "required-dock-fallback__value",
       x: placement.bounds.left + placement.bounds.width / 2,
-      dy: isCooldown ? "0.9em" : "0.35em",
+      dy: "0.35em",
     });
     valueLine.textContent = valueLabel;
     cell.append(
@@ -2286,11 +2259,7 @@ export class BattlefieldRenderer {
       }),
       labelText,
     );
-    if (isCooldown) {
-      labelText.append(ownerLine, valueLine);
-    } else {
-      labelText.append(valueLine);
-    }
+    labelText.append(valueLine);
     group.append(cell);
     return group;
   }
@@ -2302,11 +2271,14 @@ export class BattlefieldRenderer {
    * remains generic and collision-aware; this method owns only cooldown
    * presentation.
    *
-   * @param {ReturnType<typeof layoutStatusDocks>["docks"][number]} placement
+   * @param {ReturnType<typeof layoutRequiredDocks>["docks"][number]} placement
    * @returns {SVGElement}
    */
   #renderCooldownDock(placement) {
-    const rawItem = placement.visibleStatuses[0];
+    const fallbackPlacement = placement.compactFallback === true;
+    const rawItem = fallbackPlacement
+      ? placement.hiddenStatuses[0]
+      : placement.visibleStatuses[0];
     const item = isRecord(rawItem) ? rawItem : {};
     const ticks =
       Number.isInteger(item.ticks) && item.ticks > 0 ? Number(item.ticks) : "?";
@@ -2319,10 +2291,10 @@ export class BattlefieldRenderer {
       ...displayIdentityAttributes(ownerAgent),
       "data-class": classToken.cssKey,
       "data-anchor": placement.anchor,
-      "data-expanded": placement.expanded,
+      "data-expanded": fallbackPlacement ? true : placement.expanded,
       "data-collision-free": placement.collisionFree,
-      "data-visible-count": placement.visibleCount,
-      "data-hidden-count": placement.hiddenCount,
+      "data-visible-count": 1,
+      "data-hidden-count": 0,
     });
     const explanation = explainCooldown(
       {
@@ -2335,7 +2307,11 @@ export class BattlefieldRenderer {
       group.setAttribute("aria-hidden", "true");
       return group;
     }
-    if (placement.anchor !== "north" || placement.tangentShift !== 0) {
+    if (
+      fallbackPlacement ||
+      placement.anchor !== "north" ||
+      placement.tangentShift !== 0
+    ) {
       group.append(
         svgElement("line", {
           class: "dock-leader cooldown-dock__leader",
@@ -2357,9 +2333,14 @@ export class BattlefieldRenderer {
     const cell = svgElement("g", {
       class: "cooldown-cell",
       role: "img",
+      tabindex: fallbackPlacement ? "0" : null,
       "aria-label": `${token.accessibleName} cooldown, ${accessibleTicks}, ${agentIdentity(ownerAgent)}`,
       "data-zone": "ultimate-cooldown",
       ...displayIdentityAttributes(ownerAgent),
+      "data-layout-key": fallbackPlacement ? placement.layoutKey : null,
+      "data-kind": fallbackPlacement ? "cooldown" : null,
+      "data-compact-fallback": fallbackPlacement ? "true" : null,
+      "data-owner-label": fallbackPlacement ? agentIdentity(ownerAgent) : null,
       "data-class": classToken.cssKey,
       "data-token": token.cssKey,
       "data-token-id": token.tokenId,

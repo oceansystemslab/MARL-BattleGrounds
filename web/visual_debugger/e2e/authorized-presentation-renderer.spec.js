@@ -489,8 +489,7 @@ test("durable visual filters remove owned paint and restore stable battlefield i
         },
         {
           filterId: "cooldown_effects",
-          ownerSelector:
-            '.cooldown-cell, .required-dock-fallback[data-kind="cooldown"]',
+          ownerSelector: ".cooldown-cell",
           ownsTooltip: true,
           reservesLayout: true,
           layoutAttribute: "data-suppressed-cooldown-presentation-keys",
@@ -3036,4 +3035,146 @@ test("agent wins real SVG hit arbitration over an overlapping accepted route", a
     "data-tooltip-kind",
     "agent",
   );
+});
+
+test("remote cooldown placement preserves the canonical badge in the shared renderer", async ({
+  page,
+}) => {
+  await page.goto(origin);
+  const result = await page.evaluate(async (raw) => {
+    const moduleRoot = "/src";
+    const { normalizeAuthorizedPresentationFrameV1 } = await import(
+      `${moduleRoot}/authorized-presentation-normalizer.js`
+    );
+    const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { createTooltipController } = await import(`${moduleRoot}/tooltip.js`);
+    const battlefield = document.querySelector("#battlefield");
+    const empty = document.querySelector("#empty");
+    const tooltip = document.querySelector("#visual-tooltip");
+    const title = document.querySelector("#visual-tooltip-title");
+    const details = document.querySelector("#visual-tooltip-details");
+    if (
+      !(battlefield instanceof SVGSVGElement) ||
+      !(empty instanceof HTMLElement) ||
+      !(tooltip instanceof HTMLElement) ||
+      !(title instanceof HTMLElement) ||
+      !(details instanceof HTMLElement)
+    ) {
+      throw new Error("Cooldown fallback test surface is unavailable.");
+    }
+    const presentation = await normalizeAuthorizedPresentationFrameV1(raw);
+    const renderer = new BattlefieldRenderer({ battlefield, empty });
+    const controller = createTooltipController({
+      root: document.body,
+      tooltip,
+      title,
+      details,
+    });
+    /** @param {number} width @param {number} height */
+    const renderAt = (width, height) => {
+      battlefield.style.minWidth = "0";
+      battlefield.style.minHeight = "0";
+      battlefield.style.width = `${width}px`;
+      battlefield.style.height = `${height}px`;
+      renderer.render(presentation, { showRanges: true });
+      return {
+        cooldowns: battlefield.querySelectorAll(".cooldown-cell").length,
+        fallbacks: battlefield.querySelectorAll(
+          '.cooldown-cell[data-compact-fallback="true"]',
+        ).length,
+        obsoleteFallbacks: battlefield.querySelectorAll(
+          '.required-dock-fallback[data-kind="cooldown"]',
+        ).length,
+      };
+    };
+    const ordinary = renderAt(720, 480);
+    const remote = renderAt(50, 70);
+    const cell = battlefield.querySelector(
+      '.cooldown-cell[data-compact-fallback="true"]',
+    );
+    const box = cell?.querySelector(".cooldown-cell__box");
+    const value = cell?.querySelector(".cooldown-cell__value");
+    const icon = cell?.querySelector(".cooldown-cell__icon");
+    const group = cell?.parentElement;
+    if (
+      !(cell instanceof SVGElement) ||
+      !(box instanceof SVGRectElement) ||
+      !(value instanceof SVGTextElement) ||
+      !(icon instanceof SVGSVGElement) ||
+      !(group instanceof SVGGElement)
+    ) {
+      throw new Error("Remote cooldown did not retain its canonical SVG badge.");
+    }
+    const ownerKey = cell.getAttribute("data-presentation-key");
+    const protectedRegion = renderer
+      .choreographySurface()
+      ?.protectedRects.find(
+        (/** @type {Record<string, any>} */ region) =>
+          region.protectedKind === "cooldown" &&
+          region.ownerPresentationKey === ownerKey,
+      );
+    cell.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    const remoteDetails = {
+      visibleText: cell.textContent,
+      value: value.textContent,
+      iconHidden: icon.hasAttribute("hidden"),
+      box: {
+        left: box.x.baseVal.value,
+        top: box.y.baseVal.value,
+        width: box.width.baseVal.value,
+        height: box.height.baseVal.value,
+      },
+      protectedBounds: protectedRegion?.bounds ?? null,
+      leaderCount: group.querySelectorAll(".cooldown-dock__leader").length,
+      ticks: cell.getAttribute("data-ticks"),
+      tokenId: cell.getAttribute("data-token-id"),
+      className: cell.getAttribute("data-class"),
+      ownerLabel: cell.getAttribute("data-owner-label"),
+      ariaLabel: cell.getAttribute("aria-label"),
+      tabIndex: cell.getAttribute("tabindex"),
+      tooltipHidden: tooltip.hidden,
+      tooltipTitle: title.textContent,
+      tooltipDetails: details.textContent,
+    };
+    const restored = renderAt(720, 480);
+    controller.destroy();
+    return { ordinary, remote, remoteDetails, restored };
+  }, fixture.state_cases.replay_oracle_final_selected);
+
+  expect(result.ordinary).toEqual({
+    cooldowns: 1,
+    fallbacks: 0,
+    obsoleteFallbacks: 0,
+  });
+  expect(result.remote).toEqual({
+    cooldowns: 1,
+    fallbacks: 1,
+    obsoleteFallbacks: 0,
+  });
+  expect(result.remoteDetails.visibleText).toBe("29");
+  expect(result.remoteDetails.value).toBe("29");
+  expect(result.remoteDetails.iconHidden).toBe(false);
+  expect(result.remoteDetails.box.width).toBe(38);
+  expect(result.remoteDetails.box.height).toBe(18);
+  expect(result.remoteDetails.protectedBounds).toEqual({
+    left: result.remoteDetails.box.left,
+    top: result.remoteDetails.box.top,
+    right: result.remoteDetails.box.left + 38,
+    bottom: result.remoteDetails.box.top + 18,
+    width: 38,
+    height: 18,
+  });
+  expect(result.remoteDetails.leaderCount).toBe(1);
+  expect(result.remoteDetails.ticks).toBe("29");
+  expect(result.remoteDetails.tokenId).toBe("mage_burst");
+  expect(result.remoteDetails.className).toBe("mage");
+  expect(result.remoteDetails.ownerLabel).toBe("Agent ID agent-slot-0");
+  expect(result.remoteDetails.ariaLabel).toContain("29 ticks remaining");
+  expect(result.remoteDetails.ariaLabel).toContain(result.remoteDetails.ownerLabel);
+  expect(result.remoteDetails.tabIndex).toBe("0");
+  expect(result.remoteDetails.tooltipHidden).toBe(false);
+  expect(result.remoteDetails.tooltipTitle).toContain("Cooldown");
+  expect(result.remoteDetails.tooltipTitle).toContain(result.remoteDetails.ownerLabel);
+  expect(result.remoteDetails.tooltipDetails).toContain("29 Ticks");
+  expect(result.restored).toEqual(result.ordinary);
 });

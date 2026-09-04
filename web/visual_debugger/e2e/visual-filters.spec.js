@@ -787,7 +787,6 @@ async function expectAllPaintAbsentWithoutDwell(page) {
         "#battlefield .pov-observed-status",
         "#battlefield .agent-spawn-shield",
         "#battlefield .cooldown-cell",
-        '#battlefield .required-dock-fallback[data-kind="cooldown"]',
         "#battlefield .combat-effect",
         "#battlefield .combat-connector-effect",
         "#battlefield .combat-route-effect",
@@ -1543,6 +1542,10 @@ test("real maximum-status replay renders +2 without losing owner semantics", asy
       expect(row.ariaLabel).toContain(row.ownerLabel);
       expect(row.presentationKey).toMatch(/^oracle_/u);
     }
+
+    await expect(
+      page.locator('#battlefield .required-dock-fallback[data-kind="cooldown"]'),
+    ).toHaveCount(0);
   } finally {
     await stopDebugger(replay.process);
   }

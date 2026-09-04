@@ -618,6 +618,12 @@ test("required dock fallback preserves feasible priority truth around one imposs
         cellGap: 2,
         dockGap: 5,
       },
+      fallbackDockOptions: {
+        cellWidth: 38,
+        cellHeight: 18,
+        cellGap: 2,
+        dockGap: 5,
+      },
       priority: 1,
     },
     {
@@ -676,6 +682,8 @@ test("required dock fallback preserves feasible priority truth around one imposs
   assert.deepEqual(cooldownFallback.hiddenStatuses, [{ ticks: 30 }]);
   assert.equal(cooldownFallback.collisionFree, true);
   assert.equal(viewportOverflow(cooldownFallback.bounds, VIEWPORT), 0);
+  assert.equal(cooldownFallback.bounds.width, 38);
+  assert.equal(cooldownFallback.bounds.height, 18);
   for (const statusKey of ["status:2", "status:7"]) {
     const dock = forward.docks.find(({ layoutKey }) => layoutKey === statusKey);
     assert.ok(dock);
