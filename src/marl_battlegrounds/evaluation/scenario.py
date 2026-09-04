@@ -1362,17 +1362,35 @@ def _validate_scenario_evaluation_record_against_validated_replay_v2(
             )
 
 
-def _validate_official_scenario_context_for_replay_v2(
+def _validate_official_scenario_replay_v2(
     replay: ReplayArtifactV1,
 ) -> None:
     from marl_battlegrounds.evaluation.catalog import (
         _validate_official_scenario_context_v2,  # pyright: ignore[reportPrivateUsage]
     )
 
-    _validate_official_scenario_context_v2(
-        replay.header.context,
-        replay.frames[0],
+    context = replay.header.context
+    _validate_official_scenario_context_v2(context, replay.frames[0])
+
+    expected_availability = tuple(
+        tuple(
+            recipient_slot != sensor_source_slot
+            and recipient.configured_active
+            and sensor_source.configured_active
+            and recipient.configured_team_id == sensor_source.configured_team_id
+            for sensor_source_slot, sensor_source in enumerate(context.roster)
+        )
+        for recipient_slot, recipient in enumerate(context.roster)
     )
+    for frame in replay.frames:
+        if (
+            frame.shared_obs_information_availability_by_recipient_and_sensor_source
+            != expected_availability
+        ):
+            raise ValueError(
+                "official scenario evaluation requires canonical SharedObs "
+                f"availability at frame_index {frame.frame_index}"
+            )
 
 
 def _validate_scenario_evaluation_record_and_evidence_v2(
@@ -1401,7 +1419,7 @@ def _validate_scenario_evaluation_record_and_evidence_v2(
         _build_replay_artifact_reference_from_validated_v1(replay),
     )
     if require_official_context:
-        _validate_official_scenario_context_for_replay_v2(replay)
+        _validate_official_scenario_replay_v2(replay)
 
 
 def validate_scenario_evaluation_record_v2(
@@ -1476,7 +1494,7 @@ def build_scenario_evaluation_record_v2(
         replay,
         replay_reference,
     )
-    _validate_official_scenario_context_for_replay_v2(replay)
+    _validate_official_scenario_replay_v2(replay)
     return record
 
 

@@ -8,8 +8,9 @@
 This document is the normative protocol for evaluating MARL-BattleGrounds
 policies. It owns evaluation populations, cells, frozen
 weights, aggregation,
-uncertainty, checkpoint selection, information-regime separation, cross-play,
-controlled scenarios, runtime measurement, and failure/censoring treatment.
+uncertainty, checkpoint selection, canonical actor-information provenance,
+cross-play, controlled scenarios, runtime measurement, and failure/censoring
+treatment.
 The companion [metric specification](metric_specification.md) owns stable
 metric meanings, sufficient components, eligibility, attribution, and allowed
 interpretations. Accepted departures from the original design PDF are recorded
@@ -44,9 +45,10 @@ An `EvaluationSuiteV1`-equivalent declaration freezes:
   claim;
 - battleground identity and version plus the resolved episode-configuration
   contract;
-- execution-information assignment profile, including each configured active
-  assignment's regime and actor-input projection version; in V1 this profile
-  is represented by one homogeneous episode-wide pair;
+- execution-information provenance; an official suite freezes the canonical
+  episode-wide SharedObs mode and actor-input projection plus the exact
+  configured-roster availability topology, while a custom suite retains its
+  explicitly versioned generic provenance;
 - critic-information regime, canonical reward mode, and shaping configuration;
 - primary, secondary, exploratory, and diagnostic metric IDs;
 - independently approved content-addressed layouts/maps and authored initial
@@ -75,8 +77,9 @@ evaluation:
 
 - algorithms, policy architectures, training configurations, and code/artifact
   revisions;
-- each learned checkpoint's fixed execution-information regime, actor-input
-  projection version, and compatible compiled actor-front-end contract;
+- each official learned checkpoint's canonical SharedObs actor-input projection
+  version and compatible compiled actor-front-end contract; any custom
+  checkpoint retains its explicit generic mode/projection identity;
 - independent training-run identities and named training seeds;
 - evaluation seed schedule and common-condition pairing;
 - checkpoint-selection rule and selection split;
@@ -211,68 +214,60 @@ other held-out material are ineligible for policy or curriculum updates.
 requires Milestones 10–12 to extend one common pipeline spine. Episode
 specifications selected by direct/custom training distributions or curricula,
 and episode specifications fixed by evaluation suites or scenarios, enter the
-same versioned policy-assignment and seed protocol. Both execution-information
-regimes use the same reset, base observation, exact mask, legal-action
-realization, joint-action assembly, core-step, transition, completion,
-capture/replay, and metric semantics. Evaluation/scenario episodes use M10's
-host adapter; M11-selected training episodes use M12's JAX
+same versioned policy-assignment and seed protocol. Official execution uses
+SharedObs throughout the same reset, base-observation, exact-mask,
+legal-action-realization, joint-action-assembly, core-step, transition,
+completion, capture/replay, and metric lifecycle. Evaluation/scenario episodes
+use M10's host adapter; M11-selected training episodes use M12's JAX
 rollout/update/checkpoint adapter. Training selection does not create a runner
 or trainer, and training does not route through the evaluation/scenario host
 adapter.
 
-Only authorized-input composition, learner-input projection, the compatible
-compiled actor front end, checkpoint compatibility validation, measured cost,
-and manifest/report stratum may differ by execution-information regime. A
-regime must not select a separate runner, trainer, evaluator, scenario
-lifecycle, RNG protocol, action realization, capture path, replay path, or
-metric implementation. Milestone 10 owns the versioned episode and
-policy-assignment contracts, exact-saved-revision import and independent
-normalization, validation, content-addressing, and approval adapters,
-seed-schedule schema and named derivation protocol, evaluation/scenario host
-runner, capture/replay, and failure-semantics integration. Milestone 11 selects
-independently approved, content-addressed partition-neutral maps into direct,
-custom-distribution, or curriculum training populations and feeds their
-resolved specifications into the common training spine. Milestone 12 consumes
-those selections through the common JAX rollout/update path. A19 advances
-structured source-bank
-composition, scripted/reference-policy adaptation, homogeneous runtime
-selection, and reconstruction into the Milestone 7 interlude. Milestone 12
-owns the compatible learned neural projections, compiled neural actor front
-ends, and trainer/checkpoint integration; it does not own a roster catalog,
-training-selection policy, asset-approval boundary, or mutable
-development-draft loader. M12 rejects held-out evaluation/scenario assets
-before training execution.
+[Amendment A25](../design/specification_amendments.md#a25-sharedobs-only-canonical-benchmark-execution)
+supersedes the earlier forward dual-regime benchmark plan. Official baseline
+training and evaluation, controlled scenarios, tournament and cross-play
+cells, ratings, leaderboards, and Paper 1 reports require:
 
-Every learned checkpoint is fixed to one `execution_information_mode`, one
-actor-input projection version, and one compatible compiled actor-front-end
-contract. Compatibility validation rejects a mismatch before compilation,
-device allocation, or execution. An explicitly declared cross-regime
-initialization is a transfer or out-of-distribution intervention, not a mode
-switch, and receives separate provenance and reporting.
+```text
+execution_information_mode = shared_obs
+actor_projection = base-observation-plus-authorized-sensor-source-bank@1
+```
 
-The current `EvaluationEpisodeContextV1` contract is immutable and
-homogeneous: its single episode-wide `execution_information_mode` and
-`actor_projection` apply to every configured active policy assignment. V1
-mixed execution—any episode assigning SharedObs to some active slots and
-NoSharedObs to others—is scientifically ineligible even if a runtime can
-mechanically assemble its actions. It must not enter an official evaluation
-cell, controlled-scenario claim, replay publication, metric report, or
-cross-play aggregate.
+Every official replay frame must carry exactly the availability matrix derived
+from its frozen roster: a recipient/source entry is true if and only if both
+slots are configured-active, have the same configured team, and are distinct
+global slots. The matrix does not depend on living state, health, visibility,
+score, policy identity, or frame index. Configured-but-dead teammates remain
+authorized sources while their ordinary sensor material remains
+lifecycle-zeroed. Exact equality on every frame rejects both an incomplete
+stable topology and any mid-episode topology change. An all-false matrix is
+valid only when the roster itself contains no same-team off-diagonal pair.
 
-Mixed execution remains ineligible until Milestone 10 defines a V2 context and
-artifact family with per-active-slot execution-mode and actor-projection
-provenance plus sufficient per-recipient availability authority. V2 must feed
-the same policy/scenario/capture/replay/metric lifecycle; it must not mutate or
-reinterpret V1. Its homogeneous/mixed episode profile is derived from the
-configured-active per-slot assignments, never edited independently. An
-explicit V1-to-V2 migration may replicate V1's episode-wide mode and projection
-across configured-active slots and mark inactive slots not applicable, so it
-can create only a homogeneous V2 profile; it fails when required versioned
-provenance cannot be established and never mutates V1 bytes or digests. Once
-V2 exists, focal SharedObs versus opponent NoSharedObs and focal NoSharedObs
-versus opponent SharedObs are distinct directional cells, each with
-task-appropriate side swaps. They are never pooled with each other or with
-either homogeneous regime.
+Execution mode, projection, and availability remain mandatory invariant
+provenance, not official comparison or aggregation axes. NoSharedObs remains
+available through generic rollout and validation for diagnostics, custom
+research, and historical replay compatibility, but it cannot produce a new
+official baseline, scenario result, tournament cell, or Paper 1 claim. The
+current roadmap contains no mixed-regime V2 work. The immutable V1 wire
+contract remains homogeneous and dual-mode-compatible; it must never encode
+mixed execution by overloading policy identity or availability.
+
+Milestone 10 owns the common host-runner and evidence integration work that is
+not superseded by A25. Milestone 11 selects independently approved,
+content-addressed partition-neutral maps into training populations. Milestone
+12 consumes those selections through one SharedObs JAX rollout/update path and
+owns compatible learned actor front ends, checkpoints, and a benchmark
+reference encoder. It freezes categorical identities, domains, sentinel
+meanings, shapes, masks, slot/source identities, provenance, and
+reference-encoder conventions—not researchers' choice of one-hot, embedding,
+attention, or other neural representation. M12 rejects held-out
+evaluation/scenario assets before training execution.
+
+Centralized training remains separate from actor execution. An explicitly
+authorized critic may consume training-only team or privileged information,
+but every evaluated actor selects its action from the canonical SharedObs
+contract. Critic inputs never become actor availability or evaluation-frame
+actor material.
 
 ## Experimental units and terminology
 
@@ -295,7 +290,6 @@ The canonical cell coordinates are:
 battleground identity/version x layout/map
      x cooperative-partner/pool x adversarial-opponent/pool
      x side/role x roster/composition
-     x execution_information_assignment_profile
 ```
 
 Use a declared not-applicable sentinel when the evaluated setting has no
@@ -304,32 +298,19 @@ axes into one “other policy” coordinate: varying a partner while also varyin
 the opponent confounds cooperative generalization with adversarial robustness.
 
 Resolved episode configuration, scenario version, policy IDs,
-critic-information regime,
-reward mode, shaping configuration, code revision, static-catalog digest, and
-actor-input projection version remain mandatory provenance. They become
-separate cell axes whenever varying one can change the intended estimand.
-
-Battleground identity/version and the execution-information assignment profile
-are separate reporting strata by default. V1 maps its one episode-wide
-mode/projection pair to the corresponding homogeneous profile. SharedObs and
-NoSharedObs results are never pooled. Raw task-score units are never pooled
-across battlegrounds. A cross-battleground scalar requires a separately
-versioned normalization and suite contract.
-
-For V1, the cell's `execution_information_mode` is the one homogeneous mode of
-every configured active assignment. A future eligible V2 mixed-regime cell
-must also retain the full directional per-assignment mode/projection pattern as
-cell provenance; naming only the focal policy's regime is insufficient. Its
-homogeneous/mixed profile is derived from that pattern rather than supplied as
-an independent cell authority.
+critic-information regime, reward mode, shaping configuration, code revision,
+static-catalog digest, execution mode, actor-input projection version, and
+availability remain mandatory provenance. Canonical actor-information fields
+are constant eligibility facts and do not become official cell axes. Raw
+task-score units are never pooled across battlegrounds. A cross-battleground
+scalar requires a separately versioned normalization and suite contract.
 
 ## Suite construction and frozen weights
 
 Each suite declares a finite set of cells and nonnegative target weights
-`w_c` summing to one within each reported task and execution-information
-assignment-profile stratum. Equal cell weights are the default. A
-task-declared target distribution is allowed when it is motivated and frozen
-before evaluation.
+`w_c` summing to one within each reported task. Equal cell weights are the
+default. A task-declared target distribution is allowed when it is motivated
+and frozen before evaluation.
 
 Weights express the target population, not the number of episodes that happened
 to finish. A failed cell, zero-opportunity cell, or missing artifact does not
@@ -585,21 +566,15 @@ For self-play or policy-versus-policy evaluation, policy identity and side are
 not conflated. A symmetric matrix records both assignment directions or uses a
 task-justified symmetry reduction that remains recoverable.
 
-After the V2 mixed-regime contract exists, execution-information assignment
-direction is likewise not conflated with policy identity or side. Both
-SharedObs-versus-NoSharedObs directions remain recoverable and receive the same
-side-swap discipline. V1 remains homogeneous and cannot carry these cells.
-
 ## Compact scorecard reporting
 
 The [metric specification](metric_specification.md#presentation-budgets)
 exclusively owns the contents and budgets of the primary team and agent/class
-cards. An evaluation suite instantiates that scorecard for each task and
-execution-information assignment profile; V1 uses the corresponding
-homogeneous profile. This protocol does not redefine the scorecard's metric
-blocks. The suite and manifest freeze which eligible candidate fills each
-optional slot and place those primary blocks in the confirmatory endpoint
-family before locked-test evaluation.
+cards. An evaluation suite instantiates that scorecard for each task under the
+canonical SharedObs eligibility contract. This protocol does not redefine the
+scorecard's metric blocks. The suite and manifest freeze which eligible
+candidate fills each optional slot and place those primary blocks in the
+confirmatory endpoint family before locked-test evaluation.
 
 Every primary table footer reports suite/manifest versions, independent
 training runs, cells, episode schedule, defined/undefined counts, failure and
@@ -629,6 +604,11 @@ respect the scenario's fixed roster, configured-active slots, and role
 template. Changing those facts creates a different versioned scenario rather
 than an override of the current one.
 
+Every official scenario attempt binds canonical SharedObs after loading and
+validating that regime-independent scenario. Its mode, projection, and exact
+all-frame configured-roster availability must pass the official replay-level
+gate before the result is accepted.
+
 Scenario validation must also join the explicit fixed-slot roster and role
 template carried by the resolved scenario definition to the episode context,
 then prove that the episode's realized seed record is exactly one member of the
@@ -656,11 +636,10 @@ Cross-play applies a frozen population protocol to a selected base task
 endpoint. It does not duplicate every tactical metric. Cooperative partners and
 adversarial opponents are separate experimental axes.
 
-The V1 cross-play tensor is homogeneous in its episode-wide
-`execution_information_mode`. A later V2 tensor may add a frozen directional
-per-assignment regime pattern, but only after V2 supplies truthful
-per-active-slot provenance; the two mixed directions are separate tensor cells
-and are not pooled.
+Every official cross-play episode uses canonical SharedObs. Information regime
+is therefore constant provenance, not another tensor axis or assignment
+direction. A NoSharedObs or mixed-regime matchup is custom diagnostic evidence
+and cannot enter the official panel, aggregate, or rating calculation.
 
 Preserve and publish the complete
 `focal policy × cooperative partner × adversarial opponent × side assignment`
@@ -706,16 +685,14 @@ full-team policy without separable partner assignments.
 Training curves are evaluated through frozen periodic held-out evaluations.
 Ordinary curriculum rollouts do not run the full evaluation suite.
 
-Default direct training, arbitrary researcher-defined training distributions,
-and curriculum training share one rollout, batch, optimizer, update, and
-checkpoint lifecycle across information regimes. The curriculum differs only
-by retaining selector state and emitting the next ordinary episode
-specification. Regime-specific input composition, learner projection, and
-compiled actor front ends plug into that lifecycle; neither roster selection
-nor information regime creates a separate trainer. A learned checkpoint is
-emitted for exactly one regime/projection/front-end contract, and the learner
-interface must accept every structurally valid fixed-slot roster without an
-input-layer or simulator-schema change.
+Default direct training, researcher-defined benchmark training distributions,
+and curriculum training share one canonical SharedObs rollout, batch,
+optimizer, update, and checkpoint lifecycle. The curriculum differs only by
+retaining selector state and emitting the next ordinary episode specification.
+Roster selection does not create a separate trainer. A benchmark checkpoint is
+emitted for the canonical projection/front-end contract, and the learner
+interface must accept every structurally valid fixed-slot roster without a
+simulator-schema change or a change to the semantic actor-input contract.
 
 Every learning result records:
 
@@ -724,7 +701,8 @@ Every learning result records:
 - optimizer updates and samples consumed when applicable;
 - wall-clock and compute/hardware provenance;
 - evaluation checkpoint schedule; and
-- task, roster size, information regime, reward mode, and shaping identity.
+- task, roster size, canonical mode/projection, reward mode, and shaping
+  identity.
 
 Both environment and active-agent decision transitions are required because a
 1v1 and a 5v5 environment transition expose different amounts of agent
@@ -751,9 +729,10 @@ Report separately:
 - host capture/event/metric overhead when enabled; and
 - peak device and host memory where relevant.
 
-Any regime-specific composition, projection, or compiled actor-front-end cost
-is reported as a measured stratum of this same runtime protocol, not as
-evidence for a separate runner or evaluation stack.
+Canonical SharedObs composition, projection, and compiled actor-front-end cost
+are included in the declared runtime boundary. A separately labelled custom
+diagnostic may measure NoSharedObs compatibility, but it is not an official
+benchmark stratum or evidence for a separate runner or evaluation stack.
 
 Warm-up iterations and timed repetitions are fixed in the manifest. Evaluation
 capture must not be included in a claimed ordinary-training throughput number
@@ -801,7 +780,9 @@ Canonical V2 scenario loading and saving remain JAX-free and establish artifact
 and evidence validity, not official product acceptance. An official consumer
 must additionally invoke `validate_official_scenario_evaluation_record_v2`.
 That separately named host gate rehydrates the exact carried configuration and
-initial state and applies the current core product and curated-state validators.
+initial state, applies the current core product and curated-state validators,
+requires the canonical SharedObs mode and projection, and checks the exact
+configured-roster availability topology on every replay frame.
 No mutable draft, filename, or successful transport round trip can substitute
 for that gate.
 
@@ -857,6 +838,13 @@ Milestone 12 contract.
 World-state critic inputs and privileged evaluation snapshots are separate
 contracts and never leak into actor inputs.
 
+For official evidence, the episode mode and projection must equal the canonical
+SharedObs values defined above, and every frame's recorded matrix must equal
+the configured-active, same-team, off-diagonal matrix derived from the frozen
+roster. This official all-frame equality check is stricter than generic replay
+validation, which continues to admit dual-mode compatibility and a
+permitted SharedObs subset topology for custom work.
+
 The canonical `execution_information_mode` values are `shared_obs` and
 `no_shared_obs`; the historical design PDF's earlier disabled-sharing
 terminology is explicitly superseded without modifying that historical
@@ -871,9 +859,8 @@ SharedObs actor-input projection in the evaluation frame.
 This V1 mode and its compatible actor projection are episode-wide context
 authorities, not per-assignment fields. All configured active policy
 assignments must therefore be homogeneous. The current V1 context, replay, and
-metric-report family is immutable and rejects mixed-regime scientific claims;
-adding per-active-slot mode/projection provenance requires the Milestone 10 V2
-family described above.
+metric-report family is immutable and rejects implicit mixed execution. A25
+removes mixed-regime V2 from the current roadmap without changing V1.
 
 Milestone 6 evaluation records use a single normalized authority for submitted
 and accepted actions inside `TransitionFactsV1.action_acceptance_facts`; the
@@ -948,7 +935,9 @@ Before a suite is used for an official claim, verify:
 7. replay/model roundtrips preserve sufficient components;
 8. aggregation reproduces from raw rows without simulator-rule reconstruction;
 9. adversarial denominator and reward-gaming cases have visible companions;
-10. information regimes and privileged sources cannot leak or pool;
+10. canonical SharedObs mode, projection, and all-frame availability are exact;
+    privileged sources cannot leak, and NoSharedObs evidence cannot enter an
+    official aggregate;
 11. the four North Stars receive an explicit `PASS`, `APPROVED TRADEOFF`, or
     `BLOCKED` verdict;
 12. official/custom ownership and canonical-condition status remain separate

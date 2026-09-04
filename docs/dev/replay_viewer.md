@@ -15,7 +15,7 @@ or list operation:
 
 | Selector | Purpose |
 | --- | --- |
-| `--replay PATH` | Validate and open a local canonical replay bundle. |
+| `--replay PATH` | Validate and open a local canonical-format replay bundle. |
 | `--sample-replay NAME` | Verify and open one checked-in sample by stable launch name. |
 | `--scenario NAME` | Materialize one registered scripted demonstration in isolation, then open its validated bundle. |
 | `--list-scenarios` | List default scripted demonstrations and exit. |
@@ -196,6 +196,17 @@ Agent POV switches the recipient at the current tick; it never advances or
 mutates the artifact. Artifact identity, completion/processing evidence, PNG
 export, and metric download remain capabilities of the researcher tool in every
 visual POV.
+
+Under
+[amendment A25](../design/specification_amendments.md#a25-sharedobs-only-canonical-benchmark-execution),
+this dual-mode presentation is a reader-compatibility contract, not benchmark
+eligibility. NoSharedObs material is historical, diagnostic, or custom evidence
+and is noncanonical for new official claims. SharedObs rendering likewise does
+not confer official status: official evidence must separately prove the
+canonical actor projection and the exact configured-active, same-team,
+off-diagonal availability matrix on every recorded frame. The Replay Viewer
+continues to render both regimes and does not mutate, migrate, or relabel their
+artifacts.
 
 The SharedObs visual union follows
 [specification amendment A17](../design/specification_amendments.md#a17-sharedobs-recorded-visual-union-presentation).

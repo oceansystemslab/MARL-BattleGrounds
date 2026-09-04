@@ -31,6 +31,13 @@ V1 cannot represent SharedObs and NoSharedObs actors in the same match; a
 policy ID, a false availability row, or an "at least one actor shares"
 reinterpretation must not be used as an implicit mixed-regime encoding.
 
+[Amendment A25](../design/specification_amendments.md#a25-sharedobs-only-canonical-benchmark-execution)
+does not change that dual-mode wire contract. Readers and generic validators
+continue to accept homogeneous SharedObs and homogeneous NoSharedObs artifacts
+under their recorded V1 semantics. NoSharedObs replays remain available for
+diagnostics, custom research, and historical playback, but they are
+noncanonical evidence for new official benchmark claims.
+
 Milestone 7 makes one approved in-place expansion of the unreleased pre-alpha
 V1 evaluation/replay models. Resolved configuration now carries numeric task
 mode and Team Deathmatch score threshold, analysis frames carry authoritative
@@ -55,39 +62,31 @@ Development V1 artifacts created with 16 rows are disposable and are
 regenerated in place; there is no V2 alias, legacy loader, or compatibility
 shim. V1 is refrozen at 32 rows after this migration.
 
-The current V1 writers, readers, validators, canonical bytes, and digests stay
-unchanged. Milestone 10 must introduce an explicit future V2 context and replay
-binding before mixed per-slot execution-information assignments become an
-official artifact. V2 must use version dispatch rather than field guessing or
-silent V1 reinterpretation; post-A18 V1 artifacts retain their original bytes,
+The current V1 wire models, generic writers, readers, structural validators,
+canonical bytes, and digests stay unchanged. A25 strengthens only the separate
+official-scenario eligibility gate and removes mixed-regime V2 from the current
+roadmap. Any future mixed-capable artifact would require a separate approved
+versioned contract and version dispatch rather than field guessing or silent
+V1 reinterpretation; post-A18 V1 artifacts retain their original bytes,
 identities, and digests.
 
-That future mixed-capable normal form remains one physical episode record: one
-context, exactly `T + 1` frames, and exactly `T` transitions. It stores the
-same-epoch base observations once per frame, together with stable source
-provenance and required recipient-by-source availability, and never stores a
-materialized SharedObs tensor. The context records each configured-active
-slot's regime and versioned compositor/projection provenance; inactive slots
-remain not applicable. The availability matrix may be absent only when every
-configured active slot is NoSharedObs. When present, every NoSharedObs or
-inactive-recipient row is all false, and diagonal, cross-team, and
-inactive-source entries are false. Capture records the exact same-epoch matrix
-used by actor-input composition; replay never infers it. Reconstruction is
-selected-slot-specific: a NoSharedObs slot derives from its own base-observation
-row under its recorded projection, while a SharedObs slot uses the recorded
-same-epoch source material, that recipient's availability row, the stable
-source mapping, and its recorded compositor/projection versions. Exact
-structured SharedObs source-bank reconstruction uses the A19 policy projection;
-learned tensor/encoder materialization remains a Milestone 12 contract.
+New official evidence uses the existing homogeneous V1 record with episode
+mode `shared_obs` and actor projection
+`base-observation-plus-authorized-sensor-source-bank@1`. Every one of its
+`T + 1` frames carries an availability matrix exactly equal to the matrix
+derived from the frozen configured roster: true if and only if recipient and
+source are configured-active, share a configured team, and occupy different
+global slots. The official check is exact and all-frame, so a stable permitted
+subset and a later-frame topology change both fail official qualification.
+Configured-but-dead sources remain authorized; existing lifecycle semantics
+continue to zero their ordinary sensor material. A roster with no same-team
+off-diagonal pair legitimately produces an all-false matrix.
 
-The V2 homogeneous/mixed episode profile is derived from configured-active
-slot assignments and is never a competing stored authority. An explicit
-homogeneous-only V1-to-V2 migrator copies V1's episode-global mode and
-projection to every configured-active V2 slot, marks inactive slots not
-applicable, and preserves compatible recorded availability. It fails if the
-required versioned provenance cannot be established, cannot synthesize a mixed
-profile, emits a new V2 artifact identity/digest, and leaves the source V1
-bytes and digest unchanged. Loaders never perform this migration silently.
+This official eligibility rule is intentionally stricter than generic V1 frame
+validation. Generic SharedObs retains its existing presence and forbidden-cell
+checks and may carry a permitted subset topology; generic NoSharedObs continues
+to forbid the matrix. Neither case changes the schema or materializes a
+SharedObs tensor.
 
 The standard replay never contains raw `EnvState`, PRNG keys, policy logits or
 hidden state, optimizer state, learner batches, renderer summaries, local file
@@ -249,9 +248,8 @@ view. A19 additionally permits exact on-demand reconstruction of the structured
 policy source bank from recorded base rows, source mapping, lifecycle, and the
 exact availability matrix; replay still stores no materialized bank. Learned
 encoder/tensor export remains unavailable until Milestone 12. Those
-alternatives are episode-global in V1. A future
-mixed-capable V2 selects the branch from the chosen actor's slot assignment;
-another actor's regime never authorizes or blocks that selected slot's export.
+alternatives are episode-global in V1. No per-slot mode is inferred during
+export.
 
 `ActorPovReplayContentV1` is the independently privacy-testable payload. It
 contains one active actor's exact recorded base-observation and action-mask row,
@@ -299,7 +297,8 @@ surface is:
 - `save_scenario_evaluation_record_v2` and
   `load_scenario_evaluation_record_v2` for the versioned fixed-slot companion,
   plus `validate_official_scenario_evaluation_record_v2` for the mandatory
-  core-aware product and curated-state acceptance gate.
+  core-aware product/curated-state acceptance gate and canonical SharedObs
+  mode, projection, and all-frame availability check.
 
 The filename pair is derived locally, never serialized:
 
@@ -330,7 +329,9 @@ establishes canonical bytes and replay/report/scenario evidence joins but does
 not by itself confer official status. Official consumers must subsequently call
 `validate_official_scenario_evaluation_record_v2`, whose deliberately separate
 host boundary rehydrates and checks the carried configuration and curated state
-against current core authorities. Evaluation-owned V1 wire dimensions are
+against current core authorities, requires canonical SharedObs mode and
+projection, and checks the exact configured-roster availability topology on
+every frame. Evaluation-owned V1 wire dimensions are
 frozen at the post-A18 values for artifact decoding and checked against the
 current core dimensions in ordinary tests; changing them again requires an
 explicit schema migration. The V1

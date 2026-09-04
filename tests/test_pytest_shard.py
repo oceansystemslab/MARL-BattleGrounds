@@ -637,19 +637,19 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
         (
             tdm_prefix
             + "test_eager_jit_vmap_key_forms_and_x64_keep_exact_actions_and_dtypes",
-            9,
-            1,
+            4,
+            7,
         ),
         (
             tdm_prefix
             + "test_policy_uses_exact_masks_and_ignores_misleading_marginals",
-            10,
+            11,
             4,
         ),
         (
             tdm_prefix
             + "test_dead_inactive_and_stunned_masks_produce_the_canonical_inert_action",
-            5,
+            9,
             2,
         ),
         (
@@ -670,7 +670,7 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
             7,
             4,
         ),
-        ("file:tests/test_shared_obs_runtime.py", 11, 9),
+        ("file:tests/test_shared_obs_runtime.py", 11, 3),
     )
     assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset(
         {

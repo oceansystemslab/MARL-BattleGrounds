@@ -113,19 +113,19 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
             (
                 "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
                 "test_eager_jit_vmap_key_forms_and_x64_keep_exact_actions_and_dtypes",
-                9,
-                1,
+                4,
+                7,
             ),
             (
                 "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
                 "test_policy_uses_exact_masks_and_ignores_misleading_marginals",
-                10,
+                11,
                 4,
             ),
             (
                 "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
                 "test_dead_inactive_and_stunned_masks_produce_the_canonical_inert_action",
-                5,
+                9,
                 2,
             ),
             (
@@ -154,7 +154,7 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
             (
                 "file:tests/test_shared_obs_runtime.py",
                 11,
-                9,
+                3,
             ),
         )
     },

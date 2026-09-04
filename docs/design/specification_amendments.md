@@ -1554,3 +1554,105 @@ single migration; deletion of its backup requires separate owner approval.
 This amendment changes no `core/` source or contract, simulator behavior,
 Replay Viewer production code, Replay schema, replay fixture, or replay
 artifact.
+
+## A25. SharedObs-only canonical benchmark execution
+
+**Classification:** approved Paper 1 benchmark-contract consolidation and
+official-evidence qualification.
+**Supersedes:** A1, A7, A11, A12, A14, A19, and A20 only where their forward
+requirements make NoSharedObs a separately reported official regime, require
+dual-regime official cells or checkpoints, or require a mixed-regime V2
+artifact family. It preserves their implemented SharedObs semantics, common
+rollout lifecycle, local observations, replay reconstruction, historical
+calibration record, generic dual-mode compatibility, and regime-independent
+saved scenarios.
+
+Paper 1 has one canonical execution-time actor-information contract:
+
+```text
+execution_information_mode = shared_obs
+actor_projection = base-observation-plus-authorized-sensor-source-bank@1
+```
+
+Every frame of an official replay carries the exact Boolean availability
+matrix implied by its frozen configured roster. For recipient slot `r` and
+source slot `s`, availability is true exactly when both slots are
+configured-active, both have the same configured team identity, and `r != s`.
+All other entries are false. This is a complete equality requirement, not only
+a forbidden-cell check: an arbitrary subset of permitted teammate edges, an
+all-false matrix for a multi-agent team, or any mid-episode change is
+noncanonical. An all-false matrix remains canonical when the configured roster
+genuinely has no same-team off-diagonal pair, such as a 1v1 episode.
+
+The matrix is derived from immutable configured-roster topology, never from
+current alive state, health, visibility, score, controller identity, or frame
+index. A configured-but-dead teammate remains an authorized source; its
+ordinary sensor material remains zeroed by the existing lifecycle contract.
+Official validation checks the exact matrix on every replay frame so the
+recorded actor-information topology cannot silently narrow or change during an
+episode.
+
+Official baseline training and evaluation, controlled-scenario evaluation,
+tournament and cross-play evaluation, Elo or other rating inputs, leaderboards,
+and Paper 1 reporting use this canonical SharedObs contract exclusively.
+Execution information is invariant provenance for those results, not an
+evaluation cell, aggregation stratum, ablation axis, or symmetry direction.
+There are no official NoSharedObs baselines, checkpoints, scenario strata,
+tournament cells, or Paper 1 claims, and the current roadmap contains no
+mixed-regime V2 work.
+
+NoSharedObs remains a supported generic execution mode for diagnostics, custom
+research, and historical replay compatibility. Existing NoSharedObs evidence
+remains parseable, semantically valid under its versioned generic contract, and
+renderable, but it is ineligible as new official benchmark evidence. Generic
+SharedObs validation may likewise accept a structurally permitted subset
+topology; only the official eligibility boundary requires the complete matrix.
+The V1 wire format, its episode-global mode and projection fields, its
+dual-mode readers, and its prohibition on implicit mixed execution remain
+unchanged. A future mixed-regime artifact would require a new, separately
+approved amendment and versioned contract rather than being inferred from this
+amendment.
+
+Maps and scenarios remain information-regime-independent authored assets.
+Loading one does not mutate or duplicate it; an official execution owner binds
+the canonical SharedObs mode, projection, and availability topology after the
+asset has been independently normalized and validated. KOTH and CTF inherit
+this same task-independent actor-information contract when their work resumes
+after Paper 1.
+
+Centralized training is a separate authority. A critic may consume explicitly
+authorized training-only team or privileged information, but actor action
+selection still consumes only the canonical SharedObs input above. Critic
+inputs may not be relabelled as actor availability or enter an evaluation
+frame's actor projection.
+
+Milestone 12 freezes the actor-input semantic contract: categorical identities,
+domains, sentinel meanings, reference-encoder conventions, fixed shapes,
+slot/source identities, masks, and provenance. Its canonical learned-policy
+boundary is:
+
+```text
+recipient base observation
++ authorized same-epoch teammate source bank
++ exact recipient availability row
++ recipient/global-slot identity
+→ researcher-selected or benchmark reference encoder
+→ policy network
+```
+
+The reference encoder supports shipped baselines; researchers may replace it
+with one-hot, embedding, attention, or another representation without changing
+the authorized input contract. This amendment therefore standardizes
+information, not neural architecture.
+
+The built-in Random controller remains a diagnostic and quality-control policy.
+It is not an official baseline unless a later amendment explicitly promotes it
+into an official reported baseline family. Milestone 10 must reconcile
+delivered common-pipeline work, work superseded here, and any genuinely
+unfinished runner contract; removal of obsolete dual-regime requirements alone
+does not complete that milestone.
+
+This amendment changes no `core/` source or contract, simulator behavior,
+observation, mask, transition, reward, saved DevClient map or scenario, replay
+schema or artifact, generic `ExecutionInformationMode` union, SharedObs or
+NoSharedObs policy implementation, or Replay Viewer behavior.

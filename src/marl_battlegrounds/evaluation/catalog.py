@@ -81,6 +81,9 @@ from marl_battlegrounds.core.types import (
     EnvState,
     ResolvedAgentProfile,
 )
+from marl_battlegrounds.evaluation.actor_projection import (
+    SHARED_OBS_ACTOR_PROJECTION_V1,
+)
 from marl_battlegrounds.evaluation.models import (
     CATALOG_SCHEMA_ID,
     CATALOG_SCHEMA_VERSION,
@@ -618,6 +621,13 @@ def _validate_official_scenario_context_v2(  # pyright: ignore[reportUnusedFunct
         raise TypeError(
             "initial_frame must be an EvaluationFrameV1, not "
             f"{type(initial_frame).__name__}"
+        )
+    if context.execution_information_mode != "shared_obs":
+        raise ValueError("official scenario evaluation requires shared_obs execution")
+    if context.actor_projection != SHARED_OBS_ACTOR_PROJECTION_V1:
+        raise ValueError(
+            "official scenario evaluation requires "
+            "base-observation-plus-authorized-sensor-source-bank version 1"
         )
     if initial_frame.episode_id != context.identity.episode_id:
         raise ValueError("initial frame episode identity must match context")
