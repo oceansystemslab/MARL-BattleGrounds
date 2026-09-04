@@ -157,7 +157,8 @@ const cases = [
         },
         {
           label: "Primary Weakness",
-          value: "No raw healing and lower maximum health than the Warrior.",
+          value:
+            "Melee class that lacks a gap closer like the Warrior's 'Charge', so is heavily reliant on surrounding obstacles to execute flanking/ambush maneuvers and secure kills.",
         },
       ],
       ultimate: {

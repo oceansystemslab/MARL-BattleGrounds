@@ -94,7 +94,7 @@ const CLASS_DOCUMENTATION = Object.freeze({
       tacticalRow("Primary Strength", "Highest canonical base movement speed."),
       tacticalRow(
         "Primary Weakness",
-        "No raw healing and lower maximum health than the Warrior.",
+        "Melee class that lacks a gap closer like the Warrior's 'Charge', so is heavily reliant on surrounding obstacles to execute flanking/ambush maneuvers and secure kills.",
       ),
     ],
     ultimateName: "Crippling Poison",

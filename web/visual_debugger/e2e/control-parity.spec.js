@@ -1531,6 +1531,32 @@ test("Live Mage Burst retains every authorized Mage and Warrior aura modifier", 
       `#battlefield .cooldown-cell[data-presentation-key="${inventories.controlledKey}"]`,
     ),
   ).not.toHaveCount(0);
+
+  await page.locator("#battlefield-shell").evaluate((shell) => {
+    if (!(shell instanceof HTMLElement)) {
+      throw new TypeError("Battlefield shell is unavailable.");
+    }
+    shell.style.width = "50px";
+    shell.style.height = "70px";
+    shell.style.minHeight = "0";
+    const battlefield = shell.querySelector("#battlefield");
+    if (!(battlefield instanceof SVGSVGElement)) {
+      throw new TypeError("Battlefield is unavailable.");
+    }
+    battlefield.style.width = "50px";
+    battlefield.style.height = "70px";
+    battlefield.style.minWidth = "0";
+    battlefield.style.minHeight = "0";
+  });
+  const remoteCooldown = page.locator(
+    `#battlefield .cooldown-cell[data-presentation-key="${inventories.controlledKey}"][data-compact-fallback="true"]`,
+  );
+  await expect(remoteCooldown).toHaveCount(1);
+  await expect(
+    page.locator('#battlefield .required-dock-fallback[data-kind="cooldown"]'),
+  ).toHaveCount(0);
+  await expect(remoteCooldown.locator(".cooldown-cell__icon")).toBeVisible();
+  await expect(remoteCooldown.locator(".cooldown-cell__value")).toHaveText("30");
 });
 
 test("WASD followed immediately by Enter submits the installed draft once", async ({
