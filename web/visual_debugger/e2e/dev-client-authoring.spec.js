@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
@@ -1077,6 +1077,130 @@ test("authoring persists through restart and drives same-start Combat comparison
       });
     }
 
+    await expect(
+      page.locator("#devclient-scenario-controller-option"),
+    ).toHaveJSProperty("disabled", true);
+    await expect(
+      page.locator('#devclient-team-a-controller option[value="scenario_1"]'),
+    ).toHaveCount(0);
+    await applyLiveCommand(page, () =>
+      page.locator("#devclient-information-mode").selectOption("shared_obs"),
+    );
+    await expect(
+      page.locator("#devclient-scenario-controller-option"),
+    ).toHaveJSProperty("disabled", false);
+    const fixture = JSON.parse(
+      await readFile(
+        new URL("../../../tests/fixtures/scenario_1_r34.json", import.meta.url),
+        "utf8",
+      ),
+    );
+    // Import only the checked-in physical fixture into this test's isolated store.
+    const scenarioSave = await page.request.post(
+      new URL("/api/dev/authoring/command", devClient.url).href,
+      {
+        headers: {
+          "X-MARL-Debugger-Token":
+            new URLSearchParams(new URL(devClient.url).hash.slice(1)).get("token") ??
+            "",
+        },
+        data: { command_type: "save_as", draft: fixture, asset_id: "e2e_scenario_1" },
+      },
+    );
+    expect(scenarioSave.status()).toBe(200);
+    expect((await scenarioSave.json()).ok).toBe(true);
+    await page.getByRole("button", { name: "Scenarios", exact: true }).click();
+    await selectPersistedAsset(page, "#authoring-saved-draft-select", "e2e_scenario_1");
+    await applyAuthoringCommand(page, "open", () =>
+      page.locator("#authoring-open").click(),
+    );
+    const currentScenarioLoad = await applyAuthoringCommand(page, "open_in_debug", () =>
+      page.locator("#authoring-open-debug").click(),
+    );
+    expect(currentScenarioLoad.ok).toBe(true);
+    await expect(page.locator("#step-value")).toHaveText("295");
+    await applyLiveCommand(page, () =>
+      page.locator("#devclient-team-b-controller").selectOption("scenario_1"),
+    );
+    await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
+      "scenario_1",
+    );
+    await expect(page.locator("#devclient-no-shared-option")).toHaveJSProperty(
+      "disabled",
+      true,
+    );
+    await expect(page.locator("#devclient-scenario-controller-help")).toHaveText(
+      "Scenario controllers require SharedObs.",
+    );
+    for (const teamA of ["manual", "scripted_tdm", "random_valid"]) {
+      await applyLiveCommand(page, () =>
+        page.locator("#devclient-team-a-controller").selectOption(teamA),
+      );
+      await expect(page.locator("#step-value")).toHaveText("295");
+      const priestB = page.locator('#roster .roster-row[data-team="team-b"]').filter({
+        has: page.locator(".roster-class", { hasText: "Priest" }),
+      });
+      await applyLiveCommand(page, () =>
+        priestB.locator(".roster-primary-action").click(),
+      );
+      await expect(page.locator("#command-deck")).toHaveAttribute(
+        "data-policy-controller-read-only",
+        "true",
+      );
+      await expect(page.locator("#command-controlled-actor")).toContainText(
+        "Scenario 1 Controller",
+      );
+      await expect(page.locator("#command-target-select")).toBeDisabled();
+      if (teamA === "manual") {
+        const hunterA = page.locator('#roster .roster-row[data-team="team-a"]').filter({
+          has: page.locator(".roster-class", { hasText: "Hunter" }),
+        });
+        await applyLiveCommand(page, () =>
+          hunterA.locator(".roster-primary-action").click(),
+        );
+        await expect(page.locator("#command-deck")).toHaveAttribute(
+          "data-policy-controller-read-only",
+          "false",
+        );
+        await applyLiveCommand(page, () =>
+          page.getByRole("button", { name: "Move east", exact: true }).click(),
+        );
+        await expect(
+          page.locator('#command-deck button[data-move-action="3"]'),
+        ).toHaveAttribute("aria-pressed", "true");
+      }
+      await expect(page.locator("#submit-turn-button")).toBeEnabled();
+      await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
+      await expect(page.locator("#step-value")).toHaveText("296");
+      await applyLiveCommand(page, () => page.locator("#reset-button").click());
+      await expect(page.locator("#step-value")).toHaveText("295");
+      await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
+        "scenario_1",
+      );
+    }
+
+    await selectPersistedAsset(page, "#devclient-scenario-select", scenarioId);
+    const incompatible = await applyAuthoringCommand(page, "open_in_debug", () =>
+      page.locator("#devclient-scenario-load").click(),
+    );
+    expect(incompatible.ok).toBe(false);
+    await expect(page.locator("#step-value")).toHaveText("295");
+    await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
+      "scenario_1",
+    );
+    await selectPersistedAsset(page, "#devclient-scenario-select", "e2e_scenario_1");
+    const savedScenarioLoad = await applyAuthoringCommand(page, "open_in_debug", () =>
+      page.locator("#devclient-scenario-load").click(),
+    );
+    expect(savedScenarioLoad.ok).toBe(true);
+    await expect(page.locator("#devclient-team-a-controller")).toHaveValue(
+      "random_valid",
+    );
+    await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
+      "scenario_1",
+    );
+    await expect(page.locator("#step-value")).toHaveText("295");
+
     await stopDebugger(devClient.process);
     devClient = await startIsolatedDevClient({ artifactRoot });
     await page.goto(devClient.url);
@@ -1107,6 +1231,17 @@ test("authoring persists through restart and drives same-start Combat comparison
     await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
     await expect(page.locator("#step-value")).toHaveText("8");
     await expect(page.locator("#authoring-shell")).toBeHidden();
+    await selectPersistedAsset(page, "#devclient-scenario-select", "e2e_scenario_1");
+    await applyAuthoringCommand(page, "open_in_debug", () =>
+      page.locator("#devclient-scenario-load").click(),
+    );
+    await expect(page.locator("#step-value")).toHaveText("295");
+    await applyLiveCommand(page, () =>
+      page.locator("#devclient-team-b-controller").selectOption("scenario_1"),
+    );
+    await expect(page.locator("#step-value")).toHaveText("295");
+    await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
+    await expect(page.locator("#step-value")).toHaveText("296");
   } finally {
     await stopDebugger(devClient?.process ?? null);
     await rm(artifactRoot, { recursive: true, force: true });

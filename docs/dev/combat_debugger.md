@@ -138,15 +138,28 @@ NoSharedObs remains selectable for diagnostics, custom research, and
 compatibility checks. Changing either controller or the information regime
 resets the exact loaded scenario and seed before comparison.
 
-The current controller selectors are not a scenario-pressure-controller UI.
-Future official scenario evaluations will bind a versioned deterministic,
-reactive pressure controller through their separate evaluation definition and
-apply the same controller to every treatment and matched-ablation arm. Saved
-scenario assets remain controller-independent, and the DevClient does not
-silently install those future evaluation controllers when a scenario is
-loaded. See
-[amendment A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
-for that planned evaluation boundary.
+Team B additionally offers **Scenario 1 Controller**, a deterministic reactive
+pressure controller. Load your saved Scenario 1, leave Team A on Manual, select
+SharedObs, and select Scenario 1 Controller on Team B. Submit advances one turn;
+Reset restores the exact loaded starting state and seed. Team B remains
+inspectable, but its action inputs are read-only. Team A may alternatively use
+the existing Scripted TDM or Random controllers.
+
+Scenario 1 Controller is never available on Team A or under NoSharedObs. It
+requires an interactive TDM snapshot with one to five remaining transitions.
+Team B's decision-making agents must be Mage, Rogue, or Priest; configured
+Warrior/Hunter slots must start dead and cannot revive before the final
+successor. Renamed or copied compatible scenarios are accepted. An incompatible
+selection or load leaves the current session unchanged and explains the issue;
+select a normal Team B controller before loading an unsupported arena.
+
+Loading a scenario does not select its pressure controller automatically, and
+saved assets remain controller-independent. Future official evaluations bind
+the versioned controller through a separate evaluation definition and apply the
+same controller to every treatment and matched-ablation arm. DevClient play
+remains diagnostic, not official evidence. See
+[A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
+and [A28](../design/specification_amendments.md#a28-scenario-pressure-controllers-in-the-devclient).
 
 Saved maps and scenarios do not encode an information regime. Loading one
 preserves its authored bytes and binds the selected regime only for that run.

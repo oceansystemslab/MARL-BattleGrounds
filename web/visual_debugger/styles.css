@@ -2867,7 +2867,8 @@ select {
 }
 
 html[data-team-b-controller="scripted_tdm"] .roster-row[data-team="team-b"],
-html[data-team-b-controller="random_valid"] .roster-row[data-team="team-b"] {
+html[data-team-b-controller="random_valid"] .roster-row[data-team="team-b"],
+html[data-team-b-controller="scenario_1"] .roster-row[data-team="team-b"] {
   background: rgb(127 29 29 / 10%);
   box-shadow: inset 0 0 0 1px rgb(248 113 113 / 12%);
 }

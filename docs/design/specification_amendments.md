@@ -1928,3 +1928,48 @@ content identities, code and environment revisions, seeds, resource and
 failure records, and the immutable manifests that joined them. These controls
 support maintainer reproduction and eligibility assessment; they do not claim
 to make scientific misconduct technically impossible.
+
+## A28. Scenario pressure controllers in the DevClient
+
+**Classification:** narrow developer-tool integration of A26's reactive
+pressure controllers.
+**Supersedes:** A22/A23's symmetric controller-choice envelope only to allow
+explicit scenario-pressure choices on Team B. Existing Manual, Scripted TDM,
+and Random choices remain symmetric. A25/A26's information, evaluation, and
+scientific-integrity boundaries remain unchanged.
+
+The DevClient now exposes **Scenario 1 Controller** on Team B only. It is a
+deterministic, reactive SharedObs policy, not a fixed action tape or a generic
+Scripted TDM alias. Team A cannot select it. NoSharedObs cannot execute it.
+The controller consumes only canonical same-epoch SharedObs and each actor's
+exact current mask. Both teams' actions still enter one ordinary simulator step.
+
+Scenario 1's controller supports interactive TDM snapshots with one to five
+remaining transitions and Mage/Rogue/Priest Team B decision-making slots.
+Configured Warrior/Hunter slots must start dead and cannot revive before the
+final successor. Compatibility is checked against the immutable initial
+snapshot, not the asset name, ID, or revision. Renamed and copied compatible
+scenarios work. Incompatible controller or scenario replacement fails without
+changing the installed session; no controller or regime is silently substituted.
+
+Saved scenarios remain controller-independent. Loading one does not install a
+pressure controller automatically. Controller changes and Reset retain the
+existing exact-snapshot and seed semantics. Policy-controlled agents remain
+inspectable while their action inputs are read-only.
+
+The controller has its own versioned, content-addressed rule identity bound to
+the existing source revision. Diagnostic provenance distinguishes it from
+generic Scripted TDM, Random, and manual input and records deterministic policy
+execution. Existing controllers retain their previous content identities.
+Replay wire contracts and Replay Viewer responsibilities are unchanged.
+
+The checked-in Scenario 1 setup is a test-only physical fixture, not an official
+evaluation-suite release. Neither DevClient play nor a diagnostic recording
+automatically qualifies as official scenario evidence. Future evaluation
+definitions bind the controller through `pressure_protocol` as specified by
+A26; this amendment does not implement those evaluation pipelines.
+
+Small reusable target-selection and movement helpers may support later
+diagnostic policy development. Scenario-derived rules are not silently admitted
+to official training, and performance on the originating scenario must not be
+presented as uncontaminated evaluation of a policy engineered from it.

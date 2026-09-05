@@ -2191,7 +2191,7 @@ test("live presentation authority is exact and audience-scoped", () => {
   }
 });
 
-test("live combat configuration accepts Random independently for either team", () => {
+test("live combat configuration preserves Random and restricts scenarios to SharedObs Team B", () => {
   for (const [teamAController, teamBController, source] of [
     ["random_valid", "manual", researcherFrame()],
     ["scripted_tdm", "random_valid", povFrame()],
@@ -2212,6 +2212,24 @@ test("live combat configuration accepts Random independently for either team", (
     () => normalizeLiveDebuggerFrameV2(malformed),
     /combat configuration is invalid/u,
   );
+  const scenario = researcherFrame();
+  scenario.combat_configuration.team_b_controller = "scenario_1";
+  scenario.combat_configuration.execution_information_mode = "shared_obs";
+  assert.equal(
+    normalizeLiveDebuggerFrameV2(scenario).combat_configuration.team_b_controller,
+    "scenario_1",
+  );
+  for (const invalid of [
+    { team_a_controller: "scenario_1" },
+    { execution_information_mode: "no_shared_obs" },
+  ]) {
+    const changed = structuredClone(scenario);
+    Object.assign(changed.combat_configuration, invalid);
+    assert.throws(
+      () => normalizeLiveDebuggerFrameV2(changed),
+      /combat configuration is invalid/u,
+    );
+  }
 });
 
 test("raw researcher ScenarioMetadata is exact, typed, and never coerced", () => {

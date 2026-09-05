@@ -231,7 +231,7 @@ def _context_policy_execution_included(context: EvaluationEpisodeContextV1) -> b
     """Derive actual policy execution from exact per-slot assignments."""
     return any(
         isinstance(row, AssignedPolicySlotV1)
-        and row.policy_kind in ("scripted_tdm", "random_valid")
+        and row.policy_kind in ("scripted_tdm", "random_valid", "scenario_1")
         for row in context.policy_assignments
     )
 
