@@ -139,24 +139,25 @@ compatibility checks. Changing either controller or the information regime
 resets the exact loaded scenario and seed before comparison.
 
 Team B additionally offers **Reactive MRP Controller**, a deterministic reactive
-pressure controller shared by Scenarios 1 and 2. Load either saved scenario,
+pressure controller with verified Scenario 1 and 2 witnesses. Load any valid
+interactive scenario or map preview (or keep the default diagnostic arena),
 leave Team A on Manual, select SharedObs, and select Reactive MRP Controller on
 Team B. Submit advances one turn; Reset restores the exact loaded starting
 state and seed. Team B remains inspectable, but its action inputs are read-only.
 Team A may alternatively use
 the existing Scripted TDM or Random controllers.
 
-Reactive MRP Controller is never available on Team A or under NoSharedObs. It
-requires an interactive TDM snapshot with one to five remaining transitions.
-Team B's decision-making agents must be Mage, Rogue, or Priest; configured
-Warrior/Hunter slots must start dead and cannot revive before the final
-successor. Renamed or copied compatible scenarios are accepted. An incompatible
-selection or load leaves the current session unchanged and explains the issue;
-select a normal Team B controller before loading an unsupported arena.
+Reactive MRP Controller is never available on Team A or under NoSharedObs.
+There is no task, horizon, roster, score, or respawn-schedule restriction on
+valid interactive setups. Mage, Rogue, and Priest use the existing reactive
+rules; Warrior and Hunter stay idle (Stay/no-combat), including after revival.
+Registered fixed-frame diagnostics remain separate. Expected configuration
+rejections display a notice without faulting the service or requiring reconnect;
+the current session and recording progress remain intact.
 
-This is a display-label change: the existing `scenario_1` controller identity,
-behavior and provenance remain unchanged. Eligibility depends on the snapshot,
-not its name or scenario number.
+The existing `scenario_1` controller identity and behavior remain unchanged.
+Selecting it on another setup does not qualify that scenario or promise the
+same outcome as the verified Scenario 1/2 sequences.
 
 Loading a scenario does not select its pressure controller automatically, and
 saved assets remain controller-independent. Future official evaluations bind
@@ -164,7 +165,7 @@ the versioned controller through a separate evaluation definition and apply the
 same controller to every treatment and matched-ablation arm. DevClient play
 remains diagnostic, not official evidence. See
 [A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
-and [A28](../design/specification_amendments.md#a28-scenario-pressure-controllers-in-the-devclient).
+and [A29](../design/specification_amendments.md#a29-unrestricted-interactive-reactive-mrp-selection).
 
 Saved maps and scenarios do not encode an information regime. Loading one
 preserves its authored bytes and binds the selected regime only for that run.

@@ -35,18 +35,21 @@ regression controller; Random is diagnostic quality-control tooling. Neither is
 an official baseline, Big 12 entrant, or scenario pressure controller.
 Team B additionally offers **Reactive MRP Controller** under SharedObs only.
 Scenarios 1 and 2 share this unchanged controller (internal identity
-`scenario_1`). Load either scenario, keep Team A Manual, choose that Team B
+`scenario_1`). Load any valid interactive scenario or map preview (or keep the
+default diagnostic arena), keep Team A Manual, choose that Team B
 controller, and submit turns; Reset restores the exact loaded starting state.
-The controller requires a compatible short TDM snapshot and is never selectable
-for Team A.
-Incompatible selections or loads leave the current session unchanged.
+There is no task, horizon, roster, or respawn restriction. Mage/Rogue/Priest use
+their existing rules; Warrior/Hunter stay idle, including after revival.
+Expected configuration rejections leave the session and service healthy and
+show a notice without requiring reconnect. Registered fixed-frame diagnostics
+remain separate, and Reactive MRP is never selectable for Team A.
 See the [Combat Debugger guide](combat_debugger.md#loading-saved-scenarios-and-map-previews)
-for its roster and horizon requirements.
+for the execution boundaries and loading workflow.
 Future official scenario evaluations bind pressure controllers through separate
 evaluation definitions while saved scenarios remain controller-independent.
 DevClient use remains diagnostic. See
 [A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
-and [A28](../design/specification_amendments.md#a28-scenario-pressure-controllers-in-the-devclient).
+and [A29](../design/specification_amendments.md#a29-unrestricted-interactive-reactive-mrp-selection).
 Save is the only way the DevClient persists asset content; it
 creates durable numbered local revisions and never autosaves. Every applicable
 selector exposes every latest revision in numeric-aware asset-ID order through

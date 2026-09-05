@@ -375,6 +375,60 @@ test("authoring persists through restart and drives same-start Combat comparison
     await expect(page.locator("#authoring-shell")).toBeHidden();
     await page.evaluate(() => window.scrollTo(0, 0));
 
+    await expect(page.locator("#devclient-scenario-controller-help")).toHaveText(
+      "Reactive Mage/Rogue/Priest behavior. Warrior and Hunter stay idle. Team B and SharedObs only.",
+    );
+    // Exercise browser recovery with a real unchanged-frame no_op envelope.
+    // Backend service/HTTP tests independently exercise actual rejection.
+    await page.route(
+      "**/api/command",
+      async (route) => {
+        const request = route.request().postDataJSON();
+        expect(request.command.command_type).toBe("set_combat_configuration");
+        const response = await route.fetch({
+          postData: {
+            ...request,
+            command: { ...request.command, team_b_controller: "manual" },
+          },
+        });
+        const payload = await response.json();
+        expect(payload.result).toBe("no_op");
+        await route.fulfill({
+          response,
+          json: {
+            ...payload,
+            notice:
+              "This interactive configuration is unavailable; choose another controller.",
+          },
+        });
+      },
+      { times: 1 },
+    );
+    await applyLiveCommand(page, () =>
+      page.locator("#devclient-team-b-controller").selectOption("scenario_1"),
+    );
+    await expect(page.locator("#devclient-team-b-controller")).toHaveValue("manual");
+    await expect(page.locator("#notice")).toHaveText(
+      "This interactive configuration is unavailable; choose another controller.",
+    );
+    await expect(page.locator("#step-value")).toHaveText("0");
+    await applyLiveCommand(page, () =>
+      page.locator("#devclient-team-b-controller").selectOption("scenario_1"),
+    );
+    await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
+      "scenario_1",
+    );
+    await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
+    await expect(page.locator("#step-value")).toHaveText("1");
+    await applyLiveCommand(page, () => page.locator("#reset-button").click());
+    await expect(page.locator("#step-value")).toHaveText("0");
+    await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
+      "scenario_1",
+    );
+    await applyLiveCommand(page, () =>
+      page.locator("#devclient-team-b-controller").selectOption("manual"),
+    );
+
     const initialMap = await expectNoPrompts(page, () =>
       applyAuthoringCommand(page, "new_map", () =>
         page.getByRole("button", { name: "Maps", exact: true }).click(),
@@ -1130,7 +1184,7 @@ test("authoring persists through restart and drives same-start Combat comparison
       true,
     );
     await expect(page.locator("#devclient-scenario-controller-help")).toHaveText(
-      "Scenario controllers require SharedObs.",
+      "Reactive Mage/Rogue/Priest behavior. Warrior and Hunter stay idle. Team B and SharedObs only.",
     );
     for (const teamA of ["manual", "scripted_tdm", "random_valid"]) {
       await applyLiveCommand(page, () =>
@@ -1180,14 +1234,53 @@ test("authoring persists through restart and drives same-start Combat comparison
     }
 
     await selectPersistedAsset(page, "#devclient-scenario-select", scenarioId);
-    const incompatible = await applyAuthoringCommand(page, "open_in_debug", () =>
+    const longScenarioLoad = await applyAuthoringCommand(page, "open_in_debug", () =>
       page.locator("#devclient-scenario-load").click(),
     );
-    expect(incompatible.ok).toBe(false);
-    await expect(page.locator("#step-value")).toHaveText("295");
+    expect(longScenarioLoad.ok).toBe(true);
+    await expect(page.locator("#step-value")).toHaveText("7");
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
       "scenario_1",
     );
+    await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
+    await expect(page.locator("#step-value")).toHaveText("8");
+    await applyLiveCommand(page, () => page.locator("#reset-button").click());
+    await expect(page.locator("#step-value")).toHaveText("7");
+
+    await page.getByRole("button", { name: "Scenarios", exact: true }).click();
+    await selectPersistedAsset(page, "#authoring-saved-draft-select", scenarioId);
+    await applyAuthoringCommand(page, "open", () =>
+      page.locator("#authoring-open").click(),
+    );
+    const longCurrentLoad = await applyAuthoringCommand(page, "open_in_debug", () =>
+      page.locator("#authoring-open-debug").click(),
+    );
+    expect(longCurrentLoad.ok).toBe(true);
+    await expect(page.locator("#step-value")).toHaveText("7");
+    await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
+      "scenario_1",
+    );
+
+    await page.getByRole("button", { name: "Maps", exact: true }).click();
+    await expectAuthoringIdle(page);
+    const reactiveMapPreview = await applyAuthoringCommand(page, "open_in_debug", () =>
+      page.locator("#authoring-open-debug").click(),
+    );
+    expect(reactiveMapPreview.ok).toBe(true);
+    expect(reactiveMapPreview.debug_load).toMatchObject({
+      asset_kind: "map",
+      source_kind: "current_buffer",
+      debug_profile: "default_tdm_map_preview",
+      scenario_name: "Default TDM map preview",
+    });
+    await expect(page.locator("#step-value")).toHaveText("0");
+    await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
+      "scenario_1",
+    );
+    await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
+    await expect(page.locator("#step-value")).toHaveText("1");
+    await applyLiveCommand(page, () => page.locator("#reset-button").click());
+    await expect(page.locator("#step-value")).toHaveText("0");
     await selectPersistedAsset(page, "#devclient-scenario-select", "e2e_scenario_1");
     const savedScenarioLoad = await applyAuthoringCommand(page, "open_in_debug", () =>
       page.locator("#devclient-scenario-load").click(),

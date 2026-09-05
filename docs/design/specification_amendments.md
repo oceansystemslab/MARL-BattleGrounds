@@ -1973,3 +1973,38 @@ Small reusable target-selection and movement helpers may support later
 diagnostic policy development. Scenario-derived rules are not silently admitted
 to official training, and performance on the originating scenario must not be
 presented as uncontaminated evaluation of a policy engineered from it.
+
+## A29. Unrestricted interactive Reactive MRP selection
+
+**Classification:** narrow developer-tool availability and error-handling fix.
+**Supersedes:** A28's TDM-only, one-to-five-transition, and restricted
+Warrior/Hunter lifecycle requirements. Team B-only and SharedObs-only execution,
+the versioned policy rules, and A25/A26's evaluation boundaries remain intact.
+
+The DevClient's **Reactive MRP Controller** is available in every valid
+interactive setup, including no-task diagnostic arenas, TDM map previews,
+current authoring snapshots, and saved scenarios of any valid horizon or roster.
+It is not a replacement for registered fixed-frame diagnostics. No scenario
+name, score, remaining horizon, or respawn schedule gates its selection.
+
+Mage, Rogue, and Priest use their existing deterministic reactive rules.
+Warrior and Hunter retain the existing Stay/no-combat fallback, even when alive
+or revived during play; their future rules require separate design approval.
+The selector explains this limitation. The internal `scenario_1` identifier,
+controller version, canonical descriptor, and action-source contract are
+unchanged. Task provenance continues to identify the actual loaded task;
+diagnostic arenas are not relabelled TDM.
+
+Expected controller-configuration rejections return the existing nonfatal
+unchanged-frame notice response. They preserve the installed session, pending
+actions, revision, seed, generation, and recording progress without faulting
+the service or requiring reconnect. This does not suppress unexpected policy,
+simulation, capture, or presentation failures. Invalid protocol requests remain
+rejected before command execution.
+
+Controller changes and Reset retain exact initial-snapshot/seed behavior.
+Loading another asset preserves installed controllers; no controller or regime
+is silently substituted. Recorded-progress discard confirmation remains
+explicit. Saved assets, schemas, Core, policy algorithms, and Replay Viewer
+responsibilities are unchanged. Wider diagnostic availability neither qualifies
+Scenario 3 nor extends the measured Scenario 1/2 witnesses to other setups.

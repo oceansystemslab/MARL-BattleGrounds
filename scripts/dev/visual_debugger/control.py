@@ -16,9 +16,6 @@ from marl_battlegrounds.core.types import (
     MOVE_STAY,
     NUM_MOVE_ACTIONS,
     NUM_TARGET_ACTIONS,
-    PRIEST_CLASS_ID,
-    ROGUE_CLASS_ID,
-    TASK_MODE_TDM,
     TEAM_A_ID,
     TEAM_B_ID,
     Action,
@@ -600,44 +597,27 @@ def _debugger_expected_horizon(
     )
 
 
-def _validate_scenario_controller_snapshot(
+class CombatConfigurationRejectedError(ValueError):
+    """An expected selection error that leaves the current session usable."""
+
+
+def _validate_scenario_controller_selection(
     scenario: DebuggerScenario,
-    config: EnvConfig,
-    state: EnvState,
     *,
     team_b_controller: TeamBController,
     execution_information_mode: ExecutionInformationMode,
 ) -> None:
-    """Check applicability at initial epochs, never from a policy decision."""
+    """Check execution boundaries, independently of scenario content."""
     if team_b_controller != "scenario_1":
         return
-    if scenario.mode != "interactive" or config.task_mode != TASK_MODE_TDM:
-        raise ValueError("Reactive MRP Controller requires interactive TDM.")
-    if execution_information_mode != "shared_obs":
-        raise ValueError("Reactive MRP Controller requires SharedObs.")
-    remaining = config.max_steps - int(state.step_count)
-    if not 1 <= remaining <= 5:
-        raise ValueError(
-            "Reactive MRP Controller requires one to five remaining transitions."
+    if scenario.mode != "interactive":
+        raise CombatConfigurationRejectedError(
+            "Reactive MRP Controller requires an interactive session."
         )
-    profile = config.agent_profile
-    supported_classes = (MAGE_CLASS_ID, ROGUE_CLASS_ID, PRIEST_CLASS_ID)
-    for slot in range(MAX_AGENT_SLOTS):
-        if (
-            not bool(profile.active_mask[slot])
-            or int(profile.team_ids[slot]) != TEAM_B_ID
-        ):
-            continue
-        if int(profile.class_ids[slot]) in supported_classes:
-            continue
-        if (
-            bool(state.alive_mask[slot])
-            or int(state.team_respawn_wave_countdowns[TEAM_B_ID - 1]) + 1 < remaining
-        ):
-            raise ValueError(
-                "Reactive MRP Controller requires Team B Warrior/Hunter slots to start "
-                "dead and respawn no earlier than the final transition."
-            )
+    if execution_information_mode != "shared_obs":
+        raise CombatConfigurationRejectedError(
+            "Reactive MRP Controller requires SharedObs."
+        )
 
 
 def create_session(
@@ -666,10 +646,8 @@ def create_session(
         observation,
         action_mask,
     ) = _fresh_snapshot(scenario, seed)
-    _validate_scenario_controller_snapshot(
+    _validate_scenario_controller_selection(
         scenario,
-        config,
-        state,
         team_b_controller=team_b_controller,
         execution_information_mode=execution_information_mode,
     )
@@ -1174,10 +1152,8 @@ def _restart_session(
         observation,
         action_mask,
     ) = _fresh_snapshot(scenario, session.seed)
-    _validate_scenario_controller_snapshot(
+    _validate_scenario_controller_selection(
         scenario,
-        config,
-        state,
         team_b_controller=next_team_b_controller,
         execution_information_mode=next_information_mode,
     )
@@ -1274,16 +1250,16 @@ def set_combat_configuration(
 ) -> DebuggerSession:
     """Replace the episode only when its controller or information mode changes."""
     if team_a_controller not in SUPPORTED_TEAM_CONTROLLERS:
-        raise ValueError(
+        raise CombatConfigurationRejectedError(
             "team_a_controller must be manual, scripted_tdm, or random_valid"
         )
     if team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
-        raise ValueError(
+        raise CombatConfigurationRejectedError(
             "team_b_controller must be manual, scripted_tdm, random_valid, "
             "or scenario_1"
         )
     if execution_information_mode not in ("shared_obs", "no_shared_obs"):
-        raise ValueError(
+        raise CombatConfigurationRejectedError(
             "execution_information_mode must be shared_obs or no_shared_obs"
         )
     if (

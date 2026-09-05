@@ -431,11 +431,9 @@ def build_debugger_evaluation_context_v1(
             "or scenario_1"
         )
     if team_b_controller == "scenario_1" and (
-        execution_information_mode != "shared_obs"
-        or scenario.mode != "interactive"
-        or config.task_mode != TASK_MODE_TDM
+        execution_information_mode != "shared_obs" or scenario.mode != "interactive"
     ):
-        raise ValueError("Reactive MRP Controller requires interactive SharedObs TDM.")
+        raise ValueError("Reactive MRP Controller requires interactive SharedObs.")
     if execution_information_mode not in ("shared_obs", "no_shared_obs"):
         raise ValueError(
             "execution_information_mode must be shared_obs or no_shared_obs"

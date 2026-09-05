@@ -1096,6 +1096,161 @@ def test_frame_build_failure_keeps_epoch_coherent_and_consumes_command_id(
     assert step_calls == 1
 
 
+@pytest.mark.parametrize("recording", (False, True))
+def test_expected_configuration_rejection_preserves_session_and_recording(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recording: bool,
+) -> None:
+    if recording:
+        service, recorder = _recording_service(tmp_path)
+        prefix = service.apply_command(
+            _request(
+                "prefix-before-rejection",
+                base_revision=0,
+                command=KeyboardCommandV1(key="Enter"),
+            )
+        )
+        assert isinstance(prefix.payload, CommandResponseV2)
+        assert recorder.validated_transition_count == 1
+    else:
+        service = _service()
+        recorder = None
+    staged = service.apply_command(
+        _request(
+            "pending-before-rejection",
+            base_revision=service.revision,
+            command=KeyboardCommandV1(key="d"),
+        )
+    )
+    assert isinstance(staged.payload, CommandResponseV2)
+    original = service.session
+    original_frame = service.current_frame()
+    original_revision = service.revision
+    original_recording_status = service.recording_status
+    original_observer_count = service.evaluation_validated_transition_count
+    configuration = SetCombatConfigurationCommandV1(
+        team_a_controller="manual",
+        team_b_controller="scenario_1",
+        execution_information_mode="shared_obs",
+    )
+    request = _request(
+        "expected-configuration-rejection",
+        base_revision=original_revision,
+        command=(
+            ConfirmDiscardAndReplaceCommandV1(replacement=configuration)
+            if recording
+            else configuration
+        ),
+    )
+    rejected_configuration = Mock(
+        side_effect=control_module.CombatConfigurationRejectedError(
+            "Reactive MRP Controller requires SharedObs."
+        ),
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            input_module,
+            "set_combat_configuration",
+            rejected_configuration,
+        )
+        rejected = service.apply_command(request)
+        duplicate = service.apply_command(request)
+    assert isinstance(rejected.payload, CommandResponseV2)
+    assert rejected.payload.result == "no_op"
+    assert rejected.payload.notice == "Reactive MRP Controller requires SharedObs."
+    assert rejected.payload.frame is original_frame
+    assert isinstance(duplicate.payload, CommandResponseV2)
+    assert duplicate.payload.result == "duplicate"
+    assert rejected_configuration.call_count == 1
+    assert service.session is original
+    assert service.session.state is original.state
+    assert service.session.key is original.key
+    assert service.session.pending_actions is original.pending_actions
+    assert service.session.run_generation == original.run_generation
+    assert service.revision == original_revision
+    assert service.recording_status == original_recording_status
+    assert service.evaluation_validated_transition_count == original_observer_count
+    assert not service.faulted
+    if recorder is not None:
+        assert recorder.lifecycle == "recording"
+        assert recorder.validated_transition_count == 1
+
+    installed = service.apply_command(
+        _request(
+            "valid-configuration-after-rejection",
+            base_revision=service.revision,
+            command=request.command,
+        )
+    )
+    assert isinstance(installed.payload, CommandResponseV2)
+    assert installed.payload.result == "applied"
+    assert service.session.team_b_controller == "scenario_1"
+    assert service.session.run_generation == original.run_generation + 1
+    assert service.session.evaluation_context.identity.task.identifier == (
+        "visual-debugger-analysis-task"
+    )
+    if recorder is not None:
+        assert recorder.lifecycle == "discarded"
+    advanced = service.apply_command(
+        _request(
+            "submit-after-rejection",
+            base_revision=service.revision,
+            command=KeyboardCommandV1(key="Enter"),
+        )
+    )
+    assert isinstance(advanced.payload, CommandResponseV2)
+    assert advanced.payload.result == "applied"
+    assert int(service.session.state.step_count) == 1
+    restarted = service.apply_command(
+        _request(
+            "reset-after-rejection",
+            base_revision=service.revision,
+            command=(
+                ConfirmDiscardAndReplaceCommandV1(replacement=ResetCommandV1())
+                if recording
+                else ResetCommandV1()
+            ),
+        )
+    )
+    assert isinstance(restarted.payload, CommandResponseV2)
+    assert restarted.payload.result == "applied"
+    assert int(service.session.state.step_count) == 0
+    assert service.session.team_b_controller == "scenario_1"
+    assert not service.faulted
+
+
+def test_unexpected_configuration_value_error_still_faults_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service()
+    original = service.session
+    failure = Mock(side_effect=ValueError("unexpected configuration computation"))
+    monkeypatch.setattr(input_module, "set_combat_configuration", failure)
+    request = _request(
+        "unexpected-configuration-failure",
+        base_revision=0,
+        command=SetCombatConfigurationCommandV1(
+            team_a_controller="manual",
+            team_b_controller="scenario_1",
+            execution_information_mode="shared_obs",
+        ),
+    )
+    with pytest.raises(ValueError, match="unexpected configuration computation"):
+        service.apply_command(request)
+    assert service.session is original
+    assert service.faulted
+    fenced = service.apply_command(
+        _request(
+            "after-unexpected-failure",
+            base_revision=0,
+            command=ResetCommandV1(),
+        )
+    )
+    assert fenced.outcome == "service_faulted"
+    assert failure.call_count == 1
+
+
 def test_accepted_exit_fences_concurrent_submissions_without_stepping() -> None:
     service = _service()
     exit_request = _request(

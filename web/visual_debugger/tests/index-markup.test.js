@@ -100,7 +100,10 @@ test("only Team B exposes the SharedObs scenario controller", async () => {
       ],
     );
   }
-  assert.match(markup, /Scenario controllers require SharedObs\./u);
+  assert.equal(
+    elementBody(markup, "devclient-scenario-controller-help", "small").trim(),
+    "Reactive Mage/Rogue/Priest behavior. Warrior and Hunter stay idle. Team B and SharedObs only.",
+  );
 });
 
 test("replay Help names the exact arrow keys and Escape selection behavior", async () => {

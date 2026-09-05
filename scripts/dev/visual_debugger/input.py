@@ -30,6 +30,7 @@ from marl_battlegrounds.rendering.pov_scene import (
 )
 from marl_battlegrounds.rendering.scene import AgentSceneV1, AgentSceneV2
 from scripts.dev.visual_debugger.control import (
+    CombatConfigurationRejectedError,
     DebuggerTransitionFailureV1,
     arm_basic,
     arm_ultimate,
@@ -947,12 +948,22 @@ def dispatch_command(
             episode_restarted=True,
         )
     if isinstance(command, SetCombatConfigurationCommandV1):
-        edited = set_combat_configuration(
-            session,
-            team_a_controller=command.team_a_controller,
-            team_b_controller=command.team_b_controller,
-            execution_information_mode=command.execution_information_mode,
-        )
+        try:
+            edited = set_combat_configuration(
+                session,
+                team_a_controller=command.team_a_controller,
+                team_b_controller=command.team_b_controller,
+                execution_information_mode=command.execution_information_mode,
+            )
+        except CombatConfigurationRejectedError as error:
+            return _result(
+                session,
+                view_mode=view_mode,
+                preset=preset,
+                handled=True,
+                changed=False,
+                notice=str(error),
+            )
         changed = edited is not session
         return _result(
             edited,

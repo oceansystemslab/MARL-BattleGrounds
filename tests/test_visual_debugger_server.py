@@ -10,6 +10,8 @@ from pathlib import Path
 from threading import Thread
 
 import pytest
+import scripts.dev.visual_debugger.control as control_module
+import scripts.dev.visual_debugger.input as input_module
 import scripts.dev.visual_debugger.server as server_module
 from scripts.dev.visual_debugger.authoring_service import (
     DevAuthoringCommandRequestV1,
@@ -22,6 +24,8 @@ from scripts.dev.visual_debugger.protocol import (
     CommandRequestV1,
     ExitCommandV1,
     KeyboardCommandV1,
+    ResetCommandV1,
+    SetCombatConfigurationCommandV1,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.server import (
@@ -586,6 +590,130 @@ def test_command_and_stale_service_results_map_to_http(
     assert json.loads(stale_body)["error_code"] == "stale_revision"
     assert json.loads(stale_body)["latest_frame"]["revision"] == 1
     assert int(server.debugger_service.session.state.step_count) == 0
+
+
+def test_expected_controller_rejection_is_http_noop_then_commands_still_work(
+    running_server: tuple[DebuggerHTTPServer, Thread],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server, _ = running_server
+    service = server.debugger_service
+    original = service.session
+    original_frame = service.current_frame().model_dump(mode="json")
+    headers = _authorized_headers(**{"Content-Type": "application/json"})
+    configuration = SetCombatConfigurationCommandV1(
+        team_a_controller="manual",
+        team_b_controller="scenario_1",
+        execution_information_mode="shared_obs",
+    )
+    request = CommandRequestV1(
+        client_id="browser-client",
+        command_id="expected-controller-rejection",
+        base_revision=0,
+        command=configuration,
+    )
+    attempts = 0
+
+    def reject(*_args: object, **_kwargs: object) -> object:
+        nonlocal attempts
+        attempts += 1
+        raise control_module.CombatConfigurationRejectedError(
+            "Reactive MRP Controller requires SharedObs."
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(input_module, "set_combat_configuration", reject)
+        rejected, rejected_body = _exchange(
+            server,
+            "POST",
+            "/api/command",
+            body=request.model_dump_json().encode(),
+            headers=headers,
+        )
+        duplicate, duplicate_body = _exchange(
+            server,
+            "POST",
+            "/api/command",
+            body=request.model_dump_json().encode(),
+            headers=headers,
+        )
+    decoded = json.loads(rejected_body)
+    assert rejected.status == duplicate.status == HTTPStatus.OK
+    assert decoded["result"] == "no_op"
+    assert decoded["notice"] == "Reactive MRP Controller requires SharedObs."
+    assert decoded["frame"] == original_frame
+    assert json.loads(duplicate_body)["result"] == "duplicate"
+    assert attempts == 1
+    assert service.session is original
+    assert service.revision == 0
+    assert not service.faulted
+
+    for index, command in enumerate(
+        (configuration, KeyboardCommandV1(key="Enter"), ResetCommandV1()),
+        start=1,
+    ):
+        response, body = _exchange(
+            server,
+            "POST",
+            "/api/command",
+            body=CommandRequestV1(
+                client_id="browser-client",
+                command_id=f"valid-after-rejection-{index}",
+                base_revision=index - 1,
+                command=command,
+            )
+            .model_dump_json()
+            .encode(),
+            headers=headers,
+        )
+        assert response.status == HTTPStatus.OK
+        assert json.loads(body)["result"] == "applied"
+        assert service.revision == index
+        assert not service.faulted
+    assert service.session.team_b_controller == "scenario_1"
+    assert int(service.session.state.step_count) == 0
+    assert service.session.run_generation == 2
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"team_a_controller": "scenario_1"},
+        {"execution_information_mode": "no_shared_obs"},
+    ),
+)
+def test_forbidden_controller_requests_remain_recoverable_protocol_errors(
+    running_server: tuple[DebuggerHTTPServer, Thread],
+    changes: dict[str, str],
+) -> None:
+    server, _ = running_server
+    original = server.debugger_service.session
+    body = json.dumps(
+        {
+            "client_id": "browser-client",
+            "command_id": "forbidden-controller",
+            "base_revision": 0,
+            "command": {
+                "command_type": "set_combat_configuration",
+                "team_a_controller": "manual",
+                "team_b_controller": "scenario_1",
+                "execution_information_mode": "shared_obs",
+                **changes,
+            },
+        }
+    ).encode()
+    response, payload = _exchange(
+        server,
+        "POST",
+        "/api/command",
+        body=body,
+        headers=_authorized_headers(**{"Content-Type": "application/json"}),
+    )
+    assert response.status == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert json.loads(payload)["error_code"] == "invalid_request"
+    assert server.debugger_service.session is original
+    assert server.debugger_service.revision == 0
+    assert not server.debugger_service.faulted
 
 
 def test_service_shutdown_fence_maps_to_503_without_stepping(
