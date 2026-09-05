@@ -603,7 +603,7 @@ def test_expected_controller_rejection_is_http_noop_then_commands_still_work(
     headers = _authorized_headers(**{"Content-Type": "application/json"})
     configuration = SetCombatConfigurationCommandV1(
         team_a_controller="manual",
-        team_b_controller="scenario_1",
+        team_b_controller="scenario_3",
         execution_information_mode="shared_obs",
     )
     request = CommandRequestV1(
@@ -618,7 +618,7 @@ def test_expected_controller_rejection_is_http_noop_then_commands_still_work(
         nonlocal attempts
         attempts += 1
         raise control_module.CombatConfigurationRejectedError(
-            "Reactive MRP Controller requires SharedObs."
+            "Reactive controllers require SharedObs."
         )
 
     with monkeypatch.context() as patch:
@@ -640,7 +640,7 @@ def test_expected_controller_rejection_is_http_noop_then_commands_still_work(
     decoded = json.loads(rejected_body)
     assert rejected.status == duplicate.status == HTTPStatus.OK
     assert decoded["result"] == "no_op"
-    assert decoded["notice"] == "Reactive MRP Controller requires SharedObs."
+    assert decoded["notice"] == "Reactive controllers require SharedObs."
     assert decoded["frame"] == original_frame
     assert json.loads(duplicate_body)["result"] == "duplicate"
     assert attempts == 1
@@ -670,7 +670,7 @@ def test_expected_controller_rejection_is_http_noop_then_commands_still_work(
         assert json.loads(body)["result"] == "applied"
         assert service.revision == index
         assert not service.faulted
-    assert service.session.team_b_controller == "scenario_1"
+    assert service.session.team_b_controller == "scenario_3"
     assert int(service.session.state.step_count) == 0
     assert service.session.run_generation == 2
 
@@ -678,7 +678,7 @@ def test_expected_controller_rejection_is_http_noop_then_commands_still_work(
 @pytest.mark.parametrize(
     "changes",
     (
-        {"team_a_controller": "scenario_1"},
+        {"team_a_controller": "scenario_3"},
         {"execution_information_mode": "no_shared_obs"},
     ),
 )
@@ -696,7 +696,7 @@ def test_forbidden_controller_requests_remain_recoverable_protocol_errors(
             "command": {
                 "command_type": "set_combat_configuration",
                 "team_a_controller": "manual",
-                "team_b_controller": "scenario_1",
+                "team_b_controller": "scenario_3",
                 "execution_information_mode": "shared_obs",
                 **changes,
             },

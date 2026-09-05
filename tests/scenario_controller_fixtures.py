@@ -1,4 +1,4 @@
-"""Test-only Scenario 1 snapshot; never opens the user's authoring store."""
+"""Test-only scenario snapshots; never open the user's authoring store."""
 
 from pathlib import Path
 
@@ -33,3 +33,21 @@ def load_scenario_1_draft() -> DevScenarioDraftV1:
 def load_scenario_1() -> CompiledDevScenarioV1:
     """Compile the physical fixture through unchanged authoring authorities."""
     return compile_dev_scenario(load_scenario_1_draft())
+
+
+SCENARIO_3_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "scenario_3_r9.json"
+SCENARIO_3_SEMANTIC_DIGEST = (
+    "03fafb3201c7cf9c18674a71d97b943b9e92162b9d445aed80e3b7724249f063"
+)
+
+
+def load_scenario_3_draft() -> DevScenarioDraftV1:
+    """Read the approved r9 physical setup, not an official evaluation release."""
+    return DevScenarioDraftV1.model_validate_json(
+        SCENARIO_3_FIXTURE_PATH.read_text(encoding="utf-8"),
+    )
+
+
+def load_scenario_3() -> CompiledDevScenarioV1:
+    """Compile Scenario 3 through the unchanged authoring authorities."""
+    return compile_dev_scenario(load_scenario_3_draft())

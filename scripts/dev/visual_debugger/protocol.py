@@ -44,8 +44,8 @@ type PendingSubmissionScope = Literal[
     "joint_turn",
     "scripted_playback",
 ]
-type TeamController = Literal["manual", "scripted_tdm", "random_valid"]
-type TeamBController = Literal["manual", "scripted_tdm", "random_valid", "scenario_1"]
+type TeamController = Literal["manual", "reactive_tdm", "random_valid"]
+type TeamBController = TeamController | Literal["scenario_3"]
 type ExecutionInformationMode = Literal["shared_obs", "no_shared_obs"]
 type CommandResult = Literal[
     "applied",
@@ -208,12 +208,15 @@ class CombatConfigurationV1(_ProtocolModel):
     execution_information_mode: ExecutionInformationMode
 
     @model_validator(mode="after")
-    def _validate_scenario_controller_mode(self) -> Self:
+    def _validate_reactive_controller_mode(self) -> Self:
         if (
-            self.team_b_controller == "scenario_1"
+            any(
+                controller in ("reactive_tdm", "scenario_3")
+                for controller in (self.team_a_controller, self.team_b_controller)
+            )
             and self.execution_information_mode != "shared_obs"
         ):
-            raise ValueError("Reactive MRP Controller requires SharedObs.")
+            raise ValueError("Reactive controllers require SharedObs.")
         return self
 
 

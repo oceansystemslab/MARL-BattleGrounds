@@ -67,7 +67,7 @@ def _context(
     capture_profile: DebuggerCaptureProfileV1 = "debug",
     team_a_controller: TeamController = "manual",
     team_b_controller: TeamController = "manual",
-    execution_information_mode: ExecutionInformationMode = "no_shared_obs",
+    execution_information_mode: ExecutionInformationMode | None = None,
     scenario_name: str = "arena_5v5",
 ) -> EvaluationEpisodeContextV1:
     scenario = get_scenario(scenario_name)
@@ -80,7 +80,13 @@ def _context(
         action_source_kind=action_source_kind,
         team_a_controller=team_a_controller,
         team_b_controller=team_b_controller,
-        execution_information_mode=execution_information_mode,
+        execution_information_mode=(
+            execution_information_mode
+            if execution_information_mode is not None
+            else "shared_obs"
+            if "reactive_tdm" in (team_a_controller, team_b_controller)
+            else "no_shared_obs"
+        ),
     )
 
 
@@ -176,10 +182,10 @@ def test_context_is_custom_debug_no_shared_and_keeps_exact_cp2_bindings() -> Non
     }
 
 
-def test_mixed_action_source_assigns_manual_team_a_and_scripted_tdm_team_b() -> None:
+def test_mixed_action_source_assigns_manual_team_a_and_reactive_tdm_team_b() -> None:
     context = _context(
         action_source_kind="mixed",
-        team_b_controller="scripted_tdm",
+        team_b_controller="reactive_tdm",
     )
     assigned = tuple(
         row
@@ -208,11 +214,11 @@ def test_mixed_action_source_assigns_manual_team_a_and_scripted_tdm_team_b() -> 
     )
     assert tuple(row.policy_kind for row in assigned) == (
         *("manual" for _ in range(5)),
-        *("scripted_tdm" for _ in range(5)),
+        *("reactive_tdm" for _ in range(5)),
     )
     assert tuple(row.algorithm_id for row in assigned) == (
         *("not_applicable" for _ in range(5)),
-        *("canonical-scripted-team-deathmatch" for _ in range(5)),
+        *("reactive-team-deathmatch-controller" for _ in range(5)),
     )
     assert {row.training_run_id for row in assigned} == {"not_applicable"}
     assert {row.training_step for row in assigned} == {0}
@@ -230,18 +236,18 @@ def test_mixed_action_source_assigns_manual_team_a_and_scripted_tdm_team_b() -> 
     (
         ("manual", "manual", "manual", ("manual",) * 10),
         (
-            "scripted_tdm",
+            "reactive_tdm",
             "manual",
             "mixed",
-            ("scripted_tdm",) * 5 + ("manual",) * 5,
+            ("reactive_tdm",) * 5 + ("manual",) * 5,
         ),
         (
             "manual",
-            "scripted_tdm",
+            "reactive_tdm",
             "mixed",
-            ("manual",) * 5 + ("scripted_tdm",) * 5,
+            ("manual",) * 5 + ("reactive_tdm",) * 5,
         ),
-        ("scripted_tdm", "scripted_tdm", "scripted", ("scripted_tdm",) * 10),
+        ("reactive_tdm", "reactive_tdm", "policy", ("reactive_tdm",) * 10),
         (
             "random_valid",
             "manual",
@@ -257,15 +263,15 @@ def test_mixed_action_source_assigns_manual_team_a_and_scripted_tdm_team_b() -> 
         ("random_valid", "random_valid", "policy", ("random_valid",) * 10),
         (
             "random_valid",
-            "scripted_tdm",
+            "reactive_tdm",
             "policy",
-            ("random_valid",) * 5 + ("scripted_tdm",) * 5,
+            ("random_valid",) * 5 + ("reactive_tdm",) * 5,
         ),
         (
-            "scripted_tdm",
+            "reactive_tdm",
             "random_valid",
             "policy",
-            ("scripted_tdm",) * 5 + ("random_valid",) * 5,
+            ("reactive_tdm",) * 5 + ("random_valid",) * 5,
         ),
     ),
 )
@@ -292,22 +298,20 @@ def test_interactive_controller_pairs_have_truthful_per_slot_provenance(
     assert aggregation["team_a_controller"] == team_a_controller
     assert aggregation["team_b_controller"] == team_b_controller
     assert tuple(row.algorithm_id for row in assigned) == tuple(
-        "canonical-scripted-team-deathmatch"
-        if policy_kind == "scripted_tdm"
+        "reactive-team-deathmatch-controller"
+        if policy_kind == "reactive_tdm"
         else "canonical-random-valid"
         if policy_kind == "random_valid"
         else "not_applicable"
         for policy_kind in expected_policy_kinds
     )
     assert tuple(row.execution_mode for row in assigned) == tuple(
-        "stochastic"
-        if policy_kind in ("scripted_tdm", "random_valid")
-        else "deterministic"
+        "stochastic" if policy_kind == "random_valid" else "deterministic"
         for policy_kind in expected_policy_kinds
     )
 
 
-def test_random_action_source_v2_and_recording_policy_are_truthful() -> None:
+def test_interactive_v4_and_fixed_frame_v1_recording_contracts_are_truthful() -> None:
     scenario = get_scenario("arena_5v5")
     payload = evaluation_bridge._action_source_contract_payload(  # pyright: ignore[reportPrivateUsage]
         action_source_kind="mixed",
@@ -318,11 +322,11 @@ def test_random_action_source_v2_and_recording_policy_are_truthful() -> None:
         scenario_contract_digest="a" * 64,
     )
 
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 4
     assert payload["team_a_controller"] == "random_valid"
     assert payload["team_b_controller"] == "manual"
     assert payload["manual_submission_included"] is True
-    assert payload["scripted_tdm_execution_included"] is False
+    assert payload["reactive_tdm_execution_included"] is False
     assert payload["random_policy_execution_included"] is True
     assert payload["policy_execution_included"] is True
 
@@ -335,46 +339,45 @@ def test_random_action_source_v2_and_recording_policy_are_truthful() -> None:
     policy_execution_included = debugger_recording._context_policy_execution_included  # pyright: ignore[reportPrivateUsage]
     assert policy_execution_included(random_context)
     assert not policy_execution_included(manual_context)
-    nonrandom_payload = evaluation_bridge._action_source_contract_payload(  # pyright: ignore[reportPrivateUsage]
-        action_source_kind="mixed",
-        scenario_mode=scenario.mode,
-        team_a_controller="scripted_tdm",
+    fixed_frame_payload = evaluation_bridge._action_source_contract_payload(  # pyright: ignore[reportPrivateUsage]
+        action_source_kind="scripted",
+        scenario_mode="scripted",
+        team_a_controller="manual",
         team_b_controller="manual",
         execution_information_mode="shared_obs",
         scenario_contract_digest="a" * 64,
     )
 
-    assert nonrandom_payload == {
+    assert fixed_frame_payload == {
         "schema_id": "marl_battlegrounds.visual_debugger.action_source_contract",
         "schema_version": 1,
-        "action_source_kind": "mixed",
-        "team_a_controller": "scripted_tdm",
+        "action_source_kind": "scripted",
         "team_b_controller": "manual",
         "execution_information_mode": "shared_obs",
-        "manual_submission_included": True,
+        "manual_submission_included": False,
         "scripted_submission_included": True,
         "scenario_contract_digest_sha256": "a" * 64,
-        "policy_execution_included": True,
+        "policy_execution_included": False,
     }
 
 
-def test_scripted_team_identity_changes_the_action_contract_identity() -> None:
-    scripted_team_a = _context(
+def test_reactive_team_identity_changes_the_action_contract_identity() -> None:
+    reactive_team_a = _context(
         action_source_kind="mixed",
-        team_a_controller="scripted_tdm",
+        team_a_controller="reactive_tdm",
         team_b_controller="manual",
     )
-    scripted_team_b = _context(
+    reactive_team_b = _context(
         action_source_kind="mixed",
         team_a_controller="manual",
-        team_b_controller="scripted_tdm",
+        team_b_controller="reactive_tdm",
     )
 
-    assert scripted_team_a.identity.evaluation_id != (
-        scripted_team_b.identity.evaluation_id
+    assert reactive_team_a.identity.evaluation_id != (
+        reactive_team_b.identity.evaluation_id
     )
-    assert scripted_team_a.identity.matchup_id != scripted_team_b.identity.matchup_id
-    assert scripted_team_a.identity.episode_id != scripted_team_b.identity.episode_id
+    assert reactive_team_a.identity.matchup_id != reactive_team_b.identity.matchup_id
+    assert reactive_team_a.identity.episode_id != reactive_team_b.identity.episode_id
 
 
 def test_context_identities_join_config_scenario_action_code_and_generation() -> None:
@@ -388,8 +391,8 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         run_generation=0,
         action_source_kind="mixed",
         team_a_controller="manual",
-        team_b_controller="scripted_tdm",
-        execution_information_mode="no_shared_obs",
+        team_b_controller="reactive_tdm",
+        execution_information_mode="shared_obs",
     )
     same = build_debugger_evaluation_context_v1(
         launch,
@@ -398,8 +401,8 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         run_generation=0,
         action_source_kind="mixed",
         team_a_controller="manual",
-        team_b_controller="scripted_tdm",
-        execution_information_mode="no_shared_obs",
+        team_b_controller="reactive_tdm",
+        execution_information_mode="shared_obs",
     )
     next_generation = build_debugger_evaluation_context_v1(
         launch,
@@ -408,8 +411,8 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         run_generation=1,
         action_source_kind="mixed",
         team_a_controller="manual",
-        team_b_controller="scripted_tdm",
-        execution_information_mode="no_shared_obs",
+        team_b_controller="reactive_tdm",
+        execution_information_mode="shared_obs",
     )
     manual = build_debugger_evaluation_context_v1(
         launch,
@@ -429,8 +432,8 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
         run_generation=0,
         action_source_kind="mixed",
         team_a_controller="manual",
-        team_b_controller="scripted_tdm",
-        execution_information_mode="no_shared_obs",
+        team_b_controller="reactive_tdm",
+        execution_information_mode="shared_obs",
     )
     other_scenario = get_scenario("ultimate_showcase")
     other_config, _other_state = other_scenario.build_scenario()
@@ -531,7 +534,7 @@ def test_authored_team_deathmatch_uses_independent_task_map_and_scenario_identit
         run_generation=0,
         action_source_kind="mixed",
         team_a_controller="manual",
-        team_b_controller="scripted_tdm",
+        team_b_controller="reactive_tdm",
         execution_information_mode="shared_obs",
     )
 
@@ -586,8 +589,8 @@ def test_context_rejects_invalid_horizon_generation_source_and_focal_slot() -> N
             run_generation=True,  # type: ignore[arg-type]
             action_source_kind="mixed",
             team_a_controller="manual",
-            team_b_controller="scripted_tdm",
-            execution_information_mode="no_shared_obs",
+            team_b_controller="reactive_tdm",
+            execution_information_mode="shared_obs",
         )
     with pytest.raises(ValueError, match="expected_horizon"):
         build_debugger_evaluation_context_v1(
@@ -597,8 +600,8 @@ def test_context_rejects_invalid_horizon_generation_source_and_focal_slot() -> N
             run_generation=0,
             action_source_kind="mixed",
             team_a_controller="manual",
-            team_b_controller="scripted_tdm",
-            execution_information_mode="no_shared_obs",
+            team_b_controller="reactive_tdm",
+            execution_information_mode="shared_obs",
             expected_horizon=config.max_steps + 1,
         )
     with pytest.raises(ValueError, match="action_source_kind"):
@@ -609,8 +612,8 @@ def test_context_rejects_invalid_horizon_generation_source_and_focal_slot() -> N
             run_generation=0,
             action_source_kind="policy",  # type: ignore[arg-type]
             team_a_controller="manual",
-            team_b_controller="scripted_tdm",
-            execution_information_mode="no_shared_obs",
+            team_b_controller="reactive_tdm",
+            execution_information_mode="shared_obs",
         )
     sparse_scenario = get_scenario("basic_support")
     sparse_config, _sparse_state = sparse_scenario.build_scenario()

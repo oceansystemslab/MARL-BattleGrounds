@@ -376,7 +376,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     await page.evaluate(() => window.scrollTo(0, 0));
 
     await expect(page.locator("#devclient-scenario-controller-help")).toHaveText(
-      "Reactive Mage/Rogue/Priest behavior. Warrior and Hunter stay idle. Team B and SharedObs only.",
+      "Rogues pursue the lowest-health enemy and avoid intervening bodies. Other classes stay idle. Team B and SharedObs only.",
     );
     // Exercise browser recovery with a real unchanged-frame no_op envelope.
     // Backend service/HTTP tests independently exercise actual rejection.
@@ -405,7 +405,7 @@ test("authoring persists through restart and drives same-start Combat comparison
       { times: 1 },
     );
     await applyLiveCommand(page, () =>
-      page.locator("#devclient-team-b-controller").selectOption("scenario_1"),
+      page.locator("#devclient-team-b-controller").selectOption("reactive_tdm"),
     );
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue("manual");
     await expect(page.locator("#notice")).toHaveText(
@@ -413,17 +413,17 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     await expect(page.locator("#step-value")).toHaveText("0");
     await applyLiveCommand(page, () =>
-      page.locator("#devclient-team-b-controller").selectOption("scenario_1"),
+      page.locator("#devclient-team-b-controller").selectOption("reactive_tdm"),
     );
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "scenario_1",
+      "reactive_tdm",
     );
     await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
     await expect(page.locator("#step-value")).toHaveText("1");
     await applyLiveCommand(page, () => page.locator("#reset-button").click());
     await expect(page.locator("#step-value")).toHaveText("0");
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "scenario_1",
+      "reactive_tdm",
     );
     await applyLiveCommand(page, () =>
       page.locator("#devclient-team-b-controller").selectOption("manual"),
@@ -1048,10 +1048,10 @@ test("authoring persists through restart and drives same-start Combat comparison
     await expect(page.locator("#authoring-shell")).toBeHidden();
 
     await applyLiveCommand(page, () =>
-      page.locator("#devclient-team-a-controller").selectOption("scripted_tdm"),
+      page.locator("#devclient-team-a-controller").selectOption("reactive_tdm"),
     );
     await expect(page.locator("#devclient-team-a-controller")).toHaveValue(
-      "scripted_tdm",
+      "reactive_tdm",
     );
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue("manual");
     await expect(page.locator("#command-deck")).toHaveAttribute(
@@ -1068,10 +1068,10 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
 
     await applyLiveCommand(page, () =>
-      page.locator("#devclient-team-b-controller").selectOption("scripted_tdm"),
+      page.locator("#devclient-team-b-controller").selectOption("reactive_tdm"),
     );
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "scripted_tdm",
+      "reactive_tdm",
     );
     await expect(page.locator("#step-value")).toHaveText("7");
     await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
@@ -1082,13 +1082,13 @@ test("authoring persists through restart and drives same-start Combat comparison
     await expect(page.locator("#authoring-shell")).toBeHidden();
 
     await applyLiveCommand(page, () =>
-      page.locator("#devclient-team-a-controller").selectOption("scripted_tdm"),
+      page.locator("#devclient-team-a-controller").selectOption("reactive_tdm"),
     );
     await expect(page.locator("#devclient-team-a-controller")).toHaveValue(
-      "scripted_tdm",
+      "reactive_tdm",
     );
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "scripted_tdm",
+      "reactive_tdm",
     );
     await expect(page.locator("#submit-turn-button")).toBeEnabled();
     await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
@@ -1099,7 +1099,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     for (const [teamA, teamB] of [
       ["random_valid", "manual"],
       ["manual", "random_valid"],
-      ["random_valid", "scripted_tdm"],
+      ["random_valid", "reactive_tdm"],
       ["random_valid", "random_valid"],
     ]) {
       await exercisePolicyControllers(page, {
@@ -1121,7 +1121,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     for (const [teamA, teamB] of [
       ["random_valid", "manual"],
       ["manual", "random_valid"],
-      ["random_valid", "scripted_tdm"],
+      ["manual", "manual"],
       ["random_valid", "random_valid"],
     ]) {
       await exercisePolicyControllers(page, {
@@ -1135,8 +1135,18 @@ test("authoring persists through restart and drives same-start Combat comparison
       page.locator("#devclient-scenario-controller-option"),
     ).toHaveJSProperty("disabled", true);
     await expect(
-      page.locator('#devclient-team-a-controller option[value="scenario_1"]'),
+      page.locator('#devclient-team-a-controller option[value="scenario_3"]'),
     ).toHaveCount(0);
+    for (const team of ["a", "b"]) {
+      await expect(
+        page.locator(`#devclient-team-${team}-reactive-option`),
+      ).toHaveJSProperty("disabled", true);
+      await expect(
+        page.locator(
+          `#devclient-team-${team}-controller option[value="scripted_tdm"], #devclient-team-${team}-controller option[value="scenario_1"]`,
+        ),
+      ).toHaveCount(0);
+    }
     await applyLiveCommand(page, () =>
       page.locator("#devclient-information-mode").selectOption("shared_obs"),
     );
@@ -1174,19 +1184,19 @@ test("authoring persists through restart and drives same-start Combat comparison
     expect(currentScenarioLoad.ok).toBe(true);
     await expect(page.locator("#step-value")).toHaveText("295");
     await applyLiveCommand(page, () =>
-      page.locator("#devclient-team-b-controller").selectOption("scenario_1"),
+      page.locator("#devclient-team-b-controller").selectOption("reactive_tdm"),
     );
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "scenario_1",
+      "reactive_tdm",
     );
     await expect(page.locator("#devclient-no-shared-option")).toHaveJSProperty(
       "disabled",
       true,
     );
-    await expect(page.locator("#devclient-scenario-controller-help")).toHaveText(
-      "Reactive Mage/Rogue/Priest behavior. Warrior and Hunter stay idle. Team B and SharedObs only.",
+    await expect(page.locator("#devclient-reactive-controller-help")).toHaveText(
+      "Deterministic five-class reactive controller. SharedObs only.",
     );
-    for (const teamA of ["manual", "scripted_tdm", "random_valid"]) {
+    for (const teamA of ["manual", "reactive_tdm", "random_valid"]) {
       await applyLiveCommand(page, () =>
         page.locator("#devclient-team-a-controller").selectOption(teamA),
       );
@@ -1202,7 +1212,7 @@ test("authoring persists through restart and drives same-start Combat comparison
         "true",
       );
       await expect(page.locator("#command-controlled-actor")).toContainText(
-        "Reactive MRP Controller",
+        "Reactive TDM",
       );
       await expect(page.locator("#command-target-select")).toBeDisabled();
       if (teamA === "manual") {
@@ -1229,9 +1239,100 @@ test("authoring persists through restart and drives same-start Combat comparison
       await applyLiveCommand(page, () => page.locator("#reset-button").click());
       await expect(page.locator("#step-value")).toHaveText("295");
       await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-        "scenario_1",
+        "reactive_tdm",
       );
     }
+
+    const specialistFixture = JSON.parse(
+      await readFile(
+        new URL("../../../tests/fixtures/scenario_3_r9.json", import.meta.url),
+        "utf8",
+      ),
+    );
+    const specialistSave = await page.request.post(
+      new URL("/api/dev/authoring/command", devClient.url).href,
+      {
+        headers: {
+          "X-MARL-Debugger-Token":
+            new URLSearchParams(new URL(devClient.url).hash.slice(1)).get("token") ??
+            "",
+        },
+        data: {
+          command_type: "save_as",
+          draft: specialistFixture,
+          asset_id: "e2e_scenario_3",
+        },
+      },
+    );
+    expect(specialistSave.status()).toBe(200);
+    expect((await specialistSave.json()).ok).toBe(true);
+    await page.getByRole("button", { name: "Scenarios", exact: true }).click();
+    await selectPersistedAsset(page, "#authoring-saved-draft-select", "e2e_scenario_3");
+    await applyAuthoringCommand(page, "open", () =>
+      page.locator("#authoring-open").click(),
+    );
+    await applyAuthoringCommand(page, "open_in_debug", () =>
+      page.locator("#authoring-open-debug").click(),
+    );
+    await applyLiveCommand(page, () =>
+      page.locator("#devclient-team-a-controller").selectOption("manual"),
+    );
+    await applyLiveCommand(page, () =>
+      page.locator("#devclient-team-b-controller").selectOption("scenario_3"),
+    );
+    await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
+      "scenario_3",
+    );
+    await expect(page.locator("#devclient-no-shared-option")).toHaveJSProperty(
+      "disabled",
+      true,
+    );
+    const rogueB = page.locator('#roster .roster-row[data-team="team-b"]').filter({
+      has: page.locator(".roster-class", { hasText: "Rogue" }),
+    });
+    await applyLiveCommand(page, () =>
+      rogueB.locator(".roster-primary-action").click(),
+    );
+    await expect(page.locator("#command-controlled-actor")).toContainText(
+      "Scenario 3 Controller",
+    );
+    await expect(page.locator("#command-target-select")).toBeDisabled();
+    const specialistStartStep = specialistFixture.content.global_state.step_count;
+    for (const teamA of ["manual", "reactive_tdm", "random_valid"]) {
+      if ((await page.locator("#devclient-team-a-controller").inputValue()) !== teamA) {
+        await applyLiveCommand(page, () =>
+          page.locator("#devclient-team-a-controller").selectOption(teamA),
+        );
+      }
+      await expect(page.locator("#step-value")).toHaveText(String(specialistStartStep));
+      await expect(page.locator("#submit-turn-button")).toBeEnabled();
+      await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
+      await expect(page.locator("#step-value")).toHaveText(
+        String(specialistStartStep + 1),
+      );
+      await applyLiveCommand(page, () => page.locator("#reset-button").click());
+      await expect(page.locator("#step-value")).toHaveText(String(specialistStartStep));
+    }
+    await selectPersistedAsset(page, "#devclient-scenario-select", "e2e_scenario_3");
+    const specialistReload = page.waitForResponse(
+      (response) =>
+        response.request().method() === "GET" &&
+        new URL(response.url()).pathname === "/api/frame",
+    );
+    await applyAuthoringCommand(page, "open_in_debug", () =>
+      page.locator("#devclient-scenario-load").click(),
+    );
+    expect((await specialistReload).status()).toBe(200);
+    await expect(page.locator("#battlefield-shell")).toHaveAttribute(
+      "aria-busy",
+      "false",
+    );
+    await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
+      "scenario_3",
+    );
+    await applyLiveCommand(page, () =>
+      page.locator("#devclient-team-b-controller").selectOption("reactive_tdm"),
+    );
 
     await selectPersistedAsset(page, "#devclient-scenario-select", scenarioId);
     const longScenarioLoad = await applyAuthoringCommand(page, "open_in_debug", () =>
@@ -1240,7 +1341,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     expect(longScenarioLoad.ok).toBe(true);
     await expect(page.locator("#step-value")).toHaveText("7");
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "scenario_1",
+      "reactive_tdm",
     );
     await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
     await expect(page.locator("#step-value")).toHaveText("8");
@@ -1258,7 +1359,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     expect(longCurrentLoad.ok).toBe(true);
     await expect(page.locator("#step-value")).toHaveText("7");
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "scenario_1",
+      "reactive_tdm",
     );
 
     await page.getByRole("button", { name: "Maps", exact: true }).click();
@@ -1275,7 +1376,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     });
     await expect(page.locator("#step-value")).toHaveText("0");
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "scenario_1",
+      "reactive_tdm",
     );
     await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
     await expect(page.locator("#step-value")).toHaveText("1");
@@ -1290,7 +1391,7 @@ test("authoring persists through restart and drives same-start Combat comparison
       "random_valid",
     );
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "scenario_1",
+      "reactive_tdm",
     );
     await expect(page.locator("#step-value")).toHaveText("295");
 
@@ -1330,7 +1431,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     await expect(page.locator("#step-value")).toHaveText("295");
     await applyLiveCommand(page, () =>
-      page.locator("#devclient-team-b-controller").selectOption("scenario_1"),
+      page.locator("#devclient-team-b-controller").selectOption("reactive_tdm"),
     );
     await expect(page.locator("#step-value")).toHaveText("295");
     await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());

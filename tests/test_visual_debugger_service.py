@@ -1131,7 +1131,7 @@ def test_expected_configuration_rejection_preserves_session_and_recording(
     original_observer_count = service.evaluation_validated_transition_count
     configuration = SetCombatConfigurationCommandV1(
         team_a_controller="manual",
-        team_b_controller="scenario_1",
+        team_b_controller="scenario_3",
         execution_information_mode="shared_obs",
     )
     request = _request(
@@ -1145,7 +1145,7 @@ def test_expected_configuration_rejection_preserves_session_and_recording(
     )
     rejected_configuration = Mock(
         side_effect=control_module.CombatConfigurationRejectedError(
-            "Reactive MRP Controller requires SharedObs."
+            "Reactive controllers require SharedObs."
         ),
     )
     with monkeypatch.context() as patch:
@@ -1158,7 +1158,7 @@ def test_expected_configuration_rejection_preserves_session_and_recording(
         duplicate = service.apply_command(request)
     assert isinstance(rejected.payload, CommandResponseV2)
     assert rejected.payload.result == "no_op"
-    assert rejected.payload.notice == "Reactive MRP Controller requires SharedObs."
+    assert rejected.payload.notice == "Reactive controllers require SharedObs."
     assert rejected.payload.frame is original_frame
     assert isinstance(duplicate.payload, CommandResponseV2)
     assert duplicate.payload.result == "duplicate"
@@ -1185,7 +1185,7 @@ def test_expected_configuration_rejection_preserves_session_and_recording(
     )
     assert isinstance(installed.payload, CommandResponseV2)
     assert installed.payload.result == "applied"
-    assert service.session.team_b_controller == "scenario_1"
+    assert service.session.team_b_controller == "scenario_3"
     assert service.session.run_generation == original.run_generation + 1
     assert service.session.evaluation_context.identity.task.identifier == (
         "visual-debugger-analysis-task"
@@ -1216,7 +1216,7 @@ def test_expected_configuration_rejection_preserves_session_and_recording(
     assert isinstance(restarted.payload, CommandResponseV2)
     assert restarted.payload.result == "applied"
     assert int(service.session.state.step_count) == 0
-    assert service.session.team_b_controller == "scenario_1"
+    assert service.session.team_b_controller == "scenario_3"
     assert not service.faulted
 
 
@@ -1232,7 +1232,7 @@ def test_unexpected_configuration_value_error_still_faults_service(
         base_revision=0,
         command=SetCombatConfigurationCommandV1(
             team_a_controller="manual",
-            team_b_controller="scenario_1",
+            team_b_controller="scenario_3",
             execution_information_mode="shared_obs",
         ),
     )
@@ -1696,7 +1696,7 @@ def test_recording_configuration_change_requires_exact_discard_and_restarts(
     )
     assert isinstance(submitted.payload, CommandResponseV2)
     replacement = SetCombatConfigurationCommandV1(
-        team_a_controller="scripted_tdm",
+        team_a_controller="reactive_tdm",
         team_b_controller="manual",
         execution_information_mode="shared_obs",
     )
@@ -1736,7 +1736,7 @@ def test_recording_configuration_change_requires_exact_discard_and_restarts(
     assert isinstance(confirmed.payload, CommandResponseV2)
     assert confirmed.payload.result == "applied"
     assert old_recorder.lifecycle == "discarded"
-    assert service.session.team_a_controller == "scripted_tdm"
+    assert service.session.team_a_controller == "reactive_tdm"
     assert service.session.team_b_controller == "manual"
     assert service.session.evaluation_context.execution_information_mode == "shared_obs"
     assert (

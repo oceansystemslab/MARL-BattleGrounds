@@ -340,20 +340,20 @@ test("captured recording prefixes require exact discard confirmation for replace
     { command_type: "scenario_switch", scenario_name: "bravo" },
     {
       command_type: "set_combat_configuration",
-      team_a_controller: "scripted_tdm",
-      team_b_controller: "scripted_tdm",
+      team_a_controller: "reactive_tdm",
+      team_b_controller: "reactive_tdm",
       execution_information_mode: "shared_obs",
     },
     {
       command_type: "set_combat_configuration",
       team_a_controller: "random_valid",
-      team_b_controller: "scripted_tdm",
+      team_b_controller: "random_valid",
       execution_information_mode: "no_shared_obs",
     },
     {
       command_type: "set_combat_configuration",
       team_a_controller: "manual",
-      team_b_controller: "scenario_1",
+      team_b_controller: "scenario_3",
       execution_information_mode: "shared_obs",
     },
     keyboardCommand("r"),
@@ -385,15 +385,21 @@ test("captured recording prefixes require exact discard confirmation for replace
   );
   for (const invalid of [
     {
-      team_a_controller: "scenario_1",
+      team_a_controller: "scenario_3",
       team_b_controller: "manual",
       execution_information_mode: "shared_obs",
     },
     {
       team_a_controller: "manual",
-      team_b_controller: "scenario_1",
+      team_b_controller: "scenario_3",
       execution_information_mode: "no_shared_obs",
     },
+    ...["team_a_controller", "team_b_controller"].map((team) => ({
+      team_a_controller: "manual",
+      team_b_controller: "manual",
+      execution_information_mode: "no_shared_obs",
+      [team]: "reactive_tdm",
+    })),
   ]) {
     assert.equal(
       recordingReplacementCommand(frame, {
@@ -407,13 +413,13 @@ test("captured recording prefixes require exact discard confirmation for replace
     recordingReplacementCommand(frame, {
       command_type: "set_combat_configuration",
       team_a_controller: "random_valid",
-      team_b_controller: "scripted_tdm",
+      team_b_controller: "reactive_tdm",
       execution_information_mode: "shared_obs",
     }),
     {
       command_type: "set_combat_configuration",
       team_a_controller: "random_valid",
-      team_b_controller: "scripted_tdm",
+      team_b_controller: "reactive_tdm",
       execution_information_mode: "shared_obs",
     },
   );

@@ -54,17 +54,43 @@ _HAS_MATPLOTLIB = find_spec("matplotlib") is not None
 _HAS_PYPLOT = _HAS_MATPLOTLIB and find_spec("matplotlib.pyplot") is not None
 
 
-def test_recording_launch_metadata_accepts_random_policy_execution() -> None:
+@pytest.mark.parametrize(
+    "team_a,team_b",
+    (
+        ("random_valid", "manual"),
+        ("reactive_tdm", "manual"),
+        ("manual", "reactive_tdm"),
+        ("manual", "scenario_3"),
+        ("reactive_tdm", "scenario_3"),
+    ),
+)
+def test_recording_launch_metadata_accepts_installed_policy_execution(
+    team_a: str, team_b: str
+) -> None:
     session = SimpleNamespace(
         evaluation_context=SimpleNamespace(
             aggregation_keys=(SimpleNamespace(name="action_source", value="policy"),)
         ),
-        team_a_controller="random_valid",
-        team_b_controller="manual",
+        team_a_controller=team_a,
+        team_b_controller=team_b,
     )
 
     assert _recording_action_source_kind(session) == "policy"
     assert _recording_policy_execution_included(session)
+
+
+@pytest.mark.parametrize(
+    "retired_or_forbidden", ("scripted_tdm", "scenario_1", "scenario_3")
+)
+def test_recording_launch_rejects_invalid_team_a_controllers(
+    retired_or_forbidden: str,
+) -> None:
+    with pytest.raises(ValueError, match="exact team controllers"):
+        _recording_policy_execution_included(
+            SimpleNamespace(
+                team_a_controller=retired_or_forbidden, team_b_controller="manual"
+            )
+        )
 
 
 def _write_valid_replay(tmp_path: Path) -> Path:

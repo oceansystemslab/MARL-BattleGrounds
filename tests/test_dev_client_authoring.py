@@ -1446,17 +1446,17 @@ def test_loaded_snapshot_replaces_and_resets_the_exact_debugger_scenario(
     configured_result = debugger.apply_command(
         CommandRequestV1(
             client_id="authored-restart-test",
-            command_id="scripted-shared",
+            command_id="reactive-shared",
             base_revision=debugger.revision,
             command=SetCombatConfigurationCommandV1(
                 team_a_controller="manual",
-                team_b_controller="scripted_tdm",
+                team_b_controller="reactive_tdm",
                 execution_information_mode="shared_obs",
             ),
         )
     )
     assert configured_result.outcome == "response"
-    assert debugger.session.team_b_controller == "scripted_tdm"
+    assert debugger.session.team_b_controller == "reactive_tdm"
     assert int(debugger.session.state.step_count) == 7
 
 

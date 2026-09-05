@@ -50,13 +50,8 @@ from marl_battlegrounds.policies.actor import ActorAction
 from marl_battlegrounds.policies.no_shared_obs import (
     execute_no_shared_obs_team_policy,
 )
-from marl_battlegrounds.policies.scripted import (
-    TEAM_DEATHMATCH_PROFILE,
-    decide_team_deathmatch_no_shared_obs,
-    decide_team_deathmatch_shared_obs,
-    team_deathmatch_no_shared_obs_policy,
-    team_deathmatch_shared_obs_policy,
-)
+from marl_battlegrounds.policies.random_valid import random_policy
+from marl_battlegrounds.policies.reactive_tdm import reactive_tdm_policy
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsSensorSourceBankV1,
     build_default_shared_obs_information_availability,
@@ -72,6 +67,19 @@ if TYPE_CHECKING:
     class MissingKeyType: ...
 
     class MissingObservationType: ...
+
+
+def _shared_random_policy(
+    observation: Observation,
+    action_mask: ActionMask,
+    actor_key: Array,
+    source_bank: SharedObsSensorSourceBankV1,
+    recipient_source_availability: Array,
+    recipient_global_slot: Array,
+) -> ActorAction:
+    """Test-only SharedObs ABI wrapper retaining canonical Random key sensitivity."""
+    del source_bank, recipient_source_availability, recipient_global_slot
+    return random_policy(observation, action_mask, actor_key)
 
 
 def _tdm_config(
@@ -320,32 +328,28 @@ def test_compositor_preserves_base_rows_and_ignores_every_unavailable_mutation()
     )
 
 
-def test_shared_adapter_is_exactly_no_shared_when_no_source_adds_information() -> None:
-    """Both adapters feed identical facts, profile, action, and trace in parity case."""
+def test_random_adapter_preserves_local_policy_actions_and_key_sensitivity() -> None:
+    """A test-only ABI wrapper preserves the unchanged policy's per-key output."""
     config = _tdm_config()
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
     bank = build_shared_obs_sensor_source_bank(observation)
     recipient = cast(Observation, _scalar_actor(observation, 0))
     recipient_mask = cast(ActionMask, _scalar_actor(action_mask, 0))
-    key = jax.random.key(19)
     unavailable = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
-
-    no_shared = decide_team_deathmatch_no_shared_obs(recipient, recipient_mask, key)
-    shared = decide_team_deathmatch_shared_obs(
-        recipient,
-        recipient_mask,
-        key,
-        bank,
-        unavailable,
-        jnp.asarray(0, dtype=jnp.int32),
-    )
-    _assert_tree_exact(shared, no_shared)
-    assert team_deathmatch_no_shared_obs_policy.profile is TEAM_DEATHMATCH_PROFILE
-    assert team_deathmatch_shared_obs_policy.profile is TEAM_DEATHMATCH_PROFILE
+    moves: list[int] = []
+    for seed in range(8):
+        key = jax.random.key(seed)
+        local = random_policy(recipient, recipient_mask, key)
+        shared = _shared_random_policy(
+            recipient, recipient_mask, key, bank, unavailable, jnp.int32(0)
+        )
+        _assert_tree_exact(shared, local)
+        moves.append(int(shared.move))
+    assert len(set(moves)) > 1
 
 
 def test_shared_adapter_ignores_cross_team_inactive_and_unavailable_mutations() -> None:
-    """Excluded source columns cannot perturb canonical action or trace bytes."""
+    """Excluded source columns cannot perturb reactive action bytes."""
     config = _tdm_config(team_sizes=(2, 1))
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
     bank = build_shared_obs_sensor_source_bank(observation)
@@ -356,7 +360,7 @@ def test_shared_adapter_ignores_cross_team_inactive_and_unavailable_mutations() 
         config.agent_profile.team_ids,
     )[0]
     key = jax.random.key(29)
-    baseline = decide_team_deathmatch_shared_obs(
+    baseline = reactive_tdm_policy(
         recipient,
         recipient_mask,
         key,
@@ -383,7 +387,7 @@ def test_shared_adapter_ignores_cross_team_inactive_and_unavailable_mutations() 
             99_999.0,
         )
     )
-    actual = decide_team_deathmatch_shared_obs(
+    actual = reactive_tdm_policy(
         recipient,
         recipient_mask,
         key,
@@ -459,7 +463,7 @@ def test_source_bank_and_shared_scalar_adapter_match_eager_jit_and_vmap() -> Non
         config.agent_profile.team_ids,
     )[0]
     key = jax.random.key(37)
-    eager_decision = decide_team_deathmatch_shared_obs(
+    eager_decision = reactive_tdm_policy(
         recipient,
         recipient_mask,
         key,
@@ -469,7 +473,7 @@ def test_source_bank_and_shared_scalar_adapter_match_eager_jit_and_vmap() -> Non
     )
     compiled_decision = cast(
         object,
-        jax.jit(decide_team_deathmatch_shared_obs)(
+        jax.jit(reactive_tdm_policy)(
             recipient,
             recipient_mask,
             key,
@@ -479,7 +483,7 @@ def test_source_bank_and_shared_scalar_adapter_match_eager_jit_and_vmap() -> Non
         ),
     )
     _assert_tree_exact(compiled_decision, eager_decision)
-    closed_jaxpr = jax.make_jaxpr(decide_team_deathmatch_shared_obs)(
+    closed_jaxpr = jax.make_jaxpr(reactive_tdm_policy)(
         recipient,
         recipient_mask,
         key,
@@ -516,7 +520,7 @@ def test_shared_adapter_cannot_bypass_the_recipient_exact_action_mask() -> None:
             .set(True)
         ),
     )
-    action, _ = decide_team_deathmatch_shared_obs(
+    action = reactive_tdm_policy(
         recipient,
         stay_only,
         jax.random.key(23),
@@ -573,7 +577,7 @@ def _forbidden_bank_reader_policy(
 
 
 def test_teammate_only_same_epoch_sighting_can_change_movement_intent() -> None:
-    """The canonical Shared TDM adapter acts on an admitted teammate sighting."""
+    """Reactive TDM acts on an admitted current teammate sighting."""
     config = _tdm_config(team_sizes=(2, 1))
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
     recipient = cast(Observation, _scalar_actor(observation, 0))._replace(
@@ -599,7 +603,7 @@ def test_teammate_only_same_epoch_sighting_can_change_movement_intent() -> None:
     unavailable = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
     admitted = unavailable.at[1].set(True)
 
-    without_source, without_trace = decide_team_deathmatch_shared_obs(
+    without_source = reactive_tdm_policy(
         recipient,
         recipient_mask,
         jax.random.key(0),
@@ -607,7 +611,7 @@ def test_teammate_only_same_epoch_sighting_can_change_movement_intent() -> None:
         unavailable,
         jnp.asarray(0, dtype=jnp.int32),
     )
-    with_source, with_trace = decide_team_deathmatch_shared_obs(
+    with_source = reactive_tdm_policy(
         recipient,
         recipient_mask,
         jax.random.key(0),
@@ -618,8 +622,6 @@ def test_teammate_only_same_epoch_sighting_can_change_movement_intent() -> None:
     without_move = int(without_source.move)
     with_move = int(with_source.move)
     assert without_move != with_move
-    assert int(without_trace.movement_action) == without_move
-    assert int(with_trace.movement_action) == with_move
 
 
 def test_shared_team_executor_uses_global_slot_keys_and_homogeneous_source_bank() -> (
@@ -643,7 +645,7 @@ def test_shared_team_executor_uses_global_slot_keys_and_homogeneous_source_bank(
             keys,
             bank,
             availability,
-            team_deathmatch_shared_obs_policy,
+            _shared_random_policy,
             1,
         ),
     )
@@ -655,11 +657,19 @@ def test_shared_team_executor_uses_global_slot_keys_and_homogeneous_source_bank(
             keys,
             bank,
             availability,
-            team_deathmatch_shared_obs_policy,
+            _shared_random_policy,
             2,
         ),
     )
     for team_offset, team_action in ((0, shared_a), (MAX_AGENTS_PER_TEAM, shared_b)):
+        for local_slot in range(MAX_AGENTS_PER_TEAM):
+            global_slot = team_offset + local_slot
+            expected = random_policy(
+                cast(Observation, _scalar_actor(observation, global_slot)),
+                cast(ActionMask, _scalar_actor(action_mask, global_slot)),
+                keys[global_slot],
+            )
+            _assert_tree_exact(_scalar_actor(team_action, local_slot), expected)
 
         def _take_team_rows(leaf: Array, offset: int = team_offset) -> Array:
             return leaf[offset : offset + MAX_AGENTS_PER_TEAM]
@@ -686,7 +696,7 @@ def test_shared_team_executor_uses_global_slot_keys_and_homogeneous_source_bank(
             observation,
             action_mask,
             keys,
-            team_deathmatch_no_shared_obs_policy,
+            random_policy,
             1,
         ),
     )
@@ -699,7 +709,7 @@ def test_shared_team_executor_uses_global_slot_keys_and_homogeneous_source_bank(
             keys,
             bank,
             zero_availability,
-            team_deathmatch_shared_obs_policy,
+            _shared_random_policy,
             1,
         ),
     )
@@ -792,8 +802,8 @@ def test_unified_rollout_runs_both_homogeneous_modes_and_no_shared_bypasses_bank
         observation,
         action_mask,
         jax.random.key(41),
-        team_deathmatch_no_shared_obs_policy,
-        team_deathmatch_no_shared_obs_policy,
+        random_policy,
+        random_policy,
         execution_information_mode="no_shared_obs",
     )
     monkeypatch.undo()
@@ -804,8 +814,8 @@ def test_unified_rollout_runs_both_homogeneous_modes_and_no_shared_bypasses_bank
         observation,
         action_mask,
         jax.random.key(41),
-        team_deathmatch_no_shared_obs_policy,
-        team_deathmatch_no_shared_obs_policy,
+        random_policy,
+        random_policy,
         execution_information_mode="no_shared_obs",
     )
     _assert_tree_exact(repeated_no_shared, no_shared)
@@ -816,8 +826,8 @@ def test_unified_rollout_runs_both_homogeneous_modes_and_no_shared_bypasses_bank
         observation,
         action_mask,
         jax.random.key(41),
-        team_deathmatch_shared_obs_policy,
-        team_deathmatch_shared_obs_policy,
+        _shared_random_policy,
+        _shared_random_policy,
         execution_information_mode="shared_obs",
     )
     shared_successors, shared_currents = shared.successors, shared.currents
@@ -845,8 +855,8 @@ def test_rollout_availability_and_host_reconstruction_preserve_exact_provenance(
         observation,
         action_mask,
         jax.random.key(47),
-        team_deathmatch_shared_obs_policy,
-        team_deathmatch_shared_obs_policy,
+        _shared_random_policy,
+        _shared_random_policy,
         execution_information_mode="shared_obs",
     )
     availability = result.information_availability
@@ -1054,8 +1064,8 @@ def test_rollout_rejects_unknown_information_mode_before_compilation(
             observation,
             action_mask,
             jax.random.key(0),
-            cast(Callable[..., ActorAction], team_deathmatch_no_shared_obs_policy),
-            cast(Callable[..., ActorAction], team_deathmatch_no_shared_obs_policy),
+            cast(Callable[..., ActorAction], random_policy),
+            cast(Callable[..., ActorAction], random_policy),
             execution_information_mode=cast(object, invalid_mode),  # type: ignore[arg-type]
         )
 
@@ -1078,8 +1088,8 @@ def test_rollout_rejects_wrong_scalar_policy_abi_before_jit(
             observation,
             action_mask,
             jax.random.key(0),
-            cast(Callable[..., ActorAction], team_deathmatch_no_shared_obs_policy),
-            cast(Callable[..., ActorAction], team_deathmatch_no_shared_obs_policy),
+            cast(Callable[..., ActorAction], random_policy),
+            cast(Callable[..., ActorAction], random_policy),
             execution_information_mode="shared_obs",
         )
 

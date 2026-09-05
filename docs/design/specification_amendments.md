@@ -2008,3 +2008,114 @@ is silently substituted. Recorded-progress discard confirmation remains
 explicit. Saved assets, schemas, Core, policy algorithms, and Replay Viewer
 responsibilities are unchanged. Wider diagnostic availability neither qualifies
 Scenario 3 nor extends the measured Scenario 1/2 witnesses to other setups.
+
+## A30. Reactive TDM and specialist scenario controllers
+
+**Classification:** explicit pre-alpha diagnostic-policy replacement and bounded
+specialist-controller addition.
+**Supersedes:** A13/A19's executable legacy TDM scorer, profile, trace, and
+dual-adapter requirements; A22/A23's legacy live controller choices; and
+A28/A29's separate executable Reactive MRP/Scenario 1 identity and Team B-only
+general-controller restriction. A25's canonical SharedObs contract and
+A26/A27's scientific-integrity, evaluation-role, and baseline boundaries remain
+unchanged. Historical amendments and recorded evidence are preserved.
+
+The old Scripted TDM scorer, profiles, traces, policy-specific SharedObs and
+NoSharedObs adapters, exports, and dedicated algorithm tests are retired
+completely. The separate Reactive MRP/Scenario 1 executable interface is also
+retired after its useful small helpers move into the replacement. No executable
+aliases, wrappers, dormant copies, or historical-policy dispatch remain.
+Generic source composition, team execution, Random, dual-mode rollout, and
+their causal, mask, RNG, capture, and replay proofs are retained. Fixed-frame
+scripted diagnostics and future KOTH/CTF specifications are not legacy TDM
+policy code and are not removed.
+
+**Reactive TDM** is one deterministic, team-agnostic five-class policy, available
+on either DevClient team under SharedObs. **Scenario 3 Controller** is a separate
+deterministic Rogue specialist, available on Team B under SharedObs; its other
+classes Stay/no-combat, including after revival. Both work in every valid
+interactive setup without asset-name, task, horizon, roster, or respawn gates.
+The general controller contains no scenario-ID branch. Specialist behavior is
+an explicit small policy, not a controller registry, planner, behavior tree,
+plugin, or saved-policy format.
+
+Both policies consume only authorized current SharedObs and each recipient's
+exact mask. They accept but ignore actor keys. Eligible targets are observed,
+active, living, positive-health units. Movement and combat select independently;
+Ultimate replaces Basic for the transition. Health ties use global slot, except
+Priest health ties first use maximum health. Distance ties use global slot;
+movement ties use the existing movement-action order. No raw state, pending
+actions, history, future information, or scenario identity enters a decision.
+All actors use the same epoch, with at most one source bank, one joint-action
+assembly, and one unchanged simulator step. Exact masks and lifecycle no-ops
+override all preferences.
+
+Reactive TDM's class rules use center distances and existing float32 conventions:
+
+| Class | Movement with observed enemies | Combat priority |
+| --- | --- | --- |
+| Priest | Select lowest-health ally including self; approach a nonself selected ally beyond 3, otherwise retreat from nearest enemy | Lowest-health legal Ultimate ally at HP ≤30; otherwise lowest-health legal Basic ally, including self/full-health allies |
+| Mage | Nearest enemy: approach above 2, retreat below 2, Stay at exactly 2 | Legal Burst when a legal Basic enemy exists; otherwise lowest-health legal Basic enemy |
+| Rogue | Approach nearest enemy center, including at body contact | Lowest-health legal Ultimate enemy; otherwise lowest-health legal Basic enemy |
+| Hunter | Nearest enemy: retreat at/below 3, Stay in (3, 3.5], approach above 3.5 | Nearest legal Trap enemy within distance ≤2; otherwise lowest-health legal Basic enemy |
+| Warrior | Approach nearest enemy center, including at body contact | Lowest-health legal Charge enemy with HP strictly <40; otherwise lowest-health legal Basic enemy |
+
+Without observed enemies, Mage/Rogue/Hunter/Warrior move toward map center.
+Priest instead follows the nearest observed living ally excluding self:
+retreat at/below 1.5, Stay in (1.5, 2], and approach above 2. A Priest without
+another observed living ally also moves toward map center. This peaceful band
+does not change Priest's enemy-visible threshold of 3. No legal combat target
+means no-combat. Exact center or zero movement intention means Stay.
+
+General movement retains the existing eight-direction alignment ranking,
+obstacle/bounds projection, inclusive 10% useful-stride threshold, and fixed
+tie order, without estimated body interference. Clipping, sliding, contact,
+and desired oscillation remain legal. These are local intentions, not final
+distance guarantees; map-center rendezvous is not pathfinding or guaranteed
+exploration. Core remains authoritative for every actual collision.
+
+Scenario 3's Rogue pursues the lowest-health observed living enemy, recomputed
+each epoch. It independently uses Ultimate, then Basic, on the lowest-health
+legal enemy within Basic interaction radius. Without an observed enemy it
+Stays/no-combat. Its separate movement helper evaluates eight legal static-world
+projected moves retaining at least 10% stride. It screens each entire straight
+segment against other observed living body discs, excluding self and the
+selected prey, using summed radii with tangency allowed and no added margin.
+An already overlapping blocker permits only non-deepening movement ending
+farther from that blocker. The safe endpoint nearest the prey wins, with fixed
+action-order ties; the best move may temporarily increase prey distance.
+Stay is the fallback only when none qualifies, not a competing endpoint.
+This stationary-body estimate does not predict opposing actions, guarantee
+navigation against a moving blocker, or alter general Reactive TDM movement.
+
+Private live controller values become `manual`, `reactive_tdm`, `random_valid`,
+plus Team B's `scenario_3`. Obsolete live values fail strict validation rather
+than silently selecting a replacement. NoSharedObs remains available for
+Manual/Random and generic custom research, but neither reactive policy receives
+a NoSharedObs adapter. Selectors do not silently change information mode.
+Expected configuration rejection remains nonfatal and preserves the current
+session, pending actions, keys, generation, revision, and recording progress.
+Reset and controller changes preserve exact-snapshot/seed semantics; loading
+an asset preserves the installed choices and never installs a controller.
+
+New policy identities are `reactive-team-deathmatch-controller@1` and
+`scenario-3-pressure-controller@1`, with fresh canonical descriptors bound to
+the launch-captured source revision. New interactive action-source payloads use
+V4 and identify both controllers separately from the loaded map/scenario.
+Manual/manual is `manual`, exactly one manual team is `mixed`, and fully
+policy-controlled interactive execution is `policy`. Fixed-frame diagnostics
+retain their existing `scripted` payload. Existing replay formats, artifacts,
+and readers remain unchanged; historical policy identifiers do not require
+retaining their executable implementations. New interactive digests change
+without changing Random's keys or actions.
+
+Both reactive policies and Random remain diagnostic/scenario-pressure tooling,
+not official baselines, Big 12 entrants, or Baseline Library members. An official
+evaluation must separately freeze and bind the chosen controller through
+`pressure_protocol`, identically for treatment and matched ablation. Saved
+scenarios remain controller-independent. Scenario 3's physical regression
+fixture and development-stage notes do not release or qualify an official
+scenario or impose a five-transition horizon. Scenario-derived rules must not
+silently enter official training, and their originating scenario results must
+not be presented as uncontaminated evaluation. Core and public evaluation-role
+contracts are unchanged.

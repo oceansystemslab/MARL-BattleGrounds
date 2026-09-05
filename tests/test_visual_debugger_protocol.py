@@ -123,7 +123,7 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
         SetPresetCommandV1(preset="analysis"),
         SetCombatConfigurationCommandV1(
             team_a_controller="manual",
-            team_b_controller="scripted_tdm",
+            team_b_controller="reactive_tdm",
             execution_information_mode="shared_obs",
         ),
         SetCombatConfigurationCommandV1(
@@ -141,9 +141,9 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
         ),
         ConfirmDiscardAndReplaceCommandV1(
             replacement=SetCombatConfigurationCommandV1(
-                team_a_controller="scripted_tdm",
-                team_b_controller="scripted_tdm",
-                execution_information_mode="no_shared_obs",
+                team_a_controller="reactive_tdm",
+                team_b_controller="reactive_tdm",
+                execution_information_mode="shared_obs",
             )
         ),
         ExitCommandV1(),
@@ -169,7 +169,7 @@ def test_command_request_round_trips_every_discriminated_variant(
 def test_combat_configuration_requires_both_symmetric_controller_values() -> None:
     configuration = CombatConfigurationV1(
         team_a_controller="random_valid",
-        team_b_controller="scripted_tdm",
+        team_b_controller="reactive_tdm",
         execution_information_mode="shared_obs",
     )
 
@@ -182,6 +182,34 @@ def test_combat_configuration_requires_both_symmetric_controller_values() -> Non
         del payload[missing]
         with pytest.raises(ValidationError):
             CombatConfigurationV1.model_validate(payload)
+
+
+@pytest.mark.parametrize("field", ("team_a_controller", "team_b_controller"))
+@pytest.mark.parametrize("retired", ("scripted_tdm", "scenario_1"))
+def test_combat_configuration_strictly_rejects_retired_controllers(
+    field: str, retired: str
+) -> None:
+    with pytest.raises(ValidationError, match=field):
+        CombatConfigurationV1.model_validate(
+            {
+                "team_a_controller": "manual",
+                "team_b_controller": "manual",
+                "execution_information_mode": "shared_obs",
+                field: retired,
+            }
+        )
+
+
+@pytest.mark.parametrize("field", ("team_a_controller", "team_b_controller"))
+def test_reactive_tdm_is_shared_only_on_both_teams(field: str) -> None:
+    configuration = {
+        "team_a_controller": "manual",
+        "team_b_controller": "manual",
+        "execution_information_mode": "no_shared_obs",
+        field: "reactive_tdm",
+    }
+    with pytest.raises(ValidationError, match="require SharedObs"):
+        CombatConfigurationV1.model_validate(configuration)
 
 
 def test_recording_status_enforces_exact_lifecycle_availability() -> None:

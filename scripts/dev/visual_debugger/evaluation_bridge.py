@@ -48,9 +48,8 @@ from marl_battlegrounds.evaluation.models import (
     canonical_digest_sha256,
     canonical_json_bytes,
 )
-from marl_battlegrounds.policies.scenario_controllers.scenario_1 import (
-    scenario_1_controller_descriptor,
-)
+from marl_battlegrounds.policies.reactive_tdm import reactive_tdm_controller_descriptor
+from marl_battlegrounds.policies.scenario_3 import scenario_3_controller_descriptor
 from scripts.dev.visual_debugger.model import (
     SUPPORTED_TEAM_B_CONTROLLERS,
     SUPPORTED_TEAM_CONTROLLERS,
@@ -222,40 +221,17 @@ def _action_source_contract_payload(
     team_b_controller: TeamBController,
     execution_information_mode: ExecutionInformationMode,
     scenario_contract_digest: str,
+    reactive_tdm_identity: ContentAddressedIdentityV1 | None = None,
     scenario_controller_identity: ContentAddressedIdentityV1 | None = None,
 ) -> dict[str, object]:
     if action_source_kind not in ("manual", "scripted", "mixed", "policy"):
         raise ValueError(
             "action_source_kind must be manual, scripted, mixed, or policy"
         )
-    if team_b_controller == "scenario_1":
-        if scenario_controller_identity is None:
-            raise ValueError(
-                "Scenario 1 action source requires its controller identity"
-            )
+    if scenario_mode == "scripted":
+        # Fixed-frame diagnostic identities must remain byte-for-byte V1.
         return {
             "schema_id": "marl_battlegrounds.visual_debugger.action_source_contract",
-            "schema_version": 3,
-            "action_source_kind": action_source_kind,
-            "team_a_controller": team_a_controller,
-            "team_b_controller": team_b_controller,
-            "execution_information_mode": execution_information_mode,
-            "manual_submission_included": team_a_controller == "manual",
-            "scripted_tdm_execution_included": team_a_controller == "scripted_tdm",
-            "random_policy_execution_included": team_a_controller == "random_valid",
-            "scenario_controller": scenario_controller_identity,
-            "scenario_contract_digest_sha256": scenario_contract_digest,
-            "policy_execution_included": True,
-        }
-    random_policy_execution_included = "random_valid" in (
-        team_a_controller,
-        team_b_controller,
-    )
-    if not random_policy_execution_included:
-        # Preserve every established non-Random action-source identity. V2 is
-        # needed only when the new Random controller must be distinguished.
-        payload: dict[str, object] = {
-            "schema_id": ("marl_battlegrounds.visual_debugger.action_source_contract"),
             "schema_version": 1,
             "action_source_kind": action_source_kind,
             "team_b_controller": team_b_controller,
@@ -263,38 +239,31 @@ def _action_source_contract_payload(
             "manual_submission_included": action_source_kind in ("manual", "mixed"),
             "scripted_submission_included": action_source_kind in ("scripted", "mixed"),
             "scenario_contract_digest_sha256": scenario_contract_digest,
-            "policy_execution_included": (
-                scenario_mode == "interactive"
-                and "scripted_tdm" in (team_a_controller, team_b_controller)
-            ),
+            "policy_execution_included": False,
         }
-        if scenario_mode == "interactive":
-            payload["team_a_controller"] = team_a_controller
-        return payload
-    manual_submission_included = "manual" in (
-        team_a_controller,
-        team_b_controller,
-    )
-    scripted_tdm_execution_included = "scripted_tdm" in (
-        team_a_controller,
-        team_b_controller,
-    )
-    payload: dict[str, object] = {
+    controllers = (team_a_controller, team_b_controller)
+    if "reactive_tdm" in controllers and reactive_tdm_identity is None:
+        raise ValueError("Reactive TDM action source requires its controller identity")
+    if "scenario_3" in controllers and scenario_controller_identity is None:
+        raise ValueError("Scenario 3 action source requires its controller identity")
+    return {
         "schema_id": "marl_battlegrounds.visual_debugger.action_source_contract",
-        "schema_version": 2,
+        "schema_version": 4,
         "action_source_kind": action_source_kind,
         "team_a_controller": team_a_controller,
         "team_b_controller": team_b_controller,
         "execution_information_mode": execution_information_mode,
-        "manual_submission_included": manual_submission_included,
-        "scripted_tdm_execution_included": scripted_tdm_execution_included,
-        "random_policy_execution_included": random_policy_execution_included,
+        "manual_submission_included": "manual" in controllers,
+        "reactive_tdm_execution_included": "reactive_tdm" in controllers,
+        "random_policy_execution_included": "random_valid" in controllers,
+        "scenario_3_execution_included": "scenario_3" in controllers,
+        "reactive_tdm_controller": reactive_tdm_identity,
+        "scenario_controller": scenario_controller_identity,
         "scenario_contract_digest_sha256": scenario_contract_digest,
-        "policy_execution_included": (
-            scripted_tdm_execution_included or random_policy_execution_included
+        "policy_execution_included": any(
+            controller != "manual" for controller in controllers
         ),
     }
-    return payload
 
 
 def _policy_assignments(
@@ -306,6 +275,7 @@ def _policy_assignments(
     team_b_controller: TeamBController,
     actor_projection: VersionedIdentityV1,
     action_contract_digest: str,
+    reactive_tdm_identity: ContentAddressedIdentityV1 | None = None,
     scenario_controller_identity: ContentAddressedIdentityV1 | None = None,
 ) -> tuple[PolicyAssignmentSlotV1, ...]:
     profile = config.agent_profile
@@ -333,15 +303,18 @@ def _policy_assignments(
             policy_kind = (
                 team_a_controller if team_id == TEAM_A_ID else team_b_controller
             )
-        if policy_kind == "scripted_tdm":
-            algorithm_id = "canonical-scripted-team-deathmatch"
-            execution_mode = "stochastic"
+        controller_identity = None
+        if policy_kind == "reactive_tdm":
+            algorithm_id = "reactive-team-deathmatch-controller"
+            execution_mode = "deterministic"
+            controller_identity = reactive_tdm_identity
         elif policy_kind == "random_valid":
             algorithm_id = "canonical-random-valid"
             execution_mode = "stochastic"
-        elif policy_kind == "scenario_1":
-            algorithm_id = "scenario-1-pressure-controller"
+        elif policy_kind == "scenario_3":
+            algorithm_id = "scenario-3-pressure-controller"
             execution_mode = "deterministic"
+            controller_identity = scenario_controller_identity
         else:
             algorithm_id = "not_applicable"
             execution_mode = "deterministic"
@@ -352,9 +325,8 @@ def _policy_assignments(
                 policy_kind=policy_kind,
                 policy_id=f"debugger-action-source:{policy_kind}:slot:{slot}",
                 policy_content_digest=(
-                    scenario_controller_identity.canonical_digest
-                    if policy_kind == "scenario_1"
-                    and scenario_controller_identity is not None
+                    controller_identity.canonical_digest
+                    if controller_identity is not None
                     else action_contract_digest
                 ),
                 checkpoint_digest=None,
@@ -372,7 +344,7 @@ def _policy_assignments(
                 ),
                 # Manual input is not a sampled policy; deterministic records
                 # the lack of policy RNG rather than repeatable human choices.
-                # Scripted TDM samples from its seeded action distribution.
+                # Random alone samples from its seeded action distribution.
                 execution_mode=execution_mode,
             )
         )
@@ -423,17 +395,20 @@ def build_debugger_evaluation_context_v1(
         raise TypeError("config must be the exact EnvConfig type")
     if team_a_controller not in SUPPORTED_TEAM_CONTROLLERS:
         raise ValueError(
-            "team_a_controller must be manual, scripted_tdm, or random_valid"
+            "team_a_controller must be manual, reactive_tdm, or random_valid"
         )
     if team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
         raise ValueError(
-            "team_b_controller must be manual, scripted_tdm, random_valid, "
-            "or scenario_1"
+            "team_b_controller must be manual, reactive_tdm, random_valid, "
+            "or scenario_3"
         )
-    if team_b_controller == "scenario_1" and (
+    if any(
+        controller in ("reactive_tdm", "scenario_3")
+        for controller in (team_a_controller, team_b_controller)
+    ) and (
         execution_information_mode != "shared_obs" or scenario.mode != "interactive"
     ):
-        raise ValueError("Reactive MRP Controller requires interactive SharedObs.")
+        raise ValueError("Reactive controllers require interactive SharedObs.")
     if execution_information_mode not in ("shared_obs", "no_shared_obs"):
         raise ValueError(
             "execution_information_mode must be shared_obs or no_shared_obs"
@@ -470,10 +445,11 @@ def build_debugger_evaluation_context_v1(
         if execution_information_mode == "shared_obs"
         else NO_SHARED_OBS_ACTOR_PROJECTION_V2
     )
-    scenario_controller_identity = None
-    if team_b_controller == "scenario_1":
-        descriptor = scenario_1_controller_descriptor()
-        scenario_controller_identity = ContentAddressedIdentityV1.model_validate(
+
+    def controller_identity(
+        descriptor: dict[str, object],
+    ) -> ContentAddressedIdentityV1:
+        return ContentAddressedIdentityV1.model_validate(
             {
                 "identifier": descriptor["policy_id"],
                 "version": descriptor["version"],
@@ -482,6 +458,17 @@ def build_debugger_evaluation_context_v1(
                 ),
             }
         )
+
+    reactive_tdm_identity = (
+        controller_identity(reactive_tdm_controller_descriptor())
+        if "reactive_tdm" in (team_a_controller, team_b_controller)
+        else None
+    )
+    scenario_controller_identity = (
+        controller_identity(scenario_3_controller_descriptor())
+        if team_b_controller == "scenario_3"
+        else None
+    )
     action_payload = _action_source_contract_payload(
         action_source_kind=action_source_kind,
         scenario_mode=scenario.mode,
@@ -489,6 +476,7 @@ def build_debugger_evaluation_context_v1(
         team_b_controller=team_b_controller,
         execution_information_mode=execution_information_mode,
         scenario_contract_digest=scenario_digest,
+        reactive_tdm_identity=reactive_tdm_identity,
         scenario_controller_identity=scenario_controller_identity,
     )
     action_digest = canonical_digest_sha256(action_payload)
@@ -593,6 +581,7 @@ def build_debugger_evaluation_context_v1(
         team_b_controller=team_b_controller,
         actor_projection=actor_projection,
         action_contract_digest=action_digest,
+        reactive_tdm_identity=reactive_tdm_identity,
         scenario_controller_identity=scenario_controller_identity,
     )
     active_roles = {
@@ -641,6 +630,19 @@ def build_debugger_evaluation_context_v1(
     if scenario.mode == "interactive":
         aggregation_keys.append(
             AggregationKeyV1(name="team_a_controller", value=team_a_controller)
+        )
+    if reactive_tdm_identity is not None:
+        aggregation_keys.extend(
+            (
+                AggregationKeyV1(
+                    name="reactive_tdm_controller",
+                    value=f"{reactive_tdm_identity.identifier}@{reactive_tdm_identity.version}",
+                ),
+                AggregationKeyV1(
+                    name="reactive_tdm_controller_digest",
+                    value=reactive_tdm_identity.canonical_digest,
+                ),
+            )
         )
     if scenario_controller_identity is not None:
         aggregation_keys.extend(
