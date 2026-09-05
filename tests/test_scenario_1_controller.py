@@ -1,6 +1,7 @@
-"""Scenario 1's deterministic rules and accepted three-transition witnesses."""
+"""Reactive MRP rules and accepted Scenario 1 and Scenario 2 witnesses."""
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import cast
 
 import jax
@@ -8,14 +9,21 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax import Array
-from scripts.dev.visual_debugger.authoring_compiler import CompiledDevScenarioV1
+from scripts.dev.visual_debugger.authoring_compiler import (
+    CompiledDevScenarioV1,
+    compile_dev_scenario,
+)
+from scripts.dev.visual_debugger.authoring_models import DevScenarioDraftV1
 from tests.scenario_controller_fixtures import load_scenario_1
 
 from marl_battlegrounds.core.axis_mappings import (
     UNIT_DIRECTION_VECTOR_BY_MOVEMENT_ACTION_ARRAY,
 )
 from marl_battlegrounds.core.env import initialize_scenario_state, step
-from marl_battlegrounds.core.geometry import project_movement_with_geometry
+from marl_battlegrounds.core.geometry import (
+    has_clear_line_of_sight,
+    project_movement_with_geometry,
+)
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_ALIVE,
@@ -33,7 +41,9 @@ from marl_battlegrounds.core.types import (
     MOVE_EAST,
     MOVE_NORTH,
     MOVE_NORTHEAST,
+    MOVE_NORTHWEST,
     MOVE_SOUTH,
+    MOVE_SOUTHEAST,
     MOVE_SOUTHWEST,
     MOVE_STAY,
     MOVE_WEST,
@@ -645,3 +655,86 @@ def test_rules_continue_to_final_wave_without_unsupported_class_decisions(
         )
         assert bool(done.done) == (tick == 4)
     assert bool(jnp.all(state.alive_mask[6:8]))
+
+
+def test_reactive_controller_reproduces_scenario_2_cover_and_healing_witness() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "scenario_2_r12.json"
+    draft = DevScenarioDraftV1.model_validate_json(fixture.read_text(encoding="utf-8"))
+    scenario = compile_dev_scenario(draft)
+    assert draft.revision == 12
+    assert scenario.semantic_digest == (
+        "1b2e2d391053a0de15c7f292dc70f6db679ed9e62e35ec1f11dcc68bb9f1c2cc"
+    )
+    state, obs, mask = (
+        scenario.initial_state,
+        scenario.observation,
+        scenario.action_mask,
+    )
+    # Warrior/Priest: Charge/self-heal, basic/heal, no-combat/Ultimate, basic/no-combat.
+    # Target actions are observer-relative; Team A's 9 is Rogue-B and 6 is Mage-B.
+    moves = [
+        [0, MOVE_SOUTH, 0, 0, MOVE_WEST],
+        [0, MOVE_SOUTHEAST, 0, 0, MOVE_NORTHWEST],
+        [0, MOVE_NORTHWEST, 0, 0, MOVE_STAY],
+        [0, MOVE_STAY, 0, 0, MOVE_STAY],
+    ]
+    targets = [[0, 9, 0, 0, 5], [0, 9, 0, 0, 2], [0, 0, 0, 0, 2], [0, 6, 0, 0, 0]]
+    ultimates = [[0, 1, 0, 0, 0], [0] * 5, [0, 0, 0, 0, 1], [0] * 5]
+    expected_b_moves = [
+        [MOVE_WEST, 0, 0, MOVE_WEST, 0],
+        [MOVE_SOUTH, 0, 0, 0, 0],
+        [MOVE_SOUTH, 0, 0, 0, 0],
+        [MOVE_NORTH, 0, 0, 0, 0],
+    ]
+    expected_scores = [[18, 19], [19, 19], [19, 19], [20, 19]]
+    expected_warrior_hp = [15.9387493, 4.8774986, 185.8162537, 166.7550049]
+    for tick in range(4):
+        if tick == 2:
+            # Priest is protected by cover, not by being outside Mage's basic range.
+            mage, priest = state.agent_positions[5], state.agent_positions[4]
+            distance = float(jnp.linalg.norm(mage - priest))
+            assert distance == pytest.approx(2.982093, abs=1e-5)
+            assert distance < float(
+                scenario.config.agent_profile.basic_interaction_radii[5]
+            )
+            assert not bool(
+                has_clear_line_of_sight(mage, priest, scenario.config.obstacles)
+            )
+            assert not bool(mask.select_target_use_ultimate_joint_mask[5, 10, 0])
+            assert bool(mask.select_target_use_ultimate_joint_mask[4, 2, 1])
+        # These are expected outputs only; Team B is generated afresh from this epoch.
+        b = _team_b(scenario, obs, mask)
+        np.testing.assert_array_equal(b.move, expected_b_moves[tick])
+        np.testing.assert_array_equal(
+            b.select_target, [7, 0, 0, 10 if tick == 0 else 0, 0]
+        )
+        np.testing.assert_array_equal(b.use_ultimate, [0] * 5)
+        a = ActorAction(
+            jnp.array(moves[tick], dtype=jnp.int32),
+            jnp.array(targets[tick], dtype=jnp.int32),
+            jnp.array(ultimates[tick], dtype=jnp.int32),
+        )
+        joint = build_joint_action_from_actor_actions(a, b)
+        slots = jnp.arange(MAX_AGENT_SLOTS)
+        assert bool(jnp.all(mask.move_mask[slots, joint.move]))
+        assert bool(
+            jnp.all(
+                mask.select_target_use_ultimate_joint_mask[
+                    slots, joint.select_target, joint.use_ultimate
+                ]
+            )
+        )
+        state, obs, reward, done, mask, _ = _STEP(
+            scenario.config, state, mask, joint, jax.random.key(0)
+        )
+        np.testing.assert_array_equal(
+            state.team_deathmatch_scores, expected_scores[tick]
+        )
+        assert float(state.current_health[1]) == pytest.approx(
+            expected_warrior_hp[tick], abs=1e-5
+        )
+        assert float(state.current_health[4]) == 4.0
+        assert bool(done.terminated) == (tick == 3)
+        assert not bool(done.truncated)
+        assert float(reward.rewards[1]) == (1.0 if tick == 3 else 0.0)
+    assert int(state.step_count) == 299

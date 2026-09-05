@@ -421,7 +421,7 @@ class DebuggerSession:
             self.team_b_controller == "scenario_1"
             and self.evaluation_context.execution_information_mode != "shared_obs"
         ):
-            raise ValueError("Scenario 1 Controller requires SharedObs.")
+            raise ValueError("Reactive MRP Controller requires SharedObs.")
         if self.scenario.mode == "scripted":
             if self.team_a_controller != "manual" or self.team_b_controller != "manual":
                 raise ValueError(

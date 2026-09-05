@@ -1148,7 +1148,7 @@ test("authoring persists through restart and drives same-start Combat comparison
         "true",
       );
       await expect(page.locator("#command-controlled-actor")).toContainText(
-        "Scenario 1 Controller",
+        "Reactive MRP Controller",
       );
       await expect(page.locator("#command-target-select")).toBeDisabled();
       if (teamA === "manual") {

@@ -213,7 +213,7 @@ class CombatConfigurationV1(_ProtocolModel):
             self.team_b_controller == "scenario_1"
             and self.execution_information_mode != "shared_obs"
         ):
-            raise ValueError("Scenario 1 Controller requires SharedObs.")
+            raise ValueError("Reactive MRP Controller requires SharedObs.")
         return self
 
 

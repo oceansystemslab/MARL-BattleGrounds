@@ -138,20 +138,25 @@ NoSharedObs remains selectable for diagnostics, custom research, and
 compatibility checks. Changing either controller or the information regime
 resets the exact loaded scenario and seed before comparison.
 
-Team B additionally offers **Scenario 1 Controller**, a deterministic reactive
-pressure controller. Load your saved Scenario 1, leave Team A on Manual, select
-SharedObs, and select Scenario 1 Controller on Team B. Submit advances one turn;
-Reset restores the exact loaded starting state and seed. Team B remains
-inspectable, but its action inputs are read-only. Team A may alternatively use
+Team B additionally offers **Reactive MRP Controller**, a deterministic reactive
+pressure controller shared by Scenarios 1 and 2. Load either saved scenario,
+leave Team A on Manual, select SharedObs, and select Reactive MRP Controller on
+Team B. Submit advances one turn; Reset restores the exact loaded starting
+state and seed. Team B remains inspectable, but its action inputs are read-only.
+Team A may alternatively use
 the existing Scripted TDM or Random controllers.
 
-Scenario 1 Controller is never available on Team A or under NoSharedObs. It
+Reactive MRP Controller is never available on Team A or under NoSharedObs. It
 requires an interactive TDM snapshot with one to five remaining transitions.
 Team B's decision-making agents must be Mage, Rogue, or Priest; configured
 Warrior/Hunter slots must start dead and cannot revive before the final
 successor. Renamed or copied compatible scenarios are accepted. An incompatible
 selection or load leaves the current session unchanged and explains the issue;
 select a normal Team B controller before loading an unsupported arena.
+
+This is a display-label change: the existing `scenario_1` controller identity,
+behavior and provenance remain unchanged. Eligibility depends on the snapshot,
+not its name or scenario number.
 
 Loading a scenario does not select its pressure controller automatically, and
 saved assets remain controller-independent. Future official evaluations bind

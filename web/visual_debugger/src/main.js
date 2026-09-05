@@ -1930,7 +1930,7 @@ function combatControllerLabel(controller) {
     return "Random";
   }
   if (controller === "scenario_1") {
-    return "Scenario 1 Controller";
+    return "Reactive MRP Controller";
   }
   return "Manual";
 }

@@ -612,13 +612,13 @@ def _validate_scenario_controller_snapshot(
     if team_b_controller != "scenario_1":
         return
     if scenario.mode != "interactive" or config.task_mode != TASK_MODE_TDM:
-        raise ValueError("Scenario 1 Controller requires interactive TDM.")
+        raise ValueError("Reactive MRP Controller requires interactive TDM.")
     if execution_information_mode != "shared_obs":
-        raise ValueError("Scenario 1 Controller requires SharedObs.")
+        raise ValueError("Reactive MRP Controller requires SharedObs.")
     remaining = config.max_steps - int(state.step_count)
     if not 1 <= remaining <= 5:
         raise ValueError(
-            "Scenario 1 Controller requires one to five remaining transitions."
+            "Reactive MRP Controller requires one to five remaining transitions."
         )
     profile = config.agent_profile
     supported_classes = (MAGE_CLASS_ID, ROGUE_CLASS_ID, PRIEST_CLASS_ID)
@@ -635,7 +635,7 @@ def _validate_scenario_controller_snapshot(
             or int(state.team_respawn_wave_countdowns[TEAM_B_ID - 1]) + 1 < remaining
         ):
             raise ValueError(
-                "Scenario 1 Controller requires Team B Warrior/Hunter slots to start "
+                "Reactive MRP Controller requires Team B Warrior/Hunter slots to start "
                 "dead and respawn no earlier than the final transition."
             )
 

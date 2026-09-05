@@ -1434,7 +1434,7 @@ test("main labels every policy controller explicitly and fences its action editi
   assert.match(source, /controller === "random_valid"[\s\S]*return "Random"/u);
   assert.match(
     source,
-    /controller === "scenario_1"[\s\S]*return "Scenario 1 Controller"/u,
+    /controller === "scenario_1"[\s\S]*return "Reactive MRP Controller"/u,
   );
   assert.match(styles, /data-team-b-controller="scenario_1"/u);
   assert.match(

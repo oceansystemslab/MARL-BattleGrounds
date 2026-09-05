@@ -33,10 +33,12 @@ manual control, the scripted Team Deathmatch controller, or the built-in Random
 controller. Scripted TDM is the existing generic team-agnostic debugging and
 regression controller; Random is diagnostic quality-control tooling. Neither is
 an official baseline, Big 12 entrant, or scenario pressure controller.
-Team B additionally offers **Scenario 1 Controller** under SharedObs only.
-Load Scenario 1, keep Team A Manual, choose that Team B controller, and submit
-turns; Reset restores the exact loaded starting state. The controller requires
-a compatible short TDM snapshot and is never selectable for Team A.
+Team B additionally offers **Reactive MRP Controller** under SharedObs only.
+Scenarios 1 and 2 share this unchanged controller (internal identity
+`scenario_1`). Load either scenario, keep Team A Manual, choose that Team B
+controller, and submit turns; Reset restores the exact loaded starting state.
+The controller requires a compatible short TDM snapshot and is never selectable
+for Team A.
 Incompatible selections or loads leave the current session unchanged.
 See the [Combat Debugger guide](combat_debugger.md#loading-saved-scenarios-and-map-previews)
 for its roster and horizon requirements.
