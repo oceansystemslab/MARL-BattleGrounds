@@ -692,7 +692,7 @@ def test_reactive_controller_reproduces_scenario_2_cover_and_healing_witness() -
         if tick == 2:
             # Priest is protected by cover, not by being outside Mage's basic range.
             mage, priest = state.agent_positions[5], state.agent_positions[4]
-            distance = float(jnp.linalg.norm(mage - priest))
+            distance = float(cast(Array, jnp.linalg.norm(mage - priest)))
             assert distance == pytest.approx(2.982093, abs=1e-5)
             assert distance < float(
                 scenario.config.agent_profile.basic_interaction_radii[5]
