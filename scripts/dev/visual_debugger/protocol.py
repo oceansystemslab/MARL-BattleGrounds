@@ -45,6 +45,7 @@ type PendingSubmissionScope = Literal[
     "scripted_playback",
 ]
 type TeamController = Literal["manual", "scripted_tdm", "random_valid"]
+type TeamBController = Literal["manual", "scripted_tdm", "random_valid", "scenario_1"]
 type ExecutionInformationMode = Literal["shared_obs", "no_shared_obs"]
 type CommandResult = Literal[
     "applied",
@@ -203,8 +204,17 @@ class CombatConfigurationV1(_ProtocolModel):
     """Authoritative live execution settings that replace an episode."""
 
     team_a_controller: TeamController
-    team_b_controller: TeamController
+    team_b_controller: TeamBController
     execution_information_mode: ExecutionInformationMode
+
+    @model_validator(mode="after")
+    def _validate_scenario_controller_mode(self) -> Self:
+        if (
+            self.team_b_controller == "scenario_1"
+            and self.execution_information_mode != "shared_obs"
+        ):
+            raise ValueError("Scenario 1 Controller requires SharedObs.")
+        return self
 
 
 class SetCombatConfigurationCommandV1(CombatConfigurationV1):

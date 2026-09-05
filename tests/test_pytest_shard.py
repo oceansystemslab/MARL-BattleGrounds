@@ -643,31 +643,31 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
         (
             tdm_prefix
             + "test_policy_uses_exact_masks_and_ignores_misleading_marginals",
-            11,
+            10,
             4,
         ),
         (
             tdm_prefix
             + "test_dead_inactive_and_stunned_masks_produce_the_canonical_inert_action",
-            9,
+            11,
             2,
         ),
         (
             tdm_prefix
             + "test_dormant_task_history_and_lifecycle_fields_do_not_change_the_policy",
-            7,
+            8,
             4,
         ),
         ("residual:tests/test_visual_debugger_service.py", 6, 10),
         (
             tdm_prefix + "test_invalid_damage_modifier_never_suppresses_an_aged_trap",
-            7,
+            3,
             11,
         ),
         (
             tdm_prefix + "test_mage_burst_uses_the_locked_configured_crowd_"
             "and_covering_boundaries",
-            7,
+            3,
             4,
         ),
         ("file:tests/test_shared_obs_runtime.py", 11, 3),

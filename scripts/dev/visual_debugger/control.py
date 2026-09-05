@@ -16,6 +16,9 @@ from marl_battlegrounds.core.types import (
     MOVE_STAY,
     NUM_MOVE_ACTIONS,
     NUM_TARGET_ACTIONS,
+    PRIEST_CLASS_ID,
+    ROGUE_CLASS_ID,
+    TASK_MODE_TDM,
     TEAM_A_ID,
     TEAM_B_ID,
     Action,
@@ -42,6 +45,9 @@ from marl_battlegrounds.policies.no_shared_obs import (
     execute_no_shared_obs_team_policy,
 )
 from marl_battlegrounds.policies.random_valid import random_policy
+from marl_battlegrounds.policies.scenario_controllers.scenario_1 import (
+    scenario_1_policy,
+)
 from marl_battlegrounds.policies.scripted.no_shared_obs import (
     team_deathmatch_no_shared_obs_policy,
 )
@@ -66,6 +72,7 @@ from scripts.dev.visual_debugger.evaluation_bridge import (
     debugger_action_source_kind_v1,
 )
 from scripts.dev.visual_debugger.model import (
+    SUPPORTED_TEAM_B_CONTROLLERS,
     SUPPORTED_TEAM_CONTROLLERS,
     DebuggerScenario,
     DebuggerSession,
@@ -74,6 +81,7 @@ from scripts.dev.visual_debugger.model import (
     PendingAction,
     ScenarioFrame,
     SubmissionKind,
+    TeamBController,
     TeamController,
 )
 
@@ -385,7 +393,7 @@ def _resolve_team_controller_action(
     session: DebuggerSession,
     *,
     team_identity: int,
-    controller: TeamController,
+    controller: TeamBController,
     policy_keys: Array,
     source_bank: SharedObsSensorSourceBankV1 | None,
     information_availability: Array | None,
@@ -412,6 +420,8 @@ def _resolve_team_controller_action(
             policy = team_deathmatch_shared_obs_policy
         elif controller == "random_valid":
             policy = _random_shared_obs_policy
+        elif controller == "scenario_1" and team_identity == TEAM_B_ID:
+            policy = scenario_1_policy
         else:
             raise ValueError("unsupported team controller")
         return cast(
@@ -448,7 +458,7 @@ def _resolve_team_controller_action(
 
 def _build_configured_joint_action(session: DebuggerSession) -> Action:
     """Resolve both team controllers from one current decision epoch."""
-    controllers: tuple[tuple[int, TeamController], ...] = (
+    controllers: tuple[tuple[int, TeamBController], ...] = (
         (TEAM_A_ID, session.team_a_controller),
         (TEAM_B_ID, session.team_b_controller),
     )
@@ -590,6 +600,46 @@ def _debugger_expected_horizon(
     )
 
 
+def _validate_scenario_controller_snapshot(
+    scenario: DebuggerScenario,
+    config: EnvConfig,
+    state: EnvState,
+    *,
+    team_b_controller: TeamBController,
+    execution_information_mode: ExecutionInformationMode,
+) -> None:
+    """Check applicability at initial epochs, never from a policy decision."""
+    if team_b_controller != "scenario_1":
+        return
+    if scenario.mode != "interactive" or config.task_mode != TASK_MODE_TDM:
+        raise ValueError("Scenario 1 Controller requires interactive TDM.")
+    if execution_information_mode != "shared_obs":
+        raise ValueError("Scenario 1 Controller requires SharedObs.")
+    remaining = config.max_steps - int(state.step_count)
+    if not 1 <= remaining <= 5:
+        raise ValueError(
+            "Scenario 1 Controller requires one to five remaining transitions."
+        )
+    profile = config.agent_profile
+    supported_classes = (MAGE_CLASS_ID, ROGUE_CLASS_ID, PRIEST_CLASS_ID)
+    for slot in range(MAX_AGENT_SLOTS):
+        if (
+            not bool(profile.active_mask[slot])
+            or int(profile.team_ids[slot]) != TEAM_B_ID
+        ):
+            continue
+        if int(profile.class_ids[slot]) in supported_classes:
+            continue
+        if (
+            bool(state.alive_mask[slot])
+            or int(state.team_respawn_wave_countdowns[TEAM_B_ID - 1]) + 1 < remaining
+        ):
+            raise ValueError(
+                "Scenario 1 Controller requires Team B Warrior/Hunter slots to start "
+                "dead and respawn no earlier than the final transition."
+            )
+
+
 def create_session(
     scenario: DebuggerScenario,
     *,
@@ -599,7 +649,7 @@ def create_session(
     show_ranges: bool,
     verbose_logging: bool,
     team_a_controller: TeamController = "manual",
-    team_b_controller: TeamController = "manual",
+    team_b_controller: TeamBController = "manual",
     execution_information_mode: ExecutionInformationMode = "no_shared_obs",
 ) -> DebuggerSession:
     """Create one deterministic immutable debugger session.
@@ -616,6 +666,13 @@ def create_session(
         observation,
         action_mask,
     ) = _fresh_snapshot(scenario, seed)
+    _validate_scenario_controller_snapshot(
+        scenario,
+        config,
+        state,
+        team_b_controller=team_b_controller,
+        execution_information_mode=execution_information_mode,
+    )
     evaluation_context = build_debugger_evaluation_context_v1(
         evaluation_launch_specification,
         scenario=scenario,
@@ -1095,7 +1152,7 @@ def _restart_session(
     *,
     preserve_controlled_slot: bool,
     team_a_controller: TeamController | None = None,
-    team_b_controller: TeamController | None = None,
+    team_b_controller: TeamBController | None = None,
     execution_information_mode: ExecutionInformationMode | None = None,
 ) -> DebuggerSession:
     """Build one coherent fresh epoch without entering the simulator step seam."""
@@ -1117,6 +1174,13 @@ def _restart_session(
         observation,
         action_mask,
     ) = _fresh_snapshot(scenario, session.seed)
+    _validate_scenario_controller_snapshot(
+        scenario,
+        config,
+        state,
+        team_b_controller=next_team_b_controller,
+        execution_information_mode=next_information_mode,
+    )
     run_generation = session.run_generation + 1
     launch_specification = build_debugger_evaluation_launch_specification_v1(
         root_seed=session.evaluation_context.seed_protocol.root_seed,
@@ -1205,7 +1269,7 @@ def set_combat_configuration(
     session: DebuggerSession,
     *,
     team_a_controller: TeamController,
-    team_b_controller: TeamController,
+    team_b_controller: TeamBController,
     execution_information_mode: ExecutionInformationMode,
 ) -> DebuggerSession:
     """Replace the episode only when its controller or information mode changes."""
@@ -1213,9 +1277,10 @@ def set_combat_configuration(
         raise ValueError(
             "team_a_controller must be manual, scripted_tdm, or random_valid"
         )
-    if team_b_controller not in SUPPORTED_TEAM_CONTROLLERS:
+    if team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
         raise ValueError(
-            "team_b_controller must be manual, scripted_tdm, or random_valid"
+            "team_b_controller must be manual, scripted_tdm, random_valid, "
+            "or scenario_1"
         )
     if execution_information_mode not in ("shared_obs", "no_shared_obs"):
         raise ValueError(

@@ -5594,12 +5594,14 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
       !["manual", "scripted_tdm", "random_valid"].includes(
         configuration.team_a_controller,
       ) ||
-      !["manual", "scripted_tdm", "random_valid"].includes(
+      !["manual", "scripted_tdm", "random_valid", "scenario_1"].includes(
         configuration.team_b_controller,
       ) ||
       !["shared_obs", "no_shared_obs"].includes(
         configuration.execution_information_mode,
       ) ||
+      (configuration.team_b_controller === "scenario_1" &&
+        configuration.execution_information_mode !== "shared_obs") ||
       (!oracle &&
         configuration.execution_information_mode !==
           (shared ? "shared_obs" : "no_shared_obs"))

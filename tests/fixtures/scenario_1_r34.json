@@ -1,0 +1,471 @@
+{
+  "schema": "dev-scenario-draft@1",
+  "asset_id": "scenario_1",
+  "revision": 34,
+  "content": {
+    "schema": "dev-scenario-content@1",
+    "name": "scenario_1_HRP_vs_MRP",
+    "description": "Test-only Scenario 1 physical setup, sourced from saved revision 34; not an official evaluation release.",
+    "notes": "",
+    "embedded_map": {
+      "schema": "dev-map-content@1",
+      "name": "scenario_1_map",
+      "description": "",
+      "width": 20.0,
+      "height": 10.0,
+      "obstacles": [
+        {
+          "kind": "wall",
+          "object_id": "obstacle_1",
+          "center_x": 14.0,
+          "center_y": 3.0,
+          "width": 1.0,
+          "height": 2.0,
+          "rotation_degrees": 0.0
+        },
+        {
+          "kind": "wall",
+          "object_id": "obstacle_5",
+          "center_x": 9.5,
+          "center_y": 2.0,
+          "width": 1.0,
+          "height": 4.0,
+          "rotation_degrees": 0.0
+        },
+        {
+          "kind": "wall",
+          "object_id": "obstacle_6",
+          "center_x": 9.5,
+          "center_y": 8.0,
+          "width": 1.0,
+          "height": 4.0,
+          "rotation_degrees": 0.0
+        },
+        {
+          "kind": "wall",
+          "object_id": "obstacle_7",
+          "center_x": 14.0,
+          "center_y": 8.0,
+          "width": 4.0,
+          "height": 0.01,
+          "rotation_degrees": 0.0
+        },
+        {
+          "kind": "wall",
+          "object_id": "obstacle_2",
+          "center_x": 16.0,
+          "center_y": 4.0,
+          "width": 0.01,
+          "height": 4.0,
+          "rotation_degrees": 0.0
+        },
+        {
+          "kind": "wall",
+          "object_id": "obstacle_0",
+          "center_x": 12.45,
+          "center_y": 5.5,
+          "width": 0.01,
+          "height": 1.0,
+          "rotation_degrees": -45.0
+        }
+      ],
+      "spawn_pads": [
+        {
+          "object_id": "pad-a1",
+          "team": "A",
+          "team_local_slot": 1,
+          "position": {
+            "x": 0.5,
+            "y": 1.0
+          }
+        },
+        {
+          "object_id": "pad-a2",
+          "team": "A",
+          "team_local_slot": 2,
+          "position": {
+            "x": 0.5,
+            "y": 3.0
+          }
+        },
+        {
+          "object_id": "pad-a3",
+          "team": "A",
+          "team_local_slot": 3,
+          "position": {
+            "x": 0.5,
+            "y": 5.0
+          }
+        },
+        {
+          "object_id": "pad-a4",
+          "team": "A",
+          "team_local_slot": 4,
+          "position": {
+            "x": 0.5,
+            "y": 7.0
+          }
+        },
+        {
+          "object_id": "pad-a5",
+          "team": "A",
+          "team_local_slot": 5,
+          "position": {
+            "x": 0.5,
+            "y": 9.0
+          }
+        },
+        {
+          "object_id": "pad-b1",
+          "team": "B",
+          "team_local_slot": 1,
+          "position": {
+            "x": 19.5,
+            "y": 1.0
+          }
+        },
+        {
+          "object_id": "pad-b2",
+          "team": "B",
+          "team_local_slot": 2,
+          "position": {
+            "x": 19.5,
+            "y": 3.0
+          }
+        },
+        {
+          "object_id": "pad-b3",
+          "team": "B",
+          "team_local_slot": 3,
+          "position": {
+            "x": 19.5,
+            "y": 5.0
+          }
+        },
+        {
+          "object_id": "pad-b4",
+          "team": "B",
+          "team_local_slot": 4,
+          "position": {
+            "x": 19.5,
+            "y": 7.0
+          }
+        },
+        {
+          "object_id": "pad-b5",
+          "team": "B",
+          "team_local_slot": 5,
+          "position": {
+            "x": 19.5,
+            "y": 9.0
+          }
+        }
+      ]
+    },
+    "source_map_provenance": null,
+    "task": {
+      "task": "team_deathmatch",
+      "score_threshold": 20
+    },
+    "episode": {
+      "max_steps": 300,
+      "spawn_shield_duration_steps": 3,
+      "spawn_shield_movement_speed": 2.0,
+      "team_a_respawn_wave_period_steps": 5,
+      "team_b_respawn_wave_period_steps": 5
+    },
+    "global_state": {
+      "step_count": 295,
+      "team_a_score": 18,
+      "team_b_score": 17,
+      "team_a_respawn_countdown": 4,
+      "team_b_respawn_countdown": 4
+    },
+    "team_a_size": 5,
+    "team_b_size": 5,
+    "roster": [
+      {
+        "object_id": "agent-a1",
+        "team": "A",
+        "team_local_slot": 1,
+        "global_slot": 0,
+        "class_name": "mage"
+      },
+      {
+        "object_id": "agent-a2",
+        "team": "A",
+        "team_local_slot": 2,
+        "global_slot": 1,
+        "class_name": "warrior"
+      },
+      {
+        "object_id": "agent-a3",
+        "team": "A",
+        "team_local_slot": 3,
+        "global_slot": 2,
+        "class_name": "hunter"
+      },
+      {
+        "object_id": "agent-a4",
+        "team": "A",
+        "team_local_slot": 4,
+        "global_slot": 3,
+        "class_name": "rogue"
+      },
+      {
+        "object_id": "agent-a5",
+        "team": "A",
+        "team_local_slot": 5,
+        "global_slot": 4,
+        "class_name": "priest"
+      },
+      {
+        "object_id": "agent-b1",
+        "team": "B",
+        "team_local_slot": 1,
+        "global_slot": 5,
+        "class_name": "mage"
+      },
+      {
+        "object_id": "agent-b2",
+        "team": "B",
+        "team_local_slot": 2,
+        "global_slot": 6,
+        "class_name": "warrior"
+      },
+      {
+        "object_id": "agent-b3",
+        "team": "B",
+        "team_local_slot": 3,
+        "global_slot": 7,
+        "class_name": "hunter"
+      },
+      {
+        "object_id": "agent-b4",
+        "team": "B",
+        "team_local_slot": 4,
+        "global_slot": 8,
+        "class_name": "rogue"
+      },
+      {
+        "object_id": "agent-b5",
+        "team": "B",
+        "team_local_slot": 5,
+        "global_slot": 9,
+        "class_name": "priest"
+      }
+    ],
+    "agent_states": [
+      {
+        "object_id": "agent-a1",
+        "position": {
+          "x": 0.5,
+          "y": 1.0
+        },
+        "alive": false,
+        "current_health": 0.0,
+        "ultimate_cooldown_remaining": 0,
+        "spawn_shield_duration_remaining": 0,
+        "steps_until_out_of_combat": 0,
+        "warrior_charge_slow_duration": 0,
+        "hunter_basic_slow_duration": 0,
+        "rogue_poison_slow_duration": 0,
+        "warrior_charge_stun_duration": 0,
+        "hunter_trap_stun_duration": 0,
+        "rogue_poison_stun_duration": 0,
+        "rogue_poison_anti_heal_duration": 0,
+        "mage_burst_duration": 0,
+        "priest_blessing_of_freedom_duration": 0
+      },
+      {
+        "object_id": "agent-a2",
+        "position": {
+          "x": 0.5,
+          "y": 3.0
+        },
+        "alive": false,
+        "current_health": 0.0,
+        "ultimate_cooldown_remaining": 0,
+        "spawn_shield_duration_remaining": 0,
+        "steps_until_out_of_combat": 0,
+        "warrior_charge_slow_duration": 0,
+        "hunter_basic_slow_duration": 0,
+        "rogue_poison_slow_duration": 0,
+        "warrior_charge_stun_duration": 0,
+        "hunter_trap_stun_duration": 0,
+        "rogue_poison_stun_duration": 0,
+        "rogue_poison_anti_heal_duration": 0,
+        "mage_burst_duration": 0,
+        "priest_blessing_of_freedom_duration": 0
+      },
+      {
+        "object_id": "agent-a3",
+        "position": {
+          "x": 11.2,
+          "y": 4.25
+        },
+        "alive": true,
+        "current_health": 41.0,
+        "ultimate_cooldown_remaining": 0,
+        "spawn_shield_duration_remaining": 0,
+        "steps_until_out_of_combat": 5,
+        "warrior_charge_slow_duration": 0,
+        "hunter_basic_slow_duration": 0,
+        "rogue_poison_slow_duration": 0,
+        "warrior_charge_stun_duration": 0,
+        "hunter_trap_stun_duration": 0,
+        "rogue_poison_stun_duration": 0,
+        "rogue_poison_anti_heal_duration": 0,
+        "mage_burst_duration": 0,
+        "priest_blessing_of_freedom_duration": 0
+      },
+      {
+        "object_id": "agent-a4",
+        "position": {
+          "x": 13.0,
+          "y": 4.25
+        },
+        "alive": true,
+        "current_health": 12.0,
+        "ultimate_cooldown_remaining": 0,
+        "spawn_shield_duration_remaining": 0,
+        "steps_until_out_of_combat": 3,
+        "warrior_charge_slow_duration": 0,
+        "hunter_basic_slow_duration": 0,
+        "rogue_poison_slow_duration": 0,
+        "warrior_charge_stun_duration": 0,
+        "hunter_trap_stun_duration": 0,
+        "rogue_poison_stun_duration": 0,
+        "rogue_poison_anti_heal_duration": 0,
+        "mage_burst_duration": 0,
+        "priest_blessing_of_freedom_duration": 0
+      },
+      {
+        "object_id": "agent-a5",
+        "position": {
+          "x": 13.0,
+          "y": 5.3
+        },
+        "alive": true,
+        "current_health": 1.0,
+        "ultimate_cooldown_remaining": 1,
+        "spawn_shield_duration_remaining": 0,
+        "steps_until_out_of_combat": 5,
+        "warrior_charge_slow_duration": 0,
+        "hunter_basic_slow_duration": 0,
+        "rogue_poison_slow_duration": 0,
+        "warrior_charge_stun_duration": 0,
+        "hunter_trap_stun_duration": 0,
+        "rogue_poison_stun_duration": 0,
+        "rogue_poison_anti_heal_duration": 0,
+        "mage_burst_duration": 0,
+        "priest_blessing_of_freedom_duration": 0
+      },
+      {
+        "object_id": "agent-b1",
+        "position": {
+          "x": 14.1,
+          "y": 5.3
+        },
+        "alive": true,
+        "current_health": 4.0,
+        "ultimate_cooldown_remaining": 30,
+        "spawn_shield_duration_remaining": 0,
+        "steps_until_out_of_combat": 5,
+        "warrior_charge_slow_duration": 0,
+        "hunter_basic_slow_duration": 0,
+        "rogue_poison_slow_duration": 0,
+        "warrior_charge_stun_duration": 0,
+        "hunter_trap_stun_duration": 0,
+        "rogue_poison_stun_duration": 0,
+        "rogue_poison_anti_heal_duration": 0,
+        "mage_burst_duration": 5,
+        "priest_blessing_of_freedom_duration": 0
+      },
+      {
+        "object_id": "agent-b2",
+        "position": {
+          "x": 19.5,
+          "y": 3.0
+        },
+        "alive": false,
+        "current_health": 0.0,
+        "ultimate_cooldown_remaining": 0,
+        "spawn_shield_duration_remaining": 0,
+        "steps_until_out_of_combat": 0,
+        "warrior_charge_slow_duration": 0,
+        "hunter_basic_slow_duration": 0,
+        "rogue_poison_slow_duration": 0,
+        "warrior_charge_stun_duration": 0,
+        "hunter_trap_stun_duration": 0,
+        "rogue_poison_stun_duration": 0,
+        "rogue_poison_anti_heal_duration": 0,
+        "mage_burst_duration": 0,
+        "priest_blessing_of_freedom_duration": 0
+      },
+      {
+        "object_id": "agent-b3",
+        "position": {
+          "x": 19.5,
+          "y": 5.0
+        },
+        "alive": false,
+        "current_health": 0.0,
+        "ultimate_cooldown_remaining": 0,
+        "spawn_shield_duration_remaining": 0,
+        "steps_until_out_of_combat": 0,
+        "warrior_charge_slow_duration": 0,
+        "hunter_basic_slow_duration": 0,
+        "rogue_poison_slow_duration": 0,
+        "warrior_charge_stun_duration": 0,
+        "hunter_trap_stun_duration": 0,
+        "rogue_poison_stun_duration": 0,
+        "rogue_poison_anti_heal_duration": 0,
+        "mage_burst_duration": 0,
+        "priest_blessing_of_freedom_duration": 0
+      },
+      {
+        "object_id": "agent-b4",
+        "position": {
+          "x": 11.2,
+          "y": 5.25
+        },
+        "alive": true,
+        "current_health": 30.0,
+        "ultimate_cooldown_remaining": 30,
+        "spawn_shield_duration_remaining": 0,
+        "steps_until_out_of_combat": 3,
+        "warrior_charge_slow_duration": 0,
+        "hunter_basic_slow_duration": 0,
+        "rogue_poison_slow_duration": 0,
+        "warrior_charge_stun_duration": 0,
+        "hunter_trap_stun_duration": 0,
+        "rogue_poison_stun_duration": 0,
+        "rogue_poison_anti_heal_duration": 0,
+        "mage_burst_duration": 0,
+        "priest_blessing_of_freedom_duration": 0
+      },
+      {
+        "object_id": "agent-b5",
+        "position": {
+          "x": 12.8,
+          "y": 6.5
+        },
+        "alive": true,
+        "current_health": 100.0,
+        "ultimate_cooldown_remaining": 1,
+        "spawn_shield_duration_remaining": 0,
+        "steps_until_out_of_combat": 5,
+        "warrior_charge_slow_duration": 0,
+        "hunter_basic_slow_duration": 0,
+        "rogue_poison_slow_duration": 0,
+        "warrior_charge_stun_duration": 0,
+        "hunter_trap_stun_duration": 0,
+        "rogue_poison_stun_duration": 0,
+        "rogue_poison_anti_heal_duration": 0,
+        "mage_burst_duration": 0,
+        "priest_blessing_of_freedom_duration": 0
+      }
+    ]
+  }
+}

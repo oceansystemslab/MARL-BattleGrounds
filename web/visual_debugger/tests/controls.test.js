@@ -350,6 +350,12 @@ test("captured recording prefixes require exact discard confirmation for replace
       team_b_controller: "scripted_tdm",
       execution_information_mode: "no_shared_obs",
     },
+    {
+      command_type: "set_combat_configuration",
+      team_a_controller: "manual",
+      team_b_controller: "scenario_1",
+      execution_information_mode: "shared_obs",
+    },
     keyboardCommand("r"),
   ]) {
     const decision = recordingCommandDecision(frame, command);
@@ -377,6 +383,26 @@ test("captured recording prefixes require exact discard confirmation for replace
     }),
     null,
   );
+  for (const invalid of [
+    {
+      team_a_controller: "scenario_1",
+      team_b_controller: "manual",
+      execution_information_mode: "shared_obs",
+    },
+    {
+      team_a_controller: "manual",
+      team_b_controller: "scenario_1",
+      execution_information_mode: "no_shared_obs",
+    },
+  ]) {
+    assert.equal(
+      recordingReplacementCommand(frame, {
+        command_type: "set_combat_configuration",
+        ...invalid,
+      }),
+      null,
+    );
+  }
   assert.deepEqual(
     recordingReplacementCommand(frame, {
       command_type: "set_combat_configuration",

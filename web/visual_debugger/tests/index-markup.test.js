@@ -82,7 +82,7 @@ test("static debugger IDs are unique", async () => {
   assert.equal(new Set(ids).size, ids.length);
 });
 
-test("both DevClient team selectors expose the same explicit controllers", async () => {
+test("only Team B exposes the SharedObs scenario controller", async () => {
   const markup = await readFile(indexUrl, "utf8");
   for (const id of ["devclient-team-a-controller", "devclient-team-b-controller"]) {
     const select = elementBody(markup, id, "select");
@@ -94,9 +94,13 @@ test("both DevClient team selectors expose the same explicit controllers", async
         ["manual", "Manual"],
         ["scripted_tdm", "Scripted TDM"],
         ["random_valid", "Random"],
+        ...(id === "devclient-team-b-controller"
+          ? [["scenario_1", "Scenario 1 Controller"]]
+          : []),
       ],
     );
   }
+  assert.match(markup, /Scenario controllers require SharedObs\./u);
 });
 
 test("replay Help names the exact arrow keys and Escape selection behavior", async () => {

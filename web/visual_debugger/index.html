@@ -86,19 +86,21 @@
         </label>
         <label>
           <span>Team B controller</span>
-          <select id="devclient-team-b-controller">
+          <select id="devclient-team-b-controller" aria-describedby="devclient-scenario-controller-help">
             <option value="manual" selected>Manual</option>
             <option value="scripted_tdm">Scripted TDM</option>
             <option value="random_valid">Random</option>
+            <option value="scenario_1" id="devclient-scenario-controller-option" disabled>Scenario 1 Controller</option>
           </select>
         </label>
         <label>
           <span>Information</span>
-          <select id="devclient-information-mode">
+          <select id="devclient-information-mode" aria-describedby="devclient-scenario-controller-help">
             <option value="shared_obs" selected>SharedObs</option>
-            <option value="no_shared_obs">NoSharedObs</option>
+            <option value="no_shared_obs" id="devclient-no-shared-option">NoSharedObs</option>
           </select>
         </label>
+        <small id="devclient-scenario-controller-help">Scenario controllers require SharedObs.</small>
       </fieldset>
       <div class="toolbar-actions">
         <button id="reconnect-button" class="button button--quiet" type="button">

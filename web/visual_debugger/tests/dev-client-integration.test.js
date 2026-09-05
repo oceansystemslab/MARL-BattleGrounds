@@ -5,8 +5,8 @@ import {
   authoringPersistenceMessage,
   authoringSourceOptionLabel,
   createCombatConfigurationController,
-  debuggableAuthoringAssets,
   debugAssetOptionLabel,
+  debuggableAuthoringAssets,
   draftAfterAuthoringResponse,
   draftAfterSavedAssetDeletion,
   isValidAuthoringAssetId,
@@ -378,6 +378,8 @@ test("Combat configuration remains authoritative until one requested successor i
   const teamAController = { value: "manual", disabled: false };
   const teamBController = { value: "manual", disabled: false };
   const informationMode = { value: "shared_obs", disabled: false };
+  const scenarioControllerOption = { disabled: true };
+  const noSharedOption = { disabled: false };
   /** @type {Record<string, string | undefined>} */
   const dataset = {};
   const root = { dataset };
@@ -387,6 +389,8 @@ test("Combat configuration remains authoritative until one requested successor i
     teamAController,
     teamBController,
     informationMode,
+    scenarioControllerOption,
+    noSharedOption,
     root,
     emit: (configuration) => emitted.push(configuration),
   });
@@ -428,6 +432,38 @@ test("Combat configuration remains authoritative until one requested successor i
   assert.equal(root.dataset.teamAController, "random_valid");
   assert.equal(root.dataset.teamBController, "scripted_tdm");
   assert.equal(root.dataset.executionInformationMode, "no_shared_obs");
+  assert.equal(scenarioControllerOption.disabled, true);
+  teamBController.value = "scenario_1";
+  assert.equal(controller.request(), false);
+  assert.equal(teamBController.value, "scripted_tdm");
+  assert.equal(emitted.length, 1);
+
+  informationMode.value = "shared_obs";
+  assert.equal(controller.request(), true);
+  controller.install(emitted[1]);
+  assert.equal(scenarioControllerOption.disabled, false);
+  teamBController.value = "scenario_1";
+  assert.equal(controller.request(), true);
+  assert.equal(teamBController.value, "scripted_tdm");
+  assert.equal(noSharedOption.disabled, false);
+  controller.install(emitted[2]);
+  assert.equal(teamBController.value, "scenario_1");
+  assert.equal(root.dataset.teamBController, "scenario_1");
+  assert.equal(noSharedOption.disabled, true);
+
+  for (const invalid of [
+    { team_a_controller: "scenario_1" },
+    { execution_information_mode: "no_shared_obs" },
+  ]) {
+    assert.equal(controller.install({ ...emitted[2], ...invalid }), false);
+  }
+  informationMode.value = "no_shared_obs";
+  assert.equal(controller.request(), false);
+  assert.equal(informationMode.value, "shared_obs");
+  teamAController.value = "scenario_1";
+  assert.equal(controller.request(), false);
+  assert.equal(teamAController.value, "random_valid");
+  assert.equal(emitted.length, 3);
 });
 
 test("successful Debug loads emit one event into the existing frame reload path", async () => {

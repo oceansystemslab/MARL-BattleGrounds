@@ -1421,7 +1421,7 @@ test("main leaves the battlefield to visible instructions rather than a tooltip 
   assert.match(utilitySource, /Oracle View range presentation/u);
 });
 
-test("main labels Random explicitly and fences every policy-controlled actor", async () => {
+test("main labels every policy controller explicitly and fences its action editing", async () => {
   const [source, styles] = await Promise.all([
     readFile(mainUrl, "utf8"),
     readFile(stylesUrl, "utf8"),
@@ -1432,6 +1432,11 @@ test("main labels Random explicitly and fences every policy-controlled actor", a
     /value === "manual" \|\| value === "scripted_tdm" \|\| value === "random_valid"/u,
   );
   assert.match(source, /controller === "random_valid"[\s\S]*return "Random"/u);
+  assert.match(
+    source,
+    /controller === "scenario_1"[\s\S]*return "Scenario 1 Controller"/u,
+  );
+  assert.match(styles, /data-team-b-controller="scenario_1"/u);
   assert.match(
     source,
     /controller === "manual"[\s\S]*Object\.freeze\(\{ team, controller \}\)/u,

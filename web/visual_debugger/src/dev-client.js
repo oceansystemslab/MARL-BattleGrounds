@@ -218,6 +218,8 @@ export function isValidAuthoringAssetId(value) {
  *   teamAController: {value: string, disabled: boolean},
  *   teamBController: {value: string, disabled: boolean},
  *   informationMode: {value: string, disabled: boolean},
+ *   scenarioControllerOption: {disabled: boolean},
+ *   noSharedOption: {disabled: boolean},
  *   root: {dataset: Record<string, string | undefined>},
  *   emit: (configuration: Readonly<Record<string, string>>) => void,
  * }} bindings
@@ -239,9 +241,12 @@ export function createCombatConfigurationController(bindings) {
     const candidate = /** @type {Record<string, unknown>} */ (value);
     if (
       !isSupportedController(candidate.team_a_controller) ||
-      !isSupportedController(candidate.team_b_controller) ||
+      (!isSupportedController(candidate.team_b_controller) &&
+        candidate.team_b_controller !== "scenario_1") ||
       (candidate.execution_information_mode !== "shared_obs" &&
-        candidate.execution_information_mode !== "no_shared_obs")
+        candidate.execution_information_mode !== "no_shared_obs") ||
+      (candidate.team_b_controller === "scenario_1" &&
+        candidate.execution_information_mode !== "shared_obs")
     ) {
       return null;
     }
@@ -257,6 +262,10 @@ export function createCombatConfigurationController(bindings) {
     bindings.teamAController.disabled = configuration === null;
     bindings.teamBController.disabled = configuration === null;
     bindings.informationMode.disabled = configuration === null;
+    bindings.scenarioControllerOption.disabled =
+      configuration?.execution_information_mode !== "shared_obs";
+    bindings.noSharedOption.disabled =
+      configuration?.team_b_controller === "scenario_1";
     if (configuration === null) {
       return;
     }
@@ -323,6 +332,8 @@ function installDevClient() {
     teamAController: required("devclient-team-a-controller"),
     teamBController: required("devclient-team-b-controller"),
     informationMode: required("devclient-information-mode"),
+    scenarioControllerOption: required("devclient-scenario-controller-option"),
+    noSharedOption: required("devclient-no-shared-option"),
     shell: required("authoring-shell"),
     eyebrow: required("authoring-eyebrow"),
     title: required("authoring-title"),
@@ -395,6 +406,8 @@ function installDevClient() {
     teamAController: elements.teamAController,
     teamBController: elements.teamBController,
     informationMode: elements.informationMode,
+    scenarioControllerOption: elements.scenarioControllerOption,
+    noSharedOption: elements.noSharedOption,
     root: document.documentElement,
     emit: (configuration) => {
       document.dispatchEvent(

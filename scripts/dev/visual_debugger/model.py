@@ -41,6 +41,7 @@ type ScenarioMode = Literal["interactive", "scripted"]
 type ScenarioAudience = Literal["researcher", "stress"]
 type SubmissionKind = Literal["interactive", "scripted"]
 type TeamController = Literal["manual", "scripted_tdm", "random_valid"]
+type TeamBController = Literal["manual", "scripted_tdm", "random_valid", "scenario_1"]
 type TeamControllerActionSource = Literal["manual", "scripted", "mixed", "policy"]
 type ScenarioSourceKind = Literal[
     "current_buffer",
@@ -52,11 +53,15 @@ SUPPORTED_TEAM_CONTROLLERS: tuple[TeamController, ...] = (
     "scripted_tdm",
     "random_valid",
 )
+SUPPORTED_TEAM_B_CONTROLLERS: tuple[TeamBController, ...] = (
+    *SUPPORTED_TEAM_CONTROLLERS,
+    "scenario_1",
+)
 
 
 def team_controller_action_source(
     team_a_controller: TeamController,
-    team_b_controller: TeamController,
+    team_b_controller: TeamBController,
 ) -> TeamControllerActionSource:
     """Classify one interactive pair without hiding either controller identity."""
     if team_a_controller == team_b_controller == "manual":
@@ -263,7 +268,7 @@ class DebuggerSession:
     last_submission_kind: SubmissionKind | None
     last_report_actor_slots: tuple[int, ...]
     team_a_controller: TeamController
-    team_b_controller: TeamController
+    team_b_controller: TeamBController
     controlled_global_slot: int
     pending_actions: tuple[PendingAction, ...]
     next_script_frame_index: int
@@ -407,10 +412,16 @@ class DebuggerSession:
             raise ValueError(
                 "team_a_controller must be manual, scripted_tdm, or random_valid."
             )
-        if self.team_b_controller not in SUPPORTED_TEAM_CONTROLLERS:
+        if self.team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
             raise ValueError(
-                "team_b_controller must be manual, scripted_tdm, or random_valid."
+                "team_b_controller must be manual, scripted_tdm, random_valid, "
+                "or scenario_1."
             )
+        if (
+            self.team_b_controller == "scenario_1"
+            and self.evaluation_context.execution_information_mode != "shared_obs"
+        ):
+            raise ValueError("Scenario 1 Controller requires SharedObs.")
         if self.scenario.mode == "scripted":
             if self.team_a_controller != "manual" or self.team_b_controller != "manual":
                 raise ValueError(
