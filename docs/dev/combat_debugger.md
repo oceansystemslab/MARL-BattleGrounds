@@ -148,11 +148,11 @@ The shared controller admits clear paths and glancing shoulder contact at least
 45 degrees from head-on at the first contact with each intervening observed living body.
 Self and the selected prey are exempt. Tiny initial overlap within the existing
 geometry tolerance counts as contact; deeper overlap permits only non-deepening
-outward escape. Of the useful legal projected moves, choose the endpoint closest
-to prey, with action-order ties and no bonus for avoiding contact entirely;
+outward escape. Outside wall steering, choose the useful legal projected endpoint
+closest to prey, with action-order ties and no bonus for avoiding contact entirely;
 temporary retreat is allowed and no qualifying move means Stay. Ordinary
 simulator collision response resolves the attempted contact. Both scenarios use
-`scenario_5` behavior v3, displayed as BETA; the old standalone Scenario 3 controller
+`scenario_5` behavior v4, displayed as BETA; the old standalone Scenario 3 controller
 is retired, not an alias. Historical recordings retain their original identities.
 
 Combat is independent: Ultimate the lowest-health legal enemy within Basic
@@ -160,6 +160,16 @@ radius, otherwise Basic the lowest-health legal enemy there, otherwise no-combat
 The selected prey determines the destination, not necessarily the attack target.
 No target memory, hidden prey position, opponent action prediction or guaranteed
 route is available. Dead/inactive agents no-op and exact masks override preferences.
+
+ALPHA v2 and BETA v4 add SOUTH-preferred steering around nearby vertical walls,
+with NORTH used when the lower passage is unavailable and a turn across the
+wall end instead of continued boundary marching. BETA keeps its shoulder
+screening: prefer useful wall-phase progress, then distance/action-order ties;
+if none exists and an end fits, allow a body-admissible detour. See
+[A35](../design/specification_amendments.md#a35-reactive-tdm-wall-steering)
+for the precise local rules. This improves tested wall pockets but does not
+guarantee navigation: a three-tick ALPHA allied-congestion stall remains known,
+and fixed-side routing may take a longer path. Combat and class goals are unchanged.
 
 In a body-blocking study, the defending Warrior can screen a vulnerable Hunter
 and provide a moving body around which the Hunter kites, while both maintain

@@ -39,7 +39,7 @@ def reactive_tdm_beta_controller_descriptor() -> dict[str, object]:
     """Return fresh rule data, including the inherited general controller rules."""
     return {
         "policy_id": "scenario-5-pressure-controller",
-        "version": 3,
+        "version": 4,
         "information": "same-epoch SharedObs and recipient exact masks",
         "execution": "deterministic; actor key ignored",
         "inherited_controller": reactive_tdm_alpha_controller_descriptor(),
@@ -53,7 +53,11 @@ def reactive_tdm_beta_controller_descriptor() -> dict[str, object]:
             "within Basic radius: lowest-HP legal Ultimate enemy else lowest-HP "
             "legal Basic enemy else no-combat; independent of pursuit"
         ),
-        "ties": "health then global slot; endpoint distance then movement action ID",
+        "ties": (
+            "health then global slot; active preferred wall moves: phase alignment, "
+            "endpoint distance, movement action ID; otherwise endpoint distance "
+            "then movement action ID"
+        ),
         "movement": {
             "projection": "existing static obstacle/bounds geometry; no body pairs",
             "minimum_stride_fraction_inclusive": MINIMUM_MOVEMENT_FRACTION,
@@ -65,8 +69,24 @@ def reactive_tdm_beta_controller_descriptor() -> dict[str, object]:
                 "must never deepen and must finish farther away"
             ),
             "selection": (
-                "closest admissible moving endpoint to prey; no preference for "
-                "contact-free detours; detours may retreat"
+                "outside wall steering: closest admissible moving endpoint to prey; "
+                "active wall steering: useful phase progress preserving end "
+                "clearance, ranked by alignment then prey distance then action ID; "
+                "with a fitting end but no preferred move, restore all original "
+                "body-admissible moves ranked by prey distance, including during "
+                "corner crossing; no escape when neither end fits; no preference "
+                "for contact-free detours; detours may retreat; screening unchanged"
+            ),
+            "wall_steering": (
+                "nearby vertical-wall and projected-candidate strips; exclude "
+                "same-physical-end goals and far-face-cleared groups before nearest "
+                "anchor selection; group only directly overlapping body-expanded "
+                "vertical walls, not transitive closure; exit East for prey at or "
+                "beyond expanded East face within geometry tolerance, else West; "
+                "prefer fitting SOUTH, else NORTH, avoiding occupied boundary-width "
+                "passages unless an admissible South corner move exists; if both "
+                "occupied retain boundary-fitting preference; turn horizontally "
+                "on clearance or admissible phase progress; release beyond far face"
             ),
             "assumption": "other observed bodies stationary; no action prediction",
             "search": "eight directions only; no lookahead or route memory",

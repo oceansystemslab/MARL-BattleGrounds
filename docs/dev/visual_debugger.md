@@ -51,7 +51,11 @@ Policy-controlled agents remain inspectable but action-read-only. Scenarios 3
 and 5 share the Team B-only BETA option; ALPHA is available on either team.
 The old standalone Scenario 3, Scripted TDM and separate Reactive MRP executable
 interfaces have been removed. The surviving `scenario_5` identity and behavior
-v3 identify Priest → Mage → Hunter pursuit. Historical recordings
+v4 identify Priest → Mage → Hunter pursuit with local wall steering. ALPHA v2
+and BETA v4 prefer passing below nearby vertical walls, falling back above when
+needed; BETA retains body-admissible detours. This is a partial improvement,
+not guaranteed navigation—three-tick ALPHA allied congestion remains known.
+Historical recordings
 remain readable, and fixed-frame scripted diagnostics remain separate.
 See the [Combat Debugger guide](combat_debugger.md#loading-saved-scenarios-and-map-previews)
 for the execution boundaries and loading workflow.

@@ -223,8 +223,13 @@ SharedObs/NoSharedObs, exact masks, RNG-sensitive rollout, capture, and historic
 replay proof must survive removal of the old scorer/profile/trace tests.
 
 Reactive TDM must prove every class boundary and tie, peaceful Priest spacing
-independent of healing, unchanged enemy-visible Mage/Rogue behavior, and the
-existing obstacle-refinement function's unchanged behavior. Shared-controller
+independent of healing, unchanged enemy-visible Mage/Rogue target intentions,
+and unchanged retreat/Stay and combat choices. The approach refinement follows
+[A35](../design/specification_amendments.md#a35-reactive-tdm-wall-steering):
+test mirrored vertical faces, boundary fallback, corner release, slowed speed,
+mask restrictions and actual movement, while preserving scenario witnesses.
+Residual diagnostic congestion must be disclosed, not labelled deadlock-free.
+Shared-controller
 proof must retain independent legal combat, segment-based body screening,
 prey/self exclusion, tangency, overlap-reducing escape and deterministic detours.
 Actual stationary- and moving-blocker trajectories verify reactivity rather
@@ -257,8 +262,9 @@ and the retired scenario_3 live literal are also rejected.
 Service/HTTP/browser tests must preserve exact reset, authoritative selector
 confirmation, healthy nonfatal rejection, and one same-epoch bank/joint action/
 simulator step. Record installed identities accurately: V5 only for Scenario 5
-combinations, binding BETA behavior v3 without changing the V5 payload structure;
-unchanged V4 for other surviving combinations. Exercise descriptor/version/source
+combinations, binding BETA behavior v4 without changing the V5 payload structure;
+unchanged V4 structure for other surviving combinations, with ALPHA behavior v2.
+Exercise descriptor/version/source
 digest binding and saved-recording reopen. Retain fixed-frame diagnostic payloads
 and readable historical recordings. Both recording recognition paths must be exercised.
 
@@ -377,7 +383,7 @@ publication.
 | Command/service/server behavior | Protocol, input, service, server, and affected real-browser case |
 | Scenario trajectory | Scenario preflight/reference tests |
 | Scenario pressure controller | Deterministic repeated execution, same-epoch SharedObs and exact-mask checks, target/tie/fallback cases, treatment/ablation identity equality, and proof that generic TDM has no scenario-ID branch |
-| Specialist body steering | BETA's first-contact angle and overlap tolerance; self/prey exclusion, deterministic detours, actual stationary and moving-blocker trajectories, and unchanged ALPHA refinement |
+| Specialist body steering | BETA's first-contact angle and overlap tolerance; self/prey exclusion, deterministic detours, actual stationary and moving-blocker trajectories, preserved ALPHA class/combat rules and A35 wall refinement |
 | Matched scenario ablation | Frozen one-variable contrast, paired independent-run accounting, one primary endpoint plus no more than two supporting margins, replay evidence, and rejection from Elo/training/selection inputs |
 | Training/evaluation manifest boundary | Content-digest closure expansion, fail-closed overlap tests including embedded maps and result feedback, immutable population identities, and restart/reproduction proof |
 | Big 12 final-system selection | Three independent runs for each learned method, validation-only per-run and cross-run selection, frozen cadence/eligibility/ties, and hostile locked-result noninterference |

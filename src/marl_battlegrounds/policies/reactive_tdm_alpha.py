@@ -47,7 +47,7 @@ def reactive_tdm_alpha_controller_descriptor() -> dict[str, object]:
     """Return fresh canonical rule data for launch-bound controller provenance."""
     return {
         "policy_id": "reactive-team-deathmatch-controller",
-        "version": 1,
+        "version": 2,
         "information": "same-epoch-shared-obs; recipient exact masks",
         "execution": "deterministic; actor key ignored",
         "candidates": "observed living active positive-health rows",
@@ -108,6 +108,17 @@ def reactive_tdm_alpha_controller_descriptor() -> dict[str, object]:
             ),
         },
         "movement": {
+            "wall_steering": (
+                "approach-only axis-aligned vertical-wall strips, including quarter "
+                "turns; nearest eligible wall center then slot; geometry-sized band "
+                "is wall thickness plus body diameter; SOUTH if body fits and the "
+                "static exit is clear, else NORTH if available; release when actor "
+                "and goal are beyond the same expanded end or the far face; turn "
+                "toward goal-side face after end clearance or admissible projected "
+                "corner progress; preserve end clearance; prefer useful aligned "
+                "phase progress, else positive partial phase progress; neither end "
+                "fits or no admissible progress: Stay; no body prediction"
+            ),
             "projection": "existing static obstacle/bounds geometry; no body pairs",
             "minimum_stride_fraction_inclusive": MINIMUM_MOVEMENT_FRACTION,
             "search": "eight directions; preserve intended Stay; no route memory",
@@ -130,7 +141,7 @@ def _priest_direction(
     enemy_living: Array,
     recipient_global_slot: Array,
     center_direction: Array,
-) -> Array:
+) -> tuple[Array, Array]:
     """Keep healing-oriented retreat separate from peaceful nearest-ally spacing."""
     origin = centers(self_features)
     self_row = recipient_global_slot % MAX_AGENTS_PER_TEAM
@@ -139,10 +150,13 @@ def _priest_direction(
     ally_distance = jnp.sqrt(jnp.sum(jnp.square(ally_delta)))
     enemy_row = nearest_row(enemies, enemy_living, origin)
     retreat_enemy = origin - centers(enemies[enemy_row])
-    with_enemy = jnp.where(
+    with_enemy_approach = (
         jnp.any(ally_living)
         & (ally_row != self_row)
-        & (ally_distance > PRIEST_ENEMY_VISIBLE_APPROACH_DISTANCE),
+        & (ally_distance > PRIEST_ENEMY_VISIBLE_APPROACH_DISTANCE)
+    )
+    with_enemy = jnp.where(
+        with_enemy_approach,
         ally_delta,
         retreat_enemy,
     )
@@ -157,7 +171,14 @@ def _priest_direction(
         jnp.where(follow_distance > PRIEST_FOLLOW_DISTANCE, follow_delta, 0.0),
     )
     without_enemy = jnp.where(jnp.any(other_allies), without_enemy, center_direction)
-    return jnp.where(jnp.any(enemy_living), with_enemy, without_enemy)
+    return (
+        jnp.where(jnp.any(enemy_living), with_enemy, without_enemy),
+        jnp.where(
+            jnp.any(enemy_living),
+            with_enemy_approach,
+            ~jnp.any(other_allies) | (follow_distance > PRIEST_FOLLOW_DISTANCE),
+        ),
+    )
 
 
 def reactive_tdm_alpha_policy(
@@ -209,20 +230,27 @@ def reactive_tdm_alpha_policy(
     attack_direction = jnp.where(
         jnp.any(enemy_living), attack_direction, center_direction
     )
-    direction = jnp.where(
-        is_priest,
-        _priest_direction(
-            self_features,
-            allies,
-            ally_living,
-            enemies,
-            enemy_living,
-            recipient_global_slot,
-            center_direction,
-        ),
-        attack_direction,
+    priest_direction, priest_approach = _priest_direction(
+        self_features,
+        allies,
+        ally_living,
+        enemies,
+        enemy_living,
+        recipient_global_slot,
+        center_direction,
     )
-    move = refine_movement(recipient_observation, recipient_action_mask, direction)
+    direction = jnp.where(is_priest, priest_direction, attack_direction)
+    attack_approach = ~jnp.any(enemy_living) | jnp.where(
+        is_mage,
+        enemy_distance > MAGE_DISTANCE,
+        jnp.where(is_hunter, enemy_distance > HUNTER_FAR_DISTANCE, True),
+    )
+    move = refine_movement(
+        recipient_observation,
+        recipient_action_mask,
+        direction,
+        approach=jnp.where(is_priest, priest_approach, attack_approach),
+    )
 
     joint = recipient_action_mask.select_target_use_ultimate_joint_mask
     allies_basic = ally_living & joint[1:6, 0]
