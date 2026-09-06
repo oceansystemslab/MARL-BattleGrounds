@@ -91,7 +91,9 @@ def _exchange(
     body: bytes | None = None,
     headers: dict[str, str] | None = None,
 ) -> tuple[HTTPResponse, bytes]:
-    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    # Valid live commands may include cold JAX compilation. This suite checks
+    # protocol/state behavior, not a five-second server-compute deadline.
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=None)
     connection.request(method, path, body=body, headers=headers or {})
     response = connection.getresponse()
     payload = response.read()
@@ -101,6 +103,30 @@ def _exchange(
 
 def _authorized_headers(**extra: str) -> dict[str, str]:
     return {_TOKEN_HEADER: _TOKEN, **extra}
+
+
+def test_live_http_exchange_has_no_server_compute_deadline(
+    running_server: tuple[DebuggerHTTPServer, Thread],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_connection = HTTPConnection
+    connections: list[HTTPConnection] = []
+
+    def connect(host: str, port: int, *, timeout: float | None) -> HTTPConnection:
+        connection = original_connection(host, port, timeout=timeout)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(f"{__name__}.HTTPConnection", connect)
+    response, body = _exchange(
+        running_server[0], "GET", "/api/frame", headers=_authorized_headers()
+    )
+    assert response.status == HTTPStatus.OK
+    assert json.loads(body) == running_server[
+        0
+    ].debugger_service.current_frame().model_dump(mode="json")
+    assert len(connections) == 1
+    assert connections[0].timeout is None
 
 
 _TOKEN_HEADER = "X-MARL-Debugger-Token"
