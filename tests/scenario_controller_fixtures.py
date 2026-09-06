@@ -69,3 +69,25 @@ def load_scenario_5_draft() -> DevScenarioDraftV1:
 def load_scenario_5() -> CompiledDevScenarioV1:
     """Compile Scenario 5 through the unchanged authoring authorities."""
     return compile_dev_scenario(load_scenario_5_draft())
+
+
+# Scenario 6 r10 supplied the geometry and state. Its author-approved correction
+# changes Team B's starting score from 18 to 19; this is not byte-identical r10.
+SCENARIO_6_FIXTURE_PATH = (
+    Path(__file__).parent / "fixtures" / "scenario_6_r10_score_17_19.json"
+)
+SCENARIO_6_SEMANTIC_DIGEST = (
+    "6ad5b3ffa18de9defd77d8da7d3601cec7d8fceb1ea0e156f0b857c86d8331bb"
+)
+
+
+def load_scenario_6_draft() -> DevScenarioDraftV1:
+    """Read the r10-derived 17-19 regression, not an official suite release."""
+    return DevScenarioDraftV1.model_validate_json(
+        SCENARIO_6_FIXTURE_PATH.read_text(encoding="utf-8"),
+    )
+
+
+def load_scenario_6() -> CompiledDevScenarioV1:
+    """Compile Scenario 6 through the unchanged authoring authorities."""
+    return compile_dev_scenario(load_scenario_6_draft())
