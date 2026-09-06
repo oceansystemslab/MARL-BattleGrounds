@@ -736,7 +736,7 @@ def test_reactive_controller_reproduces_both_accepted_witnesses(
 def test_descriptor_is_fresh_and_contains_frozen_constants() -> None:
     first = reactive_tdm_alpha_controller_descriptor()
     assert first["policy_id"] == "reactive-team-deathmatch-controller"
-    assert first["version"] == 1
+    assert first["version"] == 2
     cast(dict[str, object], first["movement"])["minimum_stride_fraction_inclusive"] = 99
     assert (
         cast(dict[str, object], reactive_tdm_alpha_controller_descriptor()["movement"])[

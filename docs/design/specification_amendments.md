@@ -2319,3 +2319,52 @@ ALPHA and BETA remain diagnostic/scenario-pressure tools, not official baselines
 or Big 12 entrants. A recorded full match is inspectable diagnostic evidence,
 not a tournament comparison or scenario qualification. Official scenario use
 still freezes one exact pressure-controller identity across matched treatments.
+
+## A35. Reactive TDM wall steering
+
+**Classification:** diagnostic navigation improvement with an accepted residual
+limitation. **Revises:** A30/A34's forward obstacle-refinement behavior and
+controller versions only; historical amendments and recordings remain intact.
+
+ALPHA advances to behavior version 2 and BETA to version 4. Class movement
+goals, retreat/Stay intentions, spacing bands, combat priorities, authoritative
+masks and SharedObs inputs remain unchanged. Only approach refinement changes:
+near a qualifying axis-aligned vertical wall, prefer its SOUTH end, otherwise
+NORTH when the lower passage cannot fit. Equivalent quarter turns qualify;
+pillars, horizontal walls and genuinely angled walls are not steering anchors.
+Use body-sized geometric strips, nearest eligible wall-center/slot selection,
+projected corner progress and far-face release. ALPHA checks static exit
+clearance and retains positive partial phase progress if no full useful phase
+move exists. It does not predict body interference.
+
+BETA's priority-pursuing Rogue retains unchanged 45-degree shoulder screening
+and self/prey exemptions. Its local wall envelope includes directly overlapping
+body-expanded vertical walls, not a transitive route graph. Already cleared
+groups are excluded before anchor selection. Prey at or beyond the expanded
+East face selects East (with existing geometry tolerance); otherwise West,
+including prey inside the group. Boundary-width passages account for currently
+observed blockers, while an admissible SOUTH corner move can establish progress.
+Prefer phase-aligned useful moves, then prey distance and action order. With a
+fitting end but no preferred move, restore the existing body-admissible
+prey-distance choice, including during corner crossing. Neither fitting end
+means Stay; screening is never relaxed. Non-Rogues and ordinary Rogue movement
+fallback continue delegating to ALPHA.
+
+All estimates use current authorized inputs, eight moving candidates and the
+existing 10% useful-static-displacement threshold. No route memory, lookahead,
+opponent-action prediction or simulator invocation enters a policy. Actions
+remain simultaneous: current observations/masks and one SharedObs bank feed
+actor choices, one joint assembly and one ordinary simulator transition.
+Core, body radii, movement speeds, Replay schemas/behavior and saved assets do
+not change. Stable controller literals, algorithm IDs and V4/V5 recording
+structures remain; source-bound descriptors identify the new behavior versions.
+
+This is a user-tested partial improvement, not a deadlock-freedom guarantee.
+Matched diagnostic windows resolve the tested BETA pockets and captured
+scenario decisions/transitions remain exact. A three-decision ALPHA allied-body
+congestion stall remains known; no complete final-version Foxhole rollout or
+measured speedup is claimed. Fixed-side choices may take longer routes, moving
+defenders can re-block, and other local jams remain possible. The user accepts
+these limits for diagnostic use. Official scenario evidence must still freeze
+and separately qualify its exact controller identity; this change neither
+completes M7 nor qualifies a scientific scenario.
