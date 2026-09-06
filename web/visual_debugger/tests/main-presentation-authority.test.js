@@ -1429,14 +1429,14 @@ test("main labels every policy controller explicitly and fences its action editi
 
   assert.match(
     source,
-    /value === "manual" \|\| value === "scripted_tdm" \|\| value === "random_valid"/u,
+    /value === "manual" \|\| value === "reactive_tdm" \|\| value === "random_valid"/u,
   );
   assert.match(source, /controller === "random_valid"[\s\S]*return "Random"/u);
   assert.match(
     source,
-    /controller === "scenario_1"[\s\S]*return "Reactive MRP Controller"/u,
+    /controller === "scenario_3"[\s\S]*return "Scenario 3 Controller"/u,
   );
-  assert.match(styles, /data-team-b-controller="scenario_1"/u);
+  assert.match(styles, /data-team-b-controller="scenario_3"/u);
   assert.match(
     source,
     /controller === "manual"[\s\S]*Object\.freeze\(\{ team, controller \}\)/u,

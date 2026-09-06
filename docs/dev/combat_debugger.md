@@ -123,40 +123,65 @@ changes; failure leaves the current session untouched and returns linked
 problems. Reset restores the immutable loaded snapshot and seed, including its
 map, roster, scores, timers, and current timestep.
 
-Team A and Team B may each remain manual, use the scripted Team Deathmatch
-policy, or use the built-in Random policy. Random samples only the exact current
-valid action support and deliberately ignores observation features; under the
-same key and mask it therefore produces the same action in SharedObs and
-NoSharedObs. The selectors share one controller boundary without introducing a
-generic policy registry or checkpoint loader. The Scripted TDM choice invokes
-the existing generic team-agnostic controller; it is debugging and regression
-tooling, not an official baseline or Big 12 entrant. Random is likewise a
-diagnostic and quality-control controller. Under
+Team A and Team B offer **Manual**, **Reactive TDM**, and **Random**. Reactive
+TDM is one deterministic, five-class SharedObs policy, with independent movement
+and combat priorities. Random samples only the exact current valid action
+support and ignores observation features; the same key and mask therefore
+produce the same action under SharedObs and NoSharedObs. Neither controller is
+an official baseline or Big 12 entrant. There is no policy registry or
+checkpoint loader. Under
 [amendment A25](../design/specification_amendments.md#a25-sharedobs-only-canonical-benchmark-execution),
 SharedObs is the default and the only evaluation-eligible information regime.
-NoSharedObs remains selectable for diagnostics, custom research, and
-compatibility checks. Changing either controller or the information regime
-resets the exact loaded scenario and seed before comparison.
+NoSharedObs remains available when both teams use Manual or Random, and in
+generic custom research. It is disabled while either team uses a reactive
+controller; the application never silently substitutes a regime or controller.
 
-Team B additionally offers **Reactive MRP Controller**, a deterministic reactive
-pressure controller shared by Scenarios 1 and 2. Load either saved scenario,
-leave Team A on Manual, select SharedObs, and select Reactive MRP Controller on
-Team B. Submit advances one turn; Reset restores the exact loaded starting
-state and seed. Team B remains inspectable, but its action inputs are read-only.
-Team A may alternatively use
-the existing Scripted TDM or Random controllers.
+Team B additionally offers **Scenario 3 Controller**, a deterministic
+SharedObs-only specialist. Rogues pursue the lowest-health observed enemy and
+avoid other observed living bodies; legal Ultimate/Basic targets are selected
+independently by lowest health. Other classes Stay/no-combat, including after
+revival. Its body-avoidance estimate treats observed bodies as stationary and
+does not predict the opponent's pending movement or guarantee a route. This
+specialist is never available on Team A and does not change Reactive TDM's
+ordinary obstacle-only movement refinement.
 
-Reactive MRP Controller is never available on Team A or under NoSharedObs. It
-requires an interactive TDM snapshot with one to five remaining transitions.
-Team B's decision-making agents must be Mage, Rogue, or Priest; configured
-Warrior/Hunter slots must start dead and cannot revive before the final
-successor. Renamed or copied compatible scenarios are accepted. An incompatible
-selection or load leaves the current session unchanged and explains the issue;
-select a normal Team B controller before loading an unsupported arena.
+In a body-blocking study, the defending Warrior can screen a vulnerable Hunter
+and provide a moving body around which the Hunter kites, while both maintain
+offensive pressure. The specialist can attack that Warrior while pursuing the
+Hunter; body avoidance does not imply that it ignores the blocker in combat.
+For a TDM finishing scenario, classify the terminal Team A reward, not a
+particular movement sequence or minimum attack count: +1 is success, 0 is a
+draw, and −1 is failure. A zero reward before termination/truncation is not a
+draw. Keep author-observed wins distinct from exact replay-verified witnesses.
 
-This is a display-label change: the existing `scenario_1` controller identity,
-behavior and provenance remain unchanged. Eligibility depends on the snapshot,
-not its name or scenario number.
+To play against either controller:
+
+1. Load a valid scenario or map preview, or keep the default diagnostic arena.
+2. Keep Team A Manual and select SharedObs.
+3. Select Reactive TDM or Scenario 3 Controller for Team B.
+4. Stage Team A's actions and Submit; Reset restores the exact starting state.
+
+After editing and saving a scenario, explicitly load its new saved revision to
+test that update. Reset restores the already loaded snapshot; it does not pick
+up later authoring changes. Saving revised Description/Notes alone does not
+change the physical scenario or the controller's behavior identity.
+
+Reactive choices have no task, horizon, roster, score, asset-ID, or respawn
+restriction on valid interactive setups. Changing either controller or the
+information regime resets the exact loaded snapshot and seed before comparison.
+Policy-controlled teams remain inspectable but their action inputs are read-only;
+Submit works with both teams policy-controlled. Expected configuration rejection
+shows a notice and preserves the session and recording progress without requiring
+reconnect. Genuine internal failures retain their fail-closed protections.
+
+The old Scripted TDM scorer and separate Reactive MRP/`scenario_1` executable
+interface are removed. New identities are
+`reactive-team-deathmatch-controller@1` and `scenario-3-pressure-controller@1`.
+New interactive action-source payloads use V4 and record installed controllers
+separately from scenario/map identity. Historical recordings retain their old
+identities and remain readable; fixed-frame scripted diagnostics are unchanged.
+Availability on a setup does not qualify it scientifically or promise the
+outcome of another scenario's verified witness.
 
 Loading a scenario does not select its pressure controller automatically, and
 saved assets remain controller-independent. Future official evaluations bind
@@ -164,7 +189,9 @@ the versioned controller through a separate evaluation definition and apply the
 same controller to every treatment and matched-ablation arm. DevClient play
 remains diagnostic, not official evidence. See
 [A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
-and [A28](../design/specification_amendments.md#a28-scenario-pressure-controllers-in-the-devclient).
+and [A30](../design/specification_amendments.md#a30-reactive-tdm-and-specialist-scenario-controllers).
+Scenario-derived controller rules are not silently eligible for official
+training, and originating-scenario performance is not uncontaminated evaluation.
 
 Saved maps and scenarios do not encode an information regime. Loading one
 preserves its authored bytes and binds the selected regime only for that run.

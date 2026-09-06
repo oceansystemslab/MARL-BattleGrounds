@@ -92,15 +92,22 @@ test("only Team B exposes the SharedObs scenario controller", async () => {
       ),
       [
         ["manual", "Manual"],
-        ["scripted_tdm", "Scripted TDM"],
+        ["reactive_tdm", "Reactive TDM"],
         ["random_valid", "Random"],
         ...(id === "devclient-team-b-controller"
-          ? [["scenario_1", "Reactive MRP Controller"]]
+          ? [["scenario_3", "Scenario 3 Controller"]]
           : []),
       ],
     );
   }
-  assert.match(markup, /Scenario controllers require SharedObs\./u);
+  assert.equal(
+    elementBody(markup, "devclient-scenario-controller-help", "small").trim(),
+    "Rogues pursue the lowest-health enemy and avoid intervening bodies. Other classes stay idle. Team B and SharedObs only.",
+  );
+  assert.equal(
+    elementBody(markup, "devclient-reactive-controller-help", "small").trim(),
+    "Deterministic five-class reactive controller. SharedObs only.",
+  );
 });
 
 test("replay Help names the exact arrow keys and Escape selection behavior", async () => {

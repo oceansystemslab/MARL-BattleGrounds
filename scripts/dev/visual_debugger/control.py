@@ -16,9 +16,6 @@ from marl_battlegrounds.core.types import (
     MOVE_STAY,
     NUM_MOVE_ACTIONS,
     NUM_TARGET_ACTIONS,
-    PRIEST_CLASS_ID,
-    ROGUE_CLASS_ID,
-    TASK_MODE_TDM,
     TEAM_A_ID,
     TEAM_B_ID,
     Action,
@@ -45,15 +42,8 @@ from marl_battlegrounds.policies.no_shared_obs import (
     execute_no_shared_obs_team_policy,
 )
 from marl_battlegrounds.policies.random_valid import random_policy
-from marl_battlegrounds.policies.scenario_controllers.scenario_1 import (
-    scenario_1_policy,
-)
-from marl_battlegrounds.policies.scripted.no_shared_obs import (
-    team_deathmatch_no_shared_obs_policy,
-)
-from marl_battlegrounds.policies.scripted.shared_obs import (
-    team_deathmatch_shared_obs_policy,
-)
+from marl_battlegrounds.policies.reactive_tdm import reactive_tdm_policy
+from marl_battlegrounds.policies.scenario_3 import scenario_3_policy
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsSensorSourceBankV1,
     build_default_shared_obs_information_availability,
@@ -416,12 +406,12 @@ def _resolve_team_controller_action(
     if mode == "shared_obs":
         if source_bank is None or information_availability is None:
             raise ValueError("SharedObs policy execution requires its source inputs")
-        if controller == "scripted_tdm":
-            policy = team_deathmatch_shared_obs_policy
+        if controller == "reactive_tdm":
+            policy = reactive_tdm_policy
         elif controller == "random_valid":
             policy = _random_shared_obs_policy
-        elif controller == "scenario_1" and team_identity == TEAM_B_ID:
-            policy = scenario_1_policy
+        elif controller == "scenario_3" and team_identity == TEAM_B_ID:
+            policy = scenario_3_policy
         else:
             raise ValueError("unsupported team controller")
         return cast(
@@ -438,11 +428,7 @@ def _resolve_team_controller_action(
         )
     if mode != "no_shared_obs":
         raise ValueError("unsupported execution information mode")
-    if controller == "scripted_tdm":
-        policy = team_deathmatch_no_shared_obs_policy
-    elif controller == "random_valid":
-        policy = random_policy
-    else:
+    if controller != "random_valid":
         raise ValueError("unsupported team controller")
     return cast(
         ActorAction,
@@ -450,7 +436,7 @@ def _resolve_team_controller_action(
             session.observation,
             session.action_mask,
             policy_keys,
-            policy=policy,
+            policy=random_policy,
             team_identity=team_identity,
         ),
     )
@@ -600,44 +586,31 @@ def _debugger_expected_horizon(
     )
 
 
-def _validate_scenario_controller_snapshot(
+class CombatConfigurationRejectedError(ValueError):
+    """An expected selection error that leaves the current session usable."""
+
+
+def _validate_reactive_controller_selection(
     scenario: DebuggerScenario,
-    config: EnvConfig,
-    state: EnvState,
     *,
+    team_a_controller: TeamController,
     team_b_controller: TeamBController,
     execution_information_mode: ExecutionInformationMode,
 ) -> None:
-    """Check applicability at initial epochs, never from a policy decision."""
-    if team_b_controller != "scenario_1":
+    """Check execution boundaries, independently of scenario content."""
+    if not any(
+        controller in ("reactive_tdm", "scenario_3")
+        for controller in (team_a_controller, team_b_controller)
+    ):
         return
-    if scenario.mode != "interactive" or config.task_mode != TASK_MODE_TDM:
-        raise ValueError("Reactive MRP Controller requires interactive TDM.")
-    if execution_information_mode != "shared_obs":
-        raise ValueError("Reactive MRP Controller requires SharedObs.")
-    remaining = config.max_steps - int(state.step_count)
-    if not 1 <= remaining <= 5:
-        raise ValueError(
-            "Reactive MRP Controller requires one to five remaining transitions."
+    if scenario.mode != "interactive":
+        raise CombatConfigurationRejectedError(
+            "Reactive controllers require an interactive session."
         )
-    profile = config.agent_profile
-    supported_classes = (MAGE_CLASS_ID, ROGUE_CLASS_ID, PRIEST_CLASS_ID)
-    for slot in range(MAX_AGENT_SLOTS):
-        if (
-            not bool(profile.active_mask[slot])
-            or int(profile.team_ids[slot]) != TEAM_B_ID
-        ):
-            continue
-        if int(profile.class_ids[slot]) in supported_classes:
-            continue
-        if (
-            bool(state.alive_mask[slot])
-            or int(state.team_respawn_wave_countdowns[TEAM_B_ID - 1]) + 1 < remaining
-        ):
-            raise ValueError(
-                "Reactive MRP Controller requires Team B Warrior/Hunter slots to start "
-                "dead and respawn no earlier than the final transition."
-            )
+    if execution_information_mode != "shared_obs":
+        raise CombatConfigurationRejectedError(
+            "Reactive controllers require SharedObs."
+        )
 
 
 def create_session(
@@ -666,10 +639,9 @@ def create_session(
         observation,
         action_mask,
     ) = _fresh_snapshot(scenario, seed)
-    _validate_scenario_controller_snapshot(
+    _validate_reactive_controller_selection(
         scenario,
-        config,
-        state,
+        team_a_controller=team_a_controller,
         team_b_controller=team_b_controller,
         execution_information_mode=execution_information_mode,
     )
@@ -1174,10 +1146,9 @@ def _restart_session(
         observation,
         action_mask,
     ) = _fresh_snapshot(scenario, session.seed)
-    _validate_scenario_controller_snapshot(
+    _validate_reactive_controller_selection(
         scenario,
-        config,
-        state,
+        team_a_controller=next_team_a_controller,
         team_b_controller=next_team_b_controller,
         execution_information_mode=next_information_mode,
     )
@@ -1274,16 +1245,16 @@ def set_combat_configuration(
 ) -> DebuggerSession:
     """Replace the episode only when its controller or information mode changes."""
     if team_a_controller not in SUPPORTED_TEAM_CONTROLLERS:
-        raise ValueError(
-            "team_a_controller must be manual, scripted_tdm, or random_valid"
+        raise CombatConfigurationRejectedError(
+            "team_a_controller must be manual, reactive_tdm, or random_valid"
         )
     if team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
-        raise ValueError(
-            "team_b_controller must be manual, scripted_tdm, random_valid, "
-            "or scenario_1"
+        raise CombatConfigurationRejectedError(
+            "team_b_controller must be manual, reactive_tdm, random_valid, "
+            "or scenario_3"
         )
     if execution_information_mode not in ("shared_obs", "no_shared_obs"):
-        raise ValueError(
+        raise CombatConfigurationRejectedError(
             "execution_information_mode must be shared_obs or no_shared_obs"
         )
     if (

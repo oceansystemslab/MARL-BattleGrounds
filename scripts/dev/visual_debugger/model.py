@@ -40,8 +40,8 @@ type ArmOrigin = Literal["automatic", "explicit"]
 type ScenarioMode = Literal["interactive", "scripted"]
 type ScenarioAudience = Literal["researcher", "stress"]
 type SubmissionKind = Literal["interactive", "scripted"]
-type TeamController = Literal["manual", "scripted_tdm", "random_valid"]
-type TeamBController = Literal["manual", "scripted_tdm", "random_valid", "scenario_1"]
+type TeamController = Literal["manual", "reactive_tdm", "random_valid"]
+type TeamBController = TeamController | Literal["scenario_3"]
 type TeamControllerActionSource = Literal["manual", "scripted", "mixed", "policy"]
 type ScenarioSourceKind = Literal[
     "current_buffer",
@@ -50,12 +50,12 @@ type ScenarioSourceKind = Literal[
 
 SUPPORTED_TEAM_CONTROLLERS: tuple[TeamController, ...] = (
     "manual",
-    "scripted_tdm",
+    "reactive_tdm",
     "random_valid",
 )
 SUPPORTED_TEAM_B_CONTROLLERS: tuple[TeamBController, ...] = (
     *SUPPORTED_TEAM_CONTROLLERS,
-    "scenario_1",
+    "scenario_3",
 )
 
 
@@ -66,8 +66,6 @@ def team_controller_action_source(
     """Classify one interactive pair without hiding either controller identity."""
     if team_a_controller == team_b_controller == "manual":
         return "manual"
-    if team_a_controller == team_b_controller == "scripted_tdm":
-        return "scripted"
     if team_a_controller != "manual" and team_b_controller != "manual":
         return "policy"
     return "mixed"
@@ -410,18 +408,21 @@ class DebuggerSession:
                 raise ValueError("last report actor slots must be configured active.")
         if self.team_a_controller not in SUPPORTED_TEAM_CONTROLLERS:
             raise ValueError(
-                "team_a_controller must be manual, scripted_tdm, or random_valid."
+                "team_a_controller must be manual, reactive_tdm, or random_valid."
             )
         if self.team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
             raise ValueError(
-                "team_b_controller must be manual, scripted_tdm, random_valid, "
-                "or scenario_1."
+                "team_b_controller must be manual, reactive_tdm, random_valid, "
+                "or scenario_3."
             )
         if (
-            self.team_b_controller == "scenario_1"
+            any(
+                controller in ("reactive_tdm", "scenario_3")
+                for controller in (self.team_a_controller, self.team_b_controller)
+            )
             and self.evaluation_context.execution_information_mode != "shared_obs"
         ):
-            raise ValueError("Reactive MRP Controller requires SharedObs.")
+            raise ValueError("Reactive controllers require SharedObs.")
         if self.scenario.mode == "scripted":
             if self.team_a_controller != "manual" or self.team_b_controller != "manual":
                 raise ValueError(

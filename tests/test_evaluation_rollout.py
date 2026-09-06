@@ -29,9 +29,6 @@ from marl_battlegrounds.evaluation.rollout import ReferenceRolloutResult, rollou
 from marl_battlegrounds.policies.actor import ActorAction
 from marl_battlegrounds.policies.no_shared_obs import NoSharedObsPolicy
 from marl_battlegrounds.policies.random_valid import random_policy
-from marl_battlegrounds.policies.scripted import (
-    team_deathmatch_no_shared_obs_policy,
-)
 
 _FIRST_ENEMY_TARGET = 1 + MAX_AGENTS_PER_TEAM
 
@@ -490,15 +487,15 @@ def test_completion_bases_are_independent_and_retain_the_last_real_successor(
     (
         pytest.param(random_policy, id="random-valid"),
         pytest.param(
-            team_deathmatch_no_shared_obs_policy,
-            id="scripted-team-deathmatch",
+            _last_supported_action,
+            id="last-supported-action",
         ),
     ),
 )
 def test_mask_valid_policies_run_every_fixed_topology_without_rejection(
     policy: Callable[[Observation, ActionMask, Array], ActorAction],
 ) -> None:
-    """Random-valid and scripted actors integrate from 1v1 through 5v5."""
+    """Random-valid and deterministic test actors integrate from 1v1 through 5v5."""
     for team_size in range(1, MAX_AGENTS_PER_TEAM + 1):
         config = _tdm_config(team_sizes=(team_size, team_size), max_steps=1)
         history = _run(config, policy, policy)

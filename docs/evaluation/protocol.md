@@ -278,14 +278,20 @@ but every evaluated actor selects its action from the canonical SharedObs
 contract. Critic inputs never become actor availability or evaluation-frame
 actor material.
 
-[Amendment A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
-classifies the existing generic Scripted TDM controller and Random as
-diagnostic tooling; the script's SharedObs configuration does not confer
-baseline status. Scenario evaluation instead binds a separately versioned,
-deterministic pressure protocol through the resolved evaluation definition.
+[Amendment A30](../design/specification_amendments.md#a30-reactive-tdm-and-specialist-scenario-controllers)
+replaces the legacy Scripted TDM/MRP executables with general Reactive TDM and
+a separate Scenario 3 Rogue specialist. Reactive TDM supports either team;
+Scenario 3 supports Team B only. Both require SharedObs and remain diagnostic
+or scenario-pressure tooling, not official baselines. Random remains diagnostic
+quality-control tooling. Under
+[A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations),
+an official scenario evaluation independently freezes and binds the selected
+deterministic controller through `pressure_protocol`, identically for the full
+method and matched ablation. Merely selecting a controller in the DevClient or
+passing its physical regression does not qualify official scenario evidence.
 [Amendment A27](../design/specification_amendments.md#a27-rolling-big-12-and-baseline-library-governance)
-defines the planned rolling Big 12 and cumulative Baseline Library. Neither
-amendment changes the simulator, the generic cross-play contract, or the
+defines the planned rolling Big 12 and cumulative Baseline Library. These
+amendments do not change the simulator, the generic cross-play contract, or the
 existing fixed-slot focal/cooperative/adversarial role vocabulary.
 
 ## Experimental units and terminology
@@ -834,7 +840,7 @@ legitimate training workflow may consume compatible library material only
 through an immutable manifest declaring exact identities and weights. It must
 never resolve a mutable `latest_big_12` population.
 
-Scenario pressure controllers, generic Scripted TDM, Random, privileged
+Scenario pressure controllers, general Reactive TDM, Random, privileged
 policies, intermediate unqualified checkpoints, and PSRO's internal population
 members are not Big 12 entrants. Scenario controllers are also outside the
 Baseline Library. Qwen artifacts may be retained after admission, but their use

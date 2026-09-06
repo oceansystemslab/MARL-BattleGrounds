@@ -598,9 +598,7 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
         "tests/test_shared_obs_runtime.py": 110,
         "tests/test_visual_debugger_replay_service.py": 400,
     }
-    assert CI_SHARD_COST_PROFILE.split_file_family_cost_floors == {
-        "tests/test_scripted_team_deathmatch_no_shared_obs.py": 20,
-    }
+    assert CI_SHARD_COST_PROFILE.split_file_family_cost_floors == {}
     assert CI_SHARD_COST_PROFILE.extracted_family_costs == {
         (
             "tests/test_visual_debugger_scenarios.py::"
@@ -632,54 +630,11 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
         (0,) * 11 + (50,)
     )
     assert set(CI_SHARD_COST_PROFILE.relocations_by_shard_count) == {12}
-    tdm_prefix = "family:tests/test_scripted_team_deathmatch_no_shared_obs.py::"
     assert CI_SHARD_COST_PROFILE.relocations_by_shard_count[12] == (
-        (
-            tdm_prefix
-            + "test_eager_jit_vmap_key_forms_and_x64_keep_exact_actions_and_dtypes",
-            4,
-            7,
-        ),
-        (
-            tdm_prefix
-            + "test_policy_uses_exact_masks_and_ignores_misleading_marginals",
-            10,
-            4,
-        ),
-        (
-            tdm_prefix
-            + "test_dead_inactive_and_stunned_masks_produce_the_canonical_inert_action",
-            11,
-            2,
-        ),
-        (
-            tdm_prefix
-            + "test_dormant_task_history_and_lifecycle_fields_do_not_change_the_policy",
-            8,
-            4,
-        ),
         ("residual:tests/test_visual_debugger_service.py", 6, 10),
-        (
-            tdm_prefix + "test_invalid_damage_modifier_never_suppresses_an_aged_trap",
-            3,
-            11,
-        ),
-        (
-            tdm_prefix + "test_mage_burst_uses_the_locked_configured_crowd_"
-            "and_covering_boundaries",
-            3,
-            4,
-        ),
         ("file:tests/test_shared_obs_runtime.py", 11, 3),
     )
-    assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset(
-        {
-            (
-                "tests/test_scripted_team_deathmatch_no_shared_obs.py",
-                "class_rows",
-            )
-        }
-    )
+    assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset()
 
 
 def test_dominant_units_preserve_hotspot_affinity_and_exact_ownership() -> None:

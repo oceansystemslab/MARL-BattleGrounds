@@ -29,24 +29,30 @@ The Combat Debugger lists execution-valid saved map and scenario revisions.
 Scenario assets load their authored state; maps are clearly identified
 deterministic default-5v5-TDM previews. Both authoring areas call the same strict
 compile/revalidate loader through `Open in Debug`, and either team can use
-manual control, the scripted Team Deathmatch controller, or the built-in Random
-controller. Scripted TDM is the existing generic team-agnostic debugging and
-regression controller; Random is diagnostic quality-control tooling. Neither is
-an official baseline, Big 12 entrant, or scenario pressure controller.
-Team B additionally offers **Reactive MRP Controller** under SharedObs only.
-Scenarios 1 and 2 share this unchanged controller (internal identity
-`scenario_1`). Load either scenario, keep Team A Manual, choose that Team B
-controller, and submit turns; Reset restores the exact loaded starting state.
-The controller requires a compatible short TDM snapshot and is never selectable
-for Team A.
-Incompatible selections or loads leave the current session unchanged.
+**Manual**, **Reactive TDM**, or **Random**. Reactive TDM is one deterministic
+five-class SharedObs controller for either team. Team B also offers the
+SharedObs-only **Scenario 3 Controller**: Rogues pursue the lowest-health enemy
+while avoiding intervening bodies; other classes stay idle, including after
+revival. These policies are diagnostic/scenario-pressure tools, not official
+baselines or Big 12 entrants. Random remains available under both information
+modes; NoSharedObs is disabled while either team uses a reactive controller.
+
+Load any valid interactive scenario or map preview (or keep the default arena),
+keep Team A Manual, select SharedObs, choose either reactive Team B controller,
+and submit turns. Reset restores the exact loaded starting state. No task,
+horizon, roster, asset-ID, or respawn restriction applies. Expected rejection
+leaves the session healthy and shows a notice without requiring reconnect.
+Policy-controlled agents remain inspectable but action-read-only. Scenario 3
+is not selectable on Team A; Reactive TDM is. The old Scripted TDM and separate
+Reactive MRP executable interfaces have been removed. Historical recordings
+remain readable, and fixed-frame scripted diagnostics remain separate.
 See the [Combat Debugger guide](combat_debugger.md#loading-saved-scenarios-and-map-previews)
-for its roster and horizon requirements.
+for the execution boundaries and loading workflow.
 Future official scenario evaluations bind pressure controllers through separate
 evaluation definitions while saved scenarios remain controller-independent.
 DevClient use remains diagnostic. See
 [A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
-and [A28](../design/specification_amendments.md#a28-scenario-pressure-controllers-in-the-devclient).
+and [A30](../design/specification_amendments.md#a30-reactive-tdm-and-specialist-scenario-controllers).
 Save is the only way the DevClient persists asset content; it
 creates durable numbered local revisions and never autosaves. Every applicable
 selector exposes every latest revision in numeric-aware asset-ID order through

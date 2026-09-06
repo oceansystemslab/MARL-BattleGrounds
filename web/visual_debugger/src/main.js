@@ -1918,19 +1918,19 @@ function isReplayMode() {
 
 /** @param {unknown} value */
 function isTeamController(value) {
-  return value === "manual" || value === "scripted_tdm" || value === "random_valid";
+  return value === "manual" || value === "reactive_tdm" || value === "random_valid";
 }
 
 /** @param {unknown} controller */
 function combatControllerLabel(controller) {
-  if (controller === "scripted_tdm") {
-    return "Scripted TDM";
+  if (controller === "reactive_tdm") {
+    return "Reactive TDM";
   }
   if (controller === "random_valid") {
     return "Random";
   }
-  if (controller === "scenario_1") {
-    return "Reactive MRP Controller";
+  if (controller === "scenario_3") {
+    return "Scenario 3 Controller";
   }
   return "Manual";
 }
@@ -1945,10 +1945,12 @@ function combatConfigurationFromFrame(frame) {
     !isRecord(candidate) ||
     !isTeamController(candidate.team_a_controller) ||
     (!isTeamController(candidate.team_b_controller) &&
-      candidate.team_b_controller !== "scenario_1") ||
+      candidate.team_b_controller !== "scenario_3") ||
     (candidate.execution_information_mode !== "shared_obs" &&
       candidate.execution_information_mode !== "no_shared_obs") ||
-    (candidate.team_b_controller === "scenario_1" &&
+    ((candidate.team_a_controller === "reactive_tdm" ||
+      candidate.team_b_controller === "reactive_tdm" ||
+      candidate.team_b_controller === "scenario_3") &&
       candidate.execution_information_mode !== "shared_obs")
   ) {
     return null;

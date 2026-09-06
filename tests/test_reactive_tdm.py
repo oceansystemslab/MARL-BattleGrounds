@@ -1,4 +1,4 @@
-"""Reactive MRP rules and accepted Scenario 1 and Scenario 2 witnesses."""
+"""Reactive TDM rules and accepted Scenario 1 and Scenario 2 witnesses."""
 
 from collections.abc import Callable
 from pathlib import Path
@@ -36,6 +36,7 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_Y,
     CONTEXT_FEATURE_MAP_HEIGHT,
     CONTEXT_FEATURE_MAP_WIDTH,
+    HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
     MOVE_EAST,
@@ -52,6 +53,7 @@ from marl_battlegrounds.core.types import (
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
     TEAM_B_ID,
+    WARRIOR_CLASS_ID,
     ActionMask,
     DoneFlags,
     EnvState,
@@ -63,11 +65,11 @@ from marl_battlegrounds.policies.actor import (
     ActorAction,
     build_joint_action_from_actor_actions,
 )
-from marl_battlegrounds.policies.scenario_controllers import (
-    scenario_1_controller_descriptor,
-    scenario_1_policy,
+from marl_battlegrounds.policies.reactive_common import refine_movement
+from marl_battlegrounds.policies.reactive_tdm import (
+    reactive_tdm_controller_descriptor,
+    reactive_tdm_policy,
 )
-from marl_battlegrounds.policies.scenario_controllers.common import refine_movement
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsPolicy,
     SharedObsSensorSourceBankV1,
@@ -76,7 +78,7 @@ from marl_battlegrounds.policies.shared_obs import (
     execute_shared_obs_team_policy,
 )
 
-_POLICY = cast(SharedObsPolicy, jax.jit(scenario_1_policy))
+_POLICY = cast(SharedObsPolicy, jax.jit(reactive_tdm_policy))
 _REFINE = cast(
     Callable[[Observation, ActionMask, Array], Array], jax.jit(refine_movement)
 )
@@ -222,10 +224,10 @@ def _assert_exact(actual: object, expected: object) -> None:
         (11.0, None, False, MOVE_WEST),
         (11.5, None, False, MOVE_WEST),
         (11.501, None, False, MOVE_STAY),
-        (13.0, None, False, MOVE_STAY),
-        (13.001, None, False, MOVE_EAST),
+        (12.0, None, False, MOVE_STAY),
+        (12.001, None, False, MOVE_EAST),
         (11.0, 8.0, True, MOVE_EAST),
-        (11.0, None, True, MOVE_STAY),
+        (11.0, None, True, MOVE_WEST),
     ],
 )
 def test_priest_ordered_movement_branches(
@@ -264,7 +266,7 @@ def test_priest_hp_max_hp_and_slot_ties_and_full_health_healing(
     obs = _visible(obs, "ally", 2, (10, 7), hp=10, max_hp=50)
     action = _act(scenario, obs, _mask((1, 0), (2, 0), (3, 0)))
     assert int(action.select_target) == 2
-    # The movement tie chooses row 1 too; that ally lies in the desired band.
+    # Movement uses the nearest ally (row 0 by slot tie), within the peaceful band.
     assert int(action.move) == MOVE_STAY
     full = _observation(scenario, PRIEST_CLASS_ID)
     full = full._replace(
@@ -273,6 +275,145 @@ def test_priest_hp_max_hp_and_slot_ties_and_full_health_healing(
         ].set(100)
     )
     assert int(_act(scenario, full, _mask((5, 0))).select_target) == 5
+
+
+def test_priest_peaceful_spacing_is_independent_of_healing_and_self_health(
+    scenario: CompiledDevScenarioV1,
+) -> None:
+    obs = _observation(scenario, PRIEST_CLASS_ID)
+    obs = _visible(obs, "ally", 0, (14, 5), hp=1)
+    obs = _visible(obs, "ally", 1, (11, 5), hp=80)
+    # Follow the nearest ally, not the critically injured healing target.
+    action = _act(scenario, obs, _mask((1, 0), (2, 0), (5, 0)))
+    assert tuple(int(x) for x in action) == (MOVE_WEST, 1, 0)
+    # Once an enemy is visible, the existing healing-oriented >3 approach stays.
+    obs = _visible(obs, "enemy", 0, (8, 5))
+    assert int(_act(scenario, obs).move) == MOVE_EAST
+
+
+@pytest.mark.parametrize(
+    ("distance", "expected"),
+    [(2.999, MOVE_EAST), (3.0, MOVE_EAST), (3.001, MOVE_WEST)],
+)
+def test_priest_enemy_visible_upper_boundary_remains_three(
+    scenario: CompiledDevScenarioV1, distance: float, expected: int
+) -> None:
+    obs = _visible(
+        _observation(scenario, PRIEST_CLASS_ID), "ally", 0, (10 - distance, 5)
+    )
+    obs = _visible(obs, "enemy", 0, (8, 5))
+    assert int(_act(scenario, obs).move) == expected
+
+
+@pytest.mark.parametrize(
+    "class_id",
+    [MAGE_CLASS_ID, WARRIOR_CLASS_ID, HUNTER_CLASS_ID, ROGUE_CLASS_ID, PRIEST_CLASS_ID],
+)
+def test_no_enemy_rendezvous_and_exact_center_stay(
+    scenario: CompiledDevScenarioV1, class_id: int
+) -> None:
+    obs = _observation(scenario, class_id)
+    assert int(_act(scenario, obs).move) == MOVE_STAY
+    own = obs.self_features.at[AGENT_FEATURE_X].set(8)
+    obs = obs._replace(
+        self_features=own, ally_unit_features=obs.ally_unit_features.at[4].set(own)
+    )
+    assert tuple(int(x) for x in _act(scenario, obs)) == (MOVE_EAST, 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("distance", "expected"),
+    [
+        (2.999, MOVE_WEST),
+        (3.0, MOVE_WEST),
+        (3.001, MOVE_STAY),
+        (3.5, MOVE_STAY),
+        (3.501, MOVE_EAST),
+    ],
+)
+def test_hunter_spacing_boundaries(
+    scenario: CompiledDevScenarioV1, distance: float, expected: int
+) -> None:
+    obs = _visible(
+        _observation(scenario, HUNTER_CLASS_ID), "enemy", 0, (10 + distance, 5)
+    )
+    assert int(_act(scenario, obs).move) == expected
+
+
+@pytest.mark.parametrize("distance", [1.999, 2.0, 2.001])
+def test_hunter_defensive_trap_boundary_and_basic_fallback(
+    scenario: CompiledDevScenarioV1, distance: float
+) -> None:
+    obs = _visible(
+        _observation(scenario, HUNTER_CLASS_ID), "enemy", 0, (10 + distance, 5), hp=50
+    )
+    obs = _visible(obs, "enemy", 1, (8, 5), hp=1)
+    action = _act(scenario, obs, _mask((6, 0), (7, 0), (6, 1)))
+    assert int(action.use_ultimate) == int(distance <= 2.0)
+    assert int(action.select_target) == (6 if distance <= 2.0 else 7)
+    assert int(_act(scenario, obs, _mask((6, 0), (7, 0))).select_target) == 7
+
+
+def test_hunter_trap_nearest_legal_ties_and_independent_lowest_health_basic(
+    scenario: CompiledDevScenarioV1,
+) -> None:
+    obs = _visible(_observation(scenario, HUNTER_CLASS_ID), "enemy", 0, (11, 5), hp=80)
+    obs = _visible(obs, "enemy", 1, (9, 5), hp=70)
+    obs = _visible(obs, "enemy", 2, (10, 7), hp=1)
+    pairs = [(6 + i, ultimate) for i in range(3) for ultimate in range(2)]
+    action = _act(scenario, obs, _mask(*pairs))
+    assert tuple(int(x) for x in action) == (MOVE_WEST, 6, 1)
+    # Nearest illegal target cannot prevent the next legal Trap from being used.
+    action = _act(scenario, obs, _mask((6, 0), (7, 0), (8, 0), (7, 1), (8, 1)))
+    assert tuple(int(x) for x in action) == (MOVE_WEST, 7, 1)
+    action = _act(scenario, obs, _mask((6, 0), (7, 0), (8, 0)))
+    assert tuple(int(x) for x in action) == (MOVE_WEST, 8, 0)
+
+
+@pytest.mark.parametrize("health", [39.999, 40.0, 40.001])
+def test_warrior_charge_strict_threshold_and_basic_fallback(
+    scenario: CompiledDevScenarioV1, health: float
+) -> None:
+    obs = _visible(
+        _observation(scenario, WARRIOR_CLASS_ID), "enemy", 0, (11, 5), hp=health
+    )
+    action = _act(scenario, obs, _mask((6, 0), (6, 1)))
+    assert tuple(int(x) for x in action) == (MOVE_EAST, 6, int(health < 40))
+    assert int(_act(scenario, obs, _mask((6, 0))).use_ultimate) == 0
+
+
+def test_warrior_charge_uses_lowest_legal_health_not_nearest(
+    scenario: CompiledDevScenarioV1,
+) -> None:
+    obs = _visible(_observation(scenario, WARRIOR_CLASS_ID), "enemy", 0, (11, 5), hp=39)
+    obs = _visible(obs, "enemy", 1, (8, 5), hp=20)
+    obs = _visible(obs, "enemy", 2, (10, 8), hp=20)
+    obs = _visible(obs, "enemy", 3, (9, 5), hp=1)
+    action = _act(scenario, obs, _mask((6, 0), (7, 0), (6, 1), (7, 1), (8, 1)))
+    assert tuple(int(x) for x in action) == (MOVE_EAST, 7, 1)
+
+
+@pytest.mark.parametrize(
+    "class_id",
+    [MAGE_CLASS_ID, WARRIOR_CLASS_ID, HUNTER_CLASS_ID, ROGUE_CLASS_ID, PRIEST_CLASS_ID],
+)
+def test_scalar_policy_is_team_agnostic_for_each_class(
+    scenario: CompiledDevScenarioV1, class_id: int
+) -> None:
+    obs = _observation(scenario, class_id)
+    own = obs.self_features
+    obs = obs._replace(
+        ally_unit_features=jnp.zeros_like(obs.ally_unit_features).at[0].set(own),
+        ally_visibility_mask=jnp.array([True, False, False, False, False]),
+    )
+    obs = _visible(obs, "ally", 1, (11, 5), hp=20)
+    obs = _visible(obs, "enemy", 0, (8, 5), hp=20)
+    mask = _mask((1, 0), (2, 0), (2, 1), (6, 0), (6, 1), (0, 1))
+    bank = _empty_bank(scenario)
+    availability = jnp.zeros(10, dtype=jnp.bool_)
+    a = _POLICY(obs, mask, jax.random.key(1), bank, availability, jnp.int32(0))
+    b = _POLICY(obs, mask, jax.random.key(77), bank, availability, jnp.int32(5))
+    _assert_exact(a, b)
 
 
 @pytest.mark.parametrize("class_id", [MAGE_CLASS_ID, ROGUE_CLASS_ID])
@@ -486,7 +627,7 @@ def _team_b(
             jax.random.split(jax.random.key(key), 10),
             build_shared_obs_sensor_source_bank(obs),
             availability,
-            scenario_1_policy,
+            reactive_tdm_policy,
             TEAM_B_ID,
         ),
     )
@@ -512,7 +653,7 @@ def test_scalar_eager_jit_team_parity_and_key_invariance(
         av[9],
         jnp.int32(9),
     )
-    eager = scenario_1_policy(*args)
+    eager = reactive_tdm_policy(*args)
     _assert_exact(eager, _POLICY(*args))
     _assert_exact(eager, _scalar(team, 4))
 
@@ -593,12 +734,12 @@ def test_reactive_controller_reproduces_both_accepted_witnesses(
 
 
 def test_descriptor_is_fresh_and_contains_frozen_constants() -> None:
-    first = scenario_1_controller_descriptor()
-    assert first["policy_id"] == "scenario-1-pressure-controller"
+    first = reactive_tdm_controller_descriptor()
+    assert first["policy_id"] == "reactive-team-deathmatch-controller"
     assert first["version"] == 1
     cast(dict[str, object], first["movement"])["minimum_stride_fraction_inclusive"] = 99
     assert (
-        cast(dict[str, object], scenario_1_controller_descriptor()["movement"])[
+        cast(dict[str, object], reactive_tdm_controller_descriptor()["movement"])[
             "minimum_stride_fraction_inclusive"
         ]
         == 0.1
@@ -628,7 +769,7 @@ def test_not_trapping_priest_changes_next_decision_reactively(
     assert int(next_b.select_target[4]) == 1
 
 
-def test_rules_continue_to_final_wave_without_unsupported_class_decisions(
+def test_rules_continue_to_final_wave_with_dead_class_noops(
     scenario: CompiledDevScenarioV1,
 ) -> None:
     # Larger K isolates the five-transition lifecycle from early score termination.

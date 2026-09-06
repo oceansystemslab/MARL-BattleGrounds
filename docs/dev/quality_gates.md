@@ -213,6 +213,39 @@ its tests remain compatibility protection, not official-baseline
 qualification. Random is likewise a diagnostic/quality-control policy, not an
 official baseline.
 
+### Reactive controller replacement gates
+
+[Amendment A30](../design/specification_amendments.md#a30-reactive-tdm-and-specialist-scenario-controllers)
+requires one general Reactive TDM implementation and a separate Scenario 3
+Rogue specialist, with no executable legacy TDM or MRP aliases. Generic
+SharedObs/NoSharedObs, exact masks, RNG-sensitive rollout, capture, and historical
+replay proof must survive removal of the old scorer/profile/trace tests.
+
+Reactive TDM must prove every class boundary and tie, peaceful Priest spacing
+independent of healing, unchanged enemy-visible Mage/Rogue behavior, and the
+existing obstacle-refinement function's unchanged behavior. Scenario 3 must
+prove lowest-health pursuit, independent legal combat, segment-based body
+screening, prey/self exclusion, tangency, overlap-reducing escape, deterministic
+detours, and non-Rogue no-ops. Its actual simulator trajectory must demonstrate
+the stationary-blocker detour; moving-blocker tests verify reactivity rather
+than promise an unbeatable pursuer. Neither proof silently qualifies an
+official scenario or changes a saved physical setup.
+
+Cover all nine general controller pairs plus the three Team A choices against
+Scenario 3 under SharedObs. Under NoSharedObs, cover the four Manual/Random
+pairs and reject reactive choices. Scenario 3 on Team A is also rejected.
+Service/HTTP/browser tests must preserve exact reset, authoritative selector
+confirmation, healthy nonfatal rejection, and one same-epoch bank/joint action/
+simulator step. Record both new controller identities accurately in interactive
+V4 provenance; retain fixed-frame diagnostic payloads and readable historical
+recordings. Both recording recognition paths must be exercised.
+
+Retain the exact Scenario 1/2 witness outcomes through the replacement. A
+divergence blocks acceptance rather than authorizing fixture or expected-result
+changes. Measure cold/warm and representative 32-obstacle policy cost. An
+independent raw-diff/runtime audit must confirm Core, Random, Replay behavior,
+and historical asset bytes are unchanged before the frozen-candidate gate.
+
 ### Scenario-ablation activation gates
 
 [Amendment A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
@@ -305,7 +338,7 @@ method's implementation, official configuration, provenance, designated
 checkpoints, selected system, compatibility metadata, and membership/results
 history. Training consumers use immutable manifests with exact identities and
 weights and must reject mutable `latest_big_12` resolution. Scenario pressure
-controllers, generic Scripted TDM, Random, privileged policies, unqualified
+controllers, general Reactive TDM, Random, privileged policies, unqualified
 intermediate checkpoints, and PSRO internal members are never counted as Big 12
 entrants. Each admitted fixed system must pass maintainer reproduction before
 publication.
@@ -322,6 +355,7 @@ publication.
 | Command/service/server behavior | Protocol, input, service, server, and affected real-browser case |
 | Scenario trajectory | Scenario preflight/reference tests |
 | Scenario pressure controller | Deterministic repeated execution, same-epoch SharedObs and exact-mask checks, target/tie/fallback cases, treatment/ablation identity equality, and proof that generic TDM has no scenario-ID branch |
+| Specialist body avoidance | Observation-only segment clearance, self/prey exclusion, tangency and overlap escape, deterministic detours, stationary and moving-blocker trajectories, and proof that general Reactive TDM refinement is unchanged |
 | Matched scenario ablation | Frozen one-variable contrast, paired independent-run accounting, one primary endpoint plus no more than two supporting margins, replay evidence, and rejection from Elo/training/selection inputs |
 | Training/evaluation manifest boundary | Content-digest closure expansion, fail-closed overlap tests including embedded maps and result feedback, immutable population identities, and restart/reproduction proof |
 | Big 12 final-system selection | Three independent runs for each learned method, validation-only per-run and cross-run selection, frozen cadence/eligibility/ties, and hostile locked-result noninterference |
@@ -426,13 +460,12 @@ including reserved capacity for a static gate. Collection fails closed if a
 configured file or family disappears, moves, or would be assigned twice. The
 profile changes CI scheduling only; it never selects a smaller test inventory.
 
-The integrated profile was measured after the M7 merge. The scripted Team
-Deathmatch NoSharedObs file is split across its 73 intact function families;
-its fixed-key `class_rows` fixture is the sole repeatable module-fixture
-exception. That fixture is pure, deterministic, I/O-free, and returns fresh
-JAX-array values inside a read-only consumer contract. Every other module-
-scoped fixture retains ordinary affinity. Reprofiling must use per-work-unit
-and hosted job timings. A timing
+The historical post-M7 profile split the legacy Team Deathmatch NoSharedObs
+suite and explicitly allowed its pure fixed-key module fixture to repeat.
+A30 retires that algorithm suite and its stale scheduling/fixture exceptions;
+it does not retire generic policy-execution proof. Current assignments remain
+solely in the Python sharder, with exact-cover tests rejecting stale units.
+Reprofiling must use per-work-unit and hosted job timings. A timing
 change may adjust only measured affinity weights or intact family membership;
 it must not omit a test, split a parameterized family, exceed twelve Python
 workers, or displace a static gate.

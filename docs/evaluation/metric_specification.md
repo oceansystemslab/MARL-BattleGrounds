@@ -528,6 +528,14 @@ checkpoint-selection rule, and endpoint. One predeclared primary behavioral
 contrast answers the claim; no more than two secondary margins may support it.
 Differences outside the declared ablation invalidate causal interpretation.
 
+The pressure binding may use the general Reactive TDM policy or a specialist
+such as Scenario 3's body-aware Rogue. Its exact behavior identity remains an
+evaluation condition, not a metric or baseline-strength claim. DevClient
+availability and physical regression results alone do not qualify a scenario,
+define its endpoint, or establish its horizon. Scenario-derived rules remain
+within the protected evaluation content closure; their originating results
+cannot be represented as uncontaminated evaluation of those engineered rules.
+
 | Behavior | Why no episode-wide quality scalar | Required scenario evidence |
 | --- | --- | --- |
 | Peeling / backline protection | Value depends on threat, protected ally, and resulting trade | protected-ally survival or health margin; threat displacement/control; violations |

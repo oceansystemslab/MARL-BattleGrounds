@@ -22,13 +22,14 @@ visible paths, validate them through the existing simulator authorities, and
 delete unwanted saved assets after confirmation. Saved scenarios load
 directly; saved maps can be opened as clearly labelled deterministic
 default-5v5-TDM previews without modifying the map. Either team can remain
-manual, use the scripted Team Deathmatch controller, or use the built-in Random
-controller for same-start quality-control testing. Random samples only the
-current valid action support, is available under both SharedObs and
-NoSharedObs, and is a diagnostic controller rather than an official baseline.
-The generic Scripted TDM controller is likewise debugging and regression
-tooling: neither controller is a Big 12 baseline or a deterministic scenario
-pressure controller.
+manual, use **Reactive TDM**, or use **Random** for same-start testing. Reactive
+TDM is a small deterministic five-class SharedObs controller. Team B also offers
+the SharedObs-only **Scenario 3 Controller**: Rogues pursue the lowest-health
+enemy while avoiding intervening bodies; other classes stay idle. Random
+samples the exact current action support and works under either SharedObs or
+NoSharedObs. These are diagnostic/scenario-pressure tools, not official
+baselines or Big 12 entrants. The old Scripted TDM scorer and separate Reactive
+MRP controller have been removed, without changing historical replay support.
 Every applicable selector shows all latest saved revisions in numeric-aware
 asset-ID order, with native scrolling for longer lists. New Map and Scenario
 asset IDs use lowercase snake case, such as `tdm_map_10`, while their visible
@@ -112,10 +113,11 @@ instrument. Each official evaluation definition will compare a complete method
 with its matched ablation under the same scenario revision, embedded map and
 initial state, deterministic reactive pressure controller, canonical SharedObs
 contract, seeds and sides, training budget, checkpoint-selection rule, and
-primary endpoint. Scenario pressure controllers will follow versioned rules and
-authoritative action masks rather than replaying hard-coded action tapes. They
-remain separate from the saved, controller-independent DevClient scenario and
-from the generic Scripted TDM and Random diagnostic controls. Scenario results
+primary endpoint. Scenario pressure controllers follow versioned rules and
+authoritative action masks rather than replaying hard-coded action tapes. An
+evaluation definition may bind Reactive TDM or a specialist; it remains
+separate from the saved, controller-independent DevClient scenario. Diagnostic
+controller availability does not qualify an official evaluation. Scenario results
 provide evidence for a specific behavioral claim under frozen conditions; they
 do not contribute to Elo or establish general strength. See
 [specification amendment A26](docs/design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations).
@@ -161,8 +163,8 @@ challenger changes nothing. The Paper 1 snapshot remains frozen, and
 pool-centred Elo values from different weekly pools are not directly
 longitudinally comparable. Current and former entrants remain reproducibly
 available in a cumulative Baseline Library through immutable manifests—never a
-mutable `latest_big_12` alias. Scenario pressure controllers, generic Scripted
-TDM, Random, and internal training-population members are not Big 12 entrants.
+mutable `latest_big_12` alias. Reactive TDM, specialist scenario controllers,
+Random, and internal training-population members are not Big 12 entrants.
 See
 [specification amendment A27](docs/design/specification_amendments.md#a27-rolling-big-12-and-baseline-library-governance).
 

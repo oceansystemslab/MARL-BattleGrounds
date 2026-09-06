@@ -137,7 +137,7 @@ export function targetSelectionCommand(value) {
 
 /** @param {unknown} value */
 function isTeamController(value) {
-  return value === "manual" || value === "scripted_tdm" || value === "random_valid";
+  return value === "manual" || value === "reactive_tdm" || value === "random_valid";
 }
 
 /**
@@ -163,9 +163,12 @@ export function recordingReplacementCommand(frame, command) {
       typeof installed !== "object" ||
       Array.isArray(installed) ||
       !isTeamController(teamAController) ||
-      (!isTeamController(teamBController) && teamBController !== "scenario_1") ||
+      (!isTeamController(teamBController) && teamBController !== "scenario_3") ||
       (informationMode !== "shared_obs" && informationMode !== "no_shared_obs") ||
-      (teamBController === "scenario_1" && informationMode !== "shared_obs") ||
+      ((teamAController === "reactive_tdm" ||
+        teamBController === "reactive_tdm" ||
+        teamBController === "scenario_3") &&
+        informationMode !== "shared_obs") ||
       (installed.team_a_controller === teamAController &&
         installed.team_b_controller === teamBController &&
         installed.execution_information_mode === informationMode)
