@@ -145,12 +145,26 @@ does not predict the opponent's pending movement or guarantee a route. This
 specialist is never available on Team A and does not change Reactive TDM's
 ordinary obstacle-only movement refinement.
 
+In a body-blocking study, the defending Warrior can screen a vulnerable Hunter
+and provide a moving body around which the Hunter kites, while both maintain
+offensive pressure. The specialist can attack that Warrior while pursuing the
+Hunter; body avoidance does not imply that it ignores the blocker in combat.
+For a TDM finishing scenario, classify the terminal Team A reward, not a
+particular movement sequence or minimum attack count: +1 is success, 0 is a
+draw, and −1 is failure. A zero reward before termination/truncation is not a
+draw. Keep author-observed wins distinct from exact replay-verified witnesses.
+
 To play against either controller:
 
 1. Load a valid scenario or map preview, or keep the default diagnostic arena.
 2. Keep Team A Manual and select SharedObs.
 3. Select Reactive TDM or Scenario 3 Controller for Team B.
 4. Stage Team A's actions and Submit; Reset restores the exact starting state.
+
+After editing and saving a scenario, explicitly load its new saved revision to
+test that update. Reset restores the already loaded snapshot; it does not pick
+up later authoring changes. Saving revised Description/Notes alone does not
+change the physical scenario or the controller's behavior identity.
 
 Reactive choices have no task, horizon, roster, score, asset-ID, or respawn
 restriction on valid interactive setups. Changing either controller or the
