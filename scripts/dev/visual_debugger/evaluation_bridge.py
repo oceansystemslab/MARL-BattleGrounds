@@ -50,6 +50,7 @@ from marl_battlegrounds.evaluation.models import (
 )
 from marl_battlegrounds.policies.reactive_tdm import reactive_tdm_controller_descriptor
 from marl_battlegrounds.policies.scenario_3 import scenario_3_controller_descriptor
+from marl_battlegrounds.policies.scenario_5 import scenario_5_controller_descriptor
 from scripts.dev.visual_debugger.model import (
     SUPPORTED_TEAM_B_CONTROLLERS,
     SUPPORTED_TEAM_CONTROLLERS,
@@ -244,9 +245,12 @@ def _action_source_contract_payload(
     controllers = (team_a_controller, team_b_controller)
     if "reactive_tdm" in controllers and reactive_tdm_identity is None:
         raise ValueError("Reactive TDM action source requires its controller identity")
-    if "scenario_3" in controllers and scenario_controller_identity is None:
-        raise ValueError("Scenario 3 action source requires its controller identity")
-    return {
+    if (
+        team_b_controller in ("scenario_3", "scenario_5")
+        and scenario_controller_identity is None
+    ):
+        raise ValueError("Scenario action source requires its controller identity")
+    payload: dict[str, object] = {
         "schema_id": "marl_battlegrounds.visual_debugger.action_source_contract",
         "schema_version": 4,
         "action_source_kind": action_source_kind,
@@ -264,6 +268,10 @@ def _action_source_contract_payload(
             controller != "manual" for controller in controllers
         ),
     }
+    if team_b_controller == "scenario_5":
+        payload["schema_version"] = 5
+        payload["scenario_5_execution_included"] = True
+    return payload
 
 
 def _policy_assignments(
@@ -311,8 +319,12 @@ def _policy_assignments(
         elif policy_kind == "random_valid":
             algorithm_id = "canonical-random-valid"
             execution_mode = "stochastic"
-        elif policy_kind == "scenario_3":
-            algorithm_id = "scenario-3-pressure-controller"
+        elif policy_kind in ("scenario_3", "scenario_5"):
+            algorithm_id = (
+                "scenario-3-pressure-controller"
+                if policy_kind == "scenario_3"
+                else "scenario-5-pressure-controller"
+            )
             execution_mode = "deterministic"
             controller_identity = scenario_controller_identity
         else:
@@ -400,10 +412,10 @@ def build_debugger_evaluation_context_v1(
     if team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
         raise ValueError(
             "team_b_controller must be manual, reactive_tdm, random_valid, "
-            "or scenario_3"
+            "scenario_3, or scenario_5"
         )
     if any(
-        controller in ("reactive_tdm", "scenario_3")
+        controller in ("reactive_tdm", "scenario_3", "scenario_5")
         for controller in (team_a_controller, team_b_controller)
     ) and (
         execution_information_mode != "shared_obs" or scenario.mode != "interactive"
@@ -467,6 +479,8 @@ def build_debugger_evaluation_context_v1(
     scenario_controller_identity = (
         controller_identity(scenario_3_controller_descriptor())
         if team_b_controller == "scenario_3"
+        else controller_identity(scenario_5_controller_descriptor())
+        if team_b_controller == "scenario_5"
         else None
     )
     action_payload = _action_source_contract_payload(

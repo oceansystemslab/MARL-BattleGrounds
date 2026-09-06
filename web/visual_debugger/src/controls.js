@@ -163,11 +163,14 @@ export function recordingReplacementCommand(frame, command) {
       typeof installed !== "object" ||
       Array.isArray(installed) ||
       !isTeamController(teamAController) ||
-      (!isTeamController(teamBController) && teamBController !== "scenario_3") ||
+      (!isTeamController(teamBController) &&
+        teamBController !== "scenario_3" &&
+        teamBController !== "scenario_5") ||
       (informationMode !== "shared_obs" && informationMode !== "no_shared_obs") ||
       ((teamAController === "reactive_tdm" ||
         teamBController === "reactive_tdm" ||
-        teamBController === "scenario_3") &&
+        teamBController === "scenario_3" ||
+        teamBController === "scenario_5") &&
         informationMode !== "shared_obs") ||
       (installed.team_a_controller === teamAController &&
         installed.team_b_controller === teamBController &&

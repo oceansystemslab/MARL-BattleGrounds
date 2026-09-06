@@ -62,6 +62,9 @@ _HAS_PYPLOT = _HAS_MATPLOTLIB and find_spec("matplotlib.pyplot") is not None
         ("manual", "reactive_tdm"),
         ("manual", "scenario_3"),
         ("reactive_tdm", "scenario_3"),
+        ("manual", "scenario_5"),
+        ("reactive_tdm", "scenario_5"),
+        ("random_valid", "scenario_5"),
     ),
 )
 def test_recording_launch_metadata_accepts_installed_policy_execution(
@@ -80,7 +83,7 @@ def test_recording_launch_metadata_accepts_installed_policy_execution(
 
 
 @pytest.mark.parametrize(
-    "retired_or_forbidden", ("scripted_tdm", "scenario_1", "scenario_3")
+    "retired_or_forbidden", ("scripted_tdm", "scenario_1", "scenario_3", "scenario_5")
 )
 def test_recording_launch_rejects_invalid_team_a_controllers(
     retired_or_forbidden: str,

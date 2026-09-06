@@ -131,6 +131,11 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
             team_b_controller="random_valid",
             execution_information_mode="no_shared_obs",
         ),
+        SetCombatConfigurationCommandV1(
+            team_a_controller="manual",
+            team_b_controller="scenario_5",
+            execution_information_mode="shared_obs",
+        ),
         FinishAndReviewCommandV1(),
         ReviewReplayCommandV1(),
         RetrySaveCommandV1(),
@@ -143,6 +148,13 @@ def test_hud_movement_legality_requires_exact_canonical_action_rows() -> None:
             replacement=SetCombatConfigurationCommandV1(
                 team_a_controller="reactive_tdm",
                 team_b_controller="reactive_tdm",
+                execution_information_mode="shared_obs",
+            )
+        ),
+        ConfirmDiscardAndReplaceCommandV1(
+            replacement=SetCombatConfigurationCommandV1(
+                team_a_controller="random_valid",
+                team_b_controller="scenario_5",
                 execution_information_mode="shared_obs",
             )
         ),

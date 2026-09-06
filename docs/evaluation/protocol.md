@@ -281,7 +281,11 @@ actor material.
 [Amendment A30](../design/specification_amendments.md#a30-reactive-tdm-and-specialist-scenario-controllers)
 replaces the legacy Scripted TDM/MRP executables with general Reactive TDM and
 a separate Scenario 3 Rogue specialist. Reactive TDM supports either team;
-Scenario 3 supports Team B only. Both require SharedObs and remain diagnostic
+Scenario 3 supports Team B only.
+[Amendment A31](../design/specification_amendments.md#a31-scenario-5-priest-pursuit-controller)
+adds Team B's Scenario 5 Controller: Reactive TDM for other classes, with
+body-aware Priest pursuit and independent legal combat for Rogues. All require
+SharedObs and remain diagnostic
 or scenario-pressure tooling, not official baselines. Random remains diagnostic
 quality-control tooling. Under
 [A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations),

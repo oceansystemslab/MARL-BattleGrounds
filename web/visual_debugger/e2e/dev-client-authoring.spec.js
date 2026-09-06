@@ -378,6 +378,9 @@ test("authoring persists through restart and drives same-start Combat comparison
     await expect(page.locator("#devclient-scenario-controller-help")).toHaveText(
       "Rogues pursue the lowest-health enemy and avoid intervening bodies. Other classes stay idle. Team B and SharedObs only.",
     );
+    await expect(page.locator("#devclient-scenario-5-controller-help")).toHaveText(
+      "Reactive TDM for all classes; Rogues pursue observed enemy Priests using body avoidance. Team B and SharedObs only.",
+    );
     // Exercise browser recovery with a real unchanged-frame no_op envelope.
     // Backend service/HTTP tests independently exercise actual rejection.
     await page.route(
@@ -405,26 +408,69 @@ test("authoring persists through restart and drives same-start Combat comparison
       { times: 1 },
     );
     await applyLiveCommand(page, () =>
-      page.locator("#devclient-team-b-controller").selectOption("reactive_tdm"),
+      page.locator("#devclient-team-b-controller").selectOption("scenario_5"),
     );
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue("manual");
     await expect(page.locator("#notice")).toHaveText(
       "This interactive configuration is unavailable; choose another controller.",
     );
     await expect(page.locator("#step-value")).toHaveText("0");
-    await applyLiveCommand(page, () =>
-      page.locator("#devclient-team-b-controller").selectOption("reactive_tdm"),
-    );
-    await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "reactive_tdm",
-    );
+    for (const teamB of ["reactive_tdm", "scenario_5"]) {
+      await applyLiveCommand(page, () =>
+        page.locator("#devclient-team-b-controller").selectOption(teamB),
+      );
+      await expect(page.locator("#devclient-team-b-controller")).toHaveValue(teamB);
+      await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
+      await expect(page.locator("#step-value")).toHaveText("1");
+      await applyLiveCommand(page, () => page.locator("#reset-button").click());
+      await expect(page.locator("#step-value")).toHaveText("0");
+      await expect(page.locator("#devclient-team-b-controller")).toHaveValue(teamB);
+    }
+    const commandHeaders = {
+      "X-MARL-Debugger-Token":
+        new URLSearchParams(new URL(devClient.url).hash.slice(1)).get("token") ?? "",
+    };
+    const beforeForbidden = await (
+      await page.request.get(new URL("/api/frame", devClient.url).href, {
+        headers: commandHeaders,
+      })
+    ).json();
+    for (const [index, configuration] of [
+      {
+        team_a_controller: "scenario_5",
+        team_b_controller: "manual",
+        execution_information_mode: "shared_obs",
+      },
+      {
+        team_a_controller: "manual",
+        team_b_controller: "scenario_5",
+        execution_information_mode: "no_shared_obs",
+      },
+    ].entries()) {
+      const forbidden = await page.request.post(
+        new URL("/api/command", devClient.url).href,
+        {
+          headers: commandHeaders,
+          data: {
+            schema_version: 1,
+            client_id: "scenario-5-forbidden-client",
+            command_id: `scenario-5-forbidden-${index}`,
+            base_revision: beforeForbidden.revision,
+            command: { command_type: "set_combat_configuration", ...configuration },
+          },
+        },
+      );
+      expect(forbidden.status()).toBe(422);
+      const unchanged = await (
+        await page.request.get(new URL("/api/frame", devClient.url).href, {
+          headers: commandHeaders,
+        })
+      ).json();
+      expect(unchanged).toEqual(beforeForbidden);
+    }
     await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
     await expect(page.locator("#step-value")).toHaveText("1");
     await applyLiveCommand(page, () => page.locator("#reset-button").click());
-    await expect(page.locator("#step-value")).toHaveText("0");
-    await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "reactive_tdm",
-    );
     await applyLiveCommand(page, () =>
       page.locator("#devclient-team-b-controller").selectOption("manual"),
     );
@@ -1131,12 +1177,15 @@ test("authoring persists through restart and drives same-start Combat comparison
       });
     }
 
-    await expect(
-      page.locator("#devclient-scenario-controller-option"),
-    ).toHaveJSProperty("disabled", true);
-    await expect(
-      page.locator('#devclient-team-a-controller option[value="scenario_3"]'),
-    ).toHaveCount(0);
+    for (const [specialist, optionId] of [
+      ["scenario_3", "devclient-scenario-controller-option"],
+      ["scenario_5", "devclient-scenario-5-controller-option"],
+    ]) {
+      await expect(page.locator(`#${optionId}`)).toHaveJSProperty("disabled", true);
+      await expect(
+        page.locator(`#devclient-team-a-controller option[value="${specialist}"]`),
+      ).toHaveCount(0);
+    }
     for (const team of ["a", "b"]) {
       await expect(
         page.locator(`#devclient-team-${team}-reactive-option`),
@@ -1152,6 +1201,9 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     await expect(
       page.locator("#devclient-scenario-controller-option"),
+    ).toHaveJSProperty("disabled", false);
+    await expect(
+      page.locator("#devclient-scenario-5-controller-option"),
     ).toHaveJSProperty("disabled", false);
     const fixture = JSON.parse(
       await readFile(
@@ -1196,51 +1248,61 @@ test("authoring persists through restart and drives same-start Combat comparison
     await expect(page.locator("#devclient-reactive-controller-help")).toHaveText(
       "Deterministic five-class reactive controller. SharedObs only.",
     );
-    for (const teamA of ["manual", "reactive_tdm", "random_valid"]) {
-      await applyLiveCommand(page, () =>
-        page.locator("#devclient-team-a-controller").selectOption(teamA),
-      );
-      await expect(page.locator("#step-value")).toHaveText("295");
-      const priestB = page.locator('#roster .roster-row[data-team="team-b"]').filter({
-        has: page.locator(".roster-class", { hasText: "Priest" }),
-      });
-      await applyLiveCommand(page, () =>
-        priestB.locator(".roster-primary-action").click(),
-      );
-      await expect(page.locator("#command-deck")).toHaveAttribute(
-        "data-policy-controller-read-only",
-        "true",
-      );
-      await expect(page.locator("#command-controlled-actor")).toContainText(
-        "Reactive TDM",
-      );
-      await expect(page.locator("#command-target-select")).toBeDisabled();
-      if (teamA === "manual") {
-        const hunterA = page.locator('#roster .roster-row[data-team="team-a"]').filter({
-          has: page.locator(".roster-class", { hasText: "Hunter" }),
+    for (const [teamB, controllerLabel] of [
+      ["reactive_tdm", "Reactive TDM"],
+      ["scenario_5", "Scenario 5 Controller"],
+    ]) {
+      if ((await page.locator("#devclient-team-b-controller").inputValue()) !== teamB) {
+        await applyLiveCommand(page, () =>
+          page.locator("#devclient-team-b-controller").selectOption(teamB),
+        );
+      }
+      for (const teamA of ["manual", "reactive_tdm", "random_valid"]) {
+        await applyLiveCommand(page, () =>
+          page.locator("#devclient-team-a-controller").selectOption(teamA),
+        );
+        await expect(page.locator("#step-value")).toHaveText("295");
+        const priestB = page.locator('#roster .roster-row[data-team="team-b"]').filter({
+          has: page.locator(".roster-class", { hasText: "Priest" }),
         });
         await applyLiveCommand(page, () =>
-          hunterA.locator(".roster-primary-action").click(),
+          priestB.locator(".roster-primary-action").click(),
         );
         await expect(page.locator("#command-deck")).toHaveAttribute(
           "data-policy-controller-read-only",
-          "false",
+          "true",
         );
-        await applyLiveCommand(page, () =>
-          page.getByRole("button", { name: "Move east", exact: true }).click(),
+        await expect(page.locator("#command-controlled-actor")).toContainText(
+          controllerLabel,
         );
-        await expect(
-          page.locator('#command-deck button[data-move-action="3"]'),
-        ).toHaveAttribute("aria-pressed", "true");
+        await expect(page.locator("#command-target-select")).toBeDisabled();
+        if (teamA === "manual") {
+          const hunterA = page
+            .locator('#roster .roster-row[data-team="team-a"]')
+            .filter({
+              has: page.locator(".roster-class", { hasText: "Hunter" }),
+            });
+          await applyLiveCommand(page, () =>
+            hunterA.locator(".roster-primary-action").click(),
+          );
+          await expect(page.locator("#command-deck")).toHaveAttribute(
+            "data-policy-controller-read-only",
+            "false",
+          );
+          await applyLiveCommand(page, () =>
+            page.getByRole("button", { name: "Move east", exact: true }).click(),
+          );
+          await expect(
+            page.locator('#command-deck button[data-move-action="3"]'),
+          ).toHaveAttribute("aria-pressed", "true");
+        }
+        await expect(page.locator("#submit-turn-button")).toBeEnabled();
+        await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
+        await expect(page.locator("#step-value")).toHaveText("296");
+        await applyLiveCommand(page, () => page.locator("#reset-button").click());
+        await expect(page.locator("#step-value")).toHaveText("295");
+        await expect(page.locator("#devclient-team-b-controller")).toHaveValue(teamB);
       }
-      await expect(page.locator("#submit-turn-button")).toBeEnabled();
-      await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
-      await expect(page.locator("#step-value")).toHaveText("296");
-      await applyLiveCommand(page, () => page.locator("#reset-button").click());
-      await expect(page.locator("#step-value")).toHaveText("295");
-      await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-        "reactive_tdm",
-      );
     }
 
     const specialistFixture = JSON.parse(
@@ -1331,7 +1393,7 @@ test("authoring persists through restart and drives same-start Combat comparison
       "scenario_3",
     );
     await applyLiveCommand(page, () =>
-      page.locator("#devclient-team-b-controller").selectOption("reactive_tdm"),
+      page.locator("#devclient-team-b-controller").selectOption("scenario_5"),
     );
 
     await selectPersistedAsset(page, "#devclient-scenario-select", scenarioId);
@@ -1341,7 +1403,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     expect(longScenarioLoad.ok).toBe(true);
     await expect(page.locator("#step-value")).toHaveText("7");
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "reactive_tdm",
+      "scenario_5",
     );
     await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
     await expect(page.locator("#step-value")).toHaveText("8");
@@ -1359,7 +1421,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     expect(longCurrentLoad.ok).toBe(true);
     await expect(page.locator("#step-value")).toHaveText("7");
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "reactive_tdm",
+      "scenario_5",
     );
 
     await page.getByRole("button", { name: "Maps", exact: true }).click();
@@ -1376,7 +1438,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     });
     await expect(page.locator("#step-value")).toHaveText("0");
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "reactive_tdm",
+      "scenario_5",
     );
     await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
     await expect(page.locator("#step-value")).toHaveText("1");
@@ -1391,7 +1453,7 @@ test("authoring persists through restart and drives same-start Combat comparison
       "random_valid",
     );
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "reactive_tdm",
+      "scenario_5",
     );
     await expect(page.locator("#step-value")).toHaveText("295");
 

@@ -95,7 +95,10 @@ test("only Team B exposes the SharedObs scenario controller", async () => {
         ["reactive_tdm", "Reactive TDM"],
         ["random_valid", "Random"],
         ...(id === "devclient-team-b-controller"
-          ? [["scenario_3", "Scenario 3 Controller"]]
+          ? [
+              ["scenario_3", "Scenario 3 Controller"],
+              ["scenario_5", "Scenario 5 Controller"],
+            ]
           : []),
       ],
     );
@@ -103,6 +106,10 @@ test("only Team B exposes the SharedObs scenario controller", async () => {
   assert.equal(
     elementBody(markup, "devclient-scenario-controller-help", "small").trim(),
     "Rogues pursue the lowest-health enemy and avoid intervening bodies. Other classes stay idle. Team B and SharedObs only.",
+  );
+  assert.equal(
+    elementBody(markup, "devclient-scenario-5-controller-help", "small").trim(),
+    "Reactive TDM for all classes; Rogues pursue observed enemy Priests using body avoidance. Team B and SharedObs only.",
   );
   assert.equal(
     elementBody(markup, "devclient-reactive-controller-help", "small").trim(),

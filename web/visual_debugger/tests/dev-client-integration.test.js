@@ -378,7 +378,7 @@ test("Combat configuration remains authoritative until one requested successor i
   const teamAController = { value: "manual", disabled: false };
   const teamBController = { value: "manual", disabled: false };
   const informationMode = { value: "shared_obs", disabled: false };
-  const scenarioControllerOption = { disabled: true };
+  const scenarioControllerOptions = [{ disabled: true }, { disabled: true }];
   const reactiveControllerOptions = [{ disabled: true }, { disabled: true }];
   const noSharedOption = { disabled: false };
   /** @type {Record<string, string | undefined>} */
@@ -390,7 +390,7 @@ test("Combat configuration remains authoritative until one requested successor i
     teamAController,
     teamBController,
     informationMode,
-    scenarioControllerOption,
+    scenarioControllerOptions,
     reactiveControllerOptions,
     noSharedOption,
     root,
@@ -434,15 +434,20 @@ test("Combat configuration remains authoritative until one requested successor i
   assert.equal(root.dataset.teamAController, "random_valid");
   assert.equal(root.dataset.teamBController, "random_valid");
   assert.equal(root.dataset.executionInformationMode, "no_shared_obs");
-  assert.equal(scenarioControllerOption.disabled, true);
+  assert.deepEqual(
+    scenarioControllerOptions.map((option) => option.disabled),
+    [true, true],
+  );
   assert.deepEqual(
     reactiveControllerOptions.map((option) => option.disabled),
     [true, true],
   );
-  teamBController.value = "scenario_3";
-  assert.equal(controller.request(), false);
-  assert.equal(teamBController.value, "random_valid");
-  assert.equal(emitted.length, 1);
+  for (const specialist of ["scenario_3", "scenario_5"]) {
+    teamBController.value = specialist;
+    assert.equal(controller.request(), false);
+    assert.equal(teamBController.value, "random_valid");
+    assert.equal(emitted.length, 1);
+  }
   for (const selector of [teamAController, teamBController]) {
     selector.value = "reactive_tdm";
     assert.equal(controller.request(), false);
@@ -452,7 +457,10 @@ test("Combat configuration remains authoritative until one requested successor i
   informationMode.value = "shared_obs";
   assert.equal(controller.request(), true);
   controller.install(emitted[1]);
-  assert.equal(scenarioControllerOption.disabled, false);
+  assert.deepEqual(
+    scenarioControllerOptions.map((option) => option.disabled),
+    [false, false],
+  );
   assert.deepEqual(
     reactiveControllerOptions.map((option) => option.disabled),
     [false, false],
@@ -479,6 +487,29 @@ test("Combat configuration remains authoritative until one requested successor i
   assert.equal(controller.request(), false);
   assert.equal(teamAController.value, "random_valid");
   assert.equal(emitted.length, 3);
+  teamBController.value = "scenario_5";
+  assert.equal(controller.request(), true);
+  assert.equal(teamBController.value, "scenario_3");
+  assert.equal(root.dataset.teamBController, "scenario_3");
+  assert.equal(controller.install(emitted[3]), true);
+  assert.equal(teamBController.value, "scenario_5");
+  assert.equal(root.dataset.teamBController, "scenario_5");
+  assert.equal(noSharedOption.disabled, true);
+  assert.equal(controller.request(), false);
+  for (const invalid of [
+    { team_a_controller: "scenario_5" },
+    { execution_information_mode: "no_shared_obs" },
+  ]) {
+    assert.equal(controller.install({ ...emitted[3], ...invalid }), false);
+  }
+  teamAController.value = "scenario_5";
+  assert.equal(controller.request(), false);
+  assert.equal(teamAController.value, "random_valid");
+  informationMode.value = "no_shared_obs";
+  assert.equal(controller.request(), false);
+  assert.equal(informationMode.value, "shared_obs");
+  assert.equal(teamBController.value, "scenario_5");
+  assert.equal(emitted.length, 4);
   for (const team of ["team_a_controller", "team_b_controller"]) {
     const next = {
       team_a_controller: "manual",

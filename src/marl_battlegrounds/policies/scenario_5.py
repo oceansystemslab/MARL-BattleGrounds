@@ -1,4 +1,4 @@
-"""Scenario 3: deterministic Rogue pursuit around currently observed bodies."""
+"""Reactive TDM with a body-avoiding Rogue that pursues observed Priests."""
 
 import jax.numpy as jnp
 from jax import Array
@@ -9,7 +9,7 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
     AGENT_FEATURE_CLASS_ID,
     MAX_AGENTS_PER_TEAM,
-    MOVE_STAY,
+    PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
     ActionMask,
     Observation,
@@ -22,25 +22,30 @@ from marl_battlegrounds.policies.reactive_common import (
     living_candidates,
     lowest_health_row,
 )
+from marl_battlegrounds.policies.reactive_tdm import (
+    reactive_tdm_controller_descriptor,
+    reactive_tdm_policy,
+)
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsSensorSourceBankV1,
     compose_shared_obs_unit_features,
 )
 
 
-def scenario_3_controller_descriptor() -> dict[str, object]:
-    """Return fresh rule data for launch-bound specialist provenance."""
+def scenario_5_controller_descriptor() -> dict[str, object]:
+    """Return fresh rule data, including the inherited general controller rules."""
     return {
-        "policy_id": "scenario-3-pressure-controller",
+        "policy_id": "scenario-5-pressure-controller",
         "version": 1,
         "information": "same-epoch SharedObs and recipient exact masks",
         "execution": "deterministic; actor key ignored",
-        "classes": "Rogue only; other classes Stay/no-combat even after respawn",
+        "inherited_controller": reactive_tdm_controller_descriptor(),
+        "classes": "non-Rogues delegate unchanged to Reactive TDM",
         "candidates": "observed active living positive-health enemies",
-        "pursuit": "lowest current HP; recomputed every decision; no target lock",
+        "pursuit": "lowest-current-HP enemy Priest; recompute every decision",
         "combat": (
             "within Basic radius: lowest-HP legal Ultimate enemy else lowest-HP "
-            "legal Basic enemy else no-combat; independent of pursuit"
+            "legal Basic enemy else no-combat; independent of Priest pursuit"
         ),
         "ties": "health then global slot; endpoint distance then movement action ID",
         "movement": {
@@ -49,18 +54,20 @@ def scenario_3_controller_descriptor() -> dict[str, object]:
             "blockers": "observed living allies/enemies excluding self and prey",
             "clearance": "projected displacement segment; radius sum; tangency allowed",
             "overlap_escape": "never deepen initial overlap and finish farther away",
-            "selection": "closest safe moving endpoint to prey; detours may retreat",
-            "assumption": (
-                "other observed bodies stationary; not future action prediction"
-            ),
+            "selection": "closest safe moving endpoint to Priest; detours may retreat",
+            "assumption": "other observed bodies stationary; no action prediction",
             "search": "eight directions only; no lookahead or route memory",
         },
-        "fallbacks": "no prey or useful safe move: Stay; dead/inactive: no-op",
+        "fallbacks": (
+            "no Priest: unchanged Reactive TDM Rogue movement toward nearest enemy "
+            "or map center, without body screening; no useful safe move: Stay; "
+            "dead/inactive: no-op"
+        ),
         "action_priority": "Ultimate replaces Basic; exact masks override preferences",
     }
 
 
-def scenario_3_policy(
+def scenario_5_policy(
     recipient_observation: Observation,
     recipient_action_mask: ActionMask,
     actor_key: Array,
@@ -68,8 +75,15 @@ def scenario_3_policy(
     recipient_source_availability: Array,
     recipient_global_slot: Array,
 ) -> ActorAction:
-    """Pursue vulnerable prey while independently choosing legal Rogue combat."""
-    del actor_key
+    """Inherit TDM, replacing only Rogue pursuit and radius-bounded combat."""
+    baseline = reactive_tdm_policy(
+        recipient_observation,
+        recipient_action_mask,
+        actor_key,
+        source_bank,
+        recipient_source_availability,
+        recipient_global_slot,
+    )
     allies, enemies, ally_visible, enemy_visible = compose_shared_obs_unit_features(
         recipient_observation,
         source_bank,
@@ -78,11 +92,12 @@ def scenario_3_policy(
     )
     ally_living = living_candidates(allies, ally_visible)
     enemy_living = living_candidates(enemies, enemy_visible)
-    prey_row = lowest_health_row(enemies, enemy_living)
+    priests = enemy_living & (enemies[:, AGENT_FEATURE_CLASS_ID] == PRIEST_CLASS_ID)
+    prey_row = lowest_health_row(enemies, priests)
     body_mask = jnp.concatenate((ally_living, enemy_living))
     body_mask = body_mask.at[recipient_global_slot % MAX_AGENTS_PER_TEAM].set(False)
     body_mask = body_mask.at[MAX_AGENTS_PER_TEAM + prey_row].set(False)
-    move = _body_aware_move(
+    pursuit_move = _body_aware_move(
         recipient_observation,
         recipient_action_mask,
         centers(enemies[prey_row]),
@@ -100,15 +115,19 @@ def scenario_3_policy(
     use_ultimate = jnp.any(ultimate)
     combat_row = lowest_health_row(enemies, jnp.where(use_ultimate, ultimate, basic))
     target = jnp.where(use_ultimate | jnp.any(basic), combat_row + 6, 0)
-    participating = (
-        (own[AGENT_FEATURE_ACTIVE] > 0)
+    participating_rogue = (
+        (own[AGENT_FEATURE_CLASS_ID] == ROGUE_CLASS_ID)
+        & (own[AGENT_FEATURE_ACTIVE] > 0)
         & (own[AGENT_FEATURE_ALIVE] > 0)
-        & (own[AGENT_FEATURE_CLASS_ID] == ROGUE_CLASS_ID)
     )
     return ActorAction(
-        jnp.where(participating & jnp.any(enemy_living), move, MOVE_STAY).astype(
+        jnp.where(
+            participating_rogue & jnp.any(priests), pursuit_move, baseline.move
+        ).astype(jnp.int32),
+        jnp.where(participating_rogue, target, baseline.select_target).astype(
             jnp.int32
         ),
-        jnp.where(participating, target, 0).astype(jnp.int32),
-        (participating & use_ultimate).astype(jnp.int32),
+        jnp.where(participating_rogue, use_ultimate, baseline.use_ultimate).astype(
+            jnp.int32
+        ),
     )

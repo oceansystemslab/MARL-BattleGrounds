@@ -43,8 +43,10 @@ from marl_battlegrounds.policies.actor import (
     ActorAction,
     build_joint_action_from_actor_actions,
 )
-from marl_battlegrounds.policies.scenario_3 import (
+from marl_battlegrounds.policies.reactive_common import (
     _body_clear_moves,  # pyright: ignore[reportPrivateUsage]
+)
+from marl_battlegrounds.policies.scenario_3 import (
     scenario_3_controller_descriptor,
     scenario_3_policy,
 )

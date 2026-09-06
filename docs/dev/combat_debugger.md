@@ -145,6 +145,18 @@ does not predict the opponent's pending movement or guarantee a route. This
 specialist is never available on Team A and does not change Reactive TDM's
 ordinary obstacle-only movement refinement.
 
+**Scenario 5 Controller** is also Team B/SharedObs-only. Mage, Warrior, Hunter
+and Priest use Reactive TDM unchanged. Rogue instead pursues the lowest-health
+observed living enemy Priest (ties: lowest global slot), using Scenario 3's
+body avoidance. The pursued Priest is exempt from avoidance; intervening bodies
+are not. If no living Priest is observed, Rogue uses ordinary Reactive TDM
+movement toward the nearest observed enemy or, without enemies, map center.
+Combat is independent: Ultimate the lowest-health legal enemy within Basic
+radius, otherwise Basic the lowest-health legal enemy there, otherwise no-combat.
+Priest determines the destination, not necessarily the attack target. No target
+memory, hidden Priest position, opponent action prediction or guaranteed route
+is available. Dead/inactive agents no-op and exact masks override preferences.
+
 In a body-blocking study, the defending Warrior can screen a vulnerable Hunter
 and provide a moving body around which the Hunter kites, while both maintain
 offensive pressure. The specialist can attack that Warrior while pursuing the
@@ -154,11 +166,11 @@ particular movement sequence or minimum attack count: +1 is success, 0 is a
 draw, and −1 is failure. A zero reward before termination/truncation is not a
 draw. Keep author-observed wins distinct from exact replay-verified witnesses.
 
-To play against either controller:
+To play against a reactive controller:
 
 1. Load a valid scenario or map preview, or keep the default diagnostic arena.
 2. Keep Team A Manual and select SharedObs.
-3. Select Reactive TDM or Scenario 3 Controller for Team B.
+3. Select Reactive TDM, Scenario 3 Controller, or Scenario 5 Controller for Team B.
 4. Stage Team A's actions and Submit; Reset restores the exact starting state.
 
 After editing and saving a scenario, explicitly load its new saved revision to
@@ -176,8 +188,9 @@ reconnect. Genuine internal failures retain their fail-closed protections.
 
 The old Scripted TDM scorer and separate Reactive MRP/`scenario_1` executable
 interface are removed. New identities are
-`reactive-team-deathmatch-controller@1` and `scenario-3-pressure-controller@1`.
-New interactive action-source payloads use V4 and record installed controllers
+`reactive-team-deathmatch-controller@1`, `scenario-3-pressure-controller@1`, and
+`scenario-5-pressure-controller@1`. Scenario 5 combinations use private
+action-source V5; other interactive combinations retain V4. Both record installed controllers
 separately from scenario/map identity. Historical recordings retain their old
 identities and remain readable; fixed-frame scripted diagnostics are unchanged.
 Availability on a setup does not qualify it scientifically or promise the
@@ -189,7 +202,7 @@ the versioned controller through a separate evaluation definition and apply the
 same controller to every treatment and matched-ablation arm. DevClient play
 remains diagnostic, not official evidence. See
 [A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
-and [A30](../design/specification_amendments.md#a30-reactive-tdm-and-specialist-scenario-controllers).
+and [A31](../design/specification_amendments.md#a31-scenario-5-priest-pursuit-controller).
 Scenario-derived controller rules are not silently eligible for official
 training, and originating-scenario performance is not uncontaminated evaluation.
 

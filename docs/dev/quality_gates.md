@@ -231,13 +231,21 @@ the stationary-blocker detour; moving-blocker tests verify reactivity rather
 than promise an unbeatable pursuer. Neither proof silently qualifies an
 official scenario or changes a saved physical setup.
 
+[Amendment A31](../design/specification_amendments.md#a31-scenario-5-priest-pursuit-controller)
+adds Scenario 5 proof: non-Rogue action parity with Reactive TDM; observed
+Priest selection by HP/slot; ordinary Reactive TDM movement when Priest is
+absent; independent legal combat within Basic radius; and hidden/unavailable
+information noninterference. Relocated body helpers must remain algorithmically
+identical, with Scenario 3's existing trajectory/clearance tests retained.
+
 Cover all nine general controller pairs plus the three Team A choices against
-Scenario 3 under SharedObs. Under NoSharedObs, cover the four Manual/Random
-pairs and reject reactive choices. Scenario 3 on Team A is also rejected.
+each of Scenario 3 and Scenario 5 under SharedObs. Under NoSharedObs, cover the
+four Manual/Random pairs and reject reactive choices. Both specialists on Team A
+are also rejected.
 Service/HTTP/browser tests must preserve exact reset, authoritative selector
 confirmation, healthy nonfatal rejection, and one same-epoch bank/joint action/
-simulator step. Record both new controller identities accurately in interactive
-V4 provenance; retain fixed-frame diagnostic payloads and readable historical
+simulator step. Record installed identities accurately: V5 only for Scenario 5
+combinations, unchanged V4 for the others. Retain fixed-frame diagnostic payloads and readable historical
 recordings. Both recording recognition paths must be exercised.
 
 Retain the exact Scenario 1/2 witness outcomes through the replacement. A

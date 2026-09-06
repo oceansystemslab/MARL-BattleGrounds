@@ -29,6 +29,7 @@ from scripts.dev.visual_debugger.evaluation_bridge import (
 from scripts.dev.visual_debugger.model import (
     DebuggerScenario,
     DebuggerSession,
+    TeamBController,
     TeamController,
 )
 from scripts.dev.visual_debugger.protocol import CombatConfigurationV1
@@ -41,7 +42,7 @@ from scripts.dev.visual_debugger.service import DebuggerService
 from tests.scenario_controller_fixtures import load_scenario_1
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
-from marl_battlegrounds.core.types import EnvConfig, EnvState
+from marl_battlegrounds.core.types import TEAM_A_ID, TEAM_B_ID, EnvConfig, EnvState
 from marl_battlegrounds.evaluation.models import AssignedPolicySlotV1
 from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 from marl_battlegrounds.evaluation.replay_io import (
@@ -91,6 +92,7 @@ def _session(
     *,
     scenario: DebuggerScenario | None = None,
     team_a: TeamController = "manual",
+    team_b: TeamBController = "scenario_3",
     recording: bool = False,
 ) -> DebuggerSession:
     launch = debugger_test_launch_specification(7)
@@ -108,7 +110,7 @@ def _session(
         show_ranges=True,
         verbose_logging=False,
         team_a_controller=team_a,
-        team_b_controller="scenario_3",
+        team_b_controller=team_b,
         execution_information_mode="shared_obs",
     )
 
@@ -120,12 +122,18 @@ def _tree_equal(left: object, right: object) -> bool:
     )
 
 
+@pytest.fixture(params=("scenario_3", "scenario_5"))
+def scenario_controller(request: pytest.FixtureRequest) -> TeamBController:
+    return cast(TeamBController, request.param)
+
+
 @pytest.mark.parametrize("team_a", ("manual", "reactive_tdm", "random_valid"))
 def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
     monkeypatch: pytest.MonkeyPatch,
     team_a: TeamController,
+    scenario_controller: TeamBController,
 ) -> None:
-    session = _session(team_a=team_a)
+    session = _session(team_a=team_a, team_b=scenario_controller)
     calls = {"bank": 0, "assembler": 0, "step": 0}
     real_bank = control.build_shared_obs_sensor_source_bank
     real_assembler = control.build_joint_action_from_actor_actions
@@ -148,6 +156,16 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
 
     def executor(*args: object, **kwargs: object) -> object:
         input_epochs.append((args[0], args[1], args[3]))
+        if kwargs["team_identity"] == TEAM_B_ID:
+            assert kwargs["policy"] is getattr(control, f"{scenario_controller}_policy")
+        else:
+            assert kwargs["team_identity"] == TEAM_A_ID
+            expected_policy = (
+                control.reactive_tdm_policy
+                if team_a == "reactive_tdm"
+                else control._random_shared_obs_policy  # pyright: ignore[reportPrivateUsage]
+            )
+            assert kwargs["policy"] is expected_policy
         return real_executor(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(control, "build_shared_obs_sensor_source_bank", bank)
@@ -163,10 +181,15 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
         assert source_bank is input_epochs[0][2]
     assert int(advanced.state.step_count) == int(session.state.step_count) + 1
     assert advanced.incoming_evaluation_view is not None
+    acceptance = (
+        advanced.incoming_evaluation_view.transition.facts.action_acceptance_facts
+    )
+    assert acceptance.submitted_joint_action == acceptance.accepted_joint_action
     context = advanced.evaluation_context
     aggregation = {row.name: row.value for row in context.aggregation_keys}
     assert aggregation["action_source"] == ("mixed" if team_a == "manual" else "policy")
-    assert aggregation["pressure_protocol"] == "scenario-3-pressure-controller@1"
+    algorithm = f"{scenario_controller.replace('_', '-')}-pressure-controller"
+    assert aggregation["pressure_protocol"] == f"{algorithm}@1"
     if team_a == "reactive_tdm":
         assert (
             aggregation["reactive_tdm_controller"]
@@ -186,8 +209,8 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
             )
     for row in context.policy_assignments[5:]:
         assert isinstance(row, AssignedPolicySlotV1)
-        assert row.policy_kind == "scenario_3"
-        assert row.algorithm_id == "scenario-3-pressure-controller"
+        assert row.policy_kind == scenario_controller
+        assert row.algorithm_id == algorithm
         assert row.execution_mode == "deterministic"
         assert row.checkpoint_digest is None
         assert row.training_run_id == "not_applicable"
@@ -197,8 +220,11 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
 @pytest.mark.parametrize("remaining", (1, 5, 6, 300))
 def test_scenario_controller_accepts_any_valid_horizon(
     remaining: int,
+    scenario_controller: TeamBController,
 ) -> None:
-    session = _session(scenario=_scenario(remaining=remaining))
+    session = _session(
+        scenario=_scenario(remaining=remaining), team_b=scenario_controller
+    )
     assert session.evaluation_context.expected_horizon == remaining
     assert session.scenario.name == "copied_and_renamed_scenario"
 
@@ -255,15 +281,16 @@ def test_scenario_controller_survives_loading_long_or_unsupported_rosters(
     remaining: int,
     countdown: int,
     alive: bool,
+    scenario_controller: TeamBController,
 ) -> None:
-    session = _session()
+    session = _session(team_b=scenario_controller)
     loaded = control.switch_scenario(
         session,
         _scenario(remaining=remaining, countdown=countdown, unsupported_alive=alive),
     )
     assert loaded.run_generation == session.run_generation + 1
     assert loaded.seed == session.seed
-    assert loaded.team_b_controller == "scenario_3"
+    assert loaded.team_b_controller == scenario_controller
     assert loaded.team_a_controller == session.team_a_controller
     assert loaded.evaluation_context.expected_horizon == remaining
     assert loaded.evaluation_context.identity.task.identifier == "team_deathmatch"
@@ -272,53 +299,61 @@ def test_scenario_controller_survives_loading_long_or_unsupported_rosters(
     assert _tree_equal(restarted.key, loaded.key)
 
 
-def test_scenario_controller_protocol_rejects_team_a_and_nosharedobs() -> None:
+def test_scenario_controller_protocol_rejects_team_a_and_nosharedobs(
+    scenario_controller: TeamBController,
+) -> None:
     configuration = {
         "team_a_controller": "manual",
-        "team_b_controller": "scenario_3",
+        "team_b_controller": scenario_controller,
         "execution_information_mode": "shared_obs",
     }
     assert (
         CombatConfigurationV1.model_validate(configuration).team_b_controller
-        == "scenario_3"
+        == scenario_controller
     )
     with pytest.raises(ValidationError, match="team_a_controller"):
         CombatConfigurationV1.model_validate(
-            {**configuration, "team_a_controller": "scenario_3"}
+            {**configuration, "team_a_controller": scenario_controller}
         )
     with pytest.raises(ValidationError, match="require SharedObs"):
         CombatConfigurationV1.model_validate(
             {**configuration, "execution_information_mode": "no_shared_obs"}
         )
-    session = _session()
+    session = _session(team_b=scenario_controller)
     with pytest.raises(ValueError, match="require SharedObs"):
         control.set_combat_configuration(
             session,
             team_a_controller="manual",
-            team_b_controller="scenario_3",
+            team_b_controller=scenario_controller,
             execution_information_mode="no_shared_obs",
         )
     with pytest.raises(ValueError, match="team_a_controller"):
         control.set_combat_configuration(
             session,
-            team_a_controller=cast(TeamController, "scenario_3"),
-            team_b_controller="scenario_3",
+            team_a_controller=cast(TeamController, scenario_controller),
+            team_b_controller=scenario_controller,
             execution_information_mode="shared_obs",
         )
     assert session.run_generation == 0
 
 
-def test_scenario_controller_cannot_replace_registered_scripted_frames() -> None:
+def test_scenario_controller_cannot_replace_registered_scripted_frames(
+    scenario_controller: TeamBController,
+) -> None:
     with pytest.raises(ValueError, match="interactive"):
-        _session(scenario=replace(_scenario(), mode="scripted"))
+        _session(
+            scenario=replace(_scenario(), mode="scripted"),
+            team_b=scenario_controller,
+        )
 
 
 @pytest.mark.parametrize("asset_kind", ("map", "scenario"))
 def test_controller_selected_in_default_arena_survives_current_and_saved_loads(
     tmp_path: Path,
     asset_kind: str,
+    scenario_controller: TeamBController,
 ) -> None:
-    initial = _session(scenario=get_scenario("arena_5v5"))
+    initial = _session(scenario=get_scenario("arena_5v5"), team_b=scenario_controller)
     assert initial.evaluation_context.identity.task.identifier == (
         "visual-debugger-analysis-task"
     )
@@ -363,7 +398,7 @@ def test_controller_selected_in_default_arena_survives_current_and_saved_loads(
         )
         assert response.ok
         loaded = service.session
-        assert loaded.team_b_controller == "scenario_3"
+        assert loaded.team_b_controller == scenario_controller
         assert loaded.team_a_controller == "manual"
         assert loaded.seed == initial.seed
         assert loaded.evaluation_context.expected_horizon == 300
@@ -373,9 +408,11 @@ def test_controller_selected_in_default_arena_survives_current_and_saved_loads(
         assert not service.faulted
 
 
-def test_scenario_controller_can_be_selected_after_terminal_and_reset() -> None:
+def test_scenario_controller_can_be_selected_after_terminal_and_reset(
+    scenario_controller: TeamBController,
+) -> None:
     scenario = _scenario(remaining=1)
-    initial = _session(scenario=scenario)
+    initial = _session(scenario=scenario, team_b=scenario_controller)
     manual = control.set_combat_configuration(
         initial,
         team_a_controller="manual",
@@ -387,7 +424,7 @@ def test_scenario_controller_can_be_selected_after_terminal_and_reset() -> None:
     installed = control.set_combat_configuration(
         terminal,
         team_a_controller="manual",
-        team_b_controller="scenario_3",
+        team_b_controller=scenario_controller,
         execution_information_mode="shared_obs",
     )
     assert installed.run_generation == terminal.run_generation + 1
@@ -398,7 +435,7 @@ def test_scenario_controller_can_be_selected_after_terminal_and_reset() -> None:
         control.set_combat_configuration(
             installed,
             team_a_controller="manual",
-            team_b_controller="scenario_3",
+            team_b_controller=scenario_controller,
             execution_information_mode="shared_obs",
         )
         is installed
@@ -407,14 +444,15 @@ def test_scenario_controller_can_be_selected_after_terminal_and_reset() -> None:
 
 def test_scenario_controller_failure_is_atomic_and_policy_labelled(
     monkeypatch: pytest.MonkeyPatch,
+    scenario_controller: TeamBController,
 ) -> None:
-    session = _session()
+    session = _session(team_b=scenario_controller)
 
     def failed_policy(*args: object) -> object:
         del args
         raise RuntimeError("injected scenario controller failure")
 
-    monkeypatch.setattr(control, "scenario_3_policy", failed_policy)
+    monkeypatch.setattr(control, f"{scenario_controller}_policy", failed_policy)
     with pytest.raises(control.DebuggerTransitionFailureV1) as raised:
         control.submit_interactive(session)
     assert raised.value.stable_code == "policy_action_build_failed"
@@ -423,13 +461,15 @@ def test_scenario_controller_failure_is_atomic_and_policy_labelled(
     assert session.incoming_evaluation_view is None
 
 
-def test_scenario_controller_reset_noop_and_readonly_actions() -> None:
-    session = _session()
+def test_scenario_controller_reset_noop_and_readonly_actions(
+    scenario_controller: TeamBController,
+) -> None:
+    session = _session(team_b=scenario_controller)
     assert (
         control.set_combat_configuration(
             session,
             team_a_controller="manual",
-            team_b_controller="scenario_3",
+            team_b_controller=scenario_controller,
             execution_information_mode="shared_obs",
         )
         is session
@@ -439,7 +479,7 @@ def test_scenario_controller_reset_noop_and_readonly_actions() -> None:
     first = control.submit_interactive(session)
     restarted = control.reset_session(first)
     assert restarted.run_generation == 1
-    assert restarted.team_b_controller == "scenario_3"
+    assert restarted.team_b_controller == scenario_controller
     assert restarted.team_a_controller == "manual"
     assert _tree_equal(restarted.state, session.state)
     assert _tree_equal(restarted.key, session.key)
@@ -453,8 +493,10 @@ def test_scenario_controller_reset_noop_and_readonly_actions() -> None:
     )
 
 
-def test_pressure_identity_is_independent_of_scenario_name_and_generation() -> None:
-    original = _session()
+def test_pressure_identity_is_independent_of_scenario_name_and_generation(
+    scenario_controller: TeamBController,
+) -> None:
+    original = _session(team_b=scenario_controller)
     renamed = control.switch_scenario(
         original, replace(original.scenario, name="another_copy", title="Renamed")
     )
@@ -473,17 +515,19 @@ def test_pressure_identity_is_independent_of_scenario_name_and_generation() -> N
 
 def test_pressure_identity_binds_descriptor_version_and_launch_revision(
     monkeypatch: pytest.MonkeyPatch,
+    scenario_controller: TeamBController,
 ) -> None:
-    session = _session()
+    session = _session(team_b=scenario_controller)
     original_row = cast(
         AssignedPolicySlotV1,
         session.evaluation_context.policy_assignments[5],
     )
-    descriptor = evaluation_bridge.scenario_3_controller_descriptor()
+    descriptor_name = f"{scenario_controller}_controller_descriptor"
+    descriptor = getattr(evaluation_bridge, descriptor_name)()
     descriptor["version"] = 2
     monkeypatch.setattr(
         evaluation_bridge,
-        "scenario_3_controller_descriptor",
+        descriptor_name,
         lambda: descriptor,
     )
     changed = control.reset_session(session)
@@ -494,7 +538,7 @@ def test_pressure_identity_binds_descriptor_version_and_launch_revision(
     assert changed_row.policy_content_digest != original_row.policy_content_digest
     assert {row.name: row.value for row in changed.evaluation_context.aggregation_keys}[
         "pressure_protocol"
-    ] == "scenario-3-pressure-controller@2"
+    ] == f"{scenario_controller.replace('_', '-')}-pressure-controller@2"
     descriptor["version"] = 1
     launch = debugger_test_launch_specification(7)
     changed_code = launch.code_revision.model_copy(update={"commit_sha": "b" * 40})
@@ -510,7 +554,7 @@ def test_pressure_identity_binds_descriptor_version_and_launch_revision(
         show_ranges=True,
         verbose_logging=False,
         team_a_controller="manual",
-        team_b_controller="scenario_3",
+        team_b_controller=scenario_controller,
         execution_information_mode="shared_obs",
     )
     changed_row = cast(
@@ -520,19 +564,12 @@ def test_pressure_identity_binds_descriptor_version_and_launch_revision(
     assert changed_row.policy_content_digest != original_row.policy_content_digest
 
 
-@pytest.mark.parametrize("team_b", ("reactive_tdm", "scenario_3"))
+@pytest.mark.parametrize("team_b", ("reactive_tdm", "scenario_3", "scenario_5"))
 def test_reactive_controller_recording_reopens_without_replay_changes(
     tmp_path: Path,
-    team_b: str,
+    team_b: TeamBController,
 ) -> None:
-    session = _session(recording=True)
-    if team_b == "reactive_tdm":
-        session = control.set_combat_configuration(
-            session,
-            team_a_controller="manual",
-            team_b_controller="reactive_tdm",
-            execution_information_mode="shared_obs",
-        )
+    session = _session(recording=True, team_b=team_b)
     runtime = RuntimeProvenanceV1(
         python_version="3.13.0",
         package_version="0.1.0",

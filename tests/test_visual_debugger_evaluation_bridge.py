@@ -18,6 +18,7 @@ from scripts.dev.visual_debugger.evaluation_bridge import (
 )
 from scripts.dev.visual_debugger.model import (
     DebuggerScenarioProvenance,
+    TeamBController,
     TeamController,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
@@ -30,6 +31,7 @@ from marl_battlegrounds.evaluation.models import (
     REQUIRED_SCHEMA_BINDINGS_V1,
     AssignedPolicySlotV1,
     CodeRevisionV1,
+    ContentAddressedIdentityV1,
     EvaluationEpisodeContextV1,
     ExecutionInformationMode,
     NotApplicablePolicySlotV1,
@@ -66,7 +68,7 @@ def _context(
     action_source_kind: DebuggerActionSourceKindV1 = "manual",
     capture_profile: DebuggerCaptureProfileV1 = "debug",
     team_a_controller: TeamController = "manual",
-    team_b_controller: TeamController = "manual",
+    team_b_controller: TeamBController = "manual",
     execution_information_mode: ExecutionInformationMode | None = None,
     scenario_name: str = "arena_5v5",
 ) -> EvaluationEpisodeContextV1:
@@ -84,7 +86,10 @@ def _context(
             execution_information_mode
             if execution_information_mode is not None
             else "shared_obs"
-            if "reactive_tdm" in (team_a_controller, team_b_controller)
+            if any(
+                controller in ("reactive_tdm", "scenario_3", "scenario_5")
+                for controller in (team_a_controller, team_b_controller)
+            )
             else "no_shared_obs"
         ),
     )
@@ -273,11 +278,24 @@ def test_mixed_action_source_assigns_manual_team_a_and_reactive_tdm_team_b() -> 
             "policy",
             ("reactive_tdm",) * 5 + ("random_valid",) * 5,
         ),
+        ("manual", "scenario_5", "mixed", ("manual",) * 5 + ("scenario_5",) * 5),
+        (
+            "reactive_tdm",
+            "scenario_5",
+            "policy",
+            ("reactive_tdm",) * 5 + ("scenario_5",) * 5,
+        ),
+        (
+            "random_valid",
+            "scenario_5",
+            "policy",
+            ("random_valid",) * 5 + ("scenario_5",) * 5,
+        ),
     ),
 )
 def test_interactive_controller_pairs_have_truthful_per_slot_provenance(
     team_a_controller: TeamController,
-    team_b_controller: TeamController,
+    team_b_controller: TeamBController,
     action_source_kind: DebuggerActionSourceKindV1,
     expected_policy_kinds: tuple[str, ...],
 ) -> None:
@@ -302,6 +320,8 @@ def test_interactive_controller_pairs_have_truthful_per_slot_provenance(
         if policy_kind == "reactive_tdm"
         else "canonical-random-valid"
         if policy_kind == "random_valid"
+        else "scenario-5-pressure-controller"
+        if policy_kind == "scenario_5"
         else "not_applicable"
         for policy_kind in expected_policy_kinds
     )
@@ -322,13 +342,22 @@ def test_interactive_v4_and_fixed_frame_v1_recording_contracts_are_truthful() ->
         scenario_contract_digest="a" * 64,
     )
 
-    assert payload["schema_version"] == 4
-    assert payload["team_a_controller"] == "random_valid"
-    assert payload["team_b_controller"] == "manual"
-    assert payload["manual_submission_included"] is True
-    assert payload["reactive_tdm_execution_included"] is False
-    assert payload["random_policy_execution_included"] is True
-    assert payload["policy_execution_included"] is True
+    assert payload == {
+        "schema_id": "marl_battlegrounds.visual_debugger.action_source_contract",
+        "schema_version": 4,
+        "action_source_kind": "mixed",
+        "team_a_controller": "random_valid",
+        "team_b_controller": "manual",
+        "execution_information_mode": "shared_obs",
+        "manual_submission_included": True,
+        "reactive_tdm_execution_included": False,
+        "random_policy_execution_included": True,
+        "scenario_3_execution_included": False,
+        "reactive_tdm_controller": None,
+        "scenario_controller": None,
+        "scenario_contract_digest_sha256": "a" * 64,
+        "policy_execution_included": True,
+    }
 
     random_context = _context(
         action_source_kind="mixed",
@@ -359,6 +388,66 @@ def test_interactive_v4_and_fixed_frame_v1_recording_contracts_are_truthful() ->
         "scenario_contract_digest_sha256": "a" * 64,
         "policy_execution_included": False,
     }
+
+
+@pytest.mark.parametrize("team_a", ("manual", "reactive_tdm", "random_valid"))
+def test_only_scenario_5_adds_v5_execution_and_keeps_distinct_controller_identity(
+    team_a: TeamController,
+) -> None:
+    scenario_identity = ContentAddressedIdentityV1(
+        identifier="scenario-5-pressure-controller",
+        version=1,
+        canonical_digest="5" * 64,
+    )
+    reactive_identity = (
+        ContentAddressedIdentityV1(
+            identifier="reactive-team-deathmatch-controller",
+            version=1,
+            canonical_digest="4" * 64,
+        )
+        if team_a == "reactive_tdm"
+        else None
+    )
+    build_payload = evaluation_bridge._action_source_contract_payload  # pyright: ignore[reportPrivateUsage]
+    arguments = {
+        "action_source_kind": "mixed" if team_a == "manual" else "policy",
+        "scenario_mode": "interactive",
+        "team_a_controller": team_a,
+        "execution_information_mode": "shared_obs",
+        "scenario_contract_digest": "a" * 64,
+        "reactive_tdm_identity": reactive_identity,
+    }
+    payload = build_payload(
+        **arguments,  # type: ignore[arg-type]
+        team_b_controller="scenario_5",
+        scenario_controller_identity=scenario_identity,
+    )
+    assert payload["schema_version"] == 5
+    assert payload["scenario_5_execution_included"] is True
+    assert payload["scenario_3_execution_included"] is False
+    assert payload["reactive_tdm_execution_included"] == (team_a == "reactive_tdm")
+    assert payload["scenario_controller"] == scenario_identity
+    assert payload["reactive_tdm_controller"] == reactive_identity
+    assert payload["policy_execution_included"] is True
+    with pytest.raises(ValueError, match="requires its controller identity"):
+        build_payload(**arguments, team_b_controller="scenario_5")  # type: ignore[arg-type]
+    old_identity = scenario_identity.model_copy(
+        update={"identifier": "scenario-3-pressure-controller"}
+    )
+    old_payload = build_payload(
+        **arguments,  # type: ignore[arg-type]
+        team_b_controller="scenario_3",
+        scenario_controller_identity=old_identity,
+    )
+    assert old_payload["schema_version"] == 4
+    assert "scenario_5_execution_included" not in old_payload
+    assert old_payload["scenario_3_execution_included"] is True
+    context = _context(
+        team_a_controller=team_a,
+        team_b_controller="scenario_5",
+        action_source_kind="mixed" if team_a == "manual" else "policy",
+    )
+    assert debugger_recording._context_policy_execution_included(context)  # pyright: ignore[reportPrivateUsage]
 
 
 def test_reactive_team_identity_changes_the_action_contract_identity() -> None:

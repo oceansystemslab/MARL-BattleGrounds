@@ -1,4 +1,4 @@
-"""Small deterministic target and static-world movement primitives."""
+"""Small deterministic targeting and general/specialist movement primitives."""
 
 import jax.numpy as jnp
 from jax import Array
@@ -108,3 +108,82 @@ def refine_movement(
     )
     best = 1 + jnp.argmax(jnp.where(admissible, alignment, -jnp.inf))
     return jnp.where(jnp.any(admissible), best, MOVE_STAY).astype(jnp.int32)
+
+
+def _body_clear_moves(
+    origin: Array,
+    endpoints: Array,
+    radius: Array,
+    bodies: Array,
+    body_mask: Array,
+) -> Array:
+    """Screen eight displacement segments against fixed observed body discs.
+
+    This is a conservative local steering preference, not simulator collision
+    resolution. Existing overlaps allow only outward motion; the target and
+    self have already been removed from ``body_mask`` by the caller.
+    """
+    travel = endpoints - origin
+    start = origin - centers(bodies)
+    travel_squared = jnp.sum(jnp.square(travel), axis=-1)
+    initial_alignment = jnp.sum(travel[:, None, :] * start[None, :, :], axis=-1)
+    fraction = jnp.clip(
+        -initial_alignment / jnp.where(travel_squared > 0, travel_squared, 1)[:, None],
+        0,
+        1,
+    )
+    closest = start[None, :, :] + fraction[:, :, None] * travel[:, None, :]
+    closest_squared = jnp.sum(jnp.square(closest), axis=-1)
+    start_squared = jnp.sum(jnp.square(start), axis=-1)
+    end_squared = jnp.sum(
+        jnp.square(endpoints[:, None, :] - centers(bodies)[None, :, :]), axis=-1
+    )
+    required_squared = jnp.square(radius + bodies[:, AGENT_FEATURE_RADIUS])
+    escaping = (initial_alignment >= 0) & (end_squared > start_squared)
+    clear = jnp.where(
+        start_squared < required_squared,
+        escaping,
+        closest_squared >= required_squared,
+    )
+    return jnp.all(~body_mask[None, :] | clear, axis=1)
+
+
+def _body_aware_move(  # pyright: ignore[reportUnusedFunction]
+    observation: Observation,
+    action_mask: ActionMask,
+    prey_center: Array,
+    bodies: Array,
+    body_mask: Array,
+) -> Array:
+    """Choose the closest safe moving endpoint, even if a detour retreats."""
+    origin = centers(observation.self_features)
+    speed = observation.self_features[AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED]
+    radius = observation.self_features[AGENT_FEATURE_RADIUS]
+    directions = UNIT_DIRECTION_VECTOR_BY_MOVEMENT_ACTION_ARRAY[1:]
+    positions = jnp.broadcast_to(origin, (MAX_AGENT_SLOTS, 2))
+    deltas = jnp.zeros_like(positions).at[:8].set(directions * speed)
+    active = jnp.arange(MAX_AGENT_SLOTS) < 8
+    no_bodies = jnp.zeros(MAX_AGENT_SLOTS, dtype=jnp.bool_)
+    endpoints = project_movement_with_geometry(
+        positions,
+        jnp.full(MAX_AGENT_SLOTS, radius, dtype=jnp.float32),
+        deltas,
+        active,
+        active,
+        observation.context_features[CONTEXT_FEATURE_MAP_WIDTH],
+        observation.context_features[CONTEXT_FEATURE_MAP_HEIGHT],
+        observation.map_obstacle_features,
+        no_bodies,
+        no_bodies,
+        agent_agent_overlap_projection_passes=0,
+    )[:8]
+    displacement = jnp.sqrt(jnp.sum(jnp.square(endpoints - origin), axis=-1))
+    admissible = (
+        action_mask.move_mask[1:]
+        & (speed > 0)
+        & (displacement >= MINIMUM_MOVEMENT_FRACTION * speed)
+        & _body_clear_moves(origin, endpoints, radius, bodies, body_mask)
+    )
+    distance_squared = jnp.sum(jnp.square(endpoints - prey_center), axis=-1)
+    move = 1 + jnp.argmin(jnp.where(admissible, distance_squared, jnp.inf))
+    return jnp.where(jnp.any(admissible), move, MOVE_STAY).astype(jnp.int32)

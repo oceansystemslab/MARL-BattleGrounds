@@ -2119,3 +2119,59 @@ scenario or impose a five-transition horizon. Scenario-derived rules must not
 silently enter official training, and their originating scenario results must
 not be presented as uncontaminated evaluation. Core and public evaluation-role
 contracts are unchanged.
+
+## A31. Scenario 5 Priest-pursuit controller
+
+**Classification:** bounded diagnostic/scenario-pressure controller addition.
+**Extends:** A30's explicit Team B specialist choices and private live action-source
+contract. Existing Reactive TDM/Scenario 3 behavior, historical amendments,
+A25's information contract and A26/A27's evaluation-integrity boundaries remain.
+
+**Scenario 5 Controller** (`scenario_5`) is available only on Team B under
+SharedObs in every valid interactive setup, without asset, task, horizon,
+roster or respawn restrictions. Mage, Warrior, Hunter and Priest delegate to
+the unchanged Reactive TDM policy. Active living Rogues pursue the observed
+living positive-health enemy Priest with lowest current HP, breaking ties by
+global slot. The target is recomputed every epoch, without memory or hidden
+positions. If no Priest is observed, movement falls back to ordinary Reactive
+TDM: nearest observed enemy, otherwise map center, with its ordinary static-world
+refinement rather than specialist body avoidance.
+
+While pursuing Priest, Rogue reuses Scenario 3's exact body-aware movement:
+eight legal static-world projected candidates, inclusive 10% useful stride,
+full displacement-segment screening against stationary observed living bodies,
+summed radii, tangency allowed, and no added clearance margin. Self and the
+selected Priest are exempt. Initial overlaps permit non-deepening outward
+escape. Choose the safe moving endpoint closest to Priest with action-order
+ties, allowing temporary retreat; otherwise Stay. This is neither a planner nor
+a guarantee against moving blockers. General Reactive TDM steering is unchanged.
+
+Combat selects independently within Basic interaction radius: lowest-current-HP
+legal Ultimate enemy, otherwise lowest-current-HP legal Basic enemy, otherwise
+no-combat. Health ties use global slot. Rogue can attack a blocker while moving
+toward Priest. Ultimate replaces Basic; exact recipient masks and lifecycle
+no-ops override preferences. The actor key is ignored. All decisions use current
+authorized SharedObs, at most one bank, one assembler and one unchanged step;
+no raw state, pending actions, history or successor data is consumed.
+
+The algorithm identity is `scenario-5-pressure-controller@1`, deterministic,
+with a fresh descriptor covering inherited rules, pursuit, combat and fallbacks,
+bound to the launch-captured source revision. All configured-active Team B rows
+identify their installed policy as `scenario_5`, including non-Rogues. Manual
+versus Scenario 5 reports `mixed`; fully policy-controlled pairs report `policy`.
+Private action-source V5 is used only for Scenario 5 combinations and includes
+truthful execution identification; existing V4 combinations and fixed-frame V1
+payloads are preserved. Replay schemas/readers and historical artifacts need
+no changes. No checkpoint or training claim is made.
+
+Selection remains authoritative-frame-confirmed; incompatible requests fail
+without damaging session health or pending state. Loading never installs a
+controller automatically. Reset/load preserve the chosen controller pair and
+exact snapshot/seed. Team B actions remain read-only while inspectable.
+
+Saved scenarios remain controller-independent. Development notes and diagnostic
+traces do not establish an official suite release or a winning Team A solution.
+Official use still requires a separately frozen evaluation definition and the
+same pressure controller across matched treatments; scenario-derived behavior
+must not silently influence official training. No Core, public evaluation-role,
+policy-registry, Replay behavior or physical asset change is authorized here.
