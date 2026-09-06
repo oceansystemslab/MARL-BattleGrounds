@@ -45,7 +45,7 @@ type PendingSubmissionScope = Literal[
     "scripted_playback",
 ]
 type TeamController = Literal["manual", "reactive_tdm", "random_valid"]
-type TeamBController = TeamController | Literal["scenario_3"]
+type TeamBController = TeamController | Literal["scenario_5"]
 type ExecutionInformationMode = Literal["shared_obs", "no_shared_obs"]
 type CommandResult = Literal[
     "applied",
@@ -211,7 +211,7 @@ class CombatConfigurationV1(_ProtocolModel):
     def _validate_reactive_controller_mode(self) -> Self:
         if (
             any(
-                controller in ("reactive_tdm", "scenario_3")
+                controller in ("reactive_tdm", "scenario_5")
                 for controller in (self.team_a_controller, self.team_b_controller)
             )
             and self.execution_information_mode != "shared_obs"

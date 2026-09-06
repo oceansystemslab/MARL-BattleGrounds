@@ -51,7 +51,7 @@ from marl_battlegrounds.policies.no_shared_obs import (
     execute_no_shared_obs_team_policy,
 )
 from marl_battlegrounds.policies.random_valid import random_policy
-from marl_battlegrounds.policies.reactive_tdm import reactive_tdm_policy
+from marl_battlegrounds.policies.reactive_tdm_alpha import reactive_tdm_alpha_policy
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsSensorSourceBankV1,
     build_default_shared_obs_information_availability,
@@ -360,7 +360,7 @@ def test_shared_adapter_ignores_cross_team_inactive_and_unavailable_mutations() 
         config.agent_profile.team_ids,
     )[0]
     key = jax.random.key(29)
-    baseline = reactive_tdm_policy(
+    baseline = reactive_tdm_alpha_policy(
         recipient,
         recipient_mask,
         key,
@@ -387,7 +387,7 @@ def test_shared_adapter_ignores_cross_team_inactive_and_unavailable_mutations() 
             99_999.0,
         )
     )
-    actual = reactive_tdm_policy(
+    actual = reactive_tdm_alpha_policy(
         recipient,
         recipient_mask,
         key,
@@ -463,7 +463,7 @@ def test_source_bank_and_shared_scalar_adapter_match_eager_jit_and_vmap() -> Non
         config.agent_profile.team_ids,
     )[0]
     key = jax.random.key(37)
-    eager_decision = reactive_tdm_policy(
+    eager_decision = reactive_tdm_alpha_policy(
         recipient,
         recipient_mask,
         key,
@@ -473,7 +473,7 @@ def test_source_bank_and_shared_scalar_adapter_match_eager_jit_and_vmap() -> Non
     )
     compiled_decision = cast(
         object,
-        jax.jit(reactive_tdm_policy)(
+        jax.jit(reactive_tdm_alpha_policy)(
             recipient,
             recipient_mask,
             key,
@@ -483,7 +483,7 @@ def test_source_bank_and_shared_scalar_adapter_match_eager_jit_and_vmap() -> Non
         ),
     )
     _assert_tree_exact(compiled_decision, eager_decision)
-    closed_jaxpr = jax.make_jaxpr(reactive_tdm_policy)(
+    closed_jaxpr = jax.make_jaxpr(reactive_tdm_alpha_policy)(
         recipient,
         recipient_mask,
         key,
@@ -520,7 +520,7 @@ def test_shared_adapter_cannot_bypass_the_recipient_exact_action_mask() -> None:
             .set(True)
         ),
     )
-    action = reactive_tdm_policy(
+    action = reactive_tdm_alpha_policy(
         recipient,
         stay_only,
         jax.random.key(23),
@@ -603,7 +603,7 @@ def test_teammate_only_same_epoch_sighting_can_change_movement_intent() -> None:
     unavailable = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
     admitted = unavailable.at[1].set(True)
 
-    without_source = reactive_tdm_policy(
+    without_source = reactive_tdm_alpha_policy(
         recipient,
         recipient_mask,
         jax.random.key(0),
@@ -611,7 +611,7 @@ def test_teammate_only_same_epoch_sighting_can_change_movement_intent() -> None:
         unavailable,
         jnp.asarray(0, dtype=jnp.int32),
     )
-    with_source = reactive_tdm_policy(
+    with_source = reactive_tdm_alpha_policy(
         recipient,
         recipient_mask,
         jax.random.key(0),

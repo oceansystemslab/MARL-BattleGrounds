@@ -2212,25 +2212,29 @@ test("live combat configuration preserves Random and restricts scenarios to Shar
     () => normalizeLiveDebuggerFrameV2(malformed),
     /combat configuration is invalid/u,
   );
-  const scenario = researcherFrame();
-  scenario.combat_configuration.team_b_controller = "scenario_3";
-  scenario.combat_configuration.execution_information_mode = "shared_obs";
-  assert.equal(
-    normalizeLiveDebuggerFrameV2(scenario).combat_configuration.team_b_controller,
-    "scenario_3",
-  );
-  for (const invalid of [
-    { team_a_controller: "scenario_3" },
-    { execution_information_mode: "no_shared_obs" },
-    { team_b_controller: "scripted_tdm" },
-    { team_b_controller: "scenario_1" },
-  ]) {
-    const changed = structuredClone(scenario);
-    Object.assign(changed.combat_configuration, invalid);
-    assert.throws(
-      () => normalizeLiveDebuggerFrameV2(changed),
-      /combat configuration is invalid/u,
+  {
+    const specialist = "scenario_5";
+    const scenario = researcherFrame();
+    scenario.combat_configuration.team_b_controller = specialist;
+    scenario.combat_configuration.execution_information_mode = "shared_obs";
+    assert.equal(
+      normalizeLiveDebuggerFrameV2(scenario).combat_configuration.team_b_controller,
+      specialist,
     );
+    for (const invalid of [
+      { team_a_controller: specialist },
+      { execution_information_mode: "no_shared_obs" },
+      { team_b_controller: "scripted_tdm" },
+      { team_b_controller: "scenario_1" },
+      { team_b_controller: "scenario_3" },
+    ]) {
+      const changed = structuredClone(scenario);
+      Object.assign(changed.combat_configuration, invalid);
+      assert.throws(
+        () => normalizeLiveDebuggerFrameV2(changed),
+        /combat configuration is invalid/u,
+      );
+    }
   }
   for (const team of ["team_a_controller", "team_b_controller"]) {
     const reactive = researcherFrame();

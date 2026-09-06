@@ -42,8 +42,8 @@ from marl_battlegrounds.policies.no_shared_obs import (
     execute_no_shared_obs_team_policy,
 )
 from marl_battlegrounds.policies.random_valid import random_policy
-from marl_battlegrounds.policies.reactive_tdm import reactive_tdm_policy
-from marl_battlegrounds.policies.scenario_3 import scenario_3_policy
+from marl_battlegrounds.policies.reactive_tdm_alpha import reactive_tdm_alpha_policy
+from marl_battlegrounds.policies.reactive_tdm_beta import reactive_tdm_beta_policy
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsSensorSourceBankV1,
     build_default_shared_obs_information_availability,
@@ -407,11 +407,11 @@ def _resolve_team_controller_action(
         if source_bank is None or information_availability is None:
             raise ValueError("SharedObs policy execution requires its source inputs")
         if controller == "reactive_tdm":
-            policy = reactive_tdm_policy
+            policy = reactive_tdm_alpha_policy
         elif controller == "random_valid":
             policy = _random_shared_obs_policy
-        elif controller == "scenario_3" and team_identity == TEAM_B_ID:
-            policy = scenario_3_policy
+        elif controller == "scenario_5" and team_identity == TEAM_B_ID:
+            policy = reactive_tdm_beta_policy
         else:
             raise ValueError("unsupported team controller")
         return cast(
@@ -599,7 +599,7 @@ def _validate_reactive_controller_selection(
 ) -> None:
     """Check execution boundaries, independently of scenario content."""
     if not any(
-        controller in ("reactive_tdm", "scenario_3")
+        controller in ("reactive_tdm", "scenario_5")
         for controller in (team_a_controller, team_b_controller)
     ):
         return
@@ -1251,7 +1251,7 @@ def set_combat_configuration(
     if team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
         raise CombatConfigurationRejectedError(
             "team_b_controller must be manual, reactive_tdm, random_valid, "
-            "or scenario_3"
+            "or scenario_5"
         )
     if execution_information_mode not in ("shared_obs", "no_shared_obs"):
         raise CombatConfigurationRejectedError(

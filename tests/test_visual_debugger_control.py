@@ -1026,7 +1026,7 @@ def test_two_reactive_teams_share_one_same_epoch_source_bank(
         assert observation is session.observation
         assert action_mask is session.action_mask
         assert bank is source_bank
-        assert policy is control.reactive_tdm_policy
+        assert policy is control.reactive_tdm_alpha_policy
         policy_calls.append((keys, bank, availability, policy, team_identity))
         value = int(cast(int, team_identity))
         return ActorAction(

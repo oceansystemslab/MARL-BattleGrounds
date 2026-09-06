@@ -1434,9 +1434,12 @@ test("main labels every policy controller explicitly and fences its action editi
   assert.match(source, /controller === "random_valid"[\s\S]*return "Random"/u);
   assert.match(
     source,
-    /controller === "scenario_3"[\s\S]*return "Scenario 3 Controller"/u,
+    /controller === "reactive_tdm"[\s\S]*return "Reactive TDM ALPHA"/u,
   );
-  assert.match(styles, /data-team-b-controller="scenario_3"/u);
+  assert.doesNotMatch(source, /scenario_3/u);
+  assert.doesNotMatch(styles, /data-team-b-controller="scenario_3"/u);
+  assert.match(source, /controller === "scenario_5"[\s\S]*return "Reactive TDM BETA"/u);
+  assert.match(styles, /data-team-b-controller="scenario_5"/u);
   assert.match(
     source,
     /controller === "manual"[\s\S]*Object\.freeze\(\{ team, controller \}\)/u,

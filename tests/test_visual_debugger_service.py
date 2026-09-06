@@ -24,7 +24,11 @@ from scripts.dev.visual_debugger.evaluation_bridge import (
 )
 from scripts.dev.visual_debugger.frame import build_debugger_frame
 from scripts.dev.visual_debugger.input import InputDispatchResult
-from scripts.dev.visual_debugger.model import DebuggerSession, TeamController
+from scripts.dev.visual_debugger.model import (
+    DebuggerSession,
+    TeamBController,
+    TeamController,
+)
 from scripts.dev.visual_debugger.presentation_protocol import (
     LiveNoSharedObsAuthorizedPresentationFrameV1,
     LiveOracleAuthorizedPresentationFrameV1,
@@ -1097,10 +1101,12 @@ def test_frame_build_failure_keeps_epoch_coherent_and_consumes_command_id(
 
 
 @pytest.mark.parametrize("recording", (False, True))
+@pytest.mark.parametrize("team_b", ("scenario_5",))
 def test_expected_configuration_rejection_preserves_session_and_recording(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     recording: bool,
+    team_b: TeamBController,
 ) -> None:
     if recording:
         service, recorder = _recording_service(tmp_path)
@@ -1131,7 +1137,7 @@ def test_expected_configuration_rejection_preserves_session_and_recording(
     original_observer_count = service.evaluation_validated_transition_count
     configuration = SetCombatConfigurationCommandV1(
         team_a_controller="manual",
-        team_b_controller="scenario_3",
+        team_b_controller=team_b,
         execution_information_mode="shared_obs",
     )
     request = _request(
@@ -1185,7 +1191,7 @@ def test_expected_configuration_rejection_preserves_session_and_recording(
     )
     assert isinstance(installed.payload, CommandResponseV2)
     assert installed.payload.result == "applied"
-    assert service.session.team_b_controller == "scenario_3"
+    assert service.session.team_b_controller == team_b
     assert service.session.run_generation == original.run_generation + 1
     assert service.session.evaluation_context.identity.task.identifier == (
         "visual-debugger-analysis-task"
@@ -1216,12 +1222,14 @@ def test_expected_configuration_rejection_preserves_session_and_recording(
     assert isinstance(restarted.payload, CommandResponseV2)
     assert restarted.payload.result == "applied"
     assert int(service.session.state.step_count) == 0
-    assert service.session.team_b_controller == "scenario_3"
+    assert service.session.team_b_controller == team_b
     assert not service.faulted
 
 
+@pytest.mark.parametrize("team_b", ("scenario_5",))
 def test_unexpected_configuration_value_error_still_faults_service(
     monkeypatch: pytest.MonkeyPatch,
+    team_b: TeamBController,
 ) -> None:
     service = _service()
     original = service.session
@@ -1232,7 +1240,7 @@ def test_unexpected_configuration_value_error_still_faults_service(
         base_revision=0,
         command=SetCombatConfigurationCommandV1(
             team_a_controller="manual",
-            team_b_controller="scenario_3",
+            team_b_controller=team_b,
             execution_information_mode="shared_obs",
         ),
     )

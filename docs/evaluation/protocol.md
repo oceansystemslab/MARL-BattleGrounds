@@ -279,11 +279,28 @@ contract. Critic inputs never become actor availability or evaluation-frame
 actor material.
 
 [Amendment A30](../design/specification_amendments.md#a30-reactive-tdm-and-specialist-scenario-controllers)
-replaces the legacy Scripted TDM/MRP executables with general Reactive TDM and
-a separate Scenario 3 Rogue specialist. Reactive TDM supports either team;
-Scenario 3 supports Team B only. Both require SharedObs and remain diagnostic
-or scenario-pressure tooling, not official baselines. Random remains diagnostic
-quality-control tooling. Under
+retired the legacy Scripted TDM/MRP executables. Reactive TDM supports either team.
+[Amendment A31](../design/specification_amendments.md#a31-scenario-5-priest-pursuit-controller)
+introduced Team B's Scenario 5 Controller. Its
+[A32 behavior v2](../design/specification_amendments.md#a32-scenario-5-shoulder-bypass-and-fallback-prey)
+keeps Reactive TDM for other classes; Rogues pursue observed living Priests
+first, otherwise Hunters, with glancing shoulder contact and independent legal
+combat. Under
+[A33](../design/specification_amendments.md#a33-one-controller-for-scenarios-3-and-5),
+both scenarios adopted behavior v2 through the single former
+**Scenario 3 and 5 Controller** option. Under
+[A34](../design/specification_amendments.md#a34-reactive-tdm-alpha-and-beta),
+the existing general controller is displayed as **Reactive TDM ALPHA** and
+the shared variant as **Reactive TDM BETA**. BETA behavior v3 pursues Priest,
+then Mage, then Hunter; other classes and no-prey Rogue movement remain ALPHA.
+Rogue combat remains independent of pursuit and bounded by its own Basic radius
+and exact masks. The internal `scenario_5` identity and
+V5 payload remain unchanged; the old Scenario 3 executable is removed while
+historical evidence retains its original identity and outcomes. Earlier Scenario
+3 success claims must be rechecked against the new opponent, not relabelled.
+All current reactive controllers require SharedObs and remain diagnostic or scenario-pressure
+tooling, not official baselines. Random remains diagnostic quality-control
+tooling. Under
 [A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations),
 an official scenario evaluation independently freezes and binds the selected
 deterministic controller through `pressure_protocol`, identically for the full

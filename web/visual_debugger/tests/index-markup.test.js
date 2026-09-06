@@ -92,22 +92,28 @@ test("only Team B exposes the SharedObs scenario controller", async () => {
       ),
       [
         ["manual", "Manual"],
-        ["reactive_tdm", "Reactive TDM"],
+        ["reactive_tdm", "Reactive TDM ALPHA"],
         ["random_valid", "Random"],
         ...(id === "devclient-team-b-controller"
-          ? [["scenario_3", "Scenario 3 Controller"]]
+          ? [["scenario_5", "Reactive TDM BETA"]]
           : []),
       ],
     );
   }
-  assert.equal(
-    elementBody(markup, "devclient-scenario-controller-help", "small").trim(),
-    "Rogues pursue the lowest-health enemy and avoid intervening bodies. Other classes stay idle. Team B and SharedObs only.",
-  );
-  assert.equal(
-    elementBody(markup, "devclient-reactive-controller-help", "small").trim(),
+  for (const id of [
+    "devclient-reactive-controller-help",
+    "devclient-scenario-controller-help",
+    "devclient-scenario-5-controller-help",
+  ]) {
+    assert.equal(markup.includes(id), false);
+  }
+  for (const description of [
     "Deterministic five-class reactive controller. SharedObs only.",
-  );
+    "Rogues pursue the lowest-health enemy and avoid intervening bodies. Other classes stay idle. Team B and SharedObs only.",
+    "Reactive TDM for all classes; Rogues pursue observed enemy Priests using body avoidance. Team B and SharedObs only.",
+  ]) {
+    assert.equal(markup.includes(description), false);
+  }
 });
 
 test("replay Help names the exact arrow keys and Escape selection behavior", async () => {

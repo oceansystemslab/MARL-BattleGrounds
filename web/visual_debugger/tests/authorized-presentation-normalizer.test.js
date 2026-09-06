@@ -2042,20 +2042,22 @@ test("live transport identity accepts Random independently for either team", asy
 });
 
 test("live scenario identity permits only SharedObs Team B without changing Replay", async () => {
+  const specialist = "scenario_5";
   for (const kind of ["live_oracle", "live_shared_obs_agent_pov"]) {
     const pair = clone(fixture.pairs[kind]);
-    pair.transport.combat_configuration.team_b_controller = "scenario_3";
+    pair.transport.combat_configuration.team_b_controller = specialist;
     pair.transport.combat_configuration.execution_information_mode = "shared_obs";
     const joined = await joinTransportAndAuthorizedPresentationV1(
       pair.transport,
       pair.presentation,
     );
-    assert.equal(joined.transport.combat_configuration.team_b_controller, "scenario_3");
+    assert.equal(joined.transport.combat_configuration.team_b_controller, specialist);
     for (const invalid of [
-      { team_a_controller: "scenario_3" },
+      { team_a_controller: specialist },
       { execution_information_mode: "no_shared_obs" },
       { team_b_controller: "scripted_tdm" },
       { team_b_controller: "scenario_1" },
+      { team_b_controller: "scenario_3" },
     ]) {
       const changed = clone(pair);
       Object.assign(changed.transport.combat_configuration, invalid);

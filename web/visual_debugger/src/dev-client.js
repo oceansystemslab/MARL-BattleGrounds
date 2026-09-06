@@ -219,7 +219,7 @@ export function isValidAuthoringAssetId(value) {
  *   teamBController: {value: string, disabled: boolean},
  *   informationMode: {value: string, disabled: boolean},
  *   reactiveControllerOptions: {disabled: boolean}[],
- *   scenarioControllerOption: {disabled: boolean},
+ *   scenarioControllerOptions: {disabled: boolean}[],
  *   noSharedOption: {disabled: boolean},
  *   root: {dataset: Record<string, string | undefined>},
  *   emit: (configuration: Readonly<Record<string, string>>) => void,
@@ -243,12 +243,12 @@ export function createCombatConfigurationController(bindings) {
     if (
       !isSupportedController(candidate.team_a_controller) ||
       (!isSupportedController(candidate.team_b_controller) &&
-        candidate.team_b_controller !== "scenario_3") ||
+        candidate.team_b_controller !== "scenario_5") ||
       (candidate.execution_information_mode !== "shared_obs" &&
         candidate.execution_information_mode !== "no_shared_obs") ||
       ((candidate.team_a_controller === "reactive_tdm" ||
         candidate.team_b_controller === "reactive_tdm" ||
-        candidate.team_b_controller === "scenario_3") &&
+        candidate.team_b_controller === "scenario_5") &&
         candidate.execution_information_mode !== "shared_obs")
     ) {
       return null;
@@ -265,15 +265,16 @@ export function createCombatConfigurationController(bindings) {
     bindings.teamAController.disabled = configuration === null;
     bindings.teamBController.disabled = configuration === null;
     bindings.informationMode.disabled = configuration === null;
-    bindings.scenarioControllerOption.disabled =
-      configuration?.execution_information_mode !== "shared_obs";
-    for (const option of bindings.reactiveControllerOptions) {
+    for (const option of [
+      ...bindings.reactiveControllerOptions,
+      ...bindings.scenarioControllerOptions,
+    ]) {
       option.disabled = configuration?.execution_information_mode !== "shared_obs";
     }
     bindings.noSharedOption.disabled =
       configuration?.team_a_controller === "reactive_tdm" ||
       configuration?.team_b_controller === "reactive_tdm" ||
-      configuration?.team_b_controller === "scenario_3";
+      configuration?.team_b_controller === "scenario_5";
     if (configuration === null) {
       return;
     }
@@ -340,7 +341,7 @@ function installDevClient() {
     teamAController: required("devclient-team-a-controller"),
     teamBController: required("devclient-team-b-controller"),
     informationMode: required("devclient-information-mode"),
-    scenarioControllerOption: required("devclient-scenario-controller-option"),
+    scenarioControllerOptions: [required("devclient-scenario-5-controller-option")],
     reactiveControllerOptions: [
       required("devclient-team-a-reactive-option"),
       required("devclient-team-b-reactive-option"),
@@ -418,7 +419,7 @@ function installDevClient() {
     teamAController: elements.teamAController,
     teamBController: elements.teamBController,
     informationMode: elements.informationMode,
-    scenarioControllerOption: elements.scenarioControllerOption,
+    scenarioControllerOptions: elements.scenarioControllerOptions,
     reactiveControllerOptions: elements.reactiveControllerOptions,
     noSharedOption: elements.noSharedOption,
     root: document.documentElement,

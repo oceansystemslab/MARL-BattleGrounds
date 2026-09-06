@@ -2119,3 +2119,203 @@ scenario or impose a five-transition horizon. Scenario-derived rules must not
 silently enter official training, and their originating scenario results must
 not be presented as uncontaminated evaluation. Core and public evaluation-role
 contracts are unchanged.
+
+## A31. Scenario 5 Priest-pursuit controller
+
+**Classification:** bounded diagnostic/scenario-pressure controller addition.
+**Extends:** A30's explicit Team B specialist choices and private live action-source
+contract. Existing Reactive TDM/Scenario 3 behavior, historical amendments,
+A25's information contract and A26/A27's evaluation-integrity boundaries remain.
+
+**Scenario 5 Controller** (`scenario_5`) is available only on Team B under
+SharedObs in every valid interactive setup, without asset, task, horizon,
+roster or respawn restrictions. Mage, Warrior, Hunter and Priest delegate to
+the unchanged Reactive TDM policy. Active living Rogues pursue the observed
+living positive-health enemy Priest with lowest current HP, breaking ties by
+global slot. The target is recomputed every epoch, without memory or hidden
+positions. If no Priest is observed, movement falls back to ordinary Reactive
+TDM: nearest observed enemy, otherwise map center, with its ordinary static-world
+refinement rather than specialist body avoidance.
+
+While pursuing Priest, Rogue reuses Scenario 3's exact body-aware movement:
+eight legal static-world projected candidates, inclusive 10% useful stride,
+full displacement-segment screening against stationary observed living bodies,
+summed radii, tangency allowed, and no added clearance margin. Self and the
+selected Priest are exempt. Initial overlaps permit non-deepening outward
+escape. Choose the safe moving endpoint closest to Priest with action-order
+ties, allowing temporary retreat; otherwise Stay. This is neither a planner nor
+a guarantee against moving blockers. General Reactive TDM steering is unchanged.
+
+Combat selects independently within Basic interaction radius: lowest-current-HP
+legal Ultimate enemy, otherwise lowest-current-HP legal Basic enemy, otherwise
+no-combat. Health ties use global slot. Rogue can attack a blocker while moving
+toward Priest. Ultimate replaces Basic; exact recipient masks and lifecycle
+no-ops override preferences. The actor key is ignored. All decisions use current
+authorized SharedObs, at most one bank, one assembler and one unchanged step;
+no raw state, pending actions, history or successor data is consumed.
+
+The algorithm identity is `scenario-5-pressure-controller@1`, deterministic,
+with a fresh descriptor covering inherited rules, pursuit, combat and fallbacks,
+bound to the launch-captured source revision. All configured-active Team B rows
+identify their installed policy as `scenario_5`, including non-Rogues. Manual
+versus Scenario 5 reports `mixed`; fully policy-controlled pairs report `policy`.
+Private action-source V5 is used only for Scenario 5 combinations and includes
+truthful execution identification; existing V4 combinations and fixed-frame V1
+payloads are preserved. Replay schemas/readers and historical artifacts need
+no changes. No checkpoint or training claim is made.
+
+Selection remains authoritative-frame-confirmed; incompatible requests fail
+without damaging session health or pending state. Loading never installs a
+controller automatically. Reset/load preserve the chosen controller pair and
+exact snapshot/seed. Team B actions remain read-only while inspectable.
+
+Saved scenarios remain controller-independent. Development notes and diagnostic
+traces do not establish an official suite release or a winning Team A solution.
+Official use still requires a separately frozen evaluation definition and the
+same pressure controller across matched treatments; scenario-derived behavior
+must not silently influence official training. No Core, public evaluation-role,
+policy-registry, Replay behavior or physical asset change is authorized here.
+
+## A32. Scenario 5 shoulder bypass and fallback prey
+
+**Classification:** bounded diagnostic/scenario-pressure behavior revision.
+**Revises:** A31's Scenario 5 pursuit and body-contact preference. A1–A31 remain
+the historical record; A25's information contract and A26/A27's evaluation
+boundaries continue to apply. Scenario 3 retains its strict movement preference
+and behavior v1. General Reactive TDM, Core physics, physical assets, action
+masks, actor inputs, and Replay schemas/readers are unchanged.
+
+Scenario 5 (`scenario_5`) remains Team B/SharedObs-only. Active living Rogues
+choose an observed active living positive-health enemy Priest first, otherwise
+a Hunter. Within the selected class, choose lowest current HP, then lowest
+global slot. Recompute every decision. If neither class supplies a candidate,
+use ordinary Reactive TDM Rogue movement toward the nearest observed enemy or
+map center. Non-Rogues still delegate unchanged to Reactive TDM.
+
+While pursuing either prey class, examine the same eight legal static-world
+projected moves with the inclusive 10% useful-stride threshold. Screen each
+projected displacement segment against currently observed living bodies, with
+self and selected prey excluded and full physical radii retained. Admit a clear
+path or glancing contact at least 45 degrees from the inward normal at first
+contact with every contacted blocker. As in strict screening, tangency or an
+endpoint that merely reaches a body without entering it counts as clear.
+An inward head-on stride from existing contact does not qualify, however short.
+Initial overlap within the existing geometry tolerance counts as contact;
+deeper initial overlap requires non-deepening outward motion ending farther
+from the blocker. Choose the admissible endpoint closest to prey, with
+movement-action-order ties and no preference for contact-free detours. Temporary
+retreat remains allowed; without a useful admissible move, Stay.
+
+This is a local steering preference. Ordinary simulator collision handling
+resolves attempted contact and can displace either body. The controller treats
+observed bodies as stationary for its estimate; it does not inspect pending
+opponent actions, simulate a successor, remember a route, or guarantee bypass
+against moving or pinned defenders. Scenario 3 continues to use its existing
+strict clearance rule through the shared helper's default behavior.
+
+Rogue combat remains independent of pursuit: within Basic interaction radius,
+choose the lowest-health legal Ultimate enemy, otherwise the lowest-health
+legal Basic enemy, otherwise no-combat, with global-slot ties. Exact masks,
+Ultimate priority, and lifecycle no-ops remain authoritative. Current authorized
+observation/mask and one shared sensor bank feed precommitted simultaneous
+actions, one joint-action assembly, and one unchanged simulator transition;
+the next observation supplies the next decision. The actor key remains ignored.
+
+The installed identity is `scenario-5-pressure-controller@2`. The fresh behavior
+descriptor records prey priority, contact angle, overlap handling, selection,
+combat, inherited rules and fallbacks, and remains bound to the launch-captured
+source revision. The existing private V5 action-source payload carries this
+identity without a schema revision. Scenario 3/Reactive TDM algorithm IDs and
+behavior versions, other interactive V4 contracts, fixed-frame V1 payloads,
+and historical recordings remain unchanged.
+
+Qualification requires focused contact/overlap and prey-selection regressions,
+actual shoulder-contact trajectories through the public simulator, unchanged
+Scenario 3/Reactive TDM proof, version/digest and recording-reopen checks, and
+bounded policy-cost evidence. Diagnostic progress or a finishing attack does
+not establish an official scenario win or release. Official use still needs a
+separately frozen evaluation definition and identical controller identity across
+matched treatments. No saved scenario automatically selects this controller.
+
+## A33. One controller for Scenarios 3 and 5
+
+**Classification:** controller retirement and shared diagnostic usage.
+**Revises:** A30–A32's forward requirement to retain a separate executable
+Scenario 3 controller. A1–A32 and their measured historical evidence remain
+intact. This is not a change to the surviving Scenario 5 algorithm.
+
+DevClient exposes one **Scenario 3 and 5 Controller** on Team B under SharedObs.
+It uses existing `scenario_5`, `scenario-5-pressure-controller` behavior version
+2 unchanged: Rogue pursues observed living Priest first, otherwise Hunter,
+with same-epoch HP/slot ties and shoulder bypass. Without either class, movement
+falls back to ordinary Reactive TDM. Combat independently chooses the
+lowest-health legal enemy within Basic radius, Ultimate before Basic.
+Non-Rogues use ordinary Reactive TDM, including after revival. The actor key
+remains ignored. General Reactive TDM, Random and Core are unchanged.
+
+Remove the standalone Scenario 3 executable, live selector, dispatch, unused
+strict-steering branch and retired-only tests. Retain no aliases or historical
+executable copies. Preserve useful generic regression proof, physical test
+fixtures, historical documents and existing replay bytes. Retired live
+`scenario_3` requests fail ordinary validation without faulting the session;
+historical replay provenance remains readable without executing the old policy.
+
+The surviving controller literal, algorithm identity, descriptor version and
+private V5 payload remain unchanged. Preserve surviving V4/V5 payload fields;
+`scenario_3_execution_included` is fixed false compatibility metadata, not a
+live controller. No new wire format, registry, schema or policy alias is added.
+Launch-source provenance still identifies the actual code revision.
+
+Saved scenarios remain controller-independent. Update their prose using normal
+revision-fenced saves without changing physical content or historical bytes.
+Earlier Scenario 3 results remain tied to the retired opponent and are not
+claims of success against the shared controller. New usage is diagnostic until
+separately qualified; official evaluation still freezes one exact pressure
+protocol across matched treatments. Core, public evaluation roles, Replay
+behavior, scenario physical semantics and A25's SharedObs contract are unchanged.
+
+## A34. Reactive TDM ALPHA and BETA
+
+**Classification:** diagnostic presentation and narrow Rogue pursuit revision.
+**Revises:** A33's current display names and two-class pursuit order only.
+Historical amendments, saved scenarios and replay evidence remain unchanged.
+
+DevClient displays the existing general `reactive_tdm` controller as
+**Reactive TDM ALPHA**, on either team. The surviving `scenario_5` variant is
+displayed as **Reactive TDM BETA**, still Team B-only. Both require SharedObs;
+there is no new registry, controller literal, observation contract or schema.
+
+The general module and callable names become `reactive_tdm_alpha.py`,
+`reactive_tdm_alpha_policy` and `reactive_tdm_alpha_controller_descriptor`;
+this is a behavior-preserving rename. The variant uses `reactive_tdm_beta.py`,
+`reactive_tdm_beta_policy` and `reactive_tdm_beta_controller_descriptor`.
+Update imports directly; retain no `reactive_tdm.py` or `scenario_5.py` alias.
+Stable persisted/live identity strings remain separate from Python module names.
+
+BETA behavior version 3 selects observed, active, living, positive-health enemy
+Priests first, otherwise Mages, otherwise Hunters. Within the selected class,
+lowest current health wins, then lowest global slot. Recompute at every current
+decision epoch. Use the existing glancing shoulder-bypass movement unchanged
+for all three prey classes, exempting self and selected prey from body screening.
+Without any priority prey, Rogue movement falls back to ALPHA: nearest observed
+enemy, otherwise map center, with ordinary obstacle refinement.
+
+Combat remains independent of pursuit: lowest-health legal Ultimate enemy
+within Basic radius, otherwise lowest-health legal Basic enemy there, otherwise
+no-combat. This radius check remains even during the movement fallback; BETA
+does not simply return the entire ALPHA Rogue action when prey is absent.
+Every non-Rogue still delegates directly to unchanged ALPHA. Body geometry,
+movement masks, action ordering, RNG handling and simulator execution do not
+change. The new priority neither implies access to hidden prey nor guarantees
+a route past a moving defender.
+
+The algorithm identity remains `scenario-5-pressure-controller`; its fresh
+descriptor advances to version 3 and records the three-class order. Existing
+V5 provenance carries the updated descriptor/source-bound digest. ALPHA's
+algorithm/version and all prior recording bytes remain unchanged. Old versions
+remain historical evidence, not assertions about the newly selected controller.
+
+ALPHA and BETA remain diagnostic/scenario-pressure tools, not official baselines
+or Big 12 entrants. A recorded full match is inspectable diagnostic evidence,
+not a tournament comparison or scenario qualification. Official scenario use
+still freezes one exact pressure-controller identity across matched treatments.

@@ -66,9 +66,9 @@ from marl_battlegrounds.policies.actor import (
     build_joint_action_from_actor_actions,
 )
 from marl_battlegrounds.policies.reactive_common import refine_movement
-from marl_battlegrounds.policies.reactive_tdm import (
-    reactive_tdm_controller_descriptor,
-    reactive_tdm_policy,
+from marl_battlegrounds.policies.reactive_tdm_alpha import (
+    reactive_tdm_alpha_controller_descriptor,
+    reactive_tdm_alpha_policy,
 )
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsPolicy,
@@ -78,7 +78,7 @@ from marl_battlegrounds.policies.shared_obs import (
     execute_shared_obs_team_policy,
 )
 
-_POLICY = cast(SharedObsPolicy, jax.jit(reactive_tdm_policy))
+_POLICY = cast(SharedObsPolicy, jax.jit(reactive_tdm_alpha_policy))
 _REFINE = cast(
     Callable[[Observation, ActionMask, Array], Array], jax.jit(refine_movement)
 )
@@ -627,7 +627,7 @@ def _team_b(
             jax.random.split(jax.random.key(key), 10),
             build_shared_obs_sensor_source_bank(obs),
             availability,
-            reactive_tdm_policy,
+            reactive_tdm_alpha_policy,
             TEAM_B_ID,
         ),
     )
@@ -653,7 +653,7 @@ def test_scalar_eager_jit_team_parity_and_key_invariance(
         av[9],
         jnp.int32(9),
     )
-    eager = reactive_tdm_policy(*args)
+    eager = reactive_tdm_alpha_policy(*args)
     _assert_exact(eager, _POLICY(*args))
     _assert_exact(eager, _scalar(team, 4))
 
@@ -734,12 +734,12 @@ def test_reactive_controller_reproduces_both_accepted_witnesses(
 
 
 def test_descriptor_is_fresh_and_contains_frozen_constants() -> None:
-    first = reactive_tdm_controller_descriptor()
+    first = reactive_tdm_alpha_controller_descriptor()
     assert first["policy_id"] == "reactive-team-deathmatch-controller"
     assert first["version"] == 1
     cast(dict[str, object], first["movement"])["minimum_stride_fraction_inclusive"] = 99
     assert (
-        cast(dict[str, object], reactive_tdm_controller_descriptor()["movement"])[
+        cast(dict[str, object], reactive_tdm_alpha_controller_descriptor()["movement"])[
             "minimum_stride_fraction_inclusive"
         ]
         == 0.1

@@ -5594,7 +5594,7 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
       !["manual", "reactive_tdm", "random_valid"].includes(
         configuration.team_a_controller,
       ) ||
-      !["manual", "reactive_tdm", "random_valid", "scenario_3"].includes(
+      !["manual", "reactive_tdm", "random_valid", "scenario_5"].includes(
         configuration.team_b_controller,
       ) ||
       !["shared_obs", "no_shared_obs"].includes(
@@ -5602,7 +5602,7 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
       ) ||
       ((configuration.team_a_controller === "reactive_tdm" ||
         configuration.team_b_controller === "reactive_tdm" ||
-        configuration.team_b_controller === "scenario_3") &&
+        configuration.team_b_controller === "scenario_5") &&
         configuration.execution_information_mode !== "shared_obs") ||
       (!oracle &&
         configuration.execution_information_mode !==

@@ -22,14 +22,18 @@ visible paths, validate them through the existing simulator authorities, and
 delete unwanted saved assets after confirmation. Saved scenarios load
 directly; saved maps can be opened as clearly labelled deterministic
 default-5v5-TDM previews without modifying the map. Either team can remain
-manual, use **Reactive TDM**, or use **Random** for same-start testing. Reactive
-TDM is a small deterministic five-class SharedObs controller. Team B also offers
-the SharedObs-only **Scenario 3 Controller**: Rogues pursue the lowest-health
-enemy while avoiding intervening bodies; other classes stay idle. Random
+manual, use **Reactive TDM ALPHA**, or use **Random** for same-start testing.
+ALPHA is the existing deterministic five-class SharedObs controller. Team B also
+offers **Reactive TDM BETA**, which keeps ALPHA for all non-Rogues while its
+Rogues pursue observed living enemies in **Priest → Mage → Hunter** order
+and attempt glancing shoulder routes past intervening bodies. Without any of
+those prey classes, Rogue movement falls back to ALPHA. BETA requires SharedObs.
+Their attacks still independently prioritize low-health legal targets. Random
 samples the exact current action support and works under either SharedObs or
 NoSharedObs. These are diagnostic/scenario-pressure tools, not official
 baselines or Big 12 entrants. The old Scripted TDM scorer and separate Reactive
-MRP controller have been removed, without changing historical replay support.
+MRP controller and the superseded standalone Scenario 3 controller have been
+removed, without changing historical replay support.
 Every applicable selector shows all latest saved revisions in numeric-aware
 asset-ID order, with native scrolling for longer lists. New Map and Scenario
 asset IDs use lowercase snake case, such as `tdm_map_10`, while their visible

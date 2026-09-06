@@ -353,7 +353,7 @@ test("captured recording prefixes require exact discard confirmation for replace
     {
       command_type: "set_combat_configuration",
       team_a_controller: "manual",
-      team_b_controller: "scenario_3",
+      team_b_controller: "scenario_5",
       execution_information_mode: "shared_obs",
     },
     keyboardCommand("r"),
@@ -385,6 +385,16 @@ test("captured recording prefixes require exact discard confirmation for replace
   );
   for (const invalid of [
     {
+      team_a_controller: "scenario_5",
+      team_b_controller: "manual",
+      execution_information_mode: "shared_obs",
+    },
+    {
+      team_a_controller: "manual",
+      team_b_controller: "scenario_5",
+      execution_information_mode: "no_shared_obs",
+    },
+    {
       team_a_controller: "scenario_3",
       team_b_controller: "manual",
       execution_information_mode: "shared_obs",
@@ -392,7 +402,7 @@ test("captured recording prefixes require exact discard confirmation for replace
     {
       team_a_controller: "manual",
       team_b_controller: "scenario_3",
-      execution_information_mode: "no_shared_obs",
+      execution_information_mode: "shared_obs",
     },
     ...["team_a_controller", "team_b_controller"].map((team) => ({
       team_a_controller: "manual",
