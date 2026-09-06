@@ -51,3 +51,21 @@ def load_scenario_3_draft() -> DevScenarioDraftV1:
 def load_scenario_3() -> CompiledDevScenarioV1:
     """Compile Scenario 3 through the unchanged authoring authorities."""
     return compile_dev_scenario(load_scenario_3_draft())
+
+
+SCENARIO_5_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "scenario_5_r9.json"
+SCENARIO_5_SEMANTIC_DIGEST = (
+    "20361030c886f508778305e79fd161b93595db407972a92bcd0a6d3d90760fd9"
+)
+
+
+def load_scenario_5_draft() -> DevScenarioDraftV1:
+    """Read the approved r9 physical setup, not an official evaluation release."""
+    return DevScenarioDraftV1.model_validate_json(
+        SCENARIO_5_FIXTURE_PATH.read_text(encoding="utf-8"),
+    )
+
+
+def load_scenario_5() -> CompiledDevScenarioV1:
+    """Compile Scenario 5 through the unchanged authoring authorities."""
+    return compile_dev_scenario(load_scenario_5_draft())
