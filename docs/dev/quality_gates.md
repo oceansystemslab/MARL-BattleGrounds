@@ -232,11 +232,21 @@ than promise an unbeatable pursuer. Neither proof silently qualifies an
 official scenario or changes a saved physical setup.
 
 [Amendment A31](../design/specification_amendments.md#a31-scenario-5-priest-pursuit-controller)
-adds Scenario 5 proof: non-Rogue action parity with Reactive TDM; observed
-Priest selection by HP/slot; ordinary Reactive TDM movement when Priest is
-absent; independent legal combat within Basic radius; and hidden/unavailable
-information noninterference. Relocated body helpers must remain algorithmically
-identical, with Scenario 3's existing trajectory/clearance tests retained.
+and [A32](../design/specification_amendments.md#a32-scenario-5-shoulder-bypass-and-fallback-prey)
+require Scenario 5 proof: non-Rogue action parity with Reactive TDM; observed
+Priest-first, otherwise Hunter pursuit with HP/slot selection within class;
+ordinary Reactive TDM movement when neither prey class is observed alive;
+independent legal combat within Basic radius; and hidden/unavailable information
+noninterference. Retain Scenario 3's strict trajectory/clearance tests unchanged.
+
+Scenario 5's glancing-contact proof must cover the inclusive 45-degree threshold
+at first contact, head-on rejection at full/slowed/tiny strides, static-world
+clipping, multiple blockers, walls, and initial overlap on both sides of the
+geometry tolerance. Pair local admission checks with actual stationary- and
+moving-blocker simulator trajectories: admitted shoulder contact must resolve
+through ordinary collision handling and produce useful progress past the
+defender. Inspect repeated stalls/reversals; a moving defender may re-block.
+Do not infer guaranteed navigation or official qualification from these probes.
 
 Cover all nine general controller pairs plus the three Team A choices against
 each of Scenario 3 and Scenario 5 under SharedObs. Under NoSharedObs, cover the
@@ -245,8 +255,10 @@ are also rejected.
 Service/HTTP/browser tests must preserve exact reset, authoritative selector
 confirmation, healthy nonfatal rejection, and one same-epoch bank/joint action/
 simulator step. Record installed identities accurately: V5 only for Scenario 5
-combinations, unchanged V4 for the others. Retain fixed-frame diagnostic payloads and readable historical
-recordings. Both recording recognition paths must be exercised.
+combinations, binding behavior v2 without changing the V5 payload structure;
+unchanged V4 and behavior v1 for Scenario 3. Exercise descriptor/version/source
+digest binding and saved-recording reopen. Retain fixed-frame diagnostic payloads
+and readable historical recordings. Both recording recognition paths must be exercised.
 
 Retain the exact Scenario 1/2 witness outcomes through the replacement. A
 divergence blocks acceptance rather than authorizing fixture or expected-result
@@ -363,7 +375,7 @@ publication.
 | Command/service/server behavior | Protocol, input, service, server, and affected real-browser case |
 | Scenario trajectory | Scenario preflight/reference tests |
 | Scenario pressure controller | Deterministic repeated execution, same-epoch SharedObs and exact-mask checks, target/tie/fallback cases, treatment/ablation identity equality, and proof that generic TDM has no scenario-ID branch |
-| Specialist body avoidance | Observation-only segment clearance, self/prey exclusion, tangency and overlap escape, deterministic detours, stationary and moving-blocker trajectories, and proof that general Reactive TDM refinement is unchanged |
+| Specialist body steering | Scenario 3's strict clearance; Scenario 5's first-contact angle and overlap tolerance; self/prey exclusion, deterministic detours, actual stationary and moving-blocker trajectories, and unchanged general Reactive TDM refinement |
 | Matched scenario ablation | Frozen one-variable contrast, paired independent-run accounting, one primary endpoint plus no more than two supporting margins, replay evidence, and rejection from Elo/training/selection inputs |
 | Training/evaluation manifest boundary | Content-digest closure expansion, fail-closed overlap tests including embedded maps and result feedback, immutable population identities, and restart/reproduction proof |
 | Big 12 final-system selection | Three independent runs for each learned method, validation-only per-run and cross-run selection, frozen cadence/eligibility/ties, and hostile locked-result noninterference |

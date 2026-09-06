@@ -6,7 +6,10 @@ from jax import Array
 from marl_battlegrounds.core.axis_mappings import (
     UNIT_DIRECTION_VECTOR_BY_MOVEMENT_ACTION_ARRAY,
 )
-from marl_battlegrounds.core.geometry import project_movement_with_geometry
+from marl_battlegrounds.core.geometry import (
+    GEOMETRY_TOLERANCE,
+    project_movement_with_geometry,
+)
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_ALIVE,
@@ -25,6 +28,7 @@ from marl_battlegrounds.core.types import (
 )
 
 MINIMUM_MOVEMENT_FRACTION = 0.1
+BYPASS_MINIMUM_CONTACT_ANGLE_DEGREES = 45
 
 
 def centers(features: Array) -> Array:
@@ -148,12 +152,75 @@ def _body_clear_moves(
     return jnp.all(~body_mask[None, :] | clear, axis=1)
 
 
+def _body_bypass_moves(
+    origin: Array,
+    endpoints: Array,
+    radius: Array,
+    bodies: Array,
+    body_mask: Array,
+) -> Array:
+    """Admit clear segments and shoulder contact at least 45 degrees from head-on.
+
+    Incidence uses the first contact normal, not the initial direction to a
+    distant body. Tiny solver overlap counts as contact; deeper overlap retains
+    strict outward escape. This changes steering only, never physical radii.
+    """
+    travel = endpoints - origin
+    start = origin - centers(bodies)
+    travel_squared = jnp.sum(jnp.square(travel), axis=-1)[:, None]
+    safe_travel_squared = jnp.where(travel_squared > 0, travel_squared, 1)
+    alignment = jnp.sum(travel[:, None, :] * start[None, :, :], axis=-1)
+    start_squared = jnp.sum(jnp.square(start), axis=-1)
+    required_radius = radius + bodies[:, AGENT_FEATURE_RADIUS]
+    required_squared = jnp.square(required_radius)
+
+    closest_time = jnp.clip(-alignment / safe_travel_squared, 0, 1)
+    closest = start[None, :, :] + closest_time[:, :, None] * travel[:, None, :]
+    clear = jnp.sum(jnp.square(closest), axis=-1) >= required_squared
+
+    discriminant = jnp.square(alignment) - travel_squared * (
+        start_squared - required_squared
+    )
+    first_contact_time = jnp.clip(
+        (-alignment - jnp.sqrt(jnp.maximum(discriminant, 0))) / safe_travel_squared,
+        0,
+        1,
+    )
+    start_distance = jnp.sqrt(start_squared)
+    touching = start_distance <= required_radius
+    first_contact_time = jnp.where(
+        touching,
+        0,
+        first_contact_time,
+    )
+    normal = start[None, :, :] + first_contact_time[:, :, None] * travel[:, None, :]
+    inward = -jnp.sum(travel[:, None, :] * normal, axis=-1)
+    lateral = (
+        travel[:, None, 0] * normal[:, :, 1] - travel[:, None, 1] * normal[:, :, 0]
+    )
+    # At 45 degrees the lateral and inward components are equal. Comparing
+    # them directly also avoids rounding a tiny inward step into a clear path.
+    glancing = jnp.abs(lateral) >= inward
+    end_squared = jnp.sum(
+        jnp.square(endpoints[:, None, :] - centers(bodies)[None, :, :]), axis=-1
+    )
+    escaping = (alignment >= 0) & (end_squared > start_squared)
+    admissible = jnp.where(
+        start_distance < required_radius - GEOMETRY_TOLERANCE,
+        escaping,
+        (~touching & clear) | glancing,
+    )
+    return jnp.all(~body_mask[None, :] | admissible, axis=1)
+
+
 def _body_aware_move(  # pyright: ignore[reportUnusedFunction]
     observation: Observation,
     action_mask: ActionMask,
     prey_center: Array,
     bodies: Array,
     body_mask: Array,
+    *,
+    allow_glancing_contact: bool = False,
 ) -> Array:
     """Choose the closest safe moving endpoint, even if a detour retreats."""
     origin = centers(observation.self_features)
@@ -178,11 +245,12 @@ def _body_aware_move(  # pyright: ignore[reportUnusedFunction]
         agent_agent_overlap_projection_passes=0,
     )[:8]
     displacement = jnp.sqrt(jnp.sum(jnp.square(endpoints - origin), axis=-1))
+    body_screen = _body_bypass_moves if allow_glancing_contact else _body_clear_moves
     admissible = (
         action_mask.move_mask[1:]
         & (speed > 0)
         & (displacement >= MINIMUM_MOVEMENT_FRACTION * speed)
-        & _body_clear_moves(origin, endpoints, radius, bodies, body_mask)
+        & body_screen(origin, endpoints, radius, bodies, body_mask)
     )
     distance_squared = jnp.sum(jnp.square(endpoints - prey_center), axis=-1)
     move = 1 + jnp.argmin(jnp.where(admissible, distance_squared, jnp.inf))

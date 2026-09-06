@@ -146,16 +146,27 @@ specialist is never available on Team A and does not change Reactive TDM's
 ordinary obstacle-only movement refinement.
 
 **Scenario 5 Controller** is also Team B/SharedObs-only. Mage, Warrior, Hunter
-and Priest use Reactive TDM unchanged. Rogue instead pursues the lowest-health
-observed living enemy Priest (ties: lowest global slot), using Scenario 3's
-body avoidance. The pursued Priest is exempt from avoidance; intervening bodies
-are not. If no living Priest is observed, Rogue uses ordinary Reactive TDM
-movement toward the nearest observed enemy or, without enemies, map center.
+and Priest use Reactive TDM unchanged. Rogue pursues an observed living enemy
+Priest first, otherwise a Hunter, choosing lowest current HP within the selected
+class and then lowest global slot. If neither class is observed alive, Rogue
+uses ordinary Reactive TDM movement toward the nearest observed enemy or,
+without enemies, map center.
+
+Scenario 5 admits clear paths and glancing shoulder contact at least 45 degrees
+from head-on at the first contact with each intervening observed living body.
+Self and the selected prey are exempt. Tiny initial overlap within the existing
+geometry tolerance counts as contact; deeper overlap permits only non-deepening
+outward escape. Of the useful legal projected moves, choose the endpoint closest
+to prey, with action-order ties and no bonus for avoiding contact entirely;
+temporary retreat is allowed and no qualifying move means Stay. Ordinary
+simulator collision response resolves the attempted contact. Scenario 3 retains
+its strict body-clearance preference.
+
 Combat is independent: Ultimate the lowest-health legal enemy within Basic
 radius, otherwise Basic the lowest-health legal enemy there, otherwise no-combat.
-Priest determines the destination, not necessarily the attack target. No target
-memory, hidden Priest position, opponent action prediction or guaranteed route
-is available. Dead/inactive agents no-op and exact masks override preferences.
+The selected prey determines the destination, not necessarily the attack target.
+No target memory, hidden prey position, opponent action prediction or guaranteed
+route is available. Dead/inactive agents no-op and exact masks override preferences.
 
 In a body-blocking study, the defending Warrior can screen a vulnerable Hunter
 and provide a moving body around which the Hunter kites, while both maintain
@@ -189,9 +200,9 @@ reconnect. Genuine internal failures retain their fail-closed protections.
 The old Scripted TDM scorer and separate Reactive MRP/`scenario_1` executable
 interface are removed. New identities are
 `reactive-team-deathmatch-controller@1`, `scenario-3-pressure-controller@1`, and
-`scenario-5-pressure-controller@1`. Scenario 5 combinations use private
-action-source V5; other interactive combinations retain V4. Both record installed controllers
-separately from scenario/map identity. Historical recordings retain their old
+`scenario-5-pressure-controller@2`. Scenario 5 combinations retain private
+action-source V5; other interactive combinations retain V4. Both record installed
+controllers separately from scenario/map identity. Historical recordings retain their old
 identities and remain readable; fixed-frame scripted diagnostics are unchanged.
 Availability on a setup does not qualify it scientifically or promise the
 outcome of another scenario's verified witness.
@@ -202,7 +213,7 @@ the versioned controller through a separate evaluation definition and apply the
 same controller to every treatment and matched-ablation arm. DevClient play
 remains diagnostic, not official evidence. See
 [A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
-and [A31](../design/specification_amendments.md#a31-scenario-5-priest-pursuit-controller).
+and [A32](../design/specification_amendments.md#a32-scenario-5-shoulder-bypass-and-fallback-prey).
 Scenario-derived controller rules are not silently eligible for official
 training, and originating-scenario performance is not uncontaminated evaluation.
 

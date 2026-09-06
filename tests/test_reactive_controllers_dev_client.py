@@ -43,7 +43,10 @@ from tests.scenario_controller_fixtures import load_scenario_1
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.core.types import TEAM_A_ID, TEAM_B_ID, EnvConfig, EnvState
-from marl_battlegrounds.evaluation.models import AssignedPolicySlotV1
+from marl_battlegrounds.evaluation.models import (
+    AssignedPolicySlotV1,
+    canonical_digest_sha256,
+)
 from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 from marl_battlegrounds.evaluation.replay_io import (
     load_replay_bundle_v1,
@@ -189,7 +192,8 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
     aggregation = {row.name: row.value for row in context.aggregation_keys}
     assert aggregation["action_source"] == ("mixed" if team_a == "manual" else "policy")
     algorithm = f"{scenario_controller.replace('_', '-')}-pressure-controller"
-    assert aggregation["pressure_protocol"] == f"{algorithm}@1"
+    version = 2 if scenario_controller == "scenario_5" else 1
+    assert aggregation["pressure_protocol"] == f"{algorithm}@{version}"
     if team_a == "reactive_tdm":
         assert (
             aggregation["reactive_tdm_controller"]
@@ -524,7 +528,14 @@ def test_pressure_identity_binds_descriptor_version_and_launch_revision(
     )
     descriptor_name = f"{scenario_controller}_controller_descriptor"
     descriptor = getattr(evaluation_bridge, descriptor_name)()
-    descriptor["version"] = 2
+    original_version = 2 if scenario_controller == "scenario_5" else 1
+    assert descriptor["version"] == original_version
+    original_descriptor = descriptor.copy()
+    algorithm = f"{scenario_controller.replace('_', '-')}-pressure-controller"
+    assert {row.name: row.value for row in session.evaluation_context.aggregation_keys}[
+        "pressure_protocol"
+    ] == f"{algorithm}@{original_version}"
+    descriptor["version"] = original_version + 1
     monkeypatch.setattr(
         evaluation_bridge,
         descriptor_name,
@@ -538,8 +549,20 @@ def test_pressure_identity_binds_descriptor_version_and_launch_revision(
     assert changed_row.policy_content_digest != original_row.policy_content_digest
     assert {row.name: row.value for row in changed.evaluation_context.aggregation_keys}[
         "pressure_protocol"
-    ] == f"{scenario_controller.replace('_', '-')}-pressure-controller@2"
-    descriptor["version"] = 1
+    ] == f"{algorithm}@{original_version + 1}"
+    descriptor["version"] = original_version
+    descriptor["pursuit"] = "injected alternative pursuit rule"
+    changed = control.reset_session(session)
+    changed_row = cast(
+        AssignedPolicySlotV1,
+        changed.evaluation_context.policy_assignments[5],
+    )
+    assert changed_row.policy_content_digest != original_row.policy_content_digest
+    assert {row.name: row.value for row in changed.evaluation_context.aggregation_keys}[
+        "pressure_protocol"
+    ] == f"{algorithm}@{original_version}"
+    descriptor.clear()
+    descriptor.update(original_descriptor)
     launch = debugger_test_launch_specification(7)
     changed_code = launch.code_revision.model_copy(update={"commit_sha": "b" * 40})
     changed_launch = build_debugger_evaluation_launch_specification_v1(
@@ -611,3 +634,23 @@ def test_reactive_controller_recording_reopens_without_replay_changes(
     assert recorder.saved_bundle is not None
     reopened = load_replay_bundle_v1(recorder.saved_bundle.replay_path)
     assert reopened.replay.header.context == loaded.replay.header.context
+    context = reopened.replay.header.context
+    descriptor = getattr(evaluation_bridge, f"{team_b}_controller_descriptor")()
+    expected_version = 2 if team_b == "scenario_5" else 1
+    assert descriptor["version"] == expected_version
+    expected_digest = canonical_digest_sha256(
+        {"behavior": descriptor, "code_revision": context.code_revision}
+    )
+    aggregation = {row.name: row.value for row in context.aggregation_keys}
+    identity_key = (
+        "reactive_tdm_controller" if team_b == "reactive_tdm" else "pressure_protocol"
+    )
+    assert aggregation[identity_key] == (
+        f"{descriptor['policy_id']}@{expected_version}"
+    )
+    assert aggregation[f"{identity_key}_digest"] == expected_digest
+    for row in context.policy_assignments[5:]:
+        assert isinstance(row, AssignedPolicySlotV1)
+        assert row.policy_kind == team_b
+        assert row.algorithm_id == descriptor["policy_id"]
+        assert row.policy_content_digest == expected_digest

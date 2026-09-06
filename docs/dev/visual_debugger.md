@@ -35,10 +35,13 @@ SharedObs-only **Scenario 3 Controller**: Rogues pursue the lowest-health enemy
 while avoiding intervening bodies; other classes stay idle, including after
 revival. **Scenario 5 Controller** is another Team B/SharedObs-only choice:
 other classes use Reactive TDM unchanged; Rogues pursue observed enemy Priests
-using the same body avoidance, while independently attacking low-health legal
-targets. Without an observed living Priest, Rogue movement falls back to
-ordinary Reactive TDM. These policies are diagnostic/scenario-pressure tools, not official
-baselines or Big 12 entrants. Random remains available under both information
+first, otherwise Hunters, choosing the lowest-health prey within that class
+with global-slot ties. They attempt glancing shoulder routes past intervening
+bodies while independently attacking low-health legal targets. Without an
+observed living Priest or Hunter, Rogue movement falls back to ordinary
+Reactive TDM. Shoulder contact uses ordinary simulator collision response and
+does not guarantee a route. These policies are diagnostic/scenario-pressure tools,
+not official baselines or Big 12 entrants. Random remains available under both information
 modes; NoSharedObs is disabled while either team uses a reactive controller.
 
 Load any valid interactive scenario or map preview (or keep the default arena),
@@ -56,7 +59,7 @@ Future official scenario evaluations bind pressure controllers through separate
 evaluation definitions while saved scenarios remain controller-independent.
 DevClient use remains diagnostic. See
 [A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
-and [A31](../design/specification_amendments.md#a31-scenario-5-priest-pursuit-controller).
+and [A32](../design/specification_amendments.md#a32-scenario-5-shoulder-bypass-and-fallback-prey).
 Save is the only way the DevClient persists asset content; it
 creates durable numbered local revisions and never autosaves. Every applicable
 selector exposes every latest revision in numeric-aware asset-ID order through

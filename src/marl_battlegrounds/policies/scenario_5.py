@@ -1,4 +1,4 @@
-"""Reactive TDM with a body-avoiding Rogue that pursues observed Priests."""
+"""Reactive TDM with a shoulder-bypassing Rogue that pursues Priests, then Hunters."""
 
 import jax.numpy as jnp
 from jax import Array
@@ -8,6 +8,7 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ALIVE,
     AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
     AGENT_FEATURE_CLASS_ID,
+    HUNTER_CLASS_ID,
     MAX_AGENTS_PER_TEAM,
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
@@ -16,6 +17,7 @@ from marl_battlegrounds.core.types import (
 )
 from marl_battlegrounds.policies.actor import ActorAction
 from marl_battlegrounds.policies.reactive_common import (
+    BYPASS_MINIMUM_CONTACT_ANGLE_DEGREES,
     MINIMUM_MOVEMENT_FRACTION,
     _body_aware_move,  # pyright: ignore[reportPrivateUsage]
     centers,
@@ -36,31 +38,42 @@ def scenario_5_controller_descriptor() -> dict[str, object]:
     """Return fresh rule data, including the inherited general controller rules."""
     return {
         "policy_id": "scenario-5-pressure-controller",
-        "version": 1,
+        "version": 2,
         "information": "same-epoch SharedObs and recipient exact masks",
         "execution": "deterministic; actor key ignored",
         "inherited_controller": reactive_tdm_controller_descriptor(),
         "classes": "non-Rogues delegate unchanged to Reactive TDM",
         "candidates": "observed active living positive-health enemies",
-        "pursuit": "lowest-current-HP enemy Priest; recompute every decision",
+        "pursuit": (
+            "observed living enemy Priest first, else Hunter; lowest current HP "
+            "within class then global slot; recompute every decision"
+        ),
         "combat": (
             "within Basic radius: lowest-HP legal Ultimate enemy else lowest-HP "
-            "legal Basic enemy else no-combat; independent of Priest pursuit"
+            "legal Basic enemy else no-combat; independent of pursuit"
         ),
         "ties": "health then global slot; endpoint distance then movement action ID",
         "movement": {
             "projection": "existing static obstacle/bounds geometry; no body pairs",
             "minimum_stride_fraction_inclusive": MINIMUM_MOVEMENT_FRACTION,
             "blockers": "observed living allies/enemies excluding self and prey",
-            "clearance": "projected displacement segment; radius sum; tangency allowed",
-            "overlap_escape": "never deepen initial overlap and finish farther away",
-            "selection": "closest safe moving endpoint to Priest; detours may retreat",
+            "contact": "clear segment or glancing first contact at physical radius sum",
+            "minimum_contact_angle_degrees": BYPASS_MINIMUM_CONTACT_ANGLE_DEGREES,
+            "overlap_escape": (
+                "existing geometry tolerance counts as contact; deeper overlap "
+                "must never deepen and must finish farther away"
+            ),
+            "selection": (
+                "closest admissible moving endpoint to prey; no preference for "
+                "contact-free detours; detours may retreat"
+            ),
             "assumption": "other observed bodies stationary; no action prediction",
             "search": "eight directions only; no lookahead or route memory",
         },
         "fallbacks": (
-            "no Priest: unchanged Reactive TDM Rogue movement toward nearest enemy "
-            "or map center, without body screening; no useful safe move: Stay; "
+            "no Priest or Hunter: unchanged Reactive TDM Rogue movement toward "
+            "nearest enemy or map center, without body screening; "
+            "no useful safe move: Stay; "
             "dead/inactive: no-op"
         ),
         "action_priority": "Ultimate replaces Basic; exact masks override preferences",
@@ -93,7 +106,9 @@ def scenario_5_policy(
     ally_living = living_candidates(allies, ally_visible)
     enemy_living = living_candidates(enemies, enemy_visible)
     priests = enemy_living & (enemies[:, AGENT_FEATURE_CLASS_ID] == PRIEST_CLASS_ID)
-    prey_row = lowest_health_row(enemies, priests)
+    hunters = enemy_living & (enemies[:, AGENT_FEATURE_CLASS_ID] == HUNTER_CLASS_ID)
+    prey_candidates = jnp.where(jnp.any(priests), priests, hunters)
+    prey_row = lowest_health_row(enemies, prey_candidates)
     body_mask = jnp.concatenate((ally_living, enemy_living))
     body_mask = body_mask.at[recipient_global_slot % MAX_AGENTS_PER_TEAM].set(False)
     body_mask = body_mask.at[MAX_AGENTS_PER_TEAM + prey_row].set(False)
@@ -103,6 +118,7 @@ def scenario_5_policy(
         centers(enemies[prey_row]),
         jnp.concatenate((allies, enemies)),
         body_mask,
+        allow_glancing_contact=True,
     )
     own = recipient_observation.self_features
     distances_squared = jnp.sum(jnp.square(centers(enemies) - centers(own)), axis=-1)
@@ -122,7 +138,7 @@ def scenario_5_policy(
     )
     return ActorAction(
         jnp.where(
-            participating_rogue & jnp.any(priests), pursuit_move, baseline.move
+            participating_rogue & jnp.any(prey_candidates), pursuit_move, baseline.move
         ).astype(jnp.int32),
         jnp.where(participating_rogue, target, baseline.select_target).astype(
             jnp.int32

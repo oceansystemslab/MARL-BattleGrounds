@@ -283,11 +283,15 @@ replaces the legacy Scripted TDM/MRP executables with general Reactive TDM and
 a separate Scenario 3 Rogue specialist. Reactive TDM supports either team;
 Scenario 3 supports Team B only.
 [Amendment A31](../design/specification_amendments.md#a31-scenario-5-priest-pursuit-controller)
-adds Team B's Scenario 5 Controller: Reactive TDM for other classes, with
-body-aware Priest pursuit and independent legal combat for Rogues. All require
-SharedObs and remain diagnostic
-or scenario-pressure tooling, not official baselines. Random remains diagnostic
-quality-control tooling. Under
+adds Team B's Scenario 5 Controller. Its
+[A32 behavior v2](../design/specification_amendments.md#a32-scenario-5-shoulder-bypass-and-fallback-prey)
+keeps Reactive TDM for other classes; Rogues pursue observed living Priests
+first, otherwise Hunters, with glancing shoulder contact and independent legal
+combat. The behavior descriptor changes while the private V5 action-source
+payload structure remains unchanged. Scenario 3 retains behavior v1 and strict
+body clearance. All require SharedObs and remain diagnostic or scenario-pressure
+tooling, not official baselines. Random remains diagnostic quality-control
+tooling. Under
 [A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations),
 an official scenario evaluation independently freezes and binds the selected
 deterministic controller through `pressure_protocol`, identically for the full

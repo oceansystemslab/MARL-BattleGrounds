@@ -2175,3 +2175,64 @@ Official use still requires a separately frozen evaluation definition and the
 same pressure controller across matched treatments; scenario-derived behavior
 must not silently influence official training. No Core, public evaluation-role,
 policy-registry, Replay behavior or physical asset change is authorized here.
+
+## A32. Scenario 5 shoulder bypass and fallback prey
+
+**Classification:** bounded diagnostic/scenario-pressure behavior revision.
+**Revises:** A31's Scenario 5 pursuit and body-contact preference. A1–A31 remain
+the historical record; A25's information contract and A26/A27's evaluation
+boundaries continue to apply. Scenario 3 retains its strict movement preference
+and behavior v1. General Reactive TDM, Core physics, physical assets, action
+masks, actor inputs, and Replay schemas/readers are unchanged.
+
+Scenario 5 (`scenario_5`) remains Team B/SharedObs-only. Active living Rogues
+choose an observed active living positive-health enemy Priest first, otherwise
+a Hunter. Within the selected class, choose lowest current HP, then lowest
+global slot. Recompute every decision. If neither class supplies a candidate,
+use ordinary Reactive TDM Rogue movement toward the nearest observed enemy or
+map center. Non-Rogues still delegate unchanged to Reactive TDM.
+
+While pursuing either prey class, examine the same eight legal static-world
+projected moves with the inclusive 10% useful-stride threshold. Screen each
+projected displacement segment against currently observed living bodies, with
+self and selected prey excluded and full physical radii retained. Admit a clear
+path or glancing contact at least 45 degrees from the inward normal at first
+contact with every contacted blocker. As in strict screening, tangency or an
+endpoint that merely reaches a body without entering it counts as clear.
+An inward head-on stride from existing contact does not qualify, however short.
+Initial overlap within the existing geometry tolerance counts as contact;
+deeper initial overlap requires non-deepening outward motion ending farther
+from the blocker. Choose the admissible endpoint closest to prey, with
+movement-action-order ties and no preference for contact-free detours. Temporary
+retreat remains allowed; without a useful admissible move, Stay.
+
+This is a local steering preference. Ordinary simulator collision handling
+resolves attempted contact and can displace either body. The controller treats
+observed bodies as stationary for its estimate; it does not inspect pending
+opponent actions, simulate a successor, remember a route, or guarantee bypass
+against moving or pinned defenders. Scenario 3 continues to use its existing
+strict clearance rule through the shared helper's default behavior.
+
+Rogue combat remains independent of pursuit: within Basic interaction radius,
+choose the lowest-health legal Ultimate enemy, otherwise the lowest-health
+legal Basic enemy, otherwise no-combat, with global-slot ties. Exact masks,
+Ultimate priority, and lifecycle no-ops remain authoritative. Current authorized
+observation/mask and one shared sensor bank feed precommitted simultaneous
+actions, one joint-action assembly, and one unchanged simulator transition;
+the next observation supplies the next decision. The actor key remains ignored.
+
+The installed identity is `scenario-5-pressure-controller@2`. The fresh behavior
+descriptor records prey priority, contact angle, overlap handling, selection,
+combat, inherited rules and fallbacks, and remains bound to the launch-captured
+source revision. The existing private V5 action-source payload carries this
+identity without a schema revision. Scenario 3/Reactive TDM algorithm IDs and
+behavior versions, other interactive V4 contracts, fixed-frame V1 payloads,
+and historical recordings remain unchanged.
+
+Qualification requires focused contact/overlap and prey-selection regressions,
+actual shoulder-contact trajectories through the public simulator, unchanged
+Scenario 3/Reactive TDM proof, version/digest and recording-reopen checks, and
+bounded policy-cost evidence. Diagnostic progress or a finishing attack does
+not establish an official scenario win or release. Official use still needs a
+separately frozen evaluation definition and identical controller identity across
+matched treatments. No saved scenario automatically selects this controller.

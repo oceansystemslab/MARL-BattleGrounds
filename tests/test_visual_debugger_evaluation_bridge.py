@@ -396,7 +396,7 @@ def test_only_scenario_5_adds_v5_execution_and_keeps_distinct_controller_identit
 ) -> None:
     scenario_identity = ContentAddressedIdentityV1(
         identifier="scenario-5-pressure-controller",
-        version=1,
+        version=2,
         canonical_digest="5" * 64,
     )
     reactive_identity = (
@@ -422,32 +422,52 @@ def test_only_scenario_5_adds_v5_execution_and_keeps_distinct_controller_identit
         team_b_controller="scenario_5",
         scenario_controller_identity=scenario_identity,
     )
-    assert payload["schema_version"] == 5
-    assert payload["scenario_5_execution_included"] is True
-    assert payload["scenario_3_execution_included"] is False
-    assert payload["reactive_tdm_execution_included"] == (team_a == "reactive_tdm")
-    assert payload["scenario_controller"] == scenario_identity
-    assert payload["reactive_tdm_controller"] == reactive_identity
-    assert payload["policy_execution_included"] is True
+    expected_payload = {
+        "schema_id": "marl_battlegrounds.visual_debugger.action_source_contract",
+        "schema_version": 5,
+        "action_source_kind": "mixed" if team_a == "manual" else "policy",
+        "team_a_controller": team_a,
+        "team_b_controller": "scenario_5",
+        "execution_information_mode": "shared_obs",
+        "manual_submission_included": team_a == "manual",
+        "reactive_tdm_execution_included": team_a == "reactive_tdm",
+        "random_policy_execution_included": team_a == "random_valid",
+        "scenario_3_execution_included": False,
+        "scenario_5_execution_included": True,
+        "reactive_tdm_controller": reactive_identity,
+        "scenario_controller": scenario_identity,
+        "scenario_contract_digest_sha256": "a" * 64,
+        "policy_execution_included": True,
+    }
+    assert payload == expected_payload
     with pytest.raises(ValueError, match="requires its controller identity"):
         build_payload(**arguments, team_b_controller="scenario_5")  # type: ignore[arg-type]
     old_identity = scenario_identity.model_copy(
-        update={"identifier": "scenario-3-pressure-controller"}
+        update={"identifier": "scenario-3-pressure-controller", "version": 1}
     )
     old_payload = build_payload(
         **arguments,  # type: ignore[arg-type]
         team_b_controller="scenario_3",
         scenario_controller_identity=old_identity,
     )
-    assert old_payload["schema_version"] == 4
-    assert "scenario_5_execution_included" not in old_payload
-    assert old_payload["scenario_3_execution_included"] is True
+    expected_old_payload = {
+        **expected_payload,
+        "schema_version": 4,
+        "team_b_controller": "scenario_3",
+        "scenario_3_execution_included": True,
+        "scenario_controller": old_identity,
+    }
+    del expected_old_payload["scenario_5_execution_included"]
+    assert old_payload == expected_old_payload
     context = _context(
         team_a_controller=team_a,
         team_b_controller="scenario_5",
         action_source_kind="mixed" if team_a == "manual" else "policy",
     )
     assert debugger_recording._context_policy_execution_included(context)  # pyright: ignore[reportPrivateUsage]
+    assert {row.name: row.value for row in context.aggregation_keys}[
+        "pressure_protocol"
+    ] == "scenario-5-pressure-controller@2"
 
 
 def test_reactive_team_identity_changes_the_action_contract_identity() -> None:

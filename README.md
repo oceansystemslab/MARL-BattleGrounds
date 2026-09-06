@@ -27,7 +27,8 @@ TDM is a small deterministic five-class SharedObs controller. Team B also offers
 the SharedObs-only **Scenario 3 Controller**: Rogues pursue the lowest-health
 enemy while avoiding intervening bodies; other classes stay idle. **Scenario 5
 Controller**, also Team B/SharedObs-only, instead keeps Reactive TDM for all
-other classes while its Rogues pursue observed enemy Priests with body avoidance.
+other classes while its Rogues pursue observed enemy Priests first, otherwise
+Hunters, and attempt glancing shoulder routes past intervening bodies.
 Their attacks still independently prioritize low-health legal targets. Random
 samples the exact current action support and works under either SharedObs or
 NoSharedObs. These are diagnostic/scenario-pressure tools, not official

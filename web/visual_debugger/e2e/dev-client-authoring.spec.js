@@ -375,12 +375,11 @@ test("authoring persists through restart and drives same-start Combat comparison
     await expect(page.locator("#authoring-shell")).toBeHidden();
     await page.evaluate(() => window.scrollTo(0, 0));
 
-    await expect(page.locator("#devclient-scenario-controller-help")).toHaveText(
-      "Rogues pursue the lowest-health enemy and avoid intervening bodies. Other classes stay idle. Team B and SharedObs only.",
-    );
-    await expect(page.locator("#devclient-scenario-5-controller-help")).toHaveText(
-      "Reactive TDM for all classes; Rogues pursue observed enemy Priests using body avoidance. Team B and SharedObs only.",
-    );
+    await expect(
+      page.locator(
+        "#devclient-reactive-controller-help, #devclient-scenario-controller-help, #devclient-scenario-5-controller-help",
+      ),
+    ).toHaveCount(0);
     // Exercise browser recovery with a real unchanged-frame no_op envelope.
     // Backend service/HTTP tests independently exercise actual rejection.
     await page.route(
@@ -1245,9 +1244,7 @@ test("authoring persists through restart and drives same-start Combat comparison
       "disabled",
       true,
     );
-    await expect(page.locator("#devclient-reactive-controller-help")).toHaveText(
-      "Deterministic five-class reactive controller. SharedObs only.",
-    );
+    await expect(page.locator("#devclient-combat-config small")).toHaveCount(0);
     for (const [teamB, controllerLabel] of [
       ["reactive_tdm", "Reactive TDM"],
       ["scenario_5", "Scenario 5 Controller"],
