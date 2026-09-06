@@ -593,7 +593,7 @@ def test_command_and_stale_service_results_map_to_http(
     assert int(server.debugger_service.session.state.step_count) == 0
 
 
-@pytest.mark.parametrize("team_b", ("scenario_3", "scenario_5"))
+@pytest.mark.parametrize("team_b", ("scenario_5",))
 def test_expected_controller_rejection_is_http_noop_then_commands_still_work(
     running_server: tuple[DebuggerHTTPServer, Thread],
     monkeypatch: pytest.MonkeyPatch,
@@ -678,8 +678,8 @@ def test_expected_controller_rejection_is_http_noop_then_commands_still_work(
     assert service.session.run_generation == 2
 
 
-@pytest.mark.parametrize("team_b", ("scenario_3", "scenario_5"))
-@pytest.mark.parametrize("forbidden", ("team_a", "no_shared_obs"))
+@pytest.mark.parametrize("team_b", ("scenario_5",))
+@pytest.mark.parametrize("forbidden", ("team_a", "no_shared_obs", "retired"))
 def test_forbidden_controller_requests_remain_recoverable_protocol_errors(
     running_server: tuple[DebuggerHTTPServer, Thread],
     team_b: TeamBController,
@@ -695,7 +695,7 @@ def test_forbidden_controller_requests_remain_recoverable_protocol_errors(
             "command": {
                 "command_type": "set_combat_configuration",
                 "team_a_controller": team_b if forbidden == "team_a" else "manual",
-                "team_b_controller": team_b,
+                "team_b_controller": "scenario_3" if forbidden == "retired" else team_b,
                 "execution_information_mode": (
                     "no_shared_obs" if forbidden == "no_shared_obs" else "shared_obs"
                 ),

@@ -118,7 +118,6 @@ def scenario_5_policy(
         centers(enemies[prey_row]),
         jnp.concatenate((allies, enemies)),
         body_mask,
-        allow_glancing_contact=True,
     )
     own = recipient_observation.self_features
     distances_squared = jnp.sum(jnp.square(centers(enemies) - centers(own)), axis=-1)

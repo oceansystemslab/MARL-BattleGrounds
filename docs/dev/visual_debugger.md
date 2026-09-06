@@ -31,9 +31,7 @@ deterministic default-5v5-TDM previews. Both authoring areas call the same stric
 compile/revalidate loader through `Open in Debug`, and either team can use
 **Manual**, **Reactive TDM**, or **Random**. Reactive TDM is one deterministic
 five-class SharedObs controller for either team. Team B also offers the
-SharedObs-only **Scenario 3 Controller**: Rogues pursue the lowest-health enemy
-while avoiding intervening bodies; other classes stay idle, including after
-revival. **Scenario 5 Controller** is another Team B/SharedObs-only choice:
+SharedObs-only **Scenario 3 and 5 Controller**:
 other classes use Reactive TDM unchanged; Rogues pursue observed enemy Priests
 first, otherwise Hunters, choosing the lowest-health prey within that class
 with global-slot ties. They attempt glancing shoulder routes past intervening
@@ -50,8 +48,10 @@ and submit turns. Reset restores the exact loaded starting state. No task,
 horizon, roster, asset-ID, or respawn restriction applies. Expected rejection
 leaves the session healthy and shows a notice without requiring reconnect.
 Policy-controlled agents remain inspectable but action-read-only. Scenarios 3
-and 5 are not selectable on Team A; Reactive TDM is. The old Scripted TDM and separate
-Reactive MRP executable interfaces have been removed. Historical recordings
+and 5 share one Team B-only option; Reactive TDM is available on either team.
+The old standalone Scenario 3, Scripted TDM and separate Reactive MRP executable
+interfaces have been removed. The surviving `scenario_5` identity and behavior
+v2 are unchanged by the shared label. Historical recordings
 remain readable, and fixed-frame scripted diagnostics remain separate.
 See the [Combat Debugger guide](combat_debugger.md#loading-saved-scenarios-and-map-previews)
 for the execution boundaries and loading workflow.

@@ -303,10 +303,22 @@ def test_prey_contact_is_permitted_but_an_attacked_blocker_is_avoided(
     obs = _enemy(_observation(scenario), 4, (11, 5), 40, prey_class)
     assert int(_act(scenario, obs).move) == MOVE_EAST
     obs = _enemy(obs, 4, (13, 5), 40, prey_class)
+    ally_blocked = obs._replace(
+        ally_unit_features=obs.ally_unit_features.at[0].set(
+            _row(obs.self_features, (11.5, 5))
+        ),
+        ally_visibility_mask=obs.ally_visibility_mask.at[0].set(True),
+    )
+    assert int(_act(scenario, ally_blocked).move) != MOVE_EAST
     obs = _enemy(obs, 0, (11.5, 5), 1)
     result = _act(scenario, obs, _mask((6, 0), (6, 1)))
     assert int(result.move) not in (MOVE_EAST, MOVE_STAY)
     assert (int(result.select_target), int(result.use_ultimate)) == (6, 1)
+    # Retain the old specialist's useful generic mask/detour proof after its
+    # retirement: safe retreat is allowed, and a blocked-only choice is Stay.
+    assert int(_act(scenario, obs, _mask(moves=(MOVE_WEST,))).move) == MOVE_WEST
+    assert int(_act(scenario, obs, _mask(moves=(MOVE_EAST,))).move) == MOVE_STAY
+    assert int(_act(scenario, obs, _mask(moves=())).move) == MOVE_STAY
 
 
 @pytest.mark.parametrize("overlap", [0.0, 0.5 * GEOMETRY_TOLERANCE])
@@ -415,7 +427,7 @@ def test_every_admitted_body_must_allow_the_candidate(
     )
 
 
-def test_body_aware_movement_requires_explicit_glancing_opt_in(
+def test_body_aware_movement_admits_glancing_contact(
     scenario: CompiledDevScenarioV1,
 ) -> None:
     obs = _observation(scenario)
@@ -427,9 +439,7 @@ def test_body_aware_movement_requires_explicit_glancing_opt_in(
         bodies,
         jnp.array([True]),
     )
-    assert int(_body_aware_move(*args)) == MOVE_STAY
-    assert int(_body_aware_move(*args, allow_glancing_contact=False)) == MOVE_STAY
-    assert int(_body_aware_move(*args, allow_glancing_contact=True)) == MOVE_NORTHEAST
+    assert int(_body_aware_move(*args)) == MOVE_NORTHEAST
 
 
 @pytest.mark.parametrize("own_y,expected", [(5.0, MOVE_NORTHEAST), (9.5, MOVE_STAY)])

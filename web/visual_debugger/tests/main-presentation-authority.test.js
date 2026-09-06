@@ -1432,14 +1432,11 @@ test("main labels every policy controller explicitly and fences its action editi
     /value === "manual" \|\| value === "reactive_tdm" \|\| value === "random_valid"/u,
   );
   assert.match(source, /controller === "random_valid"[\s\S]*return "Random"/u);
+  assert.doesNotMatch(source, /scenario_3/u);
+  assert.doesNotMatch(styles, /data-team-b-controller="scenario_3"/u);
   assert.match(
     source,
-    /controller === "scenario_3"[\s\S]*return "Scenario 3 Controller"/u,
-  );
-  assert.match(styles, /data-team-b-controller="scenario_3"/u);
-  assert.match(
-    source,
-    /controller === "scenario_5"[\s\S]*return "Scenario 5 Controller"/u,
+    /controller === "scenario_5"[\s\S]*return "Scenario 3 and 5 Controller"/u,
   );
   assert.match(styles, /data-team-b-controller="scenario_5"/u);
   assert.match(

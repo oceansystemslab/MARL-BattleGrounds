@@ -1929,11 +1929,8 @@ function combatControllerLabel(controller) {
   if (controller === "random_valid") {
     return "Random";
   }
-  if (controller === "scenario_3") {
-    return "Scenario 3 Controller";
-  }
   if (controller === "scenario_5") {
-    return "Scenario 5 Controller";
+    return "Scenario 3 and 5 Controller";
   }
   return "Manual";
 }
@@ -1948,13 +1945,11 @@ function combatConfigurationFromFrame(frame) {
     !isRecord(candidate) ||
     !isTeamController(candidate.team_a_controller) ||
     (!isTeamController(candidate.team_b_controller) &&
-      candidate.team_b_controller !== "scenario_3" &&
       candidate.team_b_controller !== "scenario_5") ||
     (candidate.execution_information_mode !== "shared_obs" &&
       candidate.execution_information_mode !== "no_shared_obs") ||
     ((candidate.team_a_controller === "reactive_tdm" ||
       candidate.team_b_controller === "reactive_tdm" ||
-      candidate.team_b_controller === "scenario_3" ||
       candidate.team_b_controller === "scenario_5") &&
       candidate.execution_information_mode !== "shared_obs")
   ) {

@@ -2042,54 +2042,53 @@ test("live transport identity accepts Random independently for either team", asy
 });
 
 test("live scenario identity permits only SharedObs Team B without changing Replay", async () => {
-  for (const specialist of ["scenario_3", "scenario_5"]) {
-    for (const kind of ["live_oracle", "live_shared_obs_agent_pov"]) {
-      const pair = clone(fixture.pairs[kind]);
-      pair.transport.combat_configuration.team_b_controller = specialist;
-      pair.transport.combat_configuration.execution_information_mode = "shared_obs";
-      const joined = await joinTransportAndAuthorizedPresentationV1(
-        pair.transport,
-        pair.presentation,
+  const specialist = "scenario_5";
+  for (const kind of ["live_oracle", "live_shared_obs_agent_pov"]) {
+    const pair = clone(fixture.pairs[kind]);
+    pair.transport.combat_configuration.team_b_controller = specialist;
+    pair.transport.combat_configuration.execution_information_mode = "shared_obs";
+    const joined = await joinTransportAndAuthorizedPresentationV1(
+      pair.transport,
+      pair.presentation,
+    );
+    assert.equal(joined.transport.combat_configuration.team_b_controller, specialist);
+    for (const invalid of [
+      { team_a_controller: specialist },
+      { execution_information_mode: "no_shared_obs" },
+      { team_b_controller: "scripted_tdm" },
+      { team_b_controller: "scenario_1" },
+      { team_b_controller: "scenario_3" },
+    ]) {
+      const changed = clone(pair);
+      Object.assign(changed.transport.combat_configuration, invalid);
+      await assert.rejects(
+        () =>
+          joinTransportAndAuthorizedPresentationV1(
+            changed.transport,
+            changed.presentation,
+          ),
+        /combat configuration/u,
       );
-      assert.equal(joined.transport.combat_configuration.team_b_controller, specialist);
-      for (const invalid of [
-        { team_a_controller: specialist },
-        { execution_information_mode: "no_shared_obs" },
-        { team_b_controller: "scripted_tdm" },
-        { team_b_controller: "scenario_1" },
-      ]) {
-        const changed = clone(pair);
-        Object.assign(changed.transport.combat_configuration, invalid);
-        await assert.rejects(
-          () =>
-            joinTransportAndAuthorizedPresentationV1(
-              changed.transport,
-              changed.presentation,
-            ),
-          /combat configuration/u,
-        );
-      }
-      for (const team of ["team_a_controller", "team_b_controller"]) {
-        const reactive = clone(fixture.pairs[kind]);
-        reactive.transport.combat_configuration[team] = "reactive_tdm";
-        reactive.transport.combat_configuration.execution_information_mode =
-          "shared_obs";
-        const installed = await joinTransportAndAuthorizedPresentationV1(
-          reactive.transport,
-          reactive.presentation,
-        );
-        assert.equal(installed.transport.combat_configuration[team], "reactive_tdm");
-        reactive.transport.combat_configuration.execution_information_mode =
-          "no_shared_obs";
-        await assert.rejects(
-          () =>
-            joinTransportAndAuthorizedPresentationV1(
-              reactive.transport,
-              reactive.presentation,
-            ),
-          /combat configuration/u,
-        );
-      }
+    }
+    for (const team of ["team_a_controller", "team_b_controller"]) {
+      const reactive = clone(fixture.pairs[kind]);
+      reactive.transport.combat_configuration[team] = "reactive_tdm";
+      reactive.transport.combat_configuration.execution_information_mode = "shared_obs";
+      const installed = await joinTransportAndAuthorizedPresentationV1(
+        reactive.transport,
+        reactive.presentation,
+      );
+      assert.equal(installed.transport.combat_configuration[team], "reactive_tdm");
+      reactive.transport.combat_configuration.execution_information_mode =
+        "no_shared_obs";
+      await assert.rejects(
+        () =>
+          joinTransportAndAuthorizedPresentationV1(
+            reactive.transport,
+            reactive.presentation,
+          ),
+        /combat configuration/u,
+      );
     }
   }
 });

@@ -114,44 +114,6 @@ def refine_movement(
     return jnp.where(jnp.any(admissible), best, MOVE_STAY).astype(jnp.int32)
 
 
-def _body_clear_moves(
-    origin: Array,
-    endpoints: Array,
-    radius: Array,
-    bodies: Array,
-    body_mask: Array,
-) -> Array:
-    """Screen eight displacement segments against fixed observed body discs.
-
-    This is a conservative local steering preference, not simulator collision
-    resolution. Existing overlaps allow only outward motion; the target and
-    self have already been removed from ``body_mask`` by the caller.
-    """
-    travel = endpoints - origin
-    start = origin - centers(bodies)
-    travel_squared = jnp.sum(jnp.square(travel), axis=-1)
-    initial_alignment = jnp.sum(travel[:, None, :] * start[None, :, :], axis=-1)
-    fraction = jnp.clip(
-        -initial_alignment / jnp.where(travel_squared > 0, travel_squared, 1)[:, None],
-        0,
-        1,
-    )
-    closest = start[None, :, :] + fraction[:, :, None] * travel[:, None, :]
-    closest_squared = jnp.sum(jnp.square(closest), axis=-1)
-    start_squared = jnp.sum(jnp.square(start), axis=-1)
-    end_squared = jnp.sum(
-        jnp.square(endpoints[:, None, :] - centers(bodies)[None, :, :]), axis=-1
-    )
-    required_squared = jnp.square(radius + bodies[:, AGENT_FEATURE_RADIUS])
-    escaping = (initial_alignment >= 0) & (end_squared > start_squared)
-    clear = jnp.where(
-        start_squared < required_squared,
-        escaping,
-        closest_squared >= required_squared,
-    )
-    return jnp.all(~body_mask[None, :] | clear, axis=1)
-
-
 def _body_bypass_moves(
     origin: Array,
     endpoints: Array,
@@ -219,8 +181,6 @@ def _body_aware_move(  # pyright: ignore[reportUnusedFunction]
     prey_center: Array,
     bodies: Array,
     body_mask: Array,
-    *,
-    allow_glancing_contact: bool = False,
 ) -> Array:
     """Choose the closest safe moving endpoint, even if a detour retreats."""
     origin = centers(observation.self_features)
@@ -245,12 +205,11 @@ def _body_aware_move(  # pyright: ignore[reportUnusedFunction]
         agent_agent_overlap_projection_passes=0,
     )[:8]
     displacement = jnp.sqrt(jnp.sum(jnp.square(endpoints - origin), axis=-1))
-    body_screen = _body_bypass_moves if allow_glancing_contact else _body_clear_moves
     admissible = (
         action_mask.move_mask[1:]
         & (speed > 0)
         & (displacement >= MINIMUM_MOVEMENT_FRACTION * speed)
-        & body_screen(origin, endpoints, radius, bodies, body_mask)
+        & _body_bypass_moves(origin, endpoints, radius, bodies, body_mask)
     )
     distance_squared = jnp.sum(jnp.square(endpoints - prey_center), axis=-1)
     move = 1 + jnp.argmin(jnp.where(admissible, distance_squared, jnp.inf))

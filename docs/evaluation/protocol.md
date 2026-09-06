@@ -279,17 +279,20 @@ contract. Critic inputs never become actor availability or evaluation-frame
 actor material.
 
 [Amendment A30](../design/specification_amendments.md#a30-reactive-tdm-and-specialist-scenario-controllers)
-replaces the legacy Scripted TDM/MRP executables with general Reactive TDM and
-a separate Scenario 3 Rogue specialist. Reactive TDM supports either team;
-Scenario 3 supports Team B only.
+retired the legacy Scripted TDM/MRP executables. Reactive TDM supports either team.
 [Amendment A31](../design/specification_amendments.md#a31-scenario-5-priest-pursuit-controller)
-adds Team B's Scenario 5 Controller. Its
+introduced Team B's Scenario 5 Controller. Its
 [A32 behavior v2](../design/specification_amendments.md#a32-scenario-5-shoulder-bypass-and-fallback-prey)
 keeps Reactive TDM for other classes; Rogues pursue observed living Priests
 first, otherwise Hunters, with glancing shoulder contact and independent legal
-combat. The behavior descriptor changes while the private V5 action-source
-payload structure remains unchanged. Scenario 3 retains behavior v1 and strict
-body clearance. All require SharedObs and remain diagnostic or scenario-pressure
+combat. Under
+[A33](../design/specification_amendments.md#a33-one-controller-for-scenarios-3-and-5),
+both scenarios now use this unchanged behavior v2 through the single
+**Scenario 3 and 5 Controller** option. The internal `scenario_5` identity and
+V5 payload remain unchanged; the old Scenario 3 executable is removed while
+historical evidence retains its original identity and outcomes. Earlier Scenario
+3 success claims must be rechecked against the new opponent, not relabelled.
+All current reactive controllers require SharedObs and remain diagnostic or scenario-pressure
 tooling, not official baselines. Random remains diagnostic quality-control
 tooling. Under
 [A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations),

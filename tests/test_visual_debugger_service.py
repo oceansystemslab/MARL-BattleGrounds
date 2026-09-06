@@ -1101,7 +1101,7 @@ def test_frame_build_failure_keeps_epoch_coherent_and_consumes_command_id(
 
 
 @pytest.mark.parametrize("recording", (False, True))
-@pytest.mark.parametrize("team_b", ("scenario_3", "scenario_5"))
+@pytest.mark.parametrize("team_b", ("scenario_5",))
 def test_expected_configuration_rejection_preserves_session_and_recording(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1226,7 +1226,7 @@ def test_expected_configuration_rejection_preserves_session_and_recording(
     assert not service.faulted
 
 
-@pytest.mark.parametrize("team_b", ("scenario_3", "scenario_5"))
+@pytest.mark.parametrize("team_b", ("scenario_5",))
 def test_unexpected_configuration_value_error_still_faults_service(
     monkeypatch: pytest.MonkeyPatch,
     team_b: TeamBController,

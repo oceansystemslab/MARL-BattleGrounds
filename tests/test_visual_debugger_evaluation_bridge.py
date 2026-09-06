@@ -87,7 +87,7 @@ def _context(
             if execution_information_mode is not None
             else "shared_obs"
             if any(
-                controller in ("reactive_tdm", "scenario_3", "scenario_5")
+                controller in ("reactive_tdm", "scenario_5")
                 for controller in (team_a_controller, team_b_controller)
             )
             else "no_shared_obs"
@@ -442,23 +442,6 @@ def test_only_scenario_5_adds_v5_execution_and_keeps_distinct_controller_identit
     assert payload == expected_payload
     with pytest.raises(ValueError, match="requires its controller identity"):
         build_payload(**arguments, team_b_controller="scenario_5")  # type: ignore[arg-type]
-    old_identity = scenario_identity.model_copy(
-        update={"identifier": "scenario-3-pressure-controller", "version": 1}
-    )
-    old_payload = build_payload(
-        **arguments,  # type: ignore[arg-type]
-        team_b_controller="scenario_3",
-        scenario_controller_identity=old_identity,
-    )
-    expected_old_payload = {
-        **expected_payload,
-        "schema_version": 4,
-        "team_b_controller": "scenario_3",
-        "scenario_3_execution_included": True,
-        "scenario_controller": old_identity,
-    }
-    del expected_old_payload["scenario_5_execution_included"]
-    assert old_payload == expected_old_payload
     context = _context(
         team_a_controller=team_a,
         team_b_controller="scenario_5",

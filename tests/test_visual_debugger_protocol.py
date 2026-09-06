@@ -197,7 +197,7 @@ def test_combat_configuration_requires_both_symmetric_controller_values() -> Non
 
 
 @pytest.mark.parametrize("field", ("team_a_controller", "team_b_controller"))
-@pytest.mark.parametrize("retired", ("scripted_tdm", "scenario_1"))
+@pytest.mark.parametrize("retired", ("scripted_tdm", "scenario_1", "scenario_3"))
 def test_combat_configuration_strictly_rejects_retired_controllers(
     field: str, retired: str
 ) -> None:

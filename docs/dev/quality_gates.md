@@ -216,19 +216,19 @@ official baseline.
 ### Reactive controller replacement gates
 
 [Amendment A30](../design/specification_amendments.md#a30-reactive-tdm-and-specialist-scenario-controllers)
-requires one general Reactive TDM implementation and a separate Scenario 3
-Rogue specialist, with no executable legacy TDM or MRP aliases. Generic
+and [A33](../design/specification_amendments.md#a33-one-controller-for-scenarios-3-and-5)
+require one general Reactive TDM implementation and one shared Scenario 3 and 5
+controller, with no executable legacy TDM, MRP or standalone Scenario 3 aliases. Generic
 SharedObs/NoSharedObs, exact masks, RNG-sensitive rollout, capture, and historical
 replay proof must survive removal of the old scorer/profile/trace tests.
 
 Reactive TDM must prove every class boundary and tie, peaceful Priest spacing
 independent of healing, unchanged enemy-visible Mage/Rogue behavior, and the
-existing obstacle-refinement function's unchanged behavior. Scenario 3 must
-prove lowest-health pursuit, independent legal combat, segment-based body
-screening, prey/self exclusion, tangency, overlap-reducing escape, deterministic
-detours, and non-Rogue no-ops. Its actual simulator trajectory must demonstrate
-the stationary-blocker detour; moving-blocker tests verify reactivity rather
-than promise an unbeatable pursuer. Neither proof silently qualifies an
+existing obstacle-refinement function's unchanged behavior. Shared-controller
+proof must retain independent legal combat, segment-based body screening,
+prey/self exclusion, tangency, overlap-reducing escape and deterministic detours.
+Actual stationary- and moving-blocker trajectories verify reactivity rather
+than promise an unbeatable pursuer. No proof silently qualifies an
 official scenario or changes a saved physical setup.
 
 [Amendment A31](../design/specification_amendments.md#a31-scenario-5-priest-pursuit-controller)
@@ -237,7 +237,9 @@ require Scenario 5 proof: non-Rogue action parity with Reactive TDM; observed
 Priest-first, otherwise Hunter pursuit with HP/slot selection within class;
 ordinary Reactive TDM movement when neither prey class is observed alive;
 independent legal combat within Basic radius; and hidden/unavailable information
-noninterference. Retain Scenario 3's strict trajectory/clearance tests unchanged.
+noninterference. Retire obsolete standalone Scenario 3 tests; retain meaningful
+geometry/mask/information proof and physical fixtures. Old strict-steering
+measurements remain historical evidence, not an executable policy copy.
 
 Scenario 5's glancing-contact proof must cover the inclusive 45-degree threshold
 at first contact, head-on rejection at full/slowed/tiny strides, static-world
@@ -249,14 +251,14 @@ defender. Inspect repeated stalls/reversals; a moving defender may re-block.
 Do not infer guaranteed navigation or official qualification from these probes.
 
 Cover all nine general controller pairs plus the three Team A choices against
-each of Scenario 3 and Scenario 5 under SharedObs. Under NoSharedObs, cover the
-four Manual/Random pairs and reject reactive choices. Both specialists on Team A
-are also rejected.
+the single shared specialist under SharedObs. Under NoSharedObs, cover the
+four Manual/Random pairs and reject reactive choices. The specialist on Team A
+and the retired scenario_3 live literal are also rejected.
 Service/HTTP/browser tests must preserve exact reset, authoritative selector
 confirmation, healthy nonfatal rejection, and one same-epoch bank/joint action/
 simulator step. Record installed identities accurately: V5 only for Scenario 5
 combinations, binding behavior v2 without changing the V5 payload structure;
-unchanged V4 and behavior v1 for Scenario 3. Exercise descriptor/version/source
+unchanged V4 for other surviving combinations. Exercise descriptor/version/source
 digest binding and saved-recording reopen. Retain fixed-frame diagnostic payloads
 and readable historical recordings. Both recording recognition paths must be exercised.
 
@@ -375,7 +377,7 @@ publication.
 | Command/service/server behavior | Protocol, input, service, server, and affected real-browser case |
 | Scenario trajectory | Scenario preflight/reference tests |
 | Scenario pressure controller | Deterministic repeated execution, same-epoch SharedObs and exact-mask checks, target/tie/fallback cases, treatment/ablation identity equality, and proof that generic TDM has no scenario-ID branch |
-| Specialist body steering | Scenario 3's strict clearance; Scenario 5's first-contact angle and overlap tolerance; self/prey exclusion, deterministic detours, actual stationary and moving-blocker trajectories, and unchanged general Reactive TDM refinement |
+| Specialist body steering | Shared Scenario 3 and 5 controller's first-contact angle and overlap tolerance; self/prey exclusion, deterministic detours, actual stationary and moving-blocker trajectories, and unchanged general Reactive TDM refinement |
 | Matched scenario ablation | Frozen one-variable contrast, paired independent-run accounting, one primary endpoint plus no more than two supporting margins, replay evidence, and rejection from Elo/training/selection inputs |
 | Training/evaluation manifest boundary | Content-digest closure expansion, fail-closed overlap tests including embedded maps and result feedback, immutable population identities, and restart/reproduction proof |
 | Big 12 final-system selection | Three independent runs for each learned method, validation-only per-run and cross-run selection, frozen cadence/eligibility/ties, and hostile locked-result noninterference |

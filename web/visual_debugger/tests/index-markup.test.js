@@ -95,10 +95,7 @@ test("only Team B exposes the SharedObs scenario controller", async () => {
         ["reactive_tdm", "Reactive TDM"],
         ["random_valid", "Random"],
         ...(id === "devclient-team-b-controller"
-          ? [
-              ["scenario_3", "Scenario 3 Controller"],
-              ["scenario_5", "Scenario 5 Controller"],
-            ]
+          ? [["scenario_5", "Scenario 3 and 5 Controller"]]
           : []),
       ],
     );

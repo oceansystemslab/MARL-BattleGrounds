@@ -136,31 +136,24 @@ NoSharedObs remains available when both teams use Manual or Random, and in
 generic custom research. It is disabled while either team uses a reactive
 controller; the application never silently substitutes a regime or controller.
 
-Team B additionally offers **Scenario 3 Controller**, a deterministic
-SharedObs-only specialist. Rogues pursue the lowest-health observed enemy and
-avoid other observed living bodies; legal Ultimate/Basic targets are selected
-independently by lowest health. Other classes Stay/no-combat, including after
-revival. Its body-avoidance estimate treats observed bodies as stationary and
-does not predict the opponent's pending movement or guarantee a route. This
-specialist is never available on Team A and does not change Reactive TDM's
-ordinary obstacle-only movement refinement.
-
-**Scenario 5 Controller** is also Team B/SharedObs-only. Mage, Warrior, Hunter
+Team B additionally offers **Scenario 3 and 5 Controller**, a deterministic
+SharedObs-only specialist. Mage, Warrior, Hunter
 and Priest use Reactive TDM unchanged. Rogue pursues an observed living enemy
 Priest first, otherwise a Hunter, choosing lowest current HP within the selected
 class and then lowest global slot. If neither class is observed alive, Rogue
 uses ordinary Reactive TDM movement toward the nearest observed enemy or,
 without enemies, map center.
 
-Scenario 5 admits clear paths and glancing shoulder contact at least 45 degrees
-from head-on at the first contact with each intervening observed living body.
+The shared controller admits clear paths and glancing shoulder contact at least
+45 degrees from head-on at the first contact with each intervening observed living body.
 Self and the selected prey are exempt. Tiny initial overlap within the existing
 geometry tolerance counts as contact; deeper overlap permits only non-deepening
 outward escape. Of the useful legal projected moves, choose the endpoint closest
 to prey, with action-order ties and no bonus for avoiding contact entirely;
 temporary retreat is allowed and no qualifying move means Stay. Ordinary
-simulator collision response resolves the attempted contact. Scenario 3 retains
-its strict body-clearance preference.
+simulator collision response resolves the attempted contact. Both scenarios use
+the existing `scenario_5` behavior v2; the old standalone Scenario 3 controller
+is retired, not an alias. Historical recordings retain their original identities.
 
 Combat is independent: Ultimate the lowest-health legal enemy within Basic
 radius, otherwise Basic the lowest-health legal enemy there, otherwise no-combat.
@@ -181,7 +174,7 @@ To play against a reactive controller:
 
 1. Load a valid scenario or map preview, or keep the default diagnostic arena.
 2. Keep Team A Manual and select SharedObs.
-3. Select Reactive TDM, Scenario 3 Controller, or Scenario 5 Controller for Team B.
+3. Select Reactive TDM or Scenario 3 and 5 Controller for Team B.
 4. Stage Team A's actions and Submit; Reset restores the exact starting state.
 
 After editing and saving a scenario, explicitly load its new saved revision to
@@ -197,9 +190,9 @@ Submit works with both teams policy-controlled. Expected configuration rejection
 shows a notice and preserves the session and recording progress without requiring
 reconnect. Genuine internal failures retain their fail-closed protections.
 
-The old Scripted TDM scorer and separate Reactive MRP/`scenario_1` executable
-interface are removed. New identities are
-`reactive-team-deathmatch-controller@1`, `scenario-3-pressure-controller@1`, and
+The old Scripted TDM scorer, separate Reactive MRP/`scenario_1` executable
+interface and standalone Scenario 3 controller are removed. Current reactive
+identities are `reactive-team-deathmatch-controller@1` and
 `scenario-5-pressure-controller@2`. Scenario 5 combinations retain private
 action-source V5; other interactive combinations retain V4. Both record installed
 controllers separately from scenario/map identity. Historical recordings retain their old
@@ -213,7 +206,7 @@ the versioned controller through a separate evaluation definition and apply the
 same controller to every treatment and matched-ablation arm. DevClient play
 remains diagnostic, not official evidence. See
 [A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
-and [A32](../design/specification_amendments.md#a32-scenario-5-shoulder-bypass-and-fallback-prey).
+and [A33](../design/specification_amendments.md#a33-one-controller-for-scenarios-3-and-5).
 Scenario-derived controller rules are not silently eligible for official
 training, and originating-scenario performance is not uncontaminated evaluation.
 

@@ -243,13 +243,11 @@ export function createCombatConfigurationController(bindings) {
     if (
       !isSupportedController(candidate.team_a_controller) ||
       (!isSupportedController(candidate.team_b_controller) &&
-        candidate.team_b_controller !== "scenario_3" &&
         candidate.team_b_controller !== "scenario_5") ||
       (candidate.execution_information_mode !== "shared_obs" &&
         candidate.execution_information_mode !== "no_shared_obs") ||
       ((candidate.team_a_controller === "reactive_tdm" ||
         candidate.team_b_controller === "reactive_tdm" ||
-        candidate.team_b_controller === "scenario_3" ||
         candidate.team_b_controller === "scenario_5") &&
         candidate.execution_information_mode !== "shared_obs")
     ) {
@@ -276,7 +274,6 @@ export function createCombatConfigurationController(bindings) {
     bindings.noSharedOption.disabled =
       configuration?.team_a_controller === "reactive_tdm" ||
       configuration?.team_b_controller === "reactive_tdm" ||
-      configuration?.team_b_controller === "scenario_3" ||
       configuration?.team_b_controller === "scenario_5";
     if (configuration === null) {
       return;
@@ -344,10 +341,7 @@ function installDevClient() {
     teamAController: required("devclient-team-a-controller"),
     teamBController: required("devclient-team-b-controller"),
     informationMode: required("devclient-information-mode"),
-    scenarioControllerOptions: [
-      required("devclient-scenario-controller-option"),
-      required("devclient-scenario-5-controller-option"),
-    ],
+    scenarioControllerOptions: [required("devclient-scenario-5-controller-option")],
     reactiveControllerOptions: [
       required("devclient-team-a-reactive-option"),
       required("devclient-team-b-reactive-option"),

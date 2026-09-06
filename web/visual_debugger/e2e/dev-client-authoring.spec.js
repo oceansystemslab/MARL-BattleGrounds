@@ -445,6 +445,11 @@ test("authoring persists through restart and drives same-start Combat comparison
         team_b_controller: "scenario_5",
         execution_information_mode: "no_shared_obs",
       },
+      {
+        team_a_controller: "manual",
+        team_b_controller: "scenario_3",
+        execution_information_mode: "shared_obs",
+      },
     ].entries()) {
       const forbidden = await page.request.post(
         new URL("/api/command", devClient.url).href,
@@ -1176,31 +1181,25 @@ test("authoring persists through restart and drives same-start Combat comparison
       });
     }
 
-    for (const [specialist, optionId] of [
-      ["scenario_3", "devclient-scenario-controller-option"],
-      ["scenario_5", "devclient-scenario-5-controller-option"],
-    ]) {
-      await expect(page.locator(`#${optionId}`)).toHaveJSProperty("disabled", true);
-      await expect(
-        page.locator(`#devclient-team-a-controller option[value="${specialist}"]`),
-      ).toHaveCount(0);
-    }
+    await expect(
+      page.locator("#devclient-scenario-5-controller-option"),
+    ).toHaveJSProperty("disabled", true);
+    await expect(
+      page.locator('#devclient-team-a-controller option[value="scenario_5"]'),
+    ).toHaveCount(0);
     for (const team of ["a", "b"]) {
       await expect(
         page.locator(`#devclient-team-${team}-reactive-option`),
       ).toHaveJSProperty("disabled", true);
       await expect(
         page.locator(
-          `#devclient-team-${team}-controller option[value="scripted_tdm"], #devclient-team-${team}-controller option[value="scenario_1"]`,
+          `#devclient-team-${team}-controller option[value="scripted_tdm"], #devclient-team-${team}-controller option[value="scenario_1"], #devclient-team-${team}-controller option[value="scenario_3"]`,
         ),
       ).toHaveCount(0);
     }
     await applyLiveCommand(page, () =>
       page.locator("#devclient-information-mode").selectOption("shared_obs"),
     );
-    await expect(
-      page.locator("#devclient-scenario-controller-option"),
-    ).toHaveJSProperty("disabled", false);
     await expect(
       page.locator("#devclient-scenario-5-controller-option"),
     ).toHaveJSProperty("disabled", false);
@@ -1247,7 +1246,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     await expect(page.locator("#devclient-combat-config small")).toHaveCount(0);
     for (const [teamB, controllerLabel] of [
       ["reactive_tdm", "Reactive TDM"],
-      ["scenario_5", "Scenario 5 Controller"],
+      ["scenario_5", "Scenario 3 and 5 Controller"],
     ]) {
       if ((await page.locator("#devclient-team-b-controller").inputValue()) !== teamB) {
         await applyLiveCommand(page, () =>
@@ -1336,11 +1335,8 @@ test("authoring persists through restart and drives same-start Combat comparison
     await applyLiveCommand(page, () =>
       page.locator("#devclient-team-a-controller").selectOption("manual"),
     );
-    await applyLiveCommand(page, () =>
-      page.locator("#devclient-team-b-controller").selectOption("scenario_3"),
-    );
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "scenario_3",
+      "scenario_5",
     );
     await expect(page.locator("#devclient-no-shared-option")).toHaveJSProperty(
       "disabled",
@@ -1353,7 +1349,7 @@ test("authoring persists through restart and drives same-start Combat comparison
       rogueB.locator(".roster-primary-action").click(),
     );
     await expect(page.locator("#command-controlled-actor")).toContainText(
-      "Scenario 3 Controller",
+      "Scenario 3 and 5 Controller",
     );
     await expect(page.locator("#command-target-select")).toBeDisabled();
     const specialistStartStep = specialistFixture.content.global_state.step_count;
@@ -1387,10 +1383,7 @@ test("authoring persists through restart and drives same-start Combat comparison
       "false",
     );
     await expect(page.locator("#devclient-team-b-controller")).toHaveValue(
-      "scenario_3",
-    );
-    await applyLiveCommand(page, () =>
-      page.locator("#devclient-team-b-controller").selectOption("scenario_5"),
+      "scenario_5",
     );
 
     await selectPersistedAsset(page, "#devclient-scenario-select", scenarioId);

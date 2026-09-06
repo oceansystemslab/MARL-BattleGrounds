@@ -41,7 +41,7 @@ type ScenarioMode = Literal["interactive", "scripted"]
 type ScenarioAudience = Literal["researcher", "stress"]
 type SubmissionKind = Literal["interactive", "scripted"]
 type TeamController = Literal["manual", "reactive_tdm", "random_valid"]
-type TeamBController = TeamController | Literal["scenario_3", "scenario_5"]
+type TeamBController = TeamController | Literal["scenario_5"]
 type TeamControllerActionSource = Literal["manual", "scripted", "mixed", "policy"]
 type ScenarioSourceKind = Literal[
     "current_buffer",
@@ -55,7 +55,6 @@ SUPPORTED_TEAM_CONTROLLERS: tuple[TeamController, ...] = (
 )
 SUPPORTED_TEAM_B_CONTROLLERS: tuple[TeamBController, ...] = (
     *SUPPORTED_TEAM_CONTROLLERS,
-    "scenario_3",
     "scenario_5",
 )
 
@@ -414,11 +413,11 @@ class DebuggerSession:
         if self.team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
             raise ValueError(
                 "team_b_controller must be manual, reactive_tdm, random_valid, "
-                "scenario_3, or scenario_5."
+                "or scenario_5."
             )
         if (
             any(
-                controller in ("reactive_tdm", "scenario_3", "scenario_5")
+                controller in ("reactive_tdm", "scenario_5")
                 for controller in (self.team_a_controller, self.team_b_controller)
             )
             and self.evaluation_context.execution_information_mode != "shared_obs"

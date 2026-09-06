@@ -43,7 +43,6 @@ from marl_battlegrounds.policies.no_shared_obs import (
 )
 from marl_battlegrounds.policies.random_valid import random_policy
 from marl_battlegrounds.policies.reactive_tdm import reactive_tdm_policy
-from marl_battlegrounds.policies.scenario_3 import scenario_3_policy
 from marl_battlegrounds.policies.scenario_5 import scenario_5_policy
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsSensorSourceBankV1,
@@ -411,8 +410,6 @@ def _resolve_team_controller_action(
             policy = reactive_tdm_policy
         elif controller == "random_valid":
             policy = _random_shared_obs_policy
-        elif controller == "scenario_3" and team_identity == TEAM_B_ID:
-            policy = scenario_3_policy
         elif controller == "scenario_5" and team_identity == TEAM_B_ID:
             policy = scenario_5_policy
         else:
@@ -602,7 +599,7 @@ def _validate_reactive_controller_selection(
 ) -> None:
     """Check execution boundaries, independently of scenario content."""
     if not any(
-        controller in ("reactive_tdm", "scenario_3", "scenario_5")
+        controller in ("reactive_tdm", "scenario_5")
         for controller in (team_a_controller, team_b_controller)
     ):
         return
@@ -1254,7 +1251,7 @@ def set_combat_configuration(
     if team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
         raise CombatConfigurationRejectedError(
             "team_b_controller must be manual, reactive_tdm, random_valid, "
-            "scenario_3, or scenario_5"
+            "or scenario_5"
         )
     if execution_information_mode not in ("shared_obs", "no_shared_obs"):
         raise CombatConfigurationRejectedError(

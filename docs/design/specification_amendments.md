@@ -2236,3 +2236,40 @@ bounded policy-cost evidence. Diagnostic progress or a finishing attack does
 not establish an official scenario win or release. Official use still needs a
 separately frozen evaluation definition and identical controller identity across
 matched treatments. No saved scenario automatically selects this controller.
+
+## A33. One controller for Scenarios 3 and 5
+
+**Classification:** controller retirement and shared diagnostic usage.
+**Revises:** A30–A32's forward requirement to retain a separate executable
+Scenario 3 controller. A1–A32 and their measured historical evidence remain
+intact. This is not a change to the surviving Scenario 5 algorithm.
+
+DevClient exposes one **Scenario 3 and 5 Controller** on Team B under SharedObs.
+It uses existing `scenario_5`, `scenario-5-pressure-controller` behavior version
+2 unchanged: Rogue pursues observed living Priest first, otherwise Hunter,
+with same-epoch HP/slot ties and shoulder bypass. Without either class, movement
+falls back to ordinary Reactive TDM. Combat independently chooses the
+lowest-health legal enemy within Basic radius, Ultimate before Basic.
+Non-Rogues use ordinary Reactive TDM, including after revival. The actor key
+remains ignored. General Reactive TDM, Random and Core are unchanged.
+
+Remove the standalone Scenario 3 executable, live selector, dispatch, unused
+strict-steering branch and retired-only tests. Retain no aliases or historical
+executable copies. Preserve useful generic regression proof, physical test
+fixtures, historical documents and existing replay bytes. Retired live
+`scenario_3` requests fail ordinary validation without faulting the session;
+historical replay provenance remains readable without executing the old policy.
+
+The surviving controller literal, algorithm identity, descriptor version and
+private V5 payload remain unchanged. Preserve surviving V4/V5 payload fields;
+`scenario_3_execution_included` is fixed false compatibility metadata, not a
+live controller. No new wire format, registry, schema or policy alias is added.
+Launch-source provenance still identifies the actual code revision.
+
+Saved scenarios remain controller-independent. Update their prose using normal
+revision-fenced saves without changing physical content or historical bytes.
+Earlier Scenario 3 results remain tied to the retired opponent and are not
+claims of success against the shared controller. New usage is diagnostic until
+separately qualified; official evaluation still freezes one exact pressure
+protocol across matched treatments. Core, public evaluation roles, Replay
+behavior, scenario physical semantics and A25's SharedObs contract are unchanged.

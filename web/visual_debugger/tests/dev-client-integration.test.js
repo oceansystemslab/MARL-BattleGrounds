@@ -378,7 +378,7 @@ test("Combat configuration remains authoritative until one requested successor i
   const teamAController = { value: "manual", disabled: false };
   const teamBController = { value: "manual", disabled: false };
   const informationMode = { value: "shared_obs", disabled: false };
-  const scenarioControllerOptions = [{ disabled: true }, { disabled: true }];
+  const scenarioControllerOptions = [{ disabled: true }];
   const reactiveControllerOptions = [{ disabled: true }, { disabled: true }];
   const noSharedOption = { disabled: false };
   /** @type {Record<string, string | undefined>} */
@@ -436,7 +436,7 @@ test("Combat configuration remains authoritative until one requested successor i
   assert.equal(root.dataset.executionInformationMode, "no_shared_obs");
   assert.deepEqual(
     scenarioControllerOptions.map((option) => option.disabled),
-    [true, true],
+    [true],
   );
   assert.deepEqual(
     reactiveControllerOptions.map((option) => option.disabled),
@@ -459,23 +459,24 @@ test("Combat configuration remains authoritative until one requested successor i
   controller.install(emitted[1]);
   assert.deepEqual(
     scenarioControllerOptions.map((option) => option.disabled),
-    [false, false],
+    [false],
   );
   assert.deepEqual(
     reactiveControllerOptions.map((option) => option.disabled),
     [false, false],
   );
-  teamBController.value = "scenario_3";
+  teamBController.value = "scenario_5";
   assert.equal(controller.request(), true);
   assert.equal(teamBController.value, "random_valid");
   assert.equal(noSharedOption.disabled, false);
   controller.install(emitted[2]);
-  assert.equal(teamBController.value, "scenario_3");
-  assert.equal(root.dataset.teamBController, "scenario_3");
+  assert.equal(teamBController.value, "scenario_5");
+  assert.equal(root.dataset.teamBController, "scenario_5");
   assert.equal(noSharedOption.disabled, true);
 
   for (const invalid of [
-    { team_a_controller: "scenario_3" },
+    { team_a_controller: "scenario_5" },
+    { team_b_controller: "scenario_3" },
     { execution_information_mode: "no_shared_obs" },
   ]) {
     assert.equal(controller.install({ ...emitted[2], ...invalid }), false);
@@ -483,33 +484,17 @@ test("Combat configuration remains authoritative until one requested successor i
   informationMode.value = "no_shared_obs";
   assert.equal(controller.request(), false);
   assert.equal(informationMode.value, "shared_obs");
-  teamAController.value = "scenario_3";
+  teamAController.value = "scenario_5";
   assert.equal(controller.request(), false);
   assert.equal(teamAController.value, "random_valid");
   assert.equal(emitted.length, 3);
-  teamBController.value = "scenario_5";
-  assert.equal(controller.request(), true);
-  assert.equal(teamBController.value, "scenario_3");
-  assert.equal(root.dataset.teamBController, "scenario_3");
-  assert.equal(controller.install(emitted[3]), true);
+  teamBController.value = "scenario_3";
+  assert.equal(controller.request(), false);
   assert.equal(teamBController.value, "scenario_5");
   assert.equal(root.dataset.teamBController, "scenario_5");
   assert.equal(noSharedOption.disabled, true);
   assert.equal(controller.request(), false);
-  for (const invalid of [
-    { team_a_controller: "scenario_5" },
-    { execution_information_mode: "no_shared_obs" },
-  ]) {
-    assert.equal(controller.install({ ...emitted[3], ...invalid }), false);
-  }
-  teamAController.value = "scenario_5";
-  assert.equal(controller.request(), false);
-  assert.equal(teamAController.value, "random_valid");
-  informationMode.value = "no_shared_obs";
-  assert.equal(controller.request(), false);
-  assert.equal(informationMode.value, "shared_obs");
-  assert.equal(teamBController.value, "scenario_5");
-  assert.equal(emitted.length, 4);
+  assert.equal(emitted.length, 3);
   for (const team of ["team_a_controller", "team_b_controller"]) {
     const next = {
       team_a_controller: "manual",
@@ -524,7 +509,7 @@ test("Combat configuration remains authoritative until one requested successor i
       false,
     );
   }
-  for (const retired of ["scripted_tdm", "scenario_1"]) {
+  for (const retired of ["scripted_tdm", "scenario_1", "scenario_3"]) {
     assert.equal(
       controller.install({ ...emitted[0], team_b_controller: retired }),
       false,

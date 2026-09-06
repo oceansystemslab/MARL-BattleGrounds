@@ -60,8 +60,6 @@ _HAS_PYPLOT = _HAS_MATPLOTLIB and find_spec("matplotlib.pyplot") is not None
         ("random_valid", "manual"),
         ("reactive_tdm", "manual"),
         ("manual", "reactive_tdm"),
-        ("manual", "scenario_3"),
-        ("reactive_tdm", "scenario_3"),
         ("manual", "scenario_5"),
         ("reactive_tdm", "scenario_5"),
         ("random_valid", "scenario_5"),
@@ -93,6 +91,13 @@ def test_recording_launch_rejects_invalid_team_a_controllers(
             SimpleNamespace(
                 team_a_controller=retired_or_forbidden, team_b_controller="manual"
             )
+        )
+
+
+def test_recording_launch_rejects_retired_team_b_controller() -> None:
+    with pytest.raises(ValueError, match="exact team controllers"):
+        _recording_policy_execution_included(
+            SimpleNamespace(team_a_controller="manual", team_b_controller="scenario_3")
         )
 
 

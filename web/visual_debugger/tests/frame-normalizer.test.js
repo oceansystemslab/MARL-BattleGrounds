@@ -2212,7 +2212,8 @@ test("live combat configuration preserves Random and restricts scenarios to Shar
     () => normalizeLiveDebuggerFrameV2(malformed),
     /combat configuration is invalid/u,
   );
-  for (const specialist of ["scenario_3", "scenario_5"]) {
+  {
+    const specialist = "scenario_5";
     const scenario = researcherFrame();
     scenario.combat_configuration.team_b_controller = specialist;
     scenario.combat_configuration.execution_information_mode = "shared_obs";
@@ -2225,6 +2226,7 @@ test("live combat configuration preserves Random and restricts scenarios to Shar
       { execution_information_mode: "no_shared_obs" },
       { team_b_controller: "scripted_tdm" },
       { team_b_controller: "scenario_1" },
+      { team_b_controller: "scenario_3" },
     ]) {
       const changed = structuredClone(scenario);
       Object.assign(changed.combat_configuration, invalid);

@@ -11,7 +11,10 @@ from scripts.dev.visual_debugger.authoring_compiler import (
     CompiledDevScenarioV1,
     compile_dev_scenario,
 )
-from tests.scenario_controller_fixtures import load_scenario_3_draft
+from tests.scenario_controller_fixtures import (
+    SCENARIO_3_SEMANTIC_DIGEST,
+    load_scenario_3_draft,
+)
 
 from marl_battlegrounds.core.env import step
 from marl_battlegrounds.core.types import (
@@ -33,10 +36,8 @@ from marl_battlegrounds.policies.actor import (
     ActorAction,
     build_joint_action_from_actor_actions,
 )
-from marl_battlegrounds.policies.scenario_3 import scenario_3_policy
 from marl_battlegrounds.policies.scenario_5 import scenario_5_policy
 from marl_battlegrounds.policies.shared_obs import (
-    SharedObsPolicy,
     build_default_shared_obs_information_availability,
     build_shared_obs_sensor_source_bank,
     execute_shared_obs_team_policy,
@@ -58,18 +59,20 @@ def scenario(request: pytest.FixtureRequest) -> CompiledDevScenarioV1:
     # Also exercise Priest pursuit with the same test-only body-blocking setup.
     roster = list(draft.content.roster)
     roster[2] = roster[2].model_copy(update={"class_name": request.param})
-    return compile_dev_scenario(
+    compiled = compile_dev_scenario(
         draft.model_copy(
             update={
                 "content": draft.content.model_copy(update={"roster": tuple(roster)})
             }
         )
     )
+    if request.param == "hunter":
+        assert compiled.semantic_digest == SCENARIO_3_SEMANTIC_DIGEST
+    return compiled
 
 
 def _run(
     scenario: CompiledDevScenarioV1,
-    policy: SharedObsPolicy,
     first_warrior_move: int,
 ) -> list[tuple[ActorAction, EnvState]]:
     state, obs, mask = (
@@ -90,7 +93,7 @@ def _run(
             jax.random.split(jax.random.key(tick), 10),
             build_shared_obs_sensor_source_bank(obs),
             availability,
-            policy,
+            scenario_5_policy,
             TEAM_B_ID,
         )
         neutral = jnp.zeros(5, dtype=jnp.int32)
@@ -125,22 +128,18 @@ def _run(
         (MOVE_NORTH, [MOVE_NORTHWEST, MOVE_SOUTHWEST, MOVE_WEST]),
     ],
 )
-def test_shoulder_bypass_reaches_priority_prey_one_decision_before_strict_avoidance(
+def test_shoulder_bypass_preserves_three_tick_priority_prey_finish(
     scenario: CompiledDevScenarioV1,
     warrior_move: int,
     expected_moves: list[int],
 ) -> None:
-    # Only Rogue is alive on Team B before the first wave, so both policies
-    # pursue the same vulnerable prey and choose independent combat targets.
-    strict = _run(scenario, scenario_3_policy, warrior_move)
-    bypass = _run(scenario, scenario_5_policy, warrior_move)
+    # The retired strict controller finished at tick 4 in the b34e343 matched
+    # comparison. Preserve the measured v2 trajectory without executing old code.
+    bypass = _run(scenario, warrior_move)
     assert [int(b.move[3]) for b, _ in bypass[:3]] == expected_moves
     assert [int(b.select_target[3]) for b, _ in bypass[:3]] == [7, 7, 8]
-    assert [int(b.select_target[3]) for b, _ in strict] == [7, 7, 0, 8]
     assert float(bypass[1][1].current_health[2]) == 1
     assert float(bypass[2][1].current_health[2]) == 0
-    assert float(strict[2][1].current_health[2]) == 1
-    assert float(strict[3][1].current_health[2]) == 0
 
     # The Warrior submits Stay on the second tick. Its observed displacement
     # proves real body contact, not a hypothetical endpoint passing a predicate.
@@ -155,8 +154,8 @@ def test_shoulder_bypass_reaches_priority_prey_one_decision_before_strict_avoida
 def test_bypass_responds_to_observed_moving_blocker_not_pending_actions(
     scenario: CompiledDevScenarioV1,
 ) -> None:
-    stationary = _run(scenario, scenario_5_policy, MOVE_STAY)
-    moving = _run(scenario, scenario_5_policy, MOVE_NORTH)
+    stationary = _run(scenario, MOVE_STAY)
+    moving = _run(scenario, MOVE_NORTH)
     for left, right in zip(stationary[0][0], moving[0][0], strict=True):
         np.testing.assert_array_equal(left, right)
     assert int(stationary[1][0].move[3]) == MOVE_WEST

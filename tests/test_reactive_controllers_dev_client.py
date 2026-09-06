@@ -43,22 +43,29 @@ from tests.scenario_controller_fixtures import load_scenario_1
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.core.types import TEAM_A_ID, TEAM_B_ID, EnvConfig, EnvState
+from marl_battlegrounds.evaluation.metrics import build_evaluation_observer_v1
 from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV1,
+    EvaluationEpisodeContextV1,
     canonical_digest_sha256,
 )
-from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
+from marl_battlegrounds.evaluation.replay import (
+    RuntimeProvenanceV1,
+    build_replay_bundle_v1,
+)
 from marl_battlegrounds.evaluation.replay_io import (
     load_replay_bundle_v1,
     preflight_replay_bundle_destination_v1,
+    save_replay_bundle_v1,
 )
+from marl_battlegrounds.policies.actor import ActorAction
 
 
 def _scenario(
     *,
     remaining: int = 5,
     countdown: int = 4,
-    unsupported_alive: bool = False,
+    warrior_hunter_alive: bool = False,
 ) -> DebuggerScenario:
     compiled = load_scenario_1()
     config = compiled.config._replace(
@@ -69,7 +76,7 @@ def _scenario(
             1
         ].set(countdown),
     )
-    if unsupported_alive:
+    if warrior_hunter_alive:
         state = state._replace(
             alive_mask=state.alive_mask.at[6:8].set(True),
             current_health=state.current_health.at[6:8].set(
@@ -95,7 +102,7 @@ def _session(
     *,
     scenario: DebuggerScenario | None = None,
     team_a: TeamController = "manual",
-    team_b: TeamBController = "scenario_3",
+    team_b: TeamBController = "scenario_5",
     recording: bool = False,
 ) -> DebuggerSession:
     launch = debugger_test_launch_specification(7)
@@ -125,9 +132,9 @@ def _tree_equal(left: object, right: object) -> bool:
     )
 
 
-@pytest.fixture(params=("scenario_3", "scenario_5"))
-def scenario_controller(request: pytest.FixtureRequest) -> TeamBController:
-    return cast(TeamBController, request.param)
+@pytest.fixture
+def scenario_controller() -> TeamBController:
+    return "scenario_5"
 
 
 @pytest.mark.parametrize("team_a", ("manual", "reactive_tdm", "random_valid"))
@@ -192,8 +199,7 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
     aggregation = {row.name: row.value for row in context.aggregation_keys}
     assert aggregation["action_source"] == ("mixed" if team_a == "manual" else "policy")
     algorithm = f"{scenario_controller.replace('_', '-')}-pressure-controller"
-    version = 2 if scenario_controller == "scenario_5" else 1
-    assert aggregation["pressure_protocol"] == f"{algorithm}@{version}"
+    assert aggregation["pressure_protocol"] == f"{algorithm}@2"
     if team_a == "reactive_tdm":
         assert (
             aggregation["reactive_tdm_controller"]
@@ -233,14 +239,29 @@ def test_scenario_controller_accepts_any_valid_horizon(
     assert session.scenario.name == "copied_and_renamed_scenario"
 
 
-@pytest.mark.parametrize("unsupported_alive", (False, True))
-def test_scenario_controller_keeps_live_and_reviving_unsupported_classes_idle(
-    unsupported_alive: bool,
+@pytest.mark.parametrize("warrior_hunter_alive", (False, True))
+def test_scenario_controller_keeps_live_and_reviving_classes_reactive(
+    warrior_hunter_alive: bool,
 ) -> None:
     session = _session(
-        scenario=_scenario(countdown=0, unsupported_alive=unsupported_alive),
+        scenario=_scenario(countdown=0, warrior_hunter_alive=warrior_hunter_alive),
     )
     for _ in range(2):
+        baseline = cast(
+            ActorAction,
+            control.execute_shared_obs_team_policy(
+                session.observation,
+                session.action_mask,
+                control._policy_keys(session),  # pyright: ignore[reportPrivateUsage]
+                control.build_shared_obs_sensor_source_bank(session.observation),
+                control.build_default_shared_obs_information_availability(
+                    session.config.agent_profile.active_mask,
+                    session.config.agent_profile.team_ids,
+                ),
+                policy=control.reactive_tdm_policy,
+                team_identity=TEAM_B_ID,
+            ),
+        )
         advanced = control.submit_interactive(session)
         incoming = advanced.incoming_evaluation_view
         assert incoming is not None
@@ -254,7 +275,11 @@ def test_scenario_controller_keeps_live_and_reviving_unsupported_classes_idle(
                     action.move[slot],
                     action.select_target[slot],
                     action.use_ultimate[slot],
-                ) == (0, 0, 0)
+                ) == (
+                    int(baseline.move[slot - 5]),
+                    int(baseline.select_target[slot - 5]),
+                    int(baseline.use_ultimate[slot - 5]),
+                )
         assert bool(jnp.all(advanced.state.alive_mask[6:8]))
         session = advanced
 
@@ -266,11 +291,11 @@ def test_scenario_controller_accepts_either_respawn_clock_order() -> None:
         team_respawn_wave_countdowns=jnp.asarray([0, 4], dtype=jnp.int32),
     )
     asymmetric = replace(scenario, build_scenario=lambda: (config, state))
-    assert _session(scenario=asymmetric).team_b_controller == "scenario_3"
+    assert _session(scenario=asymmetric).team_b_controller == "scenario_5"
     state = state._replace(
         team_respawn_wave_countdowns=jnp.asarray([4, 0], dtype=jnp.int32),
     )
-    assert _session(scenario=asymmetric).team_b_controller == "scenario_3"
+    assert _session(scenario=asymmetric).team_b_controller == "scenario_5"
 
 
 @pytest.mark.parametrize(
@@ -281,7 +306,7 @@ def test_scenario_controller_accepts_either_respawn_clock_order() -> None:
         (5, 4, True),
     ),
 )
-def test_scenario_controller_survives_loading_long_or_unsupported_rosters(
+def test_scenario_controller_survives_loading_long_or_reviving_rosters(
     remaining: int,
     countdown: int,
     alive: bool,
@@ -290,7 +315,7 @@ def test_scenario_controller_survives_loading_long_or_unsupported_rosters(
     session = _session(team_b=scenario_controller)
     loaded = control.switch_scenario(
         session,
-        _scenario(remaining=remaining, countdown=countdown, unsupported_alive=alive),
+        _scenario(remaining=remaining, countdown=countdown, warrior_hunter_alive=alive),
     )
     assert loaded.run_generation == session.run_generation + 1
     assert loaded.seed == session.seed
@@ -528,7 +553,7 @@ def test_pressure_identity_binds_descriptor_version_and_launch_revision(
     )
     descriptor_name = f"{scenario_controller}_controller_descriptor"
     descriptor = getattr(evaluation_bridge, descriptor_name)()
-    original_version = 2 if scenario_controller == "scenario_5" else 1
+    original_version = 2
     assert descriptor["version"] == original_version
     original_descriptor = descriptor.copy()
     algorithm = f"{scenario_controller.replace('_', '-')}-pressure-controller"
@@ -587,10 +612,14 @@ def test_pressure_identity_binds_descriptor_version_and_launch_revision(
     assert changed_row.policy_content_digest != original_row.policy_content_digest
 
 
-@pytest.mark.parametrize("team_b", ("reactive_tdm", "scenario_3", "scenario_5"))
+@pytest.mark.parametrize(
+    "team_b,historical",
+    (("reactive_tdm", False), ("scenario_5", False), ("scenario_5", True)),
+)
 def test_reactive_controller_recording_reopens_without_replay_changes(
     tmp_path: Path,
     team_b: TeamBController,
+    historical: bool,
 ) -> None:
     session = _session(recording=True, team_b=team_b)
     runtime = RuntimeProvenanceV1(
@@ -654,3 +683,45 @@ def test_reactive_controller_recording_reopens_without_replay_changes(
         assert row.policy_kind == team_b
         assert row.algorithm_id == descriptor["policy_id"]
         assert row.policy_content_digest == expected_digest
+
+    if historical:
+        # Synthetic historical provenance exercises the generic reader without
+        # importing, reconstructing, or claiming to execute the retired policy.
+        legacy_payload = context.model_dump(mode="json")
+        for row in legacy_payload["policy_assignments"]:
+            if row.get("policy_kind") == "scenario_5":
+                row.update(
+                    policy_kind="scenario_3",
+                    policy_id=row["policy_id"].replace("scenario_5", "scenario_3"),
+                    algorithm_id="scenario-3-pressure-controller",
+                    policy_content_digest="3" * 64,
+                    parameter_sharing_group_id=row[
+                        "parameter_sharing_group_id"
+                    ].replace("scenario_5", "scenario_3"),
+                )
+        for row in legacy_payload["aggregation_keys"]:
+            if row["name"] == "team_b_controller":
+                row["value"] = "scenario_3"
+            elif row["name"] == "pressure_protocol":
+                row["value"] = "scenario-3-pressure-controller@1"
+            elif row["name"] == "pressure_protocol_digest":
+                row["value"] = "3" * 64
+        legacy_context = EvaluationEpisodeContextV1.model_validate_json(
+            json.dumps(legacy_payload)
+        )
+        observer = build_evaluation_observer_v1(legacy_context)
+        observer.start(reopened.replay.frames[0])
+        observer.append(reopened.replay.transitions[0], reopened.replay.frames[1])
+        report = observer.finalize(
+            completion_state="partial", end_or_failure_reason="user_finish_and_review"
+        )
+        bundle = build_replay_bundle_v1(observer, report, runtime_provenance=runtime)
+        saved = save_replay_bundle_v1(
+            bundle, tmp_path / "retired-controller.marlbg-replay.json"
+        )
+        legacy_reopened = load_replay_bundle_v1(saved.replay_path)
+        assert legacy_reopened.replay.header.context == legacy_context
+        for row in legacy_reopened.replay.header.context.policy_assignments[5:]:
+            assert isinstance(row, AssignedPolicySlotV1)
+            assert row.policy_kind == "scenario_3"
+            assert row.algorithm_id == "scenario-3-pressure-controller"
