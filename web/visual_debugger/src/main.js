@@ -1924,13 +1924,13 @@ function isTeamController(value) {
 /** @param {unknown} controller */
 function combatControllerLabel(controller) {
   if (controller === "reactive_tdm") {
-    return "Reactive TDM";
+    return "Reactive TDM ALPHA";
   }
   if (controller === "random_valid") {
     return "Random";
   }
   if (controller === "scenario_5") {
-    return "Scenario 3 and 5 Controller";
+    return "Reactive TDM BETA";
   }
   return "Manual";
 }

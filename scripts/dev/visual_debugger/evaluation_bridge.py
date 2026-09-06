@@ -48,8 +48,12 @@ from marl_battlegrounds.evaluation.models import (
     canonical_digest_sha256,
     canonical_json_bytes,
 )
-from marl_battlegrounds.policies.reactive_tdm import reactive_tdm_controller_descriptor
-from marl_battlegrounds.policies.scenario_5 import scenario_5_controller_descriptor
+from marl_battlegrounds.policies.reactive_tdm_alpha import (
+    reactive_tdm_alpha_controller_descriptor,
+)
+from marl_battlegrounds.policies.reactive_tdm_beta import (
+    reactive_tdm_beta_controller_descriptor,
+)
 from scripts.dev.visual_debugger.model import (
     SUPPORTED_TEAM_B_CONTROLLERS,
     SUPPORTED_TEAM_CONTROLLERS,
@@ -465,12 +469,12 @@ def build_debugger_evaluation_context_v1(
         )
 
     reactive_tdm_identity = (
-        controller_identity(reactive_tdm_controller_descriptor())
+        controller_identity(reactive_tdm_alpha_controller_descriptor())
         if "reactive_tdm" in (team_a_controller, team_b_controller)
         else None
     )
     scenario_controller_identity = (
-        controller_identity(scenario_5_controller_descriptor())
+        controller_identity(reactive_tdm_beta_controller_descriptor())
         if team_b_controller == "scenario_5"
         else None
     )

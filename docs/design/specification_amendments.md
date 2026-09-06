@@ -2273,3 +2273,49 @@ claims of success against the shared controller. New usage is diagnostic until
 separately qualified; official evaluation still freezes one exact pressure
 protocol across matched treatments. Core, public evaluation roles, Replay
 behavior, scenario physical semantics and A25's SharedObs contract are unchanged.
+
+## A34. Reactive TDM ALPHA and BETA
+
+**Classification:** diagnostic presentation and narrow Rogue pursuit revision.
+**Revises:** A33's current display names and two-class pursuit order only.
+Historical amendments, saved scenarios and replay evidence remain unchanged.
+
+DevClient displays the existing general `reactive_tdm` controller as
+**Reactive TDM ALPHA**, on either team. The surviving `scenario_5` variant is
+displayed as **Reactive TDM BETA**, still Team B-only. Both require SharedObs;
+there is no new registry, controller literal, observation contract or schema.
+
+The general module and callable names become `reactive_tdm_alpha.py`,
+`reactive_tdm_alpha_policy` and `reactive_tdm_alpha_controller_descriptor`;
+this is a behavior-preserving rename. The variant uses `reactive_tdm_beta.py`,
+`reactive_tdm_beta_policy` and `reactive_tdm_beta_controller_descriptor`.
+Update imports directly; retain no `reactive_tdm.py` or `scenario_5.py` alias.
+Stable persisted/live identity strings remain separate from Python module names.
+
+BETA behavior version 3 selects observed, active, living, positive-health enemy
+Priests first, otherwise Mages, otherwise Hunters. Within the selected class,
+lowest current health wins, then lowest global slot. Recompute at every current
+decision epoch. Use the existing glancing shoulder-bypass movement unchanged
+for all three prey classes, exempting self and selected prey from body screening.
+Without any priority prey, Rogue movement falls back to ALPHA: nearest observed
+enemy, otherwise map center, with ordinary obstacle refinement.
+
+Combat remains independent of pursuit: lowest-health legal Ultimate enemy
+within Basic radius, otherwise lowest-health legal Basic enemy there, otherwise
+no-combat. This radius check remains even during the movement fallback; BETA
+does not simply return the entire ALPHA Rogue action when prey is absent.
+Every non-Rogue still delegates directly to unchanged ALPHA. Body geometry,
+movement masks, action ordering, RNG handling and simulator execution do not
+change. The new priority neither implies access to hidden prey nor guarantees
+a route past a moving defender.
+
+The algorithm identity remains `scenario-5-pressure-controller`; its fresh
+descriptor advances to version 3 and records the three-class order. Existing
+V5 provenance carries the updated descriptor/source-bound digest. ALPHA's
+algorithm/version and all prior recording bytes remain unchanged. Old versions
+remain historical evidence, not assertions about the newly selected controller.
+
+ALPHA and BETA remain diagnostic/scenario-pressure tools, not official baselines
+or Big 12 entrants. A recorded full match is inspectable diagnostic evidence,
+not a tournament comparison or scenario qualification. Official scenario use
+still freezes one exact pressure-controller identity across matched treatments.

@@ -42,8 +42,8 @@ from marl_battlegrounds.policies.no_shared_obs import (
     execute_no_shared_obs_team_policy,
 )
 from marl_battlegrounds.policies.random_valid import random_policy
-from marl_battlegrounds.policies.reactive_tdm import reactive_tdm_policy
-from marl_battlegrounds.policies.scenario_5 import scenario_5_policy
+from marl_battlegrounds.policies.reactive_tdm_alpha import reactive_tdm_alpha_policy
+from marl_battlegrounds.policies.reactive_tdm_beta import reactive_tdm_beta_policy
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsSensorSourceBankV1,
     build_default_shared_obs_information_availability,
@@ -407,11 +407,11 @@ def _resolve_team_controller_action(
         if source_bank is None or information_availability is None:
             raise ValueError("SharedObs policy execution requires its source inputs")
         if controller == "reactive_tdm":
-            policy = reactive_tdm_policy
+            policy = reactive_tdm_alpha_policy
         elif controller == "random_valid":
             policy = _random_shared_obs_policy
         elif controller == "scenario_5" and team_identity == TEAM_B_ID:
-            policy = scenario_5_policy
+            policy = reactive_tdm_beta_policy
         else:
             raise ValueError("unsupported team controller")
         return cast(

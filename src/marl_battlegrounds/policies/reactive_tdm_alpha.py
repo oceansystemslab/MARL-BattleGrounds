@@ -43,7 +43,7 @@ HUNTER_TRAP_DISTANCE = 2.0
 WARRIOR_CHARGE_HEALTH = 40.0
 
 
-def reactive_tdm_controller_descriptor() -> dict[str, object]:
+def reactive_tdm_alpha_controller_descriptor() -> dict[str, object]:
     """Return fresh canonical rule data for launch-bound controller provenance."""
     return {
         "policy_id": "reactive-team-deathmatch-controller",
@@ -160,7 +160,7 @@ def _priest_direction(
     return jnp.where(jnp.any(enemy_living), with_enemy, without_enemy)
 
 
-def reactive_tdm_policy(
+def reactive_tdm_alpha_policy(
     recipient_observation: Observation,
     recipient_action_mask: ActionMask,
     actor_key: Array,

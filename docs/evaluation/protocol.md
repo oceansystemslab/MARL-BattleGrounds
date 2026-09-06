@@ -287,8 +287,14 @@ keeps Reactive TDM for other classes; Rogues pursue observed living Priests
 first, otherwise Hunters, with glancing shoulder contact and independent legal
 combat. Under
 [A33](../design/specification_amendments.md#a33-one-controller-for-scenarios-3-and-5),
-both scenarios now use this unchanged behavior v2 through the single
-**Scenario 3 and 5 Controller** option. The internal `scenario_5` identity and
+both scenarios adopted behavior v2 through the single former
+**Scenario 3 and 5 Controller** option. Under
+[A34](../design/specification_amendments.md#a34-reactive-tdm-alpha-and-beta),
+the existing general controller is displayed as **Reactive TDM ALPHA** and
+the shared variant as **Reactive TDM BETA**. BETA behavior v3 pursues Priest,
+then Mage, then Hunter; other classes and no-prey Rogue movement remain ALPHA.
+Rogue combat remains independent of pursuit and bounded by its own Basic radius
+and exact masks. The internal `scenario_5` identity and
 V5 payload remain unchanged; the old Scenario 3 executable is removed while
 historical evidence retains its original identity and outcomes. Earlier Scenario
 3 success claims must be rechecked against the new opponent, not relabelled.

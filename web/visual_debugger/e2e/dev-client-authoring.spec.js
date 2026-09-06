@@ -1245,8 +1245,8 @@ test("authoring persists through restart and drives same-start Combat comparison
     );
     await expect(page.locator("#devclient-combat-config small")).toHaveCount(0);
     for (const [teamB, controllerLabel] of [
-      ["reactive_tdm", "Reactive TDM"],
-      ["scenario_5", "Scenario 3 and 5 Controller"],
+      ["reactive_tdm", "Reactive TDM ALPHA"],
+      ["scenario_5", "Reactive TDM BETA"],
     ]) {
       if ((await page.locator("#devclient-team-b-controller").inputValue()) !== teamB) {
         await applyLiveCommand(page, () =>
@@ -1349,7 +1349,7 @@ test("authoring persists through restart and drives same-start Combat comparison
       rogueB.locator(".roster-primary-action").click(),
     );
     await expect(page.locator("#command-controlled-actor")).toContainText(
-      "Scenario 3 and 5 Controller",
+      "Reactive TDM BETA",
     );
     await expect(page.locator("#command-target-select")).toBeDisabled();
     const specialistStartStep = specialistFixture.content.global_state.step_count;

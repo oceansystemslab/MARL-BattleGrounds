@@ -29,14 +29,14 @@ The Combat Debugger lists execution-valid saved map and scenario revisions.
 Scenario assets load their authored state; maps are clearly identified
 deterministic default-5v5-TDM previews. Both authoring areas call the same strict
 compile/revalidate loader through `Open in Debug`, and either team can use
-**Manual**, **Reactive TDM**, or **Random**. Reactive TDM is one deterministic
+**Manual**, **Reactive TDM ALPHA**, or **Random**. ALPHA is the existing deterministic
 five-class SharedObs controller for either team. Team B also offers the
-SharedObs-only **Scenario 3 and 5 Controller**:
+SharedObs-only **Reactive TDM BETA**:
 other classes use Reactive TDM unchanged; Rogues pursue observed enemy Priests
-first, otherwise Hunters, choosing the lowest-health prey within that class
+first, otherwise Mages, otherwise Hunters, choosing the lowest-health prey within that class
 with global-slot ties. They attempt glancing shoulder routes past intervening
 bodies while independently attacking low-health legal targets. Without an
-observed living Priest or Hunter, Rogue movement falls back to ordinary
+observed living Priest, Mage or Hunter, Rogue movement falls back to ordinary
 Reactive TDM. Shoulder contact uses ordinary simulator collision response and
 does not guarantee a route. These policies are diagnostic/scenario-pressure tools,
 not official baselines or Big 12 entrants. Random remains available under both information
@@ -48,10 +48,10 @@ and submit turns. Reset restores the exact loaded starting state. No task,
 horizon, roster, asset-ID, or respawn restriction applies. Expected rejection
 leaves the session healthy and shows a notice without requiring reconnect.
 Policy-controlled agents remain inspectable but action-read-only. Scenarios 3
-and 5 share one Team B-only option; Reactive TDM is available on either team.
+and 5 share the Team B-only BETA option; ALPHA is available on either team.
 The old standalone Scenario 3, Scripted TDM and separate Reactive MRP executable
 interfaces have been removed. The surviving `scenario_5` identity and behavior
-v2 are unchanged by the shared label. Historical recordings
+v3 identify Priest → Mage → Hunter pursuit. Historical recordings
 remain readable, and fixed-frame scripted diagnostics remain separate.
 See the [Combat Debugger guide](combat_debugger.md#loading-saved-scenarios-and-map-previews)
 for the execution boundaries and loading workflow.

@@ -28,6 +28,7 @@ from marl_battlegrounds.core.types import (
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
     MOVE_EAST,
+    MOVE_NORTH,
     MOVE_NORTHEAST,
     MOVE_STAY,
     MOVE_WEST,
@@ -43,13 +44,13 @@ from marl_battlegrounds.policies.reactive_common import (
     _body_aware_move,  # pyright: ignore[reportPrivateUsage]
     _body_bypass_moves,  # pyright: ignore[reportPrivateUsage]
 )
-from marl_battlegrounds.policies.reactive_tdm import (
-    reactive_tdm_controller_descriptor,
-    reactive_tdm_policy,
+from marl_battlegrounds.policies.reactive_tdm_alpha import (
+    reactive_tdm_alpha_controller_descriptor,
+    reactive_tdm_alpha_policy,
 )
-from marl_battlegrounds.policies.scenario_5 import (
-    scenario_5_controller_descriptor,
-    scenario_5_policy,
+from marl_battlegrounds.policies.reactive_tdm_beta import (
+    reactive_tdm_beta_controller_descriptor,
+    reactive_tdm_beta_policy,
 )
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsPolicy,
@@ -59,8 +60,8 @@ from marl_battlegrounds.policies.shared_obs import (
     execute_shared_obs_team_policy,
 )
 
-_POLICY = cast(SharedObsPolicy, jax.jit(scenario_5_policy))
-_BASELINE = cast(SharedObsPolicy, jax.jit(reactive_tdm_policy))
+_POLICY = cast(SharedObsPolicy, jax.jit(reactive_tdm_beta_policy))
+_BASELINE = cast(SharedObsPolicy, jax.jit(reactive_tdm_alpha_policy))
 _TEAM = cast(Callable[..., ActorAction], execute_shared_obs_team_policy)
 _BYPASS = cast(Callable[..., Array], jax.jit(_body_bypass_moves))
 
@@ -208,7 +209,9 @@ def test_nonrogue_actions_are_exactly_inherited(
     _exact(_act(scenario, obs, mask), _act(scenario, obs, mask, policy=_BASELINE))
 
 
-@pytest.mark.parametrize("prey_class", [PRIEST_CLASS_ID, HUNTER_CLASS_ID])
+@pytest.mark.parametrize(
+    "prey_class", [PRIEST_CLASS_ID, MAGE_CLASS_ID, HUNTER_CLASS_ID]
+)
 def test_priority_pursuit_and_nearby_low_health_combat_are_independent(
     scenario: CompiledDevScenarioV1,
     prey_class: int,
@@ -220,7 +223,9 @@ def test_priority_pursuit_and_nearby_low_health_combat_are_independent(
     assert int(_act(scenario, obs, policy=_BASELINE).move) == MOVE_WEST
 
 
-@pytest.mark.parametrize("prey_class", [PRIEST_CLASS_ID, HUNTER_CLASS_ID])
+@pytest.mark.parametrize(
+    "prey_class", [PRIEST_CLASS_ID, MAGE_CLASS_ID, HUNTER_CLASS_ID]
+)
 def test_priority_health_slot_ties_and_reselection_have_no_memory(
     scenario: CompiledDevScenarioV1,
     prey_class: int,
@@ -237,7 +242,9 @@ def test_priority_health_slot_ties_and_reselection_have_no_memory(
     assert int(_act(scenario, tied).move) == MOVE_EAST
 
 
-@pytest.mark.parametrize("prey_class", [PRIEST_CLASS_ID, HUNTER_CLASS_ID])
+@pytest.mark.parametrize(
+    "prey_class", [PRIEST_CLASS_ID, MAGE_CLASS_ID, HUNTER_CLASS_ID]
+)
 @pytest.mark.parametrize("kind", ["hidden", "dead", "inactive", "zero_health"])
 def test_ineligible_priority_enemy_is_neither_prey_nor_blocker(
     scenario: CompiledDevScenarioV1, prey_class: int, kind: str
@@ -278,7 +285,28 @@ def test_priest_priority_returns_after_hunter_fallback(
     assert int(_act(scenario, obs).move) == MOVE_EAST
 
 
-def test_no_priest_or_hunter_movement_uses_tdm_without_body_screening(
+def test_priest_mage_hunter_priority_overrides_health_and_reselects_each_epoch(
+    scenario: CompiledDevScenarioV1,
+) -> None:
+    obs = _enemy(_observation(scenario), 0, (6, 5), 20, MAGE_CLASS_ID)
+    obs = _enemy(obs, 2, (10, 8), 1, HUNTER_CLASS_ID)
+    obs = _enemy(obs, 4, (14, 5), 50, PRIEST_CLASS_ID)
+    assert int(_act(scenario, obs).move) == MOVE_EAST
+    no_priest = obs._replace(
+        enemy_visibility_mask=obs.enemy_visibility_mask.at[4].set(False)
+    )
+    assert int(_act(scenario, no_priest).move) == MOVE_WEST
+    no_mage = no_priest._replace(
+        enemy_unit_features=no_priest.enemy_unit_features.at[
+            0, AGENT_FEATURE_ALIVE
+        ].set(0)
+    )
+    assert int(_act(scenario, no_mage).move) == MOVE_NORTH
+    assert int(_act(scenario, no_priest).move) == MOVE_WEST
+    assert int(_act(scenario, obs).move) == MOVE_EAST
+
+
+def test_no_priority_prey_movement_uses_tdm_without_body_screening(
     scenario: CompiledDevScenarioV1,
 ) -> None:
     obs = _enemy(_observation(scenario), 0, (13, 5), 20)
@@ -295,7 +323,9 @@ def test_no_priest_or_hunter_movement_uses_tdm_without_body_screening(
     _exact(_act(scenario, no_enemy), _act(scenario, no_enemy, policy=_BASELINE))
 
 
-@pytest.mark.parametrize("prey_class", [PRIEST_CLASS_ID, HUNTER_CLASS_ID])
+@pytest.mark.parametrize(
+    "prey_class", [PRIEST_CLASS_ID, MAGE_CLASS_ID, HUNTER_CLASS_ID]
+)
 def test_prey_contact_is_permitted_but_an_attacked_blocker_is_avoided(
     scenario: CompiledDevScenarioV1,
     prey_class: int,
@@ -501,7 +531,9 @@ def test_rogue_lifecycle_and_stun_force_canonical_noops(
     )
 
 
-@pytest.mark.parametrize("prey_class", [PRIEST_CLASS_ID, HUNTER_CLASS_ID])
+@pytest.mark.parametrize(
+    "prey_class", [PRIEST_CLASS_ID, MAGE_CLASS_ID, HUNTER_CLASS_ID]
+)
 def test_shared_priority_sighting_guides_movement_without_bypassing_own_mask(
     scenario: CompiledDevScenarioV1,
     prey_class: int,
@@ -558,7 +590,9 @@ def test_determinism_eager_jit_team_parity_and_descriptor_freshness(
         scenario.config.agent_profile.team_ids,
     )
     keys = jax.random.split(jax.random.key(0), 10)
-    team = _TEAM(obs, mask, keys, bank, availability, scenario_5_policy, TEAM_B_ID)
+    team = _TEAM(
+        obs, mask, keys, bank, availability, reactive_tdm_beta_policy, TEAM_B_ID
+    )
     for slot in range(5, 10):
         args = (
             cast(Observation, _scalar(obs, slot)),
@@ -568,19 +602,21 @@ def test_determinism_eager_jit_team_parity_and_descriptor_freshness(
             availability[slot],
             jnp.int32(slot),
         )
-        eager = scenario_5_policy(*args)
+        eager = reactive_tdm_beta_policy(*args)
         _exact(eager, _POLICY(*args))
         _exact(eager, _scalar(team, slot - 5))
         _exact(eager, _POLICY(*args[:2], jax.random.key(99), *args[3:]))
         for leaf in eager:
             assert leaf.shape == ()
             assert leaf.dtype == jnp.int32
-    descriptor = scenario_5_controller_descriptor()
-    assert descriptor["version"] == 2
+    descriptor = reactive_tdm_beta_controller_descriptor()
+    assert descriptor["version"] == 3
     assert descriptor["policy_id"] == "scenario-5-pressure-controller"
-    assert descriptor["inherited_controller"] == reactive_tdm_controller_descriptor()
+    assert (
+        descriptor["inherited_controller"] == reactive_tdm_alpha_controller_descriptor()
+    )
     descriptor["version"] = 999
     cast(dict[str, object], descriptor["inherited_controller"])["version"] = 999
-    fresh = scenario_5_controller_descriptor()
-    assert fresh["version"] == 2
-    assert fresh["inherited_controller"] == reactive_tdm_controller_descriptor()
+    fresh = reactive_tdm_beta_controller_descriptor()
+    assert fresh["version"] == 3
+    assert fresh["inherited_controller"] == reactive_tdm_alpha_controller_descriptor()

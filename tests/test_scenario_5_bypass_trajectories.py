@@ -36,7 +36,7 @@ from marl_battlegrounds.policies.actor import (
     ActorAction,
     build_joint_action_from_actor_actions,
 )
-from marl_battlegrounds.policies.scenario_5 import scenario_5_policy
+from marl_battlegrounds.policies.reactive_tdm_beta import reactive_tdm_beta_policy
 from marl_battlegrounds.policies.shared_obs import (
     build_default_shared_obs_information_availability,
     build_shared_obs_sensor_source_bank,
@@ -93,7 +93,7 @@ def _run(
             jax.random.split(jax.random.key(tick), 10),
             build_shared_obs_sensor_source_bank(obs),
             availability,
-            scenario_5_policy,
+            reactive_tdm_beta_policy,
             TEAM_B_ID,
         )
         neutral = jnp.zeros(5, dtype=jnp.int32)

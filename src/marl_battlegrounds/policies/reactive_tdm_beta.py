@@ -1,4 +1,4 @@
-"""Reactive TDM with a shoulder-bypassing Rogue that pursues Priests, then Hunters."""
+"""Reactive TDM BETA: Rogue shoulder pursuit prioritizes Priest, Mage, then Hunter."""
 
 import jax.numpy as jnp
 from jax import Array
@@ -9,6 +9,7 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
     AGENT_FEATURE_CLASS_ID,
     HUNTER_CLASS_ID,
+    MAGE_CLASS_ID,
     MAX_AGENTS_PER_TEAM,
     PRIEST_CLASS_ID,
     ROGUE_CLASS_ID,
@@ -24,9 +25,9 @@ from marl_battlegrounds.policies.reactive_common import (
     living_candidates,
     lowest_health_row,
 )
-from marl_battlegrounds.policies.reactive_tdm import (
-    reactive_tdm_controller_descriptor,
-    reactive_tdm_policy,
+from marl_battlegrounds.policies.reactive_tdm_alpha import (
+    reactive_tdm_alpha_controller_descriptor,
+    reactive_tdm_alpha_policy,
 )
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsSensorSourceBankV1,
@@ -34,19 +35,19 @@ from marl_battlegrounds.policies.shared_obs import (
 )
 
 
-def scenario_5_controller_descriptor() -> dict[str, object]:
+def reactive_tdm_beta_controller_descriptor() -> dict[str, object]:
     """Return fresh rule data, including the inherited general controller rules."""
     return {
         "policy_id": "scenario-5-pressure-controller",
-        "version": 2,
+        "version": 3,
         "information": "same-epoch SharedObs and recipient exact masks",
         "execution": "deterministic; actor key ignored",
-        "inherited_controller": reactive_tdm_controller_descriptor(),
+        "inherited_controller": reactive_tdm_alpha_controller_descriptor(),
         "classes": "non-Rogues delegate unchanged to Reactive TDM",
         "candidates": "observed active living positive-health enemies",
         "pursuit": (
-            "observed living enemy Priest first, else Hunter; lowest current HP "
-            "within class then global slot; recompute every decision"
+            "observed living enemy Priest first, else Mage, else Hunter; "
+            "lowest current HP within class then global slot; recompute every decision"
         ),
         "combat": (
             "within Basic radius: lowest-HP legal Ultimate enemy else lowest-HP "
@@ -71,7 +72,7 @@ def scenario_5_controller_descriptor() -> dict[str, object]:
             "search": "eight directions only; no lookahead or route memory",
         },
         "fallbacks": (
-            "no Priest or Hunter: unchanged Reactive TDM Rogue movement toward "
+            "no Priest, Mage or Hunter: unchanged Reactive TDM Rogue movement toward "
             "nearest enemy or map center, without body screening; "
             "no useful safe move: Stay; "
             "dead/inactive: no-op"
@@ -80,7 +81,7 @@ def scenario_5_controller_descriptor() -> dict[str, object]:
     }
 
 
-def scenario_5_policy(
+def reactive_tdm_beta_policy(
     recipient_observation: Observation,
     recipient_action_mask: ActionMask,
     actor_key: Array,
@@ -89,7 +90,7 @@ def scenario_5_policy(
     recipient_global_slot: Array,
 ) -> ActorAction:
     """Inherit TDM, replacing only Rogue pursuit and radius-bounded combat."""
-    baseline = reactive_tdm_policy(
+    baseline = reactive_tdm_alpha_policy(
         recipient_observation,
         recipient_action_mask,
         actor_key,
@@ -106,8 +107,11 @@ def scenario_5_policy(
     ally_living = living_candidates(allies, ally_visible)
     enemy_living = living_candidates(enemies, enemy_visible)
     priests = enemy_living & (enemies[:, AGENT_FEATURE_CLASS_ID] == PRIEST_CLASS_ID)
+    mages = enemy_living & (enemies[:, AGENT_FEATURE_CLASS_ID] == MAGE_CLASS_ID)
     hunters = enemy_living & (enemies[:, AGENT_FEATURE_CLASS_ID] == HUNTER_CLASS_ID)
-    prey_candidates = jnp.where(jnp.any(priests), priests, hunters)
+    prey_candidates = jnp.where(
+        jnp.any(priests), priests, jnp.where(jnp.any(mages), mages, hunters)
+    )
     prey_row = lowest_health_row(enemies, prey_candidates)
     body_mask = jnp.concatenate((ally_living, enemy_living))
     body_mask = body_mask.at[recipient_global_slot % MAX_AGENTS_PER_TEAM].set(False)

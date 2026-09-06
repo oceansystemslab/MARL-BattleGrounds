@@ -216,9 +216,9 @@ official baseline.
 ### Reactive controller replacement gates
 
 [Amendment A30](../design/specification_amendments.md#a30-reactive-tdm-and-specialist-scenario-controllers)
-and [A33](../design/specification_amendments.md#a33-one-controller-for-scenarios-3-and-5)
-require one general Reactive TDM implementation and one shared Scenario 3 and 5
-controller, with no executable legacy TDM, MRP or standalone Scenario 3 aliases. Generic
+and [A34](../design/specification_amendments.md#a34-reactive-tdm-alpha-and-beta)
+require one general Reactive TDM ALPHA implementation and one BETA variant,
+with no executable legacy TDM, MRP or standalone Scenario 3 aliases. Generic
 SharedObs/NoSharedObs, exact masks, RNG-sensitive rollout, capture, and historical
 replay proof must survive removal of the old scorer/profile/trace tests.
 
@@ -232,10 +232,10 @@ than promise an unbeatable pursuer. No proof silently qualifies an
 official scenario or changes a saved physical setup.
 
 [Amendment A31](../design/specification_amendments.md#a31-scenario-5-priest-pursuit-controller)
-and [A32](../design/specification_amendments.md#a32-scenario-5-shoulder-bypass-and-fallback-prey)
-require Scenario 5 proof: non-Rogue action parity with Reactive TDM; observed
-Priest-first, otherwise Hunter pursuit with HP/slot selection within class;
-ordinary Reactive TDM movement when neither prey class is observed alive;
+and [A34](../design/specification_amendments.md#a34-reactive-tdm-alpha-and-beta)
+require BETA proof: non-Rogue action parity with ALPHA; observed
+Priest-first, otherwise Mage, otherwise Hunter pursuit with HP/slot selection
+within class; ordinary ALPHA movement when no priority class is observed alive;
 independent legal combat within Basic radius; and hidden/unavailable information
 noninterference. Retire obsolete standalone Scenario 3 tests; retain meaningful
 geometry/mask/information proof and physical fixtures. Old strict-steering
@@ -257,7 +257,7 @@ and the retired scenario_3 live literal are also rejected.
 Service/HTTP/browser tests must preserve exact reset, authoritative selector
 confirmation, healthy nonfatal rejection, and one same-epoch bank/joint action/
 simulator step. Record installed identities accurately: V5 only for Scenario 5
-combinations, binding behavior v2 without changing the V5 payload structure;
+combinations, binding BETA behavior v3 without changing the V5 payload structure;
 unchanged V4 for other surviving combinations. Exercise descriptor/version/source
 digest binding and saved-recording reopen. Retain fixed-frame diagnostic payloads
 and readable historical recordings. Both recording recognition paths must be exercised.
@@ -377,7 +377,7 @@ publication.
 | Command/service/server behavior | Protocol, input, service, server, and affected real-browser case |
 | Scenario trajectory | Scenario preflight/reference tests |
 | Scenario pressure controller | Deterministic repeated execution, same-epoch SharedObs and exact-mask checks, target/tie/fallback cases, treatment/ablation identity equality, and proof that generic TDM has no scenario-ID branch |
-| Specialist body steering | Shared Scenario 3 and 5 controller's first-contact angle and overlap tolerance; self/prey exclusion, deterministic detours, actual stationary and moving-blocker trajectories, and unchanged general Reactive TDM refinement |
+| Specialist body steering | BETA's first-contact angle and overlap tolerance; self/prey exclusion, deterministic detours, actual stationary and moving-blocker trajectories, and unchanged ALPHA refinement |
 | Matched scenario ablation | Frozen one-variable contrast, paired independent-run accounting, one primary endpoint plus no more than two supporting margins, replay evidence, and rejection from Elo/training/selection inputs |
 | Training/evaluation manifest boundary | Content-digest closure expansion, fail-closed overlap tests including embedded maps and result feedback, immutable population identities, and restart/reproduction proof |
 | Big 12 final-system selection | Three independent runs for each learned method, validation-only per-run and cross-run selection, frozen cadence/eligibility/ties, and hostile locked-result noninterference |

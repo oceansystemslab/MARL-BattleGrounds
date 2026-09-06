@@ -167,11 +167,11 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
     def executor(*args: object, **kwargs: object) -> object:
         input_epochs.append((args[0], args[1], args[3]))
         if kwargs["team_identity"] == TEAM_B_ID:
-            assert kwargs["policy"] is getattr(control, f"{scenario_controller}_policy")
+            assert kwargs["policy"] is control.reactive_tdm_beta_policy
         else:
             assert kwargs["team_identity"] == TEAM_A_ID
             expected_policy = (
-                control.reactive_tdm_policy
+                control.reactive_tdm_alpha_policy
                 if team_a == "reactive_tdm"
                 else control._random_shared_obs_policy  # pyright: ignore[reportPrivateUsage]
             )
@@ -199,7 +199,7 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
     aggregation = {row.name: row.value for row in context.aggregation_keys}
     assert aggregation["action_source"] == ("mixed" if team_a == "manual" else "policy")
     algorithm = f"{scenario_controller.replace('_', '-')}-pressure-controller"
-    assert aggregation["pressure_protocol"] == f"{algorithm}@2"
+    assert aggregation["pressure_protocol"] == f"{algorithm}@3"
     if team_a == "reactive_tdm":
         assert (
             aggregation["reactive_tdm_controller"]
@@ -258,7 +258,7 @@ def test_scenario_controller_keeps_live_and_reviving_classes_reactive(
                     session.config.agent_profile.active_mask,
                     session.config.agent_profile.team_ids,
                 ),
-                policy=control.reactive_tdm_policy,
+                policy=control.reactive_tdm_alpha_policy,
                 team_identity=TEAM_B_ID,
             ),
         )
@@ -481,7 +481,7 @@ def test_scenario_controller_failure_is_atomic_and_policy_labelled(
         del args
         raise RuntimeError("injected scenario controller failure")
 
-    monkeypatch.setattr(control, f"{scenario_controller}_policy", failed_policy)
+    monkeypatch.setattr(control, "reactive_tdm_beta_policy", failed_policy)
     with pytest.raises(control.DebuggerTransitionFailureV1) as raised:
         control.submit_interactive(session)
     assert raised.value.stable_code == "policy_action_build_failed"
@@ -551,9 +551,9 @@ def test_pressure_identity_binds_descriptor_version_and_launch_revision(
         AssignedPolicySlotV1,
         session.evaluation_context.policy_assignments[5],
     )
-    descriptor_name = f"{scenario_controller}_controller_descriptor"
+    descriptor_name = "reactive_tdm_beta_controller_descriptor"
     descriptor = getattr(evaluation_bridge, descriptor_name)()
-    original_version = 2
+    original_version = 3
     assert descriptor["version"] == original_version
     original_descriptor = descriptor.copy()
     algorithm = f"{scenario_controller.replace('_', '-')}-pressure-controller"
@@ -664,8 +664,12 @@ def test_reactive_controller_recording_reopens_without_replay_changes(
     reopened = load_replay_bundle_v1(recorder.saved_bundle.replay_path)
     assert reopened.replay.header.context == loaded.replay.header.context
     context = reopened.replay.header.context
-    descriptor = getattr(evaluation_bridge, f"{team_b}_controller_descriptor")()
-    expected_version = 2 if team_b == "scenario_5" else 1
+    descriptor = (
+        evaluation_bridge.reactive_tdm_beta_controller_descriptor()
+        if team_b == "scenario_5"
+        else evaluation_bridge.reactive_tdm_alpha_controller_descriptor()
+    )
+    expected_version = 3 if team_b == "scenario_5" else 1
     assert descriptor["version"] == expected_version
     expected_digest = canonical_digest_sha256(
         {"behavior": descriptor, "code_revision": context.code_revision}

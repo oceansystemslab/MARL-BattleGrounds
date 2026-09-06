@@ -123,8 +123,8 @@ changes; failure leaves the current session untouched and returns linked
 problems. Reset restores the immutable loaded snapshot and seed, including its
 map, roster, scores, timers, and current timestep.
 
-Team A and Team B offer **Manual**, **Reactive TDM**, and **Random**. Reactive
-TDM is one deterministic, five-class SharedObs policy, with independent movement
+Team A and Team B offer **Manual**, **Reactive TDM ALPHA**, and **Random**.
+ALPHA is the existing deterministic, five-class SharedObs policy, with independent movement
 and combat priorities. Random samples only the exact current valid action
 support and ignores observation features; the same key and mask therefore
 produce the same action under SharedObs and NoSharedObs. Neither controller is
@@ -136,11 +136,11 @@ NoSharedObs remains available when both teams use Manual or Random, and in
 generic custom research. It is disabled while either team uses a reactive
 controller; the application never silently substitutes a regime or controller.
 
-Team B additionally offers **Scenario 3 and 5 Controller**, a deterministic
+Team B additionally offers **Reactive TDM BETA**, a deterministic
 SharedObs-only specialist. Mage, Warrior, Hunter
 and Priest use Reactive TDM unchanged. Rogue pursues an observed living enemy
-Priest first, otherwise a Hunter, choosing lowest current HP within the selected
-class and then lowest global slot. If neither class is observed alive, Rogue
+Priest first, otherwise Mage, otherwise Hunter, choosing lowest current HP within
+the selected class and then lowest global slot. If none is observed alive, Rogue
 uses ordinary Reactive TDM movement toward the nearest observed enemy or,
 without enemies, map center.
 
@@ -152,7 +152,7 @@ outward escape. Of the useful legal projected moves, choose the endpoint closest
 to prey, with action-order ties and no bonus for avoiding contact entirely;
 temporary retreat is allowed and no qualifying move means Stay. Ordinary
 simulator collision response resolves the attempted contact. Both scenarios use
-the existing `scenario_5` behavior v2; the old standalone Scenario 3 controller
+`scenario_5` behavior v3, displayed as BETA; the old standalone Scenario 3 controller
 is retired, not an alias. Historical recordings retain their original identities.
 
 Combat is independent: Ultimate the lowest-health legal enemy within Basic
@@ -174,7 +174,7 @@ To play against a reactive controller:
 
 1. Load a valid scenario or map preview, or keep the default diagnostic arena.
 2. Keep Team A Manual and select SharedObs.
-3. Select Reactive TDM or Scenario 3 and 5 Controller for Team B.
+3. Select Reactive TDM ALPHA or Reactive TDM BETA for Team B.
 4. Stage Team A's actions and Submit; Reset restores the exact starting state.
 
 After editing and saving a scenario, explicitly load its new saved revision to
