@@ -91,3 +91,21 @@ def load_scenario_6_draft() -> DevScenarioDraftV1:
 def load_scenario_6() -> CompiledDevScenarioV1:
     """Compile Scenario 6 through the unchanged authoring authorities."""
     return compile_dev_scenario(load_scenario_6_draft())
+
+
+SCENARIO_7_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "scenario_7_r25.json"
+SCENARIO_7_SEMANTIC_DIGEST = (
+    "455117f81ff2b7dc8bb9f3d6abee294810c21e2af58fde61f237b20ec33e042e"
+)
+
+
+def load_scenario_7_draft() -> DevScenarioDraftV1:
+    """Read the approved r25 physical setup, not an official evaluation release."""
+    return DevScenarioDraftV1.model_validate_json(
+        SCENARIO_7_FIXTURE_PATH.read_text(encoding="utf-8"),
+    )
+
+
+def load_scenario_7() -> CompiledDevScenarioV1:
+    """Compile Scenario 7 through the unchanged authoring authorities."""
+    return compile_dev_scenario(load_scenario_7_draft())
