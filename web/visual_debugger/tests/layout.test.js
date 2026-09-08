@@ -677,9 +677,9 @@ test("required dock fallback preserves feasible priority truth around one imposs
   );
   assert.ok(cooldownFallback);
   assert.equal(cooldownFallback.compactFallback, true);
-  assert.equal(cooldownFallback.visibleCount, 0);
-  assert.equal(cooldownFallback.hiddenCount, 1);
-  assert.deepEqual(cooldownFallback.hiddenStatuses, [{ ticks: 30 }]);
+  assert.equal(cooldownFallback.visibleCount, 1);
+  assert.equal(cooldownFallback.hiddenCount, 0);
+  assert.deepEqual(cooldownFallback.visibleStatuses, [{ ticks: 30 }]);
   assert.equal(cooldownFallback.collisionFree, true);
   assert.equal(viewportOverflow(cooldownFallback.bounds, VIEWPORT), 0);
   assert.equal(cooldownFallback.bounds.width, 38);
@@ -752,6 +752,44 @@ test("required status fallback retains every selected status behind one compact 
   assert.equal(viewportOverflow(fallback.bounds, VIEWPORT), 0);
   assert.equal(
     rectanglesIntersect(fallback.bounds, layout.protectedBodies[0].bounds),
+    false,
+  );
+});
+
+test("a final status uses its existing cell in ordinary and compact required docks", () => {
+  const items = statuses(2, "last-visible");
+  const body = { globalSlot: 4, center: { x: 300, y: 200 }, radius: 20 };
+  const ordinary = layoutStatusDocks(
+    { agents: [{ ...body, statuses: items }], viewport: VIEWPORT },
+    { ordinaryVisibleLimit: 1 },
+  ).docks[0];
+  assert.deepEqual(ordinary.visibleStatuses, items);
+  assert.equal(ordinary.hiddenCount, 0);
+  assert.equal(ordinary.overflowLabel, null);
+  assert.equal(ordinary.collisionFree, true);
+
+  const compact = layoutRequiredDocks({
+    agents: [{ ...body, statuses: [], selected: true }],
+    requests: [
+      {
+        layoutKey: "status:4",
+        globalSlot: 4,
+        statuses: items.slice(0, 1),
+        dockOptions: { cellWidth: 1_000 },
+        priority: 0,
+      },
+    ],
+    viewport: VIEWPORT,
+  });
+  const fallback = compact.docks[0];
+  assert.equal(fallback.compactFallback, true);
+  assert.deepEqual(fallback.visibleStatuses, items.slice(0, 1));
+  assert.equal(fallback.hiddenCount, 0);
+  assert.equal(fallback.overflowLabel, null);
+  assert.equal(fallback.collisionFree, true);
+  assert.equal(viewportOverflow(fallback.bounds, VIEWPORT), 0);
+  assert.equal(
+    rectanglesIntersect(fallback.bounds, compact.protectedBodies[0].bounds),
     false,
   );
 });

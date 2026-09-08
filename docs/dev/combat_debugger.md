@@ -12,6 +12,18 @@ Scripted demonstrations, checked samples, and existing replay artifacts belong
 to the separate [Replay Viewer](replay_viewer.md). It receives no DevClient
 navigation or authoring authority.
 
+The task selector currently offers TDM. Its scoreboard shows Team A/Team B
+controller identities, authoritative scores and the configured target, including
+loaded scenarios. Task completion adds each team's victory, draw or defeat.
+Legacy neutral debugging configurations are labelled Combat diagnostic.
+Critical evaluation metrics are computed from retained capture after recording
+stops, then included in the adjacent replay report. Full metrics are off by default. DevClient runs no full metric
+suite every simulation tick; metric inspection and CSV export belong to Replay
+Viewer.
+Finishing a recording displays an indeterminate progress indicator while its
+metrics are prepared. Longer recordings can take longer; the indicator makes no
+fixed-duration promise. Ordinary live steps do not compute the full suite.
+
 ## Launch
 
 Open the default Oracle view:
@@ -315,8 +327,12 @@ Frame is allowlisted by authority: Episode, Frame, Simulator step, and
 conditional Incoming transition. The initial frame has no incoming-transition
 row.
 
-Visual Filters contains 18 independently controlled paint families plus the
-Ranges control. All 19 visible controls are enabled by default:
+Visual Filters contains 18 independently controlled paint families plus Ranges.
+Initially enable Ultimate Ability Effects, Spawn Shield, Basic Ability Effects,
+Regeneration Effects, Death Effects, Resurrection Effects, Scrolling Battle
+Text and Respawn Wave. Together with default Ranges this gives `9 enabled`.
+Visual Filters and Roster start open; Enable All still selects all 19 controls.
+The complete inventory is:
 
 1. Aura Fields
 2. Aura Modifier Badges
@@ -338,6 +354,9 @@ Ranges control. All 19 visible controls are enabled by default:
 18. Scrolling Battle Text
 
 Duration Status Badges includes the white crossed-swords **In Combat** countdown.
+An overflow badge represents at least two hidden statuses. If only one remains,
+its actual status and duration occupy the cell. Compact and ordinary overflow
+use the same centered solid badge.
 Basic Ability Effects and Ultimate Ability Effects each own their corresponding
 activation presentation and damage/healing impact glyphs. Scrolling Battle
 Text owns the complete net-health unit: outcome glyph, signed value, recipient
@@ -371,9 +390,9 @@ Recording retains one canonical metric-complete trajectory in memory. Each
 accepted submit still performs exactly one transition and one canonical
 capture; there is no per-transition replay-file write.
 
-- **Finish & Review** closes an open prefix, publishes and validates the replay
-  plus adjacent `.marlbg-metrics.json`, and changes the same loopback page to
-  settled read-only review at frame zero.
+- **Finish & Review** closes an open prefix, computes its metric report, publishes
+  the replay plus adjacent `.marlbg-metrics.json`, and changes the same loopback
+  page to settled read-only review at frame zero.
 - Task termination or the declared horizon closes and saves automatically.
   **Review Replay** performs the frame-zero handoff when requested.
 - **Retry save** republishes the exact cached bytes or verifies an already
@@ -432,3 +451,9 @@ connection loss, and use **Exit Combat Debugger** or `Ctrl-C` to stop Python.
 
 Return to the [browser-tools migration page](visual_debugger.md) or the
 [project README](../../README.md).
+
+Recorded games save critical TDM/evaluation metrics by default: outcome, terminal
+score difference, return, episode length, and completion/failure status. Full
+metrics are off by default. Open Replay Viewer detailed analysis to request the
+complete metric suite from the captured game; this does not replace its original
+lightweight sidecar.

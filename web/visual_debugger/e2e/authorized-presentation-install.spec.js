@@ -533,7 +533,7 @@ async function cp5Slice5AssertHiddenTransportNoninterference(
   expectedPresentationKind,
 ) {
   await page.goto("about:blank");
-  await openProduct(page, productUrl, "replay");
+  await openProduct(page, productUrl, "replay", { allVisualFilters: true });
   const baselineTransport = await authenticatedGet(page, "/api/frame");
   const baselinePresentationBody = await cp5Slice5PresentationBody(page);
   const baselinePresentation = JSON.parse(baselinePresentationBody);
@@ -567,7 +567,7 @@ async function cp5Slice5AssertHiddenTransportNoninterference(
     await route.fulfill({ response, json: transport });
   });
   try {
-    await openProduct(page, productUrl, "replay");
+    await openProduct(page, productUrl, "replay", { allVisualFilters: true });
     const mutatedTransport = await authenticatedGet(page, "/api/frame");
     const mutatedPresentationBody = await cp5Slice5PresentationBody(page);
     const mutatedPresentation = JSON.parse(mutatedPresentationBody);
@@ -604,7 +604,7 @@ async function cp5Slice5AssertHiddenTransportNoninterference(
   }
   expect(mutationCount).toBeGreaterThan(0);
   await page.goto("about:blank");
-  await openProduct(page, productUrl, "replay");
+  await openProduct(page, productUrl, "replay", { allVisualFilters: true });
 }
 
 /** @param {string} captureDirectory */
@@ -1358,8 +1358,9 @@ async function captureCp4ENativeState(page, options) {
  * @param {import("@playwright/test").Page} page
  * @param {string} url
  * @param {"live" | "replay"} mode
+ * @param {{allVisualFilters?: boolean}} [options]
  */
-async function openProduct(page, url, mode) {
+async function openProduct(page, url, mode, { allVisualFilters = false } = {}) {
   captureBrowserErrors(page);
   await page.goto(url);
   await expect(page.locator("#connection-status")).toHaveText("Online", {
@@ -1371,6 +1372,22 @@ async function openProduct(page, url, mode) {
   );
   await expect(page.locator("html")).toHaveAttribute("data-viewer-mode", mode);
   expect(page.url()).not.toContain("token=");
+  if (allVisualFilters) {
+    await enableAllVisualFilters(page);
+  }
+}
+
+/** @param {import("@playwright/test").Page} page */
+async function enableAllVisualFilters(page) {
+  await openDetails(page, ["#visual-filters"]);
+  const button = page.locator("#enable-all-visual-filters-button");
+  if (await button.isEnabled()) {
+    await button.click();
+  }
+  await expect(
+    page.locator('#visual-filter-options input[type="checkbox"]:not(:checked)'),
+  ).toHaveCount(0);
+  await expect(page.locator("#connection-status")).toHaveText("Online");
 }
 
 /**
@@ -2433,6 +2450,7 @@ test("all five real service leaves install with safe pending continuity", async 
     "live",
     "combat_debugger",
   );
+  await enableAllVisualFilters(page);
   const liveOracle = await expectInstalledLeaf(
     page,
     "researcher_live_debugger",
@@ -3413,6 +3431,7 @@ test("all five real service leaves install with safe pending continuity", async 
   await expect(page.locator("#battlefield .legality-dock")).toHaveCount(0);
   await replayTargetSelectionFilter.check();
   await expect(replayTargetSelectionFilter).toBeChecked();
+  await enableAllVisualFilters(page);
   await expectReplayInspectionDom(page, replayOracleSelected);
   const replayOracleDocumentationBefore = await page
     .locator("#selection-card")
@@ -4161,7 +4180,7 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
       return passes.slice(0, 3);
     };
 
-    await openProduct(page, movingReplay.url, "replay");
+    await openProduct(page, movingReplay.url, "replay", { allVisualFilters: true });
     const movingFrameZero = await expectInstalledLeaf(
       page,
       "researcher_replay_viewer",
@@ -4387,7 +4406,7 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
 
     await page.setViewportSize({ width: 960, height: 600 });
     await installWaapiAutopause(page);
-    await openProduct(page, recoveryReplay.url, "replay");
+    await openProduct(page, recoveryReplay.url, "replay", { allVisualFilters: true });
     const recoveryFrameZero = await expectInstalledLeaf(
       page,
       "researcher_replay_viewer",
@@ -5339,7 +5358,7 @@ async function runCp5Slice5Proof(
   const proveOracleTrajectory = async (productUrl, contract) => {
     if (!contract.povFirst) {
       await page.goto("about:blank");
-      await openProduct(page, productUrl, "replay");
+      await openProduct(page, productUrl, "replay", { allVisualFilters: true });
     }
     const bootstrap = await authenticatedGet(page, "/api/presentation/frame");
     const selectedIdentity = /** @type {Record<string, any>[]} */ (
@@ -5662,7 +5681,7 @@ async function runCp5Slice5Proof(
   /** @param {string} productUrl */
   const proveDurationOnePov = async (productUrl) => {
     await page.goto("about:blank");
-    await openProduct(page, productUrl, "replay");
+    await openProduct(page, productUrl, "replay", { allVisualFilters: true });
     for (let frameIndex = 0; frameIndex <= 3; frameIndex += 1) {
       if (frameIndex > 0) {
         await seekReplay(page, frameIndex);
@@ -6815,7 +6834,7 @@ async function runCp5Slice5Proof(
         povSlot: 0,
       });
       await page.goto("about:blank");
-      await openProduct(page, activeReplay.url, "replay");
+      await openProduct(page, activeReplay.url, "replay", { allVisualFilters: true });
       await seekReplay(page, 1);
       const shared = await authenticatedGet(page, "/api/presentation/frame");
       expect(shared.presentation_kind).toBe("replay_shared_obs_agent_pov");
@@ -7151,7 +7170,7 @@ test("real death and respawn keep one opaque Oracle body identity", async ({
   if (!deathReplay) {
     throw new Error("Death replay service is unavailable.");
   }
-  await openProduct(page, deathReplay.url, "replay");
+  await openProduct(page, deathReplay.url, "replay", { allVisualFilters: true });
   const initial = await expectInstalledLeaf(
     page,
     "researcher_replay_viewer",
@@ -7345,7 +7364,7 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
   ]) {
     await page.setViewportSize(viewport);
     await page.goto("about:blank");
-    await openProduct(page, deathReplay.url, "replay");
+    await openProduct(page, deathReplay.url, "replay", { allVisualFilters: true });
     await seekReplay(page, 0);
     const initial = await authenticatedGet(page, "/api/presentation/frame");
     expect(initial.source.source_frame_index).toBe(0);

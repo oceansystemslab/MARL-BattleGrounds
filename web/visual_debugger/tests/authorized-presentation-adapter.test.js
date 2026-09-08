@@ -28,7 +28,7 @@ import {
 } from "../src/authorized-presentation-adapter.js";
 import { normalizeAuthorizedPresentationFrameV1 } from "../src/authorized-presentation-normalizer.js";
 import { explainChoreographyEvent } from "../src/choreography-painter.js";
-import { buildChoreographyPlan } from "../src/choreography-plan.js";
+import { buildChoreographyPlan as buildPlan } from "../src/choreography-plan.js";
 import {
   explainActivation,
   explainLegality,
@@ -40,6 +40,16 @@ import {
   explainSpawnShield,
 } from "../src/explanations.js";
 import { resealEmptyLocalOracleCorpseOverlay } from "./authorized-presentation-test-support.js";
+import {
+  DEFAULT_VISUAL_FILTER_STATE,
+  enableAllVisualFilters,
+} from "../src/visual-filters.js";
+
+// Exercise every authorized paint family independently of initial UI choices.
+const ALL_VISUAL_FILTERS = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
+/** @type {typeof buildPlan} */
+const buildChoreographyPlan = (presentation, surface, filters = ALL_VISUAL_FILTERS) =>
+  buildPlan(presentation, surface, filters);
 
 const fixture = JSON.parse(
   readFileSync(

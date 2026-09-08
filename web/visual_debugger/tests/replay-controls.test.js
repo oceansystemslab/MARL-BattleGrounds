@@ -1161,3 +1161,31 @@ test("Play replays middle and final incoming transitions before any continuation
     REPLAY_TRANSPORT_STATES.SETTLED,
   );
 });
+
+test("resuming after a view change advances without replaying the current effect", async () => {
+  const currentPresentation = deferred();
+  const successorPresentation = deferred();
+  let waits = 0;
+  /** @type {Array<Readonly<Record<string, any>>>} */
+  const requests = [];
+  const controller = new ReplayPlaybackController({
+    request: async (command) => {
+      requests.push(command);
+      return { frame: { cursor: cursor(2, 3) } };
+    },
+    waitForPresentation: () =>
+      (waits++ === 0 ? currentPresentation : successorPresentation).promise,
+  });
+  installConnected(controller, cursor(1, 3));
+  controller.play({ restartCurrent: false });
+  assert.equal(controller.snapshot().presentationIntent?.renderPolicy, "replay_static");
+  assert.equal(controller.snapshot().presentationIntent?.restartAnimated, false);
+  currentPresentation.resolve();
+  await flushMicrotasks();
+  assert.deepEqual(requests, [replayNavigationCommand("next")]);
+  assert.equal(controller.snapshot().cursor?.frame_index, 2);
+  controller.pause();
+  successorPresentation.resolve();
+  await flushMicrotasks();
+  assert.equal(requests.length, 1);
+});

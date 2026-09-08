@@ -13,6 +13,10 @@ They deliberately favor the four project North Stars: researcher-centricity,
 low sample complexity, meaningful tactical and strategic team behavior, and
 professional MARL/software engineering.
 
+**Current roadmap numbering:** A36 records the 2026-09-07 executive override.
+Earlier amendments and historical filenames retain their original milestone
+numbers; use A36's mapping when following the current delivery order.
+
 ## A1. Actor execution-information regimes
 
 **Classification:** risky, accepted design drift.
@@ -1709,10 +1713,12 @@ frame-indexed action tape or inspect facts outside the actor contract. All
 controlled actions are chosen from the same `o_t` and `m_t` as the evaluated
 actors, assembled into one joint action, and enter one ordinary simulator step.
 
-The intended initial twelve-scenario suite uses five-transition evidence
-horizons. Five transitions are a property of those frozen evaluation
-definitions, not a global restriction on the scenario schema, DevClient, or a
-future controlled suite.
+The approved initial suite contains eight TDM scenarios. Scenarios 1, 2 and
+4–8 have five-transition evidence horizons. Scenario 3 alone has an approved
+ten-transition horizon to examine sustained body blocking; its canonical
+respawn-wave period remains five transitions. These are properties of the
+frozen evaluation definitions, not a global scenario-schema restriction.
+See A36 for the executive acceptance and supersession record.
 
 The primary scientific role of an official scenario is a matched behavioral-
 ablation comparison:
@@ -2368,3 +2374,177 @@ defenders can re-block, and other local jams remain possible. The user accepts
 these limits for diagnostic use. Official scenario evidence must still freeze
 and separately qualify its exact controller identity; this change neither
 completes M7 nor qualifies a scientific scenario.
+
+## A36. Submission roadmap, approved TDM content and M7 closeout
+
+**Authority:** explicit executive decisions from the user on 2026-09-07.
+**Classification:** approved roadmap/scope override and developer-tool contract.
+**Supersedes:** the historical PDF's remaining milestone ordering and scenario
+count; A26's twelve-scenario target and uniform five-transition horizon;
+private plans requiring further scenario/map design approval or Scenario 3
+re-approval; and the provisional post-manuscript placement of LLM integration.
+This amendment records decisions and planned work, not implementation completion.
+
+### Current milestone names and numbering
+
+| Current milestone | Name | Historical milestone |
+| --- | --- | --- |
+| M7 | TDM Benchmark and Researcher Tools | M7 |
+| M8 | Policy Execution and Evaluation | M10 |
+| M9 | Training Distributions and Curriculum | M11 |
+| M10 | Learning Platform and Baselines | M12 |
+| M11 | LLM-Agent Integration | M14 |
+| M12 | Manuscript Experiments and Release | M13 |
+| M13 | King of the Hill | M8 |
+| M14 | Capture the Flag | M9 |
+
+The submission sequence is M7 through M12. M13 and M14 begin after manuscript
+submission. Milestones 1–6 retain their identities. The current M12 owns full
+manuscript training runs, behavioral ablations, the frozen Paper 1 tournament,
+analysis and release artifacts. Earlier milestones qualify their machinery
+with focused tests and bounded pilots; protocols and selection rules are
+frozen before the dependent full runs.
+
+Historical PDF/amendment references, commit history, private filenames and
+versioned schema identifiers are not mechanically renumbered. Their old numbers
+are aliases under this table. New plans use the current name/number and give
+the historical alias when needed to disambiguate a source. Existing private
+handoffs remain at their original paths with an explicit current-name notice.
+
+### Approved scenarios and maps
+
+The TDM suite is exactly Scenarios 1–8. Scenario authoring and design approval
+are complete; no Scenarios 9–12 or extra winning-witness approval gates are
+required for M7. The user confirms Scenario 3 r24 has been reviewed and
+accepted. Its ten-transition horizon is the sole suite exception, intentionally
+testing sustained body blocking. The respawn-wave period is five, not ten;
+an authored current countdown of four is compatible with that period and must
+not be changed merely to match its name. Stale r23/twelve-wall/review-pending
+prose must be corrected without silently changing approved physical content.
+Do not describe the user's acceptance as a newly executed Codex witness.
+
+All forty base maps and twelve curriculum maps are approved. No additional
+map-design approval, general balance campaign or reachability re-approval is
+introduced by M7 closeout. A read-only vertical-reflection audit is the sole
+additional map approval check the user permits. Exact revision/digest capture,
+loading validation and manifest packaging implement those existing decisions;
+they do not reopen approval or authorize physical asset edits.
+
+Canonical evaluation uses mirrored five-class 5v5 teams: Mage faces Mage,
+Warrior faces Warrior, Hunter faces Hunter, Rogue faces Rogue and Priest faces
+Priest at reflected same-class starting pads. Reflection is about the vertical
+map centerline (x = width/2 in the stored coordinate system). Preserve the
+existing paired side assignments. Geometric symmetry supports equal starting
+geometry; it does not by itself prove every numerical or policy behavior is
+side-invariant.
+
+The permitted audit now passes all 52 maps: exact authored obstacle reflection
+and exact opposing same-slot spawn pads. The user corrected Darkspear in r4,
+moving only `obstacle_6` from x=14.5 to x=13.5 to reflect `obstacle_1` at x=6.5.
+All other audited map bytes are unchanged. Compiled geometry agrees within
+1e-5 world units after float32 conversion (largest discrepancy approximately
+3.09e-8). Scenario 3 r25 is a prose-only successor to the accepted r24; its
+physical semantic digest is unchanged. These provenance updates implement the
+existing approvals and do not reopen them.
+
+### Final M7 DevClient and Replay Viewer work
+
+- DevClient has a task selector containing TDM only. Replay Viewer derives
+  task identity from the recorded configuration.
+- Both display authoritative current scores and configured threshold, Team A
+  in blue and Team B in red, plus truthful controller/model identities. At
+  authoritative completion, each team's label is VICTORY (green), DRAW (light
+  gray) or DEFEAT (dark red). This applies to scenarios too; an unfinished or
+  interrupted recording is not a completed loss or draw.
+- Replay Viewer gets a TDM evaluation-metrics disclosure immediately below
+  Comprehensive Agent Class Details and a usable CSV export. Keep canonical
+  JSON provenance available. Show all applicable implemented episode metrics,
+  with explicit pending, unavailable, conditional and zero-opportunity states.
+  Do not invent single-replay population/learning/rating values or activate
+  rejected/pending scientific metrics merely to fill the panel.
+- Prefer a single host analysis pass with cached cursor-prefix summaries and
+  a separate final report. Prefix values consume no future frames; complete-only
+  results remain pending until completion. Measure preparation, memory and
+  lookup cost before claiming cheap progressive inspection. DevClient has no
+  full metric panel and does not run the full suite every simulation tick.
+- Initially enable exactly Ultimate Ability Effects, Spawn Shield, Basic
+  Ability Effects, Regeneration Effects, Death Effects, Resurrection Effects,
+  Scrolling Battle Text and Respawn Wave. Initially open both Visual Filters
+  and Roster. Preserve the existing filter meanings and controls; Enable All
+  must still enable every filter.
+- Oracle and Agent POV switching must work at any replay cursor without a
+  crash/reconnect or stale-authority leakage. Preserve the durable timestep and
+  subsequent playback behavior.
+- Use one visual/layout authority for status overflow. When one status remains,
+  display that status and its duration rather than `+1`. For two or more, use
+  the existing readable solid gray, black-filled, centered `+N` badge. Preserve
+  collision handling, owner association, authorized visibility and accessibility.
+
+Implementation should favor small, cohesive extensions to existing authorities.
+The metrics panel is researcher analysis, not actor input; changing battlefield
+POV does not grant a policy access to it or to Oracle facts.
+
+### Metric computation and training persistence
+
+The user's subsequent 2026-09-07 scalability decision removes repeated deep
+validation of trusted computed metric state and final reports. The tested
+reducer pipeline owns its formulas and immutable output contract. Runtime keeps
+cheap type/identity, progress, eligibility, row uniqueness and provenance checks;
+external artifact ingestion and independent semantic tests remain authoritative
+verification boundaries. Do not retain a second expensive audit-mode pipeline.
+Completion and failure metadata remain explicit; this decision changes cost,
+not scientific metric definitions or actor information.
+
+Metric computation returns data without automatically writing files. Current
+M10 training defaults to lightweight episode statistics. Full evaluation metrics
+are off by default throughout the metric APIs and ordinary recording. The
+critical default set is outcome distribution, terminal score differential,
+evaluation return, episode length, and completion/failure metadata. Absolute
+scores retain their existing replay/scoreboard authority. Detailed TDM metrics
+require explicit opt-in, including requests for Replay Viewer detailed analysis.
+Periodic diagnostics and validation-map evaluation must reuse the same evaluator.
+The proposed downstream interface is one interval, a selected validation-map set,
+a match count, and critical/full metrics. The packaged validation-map labels are
+24, 29, 30, 32 and 37; frozen manifests remain split-membership authority. The
+user requests measured costs before finalizing cadence/API details, so this is
+a provisional handoff, not an activated scheduler. Log any eventual schedule and
+selected episode identities.
+Replay recording
+is independently opt-in or sampled. Training logging appends batches to one
+CSV per run and flushes periodically, avoiding both per-episode file proliferation
+and an end-only write that loses the entire run on interruption. Ladder evaluation
+retains one results CSV with match identities and sufficient counts/sums, plus
+running summaries over the declared N matches grouped by matchup, roster/map and
+side. Pool ratio numerators and opportunities; do not average percentages with
+unequal denominators or retain only an irreversible grand mean. Preserve failure,
+draw and exclusion counts and sufficient evidence for the declared uncertainty
+analysis. M7 provides
+reusable computation; the training control and writer belong to the learning
+platform. Measure computation, artifact loading, replay indexing and persistence
+separately. Loading UI must describe actual work, without claiming that removed
+validation establishes trust or normalizing a minute-long metrics budget.
+
+### Public ladder display
+
+The public ladder displays Elo, win/loss/draw percentages, matches played and
+the identities of the evaluated systems. It does not broadcast the full tactical
+metric suite. Reproducing researchers may explicitly enable full diagnostics
+when running the ladder locally. The user prefers one secondary team K/D column: total tournament kills divided
+by total tournament deaths, with no-death results displayed as unavailable.
+Retain raw totals internally; do not average per-match ratios or use K/D as an
+additional rating input. This narrow team-level display supersedes earlier
+broad K/D rejection; individual killer attribution and agent K/D remain rejected.
+TDM team totals use authoritative score increments
+or recorded death counts, respecting any nonzero initial score. Selected
+manuscript analyses remain a separate reporting surface.
+
+### Implementation boundary
+
+M7's planned sweep includes explicitly identified host/evaluation, transport,
+presentation, browser, test and documentation code. It does not authorize changes
+under `src/marl_battlegrounds/core/`. If a missing fact or defect requires Core
+work, Codex must stop the affected slice and ask for express approval, naming
+the exact file/function, reason, behavioral impact and proposed scope. A host
+reimplementation of simulator rules is not an acceptable way around that gate.
+No Core change is currently planned. Existing action/observation, policy,
+controller and simulator semantics remain authoritative.

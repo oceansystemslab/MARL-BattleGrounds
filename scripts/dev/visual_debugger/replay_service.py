@@ -12,6 +12,10 @@ from typing import Literal, cast
 from marl_battlegrounds.evaluation.actor_projection import (
     NO_SHARED_OBS_ACTOR_PROJECTION_V2,
 )
+from marl_battlegrounds.evaluation.analysis import (
+    ReplayAnalysis,
+    analyze_replay,
+)
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV1,
@@ -310,6 +314,8 @@ class ReplayViewerService:
             raise ValueError("viewer_session_id must be a nonempty string when set")
 
         self._bundle = bundle
+        self._metric_analysis: ReplayAnalysis | None = None
+        self._metric_analysis_lock = RLock()
         self._replay = bundle.replay
         self._context = bundle.replay.header.context
         self._active_slots: tuple[int, ...] = tuple(
@@ -466,6 +472,27 @@ class ReplayViewerService:
                     self._context.identity.episode_id
                 ),
             )
+
+    def metric_analysis(
+        self, frame_index: int, scope: str, format_: str
+    ) -> tuple[bytes, str | None]:
+        """Read immutable researcher analysis independently of battlefield POV."""
+        if scope not in ("cursor", "final") or format_ not in ("json", "csv"):
+            raise ValueError("unsupported metric scope or format")
+        self._bundle.frame_at(frame_index)
+        with self._metric_analysis_lock:
+            if self._metric_analysis is None:
+                self._metric_analysis = analyze_replay(self._bundle, full=True)
+            analysis = self._metric_analysis
+        if format_ == "json":
+            return canonical_json_bytes(
+                analysis.summary(frame_index, scope=scope)
+            ), None
+        selected = analysis.frame_count - 1 if scope == "final" else frame_index
+        return (
+            analysis.csv(frame_index, scope=scope).encode("utf-8"),
+            f"tdm-metrics-{scope}-frame-{selected}.csv",
+        )
 
     def current_presentation(self) -> PresentationResourceResultV1:
         """Build the authorized resource from one committed replay snapshot."""

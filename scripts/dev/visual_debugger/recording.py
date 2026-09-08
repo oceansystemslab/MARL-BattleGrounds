@@ -27,6 +27,7 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationTransitionV1,
     canonical_digest_sha256,
 )
+from marl_battlegrounds.evaluation.reducers import build_tdm_metric_reducers
 from marl_battlegrounds.evaluation.replay import (
     ReplayBundleV1,
     ReplayWrapperMetadataV1,
@@ -298,6 +299,7 @@ class DebuggerReplayRecorderV1:
         "_last_io_error_code",
         "_lifecycle",
         "_observer",
+        "_offline_metrics_evaluated",
         "_original_destination",
         "_persistence_error_code",
         "_prepared_bundle",
@@ -355,6 +357,7 @@ class DebuggerReplayRecorderV1:
         self._current_destination = destination
         self._reducers = reducers
         self._observer = observer
+        self._offline_metrics_evaluated = False
         self._lifecycle: RecordingLifecycleV1 = "recording"
         self._close_cause: DebuggerRecordingCloseCauseV1 | None = None
         self._close_reason: str | None = None
@@ -412,19 +415,11 @@ class DebuggerReplayRecorderV1:
 
     @property
     def retained_frame_count(self) -> int:
-        frames = self._observer.retained_frames
-        if frames is None:
-            raise RuntimeError("recording observer unexpectedly lacks retained frames")
-        return len(frames)
+        return self._observer.validated_transition_count + 1
 
     @property
     def retained_transition_count(self) -> int:
-        transitions = self._observer.retained_transitions
-        if transitions is None:
-            raise RuntimeError(
-                "recording observer unexpectedly lacks retained transitions"
-            )
-        return len(transitions)
+        return self._observer.validated_transition_count
 
     @property
     def bundle(self) -> ReplayBundleV1 | None:
@@ -588,13 +583,9 @@ class DebuggerReplayRecorderV1:
         finally:
             if self._observer.validated_transition_count == previous_count + 1:
                 self._current_frame = successor_frame
-            self._synchronize_sealed_state()
+                self._synchronize_sealed_state(transition)
 
-    def _synchronize_sealed_state(self) -> None:
-        transitions = self._observer.retained_transitions
-        if not transitions:
-            return
-        tail = transitions[-1]
+    def _synchronize_sealed_state(self, tail: EvaluationTransitionV1) -> None:
         count = self._observer.validated_transition_count
         if tail.terminated or count == self._context.expected_horizon:
             self._lifecycle = "sealed"
@@ -617,6 +608,9 @@ class DebuggerReplayRecorderV1:
             raise RuntimeError("discarded recording cannot be finalized")
         report = self._observer.finalized_report
         if report is None:
+            if not self._reducers and not self._offline_metrics_evaluated:
+                self._observer.evaluate_retained(build_tdm_metric_reducers())
+                self._offline_metrics_evaluated = True
             completion_state, reason, origin = _completion_for_cause(
                 close_cause,
                 failure_reason=failure_reason,

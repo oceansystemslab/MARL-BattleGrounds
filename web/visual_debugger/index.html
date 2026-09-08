@@ -75,6 +75,12 @@
             <option value="">Built-in arena</option>
           </select>
         </label>
+        <label>
+          <span>Task</span>
+          <select id="devclient-task-select" aria-label="Task for authored matches" disabled>
+            <option value="tdm">TDM</option>
+          </select>
+        </label>
         <button id="devclient-scenario-load" type="button" disabled>Load</button>
         <label>
           <span>Team A controller</span>
@@ -187,9 +193,11 @@
           </span>
         </div>
       </fieldset>
+      <progress id="recording-metrics-progress" class="metrics-progress" aria-label="Preparing recorded-game metrics" aria-describedby="recording-status-note" hidden></progress>
       <p id="recording-status-note" class="recording-panel__note" aria-live="polite">
         Recording authority is supplied by the local Python service.
       </p>
+      <p id="recording-metrics-help" class="recording-panel__note" hidden>Metrics summarize the captured game.</p>
     </section>
 
     <section
@@ -245,11 +253,17 @@
           type="button"
           aria-describedby="replay-download-metrics-help"
           disabled
-        >Download Metrics</button>
+        >Download Metrics CSV</button>
         <span id="replay-download-metrics-help" class="sr-only">
-          Download the canonical metric report for this replay.
+          Download evaluation metrics for the selected cursor or final-episode scope.
         </span>
+        <button id="replay-original-metrics-button" type="button" disabled>Original Metrics JSON</button>
       </fieldset>
+      <div id="replay-metrics-preparation" class="metric-preparation" role="status" hidden>
+        <progress class="metrics-progress" aria-label="Preparing metric download" aria-describedby="replay-metrics-preparation-text"></progress>
+        <span id="replay-metrics-preparation-text"></span>
+        <small>Metrics summarize the captured game.</small>
+      </div>
       <fieldset class="replay-timeline__transport">
         <legend class="sr-only">Replay transport</legend>
         <button id="replay-first-button" type="button" aria-label="Start replay tick">Start</button>
@@ -313,6 +327,12 @@
             Waiting for the Python debugger service.
           </p>
         </div>
+
+        <section id="match-scoreboard" class="match-scoreboard" aria-label="Match scoreboard" hidden>
+          <strong id="match-task" class="match-scoreboard__task">Task unavailable</strong>
+          <div id="match-team-a" class="match-scoreboard__team match-scoreboard__team--a"></div>
+          <div id="match-team-b" class="match-scoreboard__team match-scoreboard__team--b"></div>
+        </section>
 
         <div id="battlefield-shell" class="battlefield-shell" aria-busy="true">
           <svg
@@ -463,6 +483,24 @@
           </div>
         </details>
 
+        <details id="evaluation-metrics" class="hud-section" hidden>
+          <summary>TDM Evaluation Metrics</summary>
+          <div class="disclosure-body">
+            <label for="metric-scope">Scope</label>
+            <select id="metric-scope">
+              <option value="cursor">At cursor</option>
+              <option value="final">Final episode</option>
+            </select>
+            <label for="metric-selection">Metric</label>
+            <select id="metric-selection"><option value="overview">Team overview</option></select>
+            <progress id="metric-progress" class="metrics-progress" aria-label="Preparing replay metrics" aria-describedby="metric-status" hidden></progress>
+            <p id="metric-status" class="section-note" role="status">Open to analyze the captured replay.</p>
+            <div id="metric-rows"></div>
+            <p class="section-note">Metrics summarize the captured game.</p>
+            <p class="section-note">Cursor values describe the captured prefix. Complete-episode results remain pending until completion. Coordination and conditional class metrics are descriptive associations. This analysis is never an agent input.</p>
+          </div>
+        </details>
+
         <details id="pending-turn-details" class="hud-section">
           <summary class="section-heading">
             <strong id="pending-heading" class="section-title">Pending Joint Action</strong>
@@ -501,10 +539,10 @@
           </div>
         </details>
 
-        <details id="visual-filters" class="hud-section visual-filters">
+        <details id="visual-filters" class="hud-section visual-filters" open>
           <summary class="section-heading">
             <strong class="section-title">Visual Filters</strong>
-            <span id="visual-filter-count" class="count-badge">19 enabled</span>
+            <span id="visual-filter-count" class="count-badge">9 enabled</span>
           </summary>
           <div
             id="visual-filters-body"
@@ -540,7 +578,7 @@
               </div>
             </fieldset>
             <div class="visual-filters__actions">
-              <button id="enable-all-visual-filters-button" type="button" disabled>
+              <button id="enable-all-visual-filters-button" type="button">
                 Enable All
               </button>
               <button id="disable-all-visual-filters-button" type="button">

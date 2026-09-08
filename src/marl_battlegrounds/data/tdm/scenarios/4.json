@@ -1,0 +1,824 @@
+{
+  "configuration": {
+    "schema_id": "marl_battlegrounds.evaluation.resolved_env_config",
+    "schema_version": 1,
+    "canonical_digest_sha256": "02b2597162c2aabb861310318e420591f6daf2d85573a9bf0f5c1364446f0266",
+    "task_mode": 1,
+    "team_deathmatch_score_threshold": 20,
+    "maximum_episode_steps": 300,
+    "map_width": 20.0,
+    "map_height": 10.0,
+    "obstacle_slots": [
+      {
+        "obstacle_slot": 0,
+        "obstacle_type_id": 2,
+        "x": 7.5,
+        "y": 5.0,
+        "radius": 0.0,
+        "width": 1.0,
+        "height": 0.5,
+        "theta": 0.0,
+        "is_active": true
+      },
+      {
+        "obstacle_slot": 1,
+        "obstacle_type_id": 2,
+        "x": 10.5,
+        "y": 5.0,
+        "radius": 0.0,
+        "width": 2.0,
+        "height": 0.5,
+        "theta": 0.0,
+        "is_active": true
+      },
+      {
+        "obstacle_slot": 2,
+        "obstacle_type_id": 2,
+        "x": 8.5,
+        "y": 3.5,
+        "radius": 0.0,
+        "width": 1.0,
+        "height": 0.009999999776482582,
+        "theta": -0.7853981852531433,
+        "is_active": true
+      },
+      {
+        "obstacle_slot": 3,
+        "obstacle_type_id": 2,
+        "x": 7.5,
+        "y": 8.75,
+        "radius": 0.0,
+        "width": 1.0,
+        "height": 1.0,
+        "theta": 0.7853981852531433,
+        "is_active": true
+      },
+      {
+        "obstacle_slot": 4,
+        "obstacle_type_id": 2,
+        "x": 5.0,
+        "y": 6.5,
+        "radius": 0.0,
+        "width": 1.0,
+        "height": 1.0,
+        "theta": 0.7853981852531433,
+        "is_active": true
+      },
+      {
+        "obstacle_slot": 5,
+        "obstacle_type_id": 1,
+        "x": 11.5,
+        "y": 7.0,
+        "radius": 0.75,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": true
+      },
+      {
+        "obstacle_slot": 6,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 7,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 8,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 9,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 10,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 11,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 12,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 13,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 14,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 15,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 16,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 17,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 18,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 19,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 20,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 21,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 22,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 23,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 24,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 25,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 26,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 27,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 28,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 29,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 30,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      },
+      {
+        "obstacle_slot": 31,
+        "obstacle_type_id": 0,
+        "x": 0.0,
+        "y": 0.0,
+        "radius": 0.0,
+        "width": 0.0,
+        "height": 0.0,
+        "theta": 0.0,
+        "is_active": false
+      }
+    ],
+    "slot_mechanics": [
+      {
+        "global_slot": 0,
+        "body_radius": 0.5,
+        "base_movement_speed": 1.0,
+        "observation_radius": 6.0,
+        "basic_interaction_radius": 3.0,
+        "ultimate_interaction_radius": 0.0,
+        "maximum_health": 80.0,
+        "out_of_combat_delay_steps": 5,
+        "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033
+      },
+      {
+        "global_slot": 1,
+        "body_radius": 0.5,
+        "base_movement_speed": 1.0,
+        "observation_radius": 6.0,
+        "basic_interaction_radius": 1.5,
+        "ultimate_interaction_radius": 5.75,
+        "maximum_health": 200.0,
+        "out_of_combat_delay_steps": 5,
+        "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033
+      },
+      {
+        "global_slot": 2,
+        "body_radius": 0.5,
+        "base_movement_speed": 1.0,
+        "observation_radius": 6.5,
+        "basic_interaction_radius": 3.5,
+        "ultimate_interaction_radius": 3.0,
+        "maximum_health": 100.0,
+        "out_of_combat_delay_steps": 5,
+        "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033
+      },
+      {
+        "global_slot": 3,
+        "body_radius": 0.5,
+        "base_movement_speed": 1.2999999523162842,
+        "observation_radius": 6.0,
+        "basic_interaction_radius": 1.5,
+        "ultimate_interaction_radius": 1.5,
+        "maximum_health": 100.0,
+        "out_of_combat_delay_steps": 3,
+        "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033
+      },
+      {
+        "global_slot": 4,
+        "body_radius": 0.5,
+        "base_movement_speed": 1.0,
+        "observation_radius": 6.0,
+        "basic_interaction_radius": 3.0,
+        "ultimate_interaction_radius": 5.75,
+        "maximum_health": 100.0,
+        "out_of_combat_delay_steps": 5,
+        "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033
+      },
+      {
+        "global_slot": 5,
+        "body_radius": 0.5,
+        "base_movement_speed": 1.0,
+        "observation_radius": 6.0,
+        "basic_interaction_radius": 3.0,
+        "ultimate_interaction_radius": 0.0,
+        "maximum_health": 80.0,
+        "out_of_combat_delay_steps": 5,
+        "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033
+      },
+      {
+        "global_slot": 6,
+        "body_radius": 0.5,
+        "base_movement_speed": 1.0,
+        "observation_radius": 6.0,
+        "basic_interaction_radius": 1.5,
+        "ultimate_interaction_radius": 5.75,
+        "maximum_health": 200.0,
+        "out_of_combat_delay_steps": 5,
+        "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033
+      },
+      {
+        "global_slot": 7,
+        "body_radius": 0.5,
+        "base_movement_speed": 1.0,
+        "observation_radius": 6.5,
+        "basic_interaction_radius": 3.5,
+        "ultimate_interaction_radius": 3.0,
+        "maximum_health": 100.0,
+        "out_of_combat_delay_steps": 5,
+        "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033
+      },
+      {
+        "global_slot": 8,
+        "body_radius": 0.5,
+        "base_movement_speed": 1.2999999523162842,
+        "observation_radius": 6.0,
+        "basic_interaction_radius": 1.5,
+        "ultimate_interaction_radius": 1.5,
+        "maximum_health": 100.0,
+        "out_of_combat_delay_steps": 3,
+        "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033
+      },
+      {
+        "global_slot": 9,
+        "body_radius": 0.5,
+        "base_movement_speed": 1.0,
+        "observation_radius": 6.0,
+        "basic_interaction_radius": 3.0,
+        "ultimate_interaction_radius": 5.75,
+        "maximum_health": 100.0,
+        "out_of_combat_delay_steps": 5,
+        "out_of_combat_health_regeneration_fraction_per_step": 0.03999999910593033
+      }
+    ],
+    "ordinary_movement_distance_scale": 1.0,
+    "team_spawn_pad_positions": [
+      [
+        [
+          0.5,
+          1.0
+        ],
+        [
+          0.5,
+          3.0
+        ],
+        [
+          0.5,
+          5.0
+        ],
+        [
+          0.5,
+          7.0
+        ],
+        [
+          0.5,
+          9.0
+        ]
+      ],
+      [
+        [
+          19.5,
+          1.0
+        ],
+        [
+          19.5,
+          3.0
+        ],
+        [
+          19.5,
+          5.0
+        ],
+        [
+          19.5,
+          7.0
+        ],
+        [
+          19.5,
+          9.0
+        ]
+      ]
+    ],
+    "spawn_shield_duration_steps": 3,
+    "spawn_shield_movement_speed": 2.0,
+    "team_respawn_wave_period_steps": [
+      5,
+      5
+    ]
+  },
+  "initial_snapshot": {
+    "schema_id": "marl_battlegrounds.evaluation.global_analysis_snapshot",
+    "schema_version": 1,
+    "team_deathmatch_scores": [
+      18,
+      19
+    ],
+    "alive_mask": [
+      false,
+      true,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true
+    ],
+    "agent_positions": [
+      [
+        2.5,
+        7.5
+      ],
+      [
+        10.0,
+        8.0
+      ],
+      [
+        2.5,
+        8.5
+      ],
+      [
+        7.0,
+        4.199999809265137
+      ],
+      [
+        2.5,
+        9.5
+      ],
+      [
+        7.5,
+        6.0
+      ],
+      [
+        9.0,
+        7.0
+      ],
+      [
+        3.5,
+        8.5
+      ],
+      [
+        3.5,
+        9.5
+      ],
+      [
+        8.5,
+        5.5
+      ]
+    ],
+    "current_health": [
+      0.0,
+      47.0,
+      0.0,
+      36.0,
+      0.0,
+      19.0,
+      200.0,
+      0.0,
+      0.0,
+      40.0
+    ],
+    "ultimate_cooldowns": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      4
+    ],
+    "slow_durations": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ]
+    ],
+    "stun_durations": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0
+      ]
+    ],
+    "rogue_poison_anti_heal_durations": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "mage_burst_damage_amplification_durations": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "priest_blessing_of_freedom_slow_floor_durations": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "team_respawn_wave_countdowns": [
+      4,
+      4
+    ],
+    "spawn_shield_durations": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "steps_until_out_of_combat": [
+      0,
+      5,
+      0,
+      0,
+      0,
+      0,
+      5,
+      0,
+      0,
+      5
+    ],
+    "previous_timestep_move_actions": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "previous_timestep_select_target_actions": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "previous_timestep_use_ultimate_actions": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "has_previous_timestep_joint_action": false
+  },
+  "step_count": 295,
+  "notes": "Scenario 4 — Set up the finish before you are stunned\n\nQuick start\nHP means remaining health points. In each tick, everyone chooses a move plus a Basic (ordinary attack/heal), an Ultimate (special ability), or no combat. A cooldown counts the wait before reusing an Ultimate. SharedObs shares your teammates' current sightings, not the opponent's planned actions.\n\nThe challenge\nTeam A's Warrior (47 HP) and Rogue (36 HP) face Mage (19 HP), Warrior (200 HP) and Priest (40 HP). HP means health points; an agent dies when its health reaches zero. Team A trails 18–19, with 20 points needed to win and five ticks remaining. It needs TWO kills without a death, not merely the first kill. Use only the terminal Team A reward: +1 SUCCESS, 0 DRAW, -1 FAIL. A simultaneous threshold tie is a draw; a win/loss at the time limit still counts.\n\nThe few rules you need\nWarrior's Charge closes distance, deals damage and stuns a future decision. Rogue's Poison Ultimate deals a strong immediate hit, briefly stuns, and reduces subsequent healing; it is not damage over time. Mage's Burst spends one combat action preparing stronger attacks for later ticks. Priest has a small Basic heal and a large Ultimate that must finish its cooldown. Bodies cannot freely pass through each other: ordinary collision resolution can move a stunned unit. There is no separate shove command.\n\nWhy this situation is interesting\nInitially, Rogue-A is hidden from every Team B agent. It cannot see the enemies directly either, but SharedObs gives it Warrior-A's current sightings. That lets the team prepare an ambush without giving the enemy the same information. Knowing an enemy's position is not enough to attack it: Rogue still needs its own legal range and line of sight. Warrior's opening movement helps create that opportunity before an enemy Charge temporarily takes Warrior out of the fight.\n\nOne successful team sequence\nTick 1: Warrior-A Charges Mage-B and moves WEST. Rogue-A moves EAST without attacking. Mage has already selected Northeast before Charge resolves; the new stun limits its next decision, not that submitted move. Priest heals Mage and attempts Southwest movement; geometry makes its net displacement southeast, toward the ambush.\nTick 2: Warrior-A Basic-attacks Mage and moves SOUTHEAST. Rogue-A Ultimates Priest and moves NORTHEAST. Body collision displaces the stunned Mage into Rogue's future Basic reach. Meanwhile Warrior-B Charges Warrior-A: its HP has fallen from 47 to 39.18, crossing ALPHA's strict below-40 Charge threshold. Warrior-A will be stunned next tick.\nTick 3: Warrior-A is stunned and Stays/no-combat. Rogue-A STAYS and Basic-attacks Mage, killing it. Mage has 10 HP and Priest only 4, so this deliberately passes up the easier kill. Mage activates Burst this tick, but dies before it can use the empowered attack next tick. Priest is still stunned and can wait.\nTick 4: Rogue-A Basic-attacks Priest and Stays. Warrior-A Stays/no-combat in the exact reference. Priest attempts a self-heal, but Poison reduces it to 4 HP while Rogue deals 12; Priest dies. Its large Ultimate is still unavailable at this decision. Team A wins.\n\nWhat the behaviors look like\n- Teammate Modeling: Warrior prepares a target that Rogue can finish while Warrior is unable to act.\n- Opponent Modeling: anticipate the enemy Charge threshold, Mage's future Burst damage, and Priest's healing window.\n- Tactical Positioning (Body Blocking): use the resolved body arrangement to create next-tick attack range, not merely to stand near an enemy.\n- Basic Damage Target Prioritization: kill Mage before the easier Priest, protecting Warrior from the next attack.\n- Ultimate Damage Target Prioritization: Charge Mage to delay its threat while Rogue's Poison disables and weakens Priest's recovery.\n\nMulti-Step Team-Level Planning: prepare Rogue's future attack range before Warrior is stunned, then finish enemies in the order that keeps the team alive. This describes the coordinated sequence, not proof that a policy contains an explicit planner.\n\nWhat was verified, and why kill order matters\nRogue-A regenerates from 36 to 40 HP on tick 1 while outside combat. With ALPHA v2, the exact sequence wins 20–19 on tick 4 (step 299), with Warrior-A at about 7.56 HP and Rogue-A at 40 HP. Changing only the opening Warrior move to Northwest also wins, so West is not uniquely necessary. With the other moves unchanged, killing Priest on tick 3 and then Mage on tick 4 gives a 20–20 DRAW: Mage survives long enough to help kill Warrior. This controlled contrast supports the kill-order explanation; it does not prove all alternative continuations fail or reveal a policy's internal reasoning.\n\nHow to play and research use\nUse SharedObs, Manual Team A and Reactive TDM ALPHA Team B. All actors choose from one current snapshot; nobody observes the opponent's pending choice or gets a second decision halfway through a tick. Current source is scenario_4 r12: retain r11 except the decorative rotated wall at (7.5,8.5) moves 0.25 North to (7.5,8.75). This restores the original r8 actions and living trajectories while keeping all six obstacles. Earlier source r6 supplied the setup with the approved step_count correction to 295. Initially dead agents revive only in the fifth/final successor and receive no further decision. This is a candidate instrument for matched behavioral ablations, not a public suite release, an Elo score, or permission to train on official evaluation material."
+}

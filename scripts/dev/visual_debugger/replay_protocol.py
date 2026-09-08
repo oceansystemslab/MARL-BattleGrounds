@@ -66,6 +66,8 @@ type ReplayProcessingFailureStageV1 = Literal[
     "reducer_initialize",
     "transition_validation",
     "reducer_advance",
+    "offline_reducer_initialize",
+    "offline_reducer_advance",
     "completion_validation",
     "reducer_finalize",
     "statistic_materialization",
@@ -361,11 +363,12 @@ class ReplayProcessingBadgeV1(_ReplayProtocolModel):
         permits_attempted_index = self.failure_stage in (
             "transition_validation",
             "reducer_advance",
+            "offline_reducer_advance",
         )
         if not permits_attempted_index and self.attempted_transition_index is not None:
             raise ValueError("this processing stage forbids an attempted index.")
         if (
-            self.failure_stage == "reducer_advance"
+            self.failure_stage in ("reducer_advance", "offline_reducer_advance")
             and self.attempted_transition_index is None
         ):
             raise ValueError("reducer advance failure requires an attempted index.")

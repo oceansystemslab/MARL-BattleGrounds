@@ -20,9 +20,59 @@ is settled but the formula cannot activate until the owning task defines its
 score, objective, reward, and terminal facts. A deferred or blocked row is not
 an official result.
 
-This document does not create a production metric registry. Stable IDs are
-public semantic references for documentation, artifacts, tests, and future
-implementations. Formulas may be implemented only by their named owner.
+Stable IDs are public semantic references for documentation, artifacts and
+tests. Formulas may be implemented only by their named owner.
+
+### Implemented TDM episode measurements
+
+Milestone 7 implements the 46 episode metric IDs exported as
+`TDM_EPISODE_METRIC_IDS` from `marl_battlegrounds.evaluation.reducers`.
+`build_tdm_metric_reducers()` defaults to the critical outcome reducer: outcome
+distribution, terminal score differential, evaluation return, episode length,
+and completion/failure metadata. Full metrics are off by default.
+`build_tdm_metric_reducers(full=True)` explicitly selects all three families
+for the complete 46-ID suite. Both profiles share the same metric definitions.
+They consume validated recorded facts and preserve raw sufficient components,
+amount stages, opportunities, subjects, and endpoint eligibility. Implementation
+does not promote descriptive or validation-pending metrics to confirmatory
+claims. Undefined priority-target selection remains explicitly unavailable.
+Team-wipe candidates, future tasks, population ratings, learning curves and
+policy-sidecar measurements are outside this single-episode inventory.
+
+Recorded DevClient episodes compute the critical default set after capture stops. Replay
+Viewer uses `marl_battlegrounds.evaluation.analysis.analyze_replay` to prepare a
+reusable index from recorded facts without stepping the simulator. The library
+API defaults to critical metrics; `analyze_replay(bundle, full=True)` requests
+full diagnostics, as does explicitly opening the Viewer metrics panel or
+requesting its derived CSV. Its
+`summary(frame_index, scope="cursor")` and `csv(frame_index, scope="cursor")`
+methods expose measurements at that boundary; `scope="final"` explicitly
+selects the captured endpoint. Complete-episode measurements remain unavailable
+at an intermediate cursor. Frame zero is a valid empty observation interval.
+
+CSV retains components and distribution observations for later aggregation,
+alongside completion, processing, source replay, simulation and analysis
+identities. Display values are host projections of those same components.
+Distribution observations are stored once with boundary offsets. Trusted reducer
+outputs are assembled once with cheap progress, identity, eligibility and
+provenance checks; computation does not recursively revalidate accumulated
+history or rebuild the report tree. External artifact ingestion and independent
+semantic tests validate the scientific records. Reanalysis never overwrites the
+original recorded metric report or its processing result.
+
+Metric APIs return data without automatic file writes. Training defaults to
+lightweight episode statistics, with detailed TDM metrics optional or enabled
+for periodic evaluation. Training and validation-map evaluation reuse one
+evaluator; cadence/API details remain provisional pending the user's cost review. The learning platform owns batched, periodically
+flushed logging to one CSV per run. Replay recording is a separate opt-in or
+sampling control; full diagnostic capture is not the training default. Ladder
+results retain match-level sufficient components and running aggregates in one
+results file, stratified by the declared matchup and evaluation cell. Compute
+rates from pooled numerators/opportunities, preserving completion/failure and
+exclusion counts; an average of episode percentages is generally insufficient. Public ladder columns are limited to Elo,
+win/loss/draw rates, matches played and evaluated-system identity; full tactical
+metrics are local opt-in diagnostics. A secondary team K/D column pools tournament kill/death totals; no-death results
+are unavailable. Preserve the raw totals, and keep K/D separate from rating inputs.
 
 ## Metric constitution
 
@@ -463,8 +513,8 @@ named analysis needs them. They do not enter the primary tactical scorecard.
 ## Future and pending task-owned metrics
 
 These dispositions are stable, but each row remains inactive until its named
-activation dependency exists. Team Deathmatch score/outcome authority now
-exists; its compact evaluation reducers remain pending evaluation integration.
+activation dependency exists. Team Deathmatch score/outcome authority and its
+episode reducers are implemented; the candidate below remains inactive.
 
 ### Team Deathmatch
 
@@ -472,7 +522,11 @@ exists; its compact evaluation reducers remain pending evaluation integration.
 | --- | --- | --- | --- |
 | `candidate.tdm.team_wipe_count` | Task-defined transitions or intervals where every eligible opposing agent is dead; preserve respawn-wave context. | `exploratory_descriptive` / advanced | separate research activation with exact interval semantics |
 
-TDM does not create killer ownership, K/D, or generic teamfight victories.
+TDM does not create individual killer ownership, agent K/D, or generic teamfight
+victories. A36 separately permits a descriptive pooled team K/D ladder column:
+sum authoritative team score increments and opposing score increments across
+matches, accounting for nonzero initial scores, and divide only when total deaths
+are positive. This creates no individual kill attribution or rating input.
 Elimination differential is omitted because official TDM scoring makes it
 mathematically identical to terminal score differential. Team-wipe count stays
 inactive until a separate research need justifies exact interval semantics.
@@ -656,7 +710,7 @@ private M6 source ledger preserves the line-level source trace.
 | Return | Retain, secondary | Evaluation return separated from training/shaped return |
 | Episode length, time to win/defeat | Advanced | Completion-aware duration; conditional times require outcome exposure/censoring |
 | Comebacks, recovered deficits, surrendered leads, lead changes, first-score effects, close/decisive wins | Advanced descriptive | Score-trajectory slices; post-treatment and gameable, never primary |
-| Kills, last hits, K/D, general elimination participation, solo kills, pentakills | Reject | Lethal-transition damage-source truth, single-/multi-contributor lethal transitions, team wipes |
+| Individual kills, last hits, agent K/D, general elimination participation, solo kills, pentakills | Reject | Lethal-transition damage-source truth, single-/multi-contributor lethal transitions, team wipes |
 | Damage dealt/taken | Retain | Recipient-modified gross stages with exact units and shares |
 | “Effective healing,” overheal | Correct and retain selectively | Gross healing primary; recipient-level net/clamp outcomes advanced; no arbitrary source realization |
 | Damage/healing per engagement or teamfight | Reject | No generic engagement/teamfight segmentation is planned; use authoritative task context or controlled scenarios for a named question |

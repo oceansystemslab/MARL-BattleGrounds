@@ -59,6 +59,7 @@ from marl_battlegrounds.rendering.scene import (
     ResearcherAnalyzerProjectionV2,
     VisualEventBatchV2,
 )
+from scripts.dev.visual_debugger.match_summary import build_match_summary_v1
 from scripts.dev.visual_debugger.model import PendingAction
 from scripts.dev.visual_debugger.presentation_protocol import (
     AgentPovActionAxisV1,
@@ -537,6 +538,11 @@ def build_live_oracle_authorized_presentation_v1(
         ),
     )
     return LiveOracleAuthorizedPresentationFrameV1(
+        match_summary=build_match_summary_v1(
+            context,
+            current_frame,
+            () if incoming_view is None else incoming_view.transition.events,
+        ),
         schema_version=1,
         presentation_kind="live_oracle",
         product_kind="combat_debugger",
@@ -902,6 +908,11 @@ def build_live_no_shared_obs_authorized_presentation_v1(
         ),
     )
     return LiveNoSharedObsAuthorizedPresentationFrameV1(
+        match_summary=build_match_summary_v1(
+            global_context,
+            current_global_frame,
+            () if incoming_visual_events is None else incoming_visual_events.events,
+        ),
         schema_version=1,
         presentation_kind="live_no_shared_obs_agent_pov",
         product_kind="combat_debugger",
@@ -1169,6 +1180,9 @@ def build_live_shared_obs_authorized_presentation_v1(
         ),
     )
     return LiveSharedObsAuthorizedPresentationFrameV1(
+        match_summary=build_match_summary_v1(
+            context, current_frame, () if view is None else view.transition.events
+        ),
         schema_version=1,
         presentation_kind="live_shared_obs_agent_pov",
         product_kind="combat_debugger",

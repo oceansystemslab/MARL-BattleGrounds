@@ -204,6 +204,30 @@ failed classification remains runner/report-authored and replay validation does
 not infer it. Exact-horizon and task-terminal evidence remain separate
 completion bases and may coexist.
 
+Recorded DevClient sessions retain the validated trajectory during execution
+and evaluate episode metrics after recording stops. Offline failures use
+`offline_reducer_initialize` or `offline_reducer_advance`, with the exact
+reducer identity and processing boundary. The validated capture may extend
+beyond that boundary and must remain intact. Existing streaming failure stages
+retain their stricter progress rules. Readers that do not recognize the added
+failure stages reject those reports; historical artifacts are unchanged.
+An already failed capture keeps its original failure and processing boundary;
+it does not attempt another reducer pass during recording finalization. Separate
+Replay analysis can still recover derived measurements from its valid prefix.
+
+Replay analysis is a separate derived view. It preserves the original replay
+digest, original metric processing status and simulation revision, and records
+the current analysis source fingerprint and reducer versions. Original Metrics
+JSON downloads return the stored sidecar unchanged. CSV downloads describe the
+explicit selected cursor or final boundary and carry raw components and
+provenance. Intermediate prefixes cannot claim an observed episode endpoint;
+the captured endpoint retains its actual complete, partial, interrupted or
+failed classification. A successful reanalysis does not erase an original
+processing failure. The index is exposed only after successful metric processing and final-prefix
+consistency checks; source changes during analysis invalidate the result.
+Trusted metric computation reuses owned records without repeated deep
+validation. External replay/report ingestion retains its validation boundary.
+
 Team Deathmatch is threshold-victory. If neither team reaches the configured
 threshold by the horizon, the authoritative result is a draw regardless of
 terminal score differential. If both teams cross on one simultaneous

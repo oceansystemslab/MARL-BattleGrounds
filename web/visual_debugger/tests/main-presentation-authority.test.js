@@ -1017,13 +1017,10 @@ test("replay artifact actions snapshot once, fence every await, and never drive 
   const source = await readFile(mainUrl, "utf8");
   const exportStart = source.indexOf("async function exportReplayBattlefieldPng()");
   const exportEnd = source.indexOf(
-    "async function downloadReplayMetricReport()",
+    "async function downloadReplayMetricReport(original = false)",
     exportStart,
   );
-  const metricEnd = source.indexOf(
-    "/**\n * Recognize only the installed branded scripted-live pair.",
-    exportEnd,
-  );
+  const metricEnd = source.indexOf("/** @type {{key: string, summary:", exportEnd);
   const metricErrorStart = source.indexOf("function replayMetricDownloadError(");
   const metricErrorEnd = exportStart;
   const clearStart = source.indexOf("function clearPresentationAuthority(reason)");
@@ -1074,7 +1071,7 @@ test("replay artifact actions snapshot once, fence every await, and never drive 
   assertSourceOrder(
     exportSource,
     "await captureReplayBattlefieldPngV1({",
-    "if (!replayArtifactActionIsCurrent(transaction))",
+    "if (!replayArtifactActionIsCurrent(transaction)",
   );
   assertSourceOrder(
     metricSource,
@@ -1098,8 +1095,9 @@ test("replay artifact actions snapshot once, fence every await, and never drive 
   }
   assert.match(
     metricSource,
-    /new Blob\(\[report\.bytes\], \{ type: "application\/json; charset=utf-8" \}\)/u,
+    /new Blob\(\[report\.bytes\],[\s\S]*original\s*\? "application\/json; charset=utf-8"[\s\S]*: "text\/csv; charset=utf-8"/u,
   );
+  assert.match(metricSource, /replayMetricContext\(\)\?\.key !== context\?\.key/u);
   const metricCatchStart = metricSource.indexOf("} catch (error) {");
   const metricFinallyStart = metricSource.indexOf("} finally {", metricCatchStart);
   assert.notEqual(metricCatchStart, -1);

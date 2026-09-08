@@ -2856,6 +2856,7 @@ def test_agent_presentations_exclude_privileged_fields_and_canonical_values(
     raw = service.current_frame()
     payload = service.current_presentation().payload.model_dump(mode="json")
     researcher_space = cast(dict[str, object], payload.pop("researcher_space"))
+    match_summary = cast(dict[str, object], payload.pop("match_summary"))
     corpse_overlay = cast(
         dict[str, object],
         payload.pop("local_oracle_corpse_overlay"),
@@ -2873,6 +2874,53 @@ def test_agent_presentations_exclude_privileged_fields_and_canonical_values(
     researcher_strings = _recursive_string_values(researcher_space)
     replay = case.bundle.replay
     metric = replay.metric_report_reference
+    # Match metadata has one root envelope; actor and spatial payloads retain
+    # their original digest restrictions below.
+    assert set(match_summary) == {
+        "schema_version",
+        "episode_id",
+        "source_frame_index",
+        "simulator_step_count",
+        "task_mode",
+        "score_threshold",
+        "scores",
+        "outcome",
+        "teams",
+    }
+    context = replay.header.context
+    frame = replay.frames[raw.cursor.frame_index]
+    assert match_summary["episode_id"] == context.identity.episode_id
+    assert match_summary["source_frame_index"] == frame.frame_index
+    assert match_summary["simulator_step_count"] == frame.simulator_step_count
+    assert match_summary["task_mode"] == context.resolved_env_config.task_mode
+    assert match_summary["scores"] == list(frame.snapshot.team_deathmatch_scores)
+    teams = cast(list[dict[str, object]], match_summary["teams"])
+    assert [team["team_id"] for team in teams] == [1, 2]
+    for team in teams:
+        assert set(team) == {
+            "team_id",
+            "display_name",
+            "policy_ids",
+            "checkpoint_digests",
+        }
+        assignments = tuple(
+            assignment
+            for roster, assignment in zip(
+                context.roster, context.policy_assignments, strict=True
+            )
+            if roster.configured_team_id == team["team_id"]
+            and isinstance(assignment, AssignedPolicySlotV1)
+        )
+        assert team["policy_ids"] == list(
+            dict.fromkeys(assignment.policy_id for assignment in assignments)
+        )
+        assert team["checkpoint_digests"] == list(
+            dict.fromkeys(
+                assignment.checkpoint_digest
+                for assignment in assignments
+                if assignment.checkpoint_digest is not None
+            )
+        )
     forbidden_values = {
         replay.artifact_id,
         replay.canonical_digest_sha256,
@@ -2898,6 +2946,7 @@ def test_agent_presentations_exclude_privileged_fields_and_canonical_values(
     }
 
     assert not (strings & forbidden_values)
+    assert not (_recursive_string_values(match_summary) & forbidden_values)
     assert overlay_strings & forbidden_values == {
         case.bundle.replay.frames[raw.cursor.frame_index].frame_id
     }
@@ -4879,3 +4928,60 @@ print('isolated')
 
     assert result.returncode == 0, result.stderr or result.stdout
     assert result.stdout.strip() == "isolated"
+
+
+def test_metric_analysis_is_cached_across_scopes_cursors_and_pov(
+    service_cases: _ServiceCases,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = replay_service_module.analyze_replay
+    calls: list[LoadedReplayBundleV1] = []
+
+    def analyze(
+        bundle: LoadedReplayBundleV1, *, full: bool = False
+    ) -> replay_service_module.ReplayAnalysis:
+        assert full is True
+        calls.append(bundle)
+        return original(bundle, full=full)
+
+    monkeypatch.setattr(replay_service_module, "analyze_replay", analyze)
+    service = ReplayViewerService(service_cases.shared.bundle)
+    sidecar = service.current_metric_report()
+    initial, filename = service.metric_analysis(0, "cursor", "json")
+    assert filename is None
+    assert json.loads(initial)["completion"] is None
+    _apply(
+        service, ReplayAbsoluteSeekCommandV1(frame_index=1), command_id="analysis-seek"
+    )
+    _apply(service, ReplaySetViewCommandV1(view_mode="pov"), command_id="analysis-pov")
+    final, filename = service.metric_analysis(1, "final", "csv")
+    assert filename == "tdm-metrics-final-frame-2.csv"
+    assert b"metric_id" in final
+    assert service.metric_analysis(0, "cursor", "json")[0] == initial
+    assert len(calls) == 1
+    assert service.current_frame().cursor.frame_index == 1
+    assert service.current_metric_report() == sidecar
+    assert not service.faulted
+
+
+def test_metric_analysis_failure_does_not_fault_replay_or_change_sidecar(
+    service_cases: _ServiceCases,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(
+        _bundle: LoadedReplayBundleV1, *, full: bool = False
+    ) -> replay_service_module.ReplayAnalysis:
+        assert full is True
+        raise RuntimeError("injected offline analysis failure")
+
+    monkeypatch.setattr(replay_service_module, "analyze_replay", fail)
+    service = ReplayViewerService(service_cases.metric_missing.bundle)
+    frame = service.current_frame()
+    original = service.current_metric_report()
+    with pytest.raises(RuntimeError, match="injected offline"):
+        service.metric_analysis(0, "cursor", "json")
+    assert service.current_frame() == frame
+    assert service.current_metric_report() == original
+    assert not service.faulted
+    _apply(service, ReplayNextFrameCommandV1(), command_id="analysis-failed-next")
+    assert service.current_frame().cursor.frame_index == 1

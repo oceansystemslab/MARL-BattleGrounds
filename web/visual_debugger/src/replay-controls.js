@@ -628,7 +628,8 @@ export class ReplayPlaybackController {
     return this.snapshot();
   }
 
-  play() {
+  /** @param {{restartCurrent?: boolean}} [options] */
+  play({ restartCurrent = true } = {}) {
     if (
       this.disposed ||
       !this.cursor ||
@@ -659,7 +660,10 @@ export class ReplayPlaybackController {
       void this.#sendCommand(replayNavigationCommand("next"), generation, true);
     } else {
       this.transportState = REPLAY_TRANSPORT_STATES.PLAYING;
-      this.#setPresentationIntent("replay_animated", true);
+      this.#setPresentationIntent(
+        restartCurrent ? "replay_animated" : "replay_static",
+        restartCurrent,
+      );
       this.#publish();
       void this.#waitForPlaybackCompletion(generation, this.cursor);
     }

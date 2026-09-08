@@ -42,6 +42,7 @@ from marl_battlegrounds.rendering.pov_scene import (
     build_actor_pov_analyzer_projection_v1,
 )
 from marl_battlegrounds.rendering.scene import BattlefieldSceneV2, VisualEventBatchV2
+from scripts.dev.visual_debugger.match_summary import build_match_summary_v1
 from scripts.dev.visual_debugger.presentation_protocol import (
     AgentPovActionAxisV1,
     LatestTransitionActionRowV1,
@@ -563,6 +564,11 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
         action_axis=endpoint.action_axis,
     )
     return ReplayNoSharedObsAuthorizedPresentationFrameV1(
+        match_summary=build_match_summary_v1(
+            global_context,
+            current_global_frame,
+            () if incoming_visual_events is None else incoming_visual_events.events,
+        ),
         schema_version=1,
         presentation_kind="replay_no_shared_obs_agent_pov",
         product_kind="replay_viewer",
@@ -872,6 +878,11 @@ def build_replay_shared_obs_authorized_presentation_v1(
         action_axis=endpoint.action_axis,
     )
     return ReplaySharedObsAuthorizedPresentationFrameV1(
+        match_summary=build_match_summary_v1(
+            global_context,
+            current_global_frame,
+            () if incoming_transition is None else incoming_transition.events,
+        ),
         schema_version=1,
         presentation_kind="replay_shared_obs_agent_pov",
         product_kind="replay_viewer",
@@ -1034,6 +1045,11 @@ def build_replay_oracle_authorized_presentation_v1(
         ),
     )
     return ReplayOracleAuthorizedPresentationFrameV1(
+        match_summary=build_match_summary_v1(
+            context,
+            current_frame,
+            () if incoming_transition is None else incoming_transition.events,
+        ),
         schema_version=1,
         presentation_kind="replay_oracle",
         product_kind="replay_viewer",

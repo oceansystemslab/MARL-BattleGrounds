@@ -26,15 +26,44 @@ function isAuthoringResponse(response, commandType) {
  * @param {() => Promise<unknown>} activate
  */
 async function applyAuthoringCommand(page, commandType, activate) {
-  const responsePromise = page.waitForResponse((response) =>
-    isAuthoringResponse(response, commandType),
-  );
-  await activate();
-  const response = await responsePromise;
-  expect(response.status()).toBe(200);
-  const payload = await response.json();
-  expect(payload.command_type).toBe(commandType);
-  return payload;
+  /** @type {import("@playwright/test").Response | null} */
+  let replacementPresentation = null;
+  /** @param {import("@playwright/test").Response} response */
+  const observeReplacement = (response) => {
+    if (
+      response.request().method() === "GET" &&
+      new URL(response.url()).pathname === "/api/presentation/frame"
+    ) {
+      replacementPresentation = response;
+    }
+  };
+  page.on("response", observeReplacement);
+  try {
+    const responsePromise = page.waitForResponse((response) =>
+      isAuthoringResponse(response, commandType),
+    );
+    await activate();
+    const response = await responsePromise;
+    expect(response.status()).toBe(200);
+    const payload = await response.json();
+    expect(payload.command_type).toBe(commandType);
+    if (commandType === "open_in_debug" && payload.ok) {
+      // Authoring acceptance precedes installation of the replacement live frame.
+      await expect.poll(() => replacementPresentation?.status() ?? null).toBe(200);
+      await expect(page.locator("#battlefield-shell")).toHaveAttribute(
+        "aria-busy",
+        "false",
+      );
+      await expect(page.locator("html")).toHaveAttribute(
+        "data-presentation-authority",
+        "installed",
+      );
+      await expect(page.locator("#connection-status")).toHaveText("Online");
+    }
+    return payload;
+  } finally {
+    page.off("response", observeReplacement);
+  }
 }
 
 /**

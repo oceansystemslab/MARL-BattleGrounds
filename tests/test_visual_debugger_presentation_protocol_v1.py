@@ -670,6 +670,7 @@ def five_frames(
     )
     assert live_oracle_endpoint.action_axis == live_oracle_axis
     live_oracle = LiveOracleAuthorizedPresentationFrameV1(
+        match_summary=None,
         schema_version=1,
         presentation_kind="live_oracle",
         product_kind="combat_debugger",
@@ -788,6 +789,7 @@ def five_frames(
         start_tick=no_shared.frames[0].simulator_step_count,
     )
     replay_no_shared = ReplayNoSharedObsAuthorizedPresentationFrameV1(
+        match_summary=None,
         schema_version=1,
         presentation_kind="replay_no_shared_obs_agent_pov",
         product_kind="replay_viewer",
@@ -910,6 +912,7 @@ def five_frames(
         start_tick=no_shared.frames[0].simulator_step_count,
     )
     live_no_shared = LiveNoSharedObsAuthorizedPresentationFrameV1(
+        match_summary=None,
         schema_version=1,
         presentation_kind="live_no_shared_obs_agent_pov",
         product_kind="combat_debugger",
@@ -1046,6 +1049,7 @@ def five_frames(
         start_tick=inspection_cases.shared.frames[0].simulator_step_count,
     )
     replay_shared = ReplaySharedObsAuthorizedPresentationFrameV1(
+        match_summary=None,
         schema_version=1,
         presentation_kind="replay_shared_obs_agent_pov",
         product_kind="replay_viewer",
@@ -1206,6 +1210,7 @@ def _replay_no_shared_at(
         )
     replay_inspection = build_replay_no_shared_obs_inspection_v1(index, current)
     return ReplayNoSharedObsAuthorizedPresentationFrameV1(
+        match_summary=None,
         schema_version=1,
         presentation_kind="replay_no_shared_obs_agent_pov",
         product_kind="replay_viewer",
@@ -1342,6 +1347,7 @@ def _replay_shared_at(
         final_frame_index=final_frame_index,
     )
     return ReplaySharedObsAuthorizedPresentationFrameV1(
+        match_summary=None,
         schema_version=1,
         presentation_kind="replay_shared_obs_agent_pov",
         product_kind="replay_viewer",
@@ -1455,6 +1461,7 @@ def _live_oracle_at(
         else replay_projection.latest_transition.incoming_transition_id
     )
     return LiveOracleAuthorizedPresentationFrameV1(
+        match_summary=None,
         schema_version=1,
         presentation_kind="live_oracle",
         product_kind="combat_debugger",
@@ -1582,6 +1589,7 @@ def _live_no_shared_at(
             ),
         )
     return LiveNoSharedObsAuthorizedPresentationFrameV1(
+        match_summary=None,
         schema_version=1,
         presentation_kind="live_no_shared_obs_agent_pov",
         product_kind="combat_debugger",
@@ -4164,6 +4172,7 @@ def test_real_death_successor_keeps_selected_recipient_corpse_authorized() -> No
         oracle_raw,
     )
     frame = LiveNoSharedObsAuthorizedPresentationFrameV1(
+        match_summary=None,
         schema_version=1,
         presentation_kind="live_no_shared_obs_agent_pov",
         product_kind="combat_debugger",
@@ -4631,6 +4640,7 @@ def test_result_rejects_nested_subclass_and_list_model_construct_poison(
         ),
     )
     poison_root = ReplayOracleAuthorizedPresentationFrameV1.model_construct(
+        match_summary=base.match_summary,
         schema_version=base.schema_version,
         presentation_kind=base.presentation_kind,
         product_kind=base.product_kind,
@@ -4669,6 +4679,7 @@ def test_result_rejects_nested_subclass_and_list_model_construct_poison(
         ),
     )
     list_root = ReplayOracleAuthorizedPresentationFrameV1.model_construct(
+        match_summary=base.match_summary,
         schema_version=base.schema_version,
         presentation_kind=base.presentation_kind,
         product_kind=base.product_kind,
@@ -4691,6 +4702,7 @@ def test_result_rejects_nested_subclass_and_list_model_construct_poison(
         **base.source.model_dump(mode="python")
     )
     poison_source_root = ReplayOracleAuthorizedPresentationFrameV1.model_construct(
+        match_summary=base.match_summary,
         schema_version=base.schema_version,
         presentation_kind=base.presentation_kind,
         product_kind=base.product_kind,

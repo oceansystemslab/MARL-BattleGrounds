@@ -8,6 +8,7 @@ import {
   getCurrentFrameAndPresentation,
   getCurrentPresentation,
   getReplayMetricReport,
+  getReplayMetrics,
   getReplayTimeline,
   postCommand,
   postReplayCommand,
@@ -33,6 +34,7 @@ import {
   validateReplayTransportContinuityV1,
 } from "./authorized-presentation-normalizer.js";
 import { CombatChoreographer, ConsumedTransitionLedger } from "./choreography.js";
+import { renderMetricRows } from "./metrics-panel.js";
 import { SvgChoreographyPainter } from "./choreography-painter.js";
 import { isSubmissionCommand } from "./choreography-plan.js";
 import {
@@ -67,6 +69,7 @@ import {
 } from "./replay-controls.js";
 import { captureReplayBattlefieldPngV1 } from "./replay-export.js";
 import { isReplayAgentRecipientRotation } from "./replay-recipient-rotation.js";
+import { renderMatchSummary } from "./match-summary.js";
 import { BattlefieldRenderer } from "./scene.js";
 import {
   createSemanticDescriptor,
@@ -98,6 +101,11 @@ const elements = {
   connectionStatus: requiredElement("connection-status"),
   audienceBadge: requiredElement("audience-badge"),
   terminalBadge: requiredElement("terminal-badge"),
+  matchScoreboard: requiredElement("match-scoreboard"),
+  matchTask: requiredElement("match-task"),
+  matchTeamA: requiredElement("match-team-a"),
+  matchTeamB: requiredElement("match-team-b"),
+  taskSelect: requiredElement("devclient-task-select"),
   recordingBadge: requiredElement("recording-badge"),
   viewSelect: requiredElement("view-select"),
   stepValue: requiredElement("step-value"),
@@ -109,6 +117,8 @@ const elements = {
   recordingPersistenceFact: requiredElement("recording-persistence-fact"),
   recordingPersistenceError: requiredElement("recording-persistence-error"),
   recordingStatusNote: requiredElement("recording-status-note"),
+  recordingMetricsProgress: requiredElement("recording-metrics-progress"),
+  recordingMetricsHelp: requiredElement("recording-metrics-help"),
   recordingFinishButton: requiredElement("recording-finish-button"),
   recordingReviewButton: requiredElement("recording-review-button"),
   recordingRetryButton: requiredElement("recording-retry-button"),
@@ -138,6 +148,15 @@ const elements = {
   replayArtifactActions: requiredElement("replay-artifact-actions"),
   replayExportPngButton: requiredElement("replay-export-png-button"),
   replayDownloadMetricsButton: requiredElement("replay-download-metrics-button"),
+  replayOriginalMetricsButton: requiredElement("replay-original-metrics-button"),
+  replayMetricsPreparation: requiredElement("replay-metrics-preparation"),
+  replayMetricsPreparationText: requiredElement("replay-metrics-preparation-text"),
+  metricPanel: requiredElement("evaluation-metrics"),
+  metricScope: requiredElement("metric-scope"),
+  metricSelection: requiredElement("metric-selection"),
+  metricStatus: requiredElement("metric-status"),
+  metricProgress: requiredElement("metric-progress"),
+  metricRows: requiredElement("metric-rows"),
   replayRangesButton: requiredElement("replay-ranges-button"),
   replayClearReferenceButton: requiredElement("replay-clear-reference-button"),
   reconnectButton: requiredElement("reconnect-button"),
@@ -291,6 +310,7 @@ const state = {
  *   deferredDraft: Readonly<Record<string, unknown>> | null,
  *   deferredSubmit: Readonly<Record<string, unknown>> | null,
  *   releaseFocusAfterSettlement: boolean,
+ *   recordingPreparation: "metrics" | "possible" | null,
  * } | null}
  */
 let activeLiveCommandTransaction = null;
@@ -301,7 +321,7 @@ let activeLiveCommandTransaction = null;
  * installed presentation authority is cleared.
  *
  * @type {Readonly<{
- *   kind: "export_png" | "download_metrics",
+ *   kind: "export_png" | "download_metrics" | "download_original_metrics",
  *   authority: Readonly<Record<string, any>>,
  *   transport: Readonly<Record<string, any>>,
  *   presentation: Readonly<Record<string, any>>,
@@ -387,6 +407,7 @@ const PRODUCT_TITLES = Object.freeze({
   combat_debugger: "MARL-BattleGrounds DevClient",
   replay_viewer: "MARL-BattleGrounds Replay Viewer",
 });
+const METRIC_PREPARATION_MESSAGE = "Preparing metrics. Longer replays can take longer.";
 const PRODUCT_HANDOFF_COMMANDS = new Set([
   "finish_and_review",
   "review_replay",
@@ -520,6 +541,26 @@ const CONTROL_HELP = Object.freeze([
     "#devclient-scenario-load",
     "Load Debug asset",
     "Reopen, compile, and revalidate the selected scenario or map preview before replacing the current Debug session.",
+  ],
+  [
+    "#devclient-task-select",
+    "Task",
+    "TDM is the available task for authored matches. Load a saved scenario or map to use its captured configuration.",
+  ],
+  [
+    "#metric-scope",
+    "Evaluation metric scope",
+    "At cursor analyzes only captured transitions through this frame. Final episode includes the entire captured replay.",
+  ],
+  [
+    "#metric-selection",
+    "Evaluation metric",
+    "Choose the team overview or one metric from the offline report. Metrics are researcher information and do not enter agent observations.",
+  ],
+  [
+    "#replay-original-metrics-button",
+    "Original Metrics JSON",
+    "Download the original canonical metric report exactly as recorded, when its sidecar is available.",
   ],
   [
     "#devclient-team-a-controller",
@@ -979,6 +1020,11 @@ function renderPendingPresentationChrome() {
  * @param {string} reason
  */
 function clearPresentationAuthority(reason) {
+  renderInstalledMatch(null);
+  elements.metricProgress.hidden = true;
+  elements.metricRows.setAttribute("aria-busy", "false");
+  elements.recordingMetricsProgress.hidden = true;
+  elements.recordingMetricsHelp.hidden = true;
   invalidateReplayArtifactAction();
   holdWorkspaceHeightDuringAuthorityInstall();
   savePresentationPreferenceBeforeClear();
@@ -2423,6 +2469,7 @@ function renderReplayArtifactActions(installed) {
   const pending = replayArtifactActionTransaction;
   elements.replayExportPngButton.disabled = !capabilities.exportPng;
   elements.replayDownloadMetricsButton.disabled = !capabilities.downloadMetrics;
+  elements.replayOriginalMetricsButton.disabled = !capabilities.downloadMetrics;
   elements.replayExportPngButton.setAttribute(
     "aria-busy",
     String(pending?.kind === "export_png"),
@@ -2431,12 +2478,19 @@ function renderReplayArtifactActions(installed) {
     "aria-busy",
     String(pending?.kind === "download_metrics"),
   );
+  elements.replayOriginalMetricsButton.setAttribute(
+    "aria-busy",
+    String(pending?.kind === "download_original_metrics"),
+  );
+  elements.replayMetricsPreparation.hidden =
+    installed === null || pending?.kind !== "download_metrics";
+  elements.replayMetricsPreparationText.textContent = METRIC_PREPARATION_MESSAGE;
 }
 
 /**
  * Capture one exact action epoch before any asynchronous export or GET work.
  *
- * @param {"export_png" | "download_metrics"} kind
+ * @param {"export_png" | "download_metrics" | "download_original_metrics"} kind
  */
 function beginReplayArtifactAction(kind) {
   if (replayArtifactActionTransaction !== null) {
@@ -2525,6 +2579,9 @@ function finishReplayArtifactAction(transaction) {
 
 function invalidateReplayArtifactAction() {
   replayArtifactActionTransaction = null;
+  elements.replayMetricsPreparation.hidden = true;
+  elements.replayDownloadMetricsButton.setAttribute("aria-busy", "false");
+  elements.replayOriginalMetricsButton.setAttribute("aria-busy", "false");
 }
 
 /** @param {Blob} blob @param {string} filename */
@@ -2615,18 +2672,31 @@ async function exportReplayBattlefieldPng() {
   }
 }
 
-async function downloadReplayMetricReport() {
-  const transaction = beginReplayArtifactAction("download_metrics");
+/** @param {boolean} [original] */
+async function downloadReplayMetricReport(original = false) {
+  const transaction = beginReplayArtifactAction(
+    original ? "download_original_metrics" : "download_metrics",
+  );
   if (transaction === null) {
     return;
   }
   try {
-    const report = await getReplayMetricReport(state.token);
-    if (!replayArtifactActionIsCurrent(transaction)) {
+    const context = replayMetricContext();
+    if (!original && context === null) return;
+    const report =
+      !original && context !== null
+        ? await getReplayMetrics(state.token, context.frameIndex, context.scope, "csv")
+        : await getReplayMetricReport(state.token);
+    if (
+      !replayArtifactActionIsCurrent(transaction) ||
+      (!original && replayMetricContext()?.key !== context?.key)
+    ) {
       return;
     }
     downloadReplayArtifact(
-      new Blob([report.bytes], { type: "application/json; charset=utf-8" }),
+      new Blob([report.bytes], {
+        type: original ? "application/json; charset=utf-8" : "text/csv; charset=utf-8",
+      }),
       report.filename,
     );
     setNotice(`Downloaded ${report.filename}.`, "success");
@@ -2641,6 +2711,84 @@ async function downloadReplayMetricReport() {
   } finally {
     finishReplayArtifactAction(transaction);
   }
+}
+
+/** @type {{key: string, summary: Record<string, any>} | null} */
+let replayMetricSummary = null;
+/** @type {string | null} */
+let replayMetricRequest = null;
+/** @type {{key: string, message: string} | null} */
+let replayMetricFailure = null;
+let replayMetricRenderKey = "";
+
+function replayMetricContext() {
+  const installed = installedPresentationAuthority();
+  if (!isReplayMode() || installed === null) return null;
+  const frame = installed.transport;
+  const summary = frame.artifact_summary ?? frame.artifact_facts?.artifact_summary;
+  const digest = summary?.replay_reference?.canonical_digest_sha256;
+  const frameIndex = frame.cursor?.frame_index;
+  const scope = elements.metricScope.value === "final" ? "final" : "cursor";
+  if (typeof digest !== "string" || !Number.isSafeInteger(frameIndex)) return null;
+  return {
+    digest,
+    frameIndex,
+    scope: /** @type {"cursor" | "final"} */ (scope),
+    key: `${digest}:${scope}:${scope === "final" ? "final" : frameIndex}`,
+  };
+}
+
+function renderReplayMetrics() {
+  const context = replayMetricContext();
+  elements.metricProgress.hidden = true;
+  elements.metricRows.setAttribute("aria-busy", "false");
+  elements.metricPanel.hidden =
+    context === null ||
+    installedPresentationAuthority()?.presentation.match_summary?.task_mode !== 1;
+  if (context === null || elements.metricPanel.hidden || !elements.metricPanel.open)
+    return;
+  if (replayMetricSummary?.key === context.key) {
+    const summary = replayMetricSummary.summary;
+    const renderKey = `${context.key}:${elements.metricSelection.value}`;
+    if (renderKey !== replayMetricRenderKey) {
+      renderMetricRows(elements.metricRows, elements.metricSelection, summary);
+      replayMetricRenderKey = renderKey;
+    }
+    elements.metricStatus.textContent = `${summary.scope === "final" ? "Final episode" : "At cursor"} · frame ${summary.frame_index}. ${summary.original_metric_status === "available" ? "Original report preserved." : `Original report ${summary.original_metric_status}; analyzed from captured facts.`}`;
+    return;
+  }
+  elements.metricRows.replaceChildren();
+  replayMetricRenderKey = "";
+  if (replayMetricFailure?.key === context.key) {
+    elements.metricStatus.textContent = replayMetricFailure.message;
+    return;
+  }
+  elements.metricProgress.hidden = false;
+  elements.metricRows.setAttribute("aria-busy", "true");
+  elements.metricStatus.textContent = `${METRIC_PREPARATION_MESSAGE} Playback and POV controls remain available.`;
+  if (replayMetricRequest !== null) return;
+  replayMetricRequest = context.key;
+  void getReplayMetrics(state.token, context.frameIndex, context.scope)
+    .then((summary) => {
+      if (summary.source_replay_digest !== context.digest) {
+        throw new TypeError("Metric analysis belongs to another replay.");
+      }
+      replayMetricSummary = { key: context.key, summary };
+      replayMetricFailure = null;
+    })
+    .catch((error) => {
+      replayMetricFailure = {
+        key: context.key,
+        message:
+          error instanceof Error
+            ? `Metrics unavailable: ${error.message}`
+            : "Metrics unavailable.",
+      };
+    })
+    .finally(() => {
+      replayMetricRequest = null;
+      renderReplayMetrics();
+    });
 }
 
 /**
@@ -3008,6 +3156,8 @@ const recordingPersistenceLabels = Object.freeze({
 
 /** @param {ReturnType<typeof installedPresentationAuthority>} installed */
 function renderRecordingControls(installed) {
+  elements.recordingMetricsProgress.hidden = true;
+  elements.recordingMetricsHelp.hidden = true;
   if (installed === null) {
     return;
   }
@@ -3076,6 +3226,18 @@ function renderRecordingControls(installed) {
             : recording.lifecycle === "reviewing"
               ? "The local service is switching this session to read-only replay review."
               : "Recording closeout has fenced scientific controls while the canonical artifact is finalized.";
+  const preparation =
+    state.busy && !state.offline && !state.resyncRequired
+      ? activeLiveCommandTransaction?.recordingPreparation
+      : null;
+  if (preparation) {
+    elements.recordingMetricsProgress.hidden = false;
+    elements.recordingMetricsHelp.hidden = false;
+    elements.recordingStatusNote.textContent =
+      preparation === "metrics"
+        ? METRIC_PREPARATION_MESSAGE
+        : "Processing the recorded game. If the episode ends, its metrics will be prepared before saving. Longer replays can take longer.";
+  }
 
   if (recording.discard_available !== true && elements.recordingDiscardDialog.open) {
     elements.recordingDiscardDialog.close();
@@ -3458,6 +3620,7 @@ function renderConnection() {
 function renderSessionToolbar(installed = installedPresentationAuthority()) {
   const frame = installed?.transport ?? null;
   const presentation = installed?.presentation ?? null;
+  renderInstalledMatch(presentation);
   renderViewerBoundary();
   if (installed === null) {
     renderPendingPresentationChrome();
@@ -3551,6 +3714,19 @@ function renderSessionToolbar(installed = installedPresentationAuthority()) {
   renderReplayMetadata(installed);
   renderCommandAvailability();
   registerAuthorityAwareUtilityHelp();
+}
+
+/** @param {unknown} presentation */
+function renderInstalledMatch(presentation) {
+  renderMatchSummary(
+    {
+      root: elements.matchScoreboard,
+      task: elements.matchTask,
+      teams: [elements.matchTeamA, elements.matchTeamB],
+      taskSelect: elements.taskSelect,
+    },
+    presentation,
+  );
 }
 
 /**
@@ -4239,6 +4415,7 @@ function render() {
   }
   renderReplayArtifactActions(installed);
   lastBattlefieldSizeKey = battlefieldSizeKey();
+  renderReplayMetrics();
   panels.render(presentationFrame, {
     busy: state.busy,
     shuttingDown: state.shuttingDown,
@@ -4379,6 +4556,10 @@ async function sendReplayCommand(command, { deferFinalRender = false } = {}) {
   if (state.resyncRequired || state.offline) {
     throw new DebuggerApiError("Reconnect before sending another replay command.");
   }
+  let finishCommand = () => {};
+  replayCommandCompletion = new Promise((resolve) => {
+    finishCommand = resolve;
+  });
   invalidateReplayArtifactAction();
   state.busy = true;
   setNotice("Waiting for the read-only replay response…", "info");
@@ -4524,6 +4705,7 @@ async function sendReplayCommand(command, { deferFinalRender = false } = {}) {
     if (!deferFinalRender || state.resyncRequired || state.shuttingDown) {
       render();
     }
+    finishCommand();
   }
 }
 
@@ -4536,6 +4718,9 @@ async function sendReplayCommand(command, { deferFinalRender = false } = {}) {
 function sendReplayTransportCommand(command) {
   return sendReplayCommand(command, { deferFinalRender: true });
 }
+
+/** @type {Promise<void>} */
+let replayCommandCompletion = Promise.resolve();
 
 /** @param {Readonly<Record<string, any>>} command */
 async function dispatchReplayCommand(command) {
@@ -4552,13 +4737,28 @@ async function dispatchReplayCommand(command) {
   }
   const stagedRecipientActivation =
     command.command_type === "set_pov_actor" ? pendingReplayRecipientActivation : null;
+  const changingView = ["set_view", "set_pov_actor"].includes(command.command_type);
+  const wasPlaying = replayPlayback.snapshot().playing;
   invalidateReplayArtifactAction();
-  replayPlayback.pause("user_command");
+  const suspended = replayPlayback.pause("user_command");
   try {
+    if (changingView) {
+      await replayCommandCompletion;
+      if (replayPlayback.snapshot().generation !== suspended.generation) {
+        return null;
+      }
+    }
     const payload = await sendReplayCommand(command);
     const frame = state.frame;
+    const resume =
+      changingView &&
+      wasPlaying &&
+      replayPlayback.snapshot().generation === suspended.generation;
     if (frame) {
       replayPlayback.installCursor(frame.cursor);
+      if (resume && !replayPlayback.snapshot().atEnd) {
+        replayPlayback.play({ restartCurrent: false });
+      }
     }
     if (
       command.command_type === "set_pov_actor" &&
@@ -4766,11 +4966,13 @@ async function dispatchCommand(command, { deferredSubmit = null } = {}) {
     choreographer.skip();
   }
 
+  const recordingLifecycle = recordingStatus()?.lifecycle;
   /** @type {{
    *   allowsDeferredSubmit: boolean,
    *   deferredDraft: Readonly<Record<string, unknown>> | null,
    *   deferredSubmit: Readonly<Record<string, unknown>> | null,
    *   releaseFocusAfterSettlement: boolean,
+   *   recordingPreparation: "metrics" | "possible" | null,
    * }} */
   const liveCommandTransaction = {
     allowsDeferredSubmit: commandPreparesDeferredSubmit(command),
@@ -4782,10 +4984,24 @@ async function dispatchCommand(command, { deferredSubmit = null } = {}) {
         ? deferredSubmit
         : null,
     releaseFocusAfterSettlement: false,
+    recordingPreparation:
+      ["recording", "sealed"].includes(recordingLifecycle) &&
+      ["finish_and_review", "exit"].includes(String(command.command_type))
+        ? "metrics"
+        : null,
   };
   activeLiveCommandTransaction = liveCommandTransaction;
   state.busy = true;
   state.offline = false;
+  const recordingHintTimer =
+    recordingLifecycle === "recording" && isSubmissionCommand(command)
+      ? window.setTimeout(() => {
+          if (activeLiveCommandTransaction === liveCommandTransaction && state.busy) {
+            liveCommandTransaction.recordingPreparation = "possible";
+            renderRecordingControls(installedPresentationAuthority());
+          }
+        }, 2000)
+      : null;
   setNotice("Waiting for the authoritative Python response…", "info");
   let reviewHandoff = false;
   /** @type {Readonly<Record<string, unknown>> | null} */
@@ -4929,6 +5145,7 @@ async function dispatchCommand(command, { deferredSubmit = null } = {}) {
       );
     }
   } finally {
+    if (recordingHintTimer !== null) window.clearTimeout(recordingHintTimer);
     state.busy = false;
     if (activeLiveCommandTransaction === liveCommandTransaction) {
       activeLiveCommandTransaction = null;
@@ -5339,6 +5556,29 @@ elements.replayExportPngButton.addEventListener("click", () => {
 elements.replayDownloadMetricsButton.addEventListener("click", () => {
   void downloadReplayMetricReport();
 });
+elements.replayOriginalMetricsButton.addEventListener("click", () => {
+  void downloadReplayMetricReport(true);
+});
+for (const control of [
+  elements.metricPanel,
+  elements.metricScope,
+  elements.metricSelection,
+]) {
+  control.addEventListener(
+    control === elements.metricPanel ? "toggle" : "change",
+    () => {
+      replayMetricFailure = null;
+      if (
+        control === elements.metricScope &&
+        replayArtifactActionTransaction?.kind === "download_metrics"
+      ) {
+        invalidateReplayArtifactAction();
+        renderReplayArtifactActions(installedPresentationAuthority());
+      }
+      renderReplayMetrics();
+    },
+  );
+}
 
 elements.replayRangesButton.addEventListener("click", () => {
   if (!isReplayMode() || elements.replayRangesButton.disabled) {

@@ -5,6 +5,34 @@ heterogeneous adversarial multi-agent reinforcement learning.
 
 The project is currently under development.
 
+## Team Deathmatch benchmark
+
+The installed package includes the 52 approved maps and eight fixed scenarios.
+Construct ordinary configurations before calling the existing JAX environment:
+
+```python
+import jax
+from marl_battlegrounds.core.env import reset
+from marl_battlegrounds.tasks import make_standard_team_deathmatch_config
+
+config = make_standard_team_deathmatch_config(
+    map_id=0,
+    team_a_roster=("warrior", "hunter", "priest"),
+    team_b_roster=("mage", "rogue", "priest"),
+)
+state, observation, action_mask, info = reset(config, jax.random.key(0))
+```
+
+`list_tdm_maps()` and `list_tdm_scenarios()` expose names and immutable source
+identities. `load_tdm_scenario(1)` returns its approved configuration, initial
+state and Notes; pass those to `initialize_scenario_state(initial_state, config)`.
+Each team can independently contain one through five agents, including repeated
+classes. `make_canonical_team_deathmatch_evaluation_config(map_id=17)` fixes
+mirrored Mage/Warrior/Hunter/Rogue/Priest teams, first to 20, a 300-transition
+horizon, five-transition respawn waves and canonical shields. Canonical map IDs
+are 17, 20, 25, 35 and 39; training distributions belong to the later curriculum
+milestone.
+
 ## DevClient
 
 Use the DevClient as the developer workspace for live combat debugging and
@@ -71,8 +99,15 @@ samples, and materialized scripted demonstrations:
 The viewer validates or materializes one complete replay bundle before opening
 the browser. It offers settled exact-frame summaries, serialized playback,
 eight whole-clock rates, 18 paint-filter families plus Ranges,
-provenance-bearing PNG export, and researcher-space metric download across
-visual POVs. It cannot stage or submit simulator actions.
+provenance-bearing PNG export, current scores and participants, and offline
+evaluation metrics across visual POVs. Open **TDM Evaluation Metrics** below
+the class details to select **At cursor** or **Final episode**. **Download Metrics
+CSV** exports that scope; **Original Metrics JSON** preserves the recorded
+sidecar. Ordinary recording and library metric APIs default to the critical
+outcome, score-difference, return, length and completion metrics. Full diagnostics
+are explicit opt-in: `build_tdm_metric_reducers(full=True)` or
+`analyze_replay(bundle, full=True)`, including the Viewer detailed-analysis request.
+It cannot stage or submit simulator actions.
 
 See the [Replay Viewer guide](docs/dev/replay_viewer.md) for artifact selection,
 sample provenance, scenario isolation, transport and keyboard behavior,
@@ -112,8 +147,15 @@ embeddings, attention, or any other researcher neural architecture.
 
 ## Planned scenario evaluations and Big 12
 
-The planned public scenario suite is primarily a controlled behavioral-ablation
-instrument. Each official evaluation definition will compare a complete method
+The approved TDM suite contains eight scenarios. Seven use five-transition
+horizons; Scenario 3 uses ten transitions to examine sustained body blocking,
+while retaining the canonical five-transition respawn period. The scenario and
+map designs are approved. Packaged definitions and a bounded complete-suite
+qualification compose the existing rollout, capture, metrics and replay APIs.
+These plumbing controls do not replace learned-policy behavioral ablations.
+
+The public scenario suite is primarily a controlled behavioral-ablation
+instrument. Each manuscript comparison will compare a complete method
 with its matched ablation under the same scenario revision, embedded map and
 initial state, deterministic reactive pressure controller, canonical SharedObs
 contract, seeds and sides, training budget, checkpoint-selection rule, and
@@ -126,9 +168,16 @@ provide evidence for a specific behavioral claim under frozen conditions; they
 do not contribute to Elo or establish general strength. See
 [specification amendment A26](docs/design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations).
 
+The current sequence is M7 TDM Benchmark and Researcher Tools → M8 Policy
+Execution and Evaluation → M9 Training Distributions and Curriculum → M10
+Learning Platform and Baselines → M11 LLM-Agent Integration → M12 Manuscript
+Experiments and Release. KOTH (M13) and CTF (M14) follow manuscript submission.
+[Amendment A36](docs/design/specification_amendments.md#a36-submission-roadmap-approved-tdm-content-and-m7-closeout)
+records the executive override and historical milestone-number mapping.
+
 Public evaluation scenarios and their complete content closure must not inform
 training, checkpoint selection, early stopping, hyperparameters, prompts,
-curricula, population weights, or any other adaptive choice. Future M11/M12
+curricula, population weights, or any other adaptive choice. Future M9/M10
 pipelines will enforce content-addressed training, validation, and evaluation
 manifest separation, while official systems retain complete provenance for
 maintainer reproduction. This is a reproducibility and eligibility boundary,
@@ -159,7 +208,11 @@ rule enters the tournament. Qwen-Five remains tentative until a measured
 throughput and resource gate is passed. Twelve systems yield 66 unordered
 pairings and, at 100 episodes per pairing, 6,600 tournament episodes. The raw
 win/draw/loss matrix remains authoritative; rating implementation details must
-pass their own pre-tournament gate.
+pass their own pre-tournament gate. The public ladder presents Elo, win/loss/draw
+percentages and matches played, with evaluated-system identities. It does not
+broadcast full tactical metrics. Researchers can reproduce the ladder locally
+and explicitly enable those diagnostics. A secondary team K/D column pools total kills divided by total deaths across
+the tournament, showing unavailable when deaths are zero. It is not a rating input.
 
 Weekly Big 12 reviews will publish immutable dated snapshots. A qualified new
 method may enter by relegating the lowest method; a week without a qualified

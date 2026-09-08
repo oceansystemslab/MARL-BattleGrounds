@@ -4,7 +4,7 @@ import test from "node:test";
 import { normalizeAuthorizedPresentationFrameV1 } from "../src/authorized-presentation-normalizer.js";
 import { explainChoreographyEvent } from "../src/choreography-painter.js";
 import {
-  buildChoreographyPlan,
+  buildChoreographyPlan as buildPlan,
   CHOREOGRAPHY_PAINT_FOOTPRINTS,
   isSubmissionCommand,
 } from "../src/choreography-plan.js";
@@ -17,10 +17,18 @@ import { routeMarkerPose } from "../src/routes.js";
 import { BATTLEFIELD_LAYER_ORDER } from "../src/scene.js";
 import {
   DEFAULT_VISUAL_FILTER_STATE,
+  enableAllVisualFilters,
   setVisualFilterEnabled,
   VISUAL_FILTER_IDS,
   visualFilterPaintKey,
 } from "../src/visual-filters.js";
+
+// Effect semantics are exercised with every paint family enabled. Product
+// defaults are qualified separately by the visual-filter tests.
+const ALL_VISUAL_FILTERS = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
+/** @type {typeof buildPlan} */
+const buildChoreographyPlan = (presentation, surface, filters = ALL_VISUAL_FILTERS) =>
+  buildPlan(presentation, surface, filters);
 
 /**
  * @typedef {{
@@ -83,7 +91,7 @@ async function authorizedFixture() {
 function filtersDisabled(...filterIds) {
   return filterIds.reduce(
     (state, filterId) => setVisualFilterEnabled(state, filterId, false),
-    DEFAULT_VISUAL_FILTER_STATE,
+    ALL_VISUAL_FILTERS,
   );
 }
 
@@ -486,12 +494,12 @@ test("visual filters preserve scientific identity and retain suppressed atomics 
   const allOn = buildChoreographyPlan(frame, surface);
   const allOffState = VISUAL_FILTER_IDS.reduce(
     (state, filterId) => setVisualFilterEnabled(state, filterId, false),
-    DEFAULT_VISUAL_FILTER_STATE,
+    ALL_VISUAL_FILTERS,
   );
   const allOff = buildChoreographyPlan(frame, surface, allOffState);
   assert.ok(allOn);
   assert.ok(allOff);
-  assert.equal(allOn.paintKey, visualFilterPaintKey(DEFAULT_VISUAL_FILTER_STATE));
+  assert.equal(allOn.paintKey, visualFilterPaintKey(ALL_VISUAL_FILTERS));
   assert.equal(allOff.paintKey, visualFilterPaintKey(allOffState));
   assert.notEqual(allOff.paintKey, allOn.paintKey);
   assert.deepEqual(
@@ -691,7 +699,7 @@ test("all registered transient families validate without constructing disabled g
   const serializedBefore = JSON.stringify(frame);
   const allOffState = VISUAL_FILTER_IDS.reduce(
     (state, filterId) => setVisualFilterEnabled(state, filterId, false),
-    DEFAULT_VISUAL_FILTER_STATE,
+    ALL_VISUAL_FILTERS,
   );
   const forbiddenSurface = new Proxy(
     {},

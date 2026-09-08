@@ -35,6 +35,17 @@
  * }>} VisualPaintPartRegistration
  */
 
+const INITIAL_VISUAL_FILTER_IDS = new Set([
+  "ultimate_ability_effects",
+  "spawn_shield",
+  "basic_ability_effects",
+  "regeneration_effects",
+  "death_effects",
+  "resurrection_effects",
+  "scrolling_battle_text",
+  "respawn_wave",
+]);
+
 export const VISUAL_FILTER_REGISTRY = Object.freeze(
   [
     ["aura_fields", "Aura Fields"],
@@ -59,7 +70,7 @@ export const VISUAL_FILTER_REGISTRY = Object.freeze(
     Object.freeze({
       id: /** @type {VisualFilterId} */ (id),
       label,
-      defaultEnabled: true,
+      defaultEnabled: INITIAL_VISUAL_FILTER_IDS.has(id),
     }),
   ),
 );
@@ -71,6 +82,12 @@ export const VISUAL_FILTER_IDS = Object.freeze(
 const VISUAL_FILTER_ID_SET = new Set(VISUAL_FILTER_IDS);
 
 export const DEFAULT_VISUAL_FILTER_STATE = freezeVisualFilterState(
+  Object.fromEntries(
+    VISUAL_FILTER_REGISTRY.map(({ id, defaultEnabled }) => [id, defaultEnabled]),
+  ),
+);
+
+const ENABLED_VISUAL_FILTER_STATE = freezeVisualFilterState(
   Object.fromEntries(VISUAL_FILTER_IDS.map((id) => [id, true])),
 );
 
@@ -297,7 +314,7 @@ export function enableAllVisualFilters(state) {
   const normalized = assertVisualFilterState(state);
   return VISUAL_FILTER_IDS.every((id) => normalized[id])
     ? normalized
-    : DEFAULT_VISUAL_FILTER_STATE;
+    : ENABLED_VISUAL_FILTER_STATE;
 }
 
 /**

@@ -15,6 +15,7 @@ from tests.evaluation_fixtures import (
     mage_target_none_ultimate_action,
 )
 
+import marl_battlegrounds.evaluation.replay as replay_module
 from marl_battlegrounds.core.types import CONTEXT_FEATURE_CURRENT_TIMESTEP
 from marl_battlegrounds.evaluation.events import decode_evaluation_events_v1
 from marl_battlegrounds.evaluation.metrics import (
@@ -409,6 +410,7 @@ def test_replay_builds_every_rollout_outcome(
     runtime_provenance: RuntimeProvenanceV1,
     completion_state: CompletionState,
     failure_origin: RolloutFailureOrigin | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Completion classification survives without becoming processing truth."""
     transition_count = 2 if completion_state == "complete" else 1
@@ -418,19 +420,33 @@ def test_replay_builds_every_rollout_outcome(
     )
     reason = None if completion_state == "complete" else f"{completion_state} prefix"
 
-    bundle = _build_bundle(
-        trajectory,
-        runtime_provenance,
-        completion_state=completion_state,
-        end_or_failure_reason=reason,
-        failure_origin=failure_origin,
-    )
+    def no_history_revalidation(*_: object, **__: object) -> None:
+        raise AssertionError("the builder must reuse observer-validated history")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            replay_module, "_validate_replay_semantics", no_history_revalidation
+        )
+        bundle = _build_bundle(
+            trajectory,
+            runtime_provenance,
+            completion_state=completion_state,
+            end_or_failure_reason=reason,
+            failure_origin=failure_origin,
+        )
     replay = bundle.replay
 
     validate_replay_artifact_v1(replay)
     validate_metric_report_artifact_against_replay_v1(
         bundle.metric_report_artifact,
         replay,
+    )
+    assert ReplayArtifactV1.model_validate_json(canonical_json_bytes(replay)) == replay
+    assert (
+        EvaluationMetricReportArtifactV1.model_validate_json(
+            canonical_json_bytes(bundle.metric_report_artifact)
+        )
+        == bundle.metric_report_artifact
     )
     assert replay.completion.completion_state == completion_state
     assert replay.completion.failure_origin == failure_origin

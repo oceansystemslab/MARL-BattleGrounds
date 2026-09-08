@@ -9,8 +9,19 @@ reducers that consume already validated CP2 transition units.
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Annotated, Literal, Protocol, cast
+from types import UnionType
+from typing import (
+    Annotated,
+    Literal,
+    Protocol,
+    TypeAliasType,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+)
 
 from pydantic import BeforeValidator, Field, StringConstraints, model_validator
 
@@ -25,8 +36,8 @@ from marl_battlegrounds.evaluation.models import (
     SchemaVersionEntryV1,
 )
 from marl_battlegrounds.evaluation.validation import (
+    _canonicalize_evaluation_transition_unit_v1,  # pyright: ignore[reportPrivateUsage]
     validate_declared_model_tree,
-    validate_evaluation_transition_unit_v1,
     validate_initial_evaluation_frame_v1,
 )
 
@@ -47,6 +58,8 @@ type ProcessingFailureStage = Literal[
     "reducer_initialize",
     "transition_validation",
     "reducer_advance",
+    "offline_reducer_initialize",
+    "offline_reducer_advance",
     "completion_validation",
     "reducer_finalize",
     "statistic_materialization",
@@ -842,6 +855,8 @@ class EvaluationProcessingFailureV1(EvaluationModel):
         reducer_stage = self.stage in (
             "reducer_initialize",
             "reducer_advance",
+            "offline_reducer_initialize",
+            "offline_reducer_advance",
             "reducer_finalize",
         )
         if reducer_stage and self.reducer_id is None:
@@ -851,8 +866,12 @@ class EvaluationProcessingFailureV1(EvaluationModel):
         transition_stage = self.stage in (
             "transition_validation",
             "reducer_advance",
+            "offline_reducer_advance",
         )
-        if self.stage == "reducer_advance" and self.attempted_transition_index is None:
+        if (
+            self.stage in ("reducer_advance", "offline_reducer_advance")
+            and self.attempted_transition_index is None
+        ):
             raise ValueError("reducer advance failure requires an attempted index")
         if not transition_stage and self.attempted_transition_index is not None:
             raise ValueError(
@@ -902,6 +921,7 @@ _FAILURE_STAGES_WITHOUT_STATISTICS = frozenset(
     {
         "initial_validation",
         "reducer_initialize",
+        "offline_reducer_initialize",
         "completion_validation",
         "reducer_finalize",
         "statistic_materialization",
@@ -935,6 +955,19 @@ def validate_evaluation_processing_progress_v1(
     failure = processing_status.failure
     if failure is None:
         raise ValueError("failed processing requires its typed failure record")
+    if failure.stage == "offline_reducer_initialize":
+        if processed_transition_count != 0:
+            raise ValueError("offline initialization failure forbids processed steps")
+        return
+    if failure.stage == "offline_reducer_advance":
+        if (
+            processed_transition_count >= validated_transition_count
+            or failure.attempted_transition_index != processed_transition_count
+        ):
+            raise ValueError(
+                "offline advance failure must identify the first unprocessed step"
+            )
+        return
     if failure.stage == "reducer_initialize":
         if validated_transition_count != 0 or processed_transition_count != 0:
             raise ValueError(
@@ -963,9 +996,7 @@ def _replace_draft(
     draft: SufficientStatisticDraftV1,
     **updates: object,
 ) -> SufficientStatisticDraftV1:
-    payload = draft.model_dump(mode="python")
-    payload.update(updates)
-    return SufficientStatisticDraftV1.model_validate(payload)
+    return draft.model_copy(update=updates)
 
 
 def _with_episode_eligibility(
@@ -975,9 +1006,9 @@ def _with_episode_eligibility(
     component = draft.component
     if component is None or component.eligible_episode_count == eligible_episode_count:
         return draft
-    component_payload = component.model_dump(mode="python")
-    component_payload["eligible_episode_count"] = eligible_episode_count
-    replacement_component = type(component).model_validate(component_payload)
+    replacement_component = component.model_copy(
+        update={"eligible_episode_count": eligible_episode_count}
+    )
     return _replace_draft(draft, component=replacement_component)
 
 
@@ -1278,48 +1309,36 @@ class EvaluationTransitionViewV1:
     successor_frame: EvaluationFrameV1
 
     def __post_init__(self) -> None:
-        validate_evaluation_transition_unit_v1(
+        (
+            canonical_context,
+            canonical_start,
+            canonical_transition,
+            canonical_successor,
+        ) = _canonicalize_evaluation_transition_unit_v1(
             self.context,
             self.start_frame,
             self.transition,
             self.successor_frame,
         )
-        canonical_context = cast(
-            EvaluationEpisodeContextV1,
-            validate_declared_model_tree(
-                self.context,
-                record_name="transition view context",
-                expected_type=EvaluationEpisodeContextV1,
-            ),
-        )
-        canonical_start = cast(
-            EvaluationFrameV1,
-            validate_declared_model_tree(
-                self.start_frame,
-                record_name="transition view start frame",
-                expected_type=EvaluationFrameV1,
-            ),
-        )
-        canonical_transition = cast(
-            EvaluationTransitionV1,
-            validate_declared_model_tree(
-                self.transition,
-                record_name="transition view transition",
-                expected_type=EvaluationTransitionV1,
-            ),
-        )
-        canonical_successor = cast(
-            EvaluationFrameV1,
-            validate_declared_model_tree(
-                self.successor_frame,
-                record_name="transition view successor frame",
-                expected_type=EvaluationFrameV1,
-            ),
-        )
         object.__setattr__(self, "context", canonical_context)
         object.__setattr__(self, "start_frame", canonical_start)
         object.__setattr__(self, "transition", canonical_transition)
         object.__setattr__(self, "successor_frame", canonical_successor)
+
+
+def _view_from_owned_records(
+    context: EvaluationEpisodeContextV1,
+    start_frame: EvaluationFrameV1,
+    transition: EvaluationTransitionV1,
+    successor_frame: EvaluationFrameV1,
+) -> EvaluationTransitionViewV1:
+    """Reuse the observer's validated records without repeating unit validation."""
+    view = object.__new__(EvaluationTransitionViewV1)
+    object.__setattr__(view, "context", context)
+    object.__setattr__(view, "start_frame", start_frame)
+    object.__setattr__(view, "transition", transition)
+    object.__setattr__(view, "successor_frame", successor_frame)
+    return view
 
 
 class EvaluationMetricReducerV1(Protocol):
@@ -1392,7 +1411,45 @@ def _uses_strict_frozen_model_config(model_type: type[EvaluationModel]) -> bool:
     )
 
 
-def _revalidate_reducer_state(
+def _immutable_state_schema(
+    annotation: object, seen: set[type[EvaluationModel]]
+) -> bool:
+    """Inspect the declared state shape once; never traverse accumulated values."""
+    if any(annotation is scalar for scalar in (type(None), bool, int, float, str)):
+        return True
+    if isinstance(annotation, TypeAliasType):
+        return _immutable_state_schema(annotation.__value__, seen)
+    origin = get_origin(annotation)
+    arguments = get_args(annotation)
+    if origin is Annotated:
+        return _immutable_state_schema(arguments[0], seen)
+    if origin in (Union, UnionType):
+        return all(_immutable_state_schema(item, seen) for item in arguments)
+    if origin is Literal:
+        return all(
+            type(item) in (type(None), bool, int, float, str) for item in arguments
+        )
+    if origin is tuple:
+        return all(
+            item is Ellipsis or _immutable_state_schema(item, seen)
+            for item in arguments
+        )
+    if not isinstance(annotation, type) or not issubclass(annotation, EvaluationModel):
+        return False
+    if not _uses_strict_frozen_model_config(annotation) or getattr(
+        annotation, "__private_attributes__", {}
+    ):
+        return False
+    if annotation in seen:
+        return True
+    seen.add(annotation)
+    return all(
+        _immutable_state_schema(field.annotation, seen)
+        for field in annotation.model_fields.values()
+    )
+
+
+def _validate_reducer_state(
     state: object,
     *,
     reducer_id: str,
@@ -1405,39 +1462,24 @@ def _revalidate_reducer_state(
         raise TypeError(
             "reducer state subclasses must retain the strict frozen model config"
         )
-    reconstructed = type(state).model_validate(state.model_dump(mode="python"))
-    if reconstructed != state:
-        raise ValueError("reducer state changes under structural revalidation")
-    if not _is_frozen_state_value(state):
+    if expected_type is None and not _immutable_state_schema(type(state), set()):
         raise TypeError("reducer state fields must be scalar or tuple-backed models")
-    if state.reducer_id != reducer_id or state.reducer_version != reducer_version:
+    if (
+        type(state.reducer_id) is not str
+        or type(state.reducer_version) is not int
+        or state.reducer_id != reducer_id
+        or state.reducer_version != reducer_version
+    ):
         raise ValueError("reducer state identity/version must match its reducer")
     if expected_type is not None and type(state) is not expected_type:
         raise TypeError("reducer replacement state type must remain exact")
+    if getattr(state, "__pydantic_private__", None) or any(
+        type(getattr(state, name)) not in (type(None), bool, int, float, str, tuple)
+        and not isinstance(getattr(state, name), EvaluationModel)
+        for name in type(state).model_fields
+    ):
+        raise TypeError("reducer state fields must be scalar or tuple-backed models")
     return state
-
-
-def _is_frozen_state_value(value: object) -> bool:
-    """Return whether reducer state recursively excludes mutable/device values."""
-    if isinstance(value, EvaluationModel):
-        if not _uses_strict_frozen_model_config(type(value)):
-            return False
-        # Pydantic private attributes are deliberately absent from model dumps
-        # and equality.  Allowing them would let a nominally frozen reducer
-        # state retain hidden mutable data outside the replacement-state
-        # transaction, so reducer state models may not declare them at all.
-        if getattr(type(value), "__private_attributes__", {}):
-            return False
-        if getattr(value, "__pydantic_private__", None):
-            return False
-        return all(
-            _is_frozen_state_value(getattr(value, field_name))
-            for field_name in type(value).model_fields
-        )
-    if isinstance(value, tuple):
-        items = cast(tuple[object, ...], value)
-        return all(_is_frozen_state_value(item) for item in items)
-    return value is None or type(value) in (bool, int, float, str)
 
 
 def _materialize_raw_statistic(
@@ -1447,25 +1489,55 @@ def _materialize_raw_statistic(
     processing_status: EvaluationProcessingStatusV1,
 ) -> RawSufficientStatisticV1:
     eligible = _apply_episode_eligibility(draft, completion, processing_status)
-    payload = eligible.model_dump(mode="python")
-    return RawSufficientStatisticV1.model_validate(
-        {
-            **payload,
-            "episode_id": context.identity.episode_id,
-            "aggregation_keys": context.aggregation_keys,
-            "source_schema_versions": context.schema_versions,
-            "rollout_completion": completion,
-            "validated_transition_count": completion.validated_transition_count,
-            "processed_transition_count": (
-                processing_status.processed_transition_count
-            ),
-            "processing_status": processing_status,
-        }
+    if {dimension.name for dimension in eligible.dimensions}.intersection(
+        key.name for key in context.aggregation_keys
+    ):
+        raise ValueError("statistic dimensions cannot shadow context aggregation keys")
+    # Reducers own valid immutable drafts; the observer owns all provenance.
+    # Reuse those values instead of serializing and rebuilding their history.
+    return RawSufficientStatisticV1.model_construct(
+        **{
+            name: getattr(eligible, name)
+            for name in SufficientStatisticDraftV1.model_fields
+        },
+        episode_id=context.identity.episode_id,
+        aggregation_keys=context.aggregation_keys,
+        source_schema_versions=context.schema_versions,
+        rollout_completion=completion,
+        validated_transition_count=completion.validated_transition_count,
+        processed_transition_count=processing_status.processed_transition_count,
+        processing_status=processing_status,
     )
 
 
+def _reducer_drafts(
+    reducer: EvaluationMetricReducerV1,
+    state: EvaluationMetricReducerStateV1,
+    completion: EvaluationEpisodeCompletionV1,
+    processing: EvaluationProcessingStatusV1,
+) -> tuple[SufficientStatisticDraftV1, ...]:
+    """Check the producer boundary without walking accumulated component values."""
+    drafts = reducer.finalize(state, completion, processing)
+    if type(drafts) is not tuple:
+        raise TypeError("reducer finalize must return an immutable tuple")
+    for draft in drafts:
+        if type(draft) is not SufficientStatisticDraftV1:
+            raise TypeError("reducer finalize must return exact statistic drafts")
+        if (
+            draft.reducer_id != reducer.reducer_id
+            or draft.reducer_version != reducer.reducer_version
+        ):
+            raise ValueError("statistic draft reducer identity/version mismatch")
+    return drafts
+
+
 class EvaluationEpisodeObserverV1:
-    """Mutable transaction coordinator around immutable host evaluation records."""
+    """Coordinate immutable metric records with strict input validation.
+
+    Reducers are trusted pure code. Their declared state shape is checked at
+    initialization, and replacements preserve cheap identity/type boundaries.
+    Deep scientific-record validation belongs to ingestion and independent tests.
+    """
 
     __slots__ = (
         "_context",
@@ -1536,15 +1608,8 @@ class EvaluationEpisodeObserverV1:
 
     @property
     def context(self) -> EvaluationEpisodeContextV1:
-        """Return the immutable episode context owned by this observer."""
-        return cast(
-            EvaluationEpisodeContextV1,
-            validate_declared_model_tree(
-                self._context,
-                record_name="observer-owned context",
-                expected_type=EvaluationEpisodeContextV1,
-            ),
-        )
+        """Return a detached copy of the observer's immutable episode context."""
+        return deepcopy(self._context)
 
     @property
     def lifecycle_state(self) -> ObserverLifecycleState:
@@ -1566,53 +1631,24 @@ class EvaluationEpisodeObserverV1:
         """Return metric-complete frame history, or ``None`` when not retained."""
         if self._retained_frames is None:
             return None
-        return tuple(
-            cast(
-                EvaluationFrameV1,
-                validate_declared_model_tree(
-                    frame,
-                    record_name="observer-retained frame",
-                    expected_type=EvaluationFrameV1,
-                ),
-            )
-            for frame in self._retained_frames
-        )
+        return deepcopy(tuple(self._retained_frames))
 
     @property
     def retained_transitions(self) -> tuple[EvaluationTransitionV1, ...] | None:
         """Return metric-complete transition history, or ``None`` otherwise."""
         if self._retained_transitions is None:
             return None
-        return tuple(
-            cast(
-                EvaluationTransitionV1,
-                validate_declared_model_tree(
-                    transition,
-                    record_name="observer-retained transition",
-                    expected_type=EvaluationTransitionV1,
-                ),
-            )
-            for transition in self._retained_transitions
-        )
+        return deepcopy(tuple(self._retained_transitions))
 
     @property
     def finalized_report(self) -> EvaluationMetricReportV1 | None:
-        """Return the exact immutable report committed by finalization, if any."""
-        if self._finalized_report is None:
-            return None
-        return cast(
-            EvaluationMetricReportV1,
-            validate_declared_model_tree(
-                self._finalized_report,
-                record_name="observer-finalized report",
-                expected_type=EvaluationMetricReportV1,
-            ),
-        )
+        """Return a detached copy of the committed immutable report, if any."""
+        return deepcopy(self._finalized_report)
 
     @property
     def reducer_states(self) -> tuple[EvaluationMetricReducerStateV1, ...] | None:
-        """Return the last atomically committed frozen reducer states."""
-        return self._reducer_states
+        """Return detached copies of the last committed frozen reducer states."""
+        return deepcopy(self._reducer_states)
 
     def _set_failure(
         self,
@@ -1685,7 +1721,7 @@ class EvaluationEpisodeObserverV1:
         candidate_types: list[type[EvaluationMetricReducerStateV1]] = []
         for reducer in self._reducers:
             try:
-                candidate = _revalidate_reducer_state(
+                candidate = _validate_reducer_state(
                     reducer.initialize(self._context, canonical_initial_frame),
                     reducer_id=reducer.reducer_id,
                     reducer_version=reducer.reducer_version,
@@ -1742,6 +1778,14 @@ class EvaluationEpisodeObserverV1:
             self._lifecycle_state = "poisoned"
             raise
 
+        self._append_validated_view(view)
+
+    def _append_validated_view(self, view: EvaluationTransitionViewV1) -> None:
+        """Consume owned validated records through the same atomic transaction."""
+        if self._lifecycle_state != "open":
+            self._reject_lifecycle("append")
+        attempted_index = view.transition.transition_index
+
         # Validation is authoritative physical/artifact evidence and commits
         # independently from reducer progress.
         self._current_frame = view.successor_frame
@@ -1764,7 +1808,7 @@ class EvaluationEpisodeObserverV1:
             strict=True,
         ):
             try:
-                candidate = _revalidate_reducer_state(
+                candidate = _validate_reducer_state(
                     reducer.advance(previous_state, view),
                     reducer_id=reducer.reducer_id,
                     reducer_version=reducer.reducer_version,
@@ -1861,6 +1905,95 @@ class EvaluationEpisodeObserverV1:
             failure=self._processing_failure,
         )
 
+    def evaluate_retained(
+        self,
+        reducers: tuple[EvaluationMetricReducerV1, ...],
+    ) -> None:
+        """Evaluate captured facts once, after recording, without rerunning Core.
+
+        The original validated trajectory remains authoritative even when a
+        reducer fails partway through analysis. Only metric processing progress
+        and state transfer from the temporary evaluator; capture never shrinks
+        to the successfully processed metric prefix.
+        """
+        if self._reducers or self._finalize_attempted:
+            raise RuntimeError("offline evaluation requires an unfinalized capture")
+        frames = self._retained_frames
+        transitions = self._retained_transitions
+        if not frames or transitions is None:
+            raise RuntimeError("offline evaluation requires retained capture")
+        if self._processing_failure is not None:
+            # Preserve the original failure and its validated/processed boundary.
+            # Replay analysis may separately recover metrics from this prefix.
+            return
+        evaluator = EvaluationEpisodeObserverV1(self._context, reducers=reducers)
+        try:
+            evaluator.start(frames[0])
+            for start, transition, successor in zip(
+                frames[:-1], transitions, frames[1:], strict=True
+            ):
+                evaluator._append_validated_view(
+                    _view_from_owned_records(
+                        evaluator._context, start, transition, successor
+                    )
+                )
+        except RuntimeError, ValueError, TypeError:
+            if evaluator._processing_failure is None:
+                raise
+        self._reducers = evaluator._reducers
+        self._reducer_states = evaluator._reducer_states
+        self._reducer_state_types = evaluator._reducer_state_types
+        self._processed_transition_count = evaluator._processed_transition_count
+        if self._processing_failure is None:
+            failure = evaluator._processing_failure
+            if failure is not None and failure.stage in (
+                "reducer_initialize",
+                "reducer_advance",
+            ):
+                payload = failure.model_dump(mode="python")
+                payload["stage"] = f"offline_{failure.stage}"
+                failure = EvaluationProcessingFailureV1.model_validate(payload)
+            self._processing_failure = failure
+
+    def preview_statistics(
+        self,
+        *,
+        completion_state: CompletionState = "partial",
+        end_or_failure_reason: str | None = None,
+        failure_origin: RolloutFailureOrigin | None = None,
+    ) -> tuple[SufficientStatisticDraftV1, ...]:
+        """Project the current prefix without finalizing or mutating the observer.
+
+        This is researcher analysis, not an actor observation. Callers supply
+        completion only when that endpoint has actually been captured. Complete-
+        episode rows retain the same eligibility rules as the final report.
+        A failing projection raises without poisoning continued capture.
+        """
+        if self._reducer_states is None:
+            raise RuntimeError("a valid initial frame is required for a preview")
+        completion = self._build_completion(
+            completion_state=completion_state,
+            end_or_failure_reason=(
+                "cursor_prefix"
+                if completion_state == "partial" and end_or_failure_reason is None
+                else end_or_failure_reason
+            ),
+            failure_origin=failure_origin,
+        )
+        processing = EvaluationProcessingStatusV1(
+            status="succeeded" if self._processing_failure is None else "failed",
+            processed_transition_count=self._processed_transition_count,
+            failure=self._processing_failure,
+        )
+        rows: list[SufficientStatisticDraftV1] = []
+        for reducer, state in zip(self._reducers, self._reducer_states, strict=True):
+            for draft in _reducer_drafts(reducer, state, completion, processing):
+                rows.append(_apply_episode_eligibility(draft, completion, processing))
+        keys = tuple(_draft_row_key(row) for row in rows)
+        if len(keys) != len(set(keys)):
+            raise ValueError("reducers produced duplicate statistic row keys")
+        return tuple(sorted(rows, key=_draft_row_key))
+
     def finalize(
         self,
         *,
@@ -1901,31 +2034,9 @@ class EvaluationEpisodeObserverV1:
             finalization_failed = False
             for reducer, state in zip(self._reducers, states, strict=True):
                 try:
-                    reducer_drafts = reducer.finalize(
-                        state,
-                        completion,
-                        processing_status,
+                    collected.extend(
+                        _reducer_drafts(reducer, state, completion, processing_status)
                     )
-                    if type(reducer_drafts) is not tuple:
-                        raise TypeError(
-                            "reducer finalize must return an immutable tuple"
-                        )
-                    for draft in reducer_drafts:
-                        reconstructed = SufficientStatisticDraftV1.model_validate(
-                            draft.model_dump(mode="python")
-                        )
-                        if reconstructed != draft:
-                            raise ValueError(
-                                "statistic draft changes under structural revalidation"
-                            )
-                        if (
-                            draft.reducer_id != reducer.reducer_id
-                            or draft.reducer_version != reducer.reducer_version
-                        ):
-                            raise ValueError(
-                                "statistic draft reducer identity/version mismatch"
-                            )
-                        collected.append(draft)
                 except Exception as error:
                     self._set_failure(
                         stage="reducer_finalize",
@@ -1970,13 +2081,11 @@ class EvaluationEpisodeObserverV1:
                 rows = ()
 
         try:
-            report = EvaluationMetricReportV1(
-                report_id=f"{self._context.identity.episode_id}:metric-report",
-                context=self._context,
-                completion=completion,
-                processing_status=processing_status,
-                statistics=rows,
+            validate_evaluation_processing_progress_v1(
+                completion.validated_transition_count, processing_status
             )
+            for row in rows:
+                _validate_subject_join(self._context, row)
         except Exception as error:
             self._set_failure(
                 stage="report_validation",
@@ -1985,24 +2094,18 @@ class EvaluationEpisodeObserverV1:
                 replace=True,
             )
             processing_status = self._processing_status()
-            report = EvaluationMetricReportV1(
-                report_id=f"{self._context.identity.episode_id}:metric-report",
-                context=self._context,
-                completion=completion,
-                processing_status=processing_status,
-                statistics=(),
-            )
-        committed_report = cast(
-            EvaluationMetricReportV1,
-            validate_declared_model_tree(
-                report,
-                record_name="observer-finalized report",
-                expected_type=EvaluationMetricReportV1,
-            ),
+            rows = ()
+        report = EvaluationMetricReportV1.model_construct(
+            report_id=f"{self._context.identity.episode_id}:metric-report",
+            context=self._context,
+            completion=completion,
+            processing_status=processing_status,
+            statistics=rows,
         )
+        # The caller receives its own tree; finalized observer state stays owned.
         self._lifecycle_state = "finalized"
-        self._finalized_report = committed_report
-        return report
+        self._finalized_report = report
+        return deepcopy(report)
 
 
 def build_evaluation_observer_v1(

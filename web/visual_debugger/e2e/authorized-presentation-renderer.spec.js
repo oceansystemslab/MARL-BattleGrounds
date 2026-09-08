@@ -86,6 +86,10 @@ async function renderPresentation(page, rawPresentation, showRanges) {
         `${moduleRoot}/authorized-presentation-normalizer.js`
       );
       const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+      const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+        `${moduleRoot}/visual-filters.js`
+      );
+      const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
       const { authorizedPresentationSceneView } = await import(
         `${moduleRoot}/authorized-presentation-adapter.js`
       );
@@ -105,6 +109,7 @@ async function renderPresentation(page, rawPresentation, showRanges) {
       const renderer = new BattlefieldRenderer({ battlefield, empty });
       const painted = renderer.render(presentation, {
         showRanges: visible,
+        visualFilterState: allVisualFilters,
         // Deliberately ignored: transport may control visibility, never geometry.
         ranges: [{ center: [999, 999], radius: 999, global_slot: 999 }],
       });
@@ -185,6 +190,10 @@ test("Debugger unit grid is lowest, exact, click-transparent, and absent from re
         `${moduleRoot}/authorized-presentation-normalizer.js`
       );
       const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+      const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+        `${moduleRoot}/visual-filters.js`
+      );
+      const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
       const battlefield = document.querySelector("#battlefield");
       const empty = document.querySelector("#empty");
       if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement)) {
@@ -200,7 +209,10 @@ test("Debugger unit grid is lowest, exact, click-transparent, and absent from re
       ]) {
         battlefield.style.width = `${viewport.width}px`;
         battlefield.style.height = `${viewport.height}px`;
-        renderer.render(live, { showRanges: true });
+        renderer.render(live, {
+          showRanges: true,
+          visualFilterState: allVisualFilters,
+        });
         const mapLayer = battlefield.querySelector('[data-layer="map"]');
         const boundary = battlefield.querySelector(".map-boundary");
         const firstVertical = battlefield.querySelector(".map-grid-line--vertical");
@@ -236,7 +248,10 @@ test("Debugger unit grid is lowest, exact, click-transparent, and absent from re
             : null,
         });
       }
-      renderer.render(replay, { showRanges: true });
+      renderer.render(replay, {
+        showRanges: true,
+        visualFilterState: allVisualFilters,
+      });
       return {
         liveRows,
         replayGridCount: battlefield.querySelectorAll(".map-grid-line").length,
@@ -279,9 +294,12 @@ test("Target Selection Visuals hides only reticle and legality paint", async ({
       `${moduleRoot}/authorized-presentation-normalizer.js`
     );
     const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
-    const { DEFAULT_VISUAL_FILTER_STATE, setVisualFilterEnabled } = await import(
-      `${moduleRoot}/visual-filters.js`
-    );
+    const {
+      DEFAULT_VISUAL_FILTER_STATE,
+      enableAllVisualFilters,
+      setVisualFilterEnabled,
+    } = await import(`${moduleRoot}/visual-filters.js`);
+    const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
     const battlefield = document.querySelector("#battlefield");
     const empty = document.querySelector("#empty");
     if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement)) {
@@ -318,15 +336,11 @@ test("Target Selection Visuals hides only reticle and legality paint", async ({
         presentationBytes: JSON.stringify(presentation),
       };
     };
-    const enabled = paint(DEFAULT_VISUAL_FILTER_STATE);
+    const enabled = paint(allVisualFilters);
     const disabled = paint(
-      setVisualFilterEnabled(
-        DEFAULT_VISUAL_FILTER_STATE,
-        "target_selection_visuals",
-        false,
-      ),
+      setVisualFilterEnabled(allVisualFilters, "target_selection_visuals", false),
     );
-    const restored = paint(DEFAULT_VISUAL_FILTER_STATE);
+    const restored = paint(allVisualFilters);
     return { enabled, disabled, restored, presentationBytes };
   }, fixture.presentations.replay_oracle);
   expect(result.enabled.visibleReticles).toBe(1);
@@ -365,6 +379,10 @@ test("raw and forged researcher-looking scenes render unavailable and clear acce
       `${moduleRoot}/authorized-presentation-normalizer.js`
     );
     const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+      `${moduleRoot}/visual-filters.js`
+    );
+    const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
     const { authorizedPresentationSceneView } = await import(
       `${moduleRoot}/authorized-presentation-adapter.js`
     );
@@ -380,7 +398,12 @@ test("raw and forged researcher-looking scenes render unavailable and clear acce
       throw new Error("Raw authority-fence test surface is unavailable.");
     }
     const renderer = new BattlefieldRenderer({ battlefield, empty });
-    if (!renderer.render(presentation, { showRanges: true })) {
+    if (
+      !renderer.render(presentation, {
+        showRanges: true,
+        visualFilterState: allVisualFilters,
+      })
+    ) {
       throw new Error("The accepted control frame did not paint.");
     }
     const acceptedCounts = {
@@ -392,7 +415,10 @@ test("raw and forged researcher-looking scenes render unavailable and clear acce
       structuredClone(presentation),
     ];
     const rejected = candidates.map((candidate) => {
-      const painted = renderer.render(candidate, { showRanges: true });
+      const painted = renderer.render(candidate, {
+        showRanges: true,
+        visualFilterState: allVisualFilters,
+      });
       return {
         painted,
         agents: battlefield.querySelectorAll(".agent").length,
@@ -444,9 +470,12 @@ test("durable visual filters remove owned paint and restore stable battlefield i
         `${moduleRoot}/authorized-presentation-normalizer.js`
       );
       const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
-      const { DEFAULT_VISUAL_FILTER_STATE, setVisualFilterEnabled } = await import(
-        `${moduleRoot}/visual-filters.js`
-      );
+      const {
+        DEFAULT_VISUAL_FILTER_STATE,
+        enableAllVisualFilters,
+        setVisualFilterEnabled,
+      } = await import(`${moduleRoot}/visual-filters.js`);
+      const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
       const battlefield = document.querySelector("#battlefield");
       const empty = document.querySelector("#empty");
       if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement)) {
@@ -548,13 +577,16 @@ test("durable visual filters remove owned paint and restore stable battlefield i
         battlefield.style.width = `${viewport.width}px`;
         battlefield.style.height = `${viewport.height}px`;
         renderer.render(presentation, { showRanges: true });
-        const defaultAllOnMarkup = battlefield.outerHTML;
+        const defaultMarkup = battlefield.outerHTML;
         renderer.render(presentation, {
           showRanges: true,
           visualFilterState: DEFAULT_VISUAL_FILTER_STATE,
         });
-        const explicitAllOnMatchesDefault =
-          battlefield.outerHTML === defaultAllOnMarkup;
+        const explicitDefaultMatchesImplicit = battlefield.outerHTML === defaultMarkup;
+        renderer.render(presentation, {
+          showRanges: true,
+          visualFilterState: allVisualFilters,
+        });
         const originalRoot = battlefield;
         const originalAgent = battlefield.querySelector(".agent");
         const originalBodyHit = originalAgent?.querySelector(".agent-body") ?? null;
@@ -575,7 +607,7 @@ test("durable visual filters remove owned paint and restore stable battlefield i
               ? null
               : durableLayer?.hasAttribute(filterCase.layoutAttribute) === true;
           const disabledState = setVisualFilterEnabled(
-            DEFAULT_VISUAL_FILTER_STATE,
+            allVisualFilters,
             filterCase.filterId,
             false,
           );
@@ -604,7 +636,7 @@ test("durable visual filters remove owned paint and restore stable battlefield i
 
           renderer.render(presentation, {
             showRanges: true,
-            visualFilterState: DEFAULT_VISUAL_FILTER_STATE,
+            visualFilterState: allVisualFilters,
           });
           const restoredOwned = ownedSnapshot(filterCase.ownerSelector);
           const restoredProtectedKey = protectedKey();
@@ -612,7 +644,7 @@ test("durable visual filters remove owned paint and restore stable battlefield i
           rows.push({
             viewport: `${viewport.width}x${viewport.height}`,
             ...filterCase,
-            explicitAllOnMatchesDefault,
+            explicitDefaultMatchesImplicit,
             baselineOwned,
             baselineProtectedKey,
             baselineAgentAria,
@@ -643,7 +675,7 @@ test("durable visual filters remove owned paint and restore stable battlefield i
         battlefield.style.height = `${viewport.height}px`;
         renderer.render(povPresentation, {
           showRanges: true,
-          visualFilterState: DEFAULT_VISUAL_FILTER_STATE,
+          visualFilterState: allVisualFilters,
         });
         const originalAgent = battlefield.querySelector(".agent");
         const originalBodyHit = originalAgent?.querySelector(".agent-body") ?? null;
@@ -654,7 +686,7 @@ test("durable visual filters remove owned paint and restore stable battlefield i
         renderer.render(povPresentation, {
           showRanges: true,
           visualFilterState: setVisualFilterEnabled(
-            DEFAULT_VISUAL_FILTER_STATE,
+            allVisualFilters,
             "duration_status_badges",
             false,
           ),
@@ -668,7 +700,7 @@ test("durable visual filters remove owned paint and restore stable battlefield i
           (originalAgent.getAttribute("aria-label") ?? "").length > 0;
         renderer.render(povPresentation, {
           showRanges: true,
-          visualFilterState: DEFAULT_VISUAL_FILTER_STATE,
+          visualFilterState: allVisualFilters,
         });
         povStatusRows.push({
           viewport: `${viewport.width}x${viewport.height}`,
@@ -698,7 +730,7 @@ test("durable visual filters remove owned paint and restore stable battlefield i
   expect(result.stateFrozen).toBe(true);
   expect(result.rows).toHaveLength(10);
   for (const row of result.rows) {
-    expect(row.explicitAllOnMatchesDefault, row.viewport).toBe(true);
+    expect(row.explicitDefaultMatchesImplicit, row.viewport).toBe(true);
     expect(row.baselineOwned.count, `${row.viewport} ${row.filterId}`).toBeGreaterThan(
       0,
     );
@@ -752,6 +784,10 @@ test("selected Replay aura modifiers remain exact beside Mage Burst duration and
       `${moduleRoot}/authorized-presentation-adapter.js`
     );
     const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+      `${moduleRoot}/visual-filters.js`
+    );
+    const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
     const { resolveVisualToken } = await import(`${moduleRoot}/vocabulary.js`);
     const battlefield = document.querySelector("#battlefield");
     const empty = document.querySelector("#empty");
@@ -787,7 +823,10 @@ test("selected Replay aura modifiers remain exact beside Mage Burst duration and
     ]) {
       battlefield.style.width = `${viewport.width}px`;
       battlefield.style.height = `${viewport.height}px`;
-      renderer.render(presentation, { showRanges: true });
+      renderer.render(presentation, {
+        showRanges: true,
+        visualFilterState: allVisualFilters,
+      });
       const actual = Array.from(
         battlefield.querySelectorAll(".modifier-cell"),
         (cell) =>
@@ -862,6 +901,10 @@ test("all three normalized Agent POV leaves use researcher-space aura attributio
         `${moduleRoot}/authorized-presentation-normalizer.js`
       );
       const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+      const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+        `${moduleRoot}/visual-filters.js`
+      );
+      const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
       const { createTooltipController } = await import(`${moduleRoot}/tooltip.js`);
       const { resolveVisualToken } = await import(`${moduleRoot}/vocabulary.js`);
       const presentation =
@@ -881,7 +924,10 @@ test("all three normalized Agent POV leaves use researcher-space aura attributio
         throw new Error("Agent POV aura tooltip surface is unavailable.");
       }
       const renderer = new BattlefieldRenderer({ battlefield, empty });
-      const painted = renderer.render(presentation, { showRanges: true });
+      const painted = renderer.render(presentation, {
+        showRanges: true,
+        visualFilterState: allVisualFilters,
+      });
       const controller = createTooltipController({
         root: document.body,
         tooltip,
@@ -1029,6 +1075,10 @@ test("all three Agent leaves enrich visible status tooltips from researcher spac
         `${moduleRoot}/authorized-presentation-normalizer.js`
       );
       const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+      const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+        `${moduleRoot}/visual-filters.js`
+      );
+      const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
       const { createTooltipController } = await import(`${moduleRoot}/tooltip.js`);
       const presentation =
         await normalizeAuthorizedPresentationFrameV1(rawPresentation);
@@ -1163,6 +1213,7 @@ test("all three Agent leaves enrich visible status tooltips from researcher spac
       const render = () =>
         renderer.render(presentation, {
           showRanges: true,
+          visualFilterState: allVisualFilters,
           localInspectedPresentationKey: localStatusRecipient.presentation_key,
         });
       render();
@@ -1175,10 +1226,11 @@ test("all three Agent leaves enrich visible status tooltips from researcher spac
       return { standard, compact };
     }, raw);
     expect(result.standard.counts.durable, leafName).toBeGreaterThan(0);
-    expect(result.compact.counts.overflow, leafName).toBeGreaterThan(0);
+    expect(result.compact.counts.durable, leafName).toBeGreaterThan(0);
+    expect(result.compact.counts.overflow, leafName).toBe(0);
     // The branded five-leaf adapter currently has no observed-body collection.
-    // Each fixture's one status fits the compact overflow placement, so the
-    // impossible-placement fallback producer is not applicable here.
+    // Each fixture's singleton keeps its real status badge in the compact dock;
+    // neither a hidden-count badge nor an impossible-placement fallback is needed.
     expect(result.standard.counts.fallback, leafName).toBe(0);
     expect(result.compact.counts.fallback, leafName).toBe(0);
     expect(result.standard.counts.povObserved, leafName).toBe(0);
@@ -1235,6 +1287,10 @@ test("Oracle aura attribution remains exact in the tooltip and absent from aura 
       `${moduleRoot}/authorized-presentation-normalizer.js`
     );
     const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+      `${moduleRoot}/visual-filters.js`
+    );
+    const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
     const { createTooltipController } = await import(`${moduleRoot}/tooltip.js`);
     const presentation = await normalizeAuthorizedPresentationFrameV1(rawPresentation);
     const battlefield = document.querySelector("#battlefield");
@@ -1252,7 +1308,10 @@ test("Oracle aura attribution remains exact in the tooltip and absent from aura 
       throw new Error("Oracle aura tooltip surface is unavailable.");
     }
     const renderer = new BattlefieldRenderer({ battlefield, empty });
-    const painted = renderer.render(presentation, { showRanges: true });
+    const painted = renderer.render(presentation, {
+      showRanges: true,
+      visualFilterState: allVisualFilters,
+    });
     const controller = createTooltipController({
       root: document.body,
       tooltip,
@@ -1312,6 +1371,10 @@ test("incoming choreography paints presentation-key metadata and no slots", asyn
       `${moduleRoot}/authorized-presentation-normalizer.js`
     );
     const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+      `${moduleRoot}/visual-filters.js`
+    );
+    const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
     const { buildChoreographyPlan } = await import(
       `${moduleRoot}/choreography-plan.js`
     );
@@ -1325,9 +1388,12 @@ test("incoming choreography paints presentation-key metadata and no slots", asyn
       throw new Error("Renderer test surface is unavailable.");
     }
     const renderer = new BattlefieldRenderer({ battlefield, empty });
-    renderer.render(presentation, { showRanges: true });
+    renderer.render(presentation, {
+      showRanges: true,
+      visualFilterState: allVisualFilters,
+    });
     const surface = renderer.choreographySurface();
-    const plan = buildChoreographyPlan(presentation, surface);
+    const plan = buildChoreographyPlan(presentation, surface, allVisualFilters);
     if (surface === null || plan === null) {
       throw new Error("Authorized choreography surface or plan is unavailable.");
     }
@@ -1424,6 +1490,10 @@ test("live and replay damage/healing marks meet their activation route endpoint"
         `${moduleRoot}/authorized-presentation-normalizer.js`
       );
       const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+      const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+        `${moduleRoot}/visual-filters.js`
+      );
+      const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
       const { buildChoreographyPlan } = await import(
         `${moduleRoot}/choreography-plan.js`
       );
@@ -1438,9 +1508,12 @@ test("live and replay damage/healing marks meet their activation route endpoint"
         throw new Error("Activation-impact test surface is unavailable.");
       }
       const renderer = new BattlefieldRenderer({ battlefield, empty });
-      renderer.render(presentation, { showRanges: false });
+      renderer.render(presentation, {
+        showRanges: false,
+        visualFilterState: allVisualFilters,
+      });
       const surface = renderer.choreographySurface();
-      const plan = buildChoreographyPlan(presentation, surface);
+      const plan = buildChoreographyPlan(presentation, surface, allVisualFilters);
       if (surface === null || plan === null) {
         throw new Error("Authorized activation choreography is unavailable.");
       }
@@ -1586,6 +1659,10 @@ test("Agent POV damage and healing impacts stop outside the recipient body witho
           `${moduleRoot}/authorized-presentation-normalizer.js`
         );
         const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+        const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+          `${moduleRoot}/visual-filters.js`
+        );
+        const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
         const { buildChoreographyPlan } = await import(
           `${moduleRoot}/choreography-plan.js`
         );
@@ -1607,9 +1684,12 @@ test("Agent POV damage and healing impacts stop outside the recipient body witho
         battlefield.style.height = `${window.innerHeight}px`;
         battlefield.style.display = "block";
         const renderer = new BattlefieldRenderer({ battlefield, empty });
-        renderer.render(presentation, { showRanges: false });
+        renderer.render(presentation, {
+          showRanges: false,
+          visualFilterState: allVisualFilters,
+        });
         const surface = renderer.choreographySurface();
-        const plan = buildChoreographyPlan(presentation, surface);
+        const plan = buildChoreographyPlan(presentation, surface, allVisualFilters);
         if (surface === null || plan === null) {
           throw new Error("Agent impact choreography is unavailable.");
         }
@@ -1769,6 +1849,10 @@ test("live and replay keep Charge displacement authorized without painting an ov
         `${moduleRoot}/authorized-presentation-normalizer.js`
       );
       const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+      const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+        `${moduleRoot}/visual-filters.js`
+      );
+      const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
       const { buildChoreographyPlan } = await import(
         `${moduleRoot}/choreography-plan.js`
       );
@@ -1783,9 +1867,12 @@ test("live and replay keep Charge displacement authorized without painting an ov
         throw new Error("Charge displacement test surface is unavailable.");
       }
       const renderer = new BattlefieldRenderer({ battlefield, empty });
-      renderer.render(presentation, { showRanges: false });
+      renderer.render(presentation, {
+        showRanges: false,
+        visualFilterState: allVisualFilters,
+      });
       const surface = renderer.choreographySurface();
-      const plan = buildChoreographyPlan(presentation, surface);
+      const plan = buildChoreographyPlan(presentation, surface, allVisualFilters);
       if (surface === null || plan === null) {
         throw new Error("Authorized Charge event is unavailable.");
       }
@@ -1841,6 +1928,10 @@ test("digest-valid OOC state keeps all five class glyphs centered across project
       `${moduleRoot}/authorized-presentation-normalizer.js`
     );
     const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+      `${moduleRoot}/visual-filters.js`
+    );
+    const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
     const battlefield = document.querySelector("#battlefield");
     const empty = document.querySelector("#empty");
     if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement)) {
@@ -1857,7 +1948,10 @@ test("digest-valid OOC state keeps all five class glyphs centered across project
     for (const viewport of viewports) {
       battlefield.style.width = `${viewport.width}px`;
       battlefield.style.height = `${viewport.height}px`;
-      renderer.render(presentation, { showRanges: false });
+      renderer.render(presentation, {
+        showRanges: false,
+        visualFilterState: allVisualFilters,
+      });
       states.push(
         ...Array.from(battlefield.querySelectorAll(".agent")).map((agent) => {
           const classIcon = agent.querySelector(".agent-class-icon");
@@ -1957,6 +2051,10 @@ test("authorized regeneration paints packed successor plus cues while reset stay
       `${moduleRoot}/authorized-presentation-normalizer.js`
     );
     const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+      `${moduleRoot}/visual-filters.js`
+    );
+    const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
     const { buildChoreographyPlan } = await import(
       `${moduleRoot}/choreography-plan.js`
     );
@@ -1970,9 +2068,12 @@ test("authorized regeneration paints packed successor plus cues while reset stay
       throw new Error("Renderer test surface is unavailable.");
     }
     const renderer = new BattlefieldRenderer({ battlefield, empty });
-    renderer.render(presentation, { showRanges: false });
+    renderer.render(presentation, {
+      showRanges: false,
+      visualFilterState: allVisualFilters,
+    });
     const surface = renderer.choreographySurface();
-    const plan = buildChoreographyPlan(presentation, surface);
+    const plan = buildChoreographyPlan(presentation, surface, allVisualFilters);
     if (surface === null || plan === null) {
       throw new Error("Authorized regeneration choreography is unavailable.");
     }
@@ -2152,6 +2253,10 @@ test("shared painter removes cooldown start clutter and keeps clear trap and poi
       `${moduleRoot}/authorized-presentation-normalizer.js`
     );
     const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+      `${moduleRoot}/visual-filters.js`
+    );
+    const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
     const { buildChoreographyPlan } = await import(
       `${moduleRoot}/choreography-plan.js`
     );
@@ -2165,9 +2270,12 @@ test("shared painter removes cooldown start clutter and keeps clear trap and poi
       throw new Error("Shared cue test surface is unavailable.");
     }
     const renderer = new BattlefieldRenderer({ battlefield, empty });
-    renderer.render(presentation, { showRanges: false });
+    renderer.render(presentation, {
+      showRanges: false,
+      visualFilterState: allVisualFilters,
+    });
     const surface = renderer.choreographySurface();
-    const plan = buildChoreographyPlan(presentation, surface);
+    const plan = buildChoreographyPlan(presentation, surface, allVisualFilters);
     if (surface === null || plan === null) {
       throw new Error("Authorized shared cue choreography is unavailable.");
     }
@@ -2351,6 +2459,10 @@ test("authorized death, team waves, and resurrection retain outward settled geom
       `${moduleRoot}/authorized-presentation-normalizer.js`
     );
     const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+      `${moduleRoot}/visual-filters.js`
+    );
+    const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
     const { buildChoreographyPlan } = await import(
       `${moduleRoot}/choreography-plan.js`
     );
@@ -2375,9 +2487,12 @@ test("authorized death, team waves, and resurrection retain outward settled geom
       throw new Error("Renderer test surface is unavailable.");
     }
     const renderer = new BattlefieldRenderer({ battlefield, empty });
-    renderer.render(presentation, { showRanges: false });
+    renderer.render(presentation, {
+      showRanges: false,
+      visualFilterState: allVisualFilters,
+    });
     const surface = renderer.choreographySurface();
-    const plan = buildChoreographyPlan(presentation, surface);
+    const plan = buildChoreographyPlan(presentation, surface, allVisualFilters);
     if (surface === null || plan === null) {
       throw new Error("Authorized lifecycle choreography is unavailable.");
     }
@@ -2749,6 +2864,10 @@ test("authorized multi-application status paints one route-free lifecycle", asyn
       `${moduleRoot}/authorized-presentation-normalizer.js`
     );
     const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+      `${moduleRoot}/visual-filters.js`
+    );
+    const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
     const { buildChoreographyPlan } = await import(
       `${moduleRoot}/choreography-plan.js`
     );
@@ -2772,9 +2891,12 @@ test("authorized multi-application status paints one route-free lifecycle", asyn
       throw new Error("Authorized status component surface is unavailable.");
     }
     const renderer = new BattlefieldRenderer({ battlefield, empty });
-    renderer.render(presentation, { showRanges: true });
+    renderer.render(presentation, {
+      showRanges: true,
+      visualFilterState: allVisualFilters,
+    });
     const surface = renderer.choreographySurface();
-    const plan = buildChoreographyPlan(presentation, surface);
+    const plan = buildChoreographyPlan(presentation, surface, allVisualFilters);
     if (surface === null || plan === null) {
       throw new Error("Authorized status choreography plan is unavailable.");
     }
@@ -2883,6 +3005,10 @@ test("agent wins real SVG hit arbitration over an overlapping accepted route", a
       `${moduleRoot}/authorized-presentation-normalizer.js`
     );
     const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+      `${moduleRoot}/visual-filters.js`
+    );
+    const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
     const { buildChoreographyPlan } = await import(
       `${moduleRoot}/choreography-plan.js`
     );
@@ -2908,9 +3034,12 @@ test("agent wins real SVG hit arbitration over an overlapping accepted route", a
       throw new Error("Renderer tooltip test surface is unavailable.");
     }
     const renderer = new BattlefieldRenderer({ battlefield, empty });
-    renderer.render(presentation, { showRanges: true });
+    renderer.render(presentation, {
+      showRanges: true,
+      visualFilterState: allVisualFilters,
+    });
     const surface = renderer.choreographySurface();
-    const plan = buildChoreographyPlan(presentation, surface);
+    const plan = buildChoreographyPlan(presentation, surface, allVisualFilters);
     if (surface === null || plan === null) {
       throw new Error("Authorized choreography surface or plan is unavailable.");
     }
@@ -3047,6 +3176,10 @@ test("remote cooldown placement preserves the canonical badge in the shared rend
       `${moduleRoot}/authorized-presentation-normalizer.js`
     );
     const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+      `${moduleRoot}/visual-filters.js`
+    );
+    const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
     const { createTooltipController } = await import(`${moduleRoot}/tooltip.js`);
     const battlefield = document.querySelector("#battlefield");
     const empty = document.querySelector("#empty");
@@ -3076,7 +3209,10 @@ test("remote cooldown placement preserves the canonical badge in the shared rend
       battlefield.style.minHeight = "0";
       battlefield.style.width = `${width}px`;
       battlefield.style.height = `${height}px`;
-      renderer.render(presentation, { showRanges: true });
+      renderer.render(presentation, {
+        showRanges: true,
+        visualFilterState: allVisualFilters,
+      });
       return {
         cooldowns: battlefield.querySelectorAll(".cooldown-cell").length,
         fallbacks: battlefield.querySelectorAll(

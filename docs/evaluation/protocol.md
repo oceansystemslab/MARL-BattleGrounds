@@ -11,6 +11,9 @@ weights, aggregation,
 uncertainty, checkpoint selection, canonical actor-information provenance,
 cross-play, controlled scenarios, runtime measurement, and failure/censoring
 treatment.
+Current milestone numbers follow
+[A36's executive roadmap mapping](../design/specification_amendments.md#a36-submission-roadmap-approved-tdm-content-and-m7-closeout).
+Older numeric references below retain their historical aliases.
 The companion [metric specification](metric_specification.md) owns stable
 metric meanings, sufficient components, eligibility, attribution, and allowed
 interpretations. Accepted departures from the original design PDF are recorded
@@ -574,7 +577,12 @@ outcome from that structural evidence.
 ### Observer processing
 
 Processing success means that every validated transition was consumed by every
-declared reducer and the final report was validated atomically. Processing
+declared reducer and the final report was assembled atomically. Trusted pure
+reducers own valid immutable outputs; cheap identity, progress, eligibility,
+uniqueness and provenance checks protect the computation boundary. Repeated
+deep validation of computed state/report history is not part of metric
+computation. External artifact ingestion and independent tests retain full
+record validation. Processing
 failure records the stage, stable code, stage-governed reducer identity and
 attempted-transition provenance, and diagnostic detail. Reducer initialize,
 advance, and finalize failures require the exact reducer identity/version;
@@ -702,8 +710,35 @@ a digest of one realized seed record does not establish those identities.
 reduce a stochastic evaluation to one episode. Policies are compared over the
 same frozen scenario seeds when possible.
 
-The current intended suite contains twelve scenarios with five-transition
-horizons. That is a property of this suite, not a global scenario-schema limit.
+The approved TDM suite contains exactly eight scenarios. Scenarios 1, 2 and
+4–8 have five-transition horizons; approved Scenario 3 r24 alone has a
+ten-transition horizon for sustained body blocking, with the canonical
+five-transition respawn-wave period. Scenario/map design approval is complete
+under A36; remaining identity, transport and evidence checks do not reopen it.
+These horizons are properties of this suite, not a global scenario-schema limit.
+The packaged Scenario 3 r25 changes only the accepted r24 Notes; its physical
+state, map and configuration are identical. The package manifest retains both
+the approved source and distributed revision identities.
+
+`marl_battlegrounds.tasks` provides public map/scenario discovery and loading,
+`make_standard_team_deathmatch_config` for explicit approved maps and independently
+ordered rosters, and `make_canonical_team_deathmatch_evaluation_config` for the
+five canonical evaluation maps
+(17, 20, 25, 35 and 39) with mirrored Mage/Warrior/Hunter/Rogue/Priest slots.
+These constructors select immutable packaged content without importing the
+mutable DevClient draft store. Canonical evaluation retains paired side
+assignments as well as the approved geometric symmetry.
+
+`python -m scripts.dev.qualify_tdm_scenarios <new-directory>` exercises all
+eight packaged definitions at two fixed schedule coordinates through the
+existing rollout, replay, metric and V2 scenario-record contracts. Team A uses
+ALPHA as a pipeline control; Team B uses the approved ALPHA/BETA pressure
+binding. The suite index retains source/configuration/controller identities,
+completion and processing status, quantitative terminal Team A reward, and
+every failure. This qualification establishes reproducible integration; the
+learned-policy, matched-ablation and manuscript campaigns belong to the later
+milestones. It introduces no additional scenario-design approval gate.
+
 Each treatment/control arm uses multiple independently trained, deliberately
 paired runs. The training run is the replication unit; agents, ticks, episodes,
 and the two teams within an episode are nested observations, not independent
