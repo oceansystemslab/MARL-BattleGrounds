@@ -15,6 +15,7 @@ from typing import Literal
 import jax
 from tests.evaluation_fixtures import (
     captured_evaluation_trajectory,
+    captured_team_deathmatch_threshold_trajectory,
     evaluation_env_config,
     mage_target_none_ultimate_action,
     neutral_action,
@@ -221,10 +222,20 @@ def export_artifacts(output_directory: Path) -> dict[str, str]:
         execution_information_mode="no_shared_obs"
     )
     corpse_shared = build_corpse_overlay_bundle(execution_information_mode="shared_obs")
+    tdm = captured_team_deathmatch_threshold_trajectory()
+    tdm_observer = build_evaluation_observer_v1(tdm.context)
+    tdm_observer.start(tdm.frames[0])
+    tdm_observer.append(tdm.transitions[0], tdm.frames[1])
+    tdm_bundle = build_replay_bundle_v1(
+        tdm_observer,
+        tdm_observer.finalize(completion_state="complete"),
+        runtime_provenance=_runtime_provenance(),
+    )
 
     complete_path = output_directory / f"complete{REPLAY_FILE_SUFFIX_V1}"
     partial_path = output_directory / f"partial{REPLAY_FILE_SUFFIX_V1}"
     shared_path = output_directory / f"shared{REPLAY_FILE_SUFFIX_V1}"
+    tdm_path = output_directory / f"tdm{REPLAY_FILE_SUFFIX_V1}"
     corpse_no_shared_path = (
         output_directory / f"corpse-no-shared{REPLAY_FILE_SUFFIX_V1}"
     )
@@ -232,6 +243,7 @@ def export_artifacts(output_directory: Path) -> dict[str, str]:
     save_replay_bundle_v1(complete, complete_path)
     save_replay_bundle_v1(partial, partial_path)
     save_replay_bundle_v1(shared, shared_path)
+    save_replay_bundle_v1(tdm_bundle, tdm_path)
     save_replay_bundle_v1(corpse_no_shared, corpse_no_shared_path)
     save_replay_bundle_v1(corpse_shared, corpse_shared_path)
 
@@ -244,6 +256,7 @@ def export_artifacts(output_directory: Path) -> dict[str, str]:
         "complete": str(complete_path.resolve()),
         "partial": str(partial_path.resolve()),
         "shared": str(shared_path.resolve()),
+        "tdm": str(tdm_path.resolve()),
         "corpse_no_shared": str(corpse_no_shared_path.resolve()),
         "corpse_shared": str(corpse_shared_path.resolve()),
         "missing_metric": str(missing_metric_path.resolve()),

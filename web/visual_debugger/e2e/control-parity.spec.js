@@ -1477,6 +1477,8 @@ test("Live Mage Burst retains every authorized Mage and Warrior aura modifier", 
 }) => {
   await page.goto(debuggerUrl);
   await expect(page.locator("#connection-status")).toHaveText("Online");
+  await setDisclosureOpen(page, "#visual-filters", true);
+  await page.locator("#enable-all-visual-filters-button").click();
   await page.locator("#reset-button").click();
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page.locator("#step-value")).toHaveText("0");

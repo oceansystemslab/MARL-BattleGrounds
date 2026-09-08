@@ -14,6 +14,8 @@ const PROCESSING_FAILURE_STAGES = new Set([
   "reducer_initialize",
   "transition_validation",
   "reducer_advance",
+  "offline_reducer_initialize",
+  "offline_reducer_advance",
   "completion_validation",
   "reducer_finalize",
   "statistic_materialization",
@@ -578,10 +580,11 @@ function normalizeProcessing(value) {
   }
   const permitsAttemptedIndex =
     value.failure_stage === "transition_validation" ||
-    value.failure_stage === "reducer_advance";
+    value.failure_stage === "reducer_advance" ||
+    value.failure_stage === "offline_reducer_advance";
   if (
     (!permitsAttemptedIndex && value.attempted_transition_index !== null) ||
-    (value.failure_stage === "reducer_advance" &&
+    (["reducer_advance", "offline_reducer_advance"].includes(value.failure_stage) &&
       value.attempted_transition_index === null)
   ) {
     throw new TypeError("Replay processing attempted index is incoherent.");

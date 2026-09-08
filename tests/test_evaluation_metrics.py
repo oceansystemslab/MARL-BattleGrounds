@@ -1667,9 +1667,13 @@ def test_observer_rejects_undeclared_nested_transition_model(
 
 def test_observer_retains_canonical_copies_not_caller_owned_roots(
     one_transition_trajectory: CapturedEvaluationTrajectory,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Post-validation caller mutation cannot rewrite the observer prefix."""
     trajectory = one_transition_trajectory
+    context = EvaluationEpisodeContextV1.model_validate(
+        trajectory.context.model_dump(mode="python")
+    )
     initial_frame = EvaluationFrameV1.model_validate(
         trajectory.frames[0].model_dump(mode="python")
     )
@@ -1680,7 +1684,7 @@ def test_observer_retains_canonical_copies_not_caller_owned_roots(
         trajectory.frames[1].model_dump(mode="python")
     )
     observer = build_evaluation_observer_v1(
-        trajectory.context,
+        context,
         reducers=(_Reducer(),),
     )
     observer.start(initial_frame)
@@ -1689,11 +1693,79 @@ def test_observer_retains_canonical_copies_not_caller_owned_roots(
     object.__setattr__(initial_frame, "frame_index", 9)
     object.__setattr__(transition, "transition_index", 9)
     object.__setattr__(successor_frame, "frame_index", 9)
+    object.__setattr__(context.identity, "episode_id", "mutated-episode")
+    for frame in (initial_frame, successor_frame):
+        object.__setattr__(frame.snapshot, "current_health", (-1.0,) * 10)
+    object.__setattr__(
+        transition.facts.physical_facts,
+        "charge_phase_displacement_by_agent",
+        ((99.0, 99.0),) * 10,
+    )
 
     assert observer.retained_frames is not None
     assert observer.retained_transitions is not None
     assert tuple(row.frame_index for row in observer.retained_frames) == (0, 1)
     assert tuple(row.transition_index for row in observer.retained_transitions) == (0,)
+    assert observer.context == trajectory.context
+    assert observer.retained_frames == trajectory.frames
+    assert observer.retained_transitions == trajectory.transitions
+
+    expected_states = observer.reducer_states
+    exposed_states = observer.reducer_states
+    assert exposed_states is not None
+    assert isinstance(exposed_states[0], _ReducerState)
+    object.__setattr__(
+        exposed_states[0],
+        "transition_ids",
+        (trajectory.transitions[0].transition_id,) * 9,
+    )
+    assert exposed_states != expected_states
+    assert observer.reducer_states == expected_states
+
+    report = observer.finalize(completion_state="complete")
+    expected_report = observer.finalized_report
+    assert expected_report is not None
+    object.__setattr__(report.context.identity, "episode_id", "changed-return")
+    returned_component = report.statistics[0].component
+    assert isinstance(returned_component, CountComponentV1)
+    assert returned_component.count == len(trajectory.transitions)
+    object.__setattr__(returned_component, "count", 98)
+    assert observer.context == trajectory.context
+    assert observer.finalized_report == expected_report
+
+    def no_revalidation(*_: object, **__: object) -> None:
+        raise AssertionError("owned getters must copy without semantic revalidation")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(metrics_module, "validate_declared_model_tree", no_revalidation)
+        exposed_context = observer.context
+        exposed_frames = observer.retained_frames
+        exposed_transitions = observer.retained_transitions
+        exposed_report = observer.finalized_report
+        exposed_states = observer.reducer_states
+        assert exposed_frames is not None
+        assert exposed_transitions is not None
+        assert exposed_report is not None
+        assert exposed_states is not None
+        object.__setattr__(exposed_states[0], "initial_frame_id", "changed-copy")
+        object.__setattr__(exposed_context.identity, "episode_id", "changed-copy")
+        object.__setattr__(exposed_frames[0].snapshot, "current_health", (-2.0,) * 10)
+        object.__setattr__(
+            exposed_transitions[0].facts.physical_facts,
+            "charge_phase_displacement_by_agent",
+            ((98.0, 98.0),) * 10,
+        )
+        object.__setattr__(
+            exposed_report.context.identity, "episode_id", "changed-copy"
+        )
+        component = exposed_report.statistics[0].component
+        assert isinstance(component, CountComponentV1)
+        object.__setattr__(component, "count", 99)
+        assert observer.context == trajectory.context
+        assert observer.retained_frames == trajectory.frames
+        assert observer.retained_transitions == trajectory.transitions
+        assert observer.finalized_report == expected_report
+        assert observer.reducer_states == expected_states
 
 
 @pytest.mark.parametrize(
@@ -2990,9 +3062,8 @@ def test_disabled_observer_is_absence_before_any_evaluation_work(
     )
     monkeypatch.setattr(
         metrics_module,
-        "validate_evaluation_transition_unit_v1",
+        "_canonicalize_evaluation_transition_unit_v1",
         forbidden,
-        raising=False,
     )
     monkeypatch.setattr(
         validation_module,
@@ -3392,6 +3463,11 @@ def test_core_reset_and_step_have_no_static_or_runtime_cp3_hook(
         forbidden,
     )
     monkeypatch.setattr(
+        metrics_module,
+        "_canonicalize_evaluation_transition_unit_v1",
+        forbidden,
+    )
+    monkeypatch.setattr(
         validation_module,
         "decode_evaluation_events_v1",
         forbidden,
@@ -3411,3 +3487,131 @@ def test_core_reset_and_step_have_no_static_or_runtime_cp3_hook(
     )
 
     assert calls == []
+
+
+def test_preview_is_prefix_only_and_does_not_finalize(
+    two_transition_trajectory: CapturedEvaluationTrajectory,
+) -> None:
+    trajectory = two_transition_trajectory
+    observer = EvaluationEpisodeObserverV1(trajectory.context, (_Reducer(),))
+    observer.start(trajectory.frames[0])
+    initial = observer.preview_statistics()
+    assert initial[0].component == CountComponentV1(count=0, eligible_episode_count=1)
+    observer.append(trajectory.transitions[0], trajectory.frames[1])
+    prefix = observer.preview_statistics()
+    assert prefix[0].component == CountComponentV1(count=1, eligible_episode_count=1)
+    assert observer.preview_statistics() == prefix
+    assert observer.lifecycle_state == "open"
+    assert observer.finalized_report is None
+    observer.append(trajectory.transitions[1], trajectory.frames[2])
+    final_preview = observer.preview_statistics(completion_state="complete")
+    report = observer.finalize(completion_state="complete")
+    assert (
+        tuple(
+            SufficientStatisticDraftV1.model_validate(
+                row.model_dump(include=set(SufficientStatisticDraftV1.model_fields))
+            )
+            for row in report.statistics
+        )
+        == final_preview
+    )
+    assert initial[0].component == CountComponentV1(count=0, eligible_episode_count=1)
+
+
+def test_preview_failure_does_not_poison_capture(
+    two_transition_trajectory: CapturedEvaluationTrajectory,
+) -> None:
+    trajectory = two_transition_trajectory
+    reducer = _Reducer(fail_finalize=True)
+    observer = EvaluationEpisodeObserverV1(trajectory.context, (reducer,))
+    observer.start(trajectory.frames[0])
+    with pytest.raises(RuntimeError, match="intentional finalize failure"):
+        observer.preview_statistics()
+    assert observer.lifecycle_state == "open"
+    observer.append(trajectory.transitions[0], trajectory.frames[1])
+    assert observer.processed_transition_count == 1
+
+
+def test_offline_evaluation_matches_streaming_and_preserves_capture(
+    two_transition_trajectory: CapturedEvaluationTrajectory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trajectory = two_transition_trajectory
+    capture = EvaluationEpisodeObserverV1(trajectory.context)
+    streamed = EvaluationEpisodeObserverV1(trajectory.context, (_Reducer(),))
+    for observer in (capture, streamed):
+        _feed_observer(observer, trajectory.frames, trajectory.transitions)
+    assert capture.reducer_states == ()
+
+    def no_revalidation(*_: object, **__: object) -> None:
+        raise AssertionError("offline reduction must reuse already validated units")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            metrics_module,
+            "_canonicalize_evaluation_transition_unit_v1",
+            no_revalidation,
+        )
+        capture.evaluate_retained((_Reducer(),))
+    assert capture.retained_frames == trajectory.frames
+    assert capture.retained_transitions == trajectory.transitions
+    assert capture.finalize(completion_state="complete") == streamed.finalize(
+        completion_state="complete"
+    )
+    with pytest.raises(RuntimeError, match="unfinalized capture"):
+        capture.evaluate_retained((_Reducer(),))
+
+
+@pytest.mark.parametrize("initialize", [False, True], ids=["advance", "initialize"])
+def test_offline_failure_preserves_full_capture_and_processed_prefix(
+    two_transition_trajectory: CapturedEvaluationTrajectory,
+    initialize: bool,
+) -> None:
+    trajectory = two_transition_trajectory
+    capture = EvaluationEpisodeObserverV1(trajectory.context)
+    _feed_observer(capture, trajectory.frames, trajectory.transitions)
+    capture.evaluate_retained(
+        (
+            _Reducer(
+                fail_initialize=initialize,
+                fail_advance_index=0,
+            ),
+        )
+    )
+    report = capture.finalize(completion_state="complete")
+    assert report.completion.validated_transition_count == 2
+    assert report.completion.completion_state == "complete"
+    assert capture.retained_frames == trajectory.frames
+    assert capture.retained_transitions == trajectory.transitions
+    assert report.processing_status.status == "failed"
+    assert report.processing_status.processed_transition_count == 0
+    failure = report.processing_status.failure
+    assert failure is not None
+    assert failure.stage == (
+        "offline_reducer_initialize" if initialize else "offline_reducer_advance"
+    )
+    assert (
+        EvaluationMetricReportV1.model_validate_json(report.model_dump_json()) == report
+    )
+
+    # A second failure during offline work cannot invalidate an earlier capture.
+    failed_capture = EvaluationEpisodeObserverV1(trajectory.context)
+    failed_capture.start(trajectory.frames[0])
+    failed_capture.append(trajectory.transitions[0], trajectory.frames[1])
+    with pytest.raises(ValueError):
+        failed_capture.append(trajectory.transitions[0], trajectory.frames[1])
+    failed_capture.evaluate_retained(
+        (_Reducer(fail_initialize=initialize, fail_advance_index=0),)
+    )
+    failed_report = failed_capture.finalize(
+        completion_state="failed",
+        end_or_failure_reason="Capture rejected an invalid transition.",
+        failure_origin="capture",
+    )
+    assert failed_report.processing_status.failure is not None
+    assert failed_report.processing_status.failure.stage == "transition_validation"
+    assert failed_report.processing_status.processed_transition_count == 1
+    assert failed_report.completion.validated_transition_count == 1
+    assert failed_capture.retained_frames == trajectory.frames[:2]
+    assert failed_capture.retained_transitions == trajectory.transitions[:1]
+    assert failed_report.statistics == ()

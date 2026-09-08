@@ -23,6 +23,7 @@ export const REPLAY_VIEWER_ENTRYPOINT = "scripts/dev/replay_viewer.py";
  *   complete: string,
  *   partial: string,
  *   shared: string,
+ *   tdm: string,
  *   corpseNoShared: string,
  *   corpseShared: string,
  *   missingMetric: string,
@@ -55,6 +56,7 @@ export async function exportReplayArtifacts() {
       typeof payload.complete !== "string" ||
       typeof payload.partial !== "string" ||
       typeof payload.shared !== "string" ||
+      typeof payload.tdm !== "string" ||
       typeof payload.corpse_no_shared !== "string" ||
       typeof payload.corpse_shared !== "string" ||
       typeof payload.missing_metric !== "string"
@@ -66,6 +68,7 @@ export async function exportReplayArtifacts() {
       complete: payload.complete,
       partial: payload.partial,
       shared: payload.shared,
+      tdm: payload.tdm,
       corpseNoShared: payload.corpse_no_shared,
       corpseShared: payload.corpse_shared,
       missingMetric: payload.missing_metric,

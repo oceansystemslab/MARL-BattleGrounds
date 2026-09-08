@@ -192,10 +192,10 @@ test("shared shell uses the requested details and visual-filter controls without
     /<button type="button" data-key="Tab">Next actor<\/button>[\s\S]*<button type="button" data-key="Tab" data-shift="true">/u,
   );
   assert.match(markup, /<summary>Visual Key<\/summary>/u);
-  assert.match(markup, /id="visual-filter-count"[^>]*>19 enabled</u);
+  assert.match(markup, /id="visual-filter-count"[^>]*>9 enabled</u);
   assert.match(
     markup,
-    /id="enable-all-visual-filters-button"[^>]*disabled[^>]*>\s*Enable All\s*<\/button>/u,
+    /id="enable-all-visual-filters-button"[^>]*>\s*Enable All\s*<\/button>/u,
   );
   assert.match(
     markup,
@@ -323,7 +323,7 @@ test("replay artifact actions are accessible, fail closed, and CSP compatible", 
     ["replay-export-png-button", "Export PNG", "replay-export-png-help"],
     [
       "replay-download-metrics-button",
-      "Download Metrics",
+      "Download Metrics CSV",
       "replay-download-metrics-help",
     ],
   ]) {

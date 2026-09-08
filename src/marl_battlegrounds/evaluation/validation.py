@@ -442,12 +442,15 @@ def _validate_context_joined_frame(
     frame: EvaluationFrameV1,
     *,
     record_name: str,
-) -> None:
+) -> EvaluationFrameV1:
     """Revalidate one frame and its context-owned semantic constraints."""
-    validate_declared_model_tree(
-        frame,
-        record_name=record_name,
-        expected_type=EvaluationFrameV1,
+    frame = cast(
+        EvaluationFrameV1,
+        validate_declared_model_tree(
+            frame,
+            record_name=record_name,
+            expected_type=EvaluationFrameV1,
+        ),
     )
     episode_id = context.identity.episode_id
     if frame.episode_id != episode_id:
@@ -465,6 +468,7 @@ def _validate_context_joined_frame(
     _validate_frame_information_regime(context, frame)
     _validate_inactive_frame_padding(context, frame)
     _validate_task_context_projection(context, frame)
+    return frame
 
 
 def validate_context_joined_evaluation_frame_v1(
@@ -541,22 +545,45 @@ def validate_evaluation_transition_unit_v1(
     the complete canonical event sequence, and reconciles task-owned score,
     result, reward, completion flags, and end-reason authority.
     """
-    validate_declared_model_tree(
-        context,
-        record_name="context",
-        expected_type=EvaluationEpisodeContextV1,
+    _canonicalize_evaluation_transition_unit_v1(
+        context, start_frame, transition, successor_frame
     )
-    validate_declared_model_tree(
-        transition,
-        record_name="transition",
-        expected_type=EvaluationTransitionV1,
+
+
+def _canonicalize_evaluation_transition_unit_v1(
+    context: EvaluationEpisodeContextV1,
+    start_frame: EvaluationFrameV1,
+    transition: EvaluationTransitionV1,
+    successor_frame: EvaluationFrameV1,
+) -> tuple[
+    EvaluationEpisodeContextV1,
+    EvaluationFrameV1,
+    EvaluationTransitionV1,
+    EvaluationFrameV1,
+]:
+    """Validate once and retain the detached copies for an internal consumer."""
+    context = cast(
+        EvaluationEpisodeContextV1,
+        validate_declared_model_tree(
+            context,
+            record_name="context",
+            expected_type=EvaluationEpisodeContextV1,
+        ),
     )
-    _validate_context_joined_frame(
+    transition = cast(
+        EvaluationTransitionV1,
+        validate_declared_model_tree(
+            transition,
+            record_name="transition",
+            expected_type=EvaluationTransitionV1,
+        ),
+    )
+    start_frame = _validate_context_joined_frame(
         context,
         start_frame,
         record_name="start frame",
     )
-    _validate_context_joined_frame(
+    successor_frame = _validate_context_joined_frame(
         context,
         successor_frame,
         record_name="successor frame",
@@ -622,6 +649,7 @@ def validate_evaluation_transition_unit_v1(
     )
     if transition.events != expected_events:
         raise ValueError("transition events must exactly equal canonical fact decoding")
+    return context, start_frame, transition, successor_frame
 
 
 __all__ = [

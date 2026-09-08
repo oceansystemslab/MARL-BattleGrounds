@@ -990,11 +990,14 @@ def test_four_record_validation_survives_json_and_rejects_cross_record_drift() -
     successor_roundtrip = EvaluationFrameV1.model_validate_json(
         successor_frame.model_dump_json()
     )
-    validate_evaluation_transition_unit_v1(
-        context_roundtrip,
-        start_roundtrip,
-        transition_roundtrip,
-        successor_roundtrip,
+    assert (
+        validate_evaluation_transition_unit_v1(
+            context_roundtrip,
+            start_roundtrip,
+            transition_roundtrip,
+            successor_roundtrip,
+        )
+        is None
     )
 
     wrong_successor_index = successor_frame.frame_index + 1

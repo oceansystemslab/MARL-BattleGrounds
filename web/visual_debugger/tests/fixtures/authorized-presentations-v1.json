@@ -1408,6 +1408,7 @@
         "source_session_id": "cp2-5-b-oracle",
         "source_simulator_step_count": 1
       },
+      "match_summary": null,
       "pending_joint_action": {
         "action_rows": [
           {
@@ -2566,6 +2567,44 @@
           "incoming_transition_id": "service-shared:transition:0",
           "incoming_transition_index": 0,
           "transition_kind": "oracle_incoming_submitted_accepted"
+        },
+        "match_summary": {
+          "episode_id": "service-shared",
+          "outcome": "not_applicable",
+          "schema_version": 1,
+          "score_threshold": 0,
+          "scores": [
+            0,
+            0
+          ],
+          "simulator_step_count": 1,
+          "source_frame_index": 1,
+          "task_mode": 0,
+          "teams": [
+            {
+              "checkpoint_digests": [
+                "2222222222222222222222222222222222222222222222222222222222222222"
+              ],
+              "display_name": "policy-0 / policy-1 / policy-2",
+              "policy_ids": [
+                "policy-0",
+                "policy-1",
+                "policy-2"
+              ],
+              "team_id": 1
+            },
+            {
+              "checkpoint_digests": [
+                "2222222222222222222222222222222222222222222222222222222222222222"
+              ],
+              "display_name": "policy-5 / policy-6",
+              "policy_ids": [
+                "policy-5",
+                "policy-6"
+              ],
+              "team_id": 2
+            }
+          ]
         },
         "presentation_kind": "replay_oracle",
         "product_kind": "replay_viewer",
@@ -4701,6 +4740,44 @@
           "source_frame_id": "service-shared:frame:1",
           "source_frame_index": 1,
           "source_simulator_step_count": 1
+        },
+        "match_summary": {
+          "episode_id": "service-shared",
+          "outcome": "not_applicable",
+          "schema_version": 1,
+          "score_threshold": 0,
+          "scores": [
+            0,
+            0
+          ],
+          "simulator_step_count": 1,
+          "source_frame_index": 1,
+          "task_mode": 0,
+          "teams": [
+            {
+              "checkpoint_digests": [
+                "2222222222222222222222222222222222222222222222222222222222222222"
+              ],
+              "display_name": "policy-0 / policy-1 / policy-2",
+              "policy_ids": [
+                "policy-0",
+                "policy-1",
+                "policy-2"
+              ],
+              "team_id": 1
+            },
+            {
+              "checkpoint_digests": [
+                "2222222222222222222222222222222222222222222222222222222222222222"
+              ],
+              "display_name": "policy-5 / policy-6",
+              "policy_ids": [
+                "policy-5",
+                "policy-6"
+              ],
+              "team_id": 2
+            }
+          ]
         },
         "presentation_kind": "replay_shared_obs_agent_pov",
         "product_kind": "replay_viewer",
@@ -6995,6 +7072,45 @@
           "source_frame_id": "debugger-episode:3e3381dbe49ca4fc35a3e2153bd4b3f2366a741b0b501ccdf086063920fdcf02:frame:0",
           "source_frame_index": 0,
           "source_simulator_step_count": 0
+        },
+        "match_summary": {
+          "episode_id": "debugger-episode:3e3381dbe49ca4fc35a3e2153bd4b3f2366a741b0b501ccdf086063920fdcf02",
+          "outcome": "not_applicable",
+          "schema_version": 1,
+          "score_threshold": 0,
+          "scores": [
+            0,
+            0
+          ],
+          "simulator_step_count": 0,
+          "source_frame_index": 0,
+          "task_mode": 0,
+          "teams": [
+            {
+              "checkpoint_digests": [],
+              "display_name": "Manual",
+              "policy_ids": [
+                "debugger-action-source:manual:slot:0",
+                "debugger-action-source:manual:slot:1",
+                "debugger-action-source:manual:slot:2",
+                "debugger-action-source:manual:slot:3",
+                "debugger-action-source:manual:slot:4"
+              ],
+              "team_id": 1
+            },
+            {
+              "checkpoint_digests": [],
+              "display_name": "Manual",
+              "policy_ids": [
+                "debugger-action-source:manual:slot:5",
+                "debugger-action-source:manual:slot:6",
+                "debugger-action-source:manual:slot:7",
+                "debugger-action-source:manual:slot:8",
+                "debugger-action-source:manual:slot:9"
+              ],
+              "team_id": 2
+            }
+          ]
         },
         "presentation_kind": "live_no_shared_obs_agent_pov",
         "product_kind": "combat_debugger",
@@ -9873,6 +9989,45 @@
           "source_session_id": "test-session",
           "source_simulator_step_count": 0
         },
+        "match_summary": {
+          "episode_id": "debugger-episode:3e3381dbe49ca4fc35a3e2153bd4b3f2366a741b0b501ccdf086063920fdcf02",
+          "outcome": "not_applicable",
+          "schema_version": 1,
+          "score_threshold": 0,
+          "scores": [
+            0,
+            0
+          ],
+          "simulator_step_count": 0,
+          "source_frame_index": 0,
+          "task_mode": 0,
+          "teams": [
+            {
+              "checkpoint_digests": [],
+              "display_name": "Manual",
+              "policy_ids": [
+                "debugger-action-source:manual:slot:0",
+                "debugger-action-source:manual:slot:1",
+                "debugger-action-source:manual:slot:2",
+                "debugger-action-source:manual:slot:3",
+                "debugger-action-source:manual:slot:4"
+              ],
+              "team_id": 1
+            },
+            {
+              "checkpoint_digests": [],
+              "display_name": "Manual",
+              "policy_ids": [
+                "debugger-action-source:manual:slot:5",
+                "debugger-action-source:manual:slot:6",
+                "debugger-action-source:manual:slot:7",
+                "debugger-action-source:manual:slot:8",
+                "debugger-action-source:manual:slot:9"
+              ],
+              "team_id": 2
+            }
+          ]
+        },
         "pending_joint_action": {
           "action_rows": [
             {
@@ -12715,6 +12870,45 @@
           "source_frame_index": 1,
           "source_simulator_step_count": 1
         },
+        "match_summary": {
+          "episode_id": "debugger-episode:8b3e29cc2654e2460f3f438cb4d3bb4981e28c67c0d23ed4b00a84627422d7d8",
+          "outcome": "not_applicable",
+          "schema_version": 1,
+          "score_threshold": 0,
+          "scores": [
+            0,
+            0
+          ],
+          "simulator_step_count": 1,
+          "source_frame_index": 1,
+          "task_mode": 0,
+          "teams": [
+            {
+              "checkpoint_digests": [],
+              "display_name": "Manual",
+              "policy_ids": [
+                "debugger-action-source:manual:slot:0",
+                "debugger-action-source:manual:slot:1",
+                "debugger-action-source:manual:slot:2",
+                "debugger-action-source:manual:slot:3",
+                "debugger-action-source:manual:slot:4"
+              ],
+              "team_id": 1
+            },
+            {
+              "checkpoint_digests": [],
+              "display_name": "Manual",
+              "policy_ids": [
+                "debugger-action-source:manual:slot:5",
+                "debugger-action-source:manual:slot:6",
+                "debugger-action-source:manual:slot:7",
+                "debugger-action-source:manual:slot:8",
+                "debugger-action-source:manual:slot:9"
+              ],
+              "team_id": 2
+            }
+          ]
+        },
         "presentation_kind": "live_shared_obs_agent_pov",
         "product_kind": "combat_debugger",
         "researcher_space": {
@@ -14798,6 +14992,44 @@
           "source_frame_id": "service-complete:frame:1",
           "source_frame_index": 1,
           "source_simulator_step_count": 1
+        },
+        "match_summary": {
+          "episode_id": "service-complete",
+          "outcome": "not_applicable",
+          "schema_version": 1,
+          "score_threshold": 0,
+          "scores": [
+            0,
+            0
+          ],
+          "simulator_step_count": 1,
+          "source_frame_index": 1,
+          "task_mode": 0,
+          "teams": [
+            {
+              "checkpoint_digests": [
+                "2222222222222222222222222222222222222222222222222222222222222222"
+              ],
+              "display_name": "policy-0 / policy-1 / policy-2",
+              "policy_ids": [
+                "policy-0",
+                "policy-1",
+                "policy-2"
+              ],
+              "team_id": 1
+            },
+            {
+              "checkpoint_digests": [
+                "2222222222222222222222222222222222222222222222222222222222222222"
+              ],
+              "display_name": "policy-5 / policy-6",
+              "policy_ids": [
+                "policy-5",
+                "policy-6"
+              ],
+              "team_id": 2
+            }
+          ]
         },
         "presentation_kind": "replay_no_shared_obs_agent_pov",
         "product_kind": "replay_viewer",
@@ -17415,6 +17647,44 @@
           "incoming_transition_index": 0,
           "transition_kind": "oracle_incoming_submitted_accepted"
         },
+        "match_summary": {
+          "episode_id": "service-complete",
+          "outcome": "not_applicable",
+          "schema_version": 1,
+          "score_threshold": 0,
+          "scores": [
+            0,
+            0
+          ],
+          "simulator_step_count": 1,
+          "source_frame_index": 1,
+          "task_mode": 0,
+          "teams": [
+            {
+              "checkpoint_digests": [
+                "2222222222222222222222222222222222222222222222222222222222222222"
+              ],
+              "display_name": "policy-0 / policy-1 / policy-2",
+              "policy_ids": [
+                "policy-0",
+                "policy-1",
+                "policy-2"
+              ],
+              "team_id": 1
+            },
+            {
+              "checkpoint_digests": [
+                "2222222222222222222222222222222222222222222222222222222222222222"
+              ],
+              "display_name": "policy-5 / policy-6",
+              "policy_ids": [
+                "policy-5",
+                "policy-6"
+              ],
+              "team_id": 2
+            }
+          ]
+        },
         "presentation_kind": "replay_oracle",
         "product_kind": "replay_viewer",
         "replay_inspection": null,
@@ -19320,6 +19590,44 @@
           "source_frame_id": "service-shared:frame:1",
           "source_frame_index": 1,
           "source_simulator_step_count": 1
+        },
+        "match_summary": {
+          "episode_id": "service-shared",
+          "outcome": "not_applicable",
+          "schema_version": 1,
+          "score_threshold": 0,
+          "scores": [
+            0,
+            0
+          ],
+          "simulator_step_count": 1,
+          "source_frame_index": 1,
+          "task_mode": 0,
+          "teams": [
+            {
+              "checkpoint_digests": [
+                "2222222222222222222222222222222222222222222222222222222222222222"
+              ],
+              "display_name": "policy-0 / policy-1 / policy-2",
+              "policy_ids": [
+                "policy-0",
+                "policy-1",
+                "policy-2"
+              ],
+              "team_id": 1
+            },
+            {
+              "checkpoint_digests": [
+                "2222222222222222222222222222222222222222222222222222222222222222"
+              ],
+              "display_name": "policy-5 / policy-6",
+              "policy_ids": [
+                "policy-5",
+                "policy-6"
+              ],
+              "team_id": 2
+            }
+          ]
         },
         "presentation_kind": "replay_shared_obs_agent_pov",
         "product_kind": "replay_viewer",
@@ -21637,6 +21945,7 @@
         "source_frame_index": 1,
         "source_simulator_step_count": 1
       },
+      "match_summary": null,
       "presentation_kind": "live_no_shared_obs_agent_pov",
       "product_kind": "combat_debugger",
       "researcher_space": {
@@ -24123,6 +24432,7 @@
         "source_session_id": "cp2-5-b-oracle",
         "source_simulator_step_count": 1
       },
+      "match_summary": null,
       "pending_joint_action": {
         "action_rows": [
           {
@@ -25545,6 +25855,45 @@
         "source_frame_id": "debugger-episode:8b3e29cc2654e2460f3f438cb4d3bb4981e28c67c0d23ed4b00a84627422d7d8:frame:1",
         "source_frame_index": 1,
         "source_simulator_step_count": 1
+      },
+      "match_summary": {
+        "episode_id": "debugger-episode:8b3e29cc2654e2460f3f438cb4d3bb4981e28c67c0d23ed4b00a84627422d7d8",
+        "outcome": "not_applicable",
+        "schema_version": 1,
+        "score_threshold": 0,
+        "scores": [
+          0,
+          0
+        ],
+        "simulator_step_count": 1,
+        "source_frame_index": 1,
+        "task_mode": 0,
+        "teams": [
+          {
+            "checkpoint_digests": [],
+            "display_name": "Manual",
+            "policy_ids": [
+              "debugger-action-source:manual:slot:0",
+              "debugger-action-source:manual:slot:1",
+              "debugger-action-source:manual:slot:2",
+              "debugger-action-source:manual:slot:3",
+              "debugger-action-source:manual:slot:4"
+            ],
+            "team_id": 1
+          },
+          {
+            "checkpoint_digests": [],
+            "display_name": "Manual",
+            "policy_ids": [
+              "debugger-action-source:manual:slot:5",
+              "debugger-action-source:manual:slot:6",
+              "debugger-action-source:manual:slot:7",
+              "debugger-action-source:manual:slot:8",
+              "debugger-action-source:manual:slot:9"
+            ],
+            "team_id": 2
+          }
+        ]
       },
       "presentation_kind": "live_shared_obs_agent_pov",
       "product_kind": "combat_debugger",
@@ -27700,6 +28049,7 @@
         "source_frame_index": 1,
         "source_simulator_step_count": 1
       },
+      "match_summary": null,
       "presentation_kind": "replay_no_shared_obs_agent_pov",
       "product_kind": "replay_viewer",
       "replay_inspection": {
@@ -30109,6 +30459,44 @@
         "incoming_transition_index": 0,
         "transition_kind": "oracle_incoming_submitted_accepted"
       },
+      "match_summary": {
+        "episode_id": "episode-001",
+        "outcome": "not_applicable",
+        "schema_version": 1,
+        "score_threshold": 0,
+        "scores": [
+          0,
+          0
+        ],
+        "simulator_step_count": 1,
+        "source_frame_index": 1,
+        "task_mode": 0,
+        "teams": [
+          {
+            "checkpoint_digests": [
+              "2222222222222222222222222222222222222222222222222222222222222222"
+            ],
+            "display_name": "policy-0 / policy-1 / policy-2",
+            "policy_ids": [
+              "policy-0",
+              "policy-1",
+              "policy-2"
+            ],
+            "team_id": 1
+          },
+          {
+            "checkpoint_digests": [
+              "2222222222222222222222222222222222222222222222222222222222222222"
+            ],
+            "display_name": "policy-5 / policy-6",
+            "policy_ids": [
+              "policy-5",
+              "policy-6"
+            ],
+            "team_id": 2
+          }
+        ]
+      },
       "presentation_kind": "replay_oracle",
       "product_kind": "replay_viewer",
       "replay_inspection": {
@@ -31443,6 +31831,7 @@
         "source_frame_index": 1,
         "source_simulator_step_count": 1
       },
+      "match_summary": null,
       "presentation_kind": "replay_shared_obs_agent_pov",
       "product_kind": "replay_viewer",
       "replay_inspection": {
@@ -33751,6 +34140,45 @@
         "source_frame_index": 0,
         "source_simulator_step_count": 0
       },
+      "match_summary": {
+        "episode_id": "debugger-episode:3e3381dbe49ca4fc35a3e2153bd4b3f2366a741b0b501ccdf086063920fdcf02",
+        "outcome": "not_applicable",
+        "schema_version": 1,
+        "score_threshold": 0,
+        "scores": [
+          0,
+          0
+        ],
+        "simulator_step_count": 0,
+        "source_frame_index": 0,
+        "task_mode": 0,
+        "teams": [
+          {
+            "checkpoint_digests": [],
+            "display_name": "Manual",
+            "policy_ids": [
+              "debugger-action-source:manual:slot:0",
+              "debugger-action-source:manual:slot:1",
+              "debugger-action-source:manual:slot:2",
+              "debugger-action-source:manual:slot:3",
+              "debugger-action-source:manual:slot:4"
+            ],
+            "team_id": 1
+          },
+          {
+            "checkpoint_digests": [],
+            "display_name": "Manual",
+            "policy_ids": [
+              "debugger-action-source:manual:slot:5",
+              "debugger-action-source:manual:slot:6",
+              "debugger-action-source:manual:slot:7",
+              "debugger-action-source:manual:slot:8",
+              "debugger-action-source:manual:slot:9"
+            ],
+            "team_id": 2
+          }
+        ]
+      },
       "presentation_kind": "live_no_shared_obs_agent_pov",
       "product_kind": "combat_debugger",
       "researcher_space": {
@@ -35533,6 +35961,7 @@
         "source_frame_index": 0,
         "source_simulator_step_count": 0
       },
+      "match_summary": null,
       "presentation_kind": "live_no_shared_obs_agent_pov",
       "product_kind": "combat_debugger",
       "researcher_space": {
@@ -37244,6 +37673,7 @@
         "source_session_id": "cp2-7-live-oracle-zero",
         "source_simulator_step_count": 0
       },
+      "match_summary": null,
       "pending_joint_action": {
         "action_rows": [
           {
@@ -38224,6 +38654,7 @@
         "source_frame_index": 3,
         "source_simulator_step_count": 3
       },
+      "match_summary": null,
       "presentation_kind": "replay_no_shared_obs_agent_pov",
       "product_kind": "replay_viewer",
       "replay_inspection": null,
@@ -39864,6 +40295,7 @@
         "source_frame_index": 3,
         "source_simulator_step_count": 3
       },
+      "match_summary": null,
       "presentation_kind": "replay_no_shared_obs_agent_pov",
       "product_kind": "replay_viewer",
       "replay_inspection": null,
@@ -41379,6 +41811,44 @@
         "source_frame_id": "browser-corpse-overlay-no_shared_obs:frame:0",
         "source_frame_index": 0,
         "source_simulator_step_count": 0
+      },
+      "match_summary": {
+        "episode_id": "browser-corpse-overlay-no_shared_obs",
+        "outcome": "not_applicable",
+        "schema_version": 1,
+        "score_threshold": 0,
+        "scores": [
+          0,
+          0
+        ],
+        "simulator_step_count": 0,
+        "source_frame_index": 0,
+        "task_mode": 0,
+        "teams": [
+          {
+            "checkpoint_digests": [
+              "2222222222222222222222222222222222222222222222222222222222222222"
+            ],
+            "display_name": "policy-0 / policy-1 / policy-2",
+            "policy_ids": [
+              "policy-0",
+              "policy-1",
+              "policy-2"
+            ],
+            "team_id": 1
+          },
+          {
+            "checkpoint_digests": [
+              "2222222222222222222222222222222222222222222222222222222222222222"
+            ],
+            "display_name": "policy-5 / policy-6",
+            "policy_ids": [
+              "policy-5",
+              "policy-6"
+            ],
+            "team_id": 2
+          }
+        ]
       },
       "presentation_kind": "replay_no_shared_obs_agent_pov",
       "product_kind": "replay_viewer",
@@ -43153,6 +43623,7 @@
         "source_frame_index": 3,
         "source_simulator_step_count": 3
       },
+      "match_summary": null,
       "presentation_kind": "replay_no_shared_obs_agent_pov",
       "product_kind": "replay_viewer",
       "replay_inspection": null,
@@ -44564,6 +45035,7 @@
         "source_frame_index": 0,
         "source_simulator_step_count": 0
       },
+      "match_summary": null,
       "presentation_kind": "replay_no_shared_obs_agent_pov",
       "product_kind": "replay_viewer",
       "replay_inspection": {
@@ -46241,6 +46713,44 @@
         "source_frame_id": "browser-corpse-overlay-no_shared_obs:frame:1",
         "source_frame_index": 1,
         "source_simulator_step_count": 1
+      },
+      "match_summary": {
+        "episode_id": "browser-corpse-overlay-no_shared_obs",
+        "outcome": "not_applicable",
+        "schema_version": 1,
+        "score_threshold": 0,
+        "scores": [
+          0,
+          0
+        ],
+        "simulator_step_count": 1,
+        "source_frame_index": 1,
+        "task_mode": 0,
+        "teams": [
+          {
+            "checkpoint_digests": [
+              "2222222222222222222222222222222222222222222222222222222222222222"
+            ],
+            "display_name": "policy-0 / policy-1 / policy-2",
+            "policy_ids": [
+              "policy-0",
+              "policy-1",
+              "policy-2"
+            ],
+            "team_id": 1
+          },
+          {
+            "checkpoint_digests": [
+              "2222222222222222222222222222222222222222222222222222222222222222"
+            ],
+            "display_name": "policy-5 / policy-6",
+            "policy_ids": [
+              "policy-5",
+              "policy-6"
+            ],
+            "team_id": 2
+          }
+        ]
       },
       "presentation_kind": "replay_no_shared_obs_agent_pov",
       "product_kind": "replay_viewer",
@@ -48078,6 +48588,44 @@
         "incoming_transition_index": 2,
         "transition_kind": "oracle_incoming_submitted_accepted"
       },
+      "match_summary": {
+        "episode_id": "episode-001",
+        "outcome": "not_applicable",
+        "schema_version": 1,
+        "score_threshold": 0,
+        "scores": [
+          0,
+          0
+        ],
+        "simulator_step_count": 3,
+        "source_frame_index": 3,
+        "task_mode": 0,
+        "teams": [
+          {
+            "checkpoint_digests": [
+              "2222222222222222222222222222222222222222222222222222222222222222"
+            ],
+            "display_name": "policy-0 / policy-1 / policy-2",
+            "policy_ids": [
+              "policy-0",
+              "policy-1",
+              "policy-2"
+            ],
+            "team_id": 1
+          },
+          {
+            "checkpoint_digests": [
+              "2222222222222222222222222222222222222222222222222222222222222222"
+            ],
+            "display_name": "policy-5 / policy-6",
+            "policy_ids": [
+              "policy-5",
+              "policy-6"
+            ],
+            "team_id": 2
+          }
+        ]
+      },
       "presentation_kind": "replay_oracle",
       "product_kind": "replay_viewer",
       "replay_inspection": null,
@@ -49118,6 +49666,44 @@
         "incoming_transition_index": 2,
         "transition_kind": "oracle_incoming_submitted_accepted"
       },
+      "match_summary": {
+        "episode_id": "episode-001",
+        "outcome": "not_applicable",
+        "schema_version": 1,
+        "score_threshold": 0,
+        "scores": [
+          0,
+          0
+        ],
+        "simulator_step_count": 3,
+        "source_frame_index": 3,
+        "task_mode": 0,
+        "teams": [
+          {
+            "checkpoint_digests": [
+              "2222222222222222222222222222222222222222222222222222222222222222"
+            ],
+            "display_name": "policy-0 / policy-1 / policy-2",
+            "policy_ids": [
+              "policy-0",
+              "policy-1",
+              "policy-2"
+            ],
+            "team_id": 1
+          },
+          {
+            "checkpoint_digests": [
+              "2222222222222222222222222222222222222222222222222222222222222222"
+            ],
+            "display_name": "policy-5 / policy-6",
+            "policy_ids": [
+              "policy-5",
+              "policy-6"
+            ],
+            "team_id": 2
+          }
+        ]
+      },
       "presentation_kind": "replay_oracle",
       "product_kind": "replay_viewer",
       "replay_inspection": null,
@@ -49920,6 +50506,44 @@
       },
       "latest_events": null,
       "latest_transition": null,
+      "match_summary": {
+        "episode_id": "episode-001",
+        "outcome": "not_applicable",
+        "schema_version": 1,
+        "score_threshold": 0,
+        "scores": [
+          0,
+          0
+        ],
+        "simulator_step_count": 0,
+        "source_frame_index": 0,
+        "task_mode": 0,
+        "teams": [
+          {
+            "checkpoint_digests": [
+              "2222222222222222222222222222222222222222222222222222222222222222"
+            ],
+            "display_name": "policy-0 / policy-1 / policy-2",
+            "policy_ids": [
+              "policy-0",
+              "policy-1",
+              "policy-2"
+            ],
+            "team_id": 1
+          },
+          {
+            "checkpoint_digests": [
+              "2222222222222222222222222222222222222222222222222222222222222222"
+            ],
+            "display_name": "policy-5 / policy-6",
+            "policy_ids": [
+              "policy-5",
+              "policy-6"
+            ],
+            "team_id": 2
+          }
+        ]
+      },
       "presentation_kind": "replay_oracle",
       "product_kind": "replay_viewer",
       "replay_inspection": {
@@ -51267,6 +51891,7 @@
         "source_frame_index": 3,
         "source_simulator_step_count": 3
       },
+      "match_summary": null,
       "presentation_kind": "replay_shared_obs_agent_pov",
       "product_kind": "replay_viewer",
       "replay_inspection": null,
@@ -52762,6 +53387,7 @@
         "source_frame_index": 0,
         "source_simulator_step_count": 0
       },
+      "match_summary": null,
       "presentation_kind": "replay_shared_obs_agent_pov",
       "product_kind": "replay_viewer",
       "replay_inspection": {

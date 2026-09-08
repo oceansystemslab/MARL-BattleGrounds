@@ -243,9 +243,12 @@ Technical Frame expansion.
 
 ## Visual filters
 
-Visual Filters contains 18 browser-local paint families plus the Ranges
-control. Target Selection Visuals starts disabled; the other 17 paint families
-and Ranges start enabled, so Replay initially reports `18 enabled`:
+Visual Filters contains 18 browser-local paint families plus Ranges. Initially
+enable Ultimate Ability Effects, Spawn Shield, Basic Ability Effects,
+Regeneration Effects, Death Effects, Resurrection Effects, Scrolling Battle
+Text and Respawn Wave. With the existing default Ranges setting, the initial
+count is `9 enabled`. Visual Filters and Roster start open. The complete filter
+inventory is unchanged:
 
 1. Aura Fields
 2. Aura Modifier Badges
@@ -291,11 +294,37 @@ battlefield background, reflects the current audience, selection, Ranges, and
 `MARL-BattleGrounds Replay Provenance` iTXt record. Export does not navigate the
 replay or request another replay frame.
 
-**Download Metrics** is enabled at the same settled boundary in every visual
-POV. Activating it requests the canonical adjacent metric report once and
-downloads the exact bytes when available. A missing sidecar reports absence
-without a download. The metric report is artifact-wide researcher evidence;
-changing battlefield fog does not rewrite or filter it.
+The scoreboard derives the task, participant identities, current scores and
+configured target from the captured episode. Victory, draw and defeat appear
+only when the current frame contains the task completion event. Seeking backward
+removes the later result. Legacy task-zero replays say **Combat diagnostic**.
+Changing between Oracle and Agent POV preserves the cursor and playing intent.
+
+Open **TDM Evaluation Metrics**, below Comprehensive Agent Class Details, to
+prepare the offline analysis once. **At cursor** is the default: frame k uses
+exactly k captured transitions. **Final episode** explicitly selects the complete
+captured prefix; interrupted recordings do not become completed results.
+An indeterminate progress indicator appears while metrics are prepared. Longer
+replays can take longer; the indicator makes no fixed-duration promise. Playback,
+seeking and POV changes remain available while analysis prepares. CSV preparation
+also shows an indicator when the metrics panel is closed.
+The selector exposes every implemented episode metric, including explicit
+inapplicability, insufficient data and zero-opportunity reasons. Distribution
+rows show their mean and observation count; CSV preserves the individual observations.
+Conditional coordination/class associations remain descriptive, not validated
+proof of strategic reasoning.
+
+**Download Metrics CSV** exports the selected scope and its values, exposures,
+subjects, dimensions, status and provenance. **Original Metrics JSON** downloads
+the exact canonical adjacent report when present. Older empty or missing reports
+can be analyzed from recorded facts without replacing their sidecar or simulation
+identity. Derived analysis records its own source fingerprint and reducer versions.
+Metrics remain researcher analysis in every visual POV and never enter policy
+inputs, recipient tooltips or battlefield visibility. Preparing analysis does not
+hold the replay command lock; subsequent seeks reuse cached prefix components.
+Metric computation uses the captured game directly and retains inexpensive
+consistency checks. Imported artifacts still receive the input checks described
+below; computing metrics does not repeatedly revalidate that same data.
 
 ## Static Matplotlib frame
 
@@ -348,8 +377,9 @@ Closing the tab does not stop Python; use **Exit Replay Viewer** or `Ctrl-C`.
 - **Transport disabled:** reconnect if offline; Start/negative moves stop at the
   lower bound, positive moves/End stop at the captured endpoint, and artifact
   actions wait for a settled frame.
-- **Metrics unavailable:** confirm that the replay has a verified adjacent
-  metric sidecar.
+- **Original Metrics JSON unavailable:** the replay has no verified adjacent
+  metric sidecar. Offline analysis can still derive metrics from its recorded
+  facts; check the analysis panel's error if that separate operation fails.
 - **PNG export disabled:** pause playback and wait for the exact-frame summary
   to settle in a visible connected tab.
 - **Static Matplotlib import failed:** run `uv sync --extra viz`.
@@ -359,3 +389,9 @@ The replay format itself is documented in
 [replay_format.md](../evaluation/replay_format.md). Return to the
 [browser-tools migration page](visual_debugger.md) or the
 [project README](../../README.md).
+
+Ordinary recording stores critical metrics by default. Opening Evaluation Metrics
+or requesting derived CSV explicitly opts into full replay analysis; this runs
+once and is cached across cursor and POV changes. Original Metrics JSON remains
+the exact recorded sidecar, which may contain only the critical default set.
+Library callers likewise opt in with `analyze_replay(bundle, full=True)`.

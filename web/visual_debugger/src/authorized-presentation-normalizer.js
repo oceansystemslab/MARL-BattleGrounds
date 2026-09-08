@@ -4857,6 +4857,24 @@ export async function normalizeAuthorizedPresentationFrameV1(value) {
     "Authorized presentation frame",
   );
   const semantic = validateSemanticFrame(frame);
+  const match = frame.match_summary;
+  if (match != null) {
+    if (
+      match.episode_id !== frame.source.episode_id ||
+      match.source_frame_index !== frame.source.source_frame_index ||
+      match.simulator_step_count !== frame.source.source_simulator_step_count ||
+      match.teams[0].team_id !== 1 ||
+      match.teams[1].team_id !== 2 ||
+      (match.task_mode === 0 &&
+        (match.score_threshold !== 0 ||
+          match.scores.some((/** @type {number} */ score) => score !== 0) ||
+          match.outcome !== "not_applicable")) ||
+      (match.task_mode === 1 &&
+        (match.score_threshold === 0 || match.outcome === "not_applicable"))
+    ) {
+      invalid("Match summary does not join the current task and source epoch.");
+    }
+  }
   await Promise.all([
     verifyPresentationKeyDerivation(frame, semantic.presentationKeyPairs),
     verifyPresentationKeyPairs(
@@ -6026,7 +6044,9 @@ export function validateReplayTransportContinuityV1(previousValue, nextValue, re
       : next.artifact_facts;
   const completionValid = bothPrivateShared
     ? structurallyEqual(nextCompletion, previousCompletion)
-    : structurallyEqual(
+    : // Audience-local reasons intentionally differ. The exact canonical reason
+      // is still pinned by the artifact_facts comparison below.
+      structurallyEqual(
         {
           completion_state: nextCompletion.completion_state,
           episode_id: nextCompletion.episode_id,
@@ -6037,12 +6057,6 @@ export function validateReplayTransportContinuityV1(previousValue, nextValue, re
           terminated: nextCompletion.terminated,
           truncated: nextCompletion.truncated,
           completion_bases: nextCompletion.completion_bases,
-          public_end_or_failure_reason: Object.hasOwn(
-            nextCompletion,
-            "public_end_or_failure_reason",
-          )
-            ? nextCompletion.public_end_or_failure_reason
-            : nextCompletion.end_or_failure_reason,
         },
         {
           completion_state: previousCompletion.completion_state,
@@ -6054,12 +6068,6 @@ export function validateReplayTransportContinuityV1(previousValue, nextValue, re
           terminated: previousCompletion.terminated,
           truncated: previousCompletion.truncated,
           completion_bases: previousCompletion.completion_bases,
-          public_end_or_failure_reason: Object.hasOwn(
-            previousCompletion,
-            "public_end_or_failure_reason",
-          )
-            ? previousCompletion.public_end_or_failure_reason
-            : previousCompletion.end_or_failure_reason,
         },
       );
   if (

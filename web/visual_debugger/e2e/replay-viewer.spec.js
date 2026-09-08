@@ -1263,7 +1263,7 @@ async function proveReplayLeafExports(page, options) {
  */
 async function downloadCanonicalMetricReport(page, sourceMetricPath) {
   await waitForSettledReplayArtifactActions(page);
-  await expect(page.locator("#replay-download-metrics-button")).toBeEnabled();
+  await expect(page.locator("#replay-original-metrics-button")).toBeEnabled();
   /** @type {Array<{method: string, path: string}>} */
   const requests = [];
   const record = (/** @type {import("@playwright/test").Request} */ request) => {
@@ -1280,7 +1280,7 @@ async function downloadCanonicalMetricReport(page, sourceMetricPath) {
       { timeout: 30_000 },
     );
     const downloadPromise = page.waitForEvent("download", { timeout: 30_000 });
-    await page.locator("#replay-download-metrics-button").click();
+    await page.locator("#replay-original-metrics-button").click();
     [response, download] = await Promise.all([responsePromise, downloadPromise]);
     await expect(page.locator("#notice")).toContainText("Downloaded");
   } finally {
@@ -1312,7 +1312,7 @@ async function downloadCanonicalMetricReport(page, sourceMetricPath) {
 /** @param {import("@playwright/test").Page} page */
 async function proveMissingMetricUi(page) {
   await waitForSettledReplayArtifactActions(page);
-  const button = page.locator("#replay-download-metrics-button");
+  const button = page.locator("#replay-original-metrics-button");
   await expect(button).toBeEnabled();
   /** @type {Array<{method: string, path: string}>} */
   const requests = [];
@@ -1358,7 +1358,7 @@ async function proveMissingMetricUi(page) {
 /** @param {import("@playwright/test").Page} page */
 async function replayArtifactFactSurface(page) {
   await waitForSettledReplayArtifactActions(page);
-  await expect(page.locator("#replay-download-metrics-button")).toBeEnabled();
+  await expect(page.locator("#replay-original-metrics-button")).toBeEnabled();
   return Object.freeze({
     artifact: await page.locator("#replay-artifact-reference").innerText(),
     completion: await page.locator("#replay-completion-badge").innerText(),
@@ -2046,6 +2046,284 @@ test("basic_support Agent POV playback visibly dwells for Hunter and Priest", as
     page.off("request", recordReplayCommand);
     await page.goto("about:blank").catch(() => {});
     await stopDebugger(viewer?.process ?? null);
+  }
+});
+
+test("TDM scores and offline metric exports follow the cursor across POV changes", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  if (artifacts === null) throw new Error("Replay fixtures are unavailable.");
+  const viewer = await startReplayViewer({ replayPath: artifacts.tdm });
+  /** @param {string} pattern @param {boolean} [malformed] */
+  async function holdMetricResponse(pattern, malformed = false) {
+    let releaseResponse = () => {};
+    const delayed = new Promise((resolve) => {
+      releaseResponse = () => resolve(null);
+    });
+    let recordRequest = () => {};
+    const requested = new Promise((resolve) => {
+      recordRequest = () => resolve(null);
+    });
+    let recordHandled = () => {};
+    const handled = new Promise((resolve) => {
+      recordHandled = () => resolve(null);
+    });
+    await page.route(pattern, async (route) => {
+      const response = await route.fetch();
+      recordRequest();
+      await delayed;
+      await route.fulfill(malformed ? { json: { invalid: true } } : { response });
+      recordHandled();
+    });
+    return {
+      requested,
+      async release() {
+        releaseResponse();
+        await handled;
+        await page.unroute(pattern);
+      },
+    };
+  }
+  try {
+    await openReplay(page, viewer.url);
+    await expect(page.locator("#match-task")).toHaveText("Task mode: TDM");
+    await expect(page.locator("#match-team-a")).toContainText(
+      "policy-0 / policy-1 / policy-2",
+    );
+    await expect(page.locator("#match-team-b")).toContainText("policy-5 / policy-6");
+    await expect(page.locator(".match-scoreboard__score")).toHaveText([
+      "Score: 0/1",
+      "Score: 0/1",
+    ]);
+    await expect(page.locator(".match-scoreboard__result")).toHaveCount(0);
+    const initialMetrics = await holdMetricResponse(
+      "**/api/replay/metrics/0/cursor.json",
+    );
+    try {
+      await page.locator("#evaluation-metrics > summary").click();
+      await initialMetrics.requested;
+      await expect(
+        page.getByRole("progressbar", { name: "Preparing replay metrics" }),
+      ).toBeVisible();
+      expect(await page.locator("#metric-progress").getAttribute("value")).toBeNull();
+      await expect(page.locator("#metric-rows")).toHaveAttribute("aria-busy", "true");
+      await expect(page.locator("#metric-status")).toContainText(
+        "Preparing metrics. Longer replays can take longer.",
+      );
+      await expect(page.locator("#evaluation-metrics")).toContainText(
+        "Metrics summarize the captured game.",
+      );
+      await expect(page.locator("#view-select")).toBeEnabled();
+      await expect(page.locator("#replay-last-button")).toBeEnabled();
+    } finally {
+      await initialMetrics.release();
+    }
+    await expect(page.locator("#metric-status")).toContainText("At cursor · frame 0");
+    await expect(page.locator("#metric-progress")).toBeHidden();
+    await expect(page.locator("#metric-rows")).toHaveAttribute("aria-busy", "false");
+    expect(await page.locator("#metric-selection option").count()).toBeGreaterThan(1);
+    await expect(page.locator("#metric-rows")).toContainText("Pending");
+
+    for (const [scope, frameIndex] of /** @type {const} */ ([
+      ["cursor", 0],
+      ["final", 1],
+    ])) {
+      await page.locator("#metric-scope").selectOption(scope);
+      await expect(page.locator("#metric-status")).toContainText(
+        `${scope === "cursor" ? "At cursor" : "Final episode"} · frame ${frameIndex}`,
+      );
+      await waitForSettledReplayArtifactActions(page);
+      const heldCsv =
+        scope === "cursor"
+          ? await holdMetricResponse("**/api/replay/metrics/0/cursor.csv")
+          : null;
+      if (heldCsv !== null) await page.locator("#evaluation-metrics > summary").click();
+      const downloaded = page.waitForEvent("download");
+      await page.locator("#replay-download-metrics-button").click();
+      if (heldCsv !== null) {
+        try {
+          await heldCsv.requested;
+          await expect(page.locator("#evaluation-metrics")).not.toHaveAttribute("open");
+          await expect(
+            page.getByRole("progressbar", { name: "Preparing metric download" }),
+          ).toBeVisible();
+          expect(
+            await page
+              .locator("#replay-metrics-preparation progress")
+              .getAttribute("value"),
+          ).toBeNull();
+          await expect(page.locator("#replay-metrics-preparation")).toHaveAttribute(
+            "role",
+            "status",
+          );
+          await expect(page.locator("#replay-metrics-preparation")).toContainText(
+            "Longer replays can take longer.",
+          );
+          await expect(page.locator("#replay-metrics-preparation")).toContainText(
+            "Metrics summarize the captured game.",
+          );
+          await expect(page.locator("#replay-download-metrics-button")).toHaveAttribute(
+            "aria-busy",
+            "true",
+          );
+          await expect(page.locator("#replay-original-metrics-button")).toHaveAttribute(
+            "aria-busy",
+            "false",
+          );
+          await expect(page.locator("#view-select")).toBeEnabled();
+          await expect(page.locator("#replay-last-button")).toBeEnabled();
+        } finally {
+          await heldCsv.release();
+        }
+      }
+      const download = await downloaded;
+      await expect(page.locator("#replay-metrics-preparation")).toBeHidden();
+      await expect(page.locator("#replay-download-metrics-button")).toHaveAttribute(
+        "aria-busy",
+        "false",
+      );
+      if (heldCsv !== null) await page.locator("#evaluation-metrics > summary").click();
+      expect(download.suggestedFilename()).toBe(
+        `tdm-metrics-${scope}-frame-${frameIndex}.csv`,
+      );
+      const path = await download.path();
+      if (path === null) throw new Error("Metric CSV has no local path.");
+      const csv = await readFile(path, "utf8");
+      const [header, ...rows] = csv.trim().split(/\r?\n/u);
+      expect(header).toMatch(/^episode_id,scope,frame_index,metric_id,/u);
+      expect(rows.length).toBeGreaterThan(0);
+      expect(new Set(rows.map((row) => row.split(",").slice(1, 3).join(",")))).toEqual(
+        new Set([`${scope},${frameIndex}`]),
+      );
+    }
+    // Explicit final analysis never moves the scoreboard into the future.
+    await expect(page.locator(".match-scoreboard__score")).toHaveText([
+      "Score: 0/1",
+      "Score: 0/1",
+    ]);
+    await expect(page.locator(".match-scoreboard__result")).toHaveCount(0);
+    await downloadCanonicalMetricReport(
+      page,
+      artifacts.tdm.replace(REPLAY_SUFFIX, METRIC_SUFFIX),
+    );
+    await page.locator("#metric-scope").selectOption("cursor");
+    await expect(page.locator("#metric-status")).toContainText("At cursor · frame 0");
+    await installReplayView(page, "pov");
+    await expect(page.locator("#match-task")).toHaveText("Task mode: TDM");
+    await expect(page.locator("#metric-status")).toContainText("At cursor · frame 0");
+
+    const staleMetrics = await holdMetricResponse(
+      "**/api/replay/metrics/1/cursor.json",
+    );
+    try {
+      await clickReplayCommand(page, "#replay-last-button");
+      await staleMetrics.requested;
+      await expect(page.locator("#metric-progress")).toBeVisible();
+      await expect(page.locator("#metric-rows")).toHaveAttribute("aria-busy", "true");
+      await expect(page.locator(".match-scoreboard__score")).toHaveText([
+        "Score: 1/1",
+        "Score: 0/1",
+      ]);
+      await expect(page.locator(".match-scoreboard__result")).toHaveText([
+        "VICTORY",
+        "DEFEAT",
+      ]);
+      await clickReplayCommand(page, "#replay-first-button");
+      await expect(page.locator("#metric-progress")).toBeHidden();
+      await expect(page.locator("#metric-rows")).toHaveAttribute("aria-busy", "false");
+      await expect(page.locator(".match-scoreboard__result")).toHaveCount(0);
+      await expect(page.locator("#metric-status")).not.toContainText(
+        "At cursor · frame 1",
+      );
+      await staleMetrics.release();
+      await expect(page.locator("#metric-status")).toContainText("At cursor · frame 0");
+    } finally {
+      await staleMetrics.release();
+    }
+    const staleFailure = await holdMetricResponse(
+      "**/api/replay/metrics/1/cursor.json",
+      true,
+    );
+    try {
+      await clickReplayCommand(page, "#replay-last-button");
+      await staleFailure.requested;
+      await expect(page.locator("#metric-progress")).toBeVisible();
+      await clickReplayCommand(page, "#replay-first-button");
+      await staleFailure.release();
+      await expect(page.locator("#metric-status")).toContainText("At cursor · frame 0");
+      await expect(page.locator("#metric-progress")).toBeHidden();
+      await clickReplayCommand(page, "#replay-last-button");
+      await expect(page.locator("#metric-status")).toContainText(
+        "Metrics unavailable:",
+      );
+      await expect(page.locator("#metric-progress")).toBeHidden();
+      await expect(page.locator("#metric-rows")).toHaveAttribute("aria-busy", "false");
+      await expect(page.locator("#connection-status")).toHaveText("Online");
+      await clickReplayCommand(page, "#replay-first-button");
+    } finally {
+      await staleFailure.release();
+    }
+    await installReplayView(page, "researcher");
+    await expect(page.locator("#connection-status")).toHaveText("Online");
+    await expect(page.locator(".match-scoreboard__result")).toHaveCount(0);
+    expectNoBrowserErrors(page);
+  } finally {
+    await page.goto("about:blank");
+    await stopDebugger(viewer.process);
+  }
+});
+
+test("nonzero replay view changes preserve the cursor and playing intent", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  if (artifacts === null) throw new Error("Replay fixtures are unavailable.");
+  for (const replayPath of [artifacts.complete, artifacts.shared]) {
+    const viewer = await startReplayViewer({ replayPath, frameIndex: 1 });
+    try {
+      await openReplay(page, viewer.url);
+      for (const view of /** @type {const} */ (["pov", "researcher"])) {
+        const before = (await currentReplayFrame(page)).cursor;
+        await installReplayView(page, view);
+        await expect(page.locator("#connection-status")).toHaveText("Online");
+        expect((await currentReplayFrame(page)).cursor).toEqual(before);
+        await expect(page.locator("#replay-play-pause-button")).toHaveAttribute(
+          "aria-pressed",
+          "false",
+        );
+      }
+      await page.locator("#replay-playback-rate").selectOption("0.25");
+      await page.locator("#replay-play-pause-button").click();
+      await expect(page.locator("#replay-play-pause-button")).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      const playingFrame = (await currentReplayFrame(page)).cursor.frame_index;
+      await installReplayView(page, "pov");
+      await expect(page.locator("#connection-status")).toHaveText("Online");
+      await expect
+        .poll(async () => (await currentReplayFrame(page)).cursor.frame_index)
+        .toBeGreaterThan(playingFrame);
+      if (
+        (await page
+          .locator("#replay-play-pause-button")
+          .getAttribute("aria-pressed")) === "true"
+      ) {
+        await page.locator("#replay-play-pause-button").click();
+      }
+      await clickReplayCommand(page, "#replay-last-button");
+      const terminalCursor = (await currentReplayFrame(page)).cursor;
+      for (const view of /** @type {const} */ (["researcher", "pov"])) {
+        await installReplayView(page, view);
+        expect((await currentReplayFrame(page)).cursor).toEqual(terminalCursor);
+        await expect(page.locator("#connection-status")).toHaveText("Online");
+      }
+      expectNoBrowserErrors(page);
+    } finally {
+      await page.goto("about:blank");
+      await stopDebugger(viewer.process);
+    }
   }
 });
 

@@ -34,6 +34,17 @@ const FILTERS = Object.freeze([
 ]);
 
 const FILTER_IDS = FILTERS.map(([id]) => id);
+const INITIAL_FILTERS = new Set([
+  "ultimate_ability_effects",
+  "spawn_shield",
+  "basic_ability_effects",
+  "regeneration_effects",
+  "death_effects",
+  "resurrection_effects",
+  "scrolling_battle_text",
+  "respawn_wave",
+]);
+const INITIAL_DISABLED_FILTERS = FILTER_IDS.filter((id) => !INITIAL_FILTERS.has(id));
 const FILTER_INPUT = 'input[type="checkbox"][data-visual-filter-id]';
 const CHOREOGRAPHY_ROOTS =
   "#battlefield .combat-choreography, #battlefield .combat-choreography-connectors, #battlefield .combat-choreography-routes";
@@ -295,7 +306,7 @@ async function expectFilterSurface(page, disabledIds = [], rangesEnabled = true)
       value: id,
       type: "checkbox",
       autocomplete: "off",
-      defaultChecked: true,
+      defaultChecked: INITIAL_FILTERS.has(id),
       checked: !expectedDisabled.has(id),
     })),
   );
@@ -850,7 +861,9 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
     presentationKind: "live_oracle",
   });
   await openVisualFilters(page);
-  await expectFilterSurface(page);
+  await expectFilterSurface(page, INITIAL_DISABLED_FILTERS);
+  await expect(page.locator("#roster-details")).toHaveAttribute("open", "");
+  await expect(page.locator("#visual-filters")).toHaveAttribute("open", "");
   await expectLocalOnly(
     page,
     apiRequests,
@@ -861,7 +874,7 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
         }
         button.click();
       }),
-    { label: "disabled Enable All idempotency" },
+    { label: "initial Enable All restores every paint family" },
   );
   await expectFilterSurface(page);
   await ensureRangesOn(page, "live");
@@ -1140,7 +1153,7 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
     "installed",
   );
   await openVisualFilters(page);
-  await expectFilterSurface(page);
+  await expectFilterSurface(page, INITIAL_DISABLED_FILTERS);
   expect(
     JSON.parse(await authenticatedText(page, "/api/presentation/frame"))
       .presentation_kind,
@@ -1169,6 +1182,15 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
   });
   await expectReplayFrameIndex(page, 1);
   await openVisualFilters(page);
+  await expectFilterSurface(page, INITIAL_DISABLED_FILTERS);
+  await page.locator("#enable-all-visual-filters-button").click();
+  await setFilter(
+    page,
+    apiRequests,
+    "target_selection_visuals",
+    false,
+    "replay target overlay stays optional",
+  );
   await expectFilterSurface(page, ["target_selection_visuals"]);
   await ensureRangesOn(page, "replay");
 
@@ -1423,7 +1445,7 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expectReplayFrameIndex(page, 1);
   await openVisualFilters(page);
-  await expectFilterSurface(page, ["target_selection_visuals"]);
+  await expectFilterSurface(page, INITIAL_DISABLED_FILTERS);
   expect(
     JSON.parse(await authenticatedText(page, "/api/presentation/frame"))
       .presentation_kind,
@@ -1453,6 +1475,9 @@ test("real maximum-status replay renders +2 without losing owner semantics", asy
       "installed",
     );
 
+    await openVisualFilters(page);
+    await page.locator("#enable-all-visual-filters-button").click();
+    await expectFilterSurface(page);
     await expect(page.locator("#battlefield .modifier-overflow")).toHaveCount(0);
     await expect(page.locator("#battlefield .modifier-cell__value")).toHaveText([
       "×1.15",
@@ -1523,9 +1548,7 @@ test("real maximum-status replay renders +2 without losing owner semantics", asy
     const compactRows = await compactStatusOverflows.evaluateAll((overflows) =>
       overflows.map((overflow) => ({
         visibleText: overflow.textContent,
-        value: overflow.querySelector(
-          ".status-overflow__label, .required-dock-fallback__value",
-        )?.textContent,
+        value: overflow.querySelector(".status-overflow__label")?.textContent,
         ownerNodes: overflow.querySelectorAll(
           ".status-overflow__owner, .required-dock-fallback__owner",
         ).length,
@@ -1535,7 +1558,7 @@ test("real maximum-status replay renders +2 without losing owner semantics", asy
       })),
     );
     for (const row of compactRows) {
-      expect(row.value).toMatch(/^\+\d+$/u);
+      expect(row.value).toMatch(/^\+(?:[2-9]|\d{2,})$/u);
       expect(row.visibleText).toBe(row.value);
       expect(row.ownerNodes).toBe(0);
       expect(row.ownerLabel).toMatch(/^Agent ID /u);

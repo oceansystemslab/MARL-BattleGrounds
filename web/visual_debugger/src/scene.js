@@ -1933,7 +1933,16 @@ export class BattlefieldRenderer {
       ...cooldownLayout.docks.filter(({ compactFallback }) => !compactFallback),
     ].map((placement) => this.#renderCooldownDock(placement));
     const compactRequiredNodes = compactRequiredDocks.map((placement) =>
-      this.#renderRequiredStatusFallback(placement, policy.audience),
+      this.#renderFactDock(
+        placement,
+        "status",
+        {
+          cellWidth: placement.bounds.width,
+          cellHeight: placement.bounds.height,
+          cellGap: 0,
+        },
+        policy.audience,
+      ),
     );
     const usesPresentationKeys = projectedAgents.some(
       ({ presentationKey }) => presentationKey !== null,
@@ -2180,91 +2189,6 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * Render one compact, explicitly associated marker when a complete required
-   * status dock cannot fit. The marker exposes every authoritative item through
-   * the shared overflow explanation.
-   *
-   * @param {ReturnType<typeof layoutRequiredDocks>["docks"][number]} placement
-   * @param {"researcher" | "agent_pov"} audience
-   * @returns {SVGElement}
-   */
-  #renderRequiredStatusFallback(placement, audience) {
-    const rawItems = placement.hiddenStatuses;
-    const ownerAgent = this.agentByLayoutSlot.get(placement.globalSlot) ?? {};
-    const explanation =
-      audience === "agent_pov"
-        ? this.#explainStatusOverflow(rawItems, ownerAgent, audience)
-        : explainOverflow(rawItems, "status", ownerAgent, [
-            ...this.agentByLayoutSlot.values(),
-          ]);
-    if (explanation === null) {
-      return svgElement("g", { "aria-hidden": "true" });
-    }
-    const valueLabel = `+${placement.hiddenCount}`;
-    const group = svgElement("g", {
-      class: "required-dock-fallback-dock",
-      "data-zone": "required-dock-fallback-dock",
-      ...displayIdentityAttributes(ownerAgent),
-      "data-layout-key":
-        typeof ownerAgent.presentation_key === "string" ? null : placement.layoutKey,
-      "data-kind": "status",
-      "data-anchor": placement.anchor,
-      "data-collision-free": placement.collisionFree,
-    });
-    group.append(
-      svgElement("line", {
-        class: "dock-leader required-dock-fallback__leader",
-        x1: placement.leader.start.x,
-        y1: placement.leader.start.y,
-        x2: placement.leader.end.x,
-        y2: placement.leader.end.y,
-        "aria-hidden": "true",
-      }),
-    );
-    const cell = svgElement("g", {
-      class: "required-dock-fallback",
-      role: "img",
-      tabindex: "0",
-      "aria-label": `${explanation.title}. ${explanation.summary}. ${explanation.rows
-        .map((row) => `${row.label}: ${row.value}`)
-        .join(". ")}`,
-      "data-zone": "status-overflow",
-      ...displayIdentityAttributes(ownerAgent),
-      "data-layout-key": placement.layoutKey,
-      "data-kind": "status",
-      "data-hidden-count": placement.hiddenCount,
-      "data-compact-fallback": "true",
-      "data-owner-label": agentIdentity(ownerAgent),
-    });
-    registerTooltipOwner(cell, explanation);
-    const labelText = svgElement("text", {
-      class: "required-dock-fallback__label",
-      x: placement.bounds.left + placement.bounds.width / 2,
-      y: placement.bounds.top + placement.bounds.height / 2,
-    });
-    const valueLine = svgElement("tspan", {
-      class: "required-dock-fallback__value",
-      x: placement.bounds.left + placement.bounds.width / 2,
-      dy: "0.35em",
-    });
-    valueLine.textContent = valueLabel;
-    cell.append(
-      svgElement("rect", {
-        class: "required-dock-fallback__box",
-        x: placement.bounds.left,
-        y: placement.bounds.top,
-        width: placement.bounds.width,
-        height: placement.bounds.height,
-        rx: 5,
-      }),
-      labelText,
-    );
-    labelText.append(valueLine);
-    group.append(cell);
-    return group;
-  }
-
-  /**
    * Render one mandatory class-specific Ultimate cooldown cue.
    *
    * The exact tick value and icon occupy separate fixed compartments. Layout
@@ -2276,9 +2200,7 @@ export class BattlefieldRenderer {
    */
   #renderCooldownDock(placement) {
     const fallbackPlacement = placement.compactFallback === true;
-    const rawItem = fallbackPlacement
-      ? placement.hiddenStatuses[0]
-      : placement.visibleStatuses[0];
+    const rawItem = placement.visibleStatuses[0];
     const item = isRecord(rawItem) ? rawItem : {};
     const ticks =
       Number.isInteger(item.ticks) && item.ticks > 0 ? Number(item.ticks) : "?";
@@ -2400,6 +2322,11 @@ export class BattlefieldRenderer {
    * @returns {SVGElement}
    */
   #renderFactDock(placement, kind, dimensions, audience) {
+    const compact =
+      "compactFallback" in placement && placement.compactFallback === true;
+    const compactAttributes = compact
+      ? { "data-compact-fallback": true, "data-kind": kind, tabindex: "0" }
+      : {};
     const ownerAgent = this.agentByLayoutSlot.get(placement.globalSlot) ?? {};
     const group = svgElement("g", {
       class: `${kind}-dock`,
@@ -2463,7 +2390,8 @@ export class BattlefieldRenderer {
         item.duration >= 1 &&
         item.duration <= 5;
       const cell = svgElement("g", {
-        class: `${kind}-cell`,
+        class: `${kind}-cell${compact ? " required-dock-fallback" : ""}`,
+        ...compactAttributes,
         role: "img",
         "aria-label": `${token.accessibleName}, ${accessibleValue}, ${agentIdentity(ownerAgent)}`,
         "data-zone": `${kind}-cell`,
@@ -2560,7 +2488,8 @@ export class BattlefieldRenderer {
           : `${token.accessibleName}, multiplier ${formatDisplayNumber(item.multiplier)}`;
       });
       const overflow = svgElement("g", {
-        class: `${kind}-overflow`,
+        class: `${kind}-overflow${compact ? " required-dock-fallback" : ""}`,
+        ...compactAttributes,
         role: "img",
         "aria-label": `${placement.overflowLabel} hidden ${kind} cues for ${agentIdentity(ownerAgent)}: ${hiddenLabels.join("; ")}`,
         "data-zone": `${kind}-overflow`,

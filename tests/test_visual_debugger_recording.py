@@ -324,6 +324,15 @@ def test_finish_and_review_saves_exact_zero_or_nonzero_prefix(
     assert len(bundle.replay.frames) == transition_count + 1
     assert len(bundle.replay.transitions) == transition_count
     assert loaded.replay == bundle.replay
+    assert {
+        row.metric_id for row in bundle.metric_report_artifact.report.statistics
+    } == {
+        "marlbg.task.outcome_distribution.v1",
+        "marlbg.task.terminal_score_differential.v1",
+        "marlbg.task.evaluation_return.v1",
+        "marlbg.task.episode_length.v1",
+        "marlbg.artifact.completion.v1",
+    }
     assert recorder.status.review_available is True
 
 
@@ -956,6 +965,13 @@ def test_append_and_replacement_perform_no_persistence_io(
         "preflight_replay_bundle_destination_v1",
         forbidden,
     )
+    # Status and counts use committed progress, without copying growing history.
+    monkeypatch.setattr(
+        EvaluationEpisodeObserverV1, "retained_frames", property(forbidden)
+    )
+    monkeypatch.setattr(
+        EvaluationEpisodeObserverV1, "retained_transitions", property(forbidden)
+    )
     recorder.append(trajectory.transitions[0], trajectory.frames[1])
     replacement = recorder.replacement_for(
         replacement_trajectory.context,
@@ -963,6 +979,10 @@ def test_append_and_replacement_perform_no_persistence_io(
     )
     assert recorder.validated_transition_count == 1
     assert replacement.validated_transition_count == 0
+    assert recorder.retained_frame_count == 2
+    assert recorder.retained_transition_count == 1
+    assert replacement.retained_frame_count == 1
+    assert replacement.retained_transition_count == 0
 
 
 def test_replacement_readdresses_only_action_source_identity(

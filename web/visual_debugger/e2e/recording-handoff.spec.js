@@ -100,6 +100,23 @@ function expectNoBrowserErrors(page) {
   expect(browserErrors.get(page) ?? []).toEqual([]);
 }
 
+/** @param {import("@playwright/test").Page} page */
+async function expectMetricPreparation(page) {
+  const progress = page.getByRole("progressbar", {
+    name: "Preparing recorded-game metrics",
+  });
+  await expect(progress).toBeVisible();
+  expect(await progress.getAttribute("value")).toBeNull();
+  await expect(progress).toHaveAttribute("aria-describedby", "recording-status-note");
+  await expect(page.locator("#recording-status-note")).toContainText(
+    "Preparing metrics. Longer replays can take longer.",
+  );
+  await expect(page.locator("#recording-metrics-help")).toBeVisible();
+  await expect(page.locator("#recording-metrics-help")).toContainText(
+    "Metrics summarize the captured game.",
+  );
+}
+
 /**
  * @param {import("@playwright/test").Page} page
  * @param {string} path
@@ -478,16 +495,35 @@ test("confirmed prefix discard restarts capture and Finish opens settled frame-z
   });
 
   await captureOneTransition(page);
+  await expect(page.locator("#recording-metrics-progress")).toBeHidden();
+  let releaseFinish = () => {};
+  const heldFinish = new Promise((resolve) => {
+    releaseFinish = () => resolve(null);
+  });
+  await page.route(
+    "**/api/command",
+    async (route) => {
+      await heldFinish;
+      await route.continue();
+    },
+    { times: 1 },
+  );
   const finishResponse = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&
       new URL(response.url()).pathname === "/api/command",
     { timeout: 120_000 },
   );
-  await page.locator("#recording-finish-button").click();
+  try {
+    await page.locator("#recording-finish-button").click();
+    await expectMetricPreparation(page);
+  } finally {
+    releaseFinish();
+  }
   const response = await finishResponse;
   expect(response.status()).toBe(200);
   await expectSettledReplayHandoff(page);
+  await expect(page.locator("#recording-metrics-progress")).toBeHidden();
   expect(page.url()).toBe(stableUrl);
   expect(
     await page.evaluate(() =>
@@ -902,6 +938,10 @@ test("Reconnect completes a lost Finish response without retrying publication", 
   await openRecording(page, started.url);
   await captureOneTransition(page);
   let finishRequests = 0;
+  let releaseResponse = () => {};
+  const delayed = new Promise((resolve) => {
+    releaseResponse = () => resolve(null);
+  });
   await page.route("**/api/command", async (route) => {
     const payload = route.request().postDataJSON();
     if (payload?.command?.command_type !== "finish_and_review") {
@@ -909,23 +949,32 @@ test("Reconnect completes a lost Finish response without retrying publication", 
       return;
     }
     finishRequests += 1;
-    const response = await route.fetch();
+    const response = await route.fetch({ timeout: 120_000 });
     expect(response.status()).toBe(200);
+    await delayed;
     await route.abort("failed");
   });
 
-  await page.locator("#recording-finish-button").click();
+  try {
+    await page.locator("#recording-finish-button").click();
+    await expectMetricPreparation(page);
+  } finally {
+    releaseResponse();
+  }
   await expect(page.locator("#connection-status")).toHaveText("Resync required", {
     timeout: 120_000,
   });
   await expect(page.locator("#notice")).toContainText(
     "Command outcome is unknown because the connection failed",
   );
+  await expect(page.locator("#recording-metrics-progress")).toBeHidden();
+  await expect(page.locator("#recording-metrics-help")).toBeHidden();
   expect(finishRequests).toBe(1);
 
   await page.unroute("**/api/command");
   await page.locator("#reconnect-button").click();
   await expectSettledReplayHandoff(page);
+  await expect(page.locator("#recording-metrics-progress")).toBeHidden();
   expect(finishRequests).toBe(1);
   await expectSavedArtifacts(started.replayPath, started.metricReportPath, 1);
 

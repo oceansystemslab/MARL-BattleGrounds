@@ -153,7 +153,8 @@ async function debuggerGridSnapshot(page) {
         tabindex: line.getAttribute("tabindex"),
         pointerEvents: getComputedStyle(line).pointerEvents,
       })),
-      hitIsGrid: hit?.closest(".map-grid-line") !== null,
+      hitPresent: hit !== null,
+      hitIsGrid: Boolean(hit?.closest(".map-grid-line")),
     };
   });
 }
@@ -380,12 +381,14 @@ test("real Debugger grid is exact, lowest, and click-transparent", async ({ page
   ]) {
     await page.setViewportSize(viewport);
     await settleResponsiveLayout(page);
+    await page.locator("#battlefield").scrollIntoViewIfNeeded();
     const snapshot = await debuggerGridSnapshot(page);
     expect(snapshot.vertical).toHaveLength(19);
     expect(snapshot.horizontal).toHaveLength(9);
     expect(snapshot.mapAriaHidden).toBe("true");
     expect(snapshot.mapIsFirstLayer).toBe(true);
     expect(snapshot.mapPrecedesObstacleAndBody).toBe(true);
+    expect(snapshot.hitPresent).toBe(true);
     expect(snapshot.hitIsGrid).toBe(false);
     expect(
       snapshot.lineAccessibility.every(

@@ -94,6 +94,7 @@ from marl_battlegrounds.rendering.authorized_presentation import (
     oracle_presentation_key_v1,
 )
 from marl_battlegrounds.rendering.scene import BattlefieldSceneV2
+from scripts.dev.visual_debugger.match_summary import MatchSummaryV1
 
 PRESENTATION_PROTOCOL_SCHEMA_VERSION = 1
 PRESENTATION_TECHNICAL_DIGEST_PREFIX_LENGTH_V1 = 12
@@ -2482,6 +2483,7 @@ _KEY_PUBLIC_FIELD_BY_KEY_FIELD = {
 
 _WIRE_MODEL_MODULE_NAMES = (
     __name__,
+    "scripts.dev.visual_debugger.match_summary",
     "marl_battlegrounds.evaluation.pov",
     "marl_battlegrounds.rendering.authorized_incoming",
     "marl_battlegrounds.rendering.authorized_inspection",
@@ -3748,7 +3750,34 @@ class LiveSharedObsInspectionEnvelopeV1(_PresentationProtocolModel):
         return self
 
 
-class LiveOracleAuthorizedPresentationFrameV1(_PresentationProtocolModel):
+class _MatchPresentationProtocolModel(_PresentationProtocolModel):
+    """Additive match facts tied to the surrounding presentation source epoch."""
+
+    match_summary: MatchSummaryV1 | None
+
+    @model_validator(mode="after")
+    def _validate_match_source(self) -> Self:
+        if self.match_summary is not None:
+            source = cast(
+                LiveOraclePresentationSourceIdentityV1
+                | LiveNoSharedObsPresentationSourceIdentityV1
+                | LiveSharedObsPresentationSourceIdentityV1
+                | ReplayOraclePresentationSourceIdentityV1
+                | ReplayNoSharedObsPresentationSourceIdentityV1
+                | ReplaySharedObsPresentationSourceIdentityV1,
+                self.__dict__["source"],
+            )
+            if (
+                self.match_summary.episode_id != source.episode_id
+                or self.match_summary.source_frame_index != source.source_frame_index
+                or self.match_summary.simulator_step_count
+                != source.source_simulator_step_count
+            ):
+                raise ValueError("match summary must join its current source epoch")
+        return self
+
+
+class LiveOracleAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel):
     schema_version: Literal[1]
     presentation_kind: Literal["live_oracle"]
     product_kind: Literal["combat_debugger"]
@@ -3847,7 +3876,7 @@ class LiveOracleAuthorizedPresentationFrameV1(_PresentationProtocolModel):
         return self
 
 
-class LiveNoSharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
+class LiveNoSharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel):
     schema_version: Literal[1]
     presentation_kind: Literal["live_no_shared_obs_agent_pov"]
     product_kind: Literal["combat_debugger"]
@@ -3884,7 +3913,7 @@ class LiveNoSharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
         return self
 
 
-class LiveSharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
+class LiveSharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel):
     schema_version: Literal[1]
     presentation_kind: Literal["live_shared_obs_agent_pov"]
     product_kind: Literal["combat_debugger"]
@@ -3940,7 +3969,7 @@ class LiveSharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
         return self
 
 
-class ReplayOracleAuthorizedPresentationFrameV1(_PresentationProtocolModel):
+class ReplayOracleAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel):
     schema_version: Literal[1]
     presentation_kind: Literal["replay_oracle"]
     product_kind: Literal["replay_viewer"]
@@ -4020,7 +4049,7 @@ class ReplayOracleAuthorizedPresentationFrameV1(_PresentationProtocolModel):
         return self.replay_inspection
 
 
-class ReplayNoSharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
+class ReplayNoSharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel):
     schema_version: Literal[1]
     presentation_kind: Literal["replay_no_shared_obs_agent_pov"]
     product_kind: Literal["replay_viewer"]
@@ -4048,7 +4077,7 @@ class ReplayNoSharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel)
         return self
 
 
-class ReplaySharedObsAuthorizedPresentationFrameV1(_PresentationProtocolModel):
+class ReplaySharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel):
     schema_version: Literal[1]
     presentation_kind: Literal["replay_shared_obs_agent_pov"]
     product_kind: Literal["replay_viewer"]

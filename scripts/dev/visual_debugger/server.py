@@ -24,6 +24,9 @@ _TOKEN_HEADER = "X-MARL-Debugger-Token"
 _MAX_COMMAND_BODY_BYTES = 64 * 1024
 _CLIENT_SOCKET_TIMEOUT_SECONDS = 2.0
 _METRIC_REPORT_ROUTE = "/api/replay/metric-report"
+_METRIC_ANALYSIS_ROUTE = re.compile(
+    r"/api/replay/metrics/([0-9]{1,9})/(cursor|final)\.(json|csv)"
+)
 _AUTHORING_COMMAND_ROUTE = "/api/dev/authoring/command"
 _METRIC_REPORT_SUFFIX = ".marlbg-metrics.json"
 _METRIC_REPORT_CONTENT_TYPE = "application/json; charset=utf-8"
@@ -70,6 +73,8 @@ _REQUIRED_RUNTIME_ASSET_PATHS = (
     "src/icons.js",
     "src/layout.js",
     "src/main.js",
+    "src/match-summary.js",
+    "src/metrics-panel.js",
     "src/panels.js",
     "src/presentation-install.js",
     "src/replay-controls.js",
@@ -299,6 +304,7 @@ class HttpCoordinatorBinding:
     current_presentation: Callable[[], HttpPayloadResult]
     current_timeline: Callable[[], object] | None = None
     current_metric_report: Callable[[], HttpMetricReportResult] | None = None
+    metric_analysis: Callable[[int, str, str], tuple[bytes, str | None]] | None = None
     result_status: Callable[[HttpCommandResult], HTTPStatus] = _default_result_status
     authoring: HttpAuthoringBinding | None = None
 
@@ -338,6 +344,10 @@ class HttpCoordinatorBinding:
             raise ValueError("replay debugger mode requires a timeline operation.")
         if self.mode == "live" and self.current_metric_report is not None:
             raise ValueError("live debugger mode cannot expose replay metrics.")
+        if self.mode == "live" and self.metric_analysis is not None:
+            raise ValueError("live debugger mode cannot expose replay analysis.")
+        if self.metric_analysis is not None and not callable(self.metric_analysis):
+            raise TypeError("metric analysis must be callable")
         if self.mode == "replay" and not callable(self.current_metric_report):
             raise ValueError("replay debugger mode requires a metric-report operation.")
         if self.mode == "replay" and self.authoring is not None:
@@ -728,6 +738,15 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         del format, args
 
     def do_GET(self) -> None:
+        # Replay is the final coordinator generation. A long immutable analysis
+        # read releases the router lock so cursor and POV commands stay usable.
+        snapshot = self.debugger_server.coordinator_router.snapshot()
+        if (
+            snapshot.binding.mode == "replay"
+            and _METRIC_ANALYSIS_ROUTE.fullmatch(self.path) is not None
+        ):
+            self._handle_get(snapshot.binding)
+            return
         with self.debugger_server.coordinator_router.pinned_snapshot() as snapshot:
             self._handle_get(snapshot.binding)
 
@@ -784,6 +803,54 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
                 return
             try:
                 self._send_model(status, payload)
+            except BrokenPipeError, ConnectionError, TimeoutError:
+                self.close_connection = True
+            except Exception:
+                self._send_internal_error(coordinator)
+            return
+        metric_analysis = _METRIC_ANALYSIS_ROUTE.fullmatch(route)
+        if metric_analysis is not None and coordinator.metric_analysis is not None:
+            if not self._authenticated(coordinator):
+                return
+            frame_index, scope, format_ = metric_analysis.groups()
+            try:
+                payload, filename = coordinator.metric_analysis(
+                    int(frame_index), scope, format_
+                )
+                if type(payload) is not bytes:
+                    raise TypeError("metric analysis must return bytes")
+                headers: tuple[tuple[str, str], ...] = ()
+                if format_ == "csv":
+                    if (
+                        filename is None
+                        or re.fullmatch(
+                            r"tdm-metrics-(cursor|final)-frame-[0-9]+\.csv", filename
+                        )
+                        is None
+                    ):
+                        raise ValueError("invalid metric CSV filename")
+                    headers = (
+                        ("Content-Disposition", f'attachment; filename="{filename}"'),
+                    )
+                elif filename is not None:
+                    raise ValueError("JSON analysis is not a download attachment")
+                self._send_bytes(
+                    HTTPStatus.OK,
+                    payload,
+                    content_type=(
+                        "text/csv; charset=utf-8"
+                        if format_ == "csv"
+                        else _METRIC_REPORT_CONTENT_TYPE
+                    ),
+                    response_headers=headers,
+                )
+            except IndexError:
+                self._send_api_error(
+                    coordinator,
+                    HTTPStatus.UNPROCESSABLE_ENTITY,
+                    error_code="invalid_cursor",
+                    message="Metric cursor is outside the captured replay.",
+                )
             except BrokenPipeError, ConnectionError, TimeoutError:
                 self.close_connection = True
             except Exception:

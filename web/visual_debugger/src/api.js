@@ -862,3 +862,74 @@ export function extractNotice(payload) {
   }
   return null;
 }
+
+/**
+ * Read cached offline analysis for an explicit replay cursor and scope.
+ * @param {string | null} token
+ * @param {number} frameIndex
+ * @param {"cursor" | "final"} scope
+ * @param {"json" | "csv"} [format]
+ * @returns {Promise<Record<string, any>>}
+ */
+export async function getReplayMetrics(token, frameIndex, scope, format = "json") {
+  if (
+    !Number.isSafeInteger(frameIndex) ||
+    frameIndex < 0 ||
+    !["cursor", "final"].includes(scope) ||
+    !["json", "csv"].includes(format)
+  ) {
+    throw new TypeError("Invalid metric cursor, scope or format.");
+  }
+  const response = await fetchWithTimeout(
+    `/api/replay/metrics/${frameIndex}/${scope}.${format}`,
+    {
+      method: "GET",
+      headers: authorizationHeaders(token),
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+    },
+  );
+  if (!response.ok) {
+    await decodeReplayResponse(response);
+    throw new DebuggerApiError("Replay analysis request failed.", {
+      status: response.status,
+    });
+  }
+  if (format === "csv") {
+    const disposition = response.headers.get("content-disposition");
+    const match =
+      /^attachment; filename="(tdm-metrics-(cursor|final)-frame-([0-9]+)\.csv)"$/u.exec(
+        disposition ?? "",
+      );
+    if (
+      response.headers.get("content-type") !== "text/csv; charset=utf-8" ||
+      response.headers.get("cache-control") !== "no-store" ||
+      !match ||
+      match[2] !== scope ||
+      (scope === "cursor" && Number(match[3]) !== frameIndex)
+    ) {
+      throw new TypeError("Invalid metric CSV response.");
+    }
+    return { bytes: await response.arrayBuffer(), filename: match[1] };
+  }
+  const summary = await response.json();
+  if (
+    !isRecord(summary) ||
+    summary.scope !== scope ||
+    !Number.isSafeInteger(summary.frame_index) ||
+    summary.frame_index < 0 ||
+    (scope === "cursor" && summary.frame_index !== frameIndex) ||
+    (scope === "final" && summary.frame_index !== summary.captured_transition_count) ||
+    !/^[0-9a-f]{64}$/u.test(summary.source_replay_digest) ||
+    !/^[0-9a-f]{64}$/u.test(summary.analysis_source_digest) ||
+    !Array.isArray(summary.statistics) ||
+    summary.statistics.some(
+      (/** @type {unknown} */ row) =>
+        !isRecord(row) || typeof row.metric_id !== "string" || !isRecord(row.subject),
+    )
+  ) {
+    throw new TypeError("Invalid replay metric summary.");
+  }
+  return summary;
+}

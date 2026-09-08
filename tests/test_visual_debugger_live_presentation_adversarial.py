@@ -35,6 +35,7 @@ from tests.test_visual_debugger_service import (
 )
 
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
+from marl_battlegrounds.evaluation.models import AssignedPolicySlotV1
 from marl_battlegrounds.evaluation.pov import (
     ActorPovAdjacentTransitionSliceV1,
     ActorPovCurrentSliceV1,
@@ -113,6 +114,7 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
     )
     payload = result.payload.model_dump(mode="json")
     researcher_space = cast(dict[str, object], payload.pop("researcher_space"))
+    match_summary = cast(dict[str, object], payload.pop("match_summary"))
     corpse_overlay = cast(
         dict[str, object],
         payload.pop("local_oracle_corpse_overlay"),
@@ -127,6 +129,60 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
     keys = _recursive_keys(payload)
     strings = _recursive_string_values(payload)
 
+    # Researcher match metadata is a separate root envelope. Its configured
+    # policy identities do not relax any actor or spatial digest restriction.
+    assert set(match_summary) == {
+        "schema_version",
+        "episode_id",
+        "source_frame_index",
+        "simulator_step_count",
+        "task_mode",
+        "score_threshold",
+        "scores",
+        "outcome",
+        "teams",
+    }
+    context = service.session.evaluation_context
+    frame = service.session.current_evaluation_frame
+    assert match_summary["schema_version"] == 1
+    assert match_summary["episode_id"] == context.identity.episode_id
+    assert match_summary["source_frame_index"] == frame.frame_index
+    assert match_summary["simulator_step_count"] == frame.simulator_step_count
+    assert match_summary["task_mode"] == context.resolved_env_config.task_mode == 0
+    assert match_summary["score_threshold"] == (
+        context.resolved_env_config.team_deathmatch_score_threshold
+    )
+    assert match_summary["scores"] == list(frame.snapshot.team_deathmatch_scores)
+    assert match_summary["outcome"] == "not_applicable"
+    teams = cast(list[dict[str, object]], match_summary["teams"])
+    assert [team["team_id"] for team in teams] == [1, 2]
+    for team in teams:
+        assert set(team) == {
+            "team_id",
+            "display_name",
+            "policy_ids",
+            "checkpoint_digests",
+        }
+        assignments = tuple(
+            assignment
+            for roster, assignment in zip(
+                context.roster, context.policy_assignments, strict=True
+            )
+            if roster.configured_team_id == team["team_id"]
+            and isinstance(assignment, AssignedPolicySlotV1)
+        )
+        assert team["display_name"] == "Scripted scenario"
+        assert team["policy_ids"] == list(
+            dict.fromkeys(assignment.policy_id for assignment in assignments)
+        )
+        assert team["checkpoint_digests"] == list(
+            dict.fromkeys(
+                assignment.checkpoint_digest
+                for assignment in assignments
+                if assignment.checkpoint_digest is not None
+            )
+        )
+    assert not (_recursive_string_values(match_summary) & forbidden_values)
     assert not (strings & forbidden_values)
     assert overlay_strings & forbidden_values == {incoming.successor_frame.frame_id}
     researcher_keys = _recursive_keys(researcher_space)

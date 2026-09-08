@@ -2147,7 +2147,6 @@ select {
 .legality-dock,
 .status-dock,
 .cooldown-dock,
-.required-dock-fallback-dock,
 .modifier-dock {
   pointer-events: none;
 }
@@ -2156,7 +2155,6 @@ select {
 .status-cell,
 .status-overflow,
 .cooldown-cell,
-.required-dock-fallback,
 .modifier-cell,
 .modifier-overflow {
   pointer-events: all;
@@ -2172,7 +2170,6 @@ select {
 .legality-pill__box,
 .status-cell__box,
 .cooldown-cell__box,
-.required-dock-fallback__box,
 .modifier-cell__box {
   fill: rgb(8 13 24 / 94%);
   stroke: currentColor;
@@ -2229,31 +2226,6 @@ select {
 
 .cooldown-cell {
   color: var(--ultimate);
-}
-
-.required-dock-fallback {
-  color: var(--text-muted);
-}
-
-.required-dock-fallback__box {
-  stroke-dasharray: 2 2;
-}
-
-.required-dock-fallback__label {
-  fill: var(--text);
-  font-weight: 850;
-  text-anchor: middle;
-  dominant-baseline: central;
-  pointer-events: none;
-}
-
-.required-dock-fallback__value {
-  font-size: 8px;
-}
-
-.required-dock-fallback__leader {
-  stroke-width: 1.75;
-  stroke-dasharray: 2 2;
 }
 
 .status-cell[data-source-class="mage"] {
@@ -2394,6 +2366,77 @@ select {
 .modifier-overflow__label {
   font-size: 10px;
   text-anchor: middle;
+}
+
+.match-scoreboard {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem 1.2rem;
+  padding: 0.6rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--battlefield);
+  font-size: 0.8rem;
+}
+
+.match-scoreboard__task {
+  grid-column: 1 / -1;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.match-scoreboard__team {
+  display: grid;
+  grid-template: "label score" auto "policy result" auto / minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0.25rem 0.5rem;
+  padding-left: 0.65rem;
+  border-left: 2px solid var(--team-a);
+}
+
+.match-scoreboard__team--b {
+  border-left-color: var(--team-b);
+}
+
+.match-scoreboard__team-label {
+  grid-area: label;
+}
+
+.match-scoreboard__team--a .match-scoreboard__team-label {
+  color: #7db9ff;
+}
+.match-scoreboard__team--b .match-scoreboard__team-label {
+  color: #ff9292;
+}
+.match-scoreboard__policy {
+  grid-area: policy;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.match-scoreboard__score {
+  grid-area: score;
+  font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.match-scoreboard__result {
+  grid-area: result;
+  justify-self: end;
+  border-radius: 4px;
+  padding: 0.15rem 0.4rem;
+}
+.match-scoreboard__result--victory {
+  color: #89e5a8;
+  background: #153c26;
+}
+.match-scoreboard__result--draw {
+  color: #d5d9e1;
+  background: #343b46;
+}
+.match-scoreboard__result--defeat {
+  color: #fff;
+  background: #721f2b;
 }
 
 .command-deck {
@@ -3725,4 +3768,63 @@ html[data-team-a-controller="random_valid"] .roster-row[data-team="team-a"] {
   .command-group--utility {
     padding-block: 0.18rem;
   }
+}
+
+.metric-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+#evaluation-metrics .disclosure-body {
+  max-height: min(36rem, 65vh);
+}
+
+.metrics-progress {
+  inline-size: 8rem;
+  block-size: 0.5rem;
+  accent-color: #7db9ff;
+}
+
+.metric-preparation {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.metric-preparation small {
+  flex-basis: 100%;
+  color: var(--text-muted);
+}
+
+.metric-table th,
+.metric-table td {
+  padding: 0.5rem 0.35rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.metric-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.metric-table td:not(:first-child) {
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-table small {
+  color: var(--text-muted);
+}
+
+#evaluation-metrics select {
+  width: 100%;
+  margin: 0.3rem 0 0.7rem;
 }

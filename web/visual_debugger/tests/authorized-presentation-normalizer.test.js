@@ -2555,6 +2555,34 @@ test("replay continuity spans branded legacy, private, and audience-switch pairs
     validateReplayTransportContinuityV1(switchShared, switchOracle, "stale_resync"),
     switchOracle,
   );
+  const namedOraclePair = clone(switchOraclePair);
+  const namedSharedPair = clone(switchSharedPair);
+  namedOraclePair.transport.completion.end_or_failure_reason =
+    "team_deathmatch_score_threshold";
+  namedSharedPair.transport.artifact_facts.completion.end_or_failure_reason =
+    "team_deathmatch_score_threshold";
+  const namedOracle = await joinTransportAndAuthorizedPresentationV1(
+    namedOraclePair.transport,
+    namedOraclePair.presentation,
+  );
+  const namedShared = await joinTransportAndAuthorizedPresentationV1(
+    namedSharedPair.transport,
+    namedSharedPair.presentation,
+  );
+  assert.equal(namedShared.transport.completion.public_end_or_failure_reason, null);
+  assert.equal(
+    validateReplayTransportContinuityV1(namedOracle, namedShared, "stale_resync"),
+    namedShared,
+  );
+  assert.equal(
+    validateReplayTransportContinuityV1(namedShared, namedOracle, "stale_resync"),
+    namedOracle,
+  );
+  assert.throws(
+    () =>
+      validateReplayTransportContinuityV1(switchOracle, namedShared, "stale_resync"),
+    TypeError,
+  );
   assert.throws(
     () => validateReplayTransportContinuityV1(legacy, privateShared, "stale_resync"),
     TypeError,

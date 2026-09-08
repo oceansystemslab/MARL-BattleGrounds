@@ -32,7 +32,9 @@ from scripts.dev.visual_debugger.sample_replays import (
 )
 
 import marl_battlegrounds.evaluation.replay_io as replay_io_module
+from marl_battlegrounds.evaluation.analysis import analyze_replay
 from marl_battlegrounds.evaluation.models import CodeRevisionV1
+from marl_battlegrounds.evaluation.reducers import TDM_BASIC_METRIC_IDS
 from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -339,10 +341,10 @@ def test_fresh_samples_use_exact_researcher_geometry_and_event_union(
 def test_checked_samples_match_fresh_cpu_generation_scientific_truth(
     tmp_path: Path,
 ) -> None:
-    """Regenerate every checked byte with its truthful historical provenance."""
+    """Preserve historical facts while new recordings add critical metrics."""
     expected = _file_bytes_by_name(SAMPLE_REPLAY_DIRECTORY)
     assert len(expected) == 7
-    verify_sample_replays(SAMPLE_REPLAY_DIRECTORY)
+    historical_manifest = verify_sample_replays(SAMPLE_REPLAY_DIRECTORY)
 
     fresh = tmp_path / "fresh"
     _generate_samples_in_cpu_child(
@@ -350,8 +352,58 @@ def test_checked_samples_match_fresh_cpu_generation_scientific_truth(
         historical_provenance_directory=SAMPLE_REPLAY_DIRECTORY,
     )
 
-    verify_sample_replays(fresh)
-    assert _file_bytes_by_name(fresh) == expected
+    fresh_manifest = verify_sample_replays(fresh)
+    for sample in SAMPLE_REPLAYS:
+        historical = load_verified_sample_replay(sample.name)
+        current = load_verified_sample_replay(sample.name, directory=fresh)
+        old_artifact = historical.metric_report_artifact
+        new_artifact = current.metric_report_artifact
+        assert old_artifact is not None and new_artifact is not None
+        assert old_artifact.report.statistics == ()
+
+        # Recompute from the archived facts through the independent offline path.
+        # Its analysis identity remains separate from the controlled provenance.
+        analysis = analyze_replay(historical)
+        assert (
+            analysis.source_replay_digest == historical.replay.canonical_digest_sha256
+        )
+        assert analysis.original_metric_status == "empty"
+        assert new_artifact.report == analysis.final_report
+        assert {row.metric_id for row in new_artifact.report.statistics} == set(
+            TDM_BASIC_METRIC_IDS
+        )
+        assert (
+            new_artifact.report.model_copy(update={"statistics": ()})
+            == old_artifact.report
+        )
+        assert new_artifact.model_dump(
+            exclude={"canonical_digest_sha256", "report"}
+        ) == old_artifact.model_dump(exclude={"canonical_digest_sha256", "report"})
+
+        # Public verification above proves the new hashes and byte lengths.
+        # Every other replay field, including all physical facts, must be exact.
+        assert current.replay.metric_report_reference.model_dump(
+            exclude={"canonical_digest_sha256", "canonical_byte_length"}
+        ) == historical.replay.metric_report_reference.model_dump(
+            exclude={"canonical_digest_sha256", "canonical_byte_length"}
+        )
+        assert current.replay.model_dump(
+            exclude={"canonical_digest_sha256", "metric_report_reference"}
+        ) == historical.replay.model_dump(
+            exclude={"canonical_digest_sha256", "metric_report_reference"}
+        )
+
+    old_rows = cast(list[dict[str, object]], historical_manifest["samples"])
+    new_rows = cast(list[dict[str, object]], fresh_manifest["samples"])
+    for old_row, new_row in zip(old_rows, new_rows, strict=True):
+        for member in ("replay", "metric_report"):
+            old_member = cast(dict[str, object], old_row[member])
+            new_member = cast(dict[str, object], new_row[member])
+            new_member["sha256"] = old_member["sha256"]
+            if member == "metric_report":
+                new_member["byte_length"] = old_member["byte_length"]
+    assert fresh_manifest == historical_manifest
+    assert _file_bytes_by_name(SAMPLE_REPLAY_DIRECTORY) == expected
 
 
 def test_generator_refuses_to_overwrite_an_existing_directory(

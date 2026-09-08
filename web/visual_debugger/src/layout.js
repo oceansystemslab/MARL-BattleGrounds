@@ -2998,17 +2998,19 @@ function placeCompactRequiredDockFallback(input, priorDockBounds) {
   if (markerPlacement === null) {
     return null;
   }
-  const hiddenStatuses = Object.freeze([...input.agent.statuses]);
+  const singleton = input.agent.statuses.length === 1;
+  const visibleStatuses = Object.freeze(singleton ? [...input.agent.statuses] : []);
+  const hiddenStatuses = Object.freeze(singleton ? [] : [...input.agent.statuses]);
   return Object.freeze({
     ...markerPlacement,
     required: true,
-    expanded: false,
-    visibleStatuses: Object.freeze([]),
+    expanded: singleton,
+    visibleStatuses,
     hiddenStatuses,
-    visibleCount: 0,
+    visibleCount: visibleStatuses.length,
     hiddenCount: hiddenStatuses.length,
-    totalCount: hiddenStatuses.length,
-    overflowLabel: `+${hiddenStatuses.length}`,
+    totalCount: input.agent.statuses.length,
+    overflowLabel: singleton ? null : `+${hiddenStatuses.length}`,
   });
 }
 
@@ -3229,12 +3231,14 @@ function statusDockPlacementOptions(input) {
  * @returns {StatusDockPlacement}
  */
 function placementFromCandidate(input, candidate) {
-  const visibleStatuses = Object.freeze(
-    input.agent.statuses.slice(0, candidate.visibleCount),
-  );
-  const hiddenStatuses = Object.freeze(
-    input.agent.statuses.slice(candidate.visibleCount),
-  );
+  // An overflow cell occupies the same space as one actual fact. Keep the last
+  // fact visible rather than spending that cell on a redundant +1 marker.
+  const visibleCount =
+    input.agent.statuses.length - candidate.visibleCount === 1
+      ? input.agent.statuses.length
+      : candidate.visibleCount;
+  const visibleStatuses = Object.freeze(input.agent.statuses.slice(0, visibleCount));
+  const hiddenStatuses = Object.freeze(input.agent.statuses.slice(visibleCount));
   return Object.freeze({
     globalSlot: input.agent.globalSlot,
     priorityIndex: input.priorityIndex,

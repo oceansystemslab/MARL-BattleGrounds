@@ -504,7 +504,7 @@ def _require_finalized_retained_observer(
     finalized_report = observer.finalized_report
     if finalized_report is None:
         raise ValueError("finalized observer is missing its committed report")
-    if canonical_json_bytes(canonical_report) != canonical_json_bytes(finalized_report):
+    if canonical_report != finalized_report:
         raise ValueError("replay builder report must equal the observer report")
     frames = observer.retained_frames
     transitions = observer.retained_transitions
@@ -513,7 +513,7 @@ def _require_finalized_retained_observer(
             "replay construction requires a metric-complete retaining profile"
         )
     context = observer.context
-    if canonical_json_bytes(canonical_report.context) != canonical_json_bytes(context):
+    if finalized_report.context != context:
         raise ValueError("replay report context must equal observer context")
     if canonical_report.completion.validated_transition_count != len(transitions):
         raise ValueError(
@@ -527,7 +527,7 @@ def _require_finalized_retained_observer(
         raise ValueError("observer validated count must equal retained transitions")
     if len(frames) != len(transitions) + 1:
         raise ValueError("retained replay history must have exactly T+1/T records")
-    return context, frames, transitions, canonical_report
+    return context, frames, transitions, finalized_report
 
 
 def _build_replay_bundle_v1(
@@ -605,11 +605,10 @@ def _build_replay_bundle_v1(
         "source_trajectory": source_trajectory,
         "report": canonical_report,
     }
-    report_artifact = EvaluationMetricReportArtifactV1.model_validate(
-        {
-            **report_artifact_payload,
-            "canonical_digest_sha256": canonical_digest_sha256(report_artifact_payload),
-        }
+    report_artifact = EvaluationMetricReportArtifactV1.model_construct(
+        _fields_set=None,
+        **report_artifact_payload,
+        canonical_digest_sha256=canonical_digest_sha256(report_artifact_payload),
     )
     metric_reference = MetricReportReferenceV1(
         report_artifact_id=report_artifact.report_artifact_id,
@@ -631,16 +630,18 @@ def _build_replay_bundle_v1(
         "frames": frames,
         "transitions": transitions,
     }
-    replay = ReplayArtifactV1.model_validate(
-        {
-            **replay_payload,
-            "canonical_digest_sha256": canonical_digest_sha256(replay_payload),
-        }
+    replay = ReplayArtifactV1.model_construct(
+        _fields_set=None,
+        **replay_payload,
+        canonical_digest_sha256=canonical_digest_sha256(replay_payload),
     )
-    return ReplayBundleV1(
-        replay=replay,
-        metric_report_artifact=report_artifact,
-    )
+    # The observer owns the validated trajectory and report; these envelopes
+    # contain only those detached records and the identities generated above.
+    # Public constructors and import validators still check arbitrary records.
+    bundle = object.__new__(ReplayBundleV1)
+    object.__setattr__(bundle, "replay", replay)
+    object.__setattr__(bundle, "metric_report_artifact", report_artifact)
+    return bundle
 
 
 def build_replay_bundle_v1(
