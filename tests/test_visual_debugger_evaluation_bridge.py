@@ -365,7 +365,7 @@ def test_interactive_v4_and_fixed_frame_v1_recording_contracts_are_truthful() ->
         team_b_controller="manual",
     )
     manual_context = _context()
-    policy_execution_included = debugger_recording._context_policy_execution_included  # pyright: ignore[reportPrivateUsage]
+    policy_execution_included = debugger_recording.recording_policy_execution_included  # pyright: ignore[reportPrivateUsage]
     assert policy_execution_included(random_context)
     assert not policy_execution_included(manual_context)
     fixed_frame_payload = evaluation_bridge._action_source_contract_payload(  # pyright: ignore[reportPrivateUsage]
@@ -447,7 +447,7 @@ def test_only_scenario_5_adds_v5_execution_and_keeps_distinct_controller_identit
         team_b_controller="scenario_5",
         action_source_kind="mixed" if team_a == "manual" else "policy",
     )
-    assert debugger_recording._context_policy_execution_included(context)  # pyright: ignore[reportPrivateUsage]
+    assert debugger_recording.recording_policy_execution_included(context)  # pyright: ignore[reportPrivateUsage]
     assert {row.name: row.value for row in context.aggregation_keys}[
         "pressure_protocol"
     ] == "scenario-5-pressure-controller@4"

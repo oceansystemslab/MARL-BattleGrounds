@@ -10,7 +10,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from marl_battlegrounds.evaluation.catalog import build_code_revision_v1
-from marl_battlegrounds.evaluation.models import CodeRevisionV1
+from marl_battlegrounds.evaluation.models import CodeRevisionV1, CodeRevisionV2
 
 _PACKAGE_DISTRIBUTION = "marl-battlegrounds"
 
@@ -74,7 +74,7 @@ def _untracked_content_digest(repository_root: Path) -> bytes:
     return digest.digest()
 
 
-def discover_debugger_code_revision_v1(
+def discover_code_revision_v1(
     repository_root: Path,
     *,
     package_version: str | None = None,
@@ -139,4 +139,24 @@ def discover_debugger_code_revision_v1(
     )
 
 
-__all__ = ["discover_debugger_code_revision_v1"]
+def discover_code_revision_v2() -> CodeRevisionV1 | CodeRevisionV2:
+    """Record the actual checkout, or installed package content without invented Git."""
+    package = Path(__file__).resolve().parents[1]
+    for parent in package.parents:
+        if (parent / "src" / "marl_battlegrounds") == package and (
+            parent / ".git"
+        ).exists():
+            return discover_code_revision_v1(parent)
+    digest = hashlib.sha256()
+    for path in sorted(package.rglob("*")):
+        if path.is_file() and "__pycache__" not in path.parts:
+            _framed_update(
+                digest, path.relative_to(package).as_posix().encode(), path.read_bytes()
+            )
+    return CodeRevisionV2(
+        package_version=version(_PACKAGE_DISTRIBUTION),
+        source_tree_digest=digest.hexdigest(),
+    )
+
+
+__all__ = ["discover_code_revision_v1", "discover_code_revision_v2"]

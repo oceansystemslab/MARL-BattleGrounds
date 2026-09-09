@@ -7,7 +7,7 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import DTypeLike, NDArray
 
 from marl_battlegrounds.core.types import (
     CONTEXT_FEATURES,
@@ -57,6 +57,7 @@ from marl_battlegrounds.evaluation.models import (
     BaseObservationV1,
     CombatTransitionFactsV1,
     DeathTransitionFactsV1,
+    EvaluationEpisodeContext,
     EvaluationEpisodeContextV1,
     EvaluationFrameV1,
     EvaluationTransitionV1,
@@ -71,6 +72,7 @@ from marl_battlegrounds.evaluation.models import (
     StatusLifecycleTransitionFactsV1,
     TeamDeathmatchTransitionFactsV1,
     TransitionFactsV1,
+    evaluation_context_type,
 )
 from marl_battlegrounds.evaluation.validation import (
     _derive_and_validate_team_deathmatch_authority_v1,  # pyright: ignore[reportPrivateUsage]
@@ -339,7 +341,7 @@ def _normalize_previous_action_observation_v1(
 
 def _normalize_spawn_lifecycle_observation_v1(
     source: SpawnLifecycleObservation,
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
 ) -> SpawnLifecycleObservationV1:
     _require_exact_type(
         source,
@@ -421,7 +423,7 @@ def _normalize_spawn_lifecycle_observation_v1(
 
 def _normalize_base_observation_v1(
     source: Observation,
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
 ) -> BaseObservationV1:
     _require_exact_type(source, Observation, name="observation")
     specs = (
@@ -898,7 +900,7 @@ def normalize_transition_facts_v1(source: TransitionFacts) -> TransitionFactsV1:
 
 
 def _build_evaluation_frame_v1_from_host(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     *,
     frame_index: int,
     state: EnvState,
@@ -907,7 +909,7 @@ def _build_evaluation_frame_v1_from_host(
     shared_obs_information_availability_by_recipient_and_sensor_source: (object | None),
 ) -> EvaluationFrameV1:
     """Build one frame from an already-host bundle without transferring again."""
-    _require_exact_type(context, EvaluationEpisodeContextV1, name="context")
+    evaluation_context_type(context)
     if type(frame_index) is not int or frame_index < 0:
         raise ValueError("frame_index must be a nonnegative exact integer")
     simulator_step_count, snapshot = _normalize_snapshot_v1(state)
@@ -940,7 +942,7 @@ def _build_evaluation_frame_v1_from_host(
 
 
 def capture_initial_evaluation_frame_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     state: EnvState,
     observation: Observation,
     action_mask: ActionMask,
@@ -949,7 +951,7 @@ def capture_initial_evaluation_frame_v1(
     ) = None,
 ) -> EvaluationFrameV1:
     """Capture frame zero through exactly one bundled device-to-host transfer."""
-    _require_exact_type(context, EvaluationEpisodeContextV1, name="context")
+    evaluation_context_type(context)
     host_state, host_observation, host_action_mask, host_availability = cast(
         tuple[EnvState, Observation, ActionMask, object | None],
         jax.device_get(
@@ -971,7 +973,8 @@ def capture_initial_evaluation_frame_v1(
             host_availability
         ),
     )
-    validate_initial_evaluation_frame_v1(context, frame)
+    if type(context) is EvaluationEpisodeContextV1:
+        validate_initial_evaluation_frame_v1(context, frame)
     return frame
 
 
@@ -1010,7 +1013,7 @@ def _normalize_done_flags_v1(source: DoneFlags) -> tuple[bool, bool]:
 
 
 def capture_evaluation_transition_unit_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     start_frame: EvaluationFrameV1,
     successor_state: EnvState,
     successor_observation: Observation,
@@ -1024,7 +1027,7 @@ def capture_evaluation_transition_unit_v1(
     ) = None,
 ) -> tuple[EvaluationTransitionV1, EvaluationFrameV1]:
     """Capture one adjacent transition unit through one bundled device transfer."""
-    _require_exact_type(context, EvaluationEpisodeContextV1, name="context")
+    evaluation_context_type(context)
     _require_exact_type(start_frame, EvaluationFrameV1, name="start_frame")
     (
         host_successor_state,
@@ -1111,41 +1114,83 @@ def capture_evaluation_transition_unit_v1(
             "owning_task_end_reason": owning_task_end_reason,
         }
     )
-    validate_evaluation_transition_unit_v1(
-        context,
-        start_frame,
-        transition,
-        successor_frame,
-    )
+    if type(context) is EvaluationEpisodeContextV1:
+        validate_evaluation_transition_unit_v1(
+            context,
+            start_frame,
+            transition,
+            successor_frame,
+        )
     return transition, successor_frame
 
 
-def _reconstruct_transition_facts(  # pyright: ignore[reportUnusedFunction]
+def reconstruct_env_state_v1(
+    frame: EvaluationFrameV1, *, host: bool = False
+) -> EnvState:
+    """Restore captured state; host mode batches NumPy leaves before one transfer.
+
+    Core NamedTuples describe the PyTree shape. Host leaves have the same values
+    and dtypes as ``jax.device_get`` and do not trigger simulator execution.
+    """
+    from marl_battlegrounds.evaluation.catalog import (
+        _wire_float32_array,  # pyright: ignore[reportPrivateUsage]
+        _wire_int32_array,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    values = frame.snapshot.model_dump(exclude={"schema_id", "schema_version"})
+    values["step_count"] = frame.simulator_step_count
+    arrays: dict[str, jax.Array] = {}
+    for name in EnvState._fields:
+        value = values[name]
+        if name in ("alive_mask", "has_previous_timestep_joint_action"):
+            array = np.asarray(value, dtype=np.bool_)
+            arrays[name] = cast(jax.Array, array) if host else jnp.asarray(array)
+        else:
+            convert = (
+                _wire_float32_array
+                if name in ("agent_positions", "current_health")
+                else _wire_int32_array
+            )
+            arrays[name] = convert(
+                value, field_name=f"frame.snapshot.{name}", host=host
+            )
+    return EnvState(**arrays)
+
+
+def _reconstruct_transition_facts(
     source: TransitionFactsV1,
+    *,
+    host: bool = False,
 ) -> TransitionFacts:
-    """Reconstruct the exact core fact PyTree for losslessness tests."""
+    """Restore recorded Core facts; host mode avoids per-field device dispatch."""
+
+    def array(value: object, *, dtype: DTypeLike) -> jax.Array:
+        if host:
+            return cast(jax.Array, np.asarray(value, dtype=dtype))
+        return jnp.asarray(value, dtype=np.dtype(dtype))
+
     _require_exact_type(source, TransitionFactsV1, name="transition_facts_v1")
 
     def action(model: JointActionV1) -> Action:
         return Action(
-            move=jnp.asarray(model.move, dtype=jnp.int32),
-            select_target=jnp.asarray(model.select_target, dtype=jnp.int32),
-            use_ultimate=jnp.asarray(model.use_ultimate, dtype=jnp.int32),
+            move=array(model.move, dtype=jnp.int32),
+            select_target=array(model.select_target, dtype=jnp.int32),
+            use_ultimate=array(model.use_ultimate, dtype=jnp.int32),
         )
 
     acceptance = source.action_acceptance_facts
     action_acceptance_facts = ActionAcceptanceFacts(
         submitted_joint_action=action(acceptance.submitted_joint_action),
         accepted_joint_action=action(acceptance.accepted_joint_action),
-        submitted_action_tuple_is_out_of_domain_by_actor=jnp.asarray(
+        submitted_action_tuple_is_out_of_domain_by_actor=array(
             acceptance.submitted_action_tuple_is_out_of_domain_by_actor,
             dtype=jnp.bool_,
         ),
-        in_domain_move_action_is_rejected_by_actor=jnp.asarray(
+        in_domain_move_action_is_rejected_by_actor=array(
             acceptance.in_domain_move_action_is_rejected_by_actor,
             dtype=jnp.bool_,
         ),
-        in_domain_combat_action_pair_is_rejected_by_actor=jnp.asarray(
+        in_domain_combat_action_pair_is_rejected_by_actor=array(
             acceptance.in_domain_combat_action_pair_is_rejected_by_actor,
             dtype=jnp.bool_,
         ),
@@ -1157,59 +1202,59 @@ def _reconstruct_transition_facts(  # pyright: ignore[reportUnusedFunction]
         for recipient in combat.combat_effect_recipient_global_slot_by_source
     )
     combat_transition_facts = CombatTransitionFacts(
-        basic_effect_is_activated_by_source=jnp.asarray(
+        basic_effect_is_activated_by_source=array(
             combat.basic_effect_is_activated_by_source, dtype=jnp.bool_
         ),
-        ultimate_effect_is_activated_by_source=jnp.asarray(
+        ultimate_effect_is_activated_by_source=array(
             combat.ultimate_effect_is_activated_by_source, dtype=jnp.bool_
         ),
-        combat_effect_has_recipient_by_source=jnp.asarray(
+        combat_effect_has_recipient_by_source=array(
             combat.combat_effect_has_recipient_by_source, dtype=jnp.bool_
         ),
-        combat_effect_recipient_global_slot_by_source=jnp.asarray(
+        combat_effect_recipient_global_slot_by_source=array(
             recipient_slots, dtype=jnp.int32
         ),
-        raw_damage_output_by_source=jnp.asarray(
+        raw_damage_output_by_source=array(
             combat.raw_damage_output_by_source, dtype=jnp.float32
         ),
-        source_modified_damage_output_by_source=jnp.asarray(
+        source_modified_damage_output_by_source=array(
             combat.source_modified_damage_output_by_source, dtype=jnp.float32
         ),
-        recipient_damage_modifier_by_source=jnp.asarray(
+        recipient_damage_modifier_by_source=array(
             combat.recipient_damage_modifier_by_source, dtype=jnp.float32
         ),
-        total_effective_damage_by_recipient=jnp.asarray(
+        total_effective_damage_by_recipient=array(
             combat.total_effective_damage_by_recipient, dtype=jnp.float32
         ),
-        raw_healing_output_by_source=jnp.asarray(
+        raw_healing_output_by_source=array(
             combat.raw_healing_output_by_source, dtype=jnp.float32
         ),
-        source_modified_healing_output_by_source=jnp.asarray(
+        source_modified_healing_output_by_source=array(
             combat.source_modified_healing_output_by_source, dtype=jnp.float32
         ),
-        recipient_healing_modifier_by_source=jnp.asarray(
+        recipient_healing_modifier_by_source=array(
             combat.recipient_healing_modifier_by_source, dtype=jnp.float32
         ),
-        total_effective_healing_by_recipient=jnp.asarray(
+        total_effective_healing_by_recipient=array(
             combat.total_effective_healing_by_recipient, dtype=jnp.float32
         ),
-        health_after_combat_resolution_by_recipient=jnp.asarray(
+        health_after_combat_resolution_by_recipient=array(
             combat.health_after_combat_resolution_by_recipient, dtype=jnp.float32
         ),
-        slow_is_applied_by_source_and_channel=jnp.asarray(
+        slow_is_applied_by_source_and_channel=array(
             combat.slow_is_applied_by_source_and_channel, dtype=jnp.bool_
         ),
-        stun_is_applied_by_source_and_channel=jnp.asarray(
+        stun_is_applied_by_source_and_channel=array(
             combat.stun_is_applied_by_source_and_channel, dtype=jnp.bool_
         ),
-        rogue_poison_anti_heal_is_applied_by_source=jnp.asarray(
+        rogue_poison_anti_heal_is_applied_by_source=array(
             combat.rogue_poison_anti_heal_is_applied_by_source, dtype=jnp.bool_
         ),
-        mage_burst_damage_amplification_is_applied_by_source=jnp.asarray(
+        mage_burst_damage_amplification_is_applied_by_source=array(
             combat.mage_burst_damage_amplification_is_applied_by_source,
             dtype=jnp.bool_,
         ),
-        priest_blessing_of_freedom_is_applied_by_source=jnp.asarray(
+        priest_blessing_of_freedom_is_applied_by_source=array(
             combat.priest_blessing_of_freedom_is_applied_by_source,
             dtype=jnp.bool_,
         ),
@@ -1223,85 +1268,86 @@ def _reconstruct_transition_facts(  # pyright: ignore[reportUnusedFunction]
     lifecycle = source.status_lifecycle_facts
     team_deathmatch = source.team_deathmatch_facts
     return TransitionFacts(
-        has_transition=jnp.asarray(source.has_transition, dtype=jnp.bool_),
-        transition_start_step_count=jnp.asarray(
+        has_transition=array(source.has_transition, dtype=jnp.bool_),
+        transition_start_step_count=array(
             source.transition_start_step_count, dtype=jnp.int32
         ),
         action_acceptance_facts=action_acceptance_facts,
         combat_transition_facts=combat_transition_facts,
         death_facts=DeathTransitionFacts(
-            jnp.asarray(death.is_newly_dead_by_recipient, dtype=jnp.bool_),
-            jnp.asarray(death.contributed_to_new_death_by_source, dtype=jnp.bool_),
-            jnp.asarray(death.attributed_death_damage_by_source, dtype=jnp.float32),
+            array(death.is_newly_dead_by_recipient, dtype=jnp.bool_),
+            array(death.contributed_to_new_death_by_source, dtype=jnp.bool_),
+            array(death.attributed_death_damage_by_source, dtype=jnp.float32),
         ),
         spawn_shield_facts=SpawnShieldTransitionFacts(
-            jnp.asarray(
-                shield.was_active_at_transition_start_by_agent, dtype=jnp.bool_
-            ),
-            jnp.asarray(shield.expired_at_transition_end_by_agent, dtype=jnp.bool_),
+            array(shield.was_active_at_transition_start_by_agent, dtype=jnp.bool_),
+            array(shield.expired_at_transition_end_by_agent, dtype=jnp.bool_),
         ),
         respawn_facts=RespawnTransitionFacts(
-            jnp.asarray(
+            array(
                 respawn.respawn_wave_occurred_this_transition_by_team,
                 dtype=jnp.bool_,
             ),
-            jnp.asarray(
+            array(
                 respawn.was_respawned_this_transition_by_agent,
                 dtype=jnp.bool_,
             ),
         ),
         regeneration_facts=RegenerationTransitionFacts(
-            jnp.asarray(
-                regeneration.combat_countdown_was_reset_by_agent, dtype=jnp.bool_
-            ),
-            jnp.asarray(
+            array(regeneration.combat_countdown_was_reset_by_agent, dtype=jnp.bool_),
+            array(
                 regeneration.actual_health_regenerated_this_step_by_agent,
                 dtype=jnp.float32,
             ),
         ),
         physical_facts=PhysicalTransitionFacts(
-            jnp.asarray(physical.charge_phase_displacement_by_agent, dtype=jnp.float32),
-            jnp.asarray(
+            array(physical.charge_phase_displacement_by_agent, dtype=jnp.float32),
+            array(
                 physical.ordinary_movement_phase_displacement_by_agent,
                 dtype=jnp.float32,
             ),
         ),
         aura_facts=AuraTransitionFacts(
-            jnp.asarray(
+            array(
                 aura.is_covered_by_mage_damage_aura_by_emitter_and_beneficiary,
                 dtype=jnp.bool_,
             ),
-            jnp.asarray(
+            array(
                 aura.is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary,
                 dtype=jnp.bool_,
             ),
         ),
         status_lifecycle_facts=StatusLifecycleTransitionFacts(
-            jnp.asarray(
+            array(
                 lifecycle.aged_to_zero_by_recipient_and_status_channel,
                 dtype=jnp.bool_,
             ),
-            jnp.asarray(
+            array(
                 lifecycle.refreshed_or_extended_by_recipient_and_status_channel,
                 dtype=jnp.bool_,
             ),
-            jnp.asarray(
+            array(
                 lifecycle.broken_by_damage_by_recipient_and_status_channel,
                 dtype=jnp.bool_,
             ),
-            jnp.asarray(
+            array(
                 lifecycle.cleared_by_new_death_by_recipient_and_status_channel,
                 dtype=jnp.bool_,
             ),
         ),
         team_deathmatch_facts=TeamDeathmatchTransitionFacts(
-            outcome=jnp.asarray(team_deathmatch.outcome, dtype=jnp.int32),
+            outcome=array(team_deathmatch.outcome, dtype=jnp.int32),
         ),
     )
+
+
+reconstruct_transition_facts_v1 = _reconstruct_transition_facts
 
 
 __all__ = [
     "capture_evaluation_transition_unit_v1",
     "capture_initial_evaluation_frame_v1",
     "normalize_transition_facts_v1",
+    "reconstruct_env_state_v1",
+    "reconstruct_transition_facts_v1",
 ]

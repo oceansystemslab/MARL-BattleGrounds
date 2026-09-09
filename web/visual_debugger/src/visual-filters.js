@@ -26,6 +26,7 @@
  *   | "resurrection_effects"
  *   | "spawn_shield_expiry"
  *   | "scrolling_battle_text"
+ *   | "death_announcer"
  * } VisualFilterId
  * @typedef {Readonly<Record<VisualFilterId, boolean>>} VisualFilterState
  * @typedef {Readonly<Record<string, string>>} VisualPaintPart
@@ -66,6 +67,7 @@ export const VISUAL_FILTER_REGISTRY = Object.freeze(
     ["resurrection_effects", "Resurrection Effects"],
     ["spawn_shield_expiry", "Spawn-Shield Expiry"],
     ["scrolling_battle_text", "Scrolling Battle Text"],
+    ["death_announcer", "Death Announcer"],
   ].map(([id, label]) =>
     Object.freeze({
       id: /** @type {VisualFilterId} */ (id),
@@ -245,6 +247,7 @@ export const VISUAL_PAINT_PART_REGISTRY = Object.freeze([
     "status_clear_on_death",
   ),
   paintPart({ surface: "transient", kind: "death_effect" }, "death_effects"),
+  paintPart({ surface: "transient", kind: "death_announcement" }, "death_announcer"),
   paintPart({ surface: "transient", kind: "respawn_wave" }, "respawn_wave"),
   paintPart(
     { surface: "transient", kind: "resurrection_effect" },
@@ -353,6 +356,10 @@ export function reduceVisualFilterState(state, action) {
   if (action.type === "disable_all") {
     assertExactKeys(action, ["type"], "disable-all action");
     return disableAllVisualFilters(normalized);
+  }
+  if (action.type === "restore_defaults") {
+    assertExactKeys(action, ["type"], "restore-defaults action");
+    return DEFAULT_VISUAL_FILTER_STATE;
   }
   throw new RangeError(`Unknown visual filter action ${action.type}.`);
 }

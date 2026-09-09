@@ -112,10 +112,15 @@ class EvaluationModel(BaseModel):
 
 def _normalize_canonical_json(value: object) -> object:
     """Recursively normalize JSON values before content addressing."""
+    # Replay arrays contain millions of primitive leaves. Avoid model/ABC
+    # instance checks for each one while retaining the exact-float zero rule.
+    value_type = type(value)
+    if value_type is float:
+        return 0.0 if value == 0.0 else value
+    if value is None or value_type in (bool, int, str):
+        return value
     if isinstance(value, BaseModel):
         return _normalize_canonical_json(value.model_dump(mode="json"))
-    if type(value) is float and value == 0.0:
-        return 0.0
     if isinstance(value, Mapping):
         mapping = cast(Mapping[str, object], value)
         return {key: _normalize_canonical_json(item) for key, item in mapping.items()}
@@ -596,6 +601,28 @@ class AssignedPolicySlotV1(EvaluationModel):
     execution_mode: Literal["deterministic", "stochastic"]
 
 
+class AssignedPolicySlotV2(EvaluationModel):
+    """Recorded policy identity without invented external training history."""
+
+    assignment_status: Literal["assigned"] = "assigned"
+    global_slot: _GlobalSlot
+    evaluation_role: EvaluationRole
+    policy_kind: _AsciiIdentifier
+    policy_id: _AsciiIdentifier
+    lifecycle: Literal["frozen", "evolving"]
+    callable_name: _AsciiIdentifier | None = None
+    policy_content_digest: _Sha256Hex | None = None
+    checkpoint_digest: _Sha256Hex | None = None
+    algorithm_id: _AsciiIdentifier | None = None
+    training_run_id: _AsciiIdentifier | None = None
+    training_step: _NonNegativeInt | None = None
+    population_member_id: _AsciiIdentifier | None = None
+    parameter_sharing_group_id: _AsciiIdentifier | None = None
+    preprocessing: VersionedIdentityV1 | None = None
+    normalization: VersionedIdentityV1 | None = None
+    execution_mode: Literal["deterministic", "stochastic"] | None = None
+
+
 class NotApplicablePolicySlotV1(EvaluationModel):
     """Minimal canonical policy row for one inactive fixed slot."""
 
@@ -607,6 +634,13 @@ type PolicyAssignmentSlotV1 = Annotated[
     AssignedPolicySlotV1 | NotApplicablePolicySlotV1,
     Field(discriminator="assignment_status"),
 ]
+
+type PolicyAssignmentSlotV2 = Annotated[
+    AssignedPolicySlotV2 | NotApplicablePolicySlotV1,
+    Field(discriminator="assignment_status"),
+]
+
+type AssignedPolicySlot = AssignedPolicySlotV1 | AssignedPolicySlotV2
 
 
 class EvaluationSeedProtocolV1(EvaluationModel):
@@ -639,6 +673,41 @@ class CodeRevisionV1(EvaluationModel):
             raise ValueError(
                 "dirty revisions require a patch digest and clean revisions forbid one"
             )
+        return self
+
+
+class EvaluationSeedProtocolV2(EvaluationModel):
+    """Known named seeds; null means unrecorded, never an invented RNG stream."""
+
+    schema_version: Literal[2] = 2
+    seed_protocol: VersionedIdentityV1
+    root_seed: _Seed | None = None
+    episode_seed: _Seed | None = None
+    layout_seed: _Seed | None = None
+    environment_seed: _Seed | None = None
+    focal_policy_seed: _Seed | None = None
+    evaluation_seed: _Seed | None = None
+    cooperative_partner_seed: _Seed | Literal["not_applicable"] | None = None
+    adversarial_opponent_seed: _Seed | Literal["not_applicable"] | None = None
+    scenario_seed: _Seed | Literal["not_applicable"] | None = None
+
+
+class CodeRevisionV2(EvaluationModel):
+    """Installed-package provenance with optional, genuinely discovered Git facts."""
+
+    schema_version: Literal[2] = 2
+    package_version: _AsciiIdentifier
+    commit_sha: _GitCommitHex | None = None
+    source_tree_digest: _Sha256Hex | None = None
+    is_dirty: bool | None = None
+    dirty_patch_digest: _Sha256Hex | None = None
+
+    @model_validator(mode="after")
+    def _validate_dirty_revision(self) -> CodeRevisionV2:
+        if self.is_dirty is True and self.dirty_patch_digest is None:
+            raise ValueError("known dirty revisions require their patch digest")
+        if self.is_dirty is not True and self.dirty_patch_digest is not None:
+            raise ValueError("a patch digest requires a known dirty revision")
         return self
 
 
@@ -715,7 +784,87 @@ class EvaluationEpisodeContextV1(EvaluationModel):
         return self
 
 
-def _validate_context_rows(context: EvaluationEpisodeContextV1) -> None:
+class SchemaVersionEntryV2(EvaluationModel):
+    """Source-schema binding for a V2 context retaining unchanged V1 leaves."""
+
+    schema_id: _AsciiIdentifier
+    schema_version: Annotated[int, Field(ge=1, le=2)]
+
+
+REQUIRED_SCHEMA_BINDINGS_V2 = tuple(
+    (schema_id, 2 if schema_id == CONTEXT_SCHEMA_ID else version)
+    for schema_id, version in REQUIRED_SCHEMA_BINDINGS_V1
+)
+
+
+class EvaluationEpisodeContextV2(EvaluationModel):
+    """Self-describing episode context with honest optional policy provenance."""
+
+    schema_id: Literal["marl_battlegrounds.evaluation.episode_context"] = (
+        CONTEXT_SCHEMA_ID
+    )
+    schema_version: Literal[2] = 2
+    identity: EvaluationEpisodeIdentityV1
+    schema_versions: tuple[SchemaVersionEntryV2, ...]
+    aggregation_keys: tuple[AggregationKeyV1, ...]
+    expected_horizon: _PositiveInt
+    resolved_env_config: ResolvedEnvConfigV1
+    static_mechanics_catalog: StaticMechanicsCatalogV1
+    roster: Annotated[
+        tuple[RosterSlotV1, ...],
+        Field(min_length=MAX_AGENT_SLOTS, max_length=MAX_AGENT_SLOTS),
+    ]
+    policy_assignments: Annotated[
+        tuple[PolicyAssignmentSlotV2, ...],
+        Field(min_length=MAX_AGENT_SLOTS, max_length=MAX_AGENT_SLOTS),
+    ]
+    seed_protocol: EvaluationSeedProtocolV1 | EvaluationSeedProtocolV2
+    capture_profile: CaptureProfile
+    execution_information_mode: ExecutionInformationMode
+    actor_projection: VersionedIdentityV1
+    critic_information_regime: VersionedIdentityV1
+    canonical_reward_mode: VersionedIdentityV1
+    shaping_configuration: ContentAddressedIdentityV1
+    code_revision: CodeRevisionV1 | CodeRevisionV2
+    scenario_name: _AsciiText | None = None
+
+    @model_validator(mode="after")
+    def _validate_context(self) -> EvaluationEpisodeContextV2:
+        if (
+            tuple((row.schema_id, row.schema_version) for row in self.schema_versions)
+            != REQUIRED_SCHEMA_BINDINGS_V2
+        ):
+            raise ValueError("schema_versions must equal the V2 context bindings")
+        if self.expected_horizon > self.resolved_env_config.maximum_episode_steps:
+            raise ValueError("expected_horizon cannot exceed maximum_episode_steps")
+        names = tuple(row.name for row in self.aggregation_keys)
+        if names != tuple(sorted(set(names))):
+            raise ValueError("aggregation keys must be unique and sorted by name")
+        _validate_context_rows(self)
+        _validate_context_seeds(self)
+        if (
+            self.capture_profile == "scenario_metric_complete"
+            and self.identity.scenario is None
+        ):
+            raise ValueError("scenario capture requires a scenario identity")
+        if self.scenario_name is not None and self.identity.scenario is None:
+            raise ValueError("scenario display name requires its recorded identity")
+        return self
+
+
+type EvaluationEpisodeContext = EvaluationEpisodeContextV1 | EvaluationEpisodeContextV2
+
+
+def evaluation_context_type(
+    context: EvaluationEpisodeContext,
+) -> type[EvaluationEpisodeContextV1] | type[EvaluationEpisodeContextV2]:
+    """Accept exactly the two declared context roots, never an unknown subclass."""
+    if type(context) not in (EvaluationEpisodeContextV1, EvaluationEpisodeContextV2):
+        raise TypeError("context must be an exact supported episode-context root")
+    return type(context)
+
+
+def _validate_context_rows(context: EvaluationEpisodeContext) -> None:
     slots = tuple(row.global_slot for row in context.roster)
     if slots != tuple(range(MAX_AGENT_SLOTS)):
         raise ValueError("roster must contain ordered fixed global slots")
@@ -739,7 +888,7 @@ def _validate_context_rows(context: EvaluationEpisodeContextV1) -> None:
                 or roster_row.class_id == 0
             ):
                 raise ValueError("active roster rows require fixed team and class")
-            if not isinstance(policy_row, AssignedPolicySlotV1):
+            if not isinstance(policy_row, (AssignedPolicySlotV1, AssignedPolicySlotV2)):
                 raise ValueError("active roster rows require assigned policies")
         else:
             if roster_row.configured_team_id != 0 or roster_row.class_id != 0:
@@ -797,11 +946,11 @@ def _validate_context_rows(context: EvaluationEpisodeContextV1) -> None:
             )
 
 
-def _validate_context_seeds(context: EvaluationEpisodeContextV1) -> None:
+def _validate_context_seeds(context: EvaluationEpisodeContext) -> None:
     active_roles = {
         row.evaluation_role
         for row in context.policy_assignments
-        if isinstance(row, AssignedPolicySlotV1)
+        if isinstance(row, (AssignedPolicySlotV1, AssignedPolicySlotV2))
     }
     if "focal" not in active_roles:
         raise ValueError("evaluation context requires at least one focal policy")
@@ -811,9 +960,11 @@ def _validate_context_seeds(context: EvaluationEpisodeContextV1) -> None:
         ("adversarial_opponent", seeds.adversarial_opponent_seed),
     )
     for role, seed in role_seed_pairs:
+        if seed is None:
+            continue
         if (role in active_roles) != (seed != "not_applicable"):
             raise ValueError(f"{role} seed presence must match policy assignments")
-    if (context.identity.scenario is not None) != (
+    if seeds.scenario_seed is not None and (context.identity.scenario is not None) != (
         seeds.scenario_seed != "not_applicable"
     ):
         raise ValueError("scenario seed presence must match scenario identity")
@@ -1815,6 +1966,7 @@ __all__ = [
     "GLOBAL_ANALYSIS_SNAPSHOT_SCHEMA_ID",
     "GLOBAL_ANALYSIS_SNAPSHOT_SCHEMA_VERSION",
     "REQUIRED_SCHEMA_BINDINGS_V1",
+    "REQUIRED_SCHEMA_BINDINGS_V2",
     "RESOLVED_ENV_CONFIG_SCHEMA_ID",
     "RESOLVED_ENV_CONFIG_SCHEMA_VERSION",
     "TRANSITION_FACTS_SCHEMA_ID",
@@ -1829,7 +1981,9 @@ __all__ = [
     "AgentLeftCombatEventV1",
     "AgentRespawnedEventV1",
     "AggregationKeyV1",
+    "AssignedPolicySlot",
     "AssignedPolicySlotV1",
+    "AssignedPolicySlotV2",
     "AuraMechanicV1",
     "AuraTransitionFactsV1",
     "BaseObservationV1",
@@ -1837,13 +1991,16 @@ __all__ = [
     "ChargePhaseDisplacementEventV1",
     "ClassMechanicsV1",
     "CodeRevisionV1",
+    "CodeRevisionV2",
     "CombatCountdownResetEventV1",
     "CombatTransitionFactsV1",
     "ContentAddressedIdentityV1",
     "CooldownReadyEventV1",
     "CooldownStartedEventV1",
     "DeathTransitionFactsV1",
+    "EvaluationEpisodeContext",
     "EvaluationEpisodeContextV1",
+    "EvaluationEpisodeContextV2",
     "EvaluationEpisodeIdentityV1",
     "EvaluationEventBaseV1",
     "EvaluationEventV1",
@@ -1851,6 +2008,7 @@ __all__ = [
     "EvaluationModel",
     "EvaluationRole",
     "EvaluationSeedProtocolV1",
+    "EvaluationSeedProtocolV2",
     "EvaluationTransitionV1",
     "ExecutionInformationMode",
     "GlobalAnalysisSnapshotV1",
@@ -1861,6 +2019,7 @@ __all__ = [
     "OrdinaryMovementPhaseDisplacementEventV1",
     "PhysicalTransitionFactsV1",
     "PolicyAssignmentSlotV1",
+    "PolicyAssignmentSlotV2",
     "PreviousTimestepActionObservationV1",
     "RecipientHealthResolutionEventV1",
     "RegenerationTransitionFactsV1",
@@ -1871,6 +2030,7 @@ __all__ = [
     "RespawnWaveOccurredEventV1",
     "RosterSlotV1",
     "SchemaVersionEntryV1",
+    "SchemaVersionEntryV2",
     "SourceDamageOutputEventV1",
     "SourceHealingOutputEventV1",
     "SpawnLifecycleObservationV1",
@@ -1892,4 +2052,5 @@ __all__ = [
     "VersionedIdentityV1",
     "canonical_digest_sha256",
     "canonical_json_bytes",
+    "evaluation_context_type",
 ]

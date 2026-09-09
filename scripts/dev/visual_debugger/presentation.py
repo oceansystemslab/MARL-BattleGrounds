@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import cast
 
 from marl_battlegrounds.evaluation.models import (
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContext,
     EvaluationFrameV1,
     EvaluationTransitionV1,
     StaticMechanicsCatalogV1,
     canonical_digest_sha256,
+    evaluation_context_type,
 )
 from marl_battlegrounds.rendering.authorized_incoming import (
     build_replay_no_shared_obs_incoming_summary_v1,
@@ -81,7 +82,7 @@ from scripts.dev.visual_debugger.replay_protocol import (
 
 
 def _oracle_transition_action_rows_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     transition: EvaluationTransitionV1,
     *,
     authority_session_id: str,
@@ -126,7 +127,7 @@ def _oracle_transition_action_rows_v1(
 
 
 def _oracle_latest_transition_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     incoming_transition: EvaluationTransitionV1 | None,
     *,
     authority_session_id: str,
@@ -157,7 +158,7 @@ def _oracle_latest_transition_v1(
 
 
 def _oracle_upcoming_transition_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     outgoing_transition: EvaluationTransitionV1 | None,
     *,
     authority_session_id: str,
@@ -188,7 +189,7 @@ def _oracle_upcoming_transition_v1(
 
 
 def build_replay_researcher_space_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     source_scene: BattlefieldSceneV2,
     *,
     authority_session_id: str,
@@ -376,7 +377,7 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
     source: ActorPovProjectionIndexV1,
     raw_frame: ActorPovReplayViewerFrameV1,
     *,
-    global_context: EvaluationEpisodeContextV1,
+    global_context: EvaluationEpisodeContext,
     current_global_frame: EvaluationFrameV1,
     previous_global_frame: EvaluationFrameV1 | None,
     public_catalog: StaticMechanicsCatalogV1,
@@ -621,7 +622,7 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
 def build_replay_shared_obs_authorized_presentation_v1(
     raw_frame: SharedObsAgentPovReplayViewerFrameV1,
     *,
-    global_context: EvaluationEpisodeContextV1,
+    global_context: EvaluationEpisodeContext,
     current_global_frame: EvaluationFrameV1,
     previous_global_frame: EvaluationFrameV1 | None,
     public_catalog: StaticMechanicsCatalogV1,
@@ -933,7 +934,7 @@ def build_replay_shared_obs_authorized_presentation_v1(
 
 
 def build_replay_oracle_authorized_presentation_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     current_frame: EvaluationFrameV1,
     raw_frame: ResearcherReplayViewerFrameV1,
     *,
@@ -947,11 +948,10 @@ def build_replay_oracle_authorized_presentation_v1(
         raise TypeError(
             "raw_frame must be the exact ResearcherReplayViewerFrameV1 root."
         )
-    if type(context) is not EvaluationEpisodeContextV1:
-        raise TypeError("context must be the exact EvaluationEpisodeContextV1 root.")
+    evaluation_context_type(context)
     if type(current_frame) is not EvaluationFrameV1:
         raise TypeError("current_frame must be the exact EvaluationFrameV1 root.")
-    context = EvaluationEpisodeContextV1.model_validate(
+    context = evaluation_context_type(context).model_validate(
         context.model_dump(mode="python")
     )
     current_frame = EvaluationFrameV1.model_validate(

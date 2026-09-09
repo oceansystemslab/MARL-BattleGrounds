@@ -8,11 +8,11 @@ The project is currently under development.
 ## Team Deathmatch benchmark
 
 The installed package includes the 52 approved maps and eight fixed scenarios.
-Construct ordinary configurations before calling the existing JAX environment:
+Construct a configuration and use the public JAX environment:
 
 ```python
 import jax
-from marl_battlegrounds.core.env import reset
+from marl_battlegrounds import make
 from marl_battlegrounds.tasks import make_standard_team_deathmatch_config
 
 config = make_standard_team_deathmatch_config(
@@ -20,7 +20,10 @@ config = make_standard_team_deathmatch_config(
     team_a_roster=("warrior", "hunter", "priest"),
     team_b_roster=("mage", "rogue", "priest"),
 )
-state, observation, action_mask, info = reset(config, jax.random.key(0))
+env = make("tdm", metrics="priority")
+observation, state = env.reset(jax.random.key(0), config, episode_id=1)
+action_mask = env.get_action_mask(state)
+# observation, state, reward, done, info = env.step(key, state, actions)
 ```
 
 `list_tdm_maps()` and `list_tdm_scenarios()` expose names and immutable source
@@ -32,6 +35,48 @@ mirrored Mage/Warrior/Hunter/Rogue/Priest teams, first to 20, a 300-transition
 horizon, five-transition respawn waves and canonical shields. Canonical map IDs
 are 17, 20, 25, 35 and 39; training distributions belong to the later curriculum
 milestone.
+
+## Training, validation and analysis
+
+Own your trainer; use `jit`, `vmap` and `lax.scan` around the same `reset`/`step`
+contract. `make("tdm", num_envs=128)` supplies native batching. Configuration,
+authoritative masks and episode counters travel in wrapper state. Partial reset
+uses `reset(..., state=state, reset_mask=done.done)` with the next episode IDs.
+The environment does not reset completed episodes automatically.
+
+Use one callable for frozen-policy validation and evaluation:
+
+```python
+from marl_battlegrounds import evaluate
+
+result = evaluate(
+    "tdm-alpha", "tdm-beta", maps=[17, 20, 25, 35, 39],
+    num_episodes=100, num_envs=128, seed=42,
+    metrics="full", replay_episodes=range(1, 11),
+    output_dir="runs/evaluation",
+)
+print(result.paths)
+```
+
+`Policy(name, apply, variables, initial_carry)` adapts a learned policy through
+`apply(variables, carry, actor_input, action_mask, key) -> (action, next_carry)`.
+Variables stay frozen during evaluation; recurrent memory resets per actor and
+episode. The authorized SharedObs input remains structured. Custom encoders and
+training algorithms remain the researcher's choice.
+
+Metrics use `"none"`, `"priority"` (default), or `"full"`. Select extra full episodes
+with `full_metrics_episodes=range(1000, 50_001, 1000)` and replays independently
+with `replay_episodes=range(49_951, 50_001)`. No replay is needed for metrics.
+Without an output directory, results are column arrays suitable for
+`pandas.DataFrame(result.full_metrics)`, and no files are created. Each output
+request creates a unique child run; `resume_from` explicitly resumes a run.
+
+The [metric specification and data dictionary](docs/evaluation/metric_specification.md)
+explain scalar columns, missing values, attribution and recording. The
+[evaluation protocol](docs/evaluation/protocol.md) defines held-out evaluation,
+paired tournaments, ratings and uncertainty.
+The [workflow guide](docs/evaluation/workflows.md) includes runnable evaluation,
+shared-writer validation, replay and tournament commands.
 
 ## DevClient
 
@@ -70,8 +115,7 @@ under ignored `artifacts/dev_client/` storage across DevClient restarts; the
 DevClient does not autosave.
 Existing replay artifacts remain outside the DevClient.
 
-Record one manual episode to a canonical-format replay and adjacent metric
-sidecar:
+Record one manual episode to a single replay file:
 
 ```bash
 mkdir -p recordings
@@ -98,15 +142,15 @@ samples, and materialized scripted demonstrations:
 
 The viewer validates or materializes one complete replay bundle before opening
 the browser. It offers settled exact-frame summaries, serialized playback,
-eight whole-clock rates, 18 paint-filter families plus Ranges,
+eight playback rates, configurable visual effects,
 provenance-bearing PNG export, current scores and participants, and offline
 evaluation metrics across visual POVs. Open **TDM Evaluation Metrics** below
-the class details to select **At cursor** or **Final episode**. **Download Metrics
-CSV** exports that scope; **Original Metrics JSON** preserves the recorded
-sidecar. Ordinary recording and library metric APIs default to the critical
-outcome, score-difference, return, length and completion metrics. Full diagnostics
-are explicit opt-in: `build_tdm_metric_reducers(full=True)` or
-`analyze_replay(bundle, full=True)`, including the Viewer detailed-analysis request.
+the class details to select **Up to Current Tick** or **Final Episode**.
+**Download Metrics CSV** exports scalar values at that boundary. New replay
+recordings have no metric-JSON sidecar dependency; historical recordings remain
+readable. Full metrics are computed only when requested, using the same numerical
+authority as evaluation. Default filters highlight combat effects, and an optional
+Death Announcer is off initially.
 It cannot stage or submit simulator actions.
 
 See the [Replay Viewer guide](docs/dev/replay_viewer.md) for artifact selection,
@@ -151,7 +195,7 @@ The approved TDM suite contains eight scenarios. Seven use five-transition
 horizons; Scenario 3 uses ten transitions to examine sustained body blocking,
 while retaining the canonical five-transition respawn period. The scenario and
 map designs are approved. Packaged definitions and a bounded complete-suite
-qualification compose the existing rollout, capture, metrics and replay APIs.
+qualification use the shared episode executor, metrics and replay APIs.
 These plumbing controls do not replace learned-policy behavioral ablations.
 
 The public scenario suite is primarily a controlled behavioral-ablation
@@ -171,7 +215,9 @@ do not contribute to Elo or establish general strength. See
 The current sequence is M7 TDM Benchmark and Researcher Tools → M8 Policy
 Execution and Evaluation → M9 Training Distributions and Curriculum → M10
 Learning Platform and Baselines → M11 LLM-Agent Integration → M12 Manuscript
-Experiments and Release. KOTH (M13) and CTF (M14) follow manuscript submission.
+Experiments and Release. After manuscript completion, a dedicated profiler-driven
+optimization audit will cover runtime, VRAM, RAM and disk costs across the research
+workflow. KOTH (M13) and CTF (M14) follow manuscript submission and that audit.
 [Amendment A36](docs/design/specification_amendments.md#a36-submission-roadmap-approved-tdm-content-and-m7-closeout)
 records the executive override and historical milestone-number mapping.
 
@@ -201,18 +247,19 @@ Elo. The tentative initial roster is:
 11. S\*-Curriculum-Shaped
 12. Qwen-Five
 
-This roster and its training/evaluation pipeline are planned, not implemented.
-Rows 1–11 will each retain three independently trained runs and their checkpoint
+These learned systems and the manuscript training campaign are planned; the
+shared evaluation and tournament tools are implemented. Rows 1–11 will each
+retain three independently trained runs and their checkpoint
 histories, but only the fixed checkpoint selected by the frozen validation-only
 rule enters the tournament. Qwen-Five remains tentative until a measured
 throughput and resource gate is passed. Twelve systems yield 66 unordered
 pairings and, at 100 episodes per pairing, 6,600 tournament episodes. The raw
-win/draw/loss matrix remains authoritative; rating implementation details must
-pass their own pre-tournament gate. The public ladder presents Elo, win/loss/draw
-percentages and matches played, with evaluated-system identities. It does not
-broadcast full tactical metrics. Researchers can reproduce the ladder locally
-and explicitly enable those diagnostics. A secondary team K/D column pools total kills divided by total deaths across
-the tournament, showing unavailable when deaths are zero. It is not a rating input.
+win/draw/loss matrix remains authoritative. The compact ladder presentation is
+Policy, Elo with uncertainty, Expected Score with uncertainty, Win %, Draw % and
+Loss %, accompanied by full matchup and per-map results. Full tactical metrics
+are optional when running a local tournament. A planned secondary team K/D
+column pools total kills divided by total deaths across the tournament, showing
+unavailable when deaths are zero; it is not a rating input.
 
 Weekly Big 12 reviews will publish immutable dated snapshots. A qualified new
 method may enter by relegating the lowest method; a week without a qualified

@@ -35,7 +35,10 @@ from tests.test_visual_debugger_service import (
 )
 
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
-from marl_battlegrounds.evaluation.models import AssignedPolicySlotV1
+from marl_battlegrounds.evaluation.models import (
+    AgentDiedEventV1,
+    AssignedPolicySlotV1,
+)
 from marl_battlegrounds.evaluation.pov import (
     ActorPovAdjacentTransitionSliceV1,
     ActorPovCurrentSliceV1,
@@ -129,8 +132,8 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
     keys = _recursive_keys(payload)
     strings = _recursive_string_values(payload)
 
-    # Researcher match metadata is a separate root envelope. Its configured
-    # policy identities do not relax any actor or spatial digest restriction.
+    # Researcher match metadata is a separate root envelope. Configured policy
+    # identities and non-spatial death announcements do not relax actor privacy.
     assert set(match_summary) == {
         "schema_version",
         "episode_id",
@@ -141,6 +144,7 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
         "scores",
         "outcome",
         "teams",
+        "deaths",
     }
     context = service.session.evaluation_context
     frame = service.session.current_evaluation_frame
@@ -154,6 +158,17 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
     )
     assert match_summary["scores"] == list(frame.snapshot.team_deathmatch_scores)
     assert match_summary["outcome"] == "not_applicable"
+    assert match_summary["deaths"] == [
+        {
+            "public_agent_id": context.roster[
+                event.recipient_global_slot
+            ].public_agent_id,
+            "team_id": context.roster[event.recipient_global_slot].configured_team_id,
+            "class_id": context.roster[event.recipient_global_slot].class_id,
+        }
+        for event in incoming.transition.events
+        if isinstance(event, AgentDiedEventV1)
+    ]
     teams = cast(list[dict[str, object]], match_summary["teams"])
     assert [team["team_id"] for team in teams] == [1, 2]
     for team in teams:

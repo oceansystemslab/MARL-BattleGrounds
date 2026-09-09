@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { canonicalAgentIdentity } from "../src/agent-identity.js";
 
 import {
   authorizedOracleCommandSlotForPresentationKey,
@@ -58,6 +59,23 @@ const fixture = JSON.parse(
   ),
 );
 
+test("numeric researcher identities preserve every legacy replay and command identifier", async () => {
+  for (const [kind, raw] of Object.entries(fixture.presentations)) {
+    const original = JSON.stringify(raw);
+    const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+    for (const identity of authorizedPresentationIdentityRows(frame)) {
+      if (identity.command_global_slot === null) continue;
+      assert.equal(
+        canonicalAgentIdentity(identity.agent).publicIdentity,
+        `Agent ID ${identity.command_global_slot}`,
+        kind,
+      );
+      assert.equal(identity.agent.public_agent_id, identity.public_agent_id, kind);
+    }
+    assert.equal(JSON.stringify(raw), original, kind);
+  }
+});
+
 const EXPECTED_CLASS_LABELS = new Map([
   [1, "Mage"],
   [2, "Warrior"],
@@ -68,7 +86,7 @@ const EXPECTED_CLASS_LABELS = new Map([
 
 /** @param {Record<string, any>} identity */
 function expectedAuthorizedIdentityTitle(identity) {
-  return `Agent ID ${identity.public_agent_id} · ${EXPECTED_CLASS_LABELS.get(Number(identity.class_id))} · Team ${identity.team_id === 1 ? "A" : "B"}`;
+  return `Agent ID ${identity.display_agent_id ?? String(identity.public_agent_id).replace(/^agent-slot-(\d)$/u, "$1")} · ${EXPECTED_CLASS_LABELS.get(Number(identity.class_id))} · Team ${identity.team_id === 1 ? "A" : "B"}`;
 }
 
 /** @param {keyof typeof fixture.presentations} kind */
@@ -3002,6 +3020,7 @@ test("Oracle status compositor applies exact precedence and preserves every atom
         sourceIdentity: {
           presentation_key: sourceAgent.presentation_key,
           public_agent_id: sourceAgent.public_agent_id,
+          display_agent_id: sourceAgent.display_agent_id,
           class_id: sourceAgent.class_id,
           team_id: sourceAgent.team_id,
         },

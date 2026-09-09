@@ -75,8 +75,8 @@ class TestWorkUnit:
 CI_SHARD_COST_PROFILE = ShardCostProfile(
     file_cost_overrides={
         "tests/test_shared_obs_runtime.py": 110,
-        # The approved 16-case scenario suite measured 207.55 s on CPU.
-        "tests/test_tdm_scenarios.py": 208,
+        # The current 20-case scenario suite measured 104.322 s on CPU.
+        "tests/test_tdm_scenarios.py": 105,
         "tests/test_visual_debugger_replay_service.py": 400,
     },
     extracted_family_costs={
@@ -111,7 +111,7 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
         12: (
             (
                 "residual:tests/test_visual_debugger_service.py",
-                7,
+                6,
                 10,
             ),
             (

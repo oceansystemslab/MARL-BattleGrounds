@@ -39,6 +39,10 @@ from marl_battlegrounds.evaluation.replay_io import (
     load_replay_bundle_v1,
     preflight_replay_bundle_destination_v1,
 )
+from marl_battlegrounds.evaluation.revision import discover_code_revision_v1
+from marl_battlegrounds.evaluation.runtime_provenance import (
+    capture_debugger_runtime_provenance_v1,
+)
 from scripts.dev.visual_debugger.control import create_session
 from scripts.dev.visual_debugger.evaluation_bridge import (
     build_debugger_evaluation_launch_specification_v1,
@@ -54,10 +58,6 @@ from scripts.dev.visual_debugger.recording import (
 )
 from scripts.dev.visual_debugger.recording_coordinator import (
     RecordingDebuggerCoordinator,
-)
-from scripts.dev.visual_debugger.revision import discover_debugger_code_revision_v1
-from scripts.dev.visual_debugger.runtime_provenance import (
-    capture_debugger_runtime_provenance_v1,
 )
 from scripts.dev.visual_debugger.sample_replays import (
     SAMPLE_REPLAY_DEMO_PROVENANCE_NOTICE,
@@ -352,7 +352,7 @@ def generate_sample_replays(
         raise TypeError("output_directory must be pathlib.Path")
     _refuse_existing_output(output_directory)
     _require_cpu_backend()
-    resolved_revision = discover_debugger_code_revision_v1(
+    resolved_revision = discover_code_revision_v1(
         _REPOSITORY_ROOT,
         package_version="0.0.0",
     )

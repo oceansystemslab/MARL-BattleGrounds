@@ -35,6 +35,7 @@ const EXPECTED_FILTERS = Object.freeze([
   ["resurrection_effects", "Resurrection Effects"],
   ["spawn_shield_expiry", "Spawn-Shield Expiry"],
   ["scrolling_battle_text", "Scrolling Battle Text"],
+  ["death_announcer", "Death Announcer"],
 ]);
 
 const INITIAL_FILTER_IDS = [
@@ -49,7 +50,7 @@ const INITIAL_FILTER_IDS = [
 ];
 const ALL_ENABLED = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
 
-test("locked registry exposes 18 filters and the eight initial choices", () => {
+test("locked registry exposes 19 filters and the eight initial choices", () => {
   assert.deepEqual(
     VISUAL_FILTER_REGISTRY.map(({ id, label }) => [id, label]),
     EXPECTED_FILTERS,
@@ -58,7 +59,7 @@ test("locked registry exposes 18 filters and the eight initial choices", () => {
     VISUAL_FILTER_IDS,
     EXPECTED_FILTERS.map(([id]) => id),
   );
-  assert.equal(new Set(VISUAL_FILTER_IDS).size, 18);
+  assert.equal(new Set(VISUAL_FILTER_IDS).size, 19);
   assert.deepEqual(
     VISUAL_FILTER_REGISTRY.filter(({ defaultEnabled }) => defaultEnabled).map(
       ({ id }) => id,
@@ -120,6 +121,13 @@ test("strict reducer accepts only exact set and bulk actions", () => {
     VISUAL_FILTER_IDS.every((id) => allDisabled[id] === false),
     true,
   );
+  for (const changed of [disabled, allDisabled, ALL_ENABLED]) {
+    assert.equal(
+      reduceVisualFilterState(changed, { type: "restore_defaults" }),
+      DEFAULT_VISUAL_FILTER_STATE,
+    );
+  }
+  assert.equal(DEFAULT_VISUAL_FILTER_STATE.death_announcer, false);
   assert.throws(
     () =>
       reduceVisualFilterState(DEFAULT_VISUAL_FILTER_STATE, {
@@ -143,9 +151,9 @@ test("state validation and paint-key serialization are strict and deterministic"
   );
   assert.equal(
     visualFilterPaintKey(DEFAULT_VISUAL_FILTER_STATE),
-    "visual-filters-v2:000101110000011101",
+    "visual-filters-v2:0001011100000111010",
   );
-  assert.equal(visualFilterPaintKey(disabled), "visual-filters-v2:000101110000011100");
+  assert.equal(visualFilterPaintKey(disabled), "visual-filters-v2:0001011100000111000");
   assert.equal(
     visualFilterPaintKey(Object.fromEntries([...Object.entries(disabled)].reverse())),
     visualFilterPaintKey(disabled),

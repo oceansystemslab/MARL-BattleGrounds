@@ -426,6 +426,7 @@ dependencies = [
     { name = "numpy" },
     { name = "omegaconf" },
     { name = "pydantic" },
+    { name = "scipy" },
 ]
 
 [package.optional-dependencies]
@@ -470,6 +471,7 @@ requires-dist = [
     { name = "pyright", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
+    { name = "scipy" },
 ]
 provides-extras = ["cuda13", "training", "interop", "viz", "dev"]
 

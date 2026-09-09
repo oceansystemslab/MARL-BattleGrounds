@@ -248,10 +248,7 @@ test("authorized replay inspector keeps researcher selection separate from trans
       inspector.owner.public_agent_id,
       expectedOwner.public_agent_id ?? expectedOwner.actor_public_agent_id,
     );
-    assert.equal(
-      inspector.owner_descriptor.title,
-      "Agent ID agent-slot-0 · Mage · Team A",
-    );
+    assert.equal(inspector.owner_descriptor.title, "Agent ID 0 · Mage · Team A");
     assert.equal(inspector.owner_descriptor.summary, null);
     assert.deepEqual(inspector.owner_descriptor.rows, []);
     assert.deepEqual(
@@ -575,10 +572,7 @@ test("authorized replay inspector retains final selected owner without outgoing 
       inspector.owner.public_agent_id,
       expectedOwner.public_agent_id ?? expectedOwner.owner_public_agent_id,
     );
-    assert.equal(
-      inspector.owner_descriptor.title,
-      "Agent ID agent-slot-0 · Mage · Team A",
-    );
+    assert.equal(inspector.owner_descriptor.title, "Agent ID 0 · Mage · Team A");
     assert.equal(inspector.owner_class_accent, "mage");
     assert.deepEqual(Object.keys(inspector), [
       "title",

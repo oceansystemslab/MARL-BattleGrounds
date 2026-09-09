@@ -2,6 +2,7 @@
 
 import inspect
 import json
+from collections import UserDict
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, cast
 
@@ -455,6 +456,34 @@ def test_static_catalog_digest_and_json_roundtrip_are_canonical() -> None:
         canonical_json_bytes({"nonfinite": float("nan")})
 
 
+def test_canonical_json_preserves_nested_values_and_fallback_types() -> None:
+    class FloatSubclass(float):
+        pass
+
+    class IntSubclass(int):
+        pass
+
+    payload = UserDict(
+        {
+            "values": (None, True, False, 2**80, "é", -0.0, 0.0, 1.25),
+            "nested": [{"zero": -0.0}],
+            "model": VersionedIdentityV1(identifier="example", version=1),
+            # The canonical profile normalizes exact floats, not subclasses.
+            "subclasses": (FloatSubclass(-0.0), IntSubclass(7)),
+        }
+    )
+    assert canonical_json_bytes(payload) == (
+        b'{"model":{"identifier":"example","version":1},'
+        b'"nested":[{"zero":0.0}],"subclasses":[-0.0,7],'
+        b'"values":[null,true,false,1208925819614629174706176,"\xc3\xa9",0.0,0.0,1.25]}'
+    )
+    for nonfinite in (float("nan"), float("inf"), -float("inf")):
+        with pytest.raises(ValueError):
+            canonical_json_bytes({"nested": [nonfinite]})
+    with pytest.raises(TypeError):
+        canonical_json_bytes({"unsupported": object()})
+
+
 def test_catalog_rejects_digest_tampering_and_rehashed_unknown_mapping() -> None:
     catalog = build_static_mechanics_catalog_v1()
     payload = _json_payload(catalog)
@@ -522,13 +551,18 @@ def test_root_models_reject_unknown_versions_and_extra_fields() -> None:
         EvaluationEpisodeContextV1.model_validate_json(json.dumps(context_payload))
 
 
-def test_package_exports_only_the_approved_step_6_3_public_functions() -> None:
+def test_package_exports_legacy_and_current_replay_public_functions() -> None:
     exported_functions = {
         name
         for name in evaluation_api.__all__
         if inspect.isfunction(getattr(evaluation_api, name))
     }
     assert exported_functions == {
+        "build_evaluation_episode_context_v2",
+        "build_replay_v2",
+        "load_replay",
+        "save_replay",
+        "replay_from_packets",
         "build_static_mechanics_catalog_v1",
         "build_evaluation_episode_context_v1",
         "build_evaluation_observer_v1",
@@ -537,6 +571,7 @@ def test_package_exports_only_the_approved_step_6_3_public_functions() -> None:
         "build_replay_bundle_v1",
         "build_scenario_evaluation_record_v1",
         "build_scenario_evaluation_record_v2",
+        "build_scenario_evaluation_record_v3",
         "canonical_actor_pov_content_json_bytes_v1",
         "canonical_actor_pov_replay_json_bytes_v1",
         "canonical_metric_report_artifact_json_bytes_v1",
@@ -554,6 +589,7 @@ def test_package_exports_only_the_approved_step_6_3_public_functions() -> None:
         "load_replay_bundle_v1",
         "load_scenario_evaluation_record_v1",
         "load_scenario_evaluation_record_v2",
+        "load_scenario_evaluation_record_v3",
         "reconstruct_actor_class_ids_by_team_v2",
         "reconstruct_class_ids_by_agent_by_team_v2",
         "reconstruct_shared_obs_sensor_source_bank_v1",
@@ -562,6 +598,7 @@ def test_package_exports_only_the_approved_step_6_3_public_functions() -> None:
         "save_replay_bundle_v1",
         "save_scenario_evaluation_record_v1",
         "save_scenario_evaluation_record_v2",
+        "save_scenario_evaluation_record_v3",
         "validate_actor_pov_replay_against_replay_v1",
         "validate_actor_pov_replay_artifact_v1",
         "validate_actor_pov_replay_content_v1",
@@ -572,8 +609,10 @@ def test_package_exports_only_the_approved_step_6_3_public_functions() -> None:
         "validate_metric_report_artifact_against_replay_v1",
         "validate_replay_artifact_v1",
         "validate_official_scenario_evaluation_record_v2",
+        "validate_official_scenario_evaluation_record_v3",
         "validate_scenario_evaluation_record_v1",
         "validate_scenario_evaluation_record_v2",
+        "validate_scenario_evaluation_record_v3",
     }
 
 

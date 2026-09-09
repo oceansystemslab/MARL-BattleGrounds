@@ -284,7 +284,9 @@ def _valid_authorized_status_payload(
     frame: ReplayOracleAuthorizedPresentationFrameV1,
 ) -> dict[str, object]:
     mechanics = next(
-        row for row in frame.current_scene.class_mechanics if row.status_mechanics
+        row
+        for row in frame.current_endpoint.scene.class_mechanics
+        if row.status_mechanics
     )
     status = mechanics.status_mechanics[0]
     return {
@@ -326,30 +328,30 @@ def test_replay_epochs_are_structurally_separate_at_zero_middle_and_final(
     middle = _presentation(oracle_cases, 3)
     final = _presentation(oracle_cases, 5)
 
-    assert initial.incoming_summary is None
-    assert initial.outgoing_inspection is not None
-    assert initial.outgoing_inspection.outgoing_transition_index == 0
+    assert initial.latest_events is None
+    assert initial.replay_inspection is not None
+    assert initial.replay_inspection.outgoing_transition_index == 0
 
-    assert middle.incoming_summary is not None
-    assert middle.incoming_summary.incoming_transition_index == 2
-    assert middle.incoming_summary.incoming_transition_id.endswith(":transition:2")
-    assert middle.outgoing_inspection is not None
-    assert middle.outgoing_inspection.outgoing_transition_index == 3
-    assert middle.outgoing_inspection.transition_reference.transition_id.endswith(
+    assert middle.latest_events is not None
+    assert middle.latest_events.incoming_transition_index == 2
+    assert middle.latest_events.incoming_transition_id.endswith(":transition:2")
+    assert middle.replay_inspection is not None
+    assert middle.replay_inspection.outgoing_transition_index == 3
+    assert middle.replay_inspection.transition_reference.transition_id.endswith(
         ":transition:3"
     )
 
-    assert final.incoming_summary is not None
-    assert final.incoming_summary.incoming_transition_index == 4
-    assert final.outgoing_inspection is None
+    assert final.latest_events is not None
+    assert final.latest_events.incoming_transition_index == 4
+    assert final.replay_inspection is None
 
 
 def test_no_selected_actor_has_no_outgoing_inspection(
     oracle_cases: _OracleCases,
 ) -> None:
     frame = _presentation(oracle_cases, 3, selected_internal_slot=None)
-    assert frame.incoming_summary is not None
-    assert frame.outgoing_inspection is None
+    assert frame.latest_events is not None
+    assert frame.replay_inspection is None
     assert frame.upcoming_transition is not None
     assert frame.upcoming_transition.outgoing_transition_index == 3
 
@@ -362,7 +364,7 @@ def test_service_owned_selection_ignores_legacy_scene_selection(
     assert raw.projection.scene.selection.selected_global_slot == 0
 
     frame = _presentation(oracle_cases, 3, selected_internal_slot=1)
-    outgoing = frame.outgoing_inspection
+    outgoing = frame.replay_inspection
     assert outgoing is not None
     assert outgoing.actor_public_agent_id == (
         oracle_cases.trajectory.context.roster[1].public_agent_id
@@ -372,7 +374,7 @@ def test_service_owned_selection_ignores_legacy_scene_selection(
 def test_submitted_and_accepted_action_tuples_remain_distinct(
     oracle_cases: _OracleCases,
 ) -> None:
-    outgoing = _presentation(oracle_cases, 3).outgoing_inspection
+    outgoing = _presentation(oracle_cases, 3).replay_inspection
     assert outgoing is not None
     assert outgoing.submitted_action.move_action == 99
     assert outgoing.accepted_action.move_action == 0
@@ -383,7 +385,7 @@ def test_outgoing_anchor_is_owned_by_current_scene_without_successor_input(
     oracle_cases: _OracleCases,
 ) -> None:
     frame = _presentation(oracle_cases, 4)
-    outgoing = frame.outgoing_inspection
+    outgoing = frame.replay_inspection
     assert outgoing is not None
     current_agent = next(
         row
@@ -429,8 +431,8 @@ def test_checked_mirrored_sample_uses_context_target_axis_and_current_anchors() 
         incoming_transition=trajectory.transitions[0],
         outgoing_transition=trajectory.transitions[1],
     )
-    incoming = frame.incoming_summary
-    outgoing = frame.outgoing_inspection
+    incoming = frame.latest_events
+    outgoing = frame.replay_inspection
     assert incoming is not None
     assert incoming.incoming_transition_index == 0
     assert outgoing is not None
@@ -483,11 +485,13 @@ def test_checked_recovery_sample_projects_status_durations() -> None:
     )
     mechanics_by_channel = {
         status.status_channel: status
-        for mechanics in frame.current_scene.class_mechanics
+        for mechanics in frame.current_endpoint.scene.class_mechanics
         for status in mechanics.status_mechanics
     }
     durable_statuses = tuple(
-        status for agent in frame.current_scene.agents for status in agent.statuses
+        status
+        for agent in frame.current_endpoint.scene.agents
+        for status in agent.statuses
     )
     assert durable_statuses
     for status in durable_statuses:
@@ -527,10 +531,15 @@ def test_neutral_scene_uses_stable_opaque_keys_and_omits_legacy_roots(
         3,
         viewer_session_id="viewer-session-other",
     )
-    earlier_keys = tuple(row.presentation_key for row in earlier.current_scene.agents)
-    later_keys = tuple(row.presentation_key for row in later.current_scene.agents)
+    earlier_keys = tuple(
+        row.presentation_key for row in earlier.current_endpoint.scene.agents
+    )
+    later_keys = tuple(
+        row.presentation_key for row in later.current_endpoint.scene.agents
+    )
     other_keys = tuple(
-        row.presentation_key for row in other_authority_session.current_scene.agents
+        row.presentation_key
+        for row in other_authority_session.current_endpoint.scene.agents
     )
 
     assert earlier_keys == later_keys
@@ -554,7 +563,7 @@ def test_neutral_scene_uses_stable_opaque_keys_and_omits_legacy_roots(
     assert "selection" not in json.dumps(payload["current_endpoint"]["scene"])
     assert "observer_visibility" not in json.dumps(payload["current_endpoint"]["scene"])
     assert "ranges" not in json.dumps(payload["current_endpoint"]["scene"])
-    shield = earlier.current_scene.spawn_shield_mechanics
+    shield = earlier.current_endpoint.scene.spawn_shield_mechanics
     assert type(shield) is AuthorizedSpawnShieldMechanicsAvailableV2
     assert shield.availability_kind == "available_v2"
     assert shield.configured_duration_steps == (
@@ -585,14 +594,14 @@ def test_neutral_scene_uses_stable_opaque_keys_and_omits_legacy_roots(
         and row.mechanics_version == 2
         and type(row.documentation_profile)
         is AuthorizedClassDocumentationProfileAvailableV1
-        for row in earlier.current_scene.class_mechanics
+        for row in earlier.current_endpoint.scene.class_mechanics
     )
 
 
 def test_scene_accepts_all_legacy_v1_rows_but_rejects_mixed_or_discordant_v2(
     oracle_cases: _OracleCases,
 ) -> None:
-    scene = _presentation(oracle_cases, 3).current_scene
+    scene = _presentation(oracle_cases, 3).current_endpoint.scene
     shield = scene.spawn_shield_mechanics
     assert type(shield) is AuthorizedSpawnShieldMechanicsAvailableV2
     legacy_rows = tuple(
@@ -688,7 +697,7 @@ def test_v2_nested_contracts_fail_closed_on_wrong_literals_and_extras(
     replacement: object,
     message: str,
 ) -> None:
-    payload = _presentation(oracle_cases, 3).current_scene
+    payload = _presentation(oracle_cases, 3).current_endpoint.scene
     adapter = TypeAdapter(AuthorizedBattlefieldSceneV1)
     mutable = adapter.dump_python(payload, mode="json")
     target: object = mutable
@@ -717,7 +726,7 @@ def test_v2_nested_contracts_have_no_implicit_required_defaults(
 ) -> None:
     adapter = TypeAdapter(AuthorizedBattlefieldSceneV1)
     mutable = adapter.dump_python(
-        _presentation(oracle_cases, 3).current_scene,
+        _presentation(oracle_cases, 3).current_endpoint.scene,
         mode="json",
     )
     target: object = mutable
@@ -792,7 +801,7 @@ def test_incoming_inventory_exactly_matches_raw_projection(
     oracle_cases: _OracleCases,
 ) -> None:
     raw_batch = oracle_cases.raw_frames[3].projection.incoming_events
-    incoming = _presentation(oracle_cases, 3).incoming_summary
+    incoming = _presentation(oracle_cases, 3).latest_events
     assert raw_batch is not None
     assert incoming is not None
     assert incoming.ordered_event_ids == tuple(
@@ -813,7 +822,7 @@ def test_incoming_inventory_exactly_matches_raw_projection(
         for row in incoming.agent_phase_trajectories
     ) == tuple(
         (row.public_agent_id, row.position)
-        for row in _presentation(oracle_cases, 3).current_scene.agents
+        for row in _presentation(oracle_cases, 3).current_endpoint.scene.agents
     )
 
 
@@ -944,7 +953,7 @@ def test_incoming_batch_active_flags_must_join_context_roster(
 def test_active_rejection_uses_authorized_identity_and_start_anchor(
     oracle_cases: _OracleCases,
 ) -> None:
-    incoming = _presentation(oracle_cases, 4).incoming_summary
+    incoming = _presentation(oracle_cases, 4).latest_events
     assert incoming is not None
     rejection = next(
         event
@@ -1081,9 +1090,12 @@ def test_every_nested_wire_object_forbids_additional_properties() -> None:
     assert strict_definitions
     for name, definition in strict_definitions.items():
         assert definition["additionalProperties"] is False, name
-        assert set(cast(dict[str, object], definition["properties"])) == set(
-            cast(list[str], definition["required"])
-        ), name
+        properties = set(cast(dict[str, object], definition["properties"]))
+        # The researcher HUD adds one backward-compatible optional death list.
+        optional: set[str] = {"deaths"} if name == "MatchSummaryV1" else set()
+        assert properties - optional == set(cast(list[str], definition["required"])), (
+            name
+        )
     assert set(cast(dict[str, object], schema["properties"])) == set(
         cast(list[str], schema["required"])
     )
@@ -1352,7 +1364,7 @@ def test_pov_or_unknown_raw_root_never_falls_back_to_oracle(
 def test_neutral_scene_root_is_exact_dataclass(
     oracle_cases: _OracleCases,
 ) -> None:
-    scene = _presentation(oracle_cases, 3).current_scene
+    scene = _presentation(oracle_cases, 3).current_endpoint.scene
     assert type(scene) is AuthorizedBattlefieldSceneV1
     assert not hasattr(scene, "audience")
     assert not hasattr(scene, "incoming_transition_id")
@@ -1422,7 +1434,7 @@ def test_oracle_scene_wrapper_matches_existing_parts_without_mutation(
     assert TypeAdapter(EvaluationEpisodeContextV1).dump_json(context) == context_before
     assert TypeAdapter(BattlefieldSceneV2).dump_json(source_scene) == scene_before
 
-    with pytest.raises(TypeError, match="exact EvaluationEpisodeContextV1"):
+    with pytest.raises(TypeError, match="exact supported episode-context root"):
         build_oracle_authorized_scene_v1(
             cast(EvaluationEpisodeContextV1, object()),
             source_scene,

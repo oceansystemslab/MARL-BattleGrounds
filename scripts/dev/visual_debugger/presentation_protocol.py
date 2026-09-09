@@ -28,10 +28,11 @@ from pydantic import (
 
 from marl_battlegrounds.evaluation.models import (
     ActionAcceptanceFactsV1,
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContext,
     EvaluationTransitionV1,
     JointActionV1,
     TransitionFactsV1,
+    evaluation_context_type,
 )
 from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
@@ -248,7 +249,7 @@ class ReplayOraclePresentationSourceIdentityV1(_PresentationProtocolModel):
     source_authority_epoch: _NonNegativeInt
     source_artifact_id: _ScientificId
     source_timeline_id: _ScientificId
-    source_replay_schema_version: Literal[1]
+    source_replay_schema_version: Literal[1, 2]
     source_context_digest_sha256: _Sha256Hex
     source_trajectory_content_digest_sha256: _Sha256Hex
     source_artifact_digest_sha256: _Sha256Hex
@@ -1570,7 +1571,7 @@ def _seal_oracle_authorized_current_endpoint_v1(
 
 
 def _oracle_public_identity_directory_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
 ) -> OraclePublicIdentityDirectoryV1:
     catalog = context.static_mechanics_catalog
     return OraclePublicIdentityDirectoryV1(
@@ -1594,7 +1595,7 @@ def _oracle_public_identity_directory_v1(
 
 
 def _oracle_action_axis_from_context_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     scene: AuthorizedBattlefieldSceneV1,
     directory: OraclePublicIdentityDirectoryV1,
     *,
@@ -1680,14 +1681,13 @@ def _oracle_action_axis_from_context_v1(
 
 def build_oracle_authorized_current_endpoint_v1(
     *,
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     source_scene: BattlefieldSceneV2,
     authority_session_id: str,
     selected_internal_slot: int | None,
 ) -> OracleAuthorizedCurrentEndpointV1:
     """Derive the full Oracle endpoint from exact epoch-bearing authority."""
-    if type(context) is not EvaluationEpisodeContextV1:
-        raise TypeError("context must use the exact evaluation episode root.")
+    evaluation_context_type(context)
     if type(source_scene) is not BattlefieldSceneV2:
         raise TypeError("source_scene must use the exact BattlefieldSceneV2 root.")
     session = cast(
@@ -4032,21 +4032,6 @@ class ReplayOracleAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel)
             recipient_public_agent_id=None,
         )
         return self
-
-    @property
-    def current_scene(self) -> AuthorizedBattlefieldSceneV1:
-        """Temporary Python-only compatibility view; absent from the wire."""
-        return self.current_endpoint.scene
-
-    @property
-    def incoming_summary(self) -> ReplayIncomingSummaryV1 | None:
-        """Temporary Python-only compatibility view; absent from the wire."""
-        return self.latest_events
-
-    @property
-    def outgoing_inspection(self) -> ReplayInspectionPresentationV1 | None:
-        """Temporary Python-only compatibility view; absent from the wire."""
-        return self.replay_inspection
 
 
 class ReplayNoSharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel):

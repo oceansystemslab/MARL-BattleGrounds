@@ -7,12 +7,12 @@ from scripts.dev.visual_debugger.control import (
     submit_interactive,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
-from scripts.dev.visual_debugger.targeting import (
+from tests.visual_debugger_fixtures import debugger_test_launch_specification
+
+from marl_battlegrounds.core.axis_mappings import (
     global_slot_to_target_action,
     target_action_to_global_slot,
 )
-from tests.visual_debugger_fixtures import debugger_test_launch_specification
-
 from marl_battlegrounds.core.types import MAX_AGENT_SLOTS, NUM_TARGET_ACTIONS
 
 

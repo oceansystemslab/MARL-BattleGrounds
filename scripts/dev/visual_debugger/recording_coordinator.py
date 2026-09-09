@@ -41,6 +41,7 @@ class RecordingDebuggerCoordinator:
         self._service = service
         self._live_binding = HttpCoordinatorBinding(
             mode="live",
+            initial_show_ranges=service.session.show_ranges,
             routes=LIVE_HTTP_ROUTES,
             request_model=CommandRequestV1,
             error_factory=ApiErrorV2,
@@ -76,6 +77,7 @@ class RecordingDebuggerCoordinator:
 
         replay_binding = HttpCoordinatorBinding(
             mode="replay",
+            initial_show_ranges=handoff.show_ranges,
             routes=REPLAY_HTTP_ROUTES,
             request_model=ReplayCommandRequestV1,
             error_factory=ReplayApiErrorV1,
@@ -85,6 +87,7 @@ class RecordingDebuggerCoordinator:
             current_presentation=handoff.current_presentation,
             current_metric_report=handoff.current_metric_report,
             metric_analysis=handoff.metric_analysis,
+            episode_details=handoff.episode_details,
         )
         expected = self._router.snapshot()
         if (

@@ -2569,6 +2569,7 @@
           "transition_kind": "oracle_incoming_submitted_accepted"
         },
         "match_summary": {
+          "deaths": [],
           "episode_id": "service-shared",
           "outcome": "not_applicable",
           "schema_version": 1,
@@ -4742,6 +4743,7 @@
           "source_simulator_step_count": 1
         },
         "match_summary": {
+          "deaths": [],
           "episode_id": "service-shared",
           "outcome": "not_applicable",
           "schema_version": 1,
@@ -7074,6 +7076,7 @@
           "source_simulator_step_count": 0
         },
         "match_summary": {
+          "deaths": [],
           "episode_id": "debugger-episode:3e3381dbe49ca4fc35a3e2153bd4b3f2366a741b0b501ccdf086063920fdcf02",
           "outcome": "not_applicable",
           "schema_version": 1,
@@ -9990,6 +9993,7 @@
           "source_simulator_step_count": 0
         },
         "match_summary": {
+          "deaths": [],
           "episode_id": "debugger-episode:3e3381dbe49ca4fc35a3e2153bd4b3f2366a741b0b501ccdf086063920fdcf02",
           "outcome": "not_applicable",
           "schema_version": 1,
@@ -12871,6 +12875,7 @@
           "source_simulator_step_count": 1
         },
         "match_summary": {
+          "deaths": [],
           "episode_id": "debugger-episode:8b3e29cc2654e2460f3f438cb4d3bb4981e28c67c0d23ed4b00a84627422d7d8",
           "outcome": "not_applicable",
           "schema_version": 1,
@@ -14994,6 +14999,7 @@
           "source_simulator_step_count": 1
         },
         "match_summary": {
+          "deaths": [],
           "episode_id": "service-complete",
           "outcome": "not_applicable",
           "schema_version": 1,
@@ -17648,6 +17654,7 @@
           "transition_kind": "oracle_incoming_submitted_accepted"
         },
         "match_summary": {
+          "deaths": [],
           "episode_id": "service-complete",
           "outcome": "not_applicable",
           "schema_version": 1,
@@ -19592,6 +19599,7 @@
           "source_simulator_step_count": 1
         },
         "match_summary": {
+          "deaths": [],
           "episode_id": "service-shared",
           "outcome": "not_applicable",
           "schema_version": 1,
@@ -25857,6 +25865,7 @@
         "source_simulator_step_count": 1
       },
       "match_summary": {
+        "deaths": [],
         "episode_id": "debugger-episode:8b3e29cc2654e2460f3f438cb4d3bb4981e28c67c0d23ed4b00a84627422d7d8",
         "outcome": "not_applicable",
         "schema_version": 1,
@@ -30460,6 +30469,7 @@
         "transition_kind": "oracle_incoming_submitted_accepted"
       },
       "match_summary": {
+        "deaths": [],
         "episode_id": "episode-001",
         "outcome": "not_applicable",
         "schema_version": 1,
@@ -34141,6 +34151,7 @@
         "source_simulator_step_count": 0
       },
       "match_summary": {
+        "deaths": [],
         "episode_id": "debugger-episode:3e3381dbe49ca4fc35a3e2153bd4b3f2366a741b0b501ccdf086063920fdcf02",
         "outcome": "not_applicable",
         "schema_version": 1,
@@ -41813,6 +41824,7 @@
         "source_simulator_step_count": 0
       },
       "match_summary": {
+        "deaths": [],
         "episode_id": "browser-corpse-overlay-no_shared_obs",
         "outcome": "not_applicable",
         "schema_version": 1,
@@ -46715,6 +46727,7 @@
         "source_simulator_step_count": 1
       },
       "match_summary": {
+        "deaths": [],
         "episode_id": "browser-corpse-overlay-no_shared_obs",
         "outcome": "not_applicable",
         "schema_version": 1,
@@ -48589,6 +48602,7 @@
         "transition_kind": "oracle_incoming_submitted_accepted"
       },
       "match_summary": {
+        "deaths": [],
         "episode_id": "episode-001",
         "outcome": "not_applicable",
         "schema_version": 1,
@@ -49667,6 +49681,7 @@
         "transition_kind": "oracle_incoming_submitted_accepted"
       },
       "match_summary": {
+        "deaths": [],
         "episode_id": "episode-001",
         "outcome": "not_applicable",
         "schema_version": 1,
@@ -50507,6 +50522,7 @@
       "latest_events": null,
       "latest_transition": null,
       "match_summary": {
+        "deaths": [],
         "episode_id": "episode-001",
         "outcome": "not_applicable",
         "schema_version": 1,

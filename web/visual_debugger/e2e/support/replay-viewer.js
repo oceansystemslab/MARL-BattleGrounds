@@ -24,39 +24,21 @@ export const REPLAY_VIEWER_ENTRYPOINT = "scripts/dev/replay_viewer.py";
  *   partial: string,
  *   shared: string,
  *   tdm: string,
+ *   tdmShared: string,
  *   corpseNoShared: string,
  *   corpseShared: string,
  *   missingMetric: string,
  * }>}
  */
 export async function exportReplayArtifacts() {
-  const outputDirectory = await mkdtemp(
-    join(tmpdir(), "marl-battlegrounds-replay-e2e-"),
-  );
+  const { outputDirectory, payload } = await exportReplayPaths();
   try {
-    const result = await execFileAsync(
-      "uv",
-      [
-        "run",
-        "python",
-        "-m",
-        "tests.export_visual_debugger_replay_artifacts",
-        "--output-directory",
-        outputDirectory,
-      ],
-      {
-        cwd: REPOSITORY_ROOT,
-        env: process.env,
-        maxBuffer: 1024 * 1024,
-        timeout: 120_000,
-      },
-    );
-    const payload = JSON.parse(result.stdout.trim());
     if (
       typeof payload.complete !== "string" ||
       typeof payload.partial !== "string" ||
       typeof payload.shared !== "string" ||
       typeof payload.tdm !== "string" ||
+      typeof payload.tdm_shared !== "string" ||
       typeof payload.corpse_no_shared !== "string" ||
       typeof payload.corpse_shared !== "string" ||
       typeof payload.missing_metric !== "string"
@@ -69,10 +51,64 @@ export async function exportReplayArtifacts() {
       partial: payload.partial,
       shared: payload.shared,
       tdm: payload.tdm,
+      tdmShared: payload.tdm_shared,
       corpseNoShared: payload.corpse_no_shared,
       corpseShared: payload.corpse_shared,
       missingMetric: payload.missing_metric,
     };
+  } catch (error) {
+    await removeReplayArtifacts(outputDirectory);
+    throw error;
+  }
+}
+
+/** Capture the approved scenarios and actual simultaneous Core deaths. */
+export async function exportReplayAcceptanceArtifacts() {
+  const { outputDirectory, payload } = await exportReplayPaths(["--c7-acceptance"]);
+  if (
+    !Array.isArray(payload.scenarios) ||
+    payload.scenarios.length !== 8 ||
+    !payload.scenarios.every(
+      (/** @type {unknown} */ path) => typeof path === "string",
+    ) ||
+    typeof payload.dense !== "string"
+  ) {
+    await removeReplayArtifacts(outputDirectory);
+    throw new TypeError("Replay acceptance exporter returned an invalid manifest.");
+  }
+  return {
+    outputDirectory,
+    scenarios: /** @type {string[]} */ (payload.scenarios),
+    dense: payload.dense,
+  };
+}
+
+/** @param {string[]} args */
+async function exportReplayPaths(args = []) {
+  const outputDirectory = await mkdtemp(
+    join(tmpdir(), "marl-battlegrounds-replay-e2e-"),
+  );
+  try {
+    const result = await execFileAsync(
+      "uv",
+      [
+        "run",
+        "python",
+        "-m",
+        "tests.export_visual_debugger_replay_artifacts",
+        ...args,
+        "--output-directory",
+        outputDirectory,
+      ],
+      {
+        cwd: REPOSITORY_ROOT,
+        env: process.env,
+        maxBuffer: 1024 * 1024,
+        timeout: 120_000,
+      },
+    );
+    const payload = JSON.parse(result.stdout.trim());
+    return { outputDirectory, payload };
   } catch (error) {
     await rm(outputDirectory, { force: true, recursive: true });
     throw error;

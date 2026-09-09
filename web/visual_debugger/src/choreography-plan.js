@@ -1,4 +1,6 @@
+import { canonicalAgentIdentity } from "./agent-identity.js";
 import {
+  authorizedPresentationAgentDisplayId,
   authorizedPresentationAudience,
   authorizedPresentationIncomingRows,
   authorizedPresentationResearcherSceneView,
@@ -239,6 +241,7 @@ function authorizedIdentitySnapshot(value) {
   return Object.freeze({
     presentation_key: presentationKey,
     public_agent_id: publicAgentId,
+    display_agent_id: agent?.display_agent_id ?? null,
     class_id: classId,
     team_id: teamId,
   });
@@ -791,7 +794,7 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
   };
 
   for (const [eventIndex, event] of events.entries()) {
-    if (!event.spatial) {
+    if (!event.spatial || event.cueSemantic === "death_announcement") {
       continue;
     }
     if (event.kind === "activation") {
@@ -1107,6 +1110,7 @@ function choreographyFamily(event) {
     return "cooldown";
   }
   if (event.cueSemantic === "agent_died") return "death";
+  if (event.cueSemantic === "death_announcement") return "death";
   if (event.cueSemantic === "respawn_wave_occurred") return "respawn_wave";
   if (event.cueSemantic === "agent_respawned") return "respawn";
   return null;
@@ -1222,11 +1226,13 @@ function authorizedPaintParts(event, visualFilters) {
       ? { surface: "transient", kind: "cooldown", semantic: "ready" }
       : event.cueSemantic === "agent_died"
         ? { surface: "transient", kind: "death_effect" }
-        : event.cueSemantic === "respawn_wave_occurred"
-          ? { surface: "transient", kind: "respawn_wave" }
-          : event.cueSemantic === "agent_respawned"
-            ? { surface: "transient", kind: "resurrection_effect" }
-            : null;
+        : event.cueSemantic === "death_announcement"
+          ? { surface: "transient", kind: "death_announcement" }
+          : event.cueSemantic === "respawn_wave_occurred"
+            ? { surface: "transient", kind: "respawn_wave" }
+            : event.cueSemantic === "agent_respawned"
+              ? { surface: "transient", kind: "resurrection_effect" }
+              : null;
   return tag === null ? null : Object.freeze({ effect: enabled(tag) });
 }
 
@@ -1300,7 +1306,13 @@ function scheduleChoreography(events) {
       ? CHOREOGRAPHY_PHASES.outcomeStart
       : 0;
   for (const family of activeOutcomes) {
-    const duration = FAMILY_DWELL_MS[family];
+    const duration =
+      family === "death" &&
+      events.some(
+        (event) => event.cueSemantic === "death_announcement" && event.spatial,
+      )
+        ? 1000
+        : FAMILY_DWELL_MS[family];
     windows.set(family, { start: cursor, end: cursor + duration });
     cursor += duration;
   }
@@ -1323,7 +1335,11 @@ function scheduleChoreography(events) {
     v2RespawnStart: startFor("respawn"),
     povSuccessorObservationStart: startFor("health"),
     total,
-    reducedTotal: Math.min(CHOREOGRAPHY_PHASES.reducedTotal, total),
+    reducedTotal: events.some(
+      (event) => event.cueSemantic === "death_announcement" && event.spatial,
+    )
+      ? total
+      : Math.min(CHOREOGRAPHY_PHASES.reducedTotal, total),
   });
   /** @type {Record<string, any>[]} */
   const scheduledEvents = events.map((event) => {
@@ -2749,6 +2765,58 @@ function buildAuthorizedPresentationChoreographyPlan(
       }),
     );
   }
+  // Global researcher HUD facts have no world-space location or actor-input role.
+  const deaths = array(presentation.match_summary?.deaths);
+  const viewport =
+    deaths.length > 0 &&
+    isVisualPaintPartEnabled(visualFilters, {
+      surface: "transient",
+      kind: "death_announcement",
+    })
+      ? surface?.viewportBounds
+      : null;
+  if (viewport) {
+    for (const teamId of [1, 2]) {
+      const members = deaths
+        .filter((death) => death.team_id === teamId)
+        .map((death) =>
+          canonicalAgentIdentity({
+            ...death,
+            display_agent_id: authorizedPresentationAgentDisplayId(
+              presentation,
+              death.public_agent_id,
+            ),
+          }),
+        );
+      if (members.length === 0) continue;
+      const width = Math.min(220, (viewport.width - 24) / 2);
+      const height = 30 + members.length * 20;
+      planned.push(
+        Object.freeze({
+          eventId: `${transitionId}:death-announcement:${teamId}`,
+          eventType: "agent_died",
+          kind: "semantic_pulse",
+          cueSemantic: "death_announcement",
+          teamId,
+          teamIndex: teamId - 1,
+          teamSide: teamId === 1 ? "left" : "right",
+          label: `Team ${teamId === 1 ? "A" : "B"} Deaths`,
+          members: Object.freeze(members),
+          panelWidth: width,
+          panelHeight: height,
+          anchor: Object.freeze({
+            x:
+              teamId === 1
+                ? viewport.left + 8 + width / 2
+                : viewport.right - 8 - width / 2,
+            y: viewport.top + 48 + height / 2,
+          }),
+          spatial: true,
+          persistent: false,
+        }),
+      );
+    }
+  }
   const paintFiltered = applyAuthorizedVisualFilters(planned, visualFilters);
   const laidOut = layoutCrossPhaseEvents(paintFiltered, surface, sceneByKey);
   if (laidOut === null) {
@@ -2769,7 +2837,7 @@ function buildAuthorizedPresentationChoreographyPlan(
       presentation.presentation_kind,
       presentation.recipient_presentation_key,
     ]),
-    fingerprint: `${events.length}:${hashText(JSON.stringify(rows.map(({ payload }) => payload)))}`,
+    fingerprint: `${events.length}:${hashText(JSON.stringify([...rows.map(({ payload }) => payload), ...deaths]))}`,
     paintKey: visualFilterPaintKey(visualFilters),
     transitionId,
     simulatorStep,

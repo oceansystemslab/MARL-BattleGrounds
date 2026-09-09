@@ -20,9 +20,10 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pydantic_core import PydanticSerializationError
 
 from marl_battlegrounds.evaluation.models import (
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContext,
     EvaluationTransitionV1,
     StaticMechanicsCatalogV1,
+    evaluation_context_type,
 )
 from marl_battlegrounds.evaluation.wire_shapes import (
     NUM_MOVE_ACTIONS_V1,
@@ -3430,7 +3431,7 @@ def _agent_row(
 
 
 def _authorized_scene(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     scene: BattlefieldSceneV2,
     *,
     authority_session_id: str,
@@ -3576,14 +3577,13 @@ def _authorized_scene(
 
 
 def build_oracle_authorized_scene_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     scene: BattlefieldSceneV2,
     *,
     authority_session_id: str,
 ) -> AuthorizedBattlefieldSceneV1:
     """Project one exact epoch-bearing Oracle scene without adjacent branches."""
-    if type(context) is not EvaluationEpisodeContextV1:
-        raise TypeError("context must be the exact EvaluationEpisodeContextV1 root.")
+    evaluation_context_type(context)
     if type(scene) is not BattlefieldSceneV2:
         raise TypeError("scene must be the exact BattlefieldSceneV2 root.")
     _require_text(authority_session_id, name="authority_session_id")
@@ -3595,7 +3595,9 @@ def build_oracle_authorized_scene_v1(
         raise ValueError(
             "Oracle authority inputs must retain exact runtime wire types."
         ) from error
-    validated_context = EvaluationEpisodeContextV1.model_validate_json(context_json)
+    validated_context = evaluation_context_type(context).model_validate_json(
+        context_json
+    )
     validated_scene = scene_adapter.validate_json(scene_json)
 
     def exact_tree_matches(candidate: object, canonical: object) -> bool:
@@ -4733,7 +4735,7 @@ def _incoming_summary(
 
 
 def _outgoing_inspection(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     scene: BattlefieldSceneV2,
     *,
     key_by_internal_slot: dict[int, str],
@@ -4825,7 +4827,7 @@ def _outgoing_inspection(
 
 
 def build_replay_oracle_presentation_parts_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     scene: BattlefieldSceneV2,
     incoming_events: VisualEventBatchV2 | None,
     *,
@@ -4841,8 +4843,7 @@ def build_replay_oracle_presentation_parts_v1(
     anchors or composing atomic status motifs.  No successor frame is accepted
     by this API; the incoming batch's successor anchors must join ``scene``.
     """
-    if type(context) is not EvaluationEpisodeContextV1:
-        raise TypeError("context must be the exact EvaluationEpisodeContextV1 root.")
+    evaluation_context_type(context)
     if type(scene) is not BattlefieldSceneV2:
         raise TypeError("scene must be the exact BattlefieldSceneV2 root.")
     if incoming_events is not None and type(incoming_events) is not VisualEventBatchV2:

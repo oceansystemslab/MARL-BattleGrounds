@@ -1,3 +1,4 @@
+import { canonicalAgentIdentity } from "./agent-identity.js";
 import {
   authorizedPresentationAudience,
   authorizedPresentationHasResearcherSpace,
@@ -648,6 +649,7 @@ export class DebuggerPanels {
         this.rosterRows.set(identity.display_key, row);
       }
       const publicId = String(agent.public_agent_id);
+      const displayIdentity = canonicalAgentIdentity(agent).publicIdentity;
       const classToken = classTokenFromId(agent.class_id);
       const teamToken = teamTokenFromId(agent.team_id);
       row.element.dataset.presentationKey = String(agent.presentation_key);
@@ -663,7 +665,7 @@ export class DebuggerPanels {
       row.identityId.dataset.class = classToken.cssKey;
       row.element.setAttribute(
         "aria-label",
-        `Agent ID ${publicId}, ${classToken.label}, ${teamToken.label}`,
+        `${displayIdentity}, ${classToken.label}, ${teamToken.label}`,
       );
       registerTooltipOwner(
         row.primaryButton,
@@ -720,10 +722,10 @@ export class DebuggerPanels {
         rosterAudience === "researcher" &&
           presentation.viewer_mode === "live" &&
           researcherInspectionState.state_kind === "live_editable"
-          ? `Control and inspect Agent ID ${publicId}`
-          : `Inspect Agent ID ${publicId}`,
+          ? `Control and inspect ${displayIdentity}`
+          : `Inspect ${displayIdentity}`,
       );
-      row.identityId.textContent = `Agent ID ${publicId}`;
+      row.identityId.textContent = displayIdentity;
       row.identityClass.textContent = `${classToken.label} · ${teamToken.label}`;
       row.health.textContent =
         `HP ${formatDisplayNumber(agent.current_health)} / ${formatDisplayNumber(agent.max_health ?? agent.maximum_health)}` +

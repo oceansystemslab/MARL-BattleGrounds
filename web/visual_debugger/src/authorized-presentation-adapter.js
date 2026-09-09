@@ -167,6 +167,49 @@ export function authorizedPresentationHasResearcherSpace(value) {
   return isAuthorizedPresentationFrame(value) && researcherSpace(value) !== null;
 }
 
+/** @type {WeakMap<object, Map<string, number>>} */
+const identitySlotCache = new WeakMap();
+
+/** One directory lookup per immutable presentation, shared by display and commands.
+ * @param {AuthorizedPresentationFrame} value
+ */
+function identitySlots(value) {
+  const cached = identitySlotCache.get(value);
+  if (cached) return cached;
+  const directory =
+    researcherSpace(value)?.identity_directory ??
+    value.current_endpoint?.identity_directory;
+  /** @type {Map<string, number>} */
+  const slots = new Map();
+  for (const row of isRecord(directory) && Array.isArray(directory.identities)
+    ? directory.identities
+    : []) {
+    if (
+      isRecord(row) &&
+      row.configured_active === true &&
+      typeof row.public_agent_id === "string" &&
+      (row.team_id === 1 || row.team_id === 2) &&
+      Number.isInteger(row.team_local_slot) &&
+      row.team_local_slot >= 0 &&
+      row.team_local_slot < 5
+    )
+      slots.set(row.public_agent_id, (row.team_id - 1) * 5 + row.team_local_slot);
+  }
+  identitySlotCache.set(value, slots);
+  return slots;
+}
+
+/** Numeric researcher display identity; recorded IDs remain untouched.
+ * @param {unknown} value @param {unknown} publicAgentId
+ * @returns {string | null}
+ */
+export function authorizedPresentationAgentDisplayId(value, publicAgentId) {
+  if (!isAuthorizedPresentationFrame(value) || typeof publicAgentId !== "string")
+    return null;
+  const slot = identitySlots(value).get(publicAgentId);
+  return slot === undefined ? null : String(slot);
+}
+
 /**
  * Enumerate exact presentation identities for retained scene/roster nodes.
  * Oracle command slots are derived only from the fixed ten-row public identity
@@ -190,31 +233,7 @@ export function authorizedPresentationIdentityRows(value) {
   }
   const audience = authorizedPresentationAudience(value);
   const globalResearcherSpace = researcherSpace(value);
-  const directory =
-    globalResearcherSpace !== null
-      ? globalResearcherSpace.identity_directory
-      : audience === "researcher" && isRecord(value.current_endpoint)
-        ? value.current_endpoint.identity_directory
-        : null;
-  const commandSlotByPublicId = new Map();
-  if (isRecord(directory) && Array.isArray(directory.identities)) {
-    for (const row of directory.identities) {
-      if (
-        isRecord(row) &&
-        row.configured_active === true &&
-        typeof row.public_agent_id === "string" &&
-        (row.team_id === 1 || row.team_id === 2) &&
-        Number.isInteger(row.team_local_slot) &&
-        row.team_local_slot >= 0 &&
-        row.team_local_slot < 5
-      ) {
-        commandSlotByPublicId.set(
-          row.public_agent_id,
-          (row.team_id - 1) * 5 + row.team_local_slot,
-        );
-      }
-    }
-  }
+  const commandSlotByPublicId = identitySlots(value);
 
   const rows = [];
   const rosterAgents =
@@ -258,7 +277,13 @@ export function authorizedPresentationIdentityRows(value) {
               ? "live_pov_global"
               : "replay_pov_global",
         visible_in_snapshot: visiblePublicIds.has(agent.public_agent_id),
-        agent,
+        agent: Object.freeze({
+          ...agent,
+          display_agent_id: authorizedPresentationAgentDisplayId(
+            value,
+            agent.public_agent_id,
+          ),
+        }),
       }),
     );
   }
@@ -515,6 +540,10 @@ function agentView(rawAgent, presentation) {
   }
   return Object.freeze({
     ...rawAgent,
+    display_agent_id: authorizedPresentationAgentDisplayId(
+      presentation,
+      rawAgent.public_agent_id,
+    ),
     display_key: displayKey,
     alive: rawAgent.life_state === "alive",
     max_health: rawAgent.maximum_health,

@@ -61,6 +61,7 @@ from scripts.dev.visual_debugger.recording import (
     DebuggerRecordingCloseCauseV1,
     DebuggerReplayRecorderV1,
 )
+from scripts.dev.visual_debugger.replay_recorder import DebuggerReplayRecorder
 from scripts.dev.visual_debugger.replay_service import ReplayViewerService
 from scripts.dev.visual_debugger.scenarios import STRESS_SCENARIOS
 
@@ -144,7 +145,7 @@ class DebuggerService:
         preset: Preset | Literal["technical", "debug"],
         include_stress: bool,
         session_id: str | None = None,
-        recorder: DebuggerReplayRecorderV1 | None = None,
+        recorder: DebuggerReplayRecorderV1 | DebuggerReplayRecorder | None = None,
     ) -> None:
         if session.scenario_name in STRESS_SCENARIOS and not include_stress:
             msg = (
@@ -167,9 +168,11 @@ class DebuggerService:
             tuple[str, str],
             _CommandRecord,
         ] = OrderedDict()
-        self._recorder: DebuggerReplayRecorderV1 | None = self._validated_recorder(
-            self._session,
-            recorder,
+        self._recorder: DebuggerReplayRecorderV1 | DebuggerReplayRecorder | None = (
+            self._validated_recorder(
+                self._session,
+                recorder,
+            )
         )
         self._evaluation_observer: EvaluationEpisodeObserverV1 | None = (
             self._new_evaluation_observer(self._session)
@@ -181,8 +184,8 @@ class DebuggerService:
     @staticmethod
     def _validated_recorder(
         session: DebuggerSession,
-        recorder: DebuggerReplayRecorderV1 | None,
-    ) -> DebuggerReplayRecorderV1 | None:
+        recorder: DebuggerReplayRecorderV1 | DebuggerReplayRecorder | None,
+    ) -> DebuggerReplayRecorderV1 | DebuggerReplayRecorder | None:
         if recorder is None:
             if session.evaluation_context.capture_profile != "debug":
                 raise ValueError(
@@ -190,8 +193,8 @@ class DebuggerService:
                 )
             return None
         raw_recorder = cast(object, recorder)
-        if type(raw_recorder) is not DebuggerReplayRecorderV1:
-            raise TypeError("recorder must be exact DebuggerReplayRecorderV1.")
+        if type(raw_recorder) not in (DebuggerReplayRecorderV1, DebuggerReplayRecorder):
+            raise TypeError("recorder must be an exact supported debugger recorder.")
         if session.evaluation_context.capture_profile != "evaluation_metric_complete":
             raise ValueError("recording sessions require metric-complete capture.")
         if (

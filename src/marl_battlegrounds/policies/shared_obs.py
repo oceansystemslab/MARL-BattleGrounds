@@ -221,7 +221,7 @@ def compose_shared_obs_unit_features(
     return ally_features, enemy_features, ally_visible, enemy_visible
 
 
-def _mask_source_bank_for_recipient(
+def mask_source_bank_for_recipient(
     source_bank: SharedObsSensorSourceBankV1,
     recipient_source_availability: Array,
 ) -> SharedObsSensorSourceBankV1:
@@ -282,7 +282,7 @@ def execute_shared_obs_team_policy(
         recipient_source_availability: Array,
         recipient_global_slot: Array,
     ) -> ActorAction:
-        authorized_source_bank = _mask_source_bank_for_recipient(
+        authorized_source_bank = mask_source_bank_for_recipient(
             source_bank,
             recipient_source_availability,
         )
@@ -316,4 +316,5 @@ __all__ = (
     "build_shared_obs_sensor_source_bank",
     "compose_shared_obs_unit_features",
     "execute_shared_obs_team_policy",
+    "mask_source_bank_for_recipient",
 )

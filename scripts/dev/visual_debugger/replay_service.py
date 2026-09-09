@@ -7,28 +7,35 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from secrets import token_urlsafe
 from threading import RLock
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from marl_battlegrounds.evaluation.actor_projection import (
     NO_SHARED_OBS_ACTOR_PROJECTION_V2,
 )
-from marl_battlegrounds.evaluation.analysis import (
-    ReplayAnalysis,
-    analyze_replay,
-)
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV1,
+    AssignedPolicySlotV2,
     canonical_json_bytes,
 )
 from marl_battlegrounds.evaluation.pov import (
     ActorPovReplayContentV1,
     export_actor_pov_replay_v1,
 )
-from marl_battlegrounds.evaluation.replay import ReplayArtifactReferenceV1
+from marl_battlegrounds.evaluation.replay import (
+    ReplayArtifactReferenceV1,
+    ReplayArtifactV1,
+)
 from marl_battlegrounds.evaluation.replay_io import (
+    LoadedReplay,
+    LoadedReplayBundle,
     LoadedReplayBundleV1,
     canonical_metric_report_artifact_json_bytes_v1,
+)
+from marl_battlegrounds.evaluation.replay_v2 import (
+    ReplayArtifactReferenceV2,
+    ReplayArtifactV2,
+    replay_reference_v2,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
     EvaluationScenePresentationStateV1,
@@ -98,6 +105,9 @@ from scripts.dev.visual_debugger.replay_protocol import (
     SharedObsAgentPovReplayTimelineV1,
     SharedObsAgentPovReplayViewerFrameV1,
 )
+
+if TYPE_CHECKING:
+    from marl_battlegrounds.evaluation.analysis import ReplayAnalysis
 
 _COMMAND_RECORD_LIMIT = 256
 _METRIC_REPORT_SUFFIX = ".marlbg-metrics.json"
@@ -176,8 +186,12 @@ def _safe_metric_report_filename(episode_id: str) -> str:
     return f"{stem}{_METRIC_REPORT_SUFFIX}"
 
 
-def _replay_reference(bundle: LoadedReplayBundleV1) -> ReplayArtifactReferenceV1:
+def _replay_reference(
+    bundle: LoadedReplayBundle,
+) -> ReplayArtifactReferenceV1 | ReplayArtifactReferenceV2:
     replay = bundle.replay
+    if type(replay) is ReplayArtifactV2:
+        return replay_reference_v2(replay)
     return ReplayArtifactReferenceV1(
         artifact_id=replay.artifact_id,
         episode_id=replay.header.context.identity.episode_id,
@@ -188,7 +202,7 @@ def _replay_reference(bundle: LoadedReplayBundleV1) -> ReplayArtifactReferenceV1
     )
 
 
-def _completion_badge(bundle: LoadedReplayBundleV1) -> ReplayCompletionBadgeV1:
+def _completion_badge(bundle: LoadedReplayBundle) -> ReplayCompletionBadgeV1:
     completion = bundle.replay.completion
     return ReplayCompletionBadgeV1(
         episode_id=completion.episode_id,
@@ -205,8 +219,12 @@ def _completion_badge(bundle: LoadedReplayBundleV1) -> ReplayCompletionBadgeV1:
     )
 
 
-def _processing_badge(bundle: LoadedReplayBundleV1) -> ReplayProcessingBadgeV1:
-    processing = bundle.replay.processing_status
+def _processing_badge(bundle: LoadedReplayBundle) -> ReplayProcessingBadgeV1:
+    if type(bundle.replay) is ReplayArtifactV2:
+        return ReplayProcessingBadgeV1(
+            status="not_requested", processed_transition_count=0
+        )
+    processing = cast(ReplayArtifactV1, bundle.replay).processing_status
     failure = processing.failure
     return ReplayProcessingBadgeV1(
         status=processing.status,
@@ -236,7 +254,7 @@ def _pov_completion_badge(
 
 
 def _shared_completion_badge(
-    bundle: LoadedReplayBundleV1,
+    bundle: LoadedReplayBundle,
 ) -> ActorPovReplayCompletionBadgeV1:
     """Project physical SharedObs completion without researcher failure detail."""
     completion = bundle.replay.completion
@@ -277,7 +295,7 @@ class ReplayViewerService:
 
     def __init__(
         self,
-        bundle: LoadedReplayBundleV1,
+        bundle: LoadedReplayBundle,
         *,
         initial_frame_index: int = 0,
         view_mode: ReplayViewModeV1 = "researcher",
@@ -286,15 +304,17 @@ class ReplayViewerService:
         armed_lane: Literal[0, 1] | None = None,
         pov_global_slot: int | None = None,
         preset: ReplayPresetV1 | Literal["technical", "debug"] = "analysis",
-        show_ranges: bool = True,
+        show_ranges: bool = False,
         verbose: bool = False,
         viewer_session_id: str | None = None,
     ) -> None:
-        if type(bundle) is not LoadedReplayBundleV1:
-            raise TypeError("bundle must be the exact LoadedReplayBundleV1 root")
-        if bundle.status not in ("complete", "metric_report_missing") or (
-            bundle.metric_report_artifact is None
-        ) != (bundle.status == "metric_report_missing"):
+        if type(bundle) not in (LoadedReplayBundleV1, LoadedReplay):
+            raise TypeError("bundle must be an exact loaded replay root")
+        if bundle.status not in (
+            "complete",
+            "metric_report_missing",
+            "not_recorded",
+        ) or (bundle.metric_report_artifact is None) != (bundle.status != "complete"):
             raise ValueError(
                 "loaded replay status must match metric-report sidecar availability"
             )
@@ -324,7 +344,8 @@ class ReplayViewerService:
         focal_slots: tuple[int, ...] = tuple(
             row.global_slot
             for row in self._context.policy_assignments
-            if isinstance(row, AssignedPolicySlotV1) and row.evaluation_role == "focal"
+            if isinstance(row, (AssignedPolicySlotV1, AssignedPolicySlotV2))
+            and row.evaluation_role == "focal"
         )
         default_slot: int | None = min(focal_slots) if focal_slots else None
         researcher_slot: int | None = (
@@ -357,7 +378,11 @@ class ReplayViewerService:
             recorded_transition_count=len(self._replay.transitions),
             recorded_frame_count=len(self._replay.frames),
             metric_report_availability=(
-                "available" if bundle.metric_report_artifact is not None else "missing"
+                "not_recorded"
+                if type(bundle.replay) is ReplayArtifactV2
+                else "available"
+                if bundle.metric_report_artifact is not None
+                else "missing"
             ),
         )
         self._pov_artifact_summary = ReplayArtifactSummaryV1(
@@ -422,6 +447,12 @@ class ReplayViewerService:
         )
 
     @property
+    def show_ranges(self) -> bool:
+        """Return the viewer preference without exposing an actor observation."""
+        with self._lock:
+            return self._show_ranges
+
+    @property
     def revision(self) -> int:
         with self._lock:
             return self._revision
@@ -473,6 +504,22 @@ class ReplayViewerService:
                 ),
             )
 
+    def episode_details(self) -> tuple[bytes, str]:
+        """Export recorded identity and configuration without trajectory arrays."""
+        replay = self._replay
+        return canonical_json_bytes(
+            {
+                "schema_id": "marlbg.replay.episode_details",
+                "schema_version": 1,
+                "source_replay": self._artifact_summary.replay_reference,
+                "context": self._context,
+                "completion": replay.completion,
+                "runtime_provenance": replay.header.runtime_provenance,
+                "wrapper_stack": replay.header.wrapper_stack,
+                "captured_transition_count": len(replay.transitions),
+            }
+        ), "episode-details.json"
+
     def metric_analysis(
         self, frame_index: int, scope: str, format_: str
     ) -> tuple[bytes, str | None]:
@@ -482,6 +529,8 @@ class ReplayViewerService:
         self._bundle.frame_at(frame_index)
         with self._metric_analysis_lock:
             if self._metric_analysis is None:
+                from marl_battlegrounds.evaluation.analysis import analyze_replay
+
                 self._metric_analysis = analyze_replay(self._bundle, full=True)
             analysis = self._metric_analysis
         if format_ == "json":
@@ -1274,7 +1323,10 @@ class ReplayViewerService:
         cached = cache.get(global_slot)
         if cached is not None:
             return cached
-        if self._context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V2:
+        if (
+            type(self._replay) is ReplayArtifactV2
+            or self._context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V2
+        ):
             content = build_replay_no_shared_obs_visual_content_v1(
                 self._replay,
                 global_slot=global_slot,
@@ -1282,7 +1334,7 @@ class ReplayViewerService:
             exact_actor_input_export_available = False
         else:
             artifact = export_actor_pov_replay_v1(
-                self._replay,
+                cast(ReplayArtifactV1, self._replay),
                 global_slot=global_slot,
             )
             content = artifact.content

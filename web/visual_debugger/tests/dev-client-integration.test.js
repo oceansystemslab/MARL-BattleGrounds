@@ -32,7 +32,7 @@ test("Replay startup cannot load the DevClient authoring module", async () => {
   assert.doesNotMatch(markup, /<script[^>]+src="\/src\/dev-client\.js"/u);
   assert.match(
     main,
-    /const startupIdentity = applyProductIdentity\([\s\S]*startupIdentity\.product_kind === "combat_debugger"[\s\S]*startupIdentity\.authoring_available[\s\S]*import\("\.\/dev-client\.js"\)/u,
+    /const startupIdentity = applyBootstrap\([\s\S]*startupIdentity\.product_kind === "combat_debugger"[\s\S]*startupIdentity\.authoring_available[\s\S]*import\("\.\/dev-client\.js"\)/u,
   );
 });
 

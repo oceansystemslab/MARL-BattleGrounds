@@ -8,7 +8,6 @@ import {
   isReplayViewerFrame,
   normalizeReplayApiErrorV1,
   normalizeReplayCommandResponseV1,
-  normalizeReplayTimelineV1,
   normalizeReplayViewerFrameV1,
 } from "./replay-frame-normalizer.js";
 
@@ -16,10 +15,7 @@ const TOKEN_STORAGE_KEY = "marl-battlegrounds.debugger-token";
 const CLIENT_STORAGE_KEY = "marl-battlegrounds.debugger-client-id";
 const TOKEN_HEADER = "X-MARL-Debugger-Token";
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
-const REPLAY_METRIC_REPORT_ROUTE = "/api/replay/metric-report";
 const AUTHORING_COMMAND_ROUTE = "/api/dev/authoring/command";
-const REPLAY_METRIC_REPORT_CONTENT_TYPE = "application/json; charset=utf-8";
-const REPLAY_METRIC_REPORT_SUFFIX = ".marlbg-metrics.json";
 const UNJOINED_SHARED_REPLAY_FRAME_KINDS = new Set([
   "shared_obs_source_material_replay_viewer",
   "shared_obs_agent_pov_replay_viewer",
@@ -353,118 +349,6 @@ async function fetchWithTimeout(path, options) {
   } finally {
     window.clearTimeout(timeoutId);
   }
-}
-
-/**
- * Validate the complete attachment basename independently of the Python
- * service. The browser never guesses a filename from response content.
- *
- * @param {Response} response
- * @returns {string}
- */
-function replayMetricReportFilename(response) {
-  const contentType = response.headers.get("content-type");
-  const cacheControl = response.headers.get("cache-control");
-  const disposition = response.headers.get("content-disposition");
-  if (
-    contentType !== REPLAY_METRIC_REPORT_CONTENT_TYPE ||
-    cacheControl !== "no-store" ||
-    typeof disposition !== "string"
-  ) {
-    throw new DebuggerApiError(
-      "Replay metric report returned invalid download headers.",
-      { status: response.status },
-    );
-  }
-  const match = /^attachment; filename="([\x20-\x7e]+)"$/u.exec(disposition);
-  const filename = match?.[1] ?? null;
-  if (
-    filename === null ||
-    !filename.endsWith(REPLAY_METRIC_REPORT_SUFFIX) ||
-    filename.split(REPLAY_METRIC_REPORT_SUFFIX).length !== 2
-  ) {
-    throw new DebuggerApiError(
-      "Replay metric report returned an invalid attachment filename.",
-      { status: response.status },
-    );
-  }
-  const stem = filename.slice(0, -REPLAY_METRIC_REPORT_SUFFIX.length);
-  if (
-    stem.length < 1 ||
-    stem.length > 96 ||
-    !/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u.test(stem)
-  ) {
-    throw new DebuggerApiError(
-      "Replay metric report returned an invalid attachment filename.",
-      { status: response.status },
-    );
-  }
-  return filename;
-}
-
-/**
- * Download the already-authorized canonical metric artifact exactly once.
- * Success remains raw bytes; failures cross the strict Replay API envelope.
- *
- * @param {string | null} token
- * @returns {Promise<Readonly<{bytes: ArrayBuffer, filename: string}>>}
- */
-export async function getReplayMetricReport(token) {
-  let response;
-  try {
-    response = await fetchWithTimeout(REPLAY_METRIC_REPORT_ROUTE, {
-      method: "GET",
-      headers: authorizationHeaders(token),
-      cache: "no-store",
-      credentials: "omit",
-      redirect: "error",
-    });
-  } catch (error) {
-    throw new DebuggerApiError(
-      error instanceof Error
-        ? `Could not download the replay metric report: ${error.message}`
-        : "Could not download the replay metric report.",
-    );
-  }
-  if (!response.ok) {
-    await decodeReplayResponse(response);
-    throw new DebuggerApiError("Replay metric report request failed.", {
-      status: response.status,
-    });
-  }
-  if (response.status !== 200) {
-    throw new DebuggerApiError(
-      "Replay metric report returned an unexpected success status.",
-      { status: response.status },
-    );
-  }
-  const filename = replayMetricReportFilename(response);
-  const contentLength = response.headers.get("content-length");
-  if (
-    typeof contentLength !== "string" ||
-    !/^(?:0|[1-9][0-9]*)$/u.test(contentLength) ||
-    !Number.isSafeInteger(Number(contentLength))
-  ) {
-    throw new DebuggerApiError(
-      "Replay metric report returned an invalid content length.",
-      { status: response.status },
-    );
-  }
-  let bytes;
-  try {
-    bytes = await response.arrayBuffer();
-  } catch {
-    throw new DebuggerApiError("Replay metric report bytes could not be read.", {
-      status: response.status,
-    });
-  }
-  if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== Number(contentLength)) {
-    throw new DebuggerApiError(
-      "Replay metric report byte length disagrees with its response headers.",
-      { status: response.status },
-    );
-  }
-  return Object.freeze({ bytes, filename });
 }
 
 /**
@@ -835,22 +719,6 @@ export function extractFrame(payload) {
 
 /**
  * @param {unknown} payload
- * @returns {Readonly<Record<string, any>>}
- */
-export function extractReplayTimeline(payload) {
-  return normalizeReplayTimelineV1(payload);
-}
-
-/**
- * @param {unknown} payload
- * @returns {Readonly<Record<string, any>>}
- */
-export function extractReplayError(payload) {
-  return normalizeReplayApiErrorV1(payload);
-}
-
-/**
- * @param {unknown} payload
  * @returns {string | null}
  */
 export function extractNotice(payload) {
@@ -918,18 +786,84 @@ export async function getReplayMetrics(token, frameIndex, scope, format = "json"
     !isRecord(summary) ||
     summary.scope !== scope ||
     !Number.isSafeInteger(summary.frame_index) ||
+    !Number.isSafeInteger(summary.simulator_step_count) ||
+    summary.simulator_step_count < 0 ||
     summary.frame_index < 0 ||
     (scope === "cursor" && summary.frame_index !== frameIndex) ||
     (scope === "final" && summary.frame_index !== summary.captured_transition_count) ||
     !/^[0-9a-f]{64}$/u.test(summary.source_replay_digest) ||
     !/^[0-9a-f]{64}$/u.test(summary.analysis_source_digest) ||
+    !Array.isArray(summary.families) ||
+    summary.families.some(
+      (/** @type {unknown} */ family) =>
+        !isRecord(family) ||
+        typeof family.name !== "string" ||
+        typeof family.label !== "string" ||
+        typeof family.description !== "string",
+    ) ||
     !Array.isArray(summary.statistics) ||
     summary.statistics.some(
       (/** @type {unknown} */ row) =>
-        !isRecord(row) || typeof row.metric_id !== "string" || !isRecord(row.subject),
+        !isRecord(row) ||
+        typeof row.name !== "string" ||
+        typeof row.label !== "string" ||
+        typeof row.family !== "string" ||
+        typeof row.subject !== "string" ||
+        typeof row.unit !== "string" ||
+        (row.status !== null && typeof row.status !== "string") ||
+        typeof row.description !== "string" ||
+        typeof row.missing_when !== "string" ||
+        !Array.isArray(row.subjects) ||
+        !["episode", "team", "agent", "source_recipient", "ally_pair"].includes(
+          row.scope,
+        ) ||
+        !["higher", "lower", "descriptive"].includes(row.direction) ||
+        typeof row.valid !== "boolean" ||
+        (row.valid
+          ? typeof row.value !== "number" || !Number.isFinite(row.value)
+          : row.value !== null),
     )
   ) {
     throw new TypeError("Invalid replay metric summary.");
   }
   return summary;
+}
+
+/** @param {string | null} token */
+export async function getReplayEpisodeDetails(token) {
+  const response = await fetchWithTimeout("/api/replay/details", {
+    method: "GET",
+    headers: authorizationHeaders(token),
+    cache: "no-store",
+    credentials: "omit",
+    redirect: "error",
+  });
+  if (!response.ok) {
+    await decodeReplayResponse(response);
+    throw new DebuggerApiError("Episode details request failed.", {
+      status: response.status,
+    });
+  }
+  if (
+    response.status !== 200 ||
+    response.headers.get("content-type") !== "application/json; charset=utf-8" ||
+    response.headers.get("cache-control") !== "no-store" ||
+    response.headers.get("content-disposition") !==
+      'attachment; filename="episode-details.json"'
+  ) {
+    throw new TypeError("Invalid episode details attachment.");
+  }
+  const bytes = await response.arrayBuffer();
+  const details = JSON.parse(new TextDecoder().decode(bytes));
+  if (
+    !isRecord(details) ||
+    details.schema_id !== "marlbg.replay.episode_details" ||
+    details.schema_version !== 1 ||
+    !isRecord(details.context) ||
+    !isRecord(details.source_replay) ||
+    !isRecord(details.completion)
+  ) {
+    throw new TypeError("Invalid episode details document.");
+  }
+  return Object.freeze({ bytes, filename: "episode-details.json" });
 }

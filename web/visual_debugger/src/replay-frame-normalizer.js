@@ -8,7 +8,7 @@ const TIMELINE_KINDS = new Set(["researcher", "actor_pov"]);
 const PRESETS = new Set(["presentation", "analysis"]);
 const COMPLETION_STATES = new Set(["complete", "partial", "interrupted", "failed"]);
 const FAILURE_ORIGINS = new Set(["simulation", "policy", "validation", "capture"]);
-const PROCESSING_STATES = new Set(["succeeded", "failed"]);
+const PROCESSING_STATES = new Set(["succeeded", "failed", "not_requested"]);
 const PROCESSING_FAILURE_STAGES = new Set([
   "initial_validation",
   "reducer_initialize",
@@ -245,8 +245,8 @@ function normalizeArtifactReference(value) {
   exactKeys(value, ARTIFACT_REFERENCE_KEYS, "Replay artifact reference");
   if (
     value.schema_id !== REPLAY_ARTIFACT_REFERENCE_SCHEMA_ID ||
-    value.schema_version !== 1 ||
-    value.replay_schema_version !== 1
+    ![1, 2].includes(value.schema_version) ||
+    value.replay_schema_version !== value.schema_version
   ) {
     throw new TypeError("Replay artifact reference root is invalid.");
   }
@@ -307,6 +307,7 @@ function normalizeArtifactSummary(value) {
   if (
     value.metric_report_availability !== "available" &&
     value.metric_report_availability !== "missing" &&
+    value.metric_report_availability !== "not_recorded" &&
     value.metric_report_availability !== "not_available_in_actor_pov"
   ) {
     throw new TypeError("Replay metric-report availability is invalid.");
@@ -563,7 +564,7 @@ function normalizeProcessing(value) {
   ) {
     throw new TypeError("processing.attempted_transition_index is invalid.");
   }
-  if (value.status === "succeeded") {
+  if (value.status === "succeeded" || value.status === "not_requested") {
     if (
       value.failure_stage !== null ||
       value.failure_code !== null ||

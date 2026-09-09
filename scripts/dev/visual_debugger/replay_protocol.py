@@ -14,6 +14,7 @@ from pydantic import (
 )
 
 from marl_battlegrounds.evaluation.replay import ReplayArtifactReferenceV1
+from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactReferenceV2
 from marl_battlegrounds.rendering.evaluation_adapter import (
     SharedObsSourceMaterialProjectionV1,
 )
@@ -60,7 +61,7 @@ type ReplayRolloutFailureOriginV1 = Literal[
     "validation",
     "capture",
 ]
-type ReplayProcessingStateV1 = Literal["succeeded", "failed"]
+type ReplayProcessingStateV1 = Literal["succeeded", "failed", "not_requested"]
 type ReplayProcessingFailureStageV1 = Literal[
     "initial_validation",
     "reducer_initialize",
@@ -169,20 +170,26 @@ class ReplayArtifactSummaryV1(_ReplayProtocolModel):
     """Path-free replay provenance and bounded captured-prefix counts."""
 
     schema_version: Literal[1] = REPLAY_VIEWER_PROTOCOL_SCHEMA_VERSION
-    replay_reference: ReplayArtifactReferenceV1
+    replay_reference: ReplayArtifactReferenceV1 | ReplayArtifactReferenceV2
     expected_transition_count: _PositiveInt
     recorded_transition_count: _NonNegativeInt
     recorded_frame_count: _PositiveInt
     metric_report_availability: Literal[
         "available",
         "missing",
+        "not_recorded",
         "not_available_in_actor_pov",
     ]
 
     @model_validator(mode="after")
     def _validate_summary(self) -> Self:
-        if type(self.replay_reference) is not ReplayArtifactReferenceV1:
-            raise ValueError("replay_reference must be its exact V1 root.")
+        if type(self.replay_reference) not in (
+            ReplayArtifactReferenceV1,
+            ReplayArtifactReferenceV2,
+        ):
+            raise ValueError(
+                "replay_reference must be an exact supported replay reference."
+            )
         if self.recorded_frame_count != self.recorded_transition_count + 1:
             raise ValueError("replay summary requires exact T+1/T counts.")
         if self.recorded_transition_count > self.expected_transition_count:
@@ -347,7 +354,7 @@ class ReplayProcessingBadgeV1(_ReplayProtocolModel):
 
     @model_validator(mode="after")
     def _validate_processing(self) -> Self:
-        if self.status == "succeeded":
+        if self.status in ("succeeded", "not_requested"):
             if any(
                 value is not None
                 for value in (

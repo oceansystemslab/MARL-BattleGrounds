@@ -1,9 +1,8 @@
-"""Opt-in host-side metric streaming over validated evaluation records.
+"""Historical metric schemas and the active validated-record observer boundary.
 
-This module deliberately contains no simulator, JAX, persistence, logging, or
-official metric-formula authority.  It provides strict raw component records,
-an immutable accumulator, and a transactional observer seam for trusted pure
-reducers that consume already validated CP2 transition units.
+Strict V1 component/report records remain readable. The transactional observer
+serves debugger integrity and archived basic report generation; current numerical
+metrics use the public JAX evaluation workflow.
 """
 
 from __future__ import annotations
@@ -29,7 +28,9 @@ from marl_battlegrounds.evaluation.models import (
     REQUIRED_SCHEMA_BINDINGS_V1,
     AggregationKeyV1,
     AssignedPolicySlotV1,
+    EvaluationEpisodeContext,
     EvaluationEpisodeContextV1,
+    EvaluationEpisodeContextV2,
     EvaluationFrameV1,
     EvaluationModel,
     EvaluationTransitionV1,
@@ -585,179 +586,6 @@ def _draft_row_key(
     )
 
 
-def _draft_metadata_key(
-    draft: SufficientStatisticDraftV1,
-) -> tuple[object, ...]:
-    return (
-        *_draft_row_key(draft),
-        draft.reducer_id,
-        draft.reducer_version,
-        draft.units,
-        draft.amount_stage,
-        draft.completion_scope,
-        draft.supports_right_censoring,
-        draft.result_status,
-        draft.status_reason,
-        draft.endpoint_observation_status,
-        None if draft.component is None else draft.component.component_type,
-    )
-
-
-def _merge_components(
-    left: SufficientStatisticComponentV1,
-    right: SufficientStatisticComponentV1,
-) -> SufficientStatisticComponentV1:
-    if type(left) is not type(right):
-        raise ValueError("sufficient-statistic component families must match")
-    if isinstance(left, CountComponentV1) and isinstance(right, CountComponentV1):
-        return CountComponentV1(
-            count=left.count + right.count,
-            eligible_episode_count=max(
-                left.eligible_episode_count,
-                right.eligible_episode_count,
-            ),
-        )
-    if isinstance(left, SumComponentV1) and isinstance(right, SumComponentV1):
-        return SumComponentV1(
-            value=left.value + right.value,
-            observation_count=left.observation_count + right.observation_count,
-            eligible_episode_count=max(
-                left.eligible_episode_count,
-                right.eligible_episode_count,
-            ),
-        )
-    if isinstance(left, RatioComponentV1) and isinstance(right, RatioComponentV1):
-        denominator = left.denominator + right.denominator
-        return RatioComponentV1(
-            numerator=left.numerator + right.numerator,
-            denominator=denominator,
-            zero_opportunity_occurrence=0 if denominator > 0.0 else 1,
-            eligible_episode_count=max(
-                left.eligible_episode_count,
-                right.eligible_episode_count,
-            ),
-        )
-    if isinstance(left, DurationComponentV1) and isinstance(right, DurationComponentV1):
-        return DurationComponentV1(
-            qualifying_steps=left.qualifying_steps + right.qualifying_steps,
-            eligible_steps=left.eligible_steps + right.eligible_steps,
-            eligible_episode_count=max(
-                left.eligible_episode_count,
-                right.eligible_episode_count,
-            ),
-        )
-    if isinstance(left, OpportunityComponentV1) and isinstance(
-        right, OpportunityComponentV1
-    ):
-        return OpportunityComponentV1(
-            opportunity_count=left.opportunity_count + right.opportunity_count,
-            eligible_episode_count=max(
-                left.eligible_episode_count,
-                right.eligible_episode_count,
-            ),
-        )
-    if not isinstance(left, DistributionComponentV1) or not isinstance(
-        right, DistributionComponentV1
-    ):
-        raise TypeError("unrecognized sufficient-statistic component family")
-    source_ids = {
-        row.source_observation_id for row in (*left.observations, *right.observations)
-    }
-    if len(source_ids) != len(left.observations) + len(right.observations):
-        raise ValueError("distribution merges forbid duplicate observation IDs")
-    observations = tuple(
-        row.model_copy(update={"ordinal": ordinal})
-        for ordinal, row in enumerate((*left.observations, *right.observations))
-    )
-    return DistributionComponentV1(
-        observations=observations,
-        eligible_episode_count=max(
-            left.eligible_episode_count,
-            right.eligible_episode_count,
-        ),
-    )
-
-
-def _merge_drafts(
-    left: SufficientStatisticDraftV1,
-    right: SufficientStatisticDraftV1,
-) -> SufficientStatisticDraftV1:
-    if _draft_row_key(left) != _draft_row_key(right):
-        raise ValueError("only identical statistic row keys may merge")
-    if _draft_metadata_key(left) != _draft_metadata_key(right):
-        raise ValueError("statistic metadata conflicts for the same row key")
-    if left.component is None or right.component is None:
-        if left.component is not None or right.component is not None:
-            raise ValueError("undefined statistic component presence must match")
-        return left
-    merged_component = _merge_components(left.component, right.component)
-    merged_status = left.result_status
-    merged_reason = left.status_reason
-    if merged_status == "zero_opportunity" and not _component_has_zero_opportunity(
-        merged_component
-    ):
-        merged_status = "defined"
-        merged_reason = None
-    return _replace_draft(
-        left,
-        component=merged_component,
-        result_status=merged_status,
-        status_reason=merged_reason,
-    )
-
-
-class SufficientStatisticAccumulatorV1(EvaluationModel):
-    """Immutable episode-local collection of compatible raw statistic drafts.
-
-    Cross-episode aggregation consumes finalized ``RawSufficientStatisticV1``
-    rows downstream. It never merges these reducer-state drafts, so a ratio's
-    zero-opportunity occurrence remains the canonical per-episode 0/1 value.
-    """
-
-    entries: tuple[SufficientStatisticDraftV1, ...] = ()
-
-    @model_validator(mode="after")
-    def _validate_entries(self) -> SufficientStatisticAccumulatorV1:
-        for entry in self.entries:
-            _require_stable_nested_model(
-                entry,
-                record_name="accumulator draft",
-                expected_types=(SufficientStatisticDraftV1,),
-            )
-        keys = tuple(_draft_row_key(row) for row in self.entries)
-        if keys != tuple(sorted(keys)):
-            raise ValueError("accumulator entries must be canonically sorted")
-        if len(keys) != len(set(keys)):
-            raise ValueError("accumulator entries must have unique statistic keys")
-        return self
-
-    def add(
-        self,
-        draft: SufficientStatisticDraftV1,
-    ) -> SufficientStatisticAccumulatorV1:
-        """Return a replacement accumulator with one draft added or merged."""
-        replacement = list(self.entries)
-        new_key = _draft_row_key(draft)
-        for index, existing in enumerate(replacement):
-            if _draft_row_key(existing) == new_key:
-                replacement[index] = _merge_drafts(existing, draft)
-                break
-        else:
-            replacement.append(draft)
-        replacement.sort(key=_draft_row_key)
-        return SufficientStatisticAccumulatorV1(entries=tuple(replacement))
-
-    def merge(
-        self,
-        other: SufficientStatisticAccumulatorV1,
-    ) -> SufficientStatisticAccumulatorV1:
-        """Return a replacement containing every compatible entry in ``other``."""
-        replacement = self
-        for draft in other.entries:
-            replacement = replacement.add(draft)
-        return replacement
-
-
 class EvaluationMetricReducerStateV1(EvaluationModel):
     """Frozen identity-bearing base for trusted reducer replacement state."""
 
@@ -1303,12 +1131,29 @@ class EvaluationMetricReportV1(EvaluationModel):
 class EvaluationTransitionViewV1:
     """One fully validated context/start/transition/successor consumer view."""
 
-    context: EvaluationEpisodeContextV1
+    context: EvaluationEpisodeContext
     start_frame: EvaluationFrameV1
     transition: EvaluationTransitionV1
     successor_frame: EvaluationFrameV1
 
     def __post_init__(self) -> None:
+        if type(self.context) is EvaluationEpisodeContextV2:
+            # V2 carries captured facts; this view joins records without replaying
+            # the legacy simulator/metric semantic-validation pipeline.
+            episode_id = self.context.identity.episode_id
+            if (
+                self.start_frame.episode_id != episode_id
+                or self.successor_frame.episode_id != episode_id
+                or self.transition.episode_id != episode_id
+                or self.transition.start_frame_id != self.start_frame.frame_id
+                or self.transition.successor_frame_id != self.successor_frame.frame_id
+                or self.successor_frame.simulator_step_count
+                != self.start_frame.simulator_step_count + 1
+            ):
+                raise ValueError(
+                    "captured transition view must join adjacent episode frames"
+                )
+            return
         (
             canonical_context,
             canonical_start,
@@ -1327,7 +1172,7 @@ class EvaluationTransitionViewV1:
 
 
 def _view_from_owned_records(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     start_frame: EvaluationFrameV1,
     transition: EvaluationTransitionV1,
     successor_frame: EvaluationFrameV1,
@@ -2147,7 +1992,6 @@ __all__ = [
     "StatisticDimensionV1",
     "StatisticResultStatus",
     "StatisticSubjectV1",
-    "SufficientStatisticAccumulatorV1",
     "SufficientStatisticComponentV1",
     "SufficientStatisticDraftV1",
     "SumComponentV1",

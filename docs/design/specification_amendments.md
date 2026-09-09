@@ -2399,8 +2399,8 @@ This amendment records decisions and planned work, not implementation completion
 | M14 | Capture the Flag | M9 |
 
 The submission sequence is M7 through M12. M13 and M14 begin after manuscript
-submission. Milestones 1–6 retain their identities. The current M12 owns full
-manuscript training runs, behavioral ablations, the frozen Paper 1 tournament,
+submission and the optimization audit below. Milestones 1–6 retain their identities.
+The current M12 owns full manuscript training runs, behavioral ablations, the frozen Paper 1 tournament,
 analysis and release artifacts. Earlier milestones qualify their machinery
 with focused tests and bounded pilots; protocols and selection rules are
 frozen before the dependent full runs.
@@ -2410,6 +2410,23 @@ versioned schema identifiers are not mechanically renumbered. Their old numbers
 are aliases under this table. New plans use the current name/number and give
 the historical alias when needed to disambiguate a source. Existing private
 handoffs remain at their original paths with an explicit current-name notice.
+
+### Post-manuscript optimization audit
+
+The user's 2026-09-08 decision requires a dedicated optimization phase after
+manuscript completion and before KOTH/CTF implementation. Profile representative
+training, validation, evaluation, metrics, replay and persistence workloads across
+realistic batch sizes and rollout lengths. Examine runtime, peak VRAM/RAM, data
+transfer, allocation and disk costs; remove repeated computation and serialization.
+Address every identified material improvement and verify unchanged results with
+before/after measurements. Close the audit only when no identified material
+optimization remains unresolved for the declared workloads. Keep researcher
+interfaces simple and require explicit approval for concrete Core changes.
+
+The ambition is to make MARL-BGs one of the most efficient MARL benchmarks.
+Substantiate comparisons with equivalent workloads, declared hardware/precision,
+warm and compilation timings, memory measurements and preserved semantics. This
+phase does not renumber milestones or defer optimization during active work.
 
 ### Approved scenarios and maps
 

@@ -34,21 +34,23 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContextV1,
     ExecutionInformationMode,
 )
+from marl_battlegrounds.evaluation.policy_execution import (
+    Policy,
+    PolicyTree,
+    apply_policies,
+    policy,
+)
 from marl_battlegrounds.policies.actor import (
     ActorAction,
     build_joint_action_from_actor_actions,
 )
+from marl_battlegrounds.policies.input import ActorInput, Observations
 from marl_battlegrounds.policies.no_shared_obs import (
     execute_no_shared_obs_team_policy,
 )
 from marl_battlegrounds.policies.random_valid import random_policy
-from marl_battlegrounds.policies.reactive_tdm_alpha import reactive_tdm_alpha_policy
-from marl_battlegrounds.policies.reactive_tdm_beta import reactive_tdm_beta_policy
 from marl_battlegrounds.policies.shared_obs import (
-    SharedObsSensorSourceBankV1,
     build_default_shared_obs_information_availability,
-    build_shared_obs_sensor_source_bank,
-    execute_shared_obs_team_policy,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
     advance_status_source_evidence_v2,
@@ -366,120 +368,102 @@ def _policy_keys(session: DebuggerSession) -> Array:
     return actor_keys
 
 
-def _random_shared_obs_policy(
-    recipient_observation: Observation,
-    recipient_action_mask: ActionMask,
+def _manual_policy(
+    variables: PolicyTree,
+    carry: PolicyTree,
+    actor: ActorInput,
+    mask: ActionMask,
     key: Array,
-    source_bank: SharedObsSensorSourceBankV1,
-    recipient_source_availability: Array,
-    recipient_global_slot: Array,
-) -> ActorAction:
-    """Expose Random through the SharedObs ABI without changing its semantics."""
-    del source_bank, recipient_source_availability, recipient_global_slot
-    return random_policy(recipient_observation, recipient_action_mask, key)
+) -> tuple[ActorAction, PolicyTree]:
+    """Read a precommitted manual row through the same scalar actor interface."""
+    del mask, key
+    action = cast(Action, variables)
+    return ActorAction(*(value[actor.global_slot] for value in action)), carry
 
 
-def _resolve_team_controller_action(
-    session: DebuggerSession,
-    *,
-    team_identity: int,
-    controller: TeamBController,
-    policy_keys: Array,
-    source_bank: SharedObsSensorSourceBankV1 | None,
-    information_availability: Array | None,
-) -> ActorAction:
-    """Resolve one explicit team controller from the current decision epoch."""
+def _configured_policy(
+    session: DebuggerSession, team_identity: int, controller: TeamBController
+) -> Policy:
+    """Adapt existing stateless choices; no learned-policy UI or memory is added."""
     if controller == "manual":
-        team_slots = tuple(
+        slots = tuple(
             row.global_slot
             for row in session.evaluation_context.roster
             if row.configured_active and row.configured_team_id == team_identity
         )
-        manual_action = build_interactive_joint_action(
+        action = build_interactive_joint_action(
             session.evaluation_context,
             session.pending_actions,
-            actor_global_slots=team_slots,
+            actor_global_slots=slots,
         )
-        return _team_actor_action(manual_action, team_identity)
-
-    mode = session.evaluation_context.execution_information_mode
-    if mode == "shared_obs":
-        if source_bank is None or information_availability is None:
-            raise ValueError("SharedObs policy execution requires its source inputs")
-        if controller == "reactive_tdm":
-            policy = reactive_tdm_alpha_policy
-        elif controller == "random_valid":
-            policy = _random_shared_obs_policy
-        elif controller == "scenario_5" and team_identity == TEAM_B_ID:
-            policy = reactive_tdm_beta_policy
-        else:
-            raise ValueError("unsupported team controller")
-        return cast(
-            ActorAction,
-            execute_shared_obs_team_policy(
-                session.observation,
-                session.action_mask,
-                policy_keys,
-                source_bank,
-                information_availability,
-                policy=policy,
-                team_identity=team_identity,
-            ),
-        )
-    if mode != "no_shared_obs":
-        raise ValueError("unsupported execution information mode")
-    if controller != "random_valid":
-        raise ValueError("unsupported team controller")
-    return cast(
-        ActorAction,
-        execute_no_shared_obs_team_policy(
-            session.observation,
-            session.action_mask,
-            policy_keys,
-            policy=random_policy,
-            team_identity=team_identity,
-        ),
+        return Policy("manual", _manual_policy, variables=action)
+    if controller == "scenario_5" and team_identity != TEAM_B_ID:
+        raise ValueError("scenario controller belongs to Team B")
+    return policy(
+        {
+            "reactive_tdm": "tdm-alpha",
+            "random_valid": "random",
+            "scenario_5": "tdm-beta",
+        }[controller]
     )
 
 
 def _build_configured_joint_action(session: DebuggerSession) -> Action:
-    """Resolve both team controllers from one current decision epoch."""
-    controllers: tuple[tuple[int, TeamBController], ...] = (
-        (TEAM_A_ID, session.team_a_controller),
-        (TEAM_B_ID, session.team_b_controller),
-    )
-    if all(controller == "manual" for _team_id, controller in controllers):
+    """Resolve both teams before the single existing simulator step.
+
+    SharedObs uses the public five-argument application authority. Legacy
+    NoSharedObs Random keeps its original three-argument, no-source-bank ABI.
+    """
+    controllers = (session.team_a_controller, session.team_b_controller)
+    if controllers == ("manual", "manual"):
         raise ValueError("configured policy assembly requires one policy team")
-
     mode = session.evaluation_context.execution_information_mode
-    information_availability: Array | None = None
-    source_bank = None
+    availability = _captured_information_availability(session)
+    keys = _policy_keys(session)
     if mode == "shared_obs":
-        information_availability = _captured_information_availability(session)
-        assert information_availability is not None
-        source_bank = build_shared_obs_sensor_source_bank(session.observation)
-    elif mode == "no_shared_obs":
-        if _captured_information_availability(session) is not None:
-            raise ValueError("NoSharedObs must not expose SharedObs availability.")
-    else:
-        raise ValueError("unsupported execution information mode")
-
-    policy_keys = _policy_keys(session)
-    team_actions = [
-        _resolve_team_controller_action(
-            session,
-            team_identity=team_identity,
-            controller=controller,
-            policy_keys=policy_keys,
-            source_bank=source_bank,
-            information_availability=information_availability,
+        if availability is None:
+            raise ValueError("SharedObs requires captured information availability")
+        first = _configured_policy(session, TEAM_A_ID, controllers[0])
+        second = _configured_policy(session, TEAM_B_ID, controllers[1])
+        action, _, _ = apply_policies(
+            first.apply,
+            second.apply,
+            first.variables,
+            second.variables,
+            first.initial_carry,
+            second.initial_carry,
+            Observations(session.observation, availability),
+            session.action_mask,
+            keys,
         )
-        for team_identity, controller in controllers
-    ]
-    return build_joint_action_from_actor_actions(
-        team_actions[0],
-        team_actions[1],
-    )
+        return action
+    if mode != "no_shared_obs" or availability is not None:
+        raise ValueError("unsupported execution information mode")
+    actions: list[ActorAction] = []
+    for team_identity, controller in zip(
+        (TEAM_A_ID, TEAM_B_ID), controllers, strict=True
+    ):
+        if controller == "manual":
+            manual = _configured_policy(session, team_identity, controller)
+            actions.append(
+                _team_actor_action(cast(Action, manual.variables), team_identity)
+            )
+        elif controller == "random_valid":
+            actions.append(
+                cast(
+                    ActorAction,
+                    execute_no_shared_obs_team_policy(
+                        session.observation,
+                        session.action_mask,
+                        keys,
+                        policy=random_policy,
+                        team_identity=team_identity,
+                    ),
+                )
+            )
+        else:
+            raise ValueError("unsupported NoSharedObs team controller")
+    return build_joint_action_from_actor_actions(actions[0], actions[1])
 
 
 def build_scripted_joint_action(

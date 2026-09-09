@@ -40,7 +40,12 @@ const AUTHORIZED_IDENTITY_KEYS = Object.freeze([
  */
 export function canonicalAgentIdentity(rawAgent) {
   const fields = identityDataFields(rawAgent);
-  return formatIdentity(fields?.public_agent_id, fields?.class_id, fields?.team_id);
+  return formatIdentity(
+    fields?.public_agent_id,
+    fields?.class_id,
+    fields?.team_id,
+    fields?.display_agent_id,
+  );
 }
 
 /**
@@ -84,7 +89,12 @@ export function exactAuthorizedAgentIdentityV1(rawAgent) {
   ) {
     return null;
   }
-  const identity = formatIdentity(publicAgentId, classId, teamId);
+  const identity = formatIdentity(
+    publicAgentId,
+    classId,
+    teamId,
+    fields.display_agent_id,
+  );
   return Object.freeze({
     presentationKey,
     publicAgentId,
@@ -98,9 +108,12 @@ export function exactAuthorizedAgentIdentityV1(rawAgent) {
   });
 }
 
-/** @param {unknown} publicAgentId @param {unknown} classId @param {unknown} teamId */
-function formatIdentity(publicAgentId, classId, teamId) {
-  const normalizedPublicId = displayIdentifier(publicAgentId);
+/** @param {unknown} publicAgentId @param {unknown} classId @param {unknown} teamId @param {unknown} displayId */
+function formatIdentity(publicAgentId, classId, teamId, displayId) {
+  const normalizedPublicId =
+    typeof displayId === "string" && /^[0-9]$/u.test(displayId)
+      ? displayId
+      : displayIdentifier(publicAgentId);
   const classIdentity =
     Number.isInteger(classId) &&
     Object.hasOwn(CLASS_BY_ID, /** @type {number} */ (classId))
@@ -153,7 +166,7 @@ function identityDataFields(value) {
     const descriptors = Object.getOwnPropertyDescriptors(value);
     /** @type {Record<string, unknown>} */
     const fields = Object.create(null);
-    for (const key of ["public_agent_id", "class_id", "team_id"]) {
+    for (const key of ["public_agent_id", "class_id", "team_id", "display_agent_id"]) {
       const descriptor = descriptors[key];
       fields[key] =
         descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
@@ -195,6 +208,10 @@ function exactAuthorizedIdentityFields(value) {
         return null;
       }
       fields[key] = descriptor.value;
+    }
+    const display = descriptors.display_agent_id;
+    if (display && Object.hasOwn(display, "value") && display.enumerable) {
+      fields.display_agent_id = display.value;
     }
     return fields;
   } catch {

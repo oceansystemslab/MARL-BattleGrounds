@@ -23,56 +23,153 @@ an official result.
 Stable IDs are public semantic references for documentation, artifacts and
 tests. Formulas may be implemented only by their named owner.
 
-### Implemented TDM episode measurements
+## Current scalar TDM contract
 
-Milestone 7 implements the 46 episode metric IDs exported as
-`TDM_EPISODE_METRIC_IDS` from `marl_battlegrounds.evaluation.reducers`.
-`build_tdm_metric_reducers()` defaults to the critical outcome reducer: outcome
-distribution, terminal score differential, evaluation return, episode length,
-and completion/failure metadata. Full metrics are off by default.
-`build_tdm_metric_reducers(full=True)` explicitly selects all three families
-for the complete 46-ID suite. Both profiles share the same metric definitions.
-They consume validated recorded facts and preserve raw sufficient components,
-amount stages, opportunities, subjects, and endpoint eligibility. Implementation
-does not promote descriptive or validation-pending metrics to confirmatory
-claims. Undefined priority-target selection remains explicitly unavailable.
-Team-wipe candidates, future tasks, population ratings, learning curves and
-policy-sidecar measurements are outside this single-episode inventory.
+The current schema is `marlbg.tdm.scalar@1`: **26 priority numeric columns** and
+**1,388 full numeric columns**, with priority included in full. Column order and
+names remain identical across valid one-through-five-agent, asymmetric,
+permuted-class and repeated-class rosters. This schema supersedes the historical
+46-ID report catalog for new computation. It contains no KOTH or CTF metrics.
+The former host `full=True` reducer factory and unused draft accumulator are
+retired. `build_tdm_metric_reducers()` retains only the five basic V1 outcome
+statistics needed to reproduce archived samples; new full computation uses
+`evaluate(..., metrics="full")` or the corresponding environment mode.
+Historical V1 component/report schemas and readers remain supported.
 
-Recorded DevClient episodes compute the critical default set after capture stops. Replay
-Viewer uses `marl_battlegrounds.evaluation.analysis.analyze_replay` to prepare a
-reusable index from recorded facts without stepping the simulator. The library
-API defaults to critical metrics; `analyze_replay(bundle, full=True)` requests
-full diagnostics, as does explicitly opening the Viewer metrics panel or
-requesting its derived CSV. Its
-`summary(frame_index, scope="cursor")` and `csv(frame_index, scope="cursor")`
-methods expose measurements at that boundary; `scope="final"` explicitly
-selects the captured endpoint. Complete-episode measurements remain unavailable
-at an intermediate cursor. Frame zero is a valid empty observation interval.
+[The column data dictionary](metric_columns.csv) lists all **1,418 full-table
+columns**: 30 identity columns followed by 1,388 numerical measurements. Priority
+tables have **56 columns**. The dictionary includes meaning, units, scope,
+subjects, missingness, priority/full membership, GUI label and defensible direction.
+It uses the writer's identity order and `evaluation/metric_catalog.py`;
+`python -m scripts.dev.export_metric_dictionary --check` detects stale exports.
+In its `subjects` field, team scope uses Core IDs 1/2, agent scope uses slots 0–9,
+source/recipient scope orders source before recipient, and ally pairs are unordered
+pairs written with the lower slot first. Class IDs remain recorded row metadata.
 
-CSV retains components and distribution observations for later aggregation,
-alongside completion, processing, source replay, simulation and analysis
-identities. Display values are host projections of those same components.
-Distribution observations are stored once with boundary offsets. Trusted reducer
-outputs are assembled once with cheap progress, identity, eligibility and
-provenance checks; computation does not recursively revalidate accumulated
-history or rebuild the report tree. External artifact ingestion and independent
-semantic tests validate the scientific records. Reanalysis never overwrites the
-original recorded metric report or its processing result.
+### Selection and cost boundary
 
-Metric APIs return data without automatic file writes. Training defaults to
-lightweight episode statistics, with detailed TDM metrics optional or enabled
-for periodic evaluation. Training and validation-map evaluation reuse one
-evaluator; cadence/API details remain provisional pending the user's cost review. The learning platform owns batched, periodically
-flushed logging to one CSV per run. Replay recording is a separate opt-in or
-sampling control; full diagnostic capture is not the training default. Ladder
-results retain match-level sufficient components and running aggregates in one
-results file, stratified by the declared matchup and evaluation cell. Compute
-rates from pooled numerators/opportunities, preserving completion/failure and
-exclusion counts; an average of episode percentages is generally insufficient. Public ladder columns are limited to Elo,
-win/loss/draw rates, matches played and evaluated-system identity; full tactical
-metrics are local opt-in diagnostics. A secondary team K/D column pools tournament kill/death totals; no-death results
-are unavailable. Preserve the raw totals, and keep K/D separate from rating inputs.
+`make()` and `evaluate()` accept one mode: `metrics="none"`, `"priority"` (default),
+or `"full"`. `full_metrics_episodes` independently upgrades chosen one-based
+planned episode IDs. `replay_episodes` independently requests capture; neither
+selection implies the other. Finite integer iterables include `range(...)` and
+lists. Resolve selections before compiled transitions. Metric computation needs
+authoritative transition facts, not replay files.
+
+Priority records episode length; both teams' win/draw/loss indicators; canonical
+agent/team returns; Team A/B scores and A-minus-B difference; team kills/deaths.
+Team return de-broadcasts Core's per-agent team reward, so adding active teammates
+does not multiply it. Kills count deaths during this episode, independently of
+initialized scenario scores. Full includes every retained family below. None
+retains only intrinsic environment completion/outcome needed for execution.
+
+Numerical accumulation/finalization is JAX, with fixed-size integer/float32/boolean
+arrays and no mandatory trajectory. Floating GPU matrix reductions explicitly
+preserve float32 precision. Formatting, host metadata and CSV are outside the
+compiled numerical path. The performance command measures these stages separately;
+a fast final formatting operation is not evidence for fast metric computation.
+
+### Tables and identity
+
+Each CSV row describes one episode. `priority_metrics.csv` includes priority/full
+selected episodes; `full_metrics.csv` includes full-selected episodes and copies
+already computed priority values. Tournament `match_results.csv` replaces a
+redundant priority file, preserving mandatory outcomes when optional metrics are
+disabled. Shared definitions/configurations/provenance live in `run_details.json`.
+Without an output destination, return in-memory columns and create no files.
+
+Identity columns are `run_id`, `phase`, `pass_id`, `episode_id`, `seed_id`, `map_id`,
+`config_id`, `team_a_policy`, `team_b_policy`, `checkpoint_id`, then
+`agent_0_class_id`, `agent_0_active`, through slot 9. Episode IDs are positive
+integers assigned before execution; seeds identify random streams independently
+of completion order. `map_id` can be missing for a custom configuration; `config_id`
+identifies its recorded configuration. Unknown checkpoint/seed information stays
+missing. Active flags are 0/1; fixed slot/team mapping is 0–4 Team A, 5–9 Team B.
+Unknown training history is never filled with fabricated zero steps or run names.
+A training episode spanning parameter updates belongs to an evolving policy.
+
+Unavailable measurements are empty CSV cells; real zeros remain zero. An active
+Priest's Damage Done and an active Mage's Healing Done are valid zeros. Inactive
+subjects, absent class-specific capabilities and zero-denominator rates/means are
+unavailable. Failures raise errors, never become empty cells. Column names encode
+slots, never class names, making curriculum comparisons directly joinable.
+
+`RunWriter.write(infos)` consumes all completion records and selected packets in
+a step or rollout chunk. `flush()` acknowledges durability; closing flushes.
+Writes append buffered batches. New output destinations get unique child runs;
+resumption requires `resume_from`. Recovery uses durable boundaries, preserving
+exactly-once completion. Disk failures are also recorded when possible.
+
+### Retained families and attribution
+
+- Ability activations: Basic/Ultimate by agent/team; referenced by other GUI groups.
+- Deaths: agent/team counts, fractions, dead-agent steps and fractions of team dead time.
+- Kill contributions: direct damage on the authoritative lethal transition plus
+  useful same-tick Priest healing of a direct contributor. Deduplicate each
+  Priest/enemy/transition; no recursive support chains or wasted-heal credit.
+- Damage/healing done: delivered after modifiers, before health caps, including
+  overkill/overhealing. Source/recipient amounts are the sole amount authority;
+  source/team/recipient totals derive from them. Regeneration is separate.
+- Received healing: delivered Priest healing and actual regeneration, with the
+  same combined denominator for component fractions. Waste is allocated among
+  simultaneously healing Priests in proportion to delivered healing.
+- Controlled recipients: transition-start status, including damage that breaks
+  an existing Trap. New same-tick control is not retroactive. Status channels
+  overlap and must not be summed as unique controlled time.
+- Coordination: mean per-tick Focus Fire Concentration over ticks with at least
+  two damaging agents. Single/multiple contributor kill counts and fractions
+  include useful Priest support; focus fire remains about damaging agents.
+- Action acceptance: submitted/fully accepted/rejected whole actions. Named
+  rejection reasons can overlap and do not add to the number of rejected actions.
+- Control/status: application counts belong to the source; active steps belong
+  to the affected recipient. Persistent merged effects get no invented caster.
+- Trap breaks: damage-broken periods divided by all observed continuous Trap
+  periods, including initially active and still-open periods. Refresh alone
+  does not split a period; break/reapply does. Credit raw-damage contributors;
+  measure remaining duration at the aged break phase, not natural expiry.
+- Respawn: team waves and mean agents respawned per wave.
+- Burst: Mage damage while active, fraction of Mage damage, lethal-tick Burst
+  damage, and kill contributions during Burst.
+- Aura coverage: emitter coverage can overlap; unique team coverage counts a
+  recipient once. Combined Mage damage gain/Warrior prevention are team-level,
+  with no invented individual emitter shares.
+- Poison: affected-agent/team healing prevention; duration reuses status steps.
+- Priest lethal damage rescue: team opportunities, saves and fraction; individual
+  rescue participation. Capability combines legal available healing under the
+  existing masks and Core helpers against actual observed incoming damage;
+  individual participation does not imply solo rescue capability.
+- Freedom: steps where Freedom reduces the applicable slow restriction, without
+  claiming an agent moved or benefited strategically.
+- Formation: transition-start living ally distances, with each eligible unordered
+  pair counted once. Team mean is weighted by pair observations.
+
+### Column and presentation audit
+
+Recipient matrices are limited to requested damage/healing breakdowns; formation
+uses20 ally pairs. There is no universal agent/recipient/status/ability expansion,
+class-summary duplication, second agent-ID column or export of private counters.
+Team-to-recipient totals reuse received amount columns. Burst activations reuse
+Ultimate activations; poison duration reuses status steps. Requested complements
+remain: both scores/difference, and single/multiple contributor fractions. Full
+rows deliberately repeat priority values so each row is independently usable.
+
+The Viewer groups these same values for readability, rather than displaying a
+1,388-column spreadsheet. Controls use **Up to Current Tick** and **Final Episode**.
+One linear prefix index supports seeking without repeated history reductions;
+intermediate prefixes never disclose future outcomes or denominators. GUI values
+and CSV at the same boundary agree. Inapplicable/undefined cells explain their
+missingness. Formation, activity and contextual tactics have **No Preferred
+Direction** unless the catalog justifies a stronger interpretation.
+
+## Historical rationale and V1 registry
+
+The sections below preserve design rationale, historical V1 metric IDs and
+future-task proposals used by existing artifacts and references. Their older
+presentation budgets, standalone metric dispositions and raw-component report
+layout do not override the current scalar contract above. V1 artifacts remain
+readable; new runs do not retain obsolete cooldown-edge, net-health-change,
+clamp-overflow, Trap-interval-end, spawn-shield-expiry, phase-displacement,
+combat-countdown-reset, priority-target-share or lifecycle-cause metric groups.
+Future KOTH/CTF proposals remain inactive until after manuscript submission.
 
 ## Metric constitution
 
@@ -355,20 +452,18 @@ censoring estimand and preserves the required censoring component.
 
 Milestone 6 CP3 supplies strict generic count, sum, ratio-component,
 duration-component, opportunity, and distribution-observation records. It does
-not implement the metric formulas below. One immutable
-`SufficientStatisticAccumulatorV1` combines only drafts with the same complete
-semantic key and preserves raw components; ratios, means, ratings, uncertainty,
+not implement the metric formulas below. Historical records preserve raw
+components and complete semantic keys; ratios, means, ratings, uncertainty,
 and presentation values remain downstream derivations. Agent and policy
 subjects must join configured-active context rows. An absent class may appear
 as `structurally_inapplicable`, never as a fabricated zero, and padded actors
 never enter opportunity denominators merely because their canonical no-op mask
 has a valid category.
 
-The CP3 accumulator is episode-local. Its `eligible_episode_count` is therefore
-exactly `0` or `1`, and a ratio's `zero_opportunity_occurrence` is the final
-episode-level `0` or `1` incidence after local contributions merge. Later
-cross-episode reduction counts those finalized raw rows; it does not merge CP3
-draft accumulators and cannot erase zero-opportunity episodes.
+A historical CP3 draft is episode-local. Its `eligible_episode_count` is
+therefore exactly `0` or `1`, and a ratio's `zero_opportunity_occurrence` records
+the final episode-level `0` or `1` incidence. Cross-episode interpretation must
+preserve these finalized raw rows and their zero-opportunity episodes.
 At final materialization, an incomplete or otherwise ineligible row carries
 `eligible_episode_count = 0`; `defined` and eligible `zero_opportunity` rows
 carry `1`. A ratio with a recorded zero-opportunity occurrence finalizes as
@@ -637,11 +732,12 @@ For the planned Big 12 instantiation, exactly twelve method entrants contribute
 one validation-selected fixed system and one Elo value each. The resulting 66
 unordered pairings contain 100 episodes apiece—five maps by ten evaluation
 coordinates by two side assignments—for 6,600 episodes total. The complete
-win/draw/loss matrix is authoritative. The planned compact estimator is one
-jointly fitted, draw-aware Bradley–Terry–Davidson model centred at 1000, and is
-secondary to that matrix. Its exact parameterization, uncertainty, convergence
-and failure rules, implementation identity, and rounding must be frozen and
-qualified before activation.
+win/draw/loss matrix is authoritative. The qualified compact estimator is one
+jointly fitted, draw-aware Bradley–Terry–Davidson model centred at 1200, and is
+secondary to that matrix. The evaluation protocol freezes its
+[parameterization, uncertainty, convergence, failure rules and presentation](protocol.md#frozen-rating-and-uncertainty-contract).
+The implementation is qualified on bounded synthetic tournaments; manuscript
+policy training and the full Paper 1 tournament remain future work.
 
 Rows 1–11 each retain three independent training runs. A rule frozen before
 training first selects an eligible checkpoint within each run from validation
@@ -656,7 +752,7 @@ changing pools without a separately specified longitudinal model.
 
 Metric definitions do not automatically become rewards. A single label would
 conflate availability, information privilege, credit, and objective impact, so
-future M12 tooling records four independent axes:
+future M10 tooling records four independent axes:
 
 | Axis | Values |
 | --- | --- |

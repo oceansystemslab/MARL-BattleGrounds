@@ -1,3 +1,4 @@
+import { canonicalAgentIdentity } from "./agent-identity.js";
 import {
   authorizedPresentationResearcherSceneView,
   authorizedPresentationSceneView,
@@ -376,11 +377,7 @@ function ownEnumerableDataValue(value, key) {
  * @param {unknown} agent
  */
 function agentIdentity(agent) {
-  return isRecord(agent) &&
-    typeof agent.public_agent_id === "string" &&
-    agent.public_agent_id.trim()
-    ? `Agent ID ${agent.public_agent_id}`
-    : "Agent identity unavailable";
+  return canonicalAgentIdentity(agent).publicIdentity;
 }
 
 /**
@@ -1396,7 +1393,7 @@ export class BattlefieldRenderer {
         "aria-label",
         [
           `${body.relation} observation row ${body.observation_row}`,
-          `Agent ID ${body.public_agent_id}`,
+          agentIdentity(body),
           classToken.label,
           `life state ${body.alive ? "alive" : "corpse"}`,
           `health ${formatDisplayNumber(body.current_health)} of ${formatDisplayNumber(body.max_health)}`,
@@ -2811,7 +2808,7 @@ export class BattlefieldRenderer {
     nodes.root.setAttribute(
       "aria-label",
       [
-        `Agent ID ${agent.public_agent_id}`,
+        agentIdentity(agent),
         classToken.label,
         teamToken.label,
         `health ${formatDisplayNumber(agent.current_health)} of ${formatDisplayNumber(agent.max_health)}`,

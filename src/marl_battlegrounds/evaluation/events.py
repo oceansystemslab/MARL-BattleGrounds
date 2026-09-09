@@ -15,7 +15,7 @@ from marl_battlegrounds.evaluation.models import (
     CombatCountdownResetEventV1,
     CooldownReadyEventV1,
     CooldownStartedEventV1,
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContext,
     EvaluationEventBaseV1,
     EvaluationEventV1,
     EvaluationFrameV1,
@@ -125,7 +125,7 @@ def _require_routed_recipient(
 
 
 def _ultimate_activation_recipient(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     source_global_slot: int,
     recipient_global_slot: int | None,
 ) -> int | None:
@@ -149,7 +149,7 @@ def _ultimate_activation_recipient(
 
 
 def _basic_activation_recipient(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     source_global_slot: int,
     recipient_global_slot: int | None,
 ) -> int:
@@ -167,7 +167,7 @@ def _basic_activation_recipient(
 
 
 def _validate_decoder_inputs(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     start_frame: EvaluationFrameV1,
     facts: TransitionFactsV1,
     successor_frame: EvaluationFrameV1,
@@ -190,7 +190,7 @@ def _validate_decoder_inputs(
 
 def _append_action_candidates(
     candidates: list[_EventCandidate],
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     facts: TransitionFactsV1,
 ) -> None:
     """Copy every independently rejected component and accepted activation."""
@@ -641,7 +641,7 @@ def _status_application_flags_by_source(
 
 
 def _validate_status_application_source(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     facts: TransitionFactsV1,
     source_global_slot: int,
     status_channel: int,
@@ -665,7 +665,7 @@ def _validate_status_application_source(
 
 def _append_status_candidates(
     candidates: list[_EventCandidate],
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     facts: TransitionFactsV1,
 ) -> None:
     """Emit independent lifecycle causes and direct source applications."""
@@ -758,7 +758,7 @@ def _append_status_candidates(
 
 def _append_respawn_candidates(
     candidates: list[_EventCandidate],
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     facts: TransitionFactsV1,
     successor_frame: EvaluationFrameV1,
 ) -> None:
@@ -821,7 +821,7 @@ def _append_respawn_candidates(
 
 
 def _derive_team_deathmatch_authority_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     start_frame: EvaluationFrameV1,
     facts: TransitionFactsV1,
     successor_frame: EvaluationFrameV1,
@@ -928,7 +928,7 @@ def _derive_team_deathmatch_authority_v1(
 
 def _append_team_deathmatch_candidates(
     candidates: list[_EventCandidate],
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     start_frame: EvaluationFrameV1,
     facts: TransitionFactsV1,
     successor_frame: EvaluationFrameV1,
@@ -983,7 +983,7 @@ def _append_team_deathmatch_candidates(
 
 
 def decode_evaluation_events_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     start_frame: EvaluationFrameV1,
     facts: TransitionFactsV1,
     successor_frame: EvaluationFrameV1,

@@ -17,7 +17,7 @@ if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
 if TYPE_CHECKING:
-    from marl_battlegrounds.evaluation.replay_io import LoadedReplayBundleV1
+    from marl_battlegrounds.evaluation.replay_io import LoadedReplayBundle
 
 type _ViewMode = Literal["researcher", "pov"]
 
@@ -69,7 +69,8 @@ read-only replay controls:
                         1.75{_RATE_SUFFIX} / 2.00{_RATE_SUFFIX}
                         scale the complete presentation clock
   Export PNG            export the settled battlefield with replay provenance
-  Download Metrics      canonical metric-report download in every visual POV
+  Download Metrics CSV  selected-boundary scalar metrics in every visual POV
+  Episode Details       recorded episode, policy and runtime provenance
   Tick current / final  show the exact captured cursor and terminal tick
 
 The Replay Viewer is read-only and always uses fixed Analysis presentation.
@@ -193,7 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--ranges",
         action=argparse.BooleanOptionalAction,
         default=argparse.SUPPRESS,
-        help="show or hide authorized reference ranges (default: show)",
+        help="show or hide authorized reference ranges (default: hide)",
     )
 
     # Compatibility-only inputs remain accepted but absent from public help.
@@ -240,7 +241,7 @@ def _resolve_launch_options(namespace: argparse.Namespace) -> _LaunchOptions:
         no_open=cast(bool, getattr(namespace, "no_open", False)),
         port=cast(int, getattr(namespace, "port", 0)),
         view=cast(_ViewMode, getattr(namespace, "view", "researcher")),
-        ranges=cast(bool, getattr(namespace, "ranges", True)),
+        ranges=cast(bool, getattr(namespace, "ranges", False)),
         supplied=supplied,
     )
 
@@ -322,19 +323,19 @@ def _validate_option_matrix(
 def _run_browser_replay(
     options: _LaunchOptions,
     *,
-    loaded_bundle: LoadedReplayBundleV1 | None = None,
+    loaded_bundle: LoadedReplayBundle | None = None,
 ) -> int:
     """Resolve immutable replay authority before importing the HTTP server."""
     bundle = loaded_bundle
     if bundle is None:
         from marl_battlegrounds.evaluation.replay_io import (
             ReplayLoadError,
-            load_replay_bundle_v1,
+            load_replay,
         )
 
         assert options.replay is not None
         try:
-            bundle = load_replay_bundle_v1(options.replay)
+            bundle = load_replay(options.replay)
         except ReplayLoadError as exc:
             raise ValueError(f"Replay could not be loaded: {exc}") from exc
 
@@ -362,6 +363,7 @@ def _run_browser_replay(
 
     coordinator = HttpCoordinatorBinding(
         mode="replay",
+        initial_show_ranges=options.ranges,
         routes=REPLAY_HTTP_ROUTES,
         request_model=ReplayCommandRequestV1,
         error_factory=ReplayApiErrorV1,
@@ -371,6 +373,7 @@ def _run_browser_replay(
         current_presentation=service.current_presentation,
         current_metric_report=service.current_metric_report,
         metric_analysis=service.metric_analysis,
+        episode_details=service.episode_details,
     )
     return serve_browser_debugger(
         service,
@@ -383,7 +386,7 @@ def _run_browser_replay(
 
 def _run_static_loaded_replay(
     options: _LaunchOptions,
-    bundle: LoadedReplayBundleV1,
+    bundle: LoadedReplayBundle,
 ) -> int:
     """Render one frame from an already-authorized immutable bundle."""
     from scripts.dev.visual_debugger.static_renderer import (
@@ -419,7 +422,7 @@ def _validate_scripted_scenario(
 
 def _materialize_scripted_bundle(
     options: _LaunchOptions,
-) -> LoadedReplayBundleV1:
+) -> LoadedReplayBundle:
     """Run simulator-backed materialization in a child, then load public bytes."""
     assert options.scenario is not None
     with tempfile.TemporaryDirectory(prefix="marlbg-replay-scenario-") as directory:
@@ -453,11 +456,11 @@ def _materialize_scripted_bundle(
 
         from marl_battlegrounds.evaluation.replay_io import (
             ReplayLoadError,
-            load_replay_bundle_v1,
+            load_replay,
         )
 
         try:
-            return load_replay_bundle_v1(destination, require_metric_report=True)
+            return load_replay(destination)
         except ReplayLoadError as exc:
             raise ValueError(
                 f"Materialized replay could not be publicly loaded: {exc}"
@@ -475,8 +478,13 @@ def _materializer_main(argv: Sequence[str]) -> int:
 
     try:
         from marl_battlegrounds.evaluation.replay_io import (
-            load_replay_bundle_v1,
-            preflight_replay_bundle_destination_v1,
+            preflight_replay_destination,
+        )
+        from marl_battlegrounds.evaluation.revision import (
+            discover_code_revision_v1,
+        )
+        from marl_battlegrounds.evaluation.runtime_provenance import (
+            capture_debugger_runtime_provenance_v1,
         )
         from scripts.dev.visual_debugger.control import create_session
         from scripts.dev.visual_debugger.evaluation_bridge import (
@@ -488,18 +496,12 @@ def _materializer_main(argv: Sequence[str]) -> int:
             KeyboardCommandV1,
         )
         from scripts.dev.visual_debugger.recording import (
-            DebuggerReplayRecorderV1,
             build_debugger_recording_specification_v1,
         )
         from scripts.dev.visual_debugger.recording_coordinator import (
             RecordingDebuggerCoordinator,
         )
-        from scripts.dev.visual_debugger.revision import (
-            discover_debugger_code_revision_v1,
-        )
-        from scripts.dev.visual_debugger.runtime_provenance import (
-            capture_debugger_runtime_provenance_v1,
-        )
+        from scripts.dev.visual_debugger.replay_recorder import DebuggerReplayRecorder
         from scripts.dev.visual_debugger.scenarios import get_scenario
         from scripts.dev.visual_debugger.service import DebuggerService
 
@@ -510,7 +512,7 @@ def _materializer_main(argv: Sequence[str]) -> int:
             raise ValueError(
                 f"stress scenario {scenario.name!r} requires --include-stress"
             )
-        revision = discover_debugger_code_revision_v1(_REPOSITORY_ROOT)
+        revision = discover_code_revision_v1(_REPOSITORY_ROOT)
         launch = build_debugger_evaluation_launch_specification_v1(
             root_seed=options.seed,
             code_revision=revision,
@@ -523,10 +525,10 @@ def _materializer_main(argv: Sequence[str]) -> int:
             team_b_controller="manual",
             execution_information_mode="no_shared_obs",
             controlled_global_slot=None,
-            show_ranges=True,
+            show_ranges=False,
             verbose_logging=False,
         )
-        recorder = DebuggerReplayRecorderV1(
+        recorder = DebuggerReplayRecorder(
             specification=build_debugger_recording_specification_v1(
                 action_source_kind="scripted",
                 runtime_provenance=capture_debugger_runtime_provenance_v1(
@@ -534,9 +536,10 @@ def _materializer_main(argv: Sequence[str]) -> int:
                     policy_execution_included=False,
                 ),
             ),
-            destination=preflight_replay_bundle_destination_v1(options.destination),
+            destination=preflight_replay_destination(options.destination),
             context=session.evaluation_context,
             initial_frame=session.current_evaluation_frame,
+            scenario_name=scenario.name,
         )
         coordinator = RecordingDebuggerCoordinator(
             DebuggerService(
@@ -561,9 +564,8 @@ def _materializer_main(argv: Sequence[str]) -> int:
                 raise RuntimeError("scripted transition returned no live frame")
             if result.payload.result != "applied":
                 raise RuntimeError(f"scripted transition {frame_index} was not applied")
-        if recorder.lifecycle != "saved":
+        if recorder.lifecycle != "saved" or recorder.verified_loaded_bundle is None:
             raise RuntimeError("scripted scenario did not publish a complete replay")
-        load_replay_bundle_v1(options.destination, require_metric_report=True)
         return 0
     except (ImportError, OSError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

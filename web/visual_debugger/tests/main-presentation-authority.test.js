@@ -598,7 +598,7 @@ test("main shares the Agent Details latch and rejects stale local keys and focus
     source,
     /function stageReplayRecipientActivation\([\s\S]*sourcePreferenceGeneration: presentationPreferenceGeneration[\s\S]*recipientPublicAgentId: publicAgentId[\s\S]*autoOpenAgentDetails/u,
   );
-  assert.match(source, /let agentLocalRangesVisible = true;/u);
+  assert.match(source, /let agentLocalRangesVisible = false;/u);
   assert.match(source, /let agentLocalRangesInitialized = false;/u);
   assert.match(
     source,
@@ -1017,7 +1017,7 @@ test("replay artifact actions snapshot once, fence every await, and never drive 
   const source = await readFile(mainUrl, "utf8");
   const exportStart = source.indexOf("async function exportReplayBattlefieldPng()");
   const exportEnd = source.indexOf(
-    "async function downloadReplayMetricReport(original = false)",
+    "async function downloadReplayMetricReport(details = false)",
     exportStart,
   );
   const metricEnd = source.indexOf("/** @type {{key: string, summary:", exportEnd);
@@ -1075,16 +1075,16 @@ test("replay artifact actions snapshot once, fence every await, and never drive 
   );
   assertSourceOrder(
     metricSource,
-    "await getReplayMetricReport(state.token)",
+    "await getReplayEpisodeDetails(state.token)",
     "if (!replayArtifactActionIsCurrent(transaction))",
   );
   assertSourceOrder(
     metricSource,
-    "await getReplayMetricReport(state.token)",
+    "await getReplayEpisodeDetails(state.token)",
     "downloadReplayArtifact(",
   );
   assert.equal(
-    [...metricSource.matchAll(/getReplayMetricReport\(state\.token\)/gu)].length,
+    [...metricSource.matchAll(/getReplayEpisodeDetails\(state\.token\)/gu)].length,
     1,
   );
   for (const actionSource of [exportSource, metricSource]) {
@@ -1095,7 +1095,7 @@ test("replay artifact actions snapshot once, fence every await, and never drive 
   }
   assert.match(
     metricSource,
-    /new Blob\(\[report\.bytes\],[\s\S]*original\s*\? "application\/json; charset=utf-8"[\s\S]*: "text\/csv; charset=utf-8"/u,
+    /new Blob\(\[report\.bytes\],[\s\S]*details\s*\? "application\/json; charset=utf-8"[\s\S]*: "text\/csv; charset=utf-8"/u,
   );
   assert.match(metricSource, /replayMetricContext\(\)\?\.key !== context\?\.key/u);
   const metricCatchStart = metricSource.indexOf("} catch (error) {");
@@ -1275,7 +1275,7 @@ test("main renders ranges and inspector chrome only from installed presentation 
   );
   assert.match(
     source,
-    /const visibleControlCount = EXPECTED_VISUAL_FILTER_COUNT \+ 1;[\s\S]*enabledControlCount/u,
+    /const visibleControlCount = VISUAL_FILTER_REGISTRY.length \+ 1;[\s\S]*enabledControlCount/u,
   );
   assert.match(
     source,

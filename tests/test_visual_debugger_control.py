@@ -44,9 +44,9 @@ from scripts.dev.visual_debugger.model import (
     TeamController,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
-from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
+from marl_battlegrounds.core.axis_mappings import global_slot_to_target_action
 from marl_battlegrounds.core.types import (
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
@@ -57,13 +57,18 @@ from marl_battlegrounds.core.types import (
     TEAM_A_ID,
     TEAM_B_ID,
     Action,
+    ActionMask,
+    Observation,
 )
+from marl_battlegrounds.evaluation import policy_execution
 from marl_battlegrounds.evaluation.models import (
     ActionMaskV1,
     AssignedPolicySlotV1,
     ExecutionInformationMode,
 )
+from marl_battlegrounds.evaluation.policy_execution import Policy, PolicyTree
 from marl_battlegrounds.policies.actor import ActorAction
+from marl_battlegrounds.policies.input import ActorInput
 
 
 def _session(
@@ -864,24 +869,34 @@ def test_mixed_submission_keeps_team_a_rows_and_uses_identical_policy_keys(
         use_ultimate=jnp.ones((5,), dtype=jnp.int32),
     )
 
-    def fake_bank(_observation: object) -> object:
+    real_bank = policy_execution.build_shared_obs_sensor_source_bank
+    real_apply = control.apply_policies
+
+    def counting_bank(observation: Observation) -> object:
         nonlocal bank_calls
         bank_calls += 1
-        return object()
+        assert observation is shared.observation
+        return real_bank(observation)
 
-    def fake_shared(
-        _observation: object,
-        _action_mask: object,
-        keys: object,
-        _source_bank: object,
-        _availability: object,
-        *,
-        policy: object,
-        team_identity: object,
-    ) -> ActorAction:
-        del policy, team_identity
-        policy_keys["shared"] = keys
-        return policy_team_b
+    def fake_policy(name: str) -> Policy:
+        assert name == "random"
+
+        def apply(
+            variables: PolicyTree,
+            carry: PolicyTree,
+            actor: ActorInput,
+            mask: ActionMask,
+            key: Array,
+        ) -> tuple[ActorAction, PolicyTree]:
+            del variables, mask, key
+            slot = actor.global_slot - 5
+            return ActorAction(*(value[slot] for value in policy_team_b)), carry
+
+        return Policy(name, apply)
+
+    def record_shared(*args: object) -> object:
+        policy_keys["shared"] = args[8]
+        return real_apply(*args)  # type: ignore[arg-type]
 
     def fake_no_shared(
         _observation: object,
@@ -907,8 +922,11 @@ def test_mixed_submission_keeps_team_a_rows_and_uses_identical_policy_keys(
         submitted.append(action)
         return session
 
-    monkeypatch.setattr(control, "build_shared_obs_sensor_source_bank", fake_bank)
-    monkeypatch.setattr(control, "execute_shared_obs_team_policy", fake_shared)
+    monkeypatch.setattr(
+        policy_execution, "build_shared_obs_sensor_source_bank", counting_bank
+    )
+    monkeypatch.setattr(control, "policy", fake_policy)
+    monkeypatch.setattr(control, "apply_policies", record_shared)
     monkeypatch.setattr(control, "execute_no_shared_obs_team_policy", fake_no_shared)
     monkeypatch.setattr(control, "submit_joint_action", fake_submit)
 
@@ -973,7 +991,9 @@ def test_random_team_a_combines_with_manual_team_b_from_one_epoch(
         submitted.append(action)
         return session
 
-    monkeypatch.setattr(control, "build_shared_obs_sensor_source_bank", fail_bank)
+    monkeypatch.setattr(
+        policy_execution, "build_shared_obs_sensor_source_bank", fail_bank
+    )
     monkeypatch.setattr(control, "execute_no_shared_obs_team_policy", fake_no_shared)
     monkeypatch.setattr(control, "submit_joint_action", fake_submit)
 
@@ -999,41 +1019,63 @@ def test_two_reactive_teams_share_one_same_epoch_source_bank(
         team_b_controller="reactive_tdm",
         execution_information_mode="shared_obs",
     )
-    source_bank = object()
     bank_calls = 0
-    policy_calls: list[tuple[object, object, object, object, object]] = []
+    policy_names: list[str] = []
+    epoch_calls: list[tuple[object, ...]] = []
     submitted: list[Action] = []
+    real_bank = policy_execution.build_shared_obs_sensor_source_bank
+    real_apply = control.apply_policies
 
-    def fake_bank(observation: object) -> object:
+    def counting_bank(observation: Observation) -> object:
         nonlocal bank_calls
         assert observation is session.observation
         bank_calls += 1
-        return source_bank
+        return real_bank(observation)
 
     def fail_manual(*_args: object, **_kwargs: object) -> Action:
         raise AssertionError("both-policy execution must not build manual rows")
 
-    def fake_shared(
-        observation: object,
-        action_mask: object,
-        keys: object,
-        bank: object,
-        availability: object,
-        *,
-        policy: object,
-        team_identity: object,
-    ) -> ActorAction:
-        assert observation is session.observation
-        assert action_mask is session.action_mask
-        assert bank is source_bank
-        assert policy is control.reactive_tdm_alpha_policy
-        policy_calls.append((keys, bank, availability, policy, team_identity))
-        value = int(cast(int, team_identity))
-        return ActorAction(
-            move=jnp.full((5,), value, dtype=jnp.int32),
-            select_target=jnp.zeros((5,), dtype=jnp.int32),
-            use_ultimate=jnp.zeros((5,), dtype=jnp.int32),
-        )
+    def fake_policy(name: str) -> Policy:
+        policy_names.append(name)
+
+        def apply(
+            variables: PolicyTree,
+            carry: PolicyTree,
+            actor: ActorInput,
+            mask: ActionMask,
+            key: Array,
+        ) -> tuple[ActorAction, PolicyTree]:
+            del variables, mask, key
+            # A leaked source row makes the submitted action fail the side proof.
+            private_features = jnp.where(
+                actor.source_availability[:, None, None],
+                0,
+                actor.source_bank.unit_features_by_sensor_source_and_global_slot,
+            )
+            private_visibility = jnp.where(
+                actor.source_availability[:, None],
+                False,
+                actor.source_bank.unit_visibility_by_sensor_source_and_global_slot,
+            )
+            private_objectives = jnp.where(
+                actor.source_availability[:, None, None],
+                0,
+                actor.source_bank.objective_features_by_sensor_source,
+            )
+            authorized = (
+                jnp.all(private_features == 0)
+                & jnp.all(~private_visibility)
+                & jnp.all(private_objectives == 0)
+            )
+            value = jnp.where(authorized, actor.global_slot // 5 + 1, 0)
+            zero = jnp.int32(0)
+            return ActorAction(value, zero, zero), carry
+
+        return Policy(name, apply)
+
+    def record_shared(*args: object) -> object:
+        epoch_calls.append(args)
+        return real_apply(*args)  # type: ignore[arg-type]
 
     def fake_submit(
         _session: DebuggerSession,
@@ -1047,16 +1089,22 @@ def test_two_reactive_teams_share_one_same_epoch_source_bank(
         submitted.append(action)
         return session
 
-    monkeypatch.setattr(control, "build_shared_obs_sensor_source_bank", fake_bank)
+    monkeypatch.setattr(
+        policy_execution, "build_shared_obs_sensor_source_bank", counting_bank
+    )
     monkeypatch.setattr(control, "build_interactive_joint_action", fail_manual)
-    monkeypatch.setattr(control, "execute_shared_obs_team_policy", fake_shared)
+    monkeypatch.setattr(control, "policy", fake_policy)
+    monkeypatch.setattr(control, "apply_policies", record_shared)
     monkeypatch.setattr(control, "submit_joint_action", fake_submit)
 
     assert submit_interactive(session) is session
     assert bank_calls == 1
-    assert tuple(call[4] for call in policy_calls) == (TEAM_A_ID, TEAM_B_ID)
-    assert policy_calls[0][0] is policy_calls[1][0]
-    assert policy_calls[0][2] is policy_calls[1][2]
+    assert policy_names == ["tdm-alpha", "tdm-alpha"]
+    assert len(epoch_calls) == 1
+    observations, mask, keys = epoch_calls[0][6:]
+    assert observations.observation is session.observation  # type: ignore[attr-defined]
+    assert mask is session.action_mask
+    assert isinstance(keys, Array) and keys.shape == (MAX_AGENT_SLOTS,)
     assert len(submitted) == 1
     assert tuple(int(value) for value in submitted[0].move) == (
         (TEAM_A_ID,) * 5 + (TEAM_B_ID,) * 5
@@ -1084,7 +1132,7 @@ def test_every_controller_and_information_mode_executes_one_real_coherent_step(
     team_b_controller: TeamController,
     information_mode: ExecutionInformationMode,
 ) -> None:
-    real_bank = control.build_shared_obs_sensor_source_bank
+    real_bank = policy_execution.build_shared_obs_sensor_source_bank
     real_step = control.step
     bank_calls = 0
     step_calls = 0
@@ -1099,7 +1147,9 @@ def test_every_controller_and_information_mode_executes_one_real_coherent_step(
         step_calls += 1
         return real_step(*args)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(control, "build_shared_obs_sensor_source_bank", counting_bank)
+    monkeypatch.setattr(
+        policy_execution, "build_shared_obs_sensor_source_bank", counting_bank
+    )
     monkeypatch.setattr(control, "step", counting_step)
 
     def execute() -> DebuggerSession:

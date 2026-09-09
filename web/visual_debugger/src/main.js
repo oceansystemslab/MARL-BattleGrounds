@@ -7,7 +7,7 @@ import {
   extractNotice,
   getCurrentFrameAndPresentation,
   getCurrentPresentation,
-  getReplayMetricReport,
+  getReplayEpisodeDetails,
   getReplayMetrics,
   getReplayTimeline,
   postCommand,
@@ -16,6 +16,7 @@ import {
 import {
   authorizedOracleCommandSlotForPresentationKey,
   authorizedOracleCommandSlotForPublicAgentId,
+  authorizedPresentationAgentDisplayId,
   authorizedPresentationAudience,
   authorizedPresentationIdentityRows,
   authorizedPresentationInspectionState,
@@ -34,7 +35,6 @@ import {
   validateReplayTransportContinuityV1,
 } from "./authorized-presentation-normalizer.js";
 import { CombatChoreographer, ConsumedTransitionLedger } from "./choreography.js";
-import { renderMetricRows } from "./metrics-panel.js";
 import { SvgChoreographyPainter } from "./choreography-painter.js";
 import { isSubmissionCommand } from "./choreography-plan.js";
 import {
@@ -48,6 +48,8 @@ import {
   targetSelectionCommand,
 } from "./controls.js";
 import { explainAgent, explainLegality, explainTechnicalFact } from "./explanations.js";
+import { renderMatchSummary } from "./match-summary.js";
+import { renderMetricRows } from "./metrics-panel.js";
 import {
   authorizedInspectorView,
   DebuggerPanels,
@@ -69,7 +71,6 @@ import {
 } from "./replay-controls.js";
 import { captureReplayBattlefieldPngV1 } from "./replay-export.js";
 import { isReplayAgentRecipientRotation } from "./replay-recipient-rotation.js";
-import { renderMatchSummary } from "./match-summary.js";
 import { BattlefieldRenderer } from "./scene.js";
 import {
   createSemanticDescriptor,
@@ -148,7 +149,7 @@ const elements = {
   replayArtifactActions: requiredElement("replay-artifact-actions"),
   replayExportPngButton: requiredElement("replay-export-png-button"),
   replayDownloadMetricsButton: requiredElement("replay-download-metrics-button"),
-  replayOriginalMetricsButton: requiredElement("replay-original-metrics-button"),
+  replayEpisodeDetailsButton: requiredElement("replay-episode-details-button"),
   replayMetricsPreparation: requiredElement("replay-metrics-preparation"),
   replayMetricsPreparationText: requiredElement("replay-metrics-preparation-text"),
   metricPanel: requiredElement("evaluation-metrics"),
@@ -157,6 +158,7 @@ const elements = {
   metricStatus: requiredElement("metric-status"),
   metricProgress: requiredElement("metric-progress"),
   metricRows: requiredElement("metric-rows"),
+  metricDescription: requiredElement("metric-description"),
   replayRangesButton: requiredElement("replay-ranges-button"),
   replayClearReferenceButton: requiredElement("replay-clear-reference-button"),
   reconnectButton: requiredElement("reconnect-button"),
@@ -180,6 +182,7 @@ const elements = {
   visualFilterCount: requiredElement("visual-filter-count"),
   enableAllVisualFiltersButton: requiredElement("enable-all-visual-filters-button"),
   disableAllVisualFiltersButton: requiredElement("disable-all-visual-filters-button"),
+  defaultVisualFiltersButton: requiredElement("default-visual-filters-button"),
   visualKey: requiredElement("visual-key"),
   selectionCard: requiredElement("selection-card"),
   selectionHeading: requiredElement("selection-heading"),
@@ -215,22 +218,15 @@ const elements = {
   ),
 };
 
-const EXPECTED_VISUAL_FILTER_COUNT = 18;
-
 /**
  * Build the fixed page-local filter surface from the shared paint registry.
  * Replacing the empty markup container also prevents browser form restoration
- * from overriding the all-enabled state on a genuine document load.
+ * from overriding the registry defaults on a genuine document load.
  */
 function installVisualFilterControls() {
   const registeredIds = VISUAL_FILTER_REGISTRY.map(({ id }) => id);
-  if (
-    registeredIds.length !== EXPECTED_VISUAL_FILTER_COUNT ||
-    new Set(registeredIds).size !== EXPECTED_VISUAL_FILTER_COUNT
-  ) {
-    throw new TypeError(
-      `Visual Filters requires exactly ${EXPECTED_VISUAL_FILTER_COUNT} unique entries.`,
-    );
+  if (new Set(registeredIds).size !== registeredIds.length) {
+    throw new TypeError("Visual Filters requires unique registry entries.");
   }
   const fragment = document.createDocumentFragment();
   for (const { id, label, defaultEnabled } of VISUAL_FILTER_REGISTRY) {
@@ -263,9 +259,9 @@ function installVisualFilterControls() {
  * changes until the document itself reloads.
  */
 let visualFilterState = DEFAULT_VISUAL_FILTER_STATE;
-let agentLocalRangesVisible = true;
+let agentLocalRangesVisible = false;
 let agentLocalRangesInitialized = false;
-let confirmedResearcherRangesVisible = true;
+let confirmedResearcherRangesVisible = false;
 let visualFilterProductDefaultsApplied = false;
 installVisualFilterControls();
 
@@ -321,7 +317,7 @@ let activeLiveCommandTransaction = null;
  * installed presentation authority is cleared.
  *
  * @type {Readonly<{
- *   kind: "export_png" | "download_metrics" | "download_original_metrics",
+ *   kind: "export_png" | "download_metrics" | "download_episode_details",
  *   authority: Readonly<Record<string, any>>,
  *   transport: Readonly<Record<string, any>>,
  *   presentation: Readonly<Record<string, any>>,
@@ -407,6 +403,7 @@ const PRODUCT_TITLES = Object.freeze({
   combat_debugger: "MARL-BattleGrounds DevClient",
   replay_viewer: "MARL-BattleGrounds Replay Viewer",
 });
+const REPLAY_SAVE_MESSAGE = "Saving replay. Longer recordings can take longer.";
 const METRIC_PREPARATION_MESSAGE = "Preparing metrics. Longer replays can take longer.";
 const PRODUCT_HANDOFF_COMMANDS = new Set([
   "finish_and_review",
@@ -431,18 +428,23 @@ let productIdentity = null;
 let startupProductIdentityError = null;
 
 /**
- * Install one validated route-owned identity. Startup and the future explicit
- * recording-review handoff must both cross this boundary; frame facts are not
- * product-identity authority.
+ * Install the route-owned product identity and initial local UI preference.
+ * Frame facts do not authorize the product or alter the bootstrap contract.
  *
  * @param {unknown} rawIdentity
  * @returns {Readonly<{schema_version: 1, product_kind: "combat_debugger" | "replay_viewer", authoring_available: boolean}>}
  */
-function applyProductIdentity(rawIdentity) {
+function applyBootstrap(rawIdentity) {
   if (!isRecord(rawIdentity)) {
     throw new TypeError("Product bootstrap must be an object.");
   }
-  const keys = Object.keys(rawIdentity).sort();
+  const hasInitialRanges = Object.hasOwn(rawIdentity, "initial_show_ranges");
+  if (hasInitialRanges && typeof rawIdentity.initial_show_ranges !== "boolean") {
+    throw new TypeError("Initial range visibility must be a Boolean.");
+  }
+  const keys = Object.keys(rawIdentity)
+    .filter((key) => key !== "initial_show_ranges")
+    .sort();
   if (
     keys.length !== 3 ||
     keys[0] !== "authoring_available" ||
@@ -465,6 +467,10 @@ function applyProductIdentity(rawIdentity) {
   }
   if (rawIdentity.product_kind === "replay_viewer" && rawIdentity.authoring_available) {
     throw new TypeError("Replay Viewer cannot receive authoring authority.");
+  }
+  if (!agentLocalRangesInitialized && hasInitialRanges) {
+    agentLocalRangesVisible = rawIdentity.initial_show_ranges;
+    agentLocalRangesInitialized = true;
   }
   productIdentity = Object.freeze({
     schema_version: 1,
@@ -510,7 +516,7 @@ function assertFrameMatchesProductIdentity(frame) {
 }
 
 try {
-  const startupIdentity = applyProductIdentity(
+  const startupIdentity = applyBootstrap(
     Reflect.get(globalThis, "__MARL_DEBUGGER_BOOTSTRAP__"),
   );
   if (
@@ -550,17 +556,17 @@ const CONTROL_HELP = Object.freeze([
   [
     "#metric-scope",
     "Evaluation metric scope",
-    "At cursor analyzes only captured transitions through this frame. Final episode includes the entire captured replay.",
+    "Up to Current Tick includes only captured transitions through this tick. Final Episode includes the entire captured replay.",
   ],
   [
     "#metric-selection",
     "Evaluation metric",
-    "Choose the team overview or one metric from the offline report. Metrics are researcher information and do not enter agent observations.",
+    "Choose Team Overview or a group of scalar measurements. Metrics are researcher information and do not enter agent observations.",
   ],
   [
-    "#replay-original-metrics-button",
-    "Original Metrics JSON",
-    "Download the original canonical metric report exactly as recorded, when its sidecar is available.",
+    "#replay-episode-details-button",
+    "Episode Details",
+    "Download the recorded episode identity, policies, configuration, completion and runtime details as JSON.",
   ],
   [
     "#devclient-team-a-controller",
@@ -775,12 +781,17 @@ const CONTROL_HELP = Object.freeze([
   [
     "#enable-all-visual-filters-button",
     "Enable All",
-    "Turn on all 18 local visual filters and the active Ranges overlay.",
+    "Turn on all local visual filters and the active Ranges overlay.",
   ],
   [
     "#disable-all-visual-filters-button",
     "Disable All",
-    "Turn off all 18 local visual filters and the active Ranges overlay.",
+    "Turn off all local visual filters and the active Ranges overlay.",
+  ],
+  [
+    "#default-visual-filters-button",
+    "Default Configuration",
+    "Restore the eight default effects and turn off Ranges and Death Announcer.",
   ],
   [
     ".diagnostics > summary",
@@ -2055,9 +2066,9 @@ function renderVisualFilterControls(snapshot) {
       'input[type="checkbox"][data-visual-filter-id]',
     )
   );
-  if (inputs.length !== EXPECTED_VISUAL_FILTER_COUNT) {
+  if (inputs.length !== VISUAL_FILTER_REGISTRY.length) {
     throw new TypeError(
-      `Visual Filters requires exactly ${EXPECTED_VISUAL_FILTER_COUNT} checkboxes.`,
+      `Visual Filters requires exactly ${VISUAL_FILTER_REGISTRY.length} checkboxes.`,
     );
   }
   let enabledCount = 0;
@@ -2067,7 +2078,7 @@ function renderVisualFilterControls(snapshot) {
     enabledCount += enabled ? 1 : 0;
   }
   const rangesEnabled = installedPresentationRangesVisible(state.presentation);
-  const visibleControlCount = EXPECTED_VISUAL_FILTER_COUNT + 1;
+  const visibleControlCount = VISUAL_FILTER_REGISTRY.length + 1;
   const enabledControlCount = enabledCount + (rangesEnabled ? 1 : 0);
   elements.visualFilterCount.textContent = `${enabledControlCount} enabled`;
   elements.enableAllVisualFiltersButton.disabled =
@@ -2469,7 +2480,7 @@ function renderReplayArtifactActions(installed) {
   const pending = replayArtifactActionTransaction;
   elements.replayExportPngButton.disabled = !capabilities.exportPng;
   elements.replayDownloadMetricsButton.disabled = !capabilities.downloadMetrics;
-  elements.replayOriginalMetricsButton.disabled = !capabilities.downloadMetrics;
+  elements.replayEpisodeDetailsButton.disabled = !capabilities.downloadMetrics;
   elements.replayExportPngButton.setAttribute(
     "aria-busy",
     String(pending?.kind === "export_png"),
@@ -2478,9 +2489,9 @@ function renderReplayArtifactActions(installed) {
     "aria-busy",
     String(pending?.kind === "download_metrics"),
   );
-  elements.replayOriginalMetricsButton.setAttribute(
+  elements.replayEpisodeDetailsButton.setAttribute(
     "aria-busy",
-    String(pending?.kind === "download_original_metrics"),
+    String(pending?.kind === "download_episode_details"),
   );
   elements.replayMetricsPreparation.hidden =
     installed === null || pending?.kind !== "download_metrics";
@@ -2490,7 +2501,7 @@ function renderReplayArtifactActions(installed) {
 /**
  * Capture one exact action epoch before any asynchronous export or GET work.
  *
- * @param {"export_png" | "download_metrics" | "download_original_metrics"} kind
+ * @param {"export_png" | "download_metrics" | "download_episode_details"} kind
  */
 function beginReplayArtifactAction(kind) {
   if (replayArtifactActionTransaction !== null) {
@@ -2581,7 +2592,7 @@ function invalidateReplayArtifactAction() {
   replayArtifactActionTransaction = null;
   elements.replayMetricsPreparation.hidden = true;
   elements.replayDownloadMetricsButton.setAttribute("aria-busy", "false");
-  elements.replayOriginalMetricsButton.setAttribute("aria-busy", "false");
+  elements.replayEpisodeDetailsButton.setAttribute("aria-busy", "false");
 }
 
 /** @param {Blob} blob @param {string} filename */
@@ -2672,30 +2683,30 @@ async function exportReplayBattlefieldPng() {
   }
 }
 
-/** @param {boolean} [original] */
-async function downloadReplayMetricReport(original = false) {
+/** @param {boolean} [details] */
+async function downloadReplayMetricReport(details = false) {
   const transaction = beginReplayArtifactAction(
-    original ? "download_original_metrics" : "download_metrics",
+    details ? "download_episode_details" : "download_metrics",
   );
   if (transaction === null) {
     return;
   }
   try {
     const context = replayMetricContext();
-    if (!original && context === null) return;
+    if (!details && context === null) return;
     const report =
-      !original && context !== null
+      !details && context !== null
         ? await getReplayMetrics(state.token, context.frameIndex, context.scope, "csv")
-        : await getReplayMetricReport(state.token);
+        : await getReplayEpisodeDetails(state.token);
     if (
       !replayArtifactActionIsCurrent(transaction) ||
-      (!original && replayMetricContext()?.key !== context?.key)
+      (!details && replayMetricContext()?.key !== context?.key)
     ) {
       return;
     }
     downloadReplayArtifact(
       new Blob([report.bytes], {
-        type: original ? "application/json; charset=utf-8" : "text/csv; charset=utf-8",
+        type: details ? "application/json; charset=utf-8" : "text/csv; charset=utf-8",
       }),
       report.filename,
     );
@@ -2725,7 +2736,7 @@ function replayMetricContext() {
   const installed = installedPresentationAuthority();
   if (!isReplayMode() || installed === null) return null;
   const frame = installed.transport;
-  const summary = frame.artifact_summary ?? frame.artifact_facts?.artifact_summary;
+  const summary = frame.artifact_facts?.artifact_summary ?? frame.artifact_summary;
   const digest = summary?.replay_reference?.canonical_digest_sha256;
   const frameIndex = frame.cursor?.frame_index;
   const scope = elements.metricScope.value === "final" ? "final" : "cursor";
@@ -2751,10 +2762,15 @@ function renderReplayMetrics() {
     const summary = replayMetricSummary.summary;
     const renderKey = `${context.key}:${elements.metricSelection.value}`;
     if (renderKey !== replayMetricRenderKey) {
-      renderMetricRows(elements.metricRows, elements.metricSelection, summary);
+      renderMetricRows(
+        elements.metricRows,
+        elements.metricSelection,
+        summary,
+        elements.metricDescription,
+      );
       replayMetricRenderKey = renderKey;
     }
-    elements.metricStatus.textContent = `${summary.scope === "final" ? "Final episode" : "At cursor"} · frame ${summary.frame_index}. ${summary.original_metric_status === "available" ? "Original report preserved." : `Original report ${summary.original_metric_status}; analyzed from captured facts.`}`;
+    elements.metricStatus.textContent = `${summary.scope === "final" ? "Final Episode" : "Up to Current Tick"} · tick ${summary.simulator_step_count} · ${summary.statistics.length.toLocaleString()} scalar measurements.`;
     return;
   }
   elements.metricRows.replaceChildren();
@@ -3235,7 +3251,7 @@ function renderRecordingControls(installed) {
     elements.recordingMetricsHelp.hidden = false;
     elements.recordingStatusNote.textContent =
       preparation === "metrics"
-        ? METRIC_PREPARATION_MESSAGE
+        ? REPLAY_SAVE_MESSAGE
         : "Processing the recorded game. If the episode ends, its metrics will be prepared before saving. Longer replays can take longer.";
   }
 
@@ -3267,8 +3283,12 @@ function integer(value, fallback = 0) {
  * @returns {string}
  */
 function agentIdentity(publicAgentId) {
+  const displayId = authorizedPresentationAgentDisplayId(
+    state.presentation,
+    publicAgentId,
+  );
   return typeof publicAgentId === "string" && publicAgentId.length > 0
-    ? `Agent ID ${publicAgentId}`
+    ? `Agent ID ${displayId ?? publicAgentId}`
     : "Agent unavailable";
 }
 
@@ -5549,6 +5569,11 @@ elements.disableAllVisualFiltersButton.addEventListener("click", () => {
   applyAllVisualControls(false);
 });
 
+elements.defaultVisualFiltersButton.addEventListener("click", () => {
+  applyVisualFilterAction({ type: "restore_defaults" });
+  setActiveRangesVisible(false);
+});
+
 elements.replayExportPngButton.addEventListener("click", () => {
   void exportReplayBattlefieldPng();
 });
@@ -5556,7 +5581,7 @@ elements.replayExportPngButton.addEventListener("click", () => {
 elements.replayDownloadMetricsButton.addEventListener("click", () => {
   void downloadReplayMetricReport();
 });
-elements.replayOriginalMetricsButton.addEventListener("click", () => {
+elements.replayEpisodeDetailsButton.addEventListener("click", () => {
   void downloadReplayMetricReport(true);
 });
 for (const control of [

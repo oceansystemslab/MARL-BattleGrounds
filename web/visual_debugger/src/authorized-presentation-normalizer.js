@@ -4859,6 +4859,27 @@ export async function normalizeAuthorizedPresentationFrameV1(value) {
   const semantic = validateSemanticFrame(frame);
   const match = frame.match_summary;
   if (match != null) {
+    const roster =
+      frame.researcher_space?.roster_agents ??
+      frame.current_endpoint?.scene?.agents ??
+      [];
+    const deaths = match.deaths ?? [];
+    if (
+      new Set(
+        deaths.map((/** @type {Record<string, any>} */ death) => death.public_agent_id),
+      ).size !== deaths.length ||
+      deaths.some(
+        (/** @type {Record<string, any>} */ death) =>
+          !roster.some(
+            (/** @type {Record<string, any>} */ agent) =>
+              agent.public_agent_id === death.public_agent_id &&
+              agent.class_id === death.class_id &&
+              agent.team_id === death.team_id,
+          ),
+      )
+    ) {
+      invalid("Match deaths must join unique identities in the researcher roster.");
+    }
     if (
       match.episode_id !== frame.source.episode_id ||
       match.source_frame_index !== frame.source.source_frame_index ||
@@ -5745,7 +5766,7 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
       "replay_reference.replay_schema_version",
     );
     if (
-      reference.replay_schema_version !== 1 ||
+      ![1, 2].includes(reference.replay_schema_version) ||
       !/^[0-9a-f]{64}$/u.test(reference.context_digest_sha256) ||
       !/^[0-9a-f]{64}$/u.test(reference.trajectory_content_digest_sha256) ||
       !/^[0-9a-f]{64}$/u.test(reference.canonical_digest_sha256) ||

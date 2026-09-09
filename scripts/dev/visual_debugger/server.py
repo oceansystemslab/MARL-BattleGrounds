@@ -305,8 +305,10 @@ class HttpCoordinatorBinding:
     current_timeline: Callable[[], object] | None = None
     current_metric_report: Callable[[], HttpMetricReportResult] | None = None
     metric_analysis: Callable[[int, str, str], tuple[bytes, str | None]] | None = None
+    episode_details: Callable[[], tuple[bytes, str]] | None = None
     result_status: Callable[[HttpCommandResult], HTTPStatus] = _default_result_status
     authoring: HttpAuthoringBinding | None = None
+    initial_show_ranges: bool | None = None
 
     @property
     def product_kind(self) -> DebuggerProductKind:
@@ -314,6 +316,11 @@ class HttpCoordinatorBinding:
         return _PRODUCT_KIND_BY_MODE[self.mode]
 
     def __post_init__(self) -> None:
+        if (
+            self.initial_show_ranges is not None
+            and type(self.initial_show_ranges) is not bool
+        ):
+            raise TypeError("initial_show_ranges must be a bool or None.")
         if self.mode not in ("live", "replay"):
             raise ValueError("debugger server mode must be 'live' or 'replay'.")
         expected_routes = (
@@ -348,6 +355,10 @@ class HttpCoordinatorBinding:
             raise ValueError("live debugger mode cannot expose replay analysis.")
         if self.metric_analysis is not None and not callable(self.metric_analysis):
             raise TypeError("metric analysis must be callable")
+        if self.episode_details is not None and (
+            self.mode != "replay" or not callable(self.episode_details)
+        ):
+            raise ValueError("episode details require a callable replay operation")
         if self.mode == "replay" and not callable(self.current_metric_report):
             raise ValueError("replay debugger mode requires a metric-report operation.")
         if self.mode == "replay" and self.authoring is not None:
@@ -526,6 +537,9 @@ def _legacy_live_binding(service: object) -> HttpCoordinatorBinding:
         apply_command=call_apply_command,
         current_presentation=call_current_presentation,
         current_metric_report=None,
+        initial_show_ranges=getattr(
+            getattr(service, "session", None), "show_ranges", None
+        ),
     )
 
 
@@ -762,6 +776,11 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
                         "authoring_available": coordinator.authoring is not None,
                         "schema_version": 1,
                         "product_kind": coordinator.product_kind,
+                        **(
+                            {"initial_show_ranges": coordinator.initial_show_ranges}
+                            if coordinator.initial_show_ranges is not None
+                            else {}
+                        ),
                     },
                     ensure_ascii=True,
                     separators=(",", ":"),
@@ -803,6 +822,26 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
                 return
             try:
                 self._send_model(status, payload)
+            except BrokenPipeError, ConnectionError, TimeoutError:
+                self.close_connection = True
+            except Exception:
+                self._send_internal_error(coordinator)
+            return
+        if route == "/api/replay/details" and coordinator.episode_details is not None:
+            if not self._authenticated(coordinator):
+                return
+            try:
+                payload, filename = coordinator.episode_details()
+                if type(payload) is not bytes or filename != "episode-details.json":
+                    raise TypeError("episode details must return a JSON attachment")
+                self._send_bytes(
+                    HTTPStatus.OK,
+                    payload,
+                    content_type=_METRIC_REPORT_CONTENT_TYPE,
+                    response_headers=(
+                        ("Content-Disposition", f'attachment; filename="{filename}"'),
+                    ),
+                )
             except BrokenPipeError, ConnectionError, TimeoutError:
                 self.close_connection = True
             except Exception:

@@ -219,7 +219,7 @@ def build_debugger_recording_specification_v1(
     return DebuggerRecordingSpecificationV1.model_validate(payload)
 
 
-def _context_action_source(context: EvaluationEpisodeContextV1) -> str:
+def recording_action_source(context: EvaluationEpisodeContextV1) -> str:
     rows = tuple(
         row.value for row in context.aggregation_keys if row.name == "action_source"
     )
@@ -228,7 +228,7 @@ def _context_action_source(context: EvaluationEpisodeContextV1) -> str:
     return rows[0]
 
 
-def _context_policy_execution_included(context: EvaluationEpisodeContextV1) -> bool:
+def recording_policy_execution_included(context: EvaluationEpisodeContextV1) -> bool:
     """Derive actual policy execution from exact per-slot assignments."""
     return any(
         isinstance(row, AssignedPolicySlotV1)
@@ -237,7 +237,7 @@ def _context_policy_execution_included(context: EvaluationEpisodeContextV1) -> b
     )
 
 
-def _persistence_error_code(
+def recording_persistence_error_code(
     error: ReplaySaveError | ReplayLoadError,
 ) -> RecordingPersistenceErrorCodeV1:
     if error.code in _TARGET_ERROR_CODES:
@@ -249,7 +249,7 @@ def _persistence_error_code(
     return "publication_failed"
 
 
-def _completion_for_cause(
+def recording_completion_for_cause(
     cause: DebuggerRecordingCloseCauseV1,
     *,
     failure_reason: str | None,
@@ -284,6 +284,44 @@ def _completion_for_cause(
     if cause == "finish_and_review":
         return "partial", _DEFAULT_REASON_BY_CAUSE[cause], None
     return "interrupted", _DEFAULT_REASON_BY_CAUSE[cause], None
+
+
+def build_recording_status(
+    expected_transition_count: int,
+    *,
+    captured_transition_count: int,
+    lifecycle: RecordingLifecycleV1,
+    close_cause: DebuggerRecordingCloseCauseV1 | None,
+    close_reason: str | None,
+    persistence_error_code: RecordingPersistenceErrorCodeV1 | None,
+) -> RecordingStatusV1:
+    completion_state: Literal["complete", "partial", "interrupted", "failed"] | None = (
+        None
+    )
+    completion_reason: str | None = None
+    if close_cause is not None:
+        completion_state, mapped_reason, _origin = recording_completion_for_cause(
+            close_cause,
+            failure_reason=(
+                close_reason if close_cause in _FAILURE_ORIGIN_BY_CAUSE else None
+            ),
+        )
+        if completion_state != "complete":
+            completion_reason = close_reason or mapped_reason
+    return RecordingStatusV1(
+        lifecycle=lifecycle,
+        captured_transition_count=captured_transition_count,
+        expected_transition_count=expected_transition_count,
+        completion_state=completion_state,
+        completion_reason=completion_reason,
+        restart_fenced=(captured_transition_count > 0 or lifecycle != "recording"),
+        finish_available=lifecycle == "recording",
+        review_available=lifecycle == "saved",
+        retry_available=lifecycle == "persistence_failed",
+        save_as_available=lifecycle == "persistence_failed",
+        discard_available=(lifecycle == "recording" and captured_transition_count > 0),
+        persistence_error_code=persistence_error_code,
+    )
 
 
 class DebuggerReplayRecorderV1:
@@ -334,11 +372,11 @@ class DebuggerReplayRecorderV1:
             raise TypeError("reducers must be an immutable tuple")
         if context.capture_profile != "evaluation_metric_complete":
             raise ValueError("debugger recording requires metric-complete capture")
-        if _context_action_source(context) != specification.action_source_kind:
+        if recording_action_source(context) != specification.action_source_kind:
             raise ValueError("recording action source must match episode context")
         if (
             specification.runtime_provenance.policy_execution_included
-            != _context_policy_execution_included(context)
+            != recording_policy_execution_included(context)
         ):
             raise ValueError("recording policy provenance must match episode context")
         if (
@@ -446,33 +484,12 @@ class DebuggerReplayRecorderV1:
         close_reason: str | None,
         persistence_error_code: RecordingPersistenceErrorCodeV1 | None,
     ) -> RecordingStatusV1:
-        completion_state: (
-            Literal["complete", "partial", "interrupted", "failed"] | None
-        ) = None
-        completion_reason: str | None = None
-        if close_cause is not None:
-            completion_state, mapped_reason, _origin = _completion_for_cause(
-                close_cause,
-                failure_reason=(
-                    close_reason if close_cause in _FAILURE_ORIGIN_BY_CAUSE else None
-                ),
-            )
-            if completion_state != "complete":
-                completion_reason = close_reason or mapped_reason
-        return RecordingStatusV1(
-            lifecycle=lifecycle,
+        return build_recording_status(
+            self._context.expected_horizon,
             captured_transition_count=captured_transition_count,
-            expected_transition_count=self._context.expected_horizon,
-            completion_state=completion_state,
-            completion_reason=completion_reason,
-            restart_fenced=(captured_transition_count > 0 or lifecycle != "recording"),
-            finish_available=lifecycle == "recording",
-            review_available=lifecycle == "saved",
-            retry_available=lifecycle == "persistence_failed",
-            save_as_available=lifecycle == "persistence_failed",
-            discard_available=(
-                lifecycle == "recording" and captured_transition_count > 0
-            ),
+            lifecycle=lifecycle,
+            close_cause=close_cause,
+            close_reason=close_reason,
             persistence_error_code=persistence_error_code,
         )
 
@@ -547,7 +564,7 @@ class DebuggerReplayRecorderV1:
         """Build an uncommitted frame-zero recorder without mutating this one."""
         if self._lifecycle not in ("recording", "sealed") or self._bundle is not None:
             raise RuntimeError("only an unfinalized recorder may build a replacement")
-        action_source = _context_action_source(context)
+        action_source = recording_action_source(context)
         if action_source not in ("manual", "scripted", "mixed", "policy"):
             raise ValueError("replacement context has an unsupported action source")
         replacement_specification = build_debugger_recording_specification_v1(
@@ -555,7 +572,7 @@ class DebuggerReplayRecorderV1:
             runtime_provenance=self._specification.runtime_provenance.model_copy(
                 update={
                     "policy_execution_included": (
-                        _context_policy_execution_included(context)
+                        recording_policy_execution_included(context)
                     )
                 }
             ),
@@ -611,7 +628,7 @@ class DebuggerReplayRecorderV1:
             if not self._reducers and not self._offline_metrics_evaluated:
                 self._observer.evaluate_retained(build_tdm_metric_reducers())
                 self._offline_metrics_evaluated = True
-            completion_state, reason, origin = _completion_for_cause(
+            completion_state, reason, origin = recording_completion_for_cause(
                 close_cause,
                 failure_reason=failure_reason,
             )
@@ -704,7 +721,7 @@ class DebuggerReplayRecorderV1:
                 )
         except (ReplaySaveError, ReplayLoadError) as error:
             self._lifecycle = "persistence_failed"
-            self._persistence_error_code = _persistence_error_code(error)
+            self._persistence_error_code = recording_persistence_error_code(error)
             self._last_io_error_code = error.code
             self._verify_existing_on_retry = (
                 verify_existing
@@ -763,7 +780,7 @@ class DebuggerReplayRecorderV1:
         try:
             destination = preflight_replay_bundle_destination_v1(candidate_path)
         except ReplaySaveError as error:
-            self._persistence_error_code = _persistence_error_code(error)
+            self._persistence_error_code = recording_persistence_error_code(error)
             self._last_io_error_code = error.code
             self._publication_outcome = "persistence_failed"
             return "persistence_failed"
@@ -792,7 +809,7 @@ class DebuggerReplayRecorderV1:
         try:
             destination = preflight_replay_bundle_destination_v1(recovery_path)
         except ReplaySaveError as error:
-            self._persistence_error_code = _persistence_error_code(error)
+            self._persistence_error_code = recording_persistence_error_code(error)
             self._last_io_error_code = error.code
             self._publication_outcome = "persistence_failed"
             return "persistence_failed"

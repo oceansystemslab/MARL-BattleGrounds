@@ -207,12 +207,6 @@ function humanize(value) {
 }
 
 /** @param {unknown} value */
-function publicAgentLabel(value) {
-  const identity = text(value);
-  return identity === null ? "Agent ID unavailable" : `Agent ID ${identity}`;
-}
-
-/** @param {unknown} value */
 function authorizedAgentIdentityTitle(value) {
   return exactAuthorizedAgentIdentityV1(value)?.title ?? null;
 }
@@ -494,6 +488,7 @@ export function explainPovAgent(rawAgent, _selection = {}) {
   const reduced = {
     presentation_key: input.presentation_key,
     public_agent_id: input.public_agent_id,
+    display_agent_id: input.display_agent_id,
     team_id: input.team_id,
     class_id: input.class_id,
     current_health: input.current_health,
@@ -1344,6 +1339,7 @@ export function explainPovOverflow(rawItems, rawRecipient = {}) {
   const recipient = {
     presentation_key: inputRecipient.presentation_key,
     public_agent_id: inputRecipient.public_agent_id,
+    display_agent_id: inputRecipient.display_agent_id,
   };
   const items = Array.isArray(rawItems) ? rawItems : [];
   const rows = items.map((item, index) => {
@@ -1548,30 +1544,6 @@ export function explainObstacle(rawObstacle) {
     rows,
     [],
     { tone: "neutral", anchor: "pointer" },
-  );
-}
-
-/**
- * @param {unknown} rawFact
- * @param {{observerAgent?: unknown, candidateAgent?: unknown}} [context]
- */
-export function explainVisibility(rawFact, context = {}) {
-  const fact = isRecord(rawFact) ? rawFact : {};
-  const observer = isRecord(context.observerAgent) ? context.observerAgent : {};
-  const candidate = isRecord(context.candidateAgent) ? context.candidateAgent : {};
-  const visible = typeof fact.visible === "boolean" ? fact.visible : null;
-  return descriptor(
-    "visibility",
-    `visibility:${integer(fact.observer_global_slot) ?? "unknown"}:${integer(fact.candidate_global_slot) ?? "unknown"}`,
-    "Observer Visibility",
-    "Oracle View visibility diagnostic copied from the normalized scene.",
-    [
-      row("Observer", publicAgentLabel(observer.public_agent_id)),
-      row("Candidate", publicAgentLabel(candidate.public_agent_id)),
-      row("Visible", visible === null ? "Unavailable" : visible ? "True" : "False"),
-    ],
-    [],
-    { tone: "information" },
   );
 }
 

@@ -4,10 +4,13 @@ import { copyFile, mkdir, readFile, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 import { expect, test } from "@playwright/test";
+import { VISUAL_FILTER_IDS } from "../src/visual-filters.js";
+import { installWaapiAutopause } from "./support/choreography.js";
 import {
   currentReplayFrame,
   currentReplayTimeline,
   expectReplayFrameIndex,
+  exportReplayAcceptanceArtifacts,
   exportReplayArtifacts,
   removeReplayArtifacts,
   startReplayViewer,
@@ -24,7 +27,7 @@ const CP9_REPLAY_ARTIFACT_TEST_TITLE =
   "all replay authorities preserve battlefield fog and canonical metric access";
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const PNG_PROVENANCE_KEYWORD = "MARL-BattleGrounds Replay Provenance";
-const METRIC_REPORT_ROUTE = "/api/replay/metric-report";
+const EPISODE_DETAILS_ROUTE = "/api/replay/details";
 const REPLAY_SUFFIX = ".marlbg-replay.json";
 const METRIC_SUFFIX = ".marlbg-metrics.json";
 const FIXED_EXPORT_FONT_PATHS = new Set([
@@ -34,26 +37,6 @@ const FIXED_EXPORT_FONT_PATHS = new Set([
 const REPRESENTATIVE_DISABLED_FILTERS = Object.freeze([
   "aura_fields",
   "ultimate_ability_effects",
-  "scrolling_battle_text",
-]);
-const CP9_VISUAL_FILTER_IDS = Object.freeze([
-  "aura_fields",
-  "aura_modifier_badges",
-  "duration_status_badges",
-  "spawn_shield",
-  "target_selection_visuals",
-  "basic_ability_effects",
-  "ultimate_ability_effects",
-  "regeneration_effects",
-  "cooldown_effects",
-  "status_application",
-  "natural_status_expiry",
-  "freezing_trap_break",
-  "status_clear_on_death",
-  "death_effects",
-  "respawn_wave",
-  "resurrection_effects",
-  "spawn_shield_expiry",
   "scrolling_battle_text",
 ]);
 
@@ -928,7 +911,7 @@ async function exportAndInspectReplayPng(page, options) {
   await waitForSettledReplayArtifactActions(page);
   const before = await replayExportSnapshot(page);
   expect(Object.keys(before.dom.visualFilters).sort()).toEqual(
-    [...CP9_VISUAL_FILTER_IDS].sort(),
+    [...VISUAL_FILTER_IDS].sort(),
   );
   expect(before.dom.shellBorder.top).toBe("1px");
   expect(before.dom.shellBorder.right).toBe("1px");
@@ -1064,7 +1047,7 @@ async function enableAllReplayVisualFilters(page) {
     await enableAll.click();
   }
   await expect(page.locator("#visual-filter-count")).toHaveText(
-    `${CP9_VISUAL_FILTER_IDS.length + 1} enabled`,
+    `${VISUAL_FILTER_IDS.length + 1} enabled`,
   );
   await expect(enableAll).toBeDisabled();
   await expect(page.locator("#disable-all-visual-filters-button")).toBeEnabled();
@@ -1107,7 +1090,7 @@ async function installRepresentativeReplayPresentationState(page, options = {}) 
     await input.uncheck();
   }
   await expect(page.locator("#visual-filter-count")).toHaveText(
-    `${CP9_VISUAL_FILTER_IDS.length - REPRESENTATIVE_DISABLED_FILTERS.length + 1} enabled`,
+    `${VISUAL_FILTER_IDS.length - REPRESENTATIVE_DISABLED_FILTERS.length + 1} enabled`,
   );
   if (options.proveVisibleUltimate === true) {
     await expect(ultimateEffects).toHaveCount(0);
@@ -1215,7 +1198,7 @@ async function proveReplayLeafExports(page, options) {
     label: `${options.label} 960x600 all-on`,
   });
   expect(Object.values(allOn.provenance.presentation.visual_filters)).toEqual(
-    CP9_VISUAL_FILTER_IDS.map(() => true),
+    VISUAL_FILTER_IDS.map(() => true),
   );
 
   const laterFrame = await clickReplayCommand(page, "#replay-next-button");
@@ -1238,7 +1221,7 @@ async function proveReplayLeafExports(page, options) {
   expect(representative.provenance.presentation.selected_public_agent_id).toEqual(
     expect.any(String),
   );
-  for (const id of CP9_VISUAL_FILTER_IDS) {
+  for (const id of VISUAL_FILTER_IDS) {
     expect(representative.provenance.presentation.visual_filters[id]).toBe(
       !REPRESENTATIVE_DISABLED_FILTERS.includes(id),
     );
@@ -1261,9 +1244,9 @@ async function proveReplayLeafExports(page, options) {
  * @param {import("@playwright/test").Page} page
  * @param {string} sourceMetricPath
  */
-async function downloadCanonicalMetricReport(page, sourceMetricPath) {
+async function downloadEpisodeDetails(page, sourceMetricPath) {
   await waitForSettledReplayArtifactActions(page);
-  await expect(page.locator("#replay-original-metrics-button")).toBeEnabled();
+  await expect(page.locator("#replay-episode-details-button")).toBeEnabled();
   /** @type {Array<{method: string, path: string}>} */
   const requests = [];
   const record = (/** @type {import("@playwright/test").Request} */ request) => {
@@ -1276,18 +1259,18 @@ async function downloadCanonicalMetricReport(page, sourceMetricPath) {
     const responsePromise = page.waitForResponse(
       (candidate) =>
         candidate.request().method() === "GET" &&
-        new URL(candidate.url()).pathname === METRIC_REPORT_ROUTE,
+        new URL(candidate.url()).pathname === EPISODE_DETAILS_ROUTE,
       { timeout: 30_000 },
     );
     const downloadPromise = page.waitForEvent("download", { timeout: 30_000 });
-    await page.locator("#replay-original-metrics-button").click();
+    await page.locator("#replay-episode-details-button").click();
     [response, download] = await Promise.all([responsePromise, downloadPromise]);
     await expect(page.locator("#notice")).toContainText("Downloaded");
   } finally {
     page.off("request", record);
   }
   expect(response.status()).toBe(200);
-  expect(requests).toEqual([{ method: "GET", path: METRIC_REPORT_ROUTE }]);
+  expect(requests).toEqual([{ method: "GET", path: EPISODE_DETAILS_ROUTE }]);
   const path = await download.path();
   if (path === null) {
     throw new Error("Metric download has no local path.");
@@ -1296,11 +1279,14 @@ async function downloadCanonicalMetricReport(page, sourceMetricPath) {
     readFile(path),
     readFile(sourceMetricPath),
   ]);
-  expect(downloadedBytes.equals(sourceBytes)).toBe(true);
-  expect(sha256(downloadedBytes)).toBe(sha256(sourceBytes));
-  expect(download.suggestedFilename()).toMatch(
-    /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\.marlbg-metrics\.json$/u,
-  );
+  const details = JSON.parse(downloadedBytes.toString("utf8"));
+  const original = JSON.parse(sourceBytes.toString("utf8"));
+  expect(details.schema_id).toBe("marlbg.replay.episode_details");
+  expect(details.context).toEqual(original.report.context);
+  expect(details.completion).toEqual(original.report.completion);
+  expect(details).not.toHaveProperty("frames");
+  expect(details).not.toHaveProperty("statistics");
+  expect(download.suggestedFilename()).toBe("episode-details.json");
   return Object.freeze({
     filename: download.suggestedFilename(),
     sha256: sha256(downloadedBytes),
@@ -1312,53 +1298,22 @@ async function downloadCanonicalMetricReport(page, sourceMetricPath) {
 /** @param {import("@playwright/test").Page} page */
 async function proveMissingMetricUi(page) {
   await waitForSettledReplayArtifactActions(page);
-  const button = page.locator("#replay-original-metrics-button");
-  await expect(button).toBeEnabled();
-  /** @type {Array<{method: string, path: string}>} */
-  const requests = [];
-  let downloadCount = 0;
-  const recordRequest = (/** @type {import("@playwright/test").Request} */ request) => {
-    requests.push({ method: request.method(), path: new URL(request.url()).pathname });
-  };
-  const recordDownload = () => {
-    downloadCount += 1;
-  };
-  const errors = browserErrors.get(page) ?? [];
-  const errorOffset = errors.length;
-  page.on("request", recordRequest);
-  page.on("download", recordDownload);
-  let response;
-  try {
-    const responsePromise = page.waitForResponse(
-      (candidate) =>
-        candidate.request().method() === "GET" &&
-        new URL(candidate.url()).pathname === METRIC_REPORT_ROUTE,
-      { timeout: 30_000 },
-    );
-    await button.click();
-    response = await responsePromise;
-    await expect(page.locator("#notice")).toHaveText(
-      "No metric report is available for this replay.",
-    );
-    await expect(button).toBeEnabled();
-    await page.waitForTimeout(250);
-  } finally {
-    page.off("request", recordRequest);
-    page.off("download", recordDownload);
-  }
-  expect(response.status()).toBe(404);
-  expect(requests).toEqual([{ method: "GET", path: METRIC_REPORT_ROUTE }]);
-  expect(downloadCount).toBe(0);
-  expect(errors.slice(errorOffset)).toEqual([
-    "console: Failed to load resource: the server responded with a status of 404 (Not Found)",
-  ]);
-  errors.splice(errorOffset);
+  const downloaded = page.waitForEvent("download");
+  await page.locator("#replay-episode-details-button").click();
+  const download = await downloaded;
+  expect(download.suggestedFilename()).toBe("episode-details.json");
+  const path = await download.path();
+  if (path === null) throw new Error("Episode details download has no local path.");
+  const details = JSON.parse(await readFile(path, "utf8"));
+  expect(details.schema_id).toBe("marlbg.replay.episode_details");
+  expect(details.context.identity.episode_id).toEqual(expect.any(String));
+  await expect(page.locator("#notice")).toContainText("Downloaded");
 }
 
 /** @param {import("@playwright/test").Page} page */
 async function replayArtifactFactSurface(page) {
   await waitForSettledReplayArtifactActions(page);
-  await expect(page.locator("#replay-original-metrics-button")).toBeEnabled();
+  await expect(page.locator("#replay-episode-details-button")).toBeEnabled();
   return Object.freeze({
     artifact: await page.locator("#replay-artifact-reference").innerText(),
     completion: await page.locator("#replay-completion-badge").innerText(),
@@ -1374,6 +1329,11 @@ test("canonical complete and partial artifacts join their frame-zero and capture
   const complete = requiredViewer(completeViewer, "complete");
   const partial = requiredViewer(partialViewer, "partial");
   await openReplay(page, complete.url);
+
+  await expect(page.locator("#replay-ranges-button")).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
 
   const [frame, timeline] = await Promise.all([
     currentReplayFrame(page),
@@ -2049,6 +2009,338 @@ test("basic_support Agent POV playback visibly dwells for Hunter and Priest", as
   }
 });
 
+test("SharedObs TDM metrics and numeric identities remain visible across POV changes", async ({
+  page,
+}, testInfo) => {
+  if (artifacts === null) throw new Error("Replay fixtures are unavailable.");
+  const viewer = await startReplayViewer({
+    replayPath: artifacts.tdmShared,
+    frameIndex: 1,
+  });
+  /** @type {string[]} */
+  const requests = [];
+  page.on("request", (request) => {
+    if (/\/api\/replay\/metrics\/.*\.json$/u.test(new URL(request.url()).pathname))
+      requests.push(request.url());
+  });
+  try {
+    await openReplay(page, viewer.url);
+    await page.locator("#evaluation-metrics > summary").click();
+    await expect(page.locator("#metric-rows table")).toBeVisible();
+    const rows = await page.locator("#metric-rows").innerText();
+    const selection = await page.locator("#metric-selection").inputValue();
+    const scope = await page.locator("#metric-scope").inputValue();
+    const initialRequests = requests.length;
+    for (const view of /** @type {const} */ (["pov", "researcher", "pov"])) {
+      await installReplayView(page, view);
+      await expect(page.locator("#evaluation-metrics")).toBeVisible();
+      await expect(page.locator("#metric-rows table")).toBeVisible();
+      await expect(page.locator("#metric-rows")).toHaveText(rows, {
+        useInnerText: true,
+      });
+      await expect(page.locator("#metric-selection")).toHaveValue(selection);
+      await expect(page.locator("#metric-scope")).toHaveValue(scope);
+      await expect(page.locator("#connection-status")).toHaveText("Online");
+      const labels = await page.locator(".roster-id").allTextContents();
+      expect(labels.every((label) => /^Agent ID [0-9]$/u.test(label))).toBe(true);
+    }
+    expect(requests).toHaveLength(initialRequests);
+    await expect(page.locator("#metric-rows th")).toHaveText([
+      "Subject",
+      "Measure",
+      "Value",
+    ]);
+    await page.locator("#metric-selection").selectOption("healing_done");
+    await expect(page.locator('[data-metric="agent_2_healing_done"]')).toContainText(
+      "Agent 2 · Priest",
+    );
+    await expect(page.locator('[data-metric="agent_0_healing_done"]')).toContainText(
+      "Agent 0 · Mage",
+    );
+    await page.locator("#metric-selection").selectOption("controlled_damage");
+    await expect(page.locator("#metric-selection option:checked")).toHaveText(
+      "Damage to Controlled Recipients",
+    );
+    await expect(page.locator("#metric-description")).toContainText(
+      "Damage delivered to recipients with the named hostile status at transition start.",
+    );
+    await expect(page.locator("#metric-description")).toContainText(
+      "of 84 measurements available",
+    );
+    await expect(
+      page.locator('[data-metric="team_a_damage_to_warrior_charge_slow_recipient"]'),
+    ).toContainText("Warrior Charge Slow");
+    await expect(
+      page.locator('[data-metric="team_a_damage_to_hunter_trap_recipient"]'),
+    ).toContainText("Hunter Trap");
+    const controlsBefore = await page.locator("#metric-scope").boundingBox();
+    await page.locator("#metric-rows").evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    expect(await page.locator("#metric-scope").boundingBox()).toEqual(controlsBefore);
+    await page.locator("#metric-rows").evaluate((element) => {
+      element.scrollTop = 0;
+    });
+    await page.locator(".metric-measure").first().focus();
+    await expect(page.locator("#visual-tooltip")).toBeVisible();
+    await expect(page.locator("#visual-tooltip")).toContainText(
+      "No Preferred Direction",
+    );
+    await page.keyboard.press("Escape");
+    expect(requests).toHaveLength(initialRequests);
+
+    await page.locator("#enable-all-visual-filters-button").click();
+    await page.locator("#default-visual-filters-button").focus();
+    await page.keyboard.press("Enter");
+    const checkboxes = await page
+      .locator("[data-visual-filter-id]")
+      .evaluateAll((inputs) =>
+        inputs.map((input) => {
+          if (!(input instanceof HTMLInputElement))
+            throw new Error("Expected a native filter checkbox.");
+          return { checked: input.checked, defaultChecked: input.defaultChecked };
+        }),
+      );
+    expect(checkboxes.every((input) => input.checked === input.defaultChecked)).toBe(
+      true,
+    );
+    await expect(page.locator("#visual-filter-death-announcer")).not.toBeChecked();
+    await expect(page.locator("#replay-ranges-button")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    await page.locator("#metric-rows").focus();
+    await page.mouse.move(0, 0);
+    await expect(page.locator("#visual-tooltip")).toBeHidden();
+    for (const width of [1440, 820]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.screenshot({
+        path: testInfo.outputPath(`viewer-controls-${width}.png`),
+        fullPage: true,
+      });
+      await page
+        .locator("#evaluation-metrics")
+        .screenshot({ path: testInfo.outputPath(`metric-panel-${width}.png`) });
+    }
+    await page.locator("#visual-filter-death-announcer").check();
+    await page.locator("#replay-playback-rate").selectOption("0.25");
+    for (const view of /** @type {const} */ (["researcher", "pov"])) {
+      await installReplayView(page, view);
+      await clickReplayCommand(page, "#replay-first-button");
+      await expect(page.locator(".combat-death-announcement")).toHaveCount(0);
+      await page.locator("#replay-play-pause-button").click();
+      const announcements = page.locator(".combat-death-announcement");
+      await expect(announcements.first()).toBeVisible();
+      await expect
+        .poll(() =>
+          announcements
+            .first()
+            .evaluate((card) =>
+              Number(
+                getComputedStyle(/** @type {Element} */ (card.parentElement)).opacity,
+              ),
+            ),
+        )
+        .toBeGreaterThan(0.5);
+      const presentation = await currentReplayPresentation(page);
+      await expect(page.locator(".combat-death-announcement__agent")).toHaveCount(
+        presentation.match_summary.deaths.length,
+      );
+      await expect(announcements).toHaveCount(
+        new Set(
+          presentation.match_summary.deaths.map(
+            (/** @type {{team_id: number}} */ death) => death.team_id,
+          ),
+        ).size,
+      );
+      await page.screenshot({
+        path: testInfo.outputPath(`death-announcer-${view}.png`),
+        fullPage: true,
+      });
+      await page.locator("#replay-play-pause-button").click();
+      // The established Replay Pause behavior settles the recorded snapshot.
+      await expect(page.locator("#replay-transport-status")).toContainText("SETTLED");
+      await expect(announcements).toHaveCount(0);
+      await page.locator("#replay-play-pause-button").click();
+      await expect(announcements.first()).toBeVisible();
+      await expectReplayChoreographySettled(page);
+      await expect(announcements).toHaveCount(0);
+      await clickReplayCommand(page, "#replay-first-button");
+      await expect(announcements).toHaveCount(0);
+    }
+    expectNoBrowserErrors(page);
+  } finally {
+    await stopDebugger(viewer.process);
+  }
+});
+
+test("all eight scenario identities and dense authoritative deaths render in both POVs", async ({
+  page,
+}, testInfo) => {
+  const acceptance = await exportReplayAcceptanceArtifacts();
+  const classes = ["", "Mage", "Warrior", "Hunter", "Rogue", "Priest"];
+  /** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
+  let viewer = null;
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    for (const [index, replayPath] of acceptance.scenarios.entries()) {
+      const scenarioId = index + 1;
+      const source = JSON.parse(await readFile(replayPath, "utf8"));
+      const roster = source.header.context.roster.filter(
+        (/** @type {{configured_active: boolean}} */ row) => row.configured_active,
+      );
+      const expected = roster.map(
+        (
+          /** @type {{global_slot: number, class_id: number, configured_team_id: number}} */ row,
+        ) =>
+          `Agent ID ${row.global_slot} · ${classes[row.class_id]} · Team ${row.configured_team_id === 1 ? "A" : "B"}`,
+      );
+      const variant = [3, 5, 8].includes(scenarioId) ? "beta" : "alpha";
+      const initialPov = scenarioId <= 2;
+      viewer = await startReplayViewer({
+        replayPath,
+        view: initialPov ? "pov" : "researcher",
+        ranges: initialPov ? scenarioId === 1 : undefined,
+      });
+      await openReplay(page, viewer.url);
+      await expect(page.locator("#replay-ranges-button")).toHaveAttribute(
+        "aria-pressed",
+        scenarioId === 1 ? "true" : "false",
+      );
+      for (const view of /** @type {const} */ (["researcher", "pov"])) {
+        await installReplayView(page, view);
+        await expect(page.locator("#match-team-b")).toContainText(
+          `tdm-scenario-${scenarioId}-controller-${variant}`,
+        );
+        const identities = await page
+          .locator(".roster-identity")
+          .evaluateAll((rows) =>
+            rows.map(
+              (row) =>
+                `${row.querySelector(".roster-id")?.textContent} · ${row.querySelector(".roster-class")?.textContent}`,
+            ),
+          );
+        expect(identities.sort()).toEqual(expected.sort());
+        await expect(page.locator("#connection-status")).toHaveText("Online");
+        await page.screenshot({
+          path: testInfo.outputPath(`scenario-${scenarioId}-${view}.png`),
+          fullPage: true,
+        });
+      }
+      await page.goto("about:blank");
+      await stopDebugger(viewer.process);
+      viewer = null;
+    }
+
+    const source = JSON.parse(await readFile(acceptance.dense, "utf8"));
+    const deaths = source.transitions[0].events.filter(
+      (/** @type {{event_type: string}} */ event) => event.event_type === "agent_died",
+    );
+    expect(
+      deaths.map(
+        (/** @type {{recipient_global_slot: number}} */ death) =>
+          death.recipient_global_slot,
+      ),
+    ).toEqual(Array.from({ length: 10 }, (_, slot) => slot));
+    await installWaapiAutopause(page);
+    viewer = await startReplayViewer({ replayPath: acceptance.dense });
+    await openReplay(page, viewer.url);
+    await page.locator("#visual-filter-death-announcer").check();
+    for (const width of [1440, 820]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const view of /** @type {const} */ (["researcher", "pov"])) {
+        await installReplayView(page, view);
+        await clickReplayCommand(page, "#replay-first-button");
+        await expect(page.locator(".combat-death-announcement")).toHaveCount(0);
+        await page.locator("#replay-play-pause-button").click();
+        const cards = page.locator(".combat-death-announcement");
+        await expect(cards).toHaveCount(2);
+        await cards.first().evaluate(async (card) => {
+          const owner = card.parentElement;
+          const battlefield = card.closest("svg");
+          const animation = owner?.getAnimations()[0];
+          if (!animation?.effect || !battlefield)
+            throw new Error("The authoritative death animation is unavailable.");
+          const timing = animation.effect.getTiming();
+          const time = Number(timing.delay) + Number(timing.duration) / 2;
+          const animations = battlefield
+            .getAnimations({ subtree: true })
+            .filter(({ id }) => id.startsWith("mbg:"));
+          await document.fonts.ready;
+          for (const owned of animations) {
+            owned.pause();
+            owned.currentTime = time;
+          }
+          await Promise.all(animations.map(({ ready }) => ready));
+          await new Promise((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve)),
+          );
+        });
+        const presentation = await currentReplayPresentation(page);
+        expect(presentation.match_summary.scores).toEqual([5, 5]);
+        expect(presentation.match_summary.deaths).toHaveLength(10);
+        for (const [team, start] of /** @type {const} */ ([
+          ["a", 0],
+          ["b", 5],
+        ])) {
+          await expect(
+            page.locator(
+              `.combat-death-announcement--team-${team} .combat-death-announcement__agent`,
+            ),
+          ).toHaveText(
+            Array.from({ length: 5 }, (_, slot) => `Agent ID ${start + slot} · Mage`),
+          );
+        }
+        const geometry = await cards.evaluateAll((elements) =>
+          elements.map((card) => {
+            const panel = card.querySelector("rect")?.getBoundingClientRect();
+            const field = card.closest("svg")?.getBoundingClientRect();
+            if (!panel || !field) throw new Error("Missing death card geometry.");
+            return {
+              left: panel.left,
+              right: panel.right,
+              contained:
+                panel.left >= field.left &&
+                panel.right <= field.right &&
+                panel.top >= field.top &&
+                panel.bottom <= field.bottom,
+              readable: Array.from(card.querySelectorAll("text")).every((text) => {
+                const box = text.getBoundingClientRect();
+                return (
+                  box.left >= panel.left &&
+                  box.right <= panel.right &&
+                  box.top >= panel.top &&
+                  box.bottom <= panel.bottom
+                );
+              }),
+              opacity: Number(
+                getComputedStyle(/** @type {Element} */ (card.parentElement)).opacity,
+              ),
+            };
+          }),
+        );
+        expect(
+          geometry.every(
+            (card) => card.contained && card.readable && card.opacity > 0.5,
+          ),
+        ).toBe(true);
+        expect(geometry[0].right).toBeLessThan(geometry[1].left);
+        await page.screenshot({
+          path: testInfo.outputPath(`dense-deaths-${width}-${view}.png`),
+          fullPage: true,
+        });
+        await page.locator("#replay-play-pause-button").click();
+        await expect(cards).toHaveCount(0);
+      }
+    }
+    expectNoBrowserErrors(page);
+  } finally {
+    await page.goto("about:blank").catch(() => {});
+    await stopDebugger(viewer?.process ?? null);
+    await removeReplayArtifacts(acceptance.outputDirectory);
+  }
+});
+
 test("TDM scores and offline metric exports follow the cursor across POV changes", async ({
   page,
 }) => {
@@ -2119,11 +2411,15 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
     } finally {
       await initialMetrics.release();
     }
-    await expect(page.locator("#metric-status")).toContainText("At cursor · frame 0");
+    await expect(page.locator("#metric-status")).toContainText(
+      "Up to Current Tick · tick 0",
+    );
     await expect(page.locator("#metric-progress")).toBeHidden();
     await expect(page.locator("#metric-rows")).toHaveAttribute("aria-busy", "false");
     expect(await page.locator("#metric-selection option").count()).toBeGreaterThan(1);
-    await expect(page.locator("#metric-rows")).toContainText("Pending");
+    await expect(
+      page.locator("#metric-rows [aria-label^=Unavailable]"),
+    ).not.toHaveCount(0);
 
     for (const [scope, frameIndex] of /** @type {const} */ ([
       ["cursor", 0],
@@ -2131,7 +2427,7 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
     ])) {
       await page.locator("#metric-scope").selectOption(scope);
       await expect(page.locator("#metric-status")).toContainText(
-        `${scope === "cursor" ? "At cursor" : "Final episode"} · frame ${frameIndex}`,
+        `${scope === "cursor" ? "Up to Current Tick" : "Final Episode"} · tick ${frameIndex}`,
       );
       await waitForSettledReplayArtifactActions(page);
       const heldCsv =
@@ -2167,7 +2463,7 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
             "aria-busy",
             "true",
           );
-          await expect(page.locator("#replay-original-metrics-button")).toHaveAttribute(
+          await expect(page.locator("#replay-episode-details-button")).toHaveAttribute(
             "aria-busy",
             "false",
           );
@@ -2191,8 +2487,28 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
       if (path === null) throw new Error("Metric CSV has no local path.");
       const csv = await readFile(path, "utf8");
       const [header, ...rows] = csv.trim().split(/\r?\n/u);
-      expect(header).toMatch(/^episode_id,scope,frame_index,metric_id,/u);
-      expect(rows.length).toBeGreaterThan(0);
+      expect(header).toMatch(
+        /^episode_id,scope,frame_index,simulator_step_count,metric_schema_id,/u,
+      );
+      expect(rows).toHaveLength(1);
+      const names = header.split(",");
+      const cells = rows[0].split(",");
+      expect(names).toContain("agent_9_class_id");
+      const visible = await page
+        .locator("#metric-rows tbody tr")
+        .evaluateAll((elements) =>
+          elements.map((element) => ({
+            name: element.getAttribute("data-metric"),
+            value: element.querySelector(".metric-value")?.getAttribute("data-value"),
+          })),
+        );
+      for (const metric of visible) {
+        const position = names.indexOf(metric.name ?? "");
+        expect(position).toBeGreaterThan(-1);
+        if (metric.value === "") expect(cells[position]).toBe("");
+        else expect(Number(cells[position])).toBe(Number(metric.value));
+      }
+
       expect(new Set(rows.map((row) => row.split(",").slice(1, 3).join(",")))).toEqual(
         new Set([`${scope},${frameIndex}`]),
       );
@@ -2203,15 +2519,20 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
       "Score: 0/1",
     ]);
     await expect(page.locator(".match-scoreboard__result")).toHaveCount(0);
-    await downloadCanonicalMetricReport(
+    await downloadEpisodeDetails(
       page,
       artifacts.tdm.replace(REPLAY_SUFFIX, METRIC_SUFFIX),
     );
     await page.locator("#metric-scope").selectOption("cursor");
-    await expect(page.locator("#metric-status")).toContainText("At cursor · frame 0");
+    await expect(page.locator("#metric-status")).toContainText(
+      "Up to Current Tick · tick 0",
+    );
     await installReplayView(page, "pov");
+    await expect(page.locator("#evaluation-metrics")).toBeVisible();
     await expect(page.locator("#match-task")).toHaveText("Task mode: TDM");
-    await expect(page.locator("#metric-status")).toContainText("At cursor · frame 0");
+    await expect(page.locator("#metric-status")).toContainText(
+      "Up to Current Tick · tick 0",
+    );
 
     const staleMetrics = await holdMetricResponse(
       "**/api/replay/metrics/1/cursor.json",
@@ -2234,10 +2555,12 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
       await expect(page.locator("#metric-rows")).toHaveAttribute("aria-busy", "false");
       await expect(page.locator(".match-scoreboard__result")).toHaveCount(0);
       await expect(page.locator("#metric-status")).not.toContainText(
-        "At cursor · frame 1",
+        "Up to Current Tick · tick 1",
       );
       await staleMetrics.release();
-      await expect(page.locator("#metric-status")).toContainText("At cursor · frame 0");
+      await expect(page.locator("#metric-status")).toContainText(
+        "Up to Current Tick · tick 0",
+      );
     } finally {
       await staleMetrics.release();
     }
@@ -2251,7 +2574,9 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
       await expect(page.locator("#metric-progress")).toBeVisible();
       await clickReplayCommand(page, "#replay-first-button");
       await staleFailure.release();
-      await expect(page.locator("#metric-status")).toContainText("At cursor · frame 0");
+      await expect(page.locator("#metric-status")).toContainText(
+        "Up to Current Tick · tick 0",
+      );
       await expect(page.locator("#metric-progress")).toBeHidden();
       await clickReplayCommand(page, "#replay-last-button");
       await expect(page.locator("#metric-status")).toContainText(
@@ -2960,12 +3285,9 @@ test(CP9_REPLAY_ARTIFACT_TEST_TITLE, async ({ page }) => {
     );
     const completeStableUrl = page.url();
     const oracleArtifactSurface = await replayArtifactFactSurface(page);
-    const oracleMetricDownload = await downloadCanonicalMetricReport(
-      page,
-      sourceMetricPath,
-    );
+    const oracleMetricDownload = await downloadEpisodeDetails(page, sourceMetricPath);
     expect(oracleMetricDownload.requests).toEqual([
-      { method: "GET", path: METRIC_REPORT_ROUTE },
+      { method: "GET", path: EPISODE_DETAILS_ROUTE },
     ]);
 
     await openReplay(page, missingViewer.url);
@@ -2993,10 +3315,7 @@ test(CP9_REPLAY_ARTIFACT_TEST_TITLE, async ({ page }) => {
       expect(artifact.filename).not.toMatch(/[0-9a-f]{8}__frame-/u);
     }
     const noSharedArtifactSurface = await replayArtifactFactSurface(page);
-    const noSharedMetricDownload = await downloadCanonicalMetricReport(
-      page,
-      sourceMetricPath,
-    );
+    const noSharedMetricDownload = await downloadEpisodeDetails(page, sourceMetricPath);
     expect(noSharedArtifactSurface).toEqual(oracleArtifactSurface);
     expect(noSharedMetricDownload).toEqual(oracleMetricDownload);
 
@@ -3005,7 +3324,7 @@ test(CP9_REPLAY_ARTIFACT_TEST_TITLE, async ({ page }) => {
     await installReplayView(page, "researcher");
     await installFirstFrame(page);
     const sharedOracleArtifactSurface = await replayArtifactFactSurface(page);
-    const sharedOracleMetricDownload = await downloadCanonicalMetricReport(
+    const sharedOracleMetricDownload = await downloadEpisodeDetails(
       page,
       sharedSourceMetricPath,
     );
@@ -3027,7 +3346,7 @@ test(CP9_REPLAY_ARTIFACT_TEST_TITLE, async ({ page }) => {
       expect(artifact.filename).not.toMatch(/[0-9a-f]{8}__frame-/u);
     }
     const sharedArtifactSurface = await replayArtifactFactSurface(page);
-    const sharedMetricDownload = await downloadCanonicalMetricReport(
+    const sharedMetricDownload = await downloadEpisodeDetails(
       page,
       sharedSourceMetricPath,
     );

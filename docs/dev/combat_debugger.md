@@ -16,13 +16,12 @@ The task selector currently offers TDM. Its scoreboard shows Team A/Team B
 controller identities, authoritative scores and the configured target, including
 loaded scenarios. Task completion adds each team's victory, draw or defeat.
 Legacy neutral debugging configurations are labelled Combat diagnostic.
-Critical evaluation metrics are computed from retained capture after recording
-stops, then included in the adjacent replay report. Full metrics are off by default. DevClient runs no full metric
-suite every simulation tick; metric inspection and CSV export belong to Replay
-Viewer.
-Finishing a recording displays an indeterminate progress indicator while its
-metrics are prepared. Longer recordings can take longer; the indicator makes no
-fixed-duration promise. Ordinary live steps do not compute the full suite.
+Recording preserves authoritative replay facts without running the full metric
+suite. Metric inspection and CSV export belong to Replay Viewer and are computed
+on request from that capture.
+Finishing a recording displays an indeterminate progress indicator while the
+recording is prepared and saved. Longer recordings can take longer; the indicator
+makes no fixed-duration promise. Ordinary live steps do not compute the full suite.
 
 ## Launch
 
@@ -58,14 +57,14 @@ The public options are:
 
 | Option | Meaning |
 | --- | --- |
-| `--record-replay PATH` | Record one manual episode to a canonical-format replay and adjacent metric sidecar, then offer read-only review. |
+| `--record-replay PATH` | Record one manual episode to a self-contained V2 replay, then offer read-only review. |
 | `--seed N` | Set the deterministic reset/step seed; default `0`. |
 | `--controlled-slot N` | Select an initially active global slot; otherwise use the arena default. |
 | `--static` | Render one stateless Matplotlib reset snapshot without a browser server. |
 | `--no-open` | Print the URL without opening a browser automatically. |
 | `--port N` | Select a loopback port; `0` requests an ephemeral port. |
 | `--view oracle\|pov` | Select the initial authorization; default `oracle`. |
-| `--ranges` / `--no-ranges` | Show or hide controlled-actor ranges initially. |
+| `--ranges` / `--no-ranges` | Show or hide controlled-actor ranges initially; default hidden. |
 
 Option abbreviations are rejected. Replay, sample, scripted-scenario,
 frame-index, and replay-POV-slot options are rejected with the Replay Viewer
@@ -327,11 +326,12 @@ Frame is allowlisted by authority: Episode, Frame, Simulator step, and
 conditional Incoming transition. The initial frame has no incoming-transition
 row.
 
-Visual Filters contains 18 independently controlled paint families plus Ranges.
+Visual Filters contains 19 independently controlled paint families plus Ranges.
 Initially enable Ultimate Ability Effects, Spawn Shield, Basic Ability Effects,
 Regeneration Effects, Death Effects, Resurrection Effects, Scrolling Battle
-Text and Respawn Wave. Together with default Ranges this gives `9 enabled`.
-Visual Filters and Roster start open; Enable All still selects all 19 controls.
+Text and Respawn Wave. Ranges and Death Announcer start off, giving `8 enabled`.
+Visual Filters and Roster start open; Enable All selects all 20 controls, and
+Default Configuration restores the initial selection.
 The complete inventory is:
 
 1. Aura Fields
@@ -352,6 +352,11 @@ The complete inventory is:
 16. Resurrection Effects
 17. Spawn-Shield Expiry
 18. Scrolling Battle Text
+19. Death Announcer
+
+Death Announcer shows authoritative deaths in compact Team A/Team B cards with
+up to five identities each. It is researcher context in both views; it adds no
+actor observations or battlefield visibility. Pausing or seeking clears it.
 
 Duration Status Badges includes the white crossed-swords **In Combat** countdown.
 An overflow badge represents at least two hidden statuses. If only one remains,
@@ -367,8 +372,8 @@ separate filters.
 These switches affect browser paint, accessible descriptions belonging to that
 paint, and nothing else. They do not redact source data, change simulator state,
 or alter authorized event data used by battlefield choreography. Ranges uses
-its existing service/local authority path rather than the 18-entry paint schema.
-**Enable All** and **Disable All** govern all 18 paint families and the active
+its existing service/local authority path rather than the 19-entry paint schema.
+**Enable All** and **Disable All** govern all 19 paint families and the active
 Ranges control together.
 
 ## Recording and recovery
@@ -381,17 +386,17 @@ mkdir -p recordings
   --record-replay recordings/episode.marlbg-replay.json
 ```
 
-The target must end in `.marlbg-replay.json`; its parent must already exist;
-and neither it nor an incompatible companion target may already exist. The
+The target must end in `.marlbg-replay.json`; its parent must already exist,
+and the destination must not already exist. The
 launcher preflights the destination before building the scenario, discovering
 runtime provenance, binding a server, or opening a browser.
 
-Recording retains one canonical metric-complete trajectory in memory. Each
+Recording retains one authoritative trajectory in memory. Each
 accepted submit still performs exactly one transition and one canonical
 capture; there is no per-transition replay-file write.
 
-- **Finish & Review** closes an open prefix, computes its metric report, publishes
-  the replay plus adjacent `.marlbg-metrics.json`, and changes the same loopback
+- **Finish & Review** closes an open prefix, publishes its self-contained V2
+  replay without a metrics sidecar, and changes the same loopback
   page to settled read-only review at frame zero.
 - Task termination or the declared horizon closes and saves automatically.
   **Review Replay** performs the frame-zero handoff when requested.
@@ -452,8 +457,7 @@ connection loss, and use **Exit Combat Debugger** or `Ctrl-C` to stop Python.
 Return to the [browser-tools migration page](visual_debugger.md) or the
 [project README](../../README.md).
 
-Recorded games save critical TDM/evaluation metrics by default: outcome, terminal
-score difference, return, episode length, and completion/failure status. Full
-metrics are off by default. Open Replay Viewer detailed analysis to request the
-complete metric suite from the captured game; this does not replace its original
-lightweight sidecar.
+Recorded games preserve the captured states, actions, rewards and task outcomes.
+Open Replay Viewer detailed analysis to compute the complete metric suite from
+those facts and export CSV. New recordings need no metric sidecar; historical V1
+replays and their existing sidecars remain readable.

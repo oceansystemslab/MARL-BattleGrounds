@@ -28,13 +28,13 @@ from scripts.dev.visual_debugger.scenarios import (
     list_scenarios,
 )
 from scripts.dev.visual_debugger.service import DebuggerService
-from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 from tests.visual_debugger_fixtures import (
     debugger_test_launch_specification,
     rejection_lane_scenario,
     submit_fixture_frame,
 )
 
+from marl_battlegrounds.core.axis_mappings import global_slot_to_target_action
 from marl_battlegrounds.core.config import (
     CANONICAL_PRODUCT_MOVEMENT_SCALE,
     validate_env_config,

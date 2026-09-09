@@ -1700,6 +1700,18 @@ def test_recursive_schema_is_closed_required_and_key_catalog_is_exhaustive() -> 
     }
     encountered_key_fields: set[str] = set()
     one_of_count = 0
+    # The additive global HUD field defaults empty for old presentation payloads.
+    # This is the sole optional field; every other recursive requirement remains.
+    optional_fields = {"root.$defs.MatchSummaryV1": {"deaths"}}
+    death_properties = cast(
+        dict[str, object], definitions["MatchDeathV1"]["properties"]
+    )
+    assert set(death_properties) == {"public_agent_id", "team_id", "class_id"}
+    summary_properties = cast(
+        dict[str, dict[str, object]], definitions["MatchSummaryV1"]["properties"]
+    )
+    assert summary_properties["deaths"]["items"] == {"$ref": "#/$defs/MatchDeathV1"}
+    assert summary_properties["deaths"]["maxItems"] == 10
 
     def visit(value: object, *, path: str) -> None:
         nonlocal one_of_count
@@ -1713,9 +1725,11 @@ def test_recursive_schema_is_closed_required_and_key_catalog_is_exhaustive() -> 
         properties = node.get("properties")
         if type(properties) is dict:
             property_names = set(cast(dict[str, object], properties))
-            assert set(cast(list[str], node.get("required", []))) == property_names, (
-                path
-            )
+            optional = optional_fields.get(path, set())
+            assert optional <= property_names, path
+            assert set(cast(list[str], node.get("required", []))) == (
+                property_names - optional
+            ), path
             assert node.get("additionalProperties") is False, path
             for name in property_names:
                 if name == "presentation_key" or name.endswith("_presentation_key"):
@@ -2153,7 +2167,7 @@ def test_oracle_scene_wrapper_and_endpoint_factory_own_authority_inputs(
             ),
             authority_session_id=session_a,
         )
-    with pytest.raises(TypeError, match="exact EvaluationEpisodeContextV1"):
+    with pytest.raises(TypeError, match="exact supported episode-context root"):
         build_oracle_authorized_scene_v1(
             _PoisonEvaluationEpisodeContextV1.model_construct(
                 **{

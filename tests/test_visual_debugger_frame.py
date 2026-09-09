@@ -36,9 +36,9 @@ from scripts.dev.visual_debugger.scenarios import (
     STRESS_SCENARIOS,
     get_scenario,
 )
-from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
+from marl_battlegrounds.core.axis_mappings import global_slot_to_target_action
 from marl_battlegrounds.core.types import MOVE_EAST, MOVE_NORTH, NUM_MOVE_ACTIONS
 from marl_battlegrounds.evaluation.actor_projection import (
     NO_SHARED_OBS_ACTOR_PROJECTION_V2,

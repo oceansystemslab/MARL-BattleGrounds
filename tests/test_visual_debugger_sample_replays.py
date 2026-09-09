@@ -33,8 +33,12 @@ from scripts.dev.visual_debugger.sample_replays import (
 
 import marl_battlegrounds.evaluation.replay_io as replay_io_module
 from marl_battlegrounds.evaluation.analysis import analyze_replay
+from marl_battlegrounds.evaluation.metrics import build_evaluation_observer_v1
 from marl_battlegrounds.evaluation.models import CodeRevisionV1
-from marl_battlegrounds.evaluation.reducers import TDM_BASIC_METRIC_IDS
+from marl_battlegrounds.evaluation.reducers import (
+    TDM_BASIC_METRIC_IDS,
+    build_tdm_metric_reducers,
+)
 from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -119,7 +123,7 @@ def controlled_runtime(
     return runtime_provenance
 
 
-generator.discover_debugger_code_revision_v1 = controlled_revision
+generator.discover_code_revision_v1 = controlled_revision
 generator.capture_debugger_runtime_provenance_v1 = controlled_runtime
 generated = generator.generate_sample_replays(output_directory)
 print(f"generated {len(generated['samples'])} sample replays")
@@ -265,7 +269,7 @@ def _stub_truthful_provenance_capture(
 
     monkeypatch.setattr(
         generator_module,
-        "discover_debugger_code_revision_v1",
+        "discover_code_revision_v1",
         fake_revision,
     )
     monkeypatch.setattr(
@@ -361,14 +365,22 @@ def test_checked_samples_match_fresh_cpu_generation_scientific_truth(
         assert old_artifact is not None and new_artifact is not None
         assert old_artifact.report.statistics == ()
 
-        # Recompute from the archived facts through the independent offline path.
-        # Its analysis identity remains separate from the controlled provenance.
+        # The legacy generator still qualifies its exact V1 report contract.
+        # Current scalar analysis has a separate schema and source identity.
         analysis = analyze_replay(historical)
         assert (
             analysis.source_replay_digest == historical.replay.canonical_digest_sha256
         )
         assert analysis.original_metric_status == "empty"
-        assert new_artifact.report == analysis.final_report
+        legacy = build_evaluation_observer_v1(
+            historical.replay.header.context, reducers=build_tdm_metric_reducers()
+        )
+        legacy.start(historical.replay.frames[0])
+        for transition, frame in zip(
+            historical.replay.transitions, historical.replay.frames[1:], strict=True
+        ):
+            legacy.append(transition, frame)
+        assert new_artifact.report == legacy.finalize(completion_state="complete")
         assert {row.metric_id for row in new_artifact.report.statistics} == set(
             TDM_BASIC_METRIC_IDS
         )
@@ -492,7 +504,7 @@ def test_generator_captures_truthful_provenance_before_creating_output_parent(
     monkeypatch.setattr(generator_module, "_require_cpu_backend", lambda: None)
     monkeypatch.setattr(
         generator_module,
-        "discover_debugger_code_revision_v1",
+        "discover_code_revision_v1",
         fake_revision,
     )
     monkeypatch.setattr(

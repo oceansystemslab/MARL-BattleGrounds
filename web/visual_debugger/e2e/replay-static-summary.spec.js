@@ -1028,7 +1028,9 @@ test("paused replay installs a complete deterministic static summary at both sup
       await setFilter(page, apiRequests, filterId, true);
     }
   }
-  await expect(page.locator("#visual-filter-count")).toHaveText("17 enabled");
+  await expect(page.locator("#visual-filter-count")).toHaveText(
+    `${VISUAL_FILTER_IDS.length - 1} enabled`,
+  );
 
   /** @type {Awaited<ReturnType<typeof staticDomSignature>> | null} */
   let minimumSignature = null;
@@ -1146,7 +1148,8 @@ test("paused replay installs a complete deterministic static summary at both sup
   expect(restored.layoutKeys).toEqual(minimumSignature.layoutKeys);
   expect(
     restored.rootState.every(
-      ({ paintKey }) => paintKey === `visual-filters-v2:${"1".repeat(18)}`,
+      ({ paintKey }) =>
+        paintKey === `visual-filters-v2:${"1".repeat(VISUAL_FILTER_IDS.length)}`,
     ),
   ).toBe(true);
   const enabledIdempotencyMark = apiRequests.length;

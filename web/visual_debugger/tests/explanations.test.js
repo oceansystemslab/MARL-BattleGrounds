@@ -21,7 +21,6 @@ import {
   explainSpawnShield,
   explainStatus,
   explainTechnicalFact,
-  explainVisibility,
   spawnShieldStatusSummary,
 } from "../src/explanations.js";
 import { createSemanticDescriptor, projectSemanticDescriptor } from "../src/tooltip.js";
@@ -1664,19 +1663,7 @@ test("action route uses epoch-neutral copy and exact Source and Recipient identi
   );
 });
 
-test("visibility and attribution builders never manufacture slot identities", () => {
-  const visibility = explainVisibility(
-    { observer_global_slot: 1, candidate_global_slot: 7, visible: false },
-    { observerAgent: SOURCE_A, candidateAgent: SOURCE_B },
-  );
-  assert.equal(
-    visibility.summary,
-    "Oracle View visibility diagnostic copied from the normalized scene.",
-  );
-  assert.equal(rowValue(visibility, "Observer"), "Agent ID alpha/9001");
-  assert.equal(rowValue(visibility, "Candidate"), "Agent ID beta.17");
-  assert.equal(rowValue(visibility, "Visible"), "False");
-
+test("attribution builders never manufacture slot identities", () => {
   const activation = explainActivation({
     eventId: "secret-pov-cue-id",
     tokenId: "rogue_poison",

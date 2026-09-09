@@ -36,13 +36,14 @@ from marl_battlegrounds.evaluation.models import (
     SELF_FEATURES,
     TRANSITION_SCHEMA_ID,
     UNIT_FEATURES,
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContext,
     EvaluationFrameV1,
     EvaluationModel,
     EvaluationTransitionV1,
     RosterSlotV1,
     canonical_digest_sha256,
     canonical_json_bytes,
+    evaluation_context_type,
 )
 from marl_battlegrounds.evaluation.replay import (
     ReplayArtifactReferenceV1,
@@ -1459,7 +1460,7 @@ def _slice_transition(
 
 
 def _axis_mapping_from_context(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     *,
     global_slot: int,
 ) -> ActorPovAxisMappingV1:
@@ -1507,7 +1508,7 @@ def _axis_mapping_from_replay(
     )
 
 
-def _require_actor_projection_v1(context: EvaluationEpisodeContextV1) -> None:
+def _require_actor_projection_v1(context: EvaluationEpisodeContext) -> None:
     """Reject newer actor-input projections that POV V1 cannot materialize."""
     if context.actor_projection.version != ACTOR_POV_SCHEMA_VERSION:
         raise ValueError("actor POV V1 requires actor projection version 1")
@@ -1531,7 +1532,7 @@ def _require_selected_self_topology(
 
 
 def _selected_pov_roster_row(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     *,
     global_slot: int,
 ) -> RosterSlotV1:
@@ -1549,7 +1550,7 @@ def _selected_pov_roster_row(
 
 
 def build_actor_pov_current_slice_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     *,
     global_slot: int,
@@ -1557,11 +1558,11 @@ def build_actor_pov_current_slice_v1(
 ) -> ActorPovCurrentSliceV1:
     """Build one exact live POV slice without retaining earlier trajectory units."""
     canonical_context = cast(
-        EvaluationEpisodeContextV1,
+        EvaluationEpisodeContext,
         validate_declared_model_tree(
             context,
             record_name="actor POV current context",
-            expected_type=EvaluationEpisodeContextV1,
+            expected_type=evaluation_context_type(context),
         ),
     )
     roster = _selected_pov_roster_row(
@@ -1710,7 +1711,7 @@ def build_actor_pov_adjacent_transition_slice_v1(
 
 
 def slice_actor_pov_current_frame_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     *,
     global_slot: int,

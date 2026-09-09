@@ -13,9 +13,10 @@ from dataclasses import replace
 
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContext,
     EvaluationFrameV1,
     StaticMechanicsCatalogV1,
+    evaluation_context_type,
 )
 from marl_battlegrounds.evaluation.pov import (
     ActorPovAdjacentTransitionSliceV1,
@@ -210,12 +211,11 @@ def _require_shared_live_header(
 
 
 def _canonical_live_view(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     current_frame: EvaluationFrameV1,
     incoming_transition_view: EvaluationTransitionViewV1 | None,
 ) -> EvaluationTransitionViewV1 | None:
-    if type(context) is not EvaluationEpisodeContextV1:
-        raise TypeError("context must be the exact EvaluationEpisodeContextV1 root.")
+    evaluation_context_type(context)
     if type(current_frame) is not EvaluationFrameV1:
         raise TypeError("current_frame must be the exact EvaluationFrameV1 root.")
     if current_frame.frame_index == 0:
@@ -236,7 +236,7 @@ def _canonical_live_view(
 
 
 def _shared_obs_source_materials(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     *,
     recipient_global_slot: int,
@@ -285,7 +285,7 @@ def _draft_lane_v1(
 
 
 def _pending_joint_action_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     raw_frame: ResearcherLiveDebuggerFrameV2,
 ) -> LivePendingJointActionV1 | None:
     """Project the exact next joint submission without slots or geometry."""
@@ -332,7 +332,7 @@ def _pending_joint_action_v1(
 
 
 def _oracle_latest_transition_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     incoming_view: EvaluationTransitionViewV1 | None,
     *,
     authority_session_id: str,
@@ -437,7 +437,7 @@ def _no_shared_latest_transition_v1(
 
 
 def build_live_oracle_authorized_presentation_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     current_frame: EvaluationFrameV1,
     incoming_transition_view: EvaluationTransitionViewV1 | None,
     raw_frame: ResearcherLiveDebuggerFrameV2,
@@ -693,7 +693,7 @@ def build_live_no_shared_obs_authorized_presentation_v1(
     incoming_carrier: ActorPovAdjacentTransitionSliceV1 | None,
     raw_frame: ActorPovLiveDebuggerFrameV2,
     *,
-    global_context: EvaluationEpisodeContextV1,
+    global_context: EvaluationEpisodeContext,
     current_global_frame: EvaluationFrameV1,
     previous_global_frame: EvaluationFrameV1 | None,
     public_catalog: StaticMechanicsCatalogV1,
@@ -960,7 +960,7 @@ def build_live_no_shared_obs_authorized_presentation_v1(
 
 
 def build_live_shared_obs_authorized_presentation_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     current_frame: EvaluationFrameV1,
     incoming_transition_view: EvaluationTransitionViewV1 | None,
     raw_frame: SharedObsAgentPovLiveDebuggerFrameV2,

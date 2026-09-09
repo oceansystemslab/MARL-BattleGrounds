@@ -73,6 +73,70 @@ const surface = {
   protectedRects: [],
 };
 
+test("Death Announcer groups authoritative HUD deaths by team without changing fog or default paint", async () => {
+  const fixture = await authorizedFixture();
+  for (const kind of [
+    "replay_oracle",
+    "replay_no_shared_obs_agent_pov",
+    "replay_shared_obs_agent_pov",
+    "live_shared_obs_agent_pov",
+  ]) {
+    const raw = structuredClone(fixture.pairs[kind].presentation);
+    const endpointBefore = JSON.stringify(raw.current_endpoint);
+    const roster =
+      raw.researcher_space?.roster_agents ?? raw.current_endpoint.scene.agents;
+    raw.match_summary.deaths = roster.map(
+      (/** @type {Record<string, any>} */ agent) => ({
+        public_agent_id: agent.public_agent_id,
+        team_id: agent.team_id,
+        class_id: agent.class_id,
+      }),
+    );
+    const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+    const disabled = buildPlan(frame, surface, DEFAULT_VISUAL_FILTER_STATE);
+    assert.ok(disabled);
+    assert.equal(
+      disabled.events.some((event) => event.cueSemantic === "death_announcement"),
+      false,
+    );
+    const enabled = buildPlan(
+      frame,
+      surface,
+      setVisualFilterEnabled(DEFAULT_VISUAL_FILTER_STATE, "death_announcer", true),
+    );
+    assert.ok(enabled);
+    const announcements = enabled.events.filter(
+      (event) => event.cueSemantic === "death_announcement",
+    );
+    assert.deepEqual(
+      announcements.map((event) => event.teamId),
+      [1, 2],
+    );
+    assert.equal(announcements.flatMap((event) => event.members).length, roster.length);
+    for (const announcement of announcements) {
+      assert.ok(announcement.members.length <= 5);
+      assert.ok(
+        announcement.members.every((/** @type {Record<string, string>} */ member) =>
+          /^Agent ID [0-9]$/u.test(member.publicIdentity),
+        ),
+      );
+      assert.equal(announcement.phaseEnd - announcement.phaseStart, 1000);
+      assert.equal(announcement.persistent, false);
+      assert.ok(announcement.anchor.y - announcement.panelHeight / 2 >= 48);
+    }
+    assert.ok(announcements[0].anchor.x < announcements[1].anchor.x);
+    assert.equal(JSON.stringify(raw.current_endpoint), endpointBefore);
+    assert.deepEqual(
+      buildPlan(
+        frame,
+        surface,
+        setVisualFilterEnabled(DEFAULT_VISUAL_FILTER_STATE, "death_announcer", true),
+      ),
+      enabled,
+    );
+  }
+});
+
 /** @type {Promise<Record<string, any>> | undefined} */
 let authorizedFixturePromise;
 
@@ -1516,7 +1580,7 @@ test("NET cues follow scrolling battle text while regeneration retains useful gr
     );
     assert.deepEqual(
       explanation.rows.map(({ label, value }) => [label, value]),
-      [["Recipient", "Agent ID agent-slot-0 · Mage · Team A"]],
+      [["Recipient", "Agent ID 0 · Mage · Team A"]],
     );
     if (disabled.length === 0) {
       assert.deepEqual(
@@ -1833,14 +1897,14 @@ test("status presentation preserves the valid five-source application maximum", 
       [
         "Sources",
         [
-          "Agent ID agent-slot-0 · Mage · Team A",
-          "Agent ID agent-slot-1 · Warrior · Team A",
-          "Agent ID agent-slot-2 · Priest · Team A",
-          "Agent ID agent-slot-5 · Hunter · Team B",
-          "Agent ID agent-slot-6 · Rogue · Team B",
+          "Agent ID 0 · Mage · Team A",
+          "Agent ID 1 · Warrior · Team A",
+          "Agent ID 2 · Priest · Team A",
+          "Agent ID 5 · Hunter · Team B",
+          "Agent ID 6 · Rogue · Team B",
         ].join("; "),
       ],
-      ["Recipient", "Agent ID agent-slot-1 · Warrior · Team A"],
+      ["Recipient", "Agent ID 1 · Warrior · Team A"],
     ],
   );
 });

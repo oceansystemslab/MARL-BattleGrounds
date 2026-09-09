@@ -31,6 +31,7 @@ const FILTERS = Object.freeze([
   ["resurrection_effects", "Resurrection Effects"],
   ["spawn_shield_expiry", "Spawn-Shield Expiry"],
   ["scrolling_battle_text", "Scrolling Battle Text"],
+  ["death_announcer", "Death Announcer"],
 ]);
 
 const FILTER_IDS = FILTERS.map(([id]) => id);
@@ -338,6 +339,7 @@ async function expectFilterSurface(page, disabledIds = [], rangesEnabled = true)
     { id: "replay-ranges-button", text: "Ranges" },
     { id: "enable-all-visual-filters-button", text: "Enable All" },
     { id: "disable-all-visual-filters-button", text: "Disable All" },
+    { id: "default-visual-filters-button", text: "Default Configuration" },
   ]);
 }
 
@@ -827,17 +829,17 @@ async function expectAllPaintAbsentWithoutDwell(page) {
   expect(state.roots).toEqual([
     {
       state: "settled",
-      paintKey: `visual-filters-v2:${"0".repeat(18)}`,
+      paintKey: `visual-filters-v2:${"0".repeat(FILTERS.length)}`,
       childCount: 0,
     },
     {
       state: "settled",
-      paintKey: `visual-filters-v2:${"0".repeat(18)}`,
+      paintKey: `visual-filters-v2:${"0".repeat(FILTERS.length)}`,
       childCount: 0,
     },
     {
       state: "settled",
-      paintKey: `visual-filters-v2:${"0".repeat(18)}`,
+      paintKey: `visual-filters-v2:${"0".repeat(FILTERS.length)}`,
       childCount: 0,
     },
   ]);
@@ -861,9 +863,10 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
     presentationKind: "live_oracle",
   });
   await openVisualFilters(page);
-  await expectFilterSurface(page, INITIAL_DISABLED_FILTERS);
+  await expectFilterSurface(page, INITIAL_DISABLED_FILTERS, false);
   await expect(page.locator("#roster-details")).toHaveAttribute("open", "");
   await expect(page.locator("#visual-filters")).toHaveAttribute("open", "");
+  await ensureRangesOn(page, "live");
   await expectLocalOnly(
     page,
     apiRequests,
@@ -877,7 +880,6 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
     { label: "initial Enable All restores every paint family" },
   );
   await expectFilterSurface(page);
-  await ensureRangesOn(page, "live");
 
   const liveBulkScience = await rangeIndependentScientificSignature(page, false);
   const liveBulkRanges = await rangeSignature(page, "#live-ranges-button");
@@ -1043,6 +1045,14 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
   await expect(page.locator("html")).toHaveAttribute("data-audience", "agent_pov");
   const livePov = JSON.parse(await authenticatedText(page, "/api/presentation/frame"));
   expect(livePov.presentation_kind).toBe("live_shared_obs_agent_pov");
+  await expectLocalOnly(
+    page,
+    apiRequests,
+    () => page.locator("#live-ranges-button").click(),
+    {
+      label: "Enable Agent-local ranges for the visibility proof",
+    },
+  );
   await expectFilterSurface(page, disabledPair);
 
   const visiblePovTarget = targetSelect
@@ -1153,7 +1163,7 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
     "installed",
   );
   await openVisualFilters(page);
-  await expectFilterSurface(page, INITIAL_DISABLED_FILTERS);
+  await expectFilterSurface(page, INITIAL_DISABLED_FILTERS, false);
   expect(
     JSON.parse(await authenticatedText(page, "/api/presentation/frame"))
       .presentation_kind,
@@ -1182,7 +1192,8 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
   });
   await expectReplayFrameIndex(page, 1);
   await openVisualFilters(page);
-  await expectFilterSurface(page, INITIAL_DISABLED_FILTERS);
+  await expectFilterSurface(page, INITIAL_DISABLED_FILTERS, false);
+  await ensureRangesOn(page, "replay");
   await page.locator("#enable-all-visual-filters-button").click();
   await setFilter(
     page,
@@ -1192,7 +1203,6 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
     "replay target overlay stays optional",
   );
   await expectFilterSurface(page, ["target_selection_visuals"]);
-  await ensureRangesOn(page, "replay");
 
   const replayScience = await scientificSignature(page, true);
   const replayRanges = await rangeSignature(page, "#replay-ranges-button");
@@ -1314,7 +1324,15 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
     JSON.parse(await authenticatedText(page, "/api/presentation/frame"))
       .presentation_kind,
   ).toBe("replay_shared_obs_agent_pov");
-  await expectFilterSurface(page, replayDisabled);
+  await expectFilterSurface(page, replayDisabled, false);
+  await expectLocalOnly(
+    page,
+    apiRequests,
+    () => page.locator("#replay-ranges-button").click(),
+    {
+      label: "Enable Agent-local ranges for the recipient-switch proof",
+    },
+  );
 
   const replayAgentRangesButton = page.locator("#replay-ranges-button");
   await expectLocalOnly(page, apiRequests, () => replayAgentRangesButton.click(), {
@@ -1425,7 +1443,7 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
     await enabledChoreographyRoots.evaluateAll((roots) =>
       roots.map((root) => root.getAttribute("data-paint-key")),
     ),
-  ).toEqual(Array(3).fill(`visual-filters-v2:${"1".repeat(18)}`));
+  ).toEqual(Array(3).fill(`visual-filters-v2:${"1".repeat(FILTERS.length)}`));
   await expectLocalOnly(
     page,
     apiRequests,

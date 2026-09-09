@@ -267,6 +267,9 @@ class _FakeReplayService:
         self.metric_report_calls += 1
         return cast(_FakeMetricReportResult, self.metric_report_result)
 
+    def episode_details(self) -> tuple[bytes, str]:
+        return b'{"schema_id":"marlbg.replay.episode_details"}', "episode-details.json"
+
     def metric_analysis(
         self, frame: int, scope: str, format_: str
     ) -> tuple[bytes, str | None]:
@@ -454,6 +457,7 @@ def _coordinator(
             service.current_metric_report if mode == "replay" else None
         ),
         metric_analysis=service.metric_analysis if mode == "replay" else None,
+        episode_details=service.episode_details if mode == "replay" else None,
     )
 
 
@@ -2286,4 +2290,25 @@ def test_metric_analysis_http_auth_and_cursor_fail_without_mutation(
     )
     assert response.status == HTTPStatus.UNPROCESSABLE_ENTITY
     assert json.loads(payload)["error_code"] == "invalid_cursor"
+    assert service.cursor_mutations == 0
+
+
+def test_episode_details_http_is_authenticated_read_only_attachment(
+    running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
+) -> None:
+    server, service, _ = running_replay_server
+    response, _ = _exchange(server, "GET", "/api/replay/details")
+    assert response.status == HTTPStatus.UNAUTHORIZED
+    response, payload = _exchange(
+        server, "GET", "/api/replay/details", headers={_TOKEN_HEADER: _TOKEN}
+    )
+    assert response.status == HTTPStatus.OK
+    assert response.getheader("Content-Type") == "application/json; charset=utf-8"
+    assert response.getheader("Cache-Control") == "no-store"
+    assert (
+        response.getheader("Content-Disposition")
+        == 'attachment; filename="episode-details.json"'
+    )
+    assert payload == service.episode_details()[0]
+    assert not service.analysis_calls
     assert service.cursor_mutations == 0

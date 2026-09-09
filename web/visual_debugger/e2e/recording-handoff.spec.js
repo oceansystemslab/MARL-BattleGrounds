@@ -101,19 +101,19 @@ function expectNoBrowserErrors(page) {
 }
 
 /** @param {import("@playwright/test").Page} page */
-async function expectMetricPreparation(page) {
+async function expectReplaySaving(page) {
   const progress = page.getByRole("progressbar", {
-    name: "Preparing recorded-game metrics",
+    name: "Saving replay",
   });
   await expect(progress).toBeVisible();
   expect(await progress.getAttribute("value")).toBeNull();
   await expect(progress).toHaveAttribute("aria-describedby", "recording-status-note");
   await expect(page.locator("#recording-status-note")).toContainText(
-    "Preparing metrics. Longer replays can take longer.",
+    "Saving replay. Longer recordings can take longer.",
   );
   await expect(page.locator("#recording-metrics-help")).toBeVisible();
   await expect(page.locator("#recording-metrics-help")).toContainText(
-    "Metrics summarize the captured game.",
+    "Saving captured frames and provenance.",
   );
 }
 
@@ -368,22 +368,19 @@ async function expectSettledReplayHandoff(
 }
 
 /**
- * Assert the two path-independent artifacts materialized by the real recorder.
+ * Assert one self-contained replay and the absence of a legacy metrics sidecar.
  *
  * @param {string} replayPath
  * @param {string} metricPath
  * @param {number} transitionCount
  */
 async function expectSavedArtifacts(replayPath, metricPath, transitionCount) {
-  const [replay, metric] = await Promise.all([
-    readJsonArtifact(replayPath),
-    readJsonArtifact(metricPath),
-  ]);
+  const replay = await readJsonArtifact(replayPath);
+  await expect(readFile(metricPath)).rejects.toMatchObject({ code: "ENOENT" });
   expect(replay.bytes.byteLength).toBeGreaterThan(0);
-  expect(metric.bytes.byteLength).toBeGreaterThan(0);
   expect(replay.value).toMatchObject({
     schema_id: "marl_battlegrounds.evaluation.replay_artifact",
-    schema_version: 1,
+    schema_version: 2,
     header: {
       recorded_transition_count: transitionCount,
       recorded_frame_count: transitionCount + 1,
@@ -392,16 +389,9 @@ async function expectSavedArtifacts(replayPath, metricPath, transitionCount) {
   });
   expect(replay.value.frames).toHaveLength(transitionCount + 1);
   expect(replay.value.transitions).toHaveLength(transitionCount);
-  expect(metric.value).toMatchObject({
-    schema_id: "marl_battlegrounds.evaluation.metric_report_artifact",
-    schema_version: 1,
-    report: { completion: { validated_transition_count: transitionCount } },
-  });
-  expect(metric.value.report.completion).toEqual(replay.value.completion);
-  expect(metric.value.source_trajectory.episode_id).toBe(
-    replay.value.header.context.identity.episode_id,
-  );
-  return { replay, metric };
+  expect(replay.value).not.toHaveProperty("metric_report_reference");
+  expect(replay.value).not.toHaveProperty("processing_status");
+  return { replay };
 }
 
 test("confirmed prefix discard restarts capture and Finish opens settled frame-zero replay", async ({
@@ -516,7 +506,7 @@ test("confirmed prefix discard restarts capture and Finish opens settled frame-z
   );
   try {
     await page.locator("#recording-finish-button").click();
-    await expectMetricPreparation(page);
+    await expectReplaySaving(page);
   } finally {
     releaseFinish();
   }
@@ -663,14 +653,14 @@ test("actor POV handoff retains battlefield fog and artifact-wide facts", async 
     artifact_facts: {
       schema_version: 1,
       artifact_summary: {
-        metric_report_availability: "available",
+        metric_report_availability: "not_recorded",
         recorded_transition_count: 1,
         recorded_frame_count: 2,
       },
       completion: { validated_transition_count: 1 },
       processing: {
-        status: "succeeded",
-        processed_transition_count: 1,
+        status: "not_requested",
+        processed_transition_count: 0,
       },
     },
   });
@@ -957,7 +947,7 @@ test("Reconnect completes a lost Finish response without retrying publication", 
 
   try {
     await page.locator("#recording-finish-button").click();
-    await expectMetricPreparation(page);
+    await expectReplaySaving(page);
   } finally {
     releaseResponse();
   }

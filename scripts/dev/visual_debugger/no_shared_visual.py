@@ -14,10 +14,11 @@ from marl_battlegrounds.evaluation.actor_projection import (
 )
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContext,
     EvaluationFrameV1,
     VersionedIdentityV1,
     canonical_digest_sha256,
+    evaluation_context_type,
 )
 from marl_battlegrounds.evaluation.pov import (
     ACTOR_POV_CONTENT_SCHEMA_ID,
@@ -33,6 +34,7 @@ from marl_battlegrounds.evaluation.replay import (
     ReplayArtifactV1,
     validate_replay_artifact_v1,
 )
+from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactV2
 
 _VISUAL_PROJECTION_V1 = VersionedIdentityV1(
     identifier=NO_SHARED_OBS_ACTOR_PROJECTION_ID,
@@ -41,21 +43,23 @@ _VISUAL_PROJECTION_V1 = VersionedIdentityV1(
 
 
 def _visual_context_v1(
-    context: EvaluationEpisodeContextV1,
-) -> EvaluationEpisodeContextV1:
-    if type(context) is not EvaluationEpisodeContextV1:
-        raise TypeError("visual context requires exact EvaluationEpisodeContextV1")
+    context: EvaluationEpisodeContext,
+) -> EvaluationEpisodeContext:
+    evaluation_context_type(context)
     if context.execution_information_mode != "no_shared_obs":
         raise ValueError("NoSharedObs visual slices require no_shared_obs execution")
-    if context.actor_projection == _VISUAL_PROJECTION_V1:
+    if context.actor_projection.version == 1:
         return context
-    if context.actor_projection != NO_SHARED_OBS_ACTOR_PROJECTION_V2:
+    if (
+        context.actor_projection.version != 1
+        and context.actor_projection != NO_SHARED_OBS_ACTOR_PROJECTION_V2
+    ):
         raise ValueError("unsupported NoSharedObs actor projection")
     return context.model_copy(update={"actor_projection": _VISUAL_PROJECTION_V1})
 
 
 def build_live_no_shared_obs_visual_current_slice_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     *,
     global_slot: int,
@@ -102,7 +106,7 @@ def build_live_no_shared_obs_visual_adjacent_slice_v1(
 
 
 def build_replay_no_shared_obs_visual_content_v1(
-    replay: ReplayArtifactV1,
+    replay: ReplayArtifactV1 | ReplayArtifactV2,
     *,
     global_slot: int,
 ) -> ActorPovReplayContentV1:
@@ -113,13 +117,17 @@ def build_replay_no_shared_obs_visual_content_v1(
     advertised as an exact V2 policy input: the canonical replay retains the
     V2 projection identity and its separately reconstructable class-ID leaf.
     """
-    if type(replay) is not ReplayArtifactV1:
-        raise TypeError("NoSharedObs visual replay requires ReplayArtifactV1")
-    validate_replay_artifact_v1(replay)
+    if type(replay) not in (ReplayArtifactV1, ReplayArtifactV2):
+        raise TypeError("NoSharedObs visual replay requires an exact supported replay")
+    if type(replay) is ReplayArtifactV1:
+        validate_replay_artifact_v1(replay)
     context = replay.header.context
     if context.execution_information_mode != "no_shared_obs":
         raise ValueError("NoSharedObs visual replay requires no_shared_obs execution")
-    if context.actor_projection != NO_SHARED_OBS_ACTOR_PROJECTION_V2:
+    if (
+        context.actor_projection.version != 1
+        and context.actor_projection != NO_SHARED_OBS_ACTOR_PROJECTION_V2
+    ):
         raise ValueError("NoSharedObs visual replay requires actor projection V2")
 
     slices = tuple(

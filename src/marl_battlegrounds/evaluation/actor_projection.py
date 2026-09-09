@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final, cast
 
 from marl_battlegrounds.evaluation.models import (
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContext,
     EvaluationFrameV1,
     VersionedIdentityV1,
+    evaluation_context_type,
 )
 from marl_battlegrounds.evaluation.wire_shapes import (
     MAX_AGENT_SLOTS_V1,
@@ -37,14 +38,13 @@ type ActorClassIdsByTeamV2 = tuple[tuple[int, ...], ...]
 type ClassIdsByAgentByTeamV2 = tuple[ActorClassIdsByTeamV2, ...]
 
 
-def _require_context(context: EvaluationEpisodeContextV1) -> None:
+def _require_context(context: EvaluationEpisodeContext) -> None:
     """Require the exact immutable context model used by this projection."""
-    if type(context) is not EvaluationEpisodeContextV1:
-        raise TypeError("actor projection requires EvaluationEpisodeContextV1")
+    evaluation_context_type(context)
 
 
 def _derive_class_ids_by_agent_by_team(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
 ) -> ClassIdsByAgentByTeamV2:
     """Derive actor-relative class rows from serialized roster/mapping authority."""
     _require_context(context)
@@ -95,7 +95,7 @@ def _require_class_id_payload_shape(class_ids_by_agent_by_team: object) -> None:
 
 
 def validate_class_ids_by_agent_by_team_against_context_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     class_ids_by_agent_by_team: object,
 ) -> None:
     """Fail when a live public class map disagrees with immutable V1 context."""
@@ -106,7 +106,7 @@ def validate_class_ids_by_agent_by_team_against_context_v1(
 
 
 def _require_no_shared_obs_projection_v2(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
 ) -> None:
     """Require the exact supported information regime and projection identity."""
     _require_context(context)
@@ -119,7 +119,7 @@ def _require_no_shared_obs_projection_v2(
 
 
 def _require_shared_obs_projection_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
 ) -> None:
     """Require the exact structured SharedObs projection identity."""
     _require_context(context)
@@ -133,7 +133,7 @@ def _require_shared_obs_projection_v1(
 
 
 def reconstruct_shared_obs_sensor_source_bank_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
 ) -> SharedObsSensorSourceBankV1:
     """Rebuild the policy source bank from recorded base rows without persisting it.
@@ -189,7 +189,7 @@ def reconstruct_shared_obs_sensor_source_bank_v1(
 
 
 def reconstruct_class_ids_by_agent_by_team_v2(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
 ) -> ClassIdsByAgentByTeamV2:
     """Reconstruct the complete public ``(10, 2, 5)`` class-ID observation leaf."""
     _require_no_shared_obs_projection_v2(context)
@@ -197,7 +197,7 @@ def reconstruct_class_ids_by_agent_by_team_v2(
 
 
 def reconstruct_actor_class_ids_by_team_v2(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     global_slot: int,
 ) -> ActorClassIdsByTeamV2:
     """Reconstruct one actor's public ``(2, 5)`` class-ID observation row."""

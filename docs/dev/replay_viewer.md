@@ -54,6 +54,7 @@ List and materialize a scripted demonstration:
 
 The public browser options are `--frame-index`, `--pov-slot`,
 `--view oracle|pov`, `--ranges`/`--no-ranges`, `--port`, and `--no-open`.
+Ranges start hidden; `--ranges` opts in without changing the eight default effects.
 `--seed` applies only to scenario materialization. List operations reject
 unrelated options. `--static` has its own narrow matrix described below.
 Option abbreviations are rejected.
@@ -78,9 +79,10 @@ Developer visual-stress demonstrations are excluded by default:
 unavailable with local artifacts or checked samples.
 
 Scenario materialization runs in a temporary child process with
-`JAX_PLATFORMS=cpu`. The child executes the registered commands, records a
-metric-complete replay/sidecar pair, validates both through the public loader,
-and exits. Only that immutable loaded bundle crosses into the Replay Viewer.
+`JAX_PLATFORMS=cpu`. The child executes the registered commands and publishes one
+V2 replay containing the captured frames, facts and episode provenance. No metric
+sidecar or full metric computation is required. The parent opens those bytes
+through the public loader before starting the Replay Viewer.
 The read-only viewer process does not import or run simulator control.
 
 ### Authoritative-battlefield visual coverage rule
@@ -243,12 +245,12 @@ Technical Frame expansion.
 
 ## Visual filters
 
-Visual Filters contains 18 browser-local paint families plus Ranges. Initially
+Visual Filters contains 19 browser-local controls plus Ranges. Initially
 enable Ultimate Ability Effects, Spawn Shield, Basic Ability Effects,
 Regeneration Effects, Death Effects, Resurrection Effects, Scrolling Battle
-Text and Respawn Wave. With the existing default Ranges setting, the initial
-count is `9 enabled`. Visual Filters and Roster start open. The complete filter
-inventory is unchanged:
+Text and Respawn Wave. Ranges and Death Announcer start off, so the initial
+count is `8 enabled`. Visual Filters and Roster start open. **Default** restores
+this configuration. The complete filter inventory is:
 
 1. Aura Fields
 2. Aura Modifier Badges
@@ -268,6 +270,11 @@ inventory is unchanged:
 16. Resurrection Effects
 17. Spawn-Shield Expiry
 18. Scrolling Battle Text
+19. Death Announcer
+
+Death Announcer displays concise authoritative death notifications while the
+replay advances. It follows the existing presentation clock and clears when
+seeking or reinstalling a settled frame.
 
 Duration Status Badges includes the white crossed-swords **In Combat** countdown.
 Basic Ability Effects and Ultimate Ability Effects each own their corresponding
@@ -280,8 +287,8 @@ separate filters.
 A filter change pauses playback and reinstalls the current settled summary
 after filtering, so disabled paint never consumes layout space. Filters and
 Ranges do not change authorized data or authorized event data used by
-battlefield choreography. **Enable All** restores all 18 paint families plus
-Ranges; **Disable All** disables all 19 visible controls.
+battlefield choreography. **Enable All** enables all 19 controls plus Ranges;
+**Disable All** disables all 20 visible controls.
 
 ## PNG export and metrics
 
@@ -290,7 +297,7 @@ visible, settled, and free of pending replay/presentation work. It exports the
 battlefield alone—not the toolbar, timeline, or inspectors—at exactly twice
 its displayed pixel dimensions. The result uses the bundled fonts and locked
 battlefield background, reflects the current audience, selection, Ranges, and
-18 paint-filter states, and embeds one canonical
+visual-filter states, and embeds one canonical
 `MARL-BattleGrounds Replay Provenance` iTXt record. Export does not navigate the
 replay or request another replay frame.
 
@@ -301,24 +308,31 @@ removes the later result. Legacy task-zero replays say **Combat diagnostic**.
 Changing between Oracle and Agent POV preserves the cursor and playing intent.
 
 Open **TDM Evaluation Metrics**, below Comprehensive Agent Class Details, to
-prepare the offline analysis once. **At cursor** is the default: frame k uses
-exactly k captured transitions. **Final episode** explicitly selects the complete
+prepare the offline analysis once. **Up to Current Tick** is the default: local
+frame k uses exactly k captured transitions. The displayed tick comes from the
+captured simulator state, which may start above zero. **Final Episode** selects the complete
 captured prefix; interrupted recordings do not become completed results.
 An indeterminate progress indicator appears while metrics are prepared. Longer
 replays can take longer; the indicator makes no fixed-duration promise. Playback,
 seeking and POV changes remain available while analysis prepares. CSV preparation
 also shows an indicator when the metrics panel is closed.
-The selector exposes every implemented episode metric, including explicit
-inapplicability, insufficient data and zero-opportunity reasons. Distribution
-rows show their mean and observation count; CSV preserves the individual observations.
+The selector groups the complete TDM scalar catalog into readable families and
+shows the selected family's definition outside the scrolling table. Rows show
+**Subject**, **Measure** and **Value**, with teams first and numeric agent IDs
+using their recorded classes. Unavailable values appear as a dash; hover or focus
+a measure for its definition, units and missing-value rules. Formation summaries
+include mean distance and the number of eligible pair observations.
 Conditional coordination/class associations remain descriptive, not validated
 proof of strategic reasoning.
 
-**Download Metrics CSV** exports the selected scope and its values, exposures,
-subjects, dimensions, status and provenance. **Original Metrics JSON** downloads
-the exact canonical adjacent report when present. Older empty or missing reports
-can be analyzed from recorded facts without replacing their sidecar or simulation
-identity. Derived analysis records its own source fingerprint and reducer versions.
+**Download Metrics CSV** exports one wide row for the selected boundary, using
+the same scalar names, order and values as the run tables; unavailable cells are
+empty. Boundary provenance includes scope, local frame index, actual simulator
+tick and captured roster/policy identities. **Episode Details** downloads the
+recorded episode, policy, completion and runtime metadata as JSON without copying
+the trajectory or requiring a metrics sidecar. Older V1 replays can be analyzed
+from captured facts without rewriting their artifacts. Derived analysis records
+its own source fingerprint.
 Metrics remain researcher analysis in every visual POV and never enter policy
 inputs, recipient tooltips or battlefield visibility. Preparing analysis does not
 hold the replay command lock; subsequent seeks reuse cached prefix components.
@@ -350,8 +364,10 @@ scene-native Matplotlib adapter.
 
 ## Loopback and artifact safety
 
-Local artifacts, checked samples, and materialized bundles pass whole-artifact
-and companion validation before the server binds or a browser is opened.
+Local artifacts, checked samples, and materialized replays pass whole-artifact
+validation before the server binds or a browser is opened. Historical V1
+companions are checked when present or required by the checked-sample contract;
+current V2 replays are self-contained.
 Invalid schemas, canonical bytes, hashes, event/frame joins, frame indices,
 POV recipients, symlinks, and unsupported paths fail closed.
 
@@ -377,9 +393,9 @@ Closing the tab does not stop Python; use **Exit Replay Viewer** or `Ctrl-C`.
 - **Transport disabled:** reconnect if offline; Start/negative moves stop at the
   lower bound, positive moves/End stop at the captured endpoint, and artifact
   actions wait for a settled frame.
-- **Original Metrics JSON unavailable:** the replay has no verified adjacent
-  metric sidecar. Offline analysis can still derive metrics from its recorded
-  facts; check the analysis panel's error if that separate operation fails.
+- **Metrics unavailable:** inspect the analysis panel's error. A missing V1
+  metrics sidecar does not prevent analysis from recorded facts or the Episode
+  Details download; current V2 recordings do not need a sidecar.
 - **PNG export disabled:** pause playback and wait for the exact-frame summary
   to settle in a visible connected tab.
 - **Static Matplotlib import failed:** run `uv sync --extra viz`.
@@ -390,8 +406,9 @@ The replay format itself is documented in
 [browser-tools migration page](visual_debugger.md) or the
 [project README](../../README.md).
 
-Ordinary recording stores critical metrics by default. Opening Evaluation Metrics
-or requesting derived CSV explicitly opts into full replay analysis; this runs
-once and is cached across cursor and POV changes. Original Metrics JSON remains
-the exact recorded sidecar, which may contain only the critical default set.
-Library callers likewise opt in with `analyze_replay(bundle, full=True)`.
+Current DevClient and scripted-scenario recording captures the replay without
+computing full diagnostics. Opening Evaluation Metrics or requesting CSV opts
+into full replay analysis once; the result is cached across cursor and POV
+changes. Library callers likewise opt in with `analyze_replay(bundle, full=True)`.
+Research training and evaluation independently select priority/full metrics and
+replay saving through the [evaluation workflow](../evaluation/workflows.md).

@@ -1,7 +1,6 @@
-"""Structured SharedObs composition, adapter, rollout, and provenance proofs."""
+"""Structured SharedObs composition, adapter, and provenance proofs."""
 
-from collections.abc import Callable
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import jax
 import jax.numpy as jnp
@@ -10,7 +9,6 @@ import pytest
 from jax import Array
 from tests.evaluation_fixtures import evaluation_context, evaluation_env_config
 
-import marl_battlegrounds.evaluation.rollout as rollout_module
 from marl_battlegrounds.core.axis_mappings import observation_relation_and_row
 from marl_battlegrounds.core.env import reset
 from marl_battlegrounds.core.types import (
@@ -42,10 +40,6 @@ from marl_battlegrounds.evaluation.models import (
     VersionedIdentityV1,
     canonical_digest_sha256,
 )
-from marl_battlegrounds.evaluation.rollout import (
-    build_rollout_information_availability,
-    rollout,
-)
 from marl_battlegrounds.policies.actor import ActorAction
 from marl_battlegrounds.policies.no_shared_obs import (
     execute_no_shared_obs_team_policy,
@@ -59,14 +53,6 @@ from marl_battlegrounds.policies.shared_obs import (
     compose_shared_obs_unit_features,
     execute_shared_obs_team_policy,
 )
-
-if TYPE_CHECKING:
-
-    class MissingActionMaskType: ...
-
-    class MissingKeyType: ...
-
-    class MissingObservationType: ...
 
 
 def _shared_random_policy(
@@ -770,102 +756,16 @@ def test_executor_masks_all_unavailable_bank_fields_before_arbitrary_policy() ->
     _assert_tree_exact(actual, baseline)
 
 
-def test_unified_rollout_runs_both_homogeneous_modes_and_no_shared_bypasses_bank(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One scan lifecycle selects the regime statically before policy execution."""
-    config = _tdm_config(max_steps=1)
-    state, observation, action_mask, _ = reset(config, jax.random.key(0))
-
-    def _bank_must_not_be_traced(_observation: Observation) -> object:
-        raise AssertionError("NoSharedObs traced the SharedObs source-bank builder")
-
-    def _availability_must_not_be_traced(
-        _active_mask: Array,
-        _team_ids: Array,
-    ) -> object:
-        raise AssertionError("NoSharedObs traced SharedObs availability construction")
-
-    monkeypatch.setattr(
-        rollout_module,
-        "build_shared_obs_sensor_source_bank",
-        _bank_must_not_be_traced,
-    )
-    monkeypatch.setattr(
-        rollout_module,
-        "build_default_shared_obs_information_availability",
-        _availability_must_not_be_traced,
-    )
-    no_shared = rollout(
-        config,
-        state,
-        observation,
-        action_mask,
-        jax.random.key(41),
-        random_policy,
-        random_policy,
-        execution_information_mode="no_shared_obs",
-    )
-    monkeypatch.undo()
-
-    repeated_no_shared = rollout(
-        config,
-        state,
-        observation,
-        action_mask,
-        jax.random.key(41),
-        random_policy,
-        random_policy,
-        execution_information_mode="no_shared_obs",
-    )
-    _assert_tree_exact(repeated_no_shared, no_shared)
-
-    shared = rollout(
-        config,
-        state,
-        observation,
-        action_mask,
-        jax.random.key(41),
-        _shared_random_policy,
-        _shared_random_policy,
-        execution_information_mode="shared_obs",
-    )
-    shared_successors, shared_currents = shared.successors, shared.currents
-    no_shared_successors, no_shared_currents = (
-        no_shared.successors,
-        no_shared.currents,
-    )
-    assert shared.information_availability is not None
-    assert no_shared.information_availability is None
-    assert bool(shared_successors[5].transition_facts.has_transition[0])
-    assert bool(no_shared_successors[5].transition_facts.has_transition[0])
-    assert int(shared_currents[0].step_count[0]) == 0
-    assert int(no_shared_currents[0].step_count[0]) == 0
-
-
 def test_rollout_availability_and_host_reconstruction_preserve_exact_provenance() -> (
     None
 ):
     """Capture stores base rows and matrix, then reconstructs no second copy."""
     config = _tdm_config()
     state, observation, action_mask, _ = reset(config, jax.random.key(0))
-    result = rollout(
-        config,
-        state,
-        observation,
-        action_mask,
-        jax.random.key(47),
-        _shared_random_policy,
-        _shared_random_policy,
-        execution_information_mode="shared_obs",
+    availability = build_default_shared_obs_information_availability(
+        config.agent_profile.active_mask,
+        config.agent_profile.team_ids,
     )
-    availability = result.information_availability
-    assert availability is not None
-    _assert_tree_exact(
-        availability,
-        build_rollout_information_availability(config, "shared_obs"),
-    )
-    assert build_rollout_information_availability(config, "no_shared_obs") is None
     context = evaluation_context(
         execution_information_mode="shared_obs",
         config=config,
@@ -1045,76 +945,3 @@ def test_shared_projection_identity_and_reconstruction_fail_closed() -> None:
             context,
             without_availability,
         )
-
-
-@pytest.mark.parametrize(
-    "invalid_mode",
-    ("invalid", "", "SharedObs"),
-)
-def test_rollout_rejects_unknown_information_mode_before_compilation(
-    invalid_mode: str,
-) -> None:
-    """An invalid high-level flag cannot silently select NoSharedObs."""
-    config = _tdm_config()
-    state, observation, action_mask, _ = reset(config, jax.random.key(0))
-    with pytest.raises(ValueError, match="execution_information_mode"):
-        rollout(
-            config,
-            state,
-            observation,
-            action_mask,
-            jax.random.key(0),
-            cast(Callable[..., ActorAction], random_policy),
-            cast(Callable[..., ActorAction], random_policy),
-            execution_information_mode=cast(object, invalid_mode),  # type: ignore[arg-type]
-        )
-
-
-def test_rollout_rejects_wrong_scalar_policy_abi_before_jit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """ABI checks reject opposite callables without evaluating annotations."""
-    config = _tdm_config()
-    state, observation, action_mask, _ = reset(config, jax.random.key(0))
-
-    def _jit_must_not_run(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("wrong scalar policy ABI reached JIT")
-
-    monkeypatch.setattr(rollout_module, "_rollout_jit", _jit_must_not_run)
-    with pytest.raises(TypeError, match=r"team_a_policy.*shared_obs.*6 positional"):
-        rollout(
-            config,
-            state,
-            observation,
-            action_mask,
-            jax.random.key(0),
-            cast(Callable[..., ActorAction], random_policy),
-            cast(Callable[..., ActorAction], random_policy),
-            execution_information_mode="shared_obs",
-        )
-
-    sentinel = object()
-
-    def _valid_policy_with_unresolved_annotations(
-        observation: MissingObservationType,
-        action_mask: MissingActionMaskType,
-        key: MissingKeyType,
-    ) -> ActorAction:
-        del observation, action_mask, key
-        raise AssertionError("ABI validation must not execute the policy")
-
-    def _return_sentinel(*_args: object) -> object:
-        return sentinel
-
-    monkeypatch.setattr(rollout_module, "_rollout_jit", _return_sentinel)
-    result = rollout(
-        config,
-        state,
-        observation,
-        action_mask,
-        jax.random.key(0),
-        cast(Callable[..., ActorAction], _valid_policy_with_unresolved_annotations),
-        cast(Callable[..., ActorAction], _valid_policy_with_unresolved_annotations),
-        execution_information_mode="no_shared_obs",
-    )
-    assert result is sentinel

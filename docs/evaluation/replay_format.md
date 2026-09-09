@@ -1,5 +1,40 @@
 # Standard Evaluation Replay Format
 
+## Current single-file V2 recording
+
+New recording uses `ReplayArtifactV2`: one context/header, authoritative initial
+and successor frames, transitions and completion. It has no metric-report JSON
+reference and does not compute metrics to save a replay. `save_replay` publishes
+one canonical `.marlbg-replay.json` file without overwriting an existing artifact;
+`load_replay` explicitly dispatches supported versions. Original V1 bytes and
+strict versioned readers remain unchanged.
+
+V2 preserves essential resolved configuration, the ten-slot roster, observations,
+action masks and transition facts. Optional policy/checkpoint/training and seed
+provenance represents unknown values as null. A frozen policy and an evolving
+training policy are distinguished. Recorded simulator/runtime identity remains
+separate from the current analysis identity. V2 does not introduce mixed actor
+information regimes; canonical new research remains SharedObs.
+
+Selected capture returns bounded per-step numeric packets. No episode-length
+buffer resides in environment state. `RunWriter` joins packets across chunks,
+spools incomplete episodes and atomically publishes completed replays. Unfinished
+episodes restart on explicit resume; temporary spools are not completed evidence.
+The in-memory evaluator can return selected artifacts without creating files.
+Saving a replay and requesting full metrics are independent selections.
+
+Replay Viewer analyzes prefixes/final results with the shared scalar JAX metric
+authority. CSV is the metric export; episode details/configuration are labelled
+separately. Historical metric sidecars may still be read by explicit legacy APIs,
+but new writing and analysis do not depend on them.
+
+## Historical V1 format
+
+The following sections retain the V1 wire contract and historical migration
+record. Their old in-place migration and sidecar rules apply to those historical
+versions; they do not override the separately versioned V2 recording above.
+
+
 This document defines the version-1 semantic replay normal form introduced in
 Milestone 6. It is a contract for evaluation evidence, not a renderer frame,
 simulator checkpoint, policy-state dump, or offline-RL dataset.
@@ -323,6 +358,17 @@ surface is:
   plus `validate_official_scenario_evaluation_record_v2` for the mandatory
   core-aware product/curated-state acceptance gate and canonical SharedObs
   mode, projection, and all-frame availability check.
+
+Current controlled-scenario captures use `ScenarioEvaluationRecordV3` with
+`ResolvedScenarioSpecificationV3`, `ScenarioSeedScheduleV3` and a V2 replay
+reference. Their endpoint/role/initial-state semantics are unchanged; named seed
+facts may be unknown and no metric-report reference is required. Use
+`save_scenario_evaluation_record_v3` / `load_scenario_evaluation_record_v3` for
+canonical artifact joins, then `validate_official_scenario_evaluation_record_v3`
+for live official eligibility. The latter reuses the same Core-backed product,
+curated-state and all-frame SharedObs checks as the historical V2 gate. Old V1/V2
+scenario files retain their original strict readers and report joins. Current
+full scalar rows live in the run CSV, independently of the replay file.
 
 The filename pair is derived locally, never serialized:
 

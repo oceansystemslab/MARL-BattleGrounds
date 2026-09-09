@@ -9,7 +9,7 @@ import {
   getCurrentFrame,
   getCurrentFrameAndPresentation,
   getCurrentPresentation,
-  getReplayMetricReport,
+  getReplayEpisodeDetails,
   getReplayTimeline,
   postCommand,
   postReplayCommand,
@@ -72,34 +72,6 @@ function jsonResponse(
       ok,
       status,
       text: async () => "",
-    })
-  );
-}
-
-/**
- * @param {Uint8Array} bytes
- * @param {Record<string, string>} [overrides]
- * @param {number} [status]
- */
-function metricResponse(bytes, overrides = {}, status = 200) {
-  const headers = new Map(
-    Object.entries({
-      "cache-control": "no-store",
-      "content-disposition": 'attachment; filename="episode.marlbg-metrics.json"',
-      "content-length": String(bytes.byteLength),
-      "content-type": "application/json; charset=utf-8",
-      ...overrides,
-    }),
-  );
-  return /** @type {Response} */ (
-    /** @type {unknown} */ ({
-      arrayBuffer: async () => bytes.slice().buffer,
-      headers: {
-        get: (/** @type {string} */ name) =>
-          headers.get(String(name).toLowerCase()) ?? null,
-      },
-      ok: status >= 200 && status < 300,
-      status,
     })
   );
 }
@@ -611,218 +583,6 @@ test("replay timeline and command use separate exact routes and send once", asyn
   }
 });
 
-test("metric report GET preserves exact bytes and validates its attachment", async () => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
-  const expected = new TextEncoder().encode('{"canonical":"bytes"}');
-  /** @type {Array<{path: string, options: RequestInit}>} */
-  const calls = [];
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: {
-      clearTimeout: globalThis.clearTimeout,
-      /** @param {string} path @param {RequestInit} options */
-      fetch: async (path, options) => {
-        calls.push({ path: String(path), options });
-        return metricResponse(expected);
-      },
-      setTimeout: globalThis.setTimeout,
-    },
-  });
-
-  try {
-    const result = await getReplayMetricReport("capability");
-    assert.equal(Object.isFrozen(result), true);
-    assert.equal(result.filename, "episode.marlbg-metrics.json");
-    assert.deepEqual(new Uint8Array(result.bytes), expected);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].path, "/api/replay/metric-report");
-    assert.deepEqual(calls[0].options, {
-      method: "GET",
-      headers: { "X-MARL-Debugger-Token": "capability" },
-      cache: "no-store",
-      credentials: "omit",
-      redirect: "error",
-      signal: calls[0].options.signal,
-    });
-    assert.ok(calls[0].options.signal instanceof AbortSignal);
-  } finally {
-    if (originalWindow) {
-      Object.defineProperty(globalThis, "window", originalWindow);
-    } else {
-      Reflect.deleteProperty(globalThis, "window");
-    }
-  }
-});
-
-test("metric report rejects malformed success headers and lengths without retry", async () => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
-  const expected = new TextEncoder().encode("{}");
-  /** @type {Array<Record<string, string>>} */
-  const cases = [
-    { "content-type": "application/json" },
-    { "cache-control": "private" },
-    { "content-disposition": 'inline; filename="episode.marlbg-metrics.json"' },
-    {
-      "content-disposition":
-        'attachment; filename="episode.marlbg-metrics.json.marlbg-metrics.json"',
-    },
-    { "content-disposition": 'attachment; filename="../x.marlbg-metrics.json"' },
-    { "content-length": "02" },
-    { "content-length": "3" },
-  ];
-  let fetchCalls = 0;
-  let responseIndex = 0;
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: {
-      clearTimeout: globalThis.clearTimeout,
-      fetch: async () => {
-        fetchCalls += 1;
-        return metricResponse(expected, cases[responseIndex++]);
-      },
-      setTimeout: globalThis.setTimeout,
-    },
-  });
-
-  try {
-    for (const _ of cases) {
-      await assert.rejects(
-        getReplayMetricReport("capability"),
-        (error) => error instanceof DebuggerApiError && error.status === 200,
-      );
-    }
-    assert.equal(fetchCalls, cases.length);
-  } finally {
-    if (originalWindow) {
-      Object.defineProperty(globalThis, "window", originalWindow);
-    } else {
-      Reflect.deleteProperty(globalThis, "window");
-    }
-  }
-});
-
-test("metric report rejects non-200 success statuses without retry", async () => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
-  const expected = new TextEncoder().encode("{}");
-  const statuses = [201, 204, 206];
-  let fetchCalls = 0;
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: {
-      clearTimeout: globalThis.clearTimeout,
-      fetch: async () => metricResponse(expected, {}, statuses[fetchCalls++]),
-      setTimeout: globalThis.setTimeout,
-    },
-  });
-
-  try {
-    for (const expectedStatus of statuses) {
-      await assert.rejects(getReplayMetricReport("capability"), (error) => {
-        assert.ok(error instanceof DebuggerApiError);
-        assert.equal(error.status, expectedStatus);
-        return true;
-      });
-    }
-    assert.equal(fetchCalls, statuses.length);
-  } finally {
-    if (originalWindow) {
-      Object.defineProperty(globalThis, "window", originalWindow);
-    } else {
-      Reflect.deleteProperty(globalThis, "window");
-    }
-  }
-});
-
-test("metric report preserves strict 403 and 404 replay errors and never retries", async () => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
-  const responses = [
-    {
-      status: 403,
-      payload: {
-        schema_version: 1,
-        error_code: "audience_unavailable",
-        message: "Metric reports are available only in Oracle View.",
-        latest_frame: null,
-      },
-    },
-    {
-      status: 404,
-      payload: {
-        schema_version: 1,
-        error_code: "not_found",
-        message: "No metric report is available for this replay.",
-        latest_frame: null,
-      },
-    },
-  ];
-  let fetchCalls = 0;
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: {
-      clearTimeout: globalThis.clearTimeout,
-      fetch: async () => {
-        const response = responses[fetchCalls++];
-        return jsonResponse(response.payload, {
-          ok: false,
-          status: response.status,
-        });
-      },
-      setTimeout: globalThis.setTimeout,
-    },
-  });
-
-  try {
-    for (const expected of responses) {
-      await assert.rejects(getReplayMetricReport("capability"), (error) => {
-        assert.ok(error instanceof DebuggerApiError);
-        assert.equal(error.status, expected.status);
-        assert.deepEqual(error.payload, expected.payload);
-        return true;
-      });
-    }
-    assert.equal(fetchCalls, 2);
-  } finally {
-    if (originalWindow) {
-      Object.defineProperty(globalThis, "window", originalWindow);
-    } else {
-      Reflect.deleteProperty(globalThis, "window");
-    }
-  }
-});
-
-test("metric report connection failure has no retry path", async () => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
-  let fetchCalls = 0;
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: {
-      clearTimeout: globalThis.clearTimeout,
-      fetch: async () => {
-        fetchCalls += 1;
-        throw new Error("synthetic disconnect");
-      },
-      setTimeout: globalThis.setTimeout,
-    },
-  });
-
-  try {
-    await assert.rejects(
-      getReplayMetricReport("capability"),
-      (error) =>
-        error instanceof DebuggerApiError &&
-        error.status === 0 &&
-        error.message.includes("Could not download"),
-    );
-    assert.equal(fetchCalls, 1);
-  } finally {
-    if (originalWindow) {
-      Object.defineProperty(globalThis, "window", originalWindow);
-    } else {
-      Reflect.deleteProperty(globalThis, "window");
-    }
-  }
-});
-
 test("replay HTTP errors cross the exact error boundary before callers can inspect them", async () => {
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   /** @type {Record<string, any>} */
@@ -886,5 +646,53 @@ test("replay HTTP errors cross the exact error boundary before callers can inspe
     } else {
       Reflect.deleteProperty(globalThis, "window");
     }
+  }
+});
+
+test("episode details download authenticates one JSON attachment and rejects mislabeled content", async () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const details = {
+    schema_id: "marlbg.replay.episode_details",
+    schema_version: 1,
+    context: { identity: { episode_id: "episode-1" } },
+    source_replay: {},
+    completion: {},
+  };
+  let filename = "episode-details.json";
+  let requests = 0;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      clearTimeout: globalThis.clearTimeout,
+      setTimeout: globalThis.setTimeout,
+      fetch: async (/** @type {string} */ path, /** @type {RequestInit} */ options) => {
+        requests += 1;
+        assert.equal(path, "/api/replay/details");
+        assert.equal(options.method, "GET");
+        assert.deepEqual(options.headers, { "X-MARL-Debugger-Token": "capability" });
+        return new Response(JSON.stringify(details), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "no-store",
+            "Content-Disposition": `attachment; filename="${filename}"`,
+          },
+        });
+      },
+    },
+  });
+  try {
+    const result = await getReplayEpisodeDetails("capability");
+    assert.equal(result.filename, "episode-details.json");
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(result.bytes)), details);
+    filename = "metrics.json";
+    await assert.rejects(
+      getReplayEpisodeDetails("capability"),
+      /Invalid episode details attachment/u,
+    );
+    assert.equal(requests, 2);
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+    else Reflect.deleteProperty(globalThis, "window");
   }
 });

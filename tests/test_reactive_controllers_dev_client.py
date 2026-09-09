@@ -42,13 +42,15 @@ from scripts.dev.visual_debugger.service import DebuggerService
 from tests.scenario_controller_fixtures import load_scenario_1
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
-from marl_battlegrounds.core.types import TEAM_A_ID, TEAM_B_ID, EnvConfig, EnvState
+from marl_battlegrounds.core.types import TEAM_B_ID, EnvConfig, EnvState
+from marl_battlegrounds.evaluation import policy_execution
 from marl_battlegrounds.evaluation.metrics import build_evaluation_observer_v1
 from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV1,
     EvaluationEpisodeContextV1,
     canonical_digest_sha256,
 )
+from marl_battlegrounds.evaluation.policy_execution import Policy, policy
 from marl_battlegrounds.evaluation.replay import (
     RuntimeProvenanceV1,
     build_replay_bundle_v1,
@@ -59,6 +61,12 @@ from marl_battlegrounds.evaluation.replay_io import (
     save_replay_bundle_v1,
 )
 from marl_battlegrounds.policies.actor import ActorAction
+from marl_battlegrounds.policies.input import Observations
+from marl_battlegrounds.policies.reactive_tdm_alpha import reactive_tdm_alpha_policy
+from marl_battlegrounds.policies.shared_obs import (
+    build_shared_obs_sensor_source_bank,
+    execute_shared_obs_team_policy,
+)
 
 
 def _scenario(
@@ -145,10 +153,10 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
 ) -> None:
     session = _session(team_a=team_a, team_b=scenario_controller)
     calls = {"bank": 0, "assembler": 0, "step": 0}
-    real_bank = control.build_shared_obs_sensor_source_bank
-    real_assembler = control.build_joint_action_from_actor_actions
+    real_bank = policy_execution.build_shared_obs_sensor_source_bank
+    real_assembler = policy_execution.build_joint_action_from_actor_actions
     real_step = control.step
-    real_executor = control.execute_shared_obs_team_policy
+    real_executor = control.apply_policies
     input_epochs: list[tuple[object, object, object]] = []
 
     def bank(observation: object) -> object:
@@ -165,30 +173,27 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
         return real_step(*args)  # type: ignore[arg-type]
 
     def executor(*args: object, **kwargs: object) -> object:
-        input_epochs.append((args[0], args[1], args[3]))
-        if kwargs["team_identity"] == TEAM_B_ID:
-            assert kwargs["policy"] is control.reactive_tdm_beta_policy
-        else:
-            assert kwargs["team_identity"] == TEAM_A_ID
-            expected_policy = (
-                control.reactive_tdm_alpha_policy
-                if team_a == "reactive_tdm"
-                else control._random_shared_obs_policy  # pyright: ignore[reportPrivateUsage]
-            )
-            assert kwargs["policy"] is expected_policy
+        input_epochs.append((args[6], args[7], args[8]))
+        assert args[1] is policy("tdm-beta").apply
+        if team_a != "manual":
+            expected = "tdm-alpha" if team_a == "reactive_tdm" else "random"
+            assert args[0] is policy(expected).apply
         return real_executor(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(control, "build_shared_obs_sensor_source_bank", bank)
-    monkeypatch.setattr(control, "build_joint_action_from_actor_actions", assembler)
+    monkeypatch.setattr(policy_execution, "build_shared_obs_sensor_source_bank", bank)
+    monkeypatch.setattr(
+        policy_execution, "build_joint_action_from_actor_actions", assembler
+    )
     monkeypatch.setattr(control, "step", step)
-    monkeypatch.setattr(control, "execute_shared_obs_team_policy", executor)
+    monkeypatch.setattr(control, "apply_policies", executor)
     advanced = control.submit_interactive(session)
     assert calls == {"bank": 1, "assembler": 1, "step": 1}
-    assert len(input_epochs) == (1 if team_a == "manual" else 2)
-    for observation, mask, source_bank in input_epochs:
-        assert observation is session.observation
-        assert mask is session.action_mask
-        assert source_bank is input_epochs[0][2]
+    assert len(input_epochs) == 1
+    observations, mask, keys = input_epochs[0]
+    assert isinstance(observations, Observations)
+    assert observations.observation is session.observation
+    assert mask is session.action_mask
+    assert isinstance(keys, jax.Array) and keys.shape == (10,)
     assert int(advanced.state.step_count) == int(session.state.step_count) + 1
     assert advanced.incoming_evaluation_view is not None
     acceptance = (
@@ -249,16 +254,16 @@ def test_scenario_controller_keeps_live_and_reviving_classes_reactive(
     for _ in range(2):
         baseline = cast(
             ActorAction,
-            control.execute_shared_obs_team_policy(
+            execute_shared_obs_team_policy(
                 session.observation,
                 session.action_mask,
                 control._policy_keys(session),  # pyright: ignore[reportPrivateUsage]
-                control.build_shared_obs_sensor_source_bank(session.observation),
+                build_shared_obs_sensor_source_bank(session.observation),
                 control.build_default_shared_obs_information_availability(
                     session.config.agent_profile.active_mask,
                     session.config.agent_profile.team_ids,
                 ),
-                policy=control.reactive_tdm_alpha_policy,
+                policy=reactive_tdm_alpha_policy,
                 team_identity=TEAM_B_ID,
             ),
         )
@@ -481,7 +486,13 @@ def test_scenario_controller_failure_is_atomic_and_policy_labelled(
         del args
         raise RuntimeError("injected scenario controller failure")
 
-    monkeypatch.setattr(control, "reactive_tdm_beta_policy", failed_policy)
+    def injected_policy(name: str) -> Policy:
+        original = policy(name)
+        return (
+            replace(original, apply=failed_policy) if name == "tdm-beta" else original
+        )
+
+    monkeypatch.setattr(control, "policy", injected_policy)
     with pytest.raises(control.DebuggerTransitionFailureV1) as raised:
         control.submit_interactive(session)
     assert raised.value.stable_code == "policy_action_build_failed"

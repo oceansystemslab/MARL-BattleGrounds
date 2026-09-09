@@ -35,6 +35,19 @@ def capture_debugger_runtime_provenance_v1(
         raise TypeError("code_revision must be exact CodeRevisionV1")
     if type(policy_execution_included) is not bool:
         raise TypeError("policy_execution_included must be an exact bool")
+    return capture_runtime_provenance(
+        code_revision.package_version,
+        policy_execution_included=policy_execution_included,
+    )
+
+
+def capture_runtime_provenance(
+    package_version: str,
+    *,
+    policy_execution_included: bool = True,
+    num_envs: int = 1,
+) -> RuntimeProvenanceV1:
+    """Capture the actual numerical runtime once for an evaluation pass."""
 
     import jax
 
@@ -56,7 +69,7 @@ def capture_debugger_runtime_provenance_v1(
 
     return RuntimeProvenanceV1(
         python_version=host_platform.python_version(),
-        package_version=code_revision.package_version,
+        package_version=package_version,
         jax_version=version("jax"),
         jaxlib_version=version("jaxlib"),
         numpy_version=version("numpy"),
@@ -68,10 +81,10 @@ def capture_debugger_runtime_provenance_v1(
         driver_version=None,
         runtime_version=runtime_version,
         precision="float64" if x64_enabled else "float32",
-        environment_count=1,
-        batch_shape=(1,),
+        environment_count=num_envs,
+        batch_shape=(num_envs,),
         policy_execution_included=policy_execution_included,
     )
 
 
-__all__ = ["capture_debugger_runtime_provenance_v1"]
+__all__ = ["capture_debugger_runtime_provenance_v1", "capture_runtime_provenance"]

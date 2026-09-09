@@ -19,11 +19,12 @@ from pydantic import ConfigDict, Field
 from marl_battlegrounds.evaluation.models import (
     ActionAcceptanceFactsV1,
     ActionMaskV1,
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContext,
     EvaluationFrameV1,
     EvaluationTransitionV1,
     JointActionV1,
     TransitionFactsV1,
+    evaluation_context_type,
 )
 from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
@@ -684,11 +685,12 @@ class LiveDraftInspectionPresentationV1:
 
 
 def _validated_context(
-    context: EvaluationEpisodeContextV1,
-) -> EvaluationEpisodeContextV1:
-    if type(context) is not EvaluationEpisodeContextV1:
-        raise TypeError("context must be the exact EvaluationEpisodeContextV1 root.")
-    return EvaluationEpisodeContextV1.model_validate(context.model_dump(mode="python"))
+    context: EvaluationEpisodeContext,
+) -> EvaluationEpisodeContext:
+    evaluation_context_type(context)
+    return evaluation_context_type(context).model_validate(
+        context.model_dump(mode="python")
+    )
 
 
 def _validated_frame(frame: EvaluationFrameV1) -> EvaluationFrameV1:
@@ -904,7 +906,7 @@ def _decision_mask(
 
 
 def _oracle_target_public_axis(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     *,
     actor_internal_slot: int,
 ) -> tuple[str | None, ...]:
@@ -922,7 +924,7 @@ def _oracle_target_public_axis(
 
 
 def _oracle_current_join(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     scene: AuthorizedBattlefieldSceneV1,
 ) -> dict[int, AuthorizedAgentV1]:
@@ -954,7 +956,7 @@ def _oracle_current_join(
 
 
 def _oracle_decision_mask(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     scene: AuthorizedBattlefieldSceneV1,
     *,
@@ -1061,7 +1063,7 @@ def _validate_outgoing_epoch(
 
 
 def build_replay_oracle_inspection_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     current_frame: EvaluationFrameV1,
     current_scene: AuthorizedBattlefieldSceneV1,
     *,
@@ -1575,7 +1577,7 @@ def _draft_root(
 
 
 def _oracle_target_action_for_internal_slot(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     *,
     actor_internal_slot: int,
     target_internal_slot: int | None,
@@ -1601,7 +1603,7 @@ def _oracle_target_action_for_internal_slot(
 
 
 def build_live_oracle_draft_inspection_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     current_frame: EvaluationFrameV1,
     current_scene: AuthorizedBattlefieldSceneV1,
     *,

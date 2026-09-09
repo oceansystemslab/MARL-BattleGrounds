@@ -596,7 +596,7 @@ def test_strict_cost_profile_rejects_stale_entries(
 def test_production_profile_names_and_weights_exactly_five_extracted_families() -> None:
     assert CI_SHARD_COST_PROFILE.file_cost_overrides == {
         "tests/test_shared_obs_runtime.py": 110,
-        "tests/test_tdm_scenarios.py": 208,
+        "tests/test_tdm_scenarios.py": 105,
         "tests/test_visual_debugger_replay_service.py": 400,
     }
     assert CI_SHARD_COST_PROFILE.split_file_family_cost_floors == {}
@@ -632,7 +632,7 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
     )
     assert set(CI_SHARD_COST_PROFILE.relocations_by_shard_count) == {12}
     assert CI_SHARD_COST_PROFILE.relocations_by_shard_count[12] == (
-        ("residual:tests/test_visual_debugger_service.py", 7, 10),
+        ("residual:tests/test_visual_debugger_service.py", 6, 10),
         ("file:tests/test_shared_obs_runtime.py", 11, 3),
     )
     assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset()

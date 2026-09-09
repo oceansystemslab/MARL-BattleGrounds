@@ -1933,6 +1933,32 @@ select {
   pointer-events: none;
 }
 
+.combat-death-announcement--team-a {
+  color: var(--team-a);
+}
+.combat-death-announcement--team-b {
+  color: var(--team-b);
+}
+.combat-death-announcement__panel {
+  fill: rgb(8 15 29 / 96%);
+  stroke: currentColor;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.combat-death-announcement__heading {
+  fill: currentColor;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+.combat-death-announcement__agent {
+  fill: var(--text);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .agent {
   cursor: pointer;
   color: var(--text);
@@ -3310,6 +3336,7 @@ html[data-team-a-controller="random_valid"] .roster-row[data-team="team-a"] {
 
 .visual-filters__actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.4rem;
   justify-content: flex-end;
   margin-top: 0.55rem;
@@ -3776,10 +3803,6 @@ html[data-team-a-controller="random_valid"] .roster-row[data-team="team-a"] {
   font-size: 0.8rem;
 }
 
-#evaluation-metrics .disclosure-body {
-  max-height: min(36rem, 65vh);
-}
-
 .metrics-progress {
   inline-size: 8rem;
   block-size: 0.5rem;
@@ -3827,4 +3850,56 @@ html[data-team-a-controller="random_valid"] .roster-row[data-team="team-a"] {
 #evaluation-metrics select {
   width: 100%;
   margin: 0.3rem 0 0.7rem;
+}
+
+/* Scope and group controls stay visible while only the measurements scroll. */
+#evaluation-metrics .disclosure-body {
+  max-height: none;
+  overflow: visible;
+}
+
+#metric-rows {
+  max-height: min(30rem, 55vh);
+  overflow: auto;
+  scrollbar-gutter: stable;
+  border-top: 1px solid var(--border);
+}
+
+.metric-table td:first-child {
+  width: 32%;
+  color: var(--text-muted);
+}
+
+.metric-table td:nth-child(2) {
+  width: 48%;
+}
+
+.metric-table small {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.7rem;
+}
+
+.metric-table .metric-value,
+.metric-table th:last-child {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.metric-measure {
+  cursor: help;
+  text-decoration: underline dotted var(--text-muted);
+  text-underline-offset: 0.2em;
+}
+
+.metric-measure:focus-visible {
+  outline: 1px solid var(--text-muted);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.metric-condition {
+  margin-top: 0.25rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
 }

@@ -15,9 +15,10 @@ import numpy as np
 from numpy.typing import NDArray
 
 from marl_battlegrounds.evaluation.models import (
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContext,
     EvaluationFrameV1,
     ResolvedObstacleV1,
+    evaluation_context_type,
 )
 from marl_battlegrounds.rendering.authorized_pov_scene import (
     pov_presentation_key_v1,
@@ -202,7 +203,7 @@ def _status_durations(frame: EvaluationFrameV1, global_slot: int) -> tuple[int, 
 
 
 def _corpse_statuses(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     *,
     global_slot: int,
@@ -247,7 +248,7 @@ def _corpse_statuses(
 
 
 def _corpse_agent(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     *,
     global_slot: int,
@@ -321,7 +322,7 @@ def _corpse_agent(
 
 
 def build_local_oracle_corpse_overlay_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     base_scene: AuthorizedBattlefieldSceneV1,
     *,
@@ -331,8 +332,7 @@ def build_local_oracle_corpse_overlay_v1(
     living_sensor_public_agent_ids: tuple[str, ...],
 ) -> LocalOracleCorpseOverlayV1:
     """Authorize dead bodies visible to one or more living local sensors."""
-    if type(context) is not EvaluationEpisodeContextV1:
-        raise TypeError("context must use the exact EvaluationEpisodeContextV1 root.")
+    evaluation_context_type(context)
     if type(frame) is not EvaluationFrameV1:
         raise TypeError("frame must use the exact EvaluationFrameV1 root.")
     if type(base_scene) is not AuthorizedBattlefieldSceneV1:
@@ -471,7 +471,7 @@ def build_local_oracle_corpse_overlay_v1(
 
 def validate_local_oracle_corpse_overlay_against_source_v1(
     overlay: LocalOracleCorpseOverlayV1,
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     base_scene: AuthorizedBattlefieldSceneV1,
     *,

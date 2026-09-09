@@ -204,6 +204,7 @@ def _corpse_overlay_browser_cases() -> tuple[
             view_mode="pov",
             pov_global_slot=0,
             viewer_session_id="browser-replay-no-shared-corpse-overlay",
+            show_ranges=True,
         )
         result = service.current_presentation()
         persistent_service = ReplayViewerService(
@@ -212,6 +213,7 @@ def _corpse_overlay_browser_cases() -> tuple[
             view_mode="pov",
             pov_global_slot=0,
             viewer_session_id="browser-replay-no-shared-persistent-corpse-overlay",
+            show_ranges=True,
         )
         persistent_result = persistent_service.current_presentation()
     if (
@@ -537,6 +539,7 @@ def render_fixture() -> str:
                 view_mode="researcher",
                 selected_global_slot=0,
                 viewer_session_id=continuity_session,
+                show_ranges=True,
             )
         ),
         "shared_obs": _pair(
@@ -546,6 +549,7 @@ def render_fixture() -> str:
                 view_mode="pov",
                 pov_global_slot=0,
                 viewer_session_id=continuity_session,
+                show_ranges=True,
             )
         ),
     }

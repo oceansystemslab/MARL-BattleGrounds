@@ -1,4 +1,7 @@
-import { exactAuthorizedAgentIdentityV1 } from "./agent-identity.js";
+import {
+  canonicalAgentIdentity,
+  exactAuthorizedAgentIdentityV1,
+} from "./agent-identity.js";
 import { CHOREOGRAPHY_PAINT_FOOTPRINTS } from "./choreography-plan.js";
 import { formatCompactDisplayNumber, formatDisplayNumber } from "./display.js";
 import { explainActivation, explainNetHealth } from "./explanations.js";
@@ -13,10 +16,9 @@ const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 /**
  * @param {unknown} publicAgentId
  */
-function formatAgentIdentity(publicAgentId) {
-  return typeof publicAgentId === "string" && publicAgentId.trim()
-    ? `Agent ID ${publicAgentId}`
-    : "Agent ID unavailable";
+function formatAgentIdentity(publicAgentId, identity = null) {
+  return canonicalAgentIdentity(identity ?? { public_agent_id: publicAgentId })
+    .publicIdentity;
 }
 
 /** @param {unknown} value */
@@ -33,6 +35,17 @@ function humanizeEventName(value) {
 
 /** @param {Record<string, any>} event */
 function semanticEventCopy(event) {
+  if (event.cueSemantic === "death_announcement") {
+    return Object.freeze({
+      title: event.label,
+      summary: event.members
+        .map(
+          (/** @type {Record<string, string>} */ member) =>
+            `${member.title} has been killed.`,
+        )
+        .join(" "),
+    });
+  }
   if (event.cueSemantic === "agent_died") {
     return Object.freeze({
       title: "Agent Died",
@@ -430,6 +443,7 @@ export class SvgChoreographyPainter {
    * } | null}
    */
   #renderEvent(ownerDocument, event, plan, options, animationSpecs) {
+    if (event.cueSemantic === "death_announcement" && options.settled) return null;
     if (event.kind === "semantic_pulse" && event.cueSemantic === "cooldown_started") {
       return null;
     }
@@ -690,7 +704,7 @@ export class SvgChoreographyPainter {
           event.ownershipDisposition,
           event.ownershipCueCollisionFree,
         );
-        const ownershipLabel = `${formatAgentIdentity(event.sourcePublicAgentId)} → ${formatAgentIdentity(event.targetPublicAgentId)}`;
+        const ownershipLabel = `${formatAgentIdentity(event.sourcePublicAgentId, event.sourceIdentity)} → ${formatAgentIdentity(event.targetPublicAgentId, event.recipientIdentity)}`;
         ownership.append(
           svgElement(ownerDocument, "line", {
             class: "combat-route__ownership-leader",
@@ -1123,7 +1137,10 @@ export class SvgChoreographyPainter {
       const recipientLabel = svgElement(ownerDocument, "text", {
         class: "combat-net__recipient",
       });
-      const fullRecipientLabel = formatAgentIdentity(event.recipientPublicAgentId);
+      const fullRecipientLabel = formatAgentIdentity(
+        event.recipientPublicAgentId,
+        event.recipientIdentity,
+      );
       recipientLabel.textContent = fullRecipientLabel;
       group.dataset.recipientLabel = fullRecipientLabel;
       group.append(recipientLabel);
@@ -1358,6 +1375,10 @@ export class SvgChoreographyPainter {
     if (!event.anchor) {
       return;
     }
+    if (event.cueSemantic === "death_announcement") {
+      this.#renderDeathAnnouncement(ownerDocument, group, event);
+      return;
+    }
     if (event.cueSemantic === "agent_died" || event.cueSemantic === "agent_respawned") {
       this.#renderLifecycleRing(
         ownerDocument,
@@ -1546,6 +1567,43 @@ export class SvgChoreographyPainter {
     setAttributes(wave, {
       transform: `translate(${anchor.x} ${anchor.y})`,
     });
+  }
+
+  /** Bounded per-team HUD: at most five rows, on the existing transition clock.
+   * @param {Document} ownerDocument @param {SVGElement} group @param {JsonRecord} event
+   */
+  #renderDeathAnnouncement(ownerDocument, group, event) {
+    const card = svgElement(ownerDocument, "g", {
+      class: `combat-death-announcement combat-death-announcement--team-${event.teamId === 1 ? "a" : "b"}`,
+      transform: `translate(${event.anchor.x - event.panelWidth / 2} ${event.anchor.y - event.panelHeight / 2})`,
+    });
+    card.append(
+      svgElement(ownerDocument, "rect", {
+        class: "combat-death-announcement__panel",
+        width: event.panelWidth,
+        height: event.panelHeight,
+        rx: 7,
+      }),
+    );
+    const heading = svgElement(ownerDocument, "text", {
+      class: "combat-death-announcement__heading",
+      x: 10,
+      y: 18,
+    });
+    heading.textContent = `TEAM ${event.teamId === 1 ? "A" : "B"} · KILLED`;
+    card.append(heading);
+    event.members.forEach(
+      (/** @type {Record<string, string>} */ member, /** @type {number} */ index) => {
+        const label = svgElement(ownerDocument, "text", {
+          class: "combat-death-announcement__agent",
+          x: 10,
+          y: 39 + index * 20,
+        });
+        label.textContent = `${member.publicIdentity} · ${member.classLabel}`;
+        card.append(label);
+      },
+    );
+    group.append(card);
   }
 
   /**

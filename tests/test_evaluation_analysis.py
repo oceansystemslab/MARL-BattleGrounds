@@ -1,150 +1,169 @@
-"""Offline analysis preserves cursor scope, raw exports and artifact identity."""
-
-from __future__ import annotations
+"""Scalar replay analysis shares numerical authority and immutable boundaries."""
 
 import csv
 import io
-import json
+from typing import cast
 
+import jax.numpy as jnp
+import numpy as np
 import pytest
 from tests.evaluation_fixtures import captured_evaluation_trajectory
+from tests.test_evaluation_replay import runtime_provenance as runtime_provenance
 
+from marl_battlegrounds.core.types import ActionMask, Info, Reward
+from marl_battlegrounds.evaluation import analysis as analysis_module
 from marl_battlegrounds.evaluation.analysis import analyze_replay
-from marl_battlegrounds.evaluation.metrics import (
-    CompletionState,
-    CountComponentV1,
-    EvaluationEpisodeObserverV1,
-    RolloutFailureOrigin,
-    SufficientStatisticDraftV1,
+from marl_battlegrounds.evaluation.capture import (
+    reconstruct_env_state_v1,
+    reconstruct_transition_facts_v1,
 )
-from marl_battlegrounds.evaluation.reducers import build_tdm_metric_reducers
+from marl_battlegrounds.evaluation.catalog import reconstruct_env_config_v1
+from marl_battlegrounds.evaluation.episode_metrics import (
+    initialize_priority,
+    priority_values,
+    update_priority,
+)
+from marl_battlegrounds.evaluation.full_metrics import (
+    full_values,
+    initialize_full,
+    update_full,
+)
+from marl_battlegrounds.evaluation.metric_catalog import (
+    METRIC_COLUMNS,
+    METRIC_FAMILIES,
+    PRIORITY_METRIC_COLUMNS,
+)
+from marl_battlegrounds.evaluation.metrics import EvaluationEpisodeObserverV1
 from marl_battlegrounds.evaluation.replay import (
     RuntimeProvenanceV1,
     build_replay_bundle_v1,
 )
-from marl_battlegrounds.evaluation.replay_io import LoadedReplayBundleV1
+from marl_battlegrounds.evaluation.replay_io import LoadedReplay, LoadedReplayBundleV1
+from marl_battlegrounds.evaluation.replay_v2 import build_replay_v2
 
 
-@pytest.fixture
-def runtime_provenance() -> RuntimeProvenanceV1:
-    return RuntimeProvenanceV1(
-        python_version="3.14.0",
-        package_version="0.0.0",
-        jax_version="0.10.1",
-        jaxlib_version="0.10.1",
-        numpy_version="2.3.0",
-        pydantic_version="2.11.0",
-        platform="linux",
-        machine="x86_64",
-        backend="cpu",
-        device="generic-cpu",
-        precision="float32",
-        environment_count=1,
-        batch_shape=(1,),
-        policy_execution_included=False,
-    )
-
-
-def test_replay_analysis_matches_final_report_and_prefix_csv(
+@pytest.mark.parametrize("version", [1, 2])
+def test_replay_scalar_prefixes_match_direct_metrics_and_wide_csv(
     runtime_provenance: RuntimeProvenanceV1,
     monkeypatch: pytest.MonkeyPatch,
+    version: int,
 ) -> None:
-    trajectory = captured_evaluation_trajectory(transition_count=2, expected_horizon=2)
-    capture = EvaluationEpisodeObserverV1(trajectory.context)
-    direct = EvaluationEpisodeObserverV1(
-        trajectory.context, build_tdm_metric_reducers(full=True)
-    )
-    for observer in (capture, direct):
-        observer.start(trajectory.frames[0])
+    trajectory = captured_evaluation_trajectory(transition_count=3, expected_horizon=3)
+    if version == 1:
+        capture = EvaluationEpisodeObserverV1(trajectory.context)
+        capture.start(trajectory.frames[0])
         for transition, frame in zip(
             trajectory.transitions, trajectory.frames[1:], strict=True
         ):
-            observer.append(transition, frame)
-    original = capture.finalize(completion_state="complete")
-    bundle = build_replay_bundle_v1(
-        capture, original, runtime_provenance=runtime_provenance
-    )
-    loaded = LoadedReplayBundleV1(
-        bundle.replay, bundle.metric_report_artifact, "complete"
-    )
-    before = bundle.metric_report_artifact.model_dump_json()
+            capture.append(transition, frame)
+        bundle = build_replay_bundle_v1(
+            capture,
+            capture.finalize(completion_state="complete"),
+            runtime_provenance=runtime_provenance,
+        )
+        loaded = LoadedReplayBundleV1(
+            bundle.replay, bundle.metric_report_artifact, "complete"
+        )
+    else:
+        replay = build_replay_v2(
+            trajectory.context,
+            trajectory.frames,
+            trajectory.transitions,
+            runtime_provenance=runtime_provenance,
+        )
+        loaded = LoadedReplay(replay, None, "not_recorded")
+    before = loaded.replay.model_dump_json()
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError(
+            "analysis must use captured arrays, without observer or simulation"
+        )
+
+    monkeypatch.setattr(EvaluationEpisodeObserverV1, "start", forbidden)
+    monkeypatch.setattr("marl_battlegrounds.core.env.step", forbidden)
+    monkeypatch.setattr("marl_battlegrounds.core.env.reset", forbidden)
+    # Two blocks plus padding exercise the carry boundary, without a long replay.
+    monkeypatch.setattr(analysis_module, "_BLOCK_SIZE", 2)
     analysis = analyze_replay(loaded, full=True)
-    assert analysis.source_replay_digest == bundle.replay.canonical_digest_sha256
-    assert analysis.source_processing_status == bundle.replay.processing_status
-    assert analysis.original_metric_status == "empty"
-    assert analysis.final_report == direct.finalize(completion_state="complete")
-    assert bundle.metric_report_artifact.model_dump_json() == before
+    basic = analyze_replay(loaded)
+    assert analysis.source_replay_digest == loaded.replay.canonical_digest_sha256
+    assert loaded.replay.model_dump_json() == before
+    assert analysis.frame_count == 4
+    assert analysis.columns == METRIC_COLUMNS
+    assert basic.columns == PRIORITY_METRIC_COLUMNS
     assert analysis.summary(0)["completion"] is None
-    assert analysis.summary(1)["completion"] is None
-    assert analysis.summary(0, scope="final")["frame_index"] == 2
+    assert analysis.summary(0, scope="final")["frame_index"] == 3
+    config = reconstruct_env_config_v1(trajectory.context)
+    initial = reconstruct_env_state_v1(trajectory.frames[0])
+    priority = initialize_priority()
+    full = initialize_full(config, initial)
+    for index, frame in enumerate(trajectory.frames):
+        state = reconstruct_env_state_v1(frame)
+        outcome = jnp.asarray(0, jnp.int32)
+        if index:
+            transition = trajectory.transitions[index - 1]
+            start = trajectory.frames[index - 1]
+            info = Info(reconstruct_transition_facts_v1(transition.facts))
+            reward = Reward(
+                jnp.asarray(transition.canonical_reward_by_agent, jnp.float32)
+            )
+            mask = ActionMask(
+                *(
+                    jnp.asarray(getattr(start.action_mask, name), bool)
+                    for name in ActionMask._fields
+                )
+            )
+            priority = update_priority(priority, reward, info)
+            full = update_full(
+                full, config, reconstruct_env_state_v1(start), mask, info
+            )
+            outcome = info.transition_facts.team_deathmatch_facts.outcome
+        expected = full_values(
+            full,
+            config,
+            priority_values(config, state, initial.step_count, priority, outcome),
+        )
+        summary = analysis.summary(index)
+        families = [
+            {"name": name, "label": label, "description": description}
+            for name, (label, description) in METRIC_FAMILIES.items()
+        ]
+        assert summary["families"] == families
+        assert basic.summary(index)["families"] == families[:2]
+        statistics = cast(list[dict[str, object]], summary["statistics"])
+        csv_rows = list(csv.DictReader(io.StringIO(analysis.csv(index))))
+        assert len(csv_rows) == 1
+        row = csv_rows[0]
+        assert row["frame_index"] == str(index)
+        assert row["scope"] == "cursor"
+        for slot in range(10):
+            assert row[f"agent_{slot}_class_id"] == str(
+                trajectory.context.roster[slot].class_id
+            )
+        for column_index, column in enumerate(METRIC_COLUMNS):
+            scalar = statistics[column_index]
+            assert scalar["name"] == column.name
+            assert scalar["valid"] == bool(expected.valid[column_index])
+            if scalar["valid"]:
+                assert scalar["value"] == pytest.approx(
+                    float(expected.values[column_index]), rel=1e-5, abs=1e-5
+                )
+                assert float(row[column.name]) == scalar["value"]
+            else:
+                assert row[column.name] == ""
+                assert scalar["value"] is None
+        assert (
+            cast(list[dict[str, object]], basic.summary(index)["statistics"])
+            == statistics[: len(PRIORITY_METRIC_COLUMNS)]
+        )
+    # Cached reads cannot collect more facts or mutate an earlier snapshot.
     first = analysis.summary(0)
-    for index in (2, 1, 0, 2, 0):
+    monkeypatch.setattr(analysis_module, "_scan_block", forbidden)
+    for index in (3, 1, 0, 3, 0):
         assert analysis.summary(index)["frame_index"] == index
     assert analysis.summary(0) == first
-    for index in range(3):
-        rows = list(csv.DictReader(io.StringIO(analysis.csv(index))))
-        assert rows
-        assert {row["frame_index"] for row in rows} == {str(index)}
-        assert {row["scope"] for row in rows} == {"cursor"}
-        assert {row["source_replay_digest"] for row in rows} == {
-            analysis.source_replay_digest
-        }
-        assert all(isinstance(json.loads(row["subject"]), dict) for row in rows)
-        assert {row["source_processing_status"] for row in rows} == {
-            analysis.source_processing_status.model_dump_json()
-        }
-        assert {row["completion_state"] for row in rows} == {
-            "complete" if index == 2 else "partial"
-        }
-        if index == 0:
-            assert all(row["ordinal"] == "" for row in rows)
     with pytest.raises(IndexError):
-        analysis.summary(3)
+        analysis.summary(4)
     with pytest.raises(ValueError):
         analysis.summary(0, scope="invalid")  # pyright: ignore[reportArgumentType]
-
-    basic = analyze_replay(loaded)
-    basic_ids = {
-        "marlbg.task.outcome_distribution.v1",
-        "marlbg.task.terminal_score_differential.v1",
-        "marlbg.task.evaluation_return.v1",
-        "marlbg.task.episode_length.v1",
-        "marlbg.artifact.completion.v1",
-    }
-    assert {row.metric_id for row in basic.final_report.statistics} == basic_ids
-    assert basic.final_report.statistics == tuple(
-        row for row in analysis.final_report.statistics if row.metric_id in basic_ids
-    )
-
-    original_project = EvaluationEpisodeObserverV1.preview_statistics
-
-    def corrupted_projection(
-        self: EvaluationEpisodeObserverV1,
-        *,
-        completion_state: CompletionState = "partial",
-        end_or_failure_reason: str | None = None,
-        failure_origin: RolloutFailureOrigin | None = None,
-    ) -> tuple[SufficientStatisticDraftV1, ...]:
-        rows = list(
-            original_project(
-                self,
-                completion_state=completion_state,
-                end_or_failure_reason=end_or_failure_reason,
-                failure_origin=failure_origin,
-            )
-        )
-        # A valid count with the wrong value must not bypass the final evidence gate.
-        for index, row in enumerate(rows):
-            if isinstance(row.component, CountComponentV1):
-                component = row.component.model_copy(
-                    update={"count": row.component.count + 1}
-                )
-                rows[index] = row.model_copy(update={"component": component})
-                break
-        return tuple(rows)
-
-    monkeypatch.setattr(
-        EvaluationEpisodeObserverV1, "preview_statistics", corrupted_projection
-    )
-    with pytest.raises(ValueError, match="projected component differs"):
-        analyze_replay(loaded, full=True)
+    np.testing.assert_equal(len(first["statistics"]), len(METRIC_COLUMNS))  # pyright: ignore[reportArgumentType]

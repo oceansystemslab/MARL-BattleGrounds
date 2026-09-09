@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -78,7 +78,6 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_FEATURE_Y,
     OBSTACLE_FEATURES,
     EnvConfig,
-    EnvState,
     ResolvedAgentProfile,
 )
 from marl_battlegrounds.evaluation.actor_projection import (
@@ -88,6 +87,7 @@ from marl_battlegrounds.evaluation.models import (
     CATALOG_SCHEMA_ID,
     CATALOG_SCHEMA_VERSION,
     REQUIRED_SCHEMA_BINDINGS_V1,
+    REQUIRED_SCHEMA_BINDINGS_V2,
     RESOLVED_ENV_CONFIG_SCHEMA_ID,
     RESOLVED_ENV_CONFIG_SCHEMA_VERSION,
     AggregationKeyV1,
@@ -95,18 +95,24 @@ from marl_battlegrounds.evaluation.models import (
     CaptureProfile,
     ClassMechanicsV1,
     CodeRevisionV1,
+    CodeRevisionV2,
     ContentAddressedIdentityV1,
+    EvaluationEpisodeContext,
     EvaluationEpisodeContextV1,
+    EvaluationEpisodeContextV2,
     EvaluationEpisodeIdentityV1,
     EvaluationFrameV1,
     EvaluationSeedProtocolV1,
+    EvaluationSeedProtocolV2,
     ExecutionInformationMode,
     PolicyAssignmentSlotV1,
+    PolicyAssignmentSlotV2,
     ResolvedEnvConfigV1,
     ResolvedObstacleV1,
     ResolvedSlotMechanicsV1,
     RosterSlotV1,
     SchemaVersionEntryV1,
+    SchemaVersionEntryV2,
     StaticMechanicsCatalogV1,
     StatusMechanicV1,
     VersionedIdentityV1,
@@ -576,11 +582,57 @@ def build_evaluation_episode_context_v1(
     )
 
 
+def build_evaluation_episode_context_v2(
+    *,
+    identity: EvaluationEpisodeIdentityV1,
+    aggregation_keys: tuple[AggregationKeyV1, ...],
+    expected_horizon: int,
+    config: EnvConfig,
+    public_agent_id_by_global_slot: tuple[str, ...],
+    policy_assignments: tuple[PolicyAssignmentSlotV2, ...],
+    seed_protocol: EvaluationSeedProtocolV1 | EvaluationSeedProtocolV2,
+    capture_profile: CaptureProfile,
+    execution_information_mode: ExecutionInformationMode,
+    actor_projection: VersionedIdentityV1,
+    critic_information_regime: VersionedIdentityV1,
+    canonical_reward_mode: VersionedIdentityV1,
+    shaping_configuration: ContentAddressedIdentityV1,
+    code_revision: CodeRevisionV1 | CodeRevisionV2,
+    scenario_name: str | None = None,
+) -> EvaluationEpisodeContextV2:
+    """Build one context without inventing runner-owned provenance."""
+    validate_env_config(config)
+    if len(policy_assignments) != MAX_AGENT_SLOTS:
+        raise ValueError("policy_assignments must have length 10")
+    return EvaluationEpisodeContextV2(
+        identity=identity,
+        schema_versions=tuple(
+            SchemaVersionEntryV2(schema_id=name, schema_version=version)
+            for name, version in REQUIRED_SCHEMA_BINDINGS_V2
+        ),
+        aggregation_keys=aggregation_keys,
+        expected_horizon=expected_horizon,
+        resolved_env_config=build_resolved_env_config_v1(config),
+        static_mechanics_catalog=build_static_mechanics_catalog_v1(),
+        roster=build_roster_v1(config, public_agent_id_by_global_slot),
+        policy_assignments=policy_assignments,
+        seed_protocol=seed_protocol,
+        capture_profile=capture_profile,
+        execution_information_mode=execution_information_mode,
+        actor_projection=actor_projection,
+        critic_information_regime=critic_information_regime,
+        canonical_reward_mode=canonical_reward_mode,
+        shaping_configuration=shaping_configuration,
+        code_revision=code_revision,
+        scenario_name=scenario_name,
+    )
+
+
 _INT32_MIN = int(np.iinfo(np.int32).min)
 _INT32_MAX = int(np.iinfo(np.int32).max)
 
 
-def _wire_int32_array(value: object, *, field_name: str) -> Array:
+def _wire_int32_array(value: object, *, field_name: str, host: bool = False) -> Array:
     """Build one explicit JAX int32 array without silently narrowing wire data."""
     object_values = np.asarray(value, dtype=object)
     for item in object_values.flat:
@@ -589,10 +641,11 @@ def _wire_int32_array(value: object, *, field_name: str) -> Array:
         integer = int(item)
         if not _INT32_MIN <= integer <= _INT32_MAX:
             raise ValueError(f"{field_name} must be representable as int32")
-    return jnp.asarray(np.asarray(value, dtype=np.int32), dtype=jnp.int32)
+    array = np.asarray(value, dtype=np.int32)
+    return cast(Array, array) if host else jnp.asarray(array, dtype=jnp.int32)
 
 
-def _wire_float32_array(value: object, *, field_name: str) -> Array:
+def _wire_float32_array(value: object, *, field_name: str, host: bool = False) -> Array:
     """Build one explicit JAX float32 array after a lossless narrowing check."""
     host_values = np.asarray(value, dtype=np.float64)
     if not bool(np.all(np.isfinite(host_values))):
@@ -604,40 +657,11 @@ def _wire_float32_array(value: object, *, field_name: str) -> Array:
         narrowed.astype(np.float64),
     ):
         raise ValueError(f"{field_name} must be losslessly representable as float32")
-    return jnp.asarray(narrowed, dtype=jnp.float32)
+    return cast(Array, narrowed) if host else jnp.asarray(narrowed, dtype=jnp.float32)
 
 
-def _validate_official_scenario_context_v2(  # pyright: ignore[reportUnusedFunction]
-    context: EvaluationEpisodeContextV1,
-    initial_frame: EvaluationFrameV1,
-) -> None:
-    """Enforce live product/config/state parity for one loaded V2 scenario."""
-    if type(context) is not EvaluationEpisodeContextV1:
-        raise TypeError(
-            "context must be an EvaluationEpisodeContextV1, not "
-            f"{type(context).__name__}"
-        )
-    if type(initial_frame) is not EvaluationFrameV1:
-        raise TypeError(
-            "initial_frame must be an EvaluationFrameV1, not "
-            f"{type(initial_frame).__name__}"
-        )
-    if context.execution_information_mode != "shared_obs":
-        raise ValueError("official scenario evaluation requires shared_obs execution")
-    if context.actor_projection != SHARED_OBS_ACTOR_PROJECTION_V1:
-        raise ValueError(
-            "official scenario evaluation requires "
-            "base-observation-plus-authorized-sensor-source-bank version 1"
-        )
-    if initial_frame.episode_id != context.identity.episode_id:
-        raise ValueError("initial frame episode identity must match context")
-    if initial_frame.frame_index != 0:
-        raise ValueError("official scenario initial_frame must have frame_index zero")
-
-    live_catalog = build_static_mechanics_catalog_v1()
-    if context.static_mechanics_catalog != live_catalog:
-        raise ValueError("loaded context mechanics catalog disagrees with live catalog")
-
+def reconstruct_env_config_v1(context: EvaluationEpisodeContext) -> EnvConfig:
+    """Restore recorded configuration values without re-running simulator setup."""
     resolved = context.resolved_env_config
     roster = context.roster
     mechanics = resolved.slot_mechanics
@@ -759,6 +783,60 @@ def _validate_official_scenario_context_v2(  # pyright: ignore[reportUnusedFunct
             field_name="resolved_env_config.team_respawn_wave_period_steps",
         ),
     )
+    return config
+
+
+def _validate_official_scenario_context_v2(  # pyright: ignore[reportUnusedFunction]
+    context: EvaluationEpisodeContextV1,
+    initial_frame: EvaluationFrameV1,
+) -> None:
+    """Enforce live product/config/state parity for one loaded V2 scenario."""
+    if type(context) is not EvaluationEpisodeContextV1:
+        raise TypeError(
+            "context must be an EvaluationEpisodeContextV1, not "
+            f"{type(context).__name__}"
+        )
+    _validate_official_scenario_context(context, initial_frame)
+
+
+def _validate_official_scenario_context_v3(  # pyright: ignore[reportUnusedFunction]
+    context: EvaluationEpisodeContextV2,
+    initial_frame: EvaluationFrameV1,
+) -> None:
+    """Apply the same official scientific checks to current replay contexts."""
+    if type(context) is not EvaluationEpisodeContextV2:
+        raise TypeError("context must be an EvaluationEpisodeContextV2")
+    _validate_official_scenario_context(context, initial_frame)
+
+
+def _validate_official_scenario_context(
+    context: EvaluationEpisodeContextV1 | EvaluationEpisodeContextV2,
+    initial_frame: EvaluationFrameV1,
+) -> None:
+    if type(initial_frame) is not EvaluationFrameV1:
+        raise TypeError(
+            "initial_frame must be an EvaluationFrameV1, not "
+            f"{type(initial_frame).__name__}"
+        )
+    if context.execution_information_mode != "shared_obs":
+        raise ValueError("official scenario evaluation requires shared_obs execution")
+    if context.actor_projection != SHARED_OBS_ACTOR_PROJECTION_V1:
+        raise ValueError(
+            "official scenario evaluation requires "
+            "base-observation-plus-authorized-sensor-source-bank version 1"
+        )
+    if initial_frame.episode_id != context.identity.episode_id:
+        raise ValueError("initial frame episode identity must match context")
+    if initial_frame.frame_index != 0:
+        raise ValueError("official scenario initial_frame must have frame_index zero")
+
+    live_catalog = build_static_mechanics_catalog_v1()
+    if context.static_mechanics_catalog != live_catalog:
+        raise ValueError("loaded context mechanics catalog disagrees with live catalog")
+
+    config = reconstruct_env_config_v1(context)
+    resolved = context.resolved_env_config
+    roster = context.roster
     validate_product_env_config(config)
 
     reprojected_config = build_resolved_env_config_v1(config)
@@ -768,98 +846,20 @@ def _validate_official_scenario_context_v2(  # pyright: ignore[reportUnusedFunct
     if build_roster_v1(config, public_agent_ids) != roster:
         raise ValueError("loaded roster does not exactly reproject")
 
-    snapshot = initial_frame.snapshot
-    initial_state = EnvState(
-        team_deathmatch_scores=_wire_int32_array(
-            snapshot.team_deathmatch_scores,
-            field_name="initial_frame.snapshot.team_deathmatch_scores",
-        ),
-        step_count=_wire_int32_array(
-            initial_frame.simulator_step_count,
-            field_name="initial_frame.simulator_step_count",
-        ),
-        agent_positions=_wire_float32_array(
-            snapshot.agent_positions,
-            field_name="initial_frame.snapshot.agent_positions",
-        ),
-        alive_mask=jnp.asarray(
-            np.asarray(snapshot.alive_mask, dtype=np.bool_),
-            dtype=jnp.bool_,
-        ),
-        current_health=_wire_float32_array(
-            snapshot.current_health,
-            field_name="initial_frame.snapshot.current_health",
-        ),
-        ultimate_cooldowns=_wire_int32_array(
-            snapshot.ultimate_cooldowns,
-            field_name="initial_frame.snapshot.ultimate_cooldowns",
-        ),
-        slow_durations=_wire_int32_array(
-            snapshot.slow_durations,
-            field_name="initial_frame.snapshot.slow_durations",
-        ),
-        stun_durations=_wire_int32_array(
-            snapshot.stun_durations,
-            field_name="initial_frame.snapshot.stun_durations",
-        ),
-        rogue_poison_anti_heal_durations=_wire_int32_array(
-            snapshot.rogue_poison_anti_heal_durations,
-            field_name="initial_frame.snapshot.rogue_poison_anti_heal_durations",
-        ),
-        mage_burst_damage_amplification_durations=_wire_int32_array(
-            snapshot.mage_burst_damage_amplification_durations,
-            field_name=(
-                "initial_frame.snapshot.mage_burst_damage_amplification_durations"
-            ),
-        ),
-        priest_blessing_of_freedom_slow_floor_durations=_wire_int32_array(
-            snapshot.priest_blessing_of_freedom_slow_floor_durations,
-            field_name=(
-                "initial_frame.snapshot.priest_blessing_of_freedom_slow_floor_durations"
-            ),
-        ),
-        team_respawn_wave_countdowns=_wire_int32_array(
-            snapshot.team_respawn_wave_countdowns,
-            field_name="initial_frame.snapshot.team_respawn_wave_countdowns",
-        ),
-        spawn_shield_durations=_wire_int32_array(
-            snapshot.spawn_shield_durations,
-            field_name="initial_frame.snapshot.spawn_shield_durations",
-        ),
-        steps_until_out_of_combat=_wire_int32_array(
-            snapshot.steps_until_out_of_combat,
-            field_name="initial_frame.snapshot.steps_until_out_of_combat",
-        ),
-        previous_timestep_move_actions=_wire_int32_array(
-            snapshot.previous_timestep_move_actions,
-            field_name="initial_frame.snapshot.previous_timestep_move_actions",
-        ),
-        previous_timestep_select_target_actions=_wire_int32_array(
-            snapshot.previous_timestep_select_target_actions,
-            field_name=(
-                "initial_frame.snapshot.previous_timestep_select_target_actions"
-            ),
-        ),
-        previous_timestep_use_ultimate_actions=_wire_int32_array(
-            snapshot.previous_timestep_use_ultimate_actions,
-            field_name=(
-                "initial_frame.snapshot.previous_timestep_use_ultimate_actions"
-            ),
-        ),
-        has_previous_timestep_joint_action=jnp.asarray(
-            snapshot.has_previous_timestep_joint_action,
-            dtype=jnp.bool_,
-        ),
-    )
+    from marl_battlegrounds.evaluation.capture import reconstruct_env_state_v1
+
+    initial_state = reconstruct_env_state_v1(initial_frame)
     validate_scenario_initial_state(config, initial_state)
 
 
 __all__ = [
     "build_code_revision_v1",
     "build_evaluation_episode_context_v1",
+    "build_evaluation_episode_context_v2",
     "build_evaluation_seed_protocol_v1",
     "build_resolved_env_config_v1",
     "build_roster_v1",
     "build_static_mechanics_catalog_v1",
     "default_schema_versions_v1",
+    "reconstruct_env_config_v1",
 ]

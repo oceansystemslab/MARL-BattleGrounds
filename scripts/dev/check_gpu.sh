@@ -174,6 +174,10 @@ PY
 uv run --no-sync pytest \
   tests/test_core_spine.py::test_that_step_can_be_jit_compiled \
   tests/test_core_spine.py::test_step_can_run_in_scanned_rollout \
+  tests/test_environment.py::test_scalar_reset_remains_valid_under_external_vmap \
+  tests/test_environment.py::test_native_selected_metrics_match_full_across_chunks_and_resets \
+  tests/test_policy_execution.py::test_dynamic_variables_and_recurrent_memory_do_not_retrace_or_share_actors \
+  tests/test_public_evaluate.py::test_selected_replays_in_memory_need_no_metrics_or_files \
   -q \
   --maxfail=1
 

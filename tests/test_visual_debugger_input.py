@@ -40,9 +40,9 @@ from scripts.dev.visual_debugger.protocol import (
     SetViewCommandV1,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
-from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
+from marl_battlegrounds.core.axis_mappings import global_slot_to_target_action
 from marl_battlegrounds.core.types import (
     MAX_AGENT_SLOTS,
     MOVE_EAST,

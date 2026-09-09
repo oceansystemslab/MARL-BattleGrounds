@@ -8,6 +8,7 @@ from marl_battlegrounds.rendering import render_scene_geometry
 
 if TYPE_CHECKING:
     from marl_battlegrounds.evaluation.replay import ReplayArtifactV1
+    from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactV2
     from scripts.dev.visual_debugger.evaluation_bridge import (
         DebuggerEvaluationLaunchSpecificationV1,
     )
@@ -105,21 +106,22 @@ def run_static_replay_renderer(
 
 def run_static_replay_artifact_renderer(
     *,
-    replay: ReplayArtifactV1,
+    replay: ReplayArtifactV1 | ReplayArtifactV2,
     frame_index: int,
     show_ranges: bool,
 ) -> int:
     """Project and render one already-validated canonical replay artifact."""
     from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
     from marl_battlegrounds.evaluation.replay import ReplayArtifactV1
+    from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactV2
     from marl_battlegrounds.rendering.evaluation_adapter import (
         EvaluationScenePresentationStateV1,
         build_researcher_analyzer_projection_v2,
         build_status_source_evidence_index_v2,
     )
 
-    if type(replay) is not ReplayArtifactV1:
-        raise TypeError("replay must be the exact ReplayArtifactV1 root.")
+    if type(replay) not in (ReplayArtifactV1, ReplayArtifactV2):
+        raise TypeError("replay must be an exact supported replay artifact.")
     if type(frame_index) is not int:
         raise ValueError("replay frame index must be a Python integer.")
     if not 0 <= frame_index < len(replay.frames):

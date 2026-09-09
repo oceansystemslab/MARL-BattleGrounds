@@ -40,10 +40,11 @@ from marl_battlegrounds.evaluation.models import (
     CooldownStartedEventV1 as EvaluationCooldownStartedEventV1,
 )
 from marl_battlegrounds.evaluation.models import (
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContext,
     EvaluationEventV1,
     EvaluationFrameV1,
     EvaluationTransitionV1,
+    evaluation_context_type,
 )
 from marl_battlegrounds.evaluation.models import (
     HealthRegeneratedEventV1 as EvaluationHealthRegeneratedEventV1,
@@ -677,12 +678,11 @@ class SharedObsSourceMaterialProjectionV1:
 
 
 def _validate_projection_inputs(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     transition_view: EvaluationTransitionViewV1 | None,
 ) -> EvaluationTransitionViewV1 | None:
-    if type(context) is not EvaluationEpisodeContextV1:
-        raise TypeError("context must be the exact EvaluationEpisodeContextV1 root.")
+    evaluation_context_type(context)
     if type(frame) is not EvaluationFrameV1:
         raise TypeError("frame must be the exact EvaluationFrameV1 root.")
     if frame.episode_id != context.identity.episode_id:
@@ -736,7 +736,7 @@ def _decode_wire_int(
 
 
 def _base_sensor_axis_mapping(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     *,
     selected_global_slot: int,
 ) -> ActorPovAxisMappingV1:
@@ -1115,7 +1115,7 @@ def _shared_obs_base_sensor_scene(
     )
 
 
-def _map_scene(context: EvaluationEpisodeContextV1) -> MapSceneV1:
+def _map_scene(context: EvaluationEpisodeContext) -> MapSceneV1:
     config = context.resolved_env_config
     obstacles: list[ObstacleSceneV1] = []
     for row in config.obstacle_slots:
@@ -1155,7 +1155,7 @@ def _map_scene(context: EvaluationEpisodeContextV1) -> MapSceneV1:
 
 
 def _class_mechanics(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
 ) -> tuple[ClassMechanicsSceneV2, ...]:
     real_class_ids = range(1, len(context.static_mechanics_catalog.class_mechanics))
     rows: list[ClassMechanicsSceneV2] = []
@@ -1216,7 +1216,7 @@ def _class_mechanics(
 
 
 def _incoming_status_sources(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     transition_view: EvaluationTransitionViewV1 | None,
 ) -> dict[tuple[int, int], tuple[StatusSourceEvidenceSceneV2, ...]]:
     if transition_view is None:
@@ -1260,7 +1260,7 @@ def _status_durations(frame: EvaluationFrameV1, global_slot: int) -> tuple[int, 
 
 
 def _status_source_state_from_frame(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     evidence_by_key: dict[tuple[int, int], tuple[StatusSourceEvidenceSceneV2, ...]],
 ) -> StatusSourceEvidenceStateV2:
@@ -1297,7 +1297,7 @@ def _status_source_state_from_frame(
 
 
 def initialize_status_source_evidence_v2(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     initial_frame: EvaluationFrameV1,
 ) -> StatusSourceEvidenceStateV2:
     """Initialize frame-zero status evidence without inventing source agents."""
@@ -1365,7 +1365,7 @@ def advance_status_source_evidence_v2(
 
 
 def build_status_source_evidence_index_v2(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frames: tuple[EvaluationFrameV1, ...],
     transitions: tuple[EvaluationTransitionV1, ...],
 ) -> StatusSourceEvidenceIndexV2:
@@ -1395,7 +1395,7 @@ def build_status_source_evidence_index_v2(
 
 
 def _status_scenes(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     global_slot: int,
     source_evidence: dict[tuple[int, int], tuple[StatusSourceEvidenceSceneV2, ...]],
@@ -1449,7 +1449,7 @@ def _incoming_respawn_event_ids(
 
 
 def _agent_scenes(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     transition_view: EvaluationTransitionViewV1 | None,
     status_source_evidence_state: StatusSourceEvidenceStateV2 | None = None,
@@ -1538,7 +1538,7 @@ def _agent_scenes(
 
 
 def _aura_fields(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
 ) -> tuple[AuraFieldSceneV2, ...]:
     catalog = context.static_mechanics_catalog
@@ -1576,7 +1576,7 @@ def _aura_fields(
 
 
 def _spawn_pads(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
 ) -> tuple[SpawnPadSceneV2, ...]:
     positions = context.resolved_env_config.team_spawn_pad_positions
     rows = [
@@ -1594,7 +1594,7 @@ def _spawn_pads(
 
 
 def _respawn_waves(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
 ) -> tuple[RespawnWaveSceneV2, ...]:
     config = context.resolved_env_config
@@ -1610,7 +1610,7 @@ def _respawn_waves(
 
 
 def validate_oracle_scene_static_authority_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     scene: BattlefieldSceneV2,
 ) -> None:
     """Check static coherence of already canonical, deeply validated exact roots.
@@ -1618,8 +1618,7 @@ def validate_oracle_scene_static_authority_v1(
     This predicate does not construct or deep-validate either input. Authority
     constructors must perform that validation before calling it.
     """
-    if type(context) is not EvaluationEpisodeContextV1:
-        raise TypeError("context must be the exact EvaluationEpisodeContextV1 root.")
+    evaluation_context_type(context)
     if type(scene) is not BattlefieldSceneV2:
         raise TypeError("scene must be the exact BattlefieldSceneV2 root.")
     if scene.episode_id != context.identity.episode_id:
@@ -1732,7 +1731,7 @@ def validate_oracle_scene_static_authority_v1(
 
 
 def _selection_projection(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     presentation: EvaluationScenePresentationStateV1,
 ) -> tuple[
@@ -1805,7 +1804,7 @@ def _selection_projection(
 
 
 def _observer_visibility_projection(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     presentation: EvaluationScenePresentationStateV1,
 ) -> tuple[ObserverVisibilitySceneV1, ...]:
@@ -1839,7 +1838,7 @@ def _observer_visibility_projection(
 
 
 def build_evaluation_battlefield_scene_v2(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     *,
     transition_view: EvaluationTransitionViewV1 | None = None,
@@ -1898,7 +1897,7 @@ def build_evaluation_battlefield_scene_v2(
 
 
 def _build_shared_obs_source_material_projection_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     *,
     selected_global_slot: int,
@@ -1997,7 +1996,7 @@ def _build_shared_obs_source_material_projection_v1(
 
 
 def build_shared_obs_source_material_projection_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     *,
     selected_global_slot: int,
@@ -2020,7 +2019,7 @@ def build_shared_obs_source_material_projection_v1(
 
 
 def build_shared_obs_authority_source_material_projection_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     *,
     selected_global_slot: int,
@@ -2390,7 +2389,7 @@ def build_visual_event_batch_v2(
 
 
 def build_researcher_analyzer_projection_v2(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     *,
     transition_view: EvaluationTransitionViewV1 | None = None,

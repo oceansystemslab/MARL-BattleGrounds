@@ -164,7 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--ranges",
         action=argparse.BooleanOptionalAction,
         default=argparse.SUPPRESS,
-        help="show or hide controlled-actor ranges (default: show)",
+        help="show or hide controlled-actor ranges (default: hide)",
     )
     parser.add_argument(
         "--execution-information-mode",
@@ -246,7 +246,7 @@ def _resolve_launch_options(namespace: argparse.Namespace) -> _LaunchOptions:
         no_open=cast(bool, getattr(namespace, "no_open", False)),
         port=cast(int, getattr(namespace, "port", 0)),
         view=cast(_ViewMode, getattr(namespace, "view", "researcher")),
-        ranges=cast(bool, getattr(namespace, "ranges", True)),
+        ranges=cast(bool, getattr(namespace, "ranges", False)),
         execution_information_mode=cast(
             _ExecutionInformationMode,
             getattr(namespace, "execution_information_mode", "shared_obs"),
@@ -325,11 +325,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if options.record_replay is not None:
             from marl_battlegrounds.evaluation.replay_io import (
                 ReplaySaveError,
-                preflight_replay_bundle_destination_v1,
+                preflight_replay_destination,
             )
 
             try:
-                recording_destination = preflight_replay_bundle_destination_v1(
+                recording_destination = preflight_replay_destination(
                     options.record_replay
                 )
             except ReplaySaveError as exc:
@@ -337,11 +337,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"Replay recording target is unavailable: {exc}"
                 ) from exc
 
+        from marl_battlegrounds.evaluation.revision import (
+            discover_code_revision_v1,
+        )
         from scripts.dev.visual_debugger.evaluation_bridge import (
             build_debugger_evaluation_launch_specification_v1,
-        )
-        from scripts.dev.visual_debugger.revision import (
-            discover_debugger_code_revision_v1,
         )
         from scripts.dev.visual_debugger.scenarios import get_scenario
 
@@ -350,7 +350,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             scenario,
             controlled_global_slot=options.controlled_slot,
         )
-        code_revision = discover_debugger_code_revision_v1(_REPOSITORY_ROOT)
+        code_revision = discover_code_revision_v1(_REPOSITORY_ROOT)
         evaluation_launch_specification = (
             build_debugger_evaluation_launch_specification_v1(
                 root_seed=options.seed,
@@ -442,15 +442,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 authoring=authoring_http,
             )
 
+        from marl_battlegrounds.evaluation.runtime_provenance import (
+            capture_debugger_runtime_provenance_v1,
+        )
         from scripts.dev.visual_debugger.recording import (
-            DebuggerReplayRecorderV1,
             build_debugger_recording_specification_v1,
         )
         from scripts.dev.visual_debugger.recording_coordinator import (
             RecordingDebuggerCoordinator,
-        )
-        from scripts.dev.visual_debugger.runtime_provenance import (
-            capture_debugger_runtime_provenance_v1,
         )
 
         try:
@@ -464,7 +463,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "selected JAX backend exposes a usable device and precision setting."
             ) from exc
 
-        recorder = DebuggerReplayRecorderV1(
+        from scripts.dev.visual_debugger.replay_recorder import DebuggerReplayRecorder
+
+        recorder = DebuggerReplayRecorder(
             specification=build_debugger_recording_specification_v1(
                 action_source_kind=_recording_action_source_kind(session),
                 runtime_provenance=runtime_provenance,
@@ -472,6 +473,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             destination=recording_destination,
             context=session.evaluation_context,
             initial_frame=session.current_evaluation_frame,
+            scenario_name=session.scenario.name
+            if session.evaluation_context.identity.scenario is not None
+            else None,
         )
         service = DebuggerService(
             session,
