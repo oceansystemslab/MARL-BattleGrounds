@@ -340,14 +340,14 @@
     },
     {
       "map_id": 24,
-      "name": "tdm_map_id_24_chesire_cat_validation",
+      "name": "tdm_map_id_24_cheshire_cat_validation",
       "split": "validation",
       "curriculum": false,
       "source": {
-        "asset_id": "tdm_map_id_24_chesire_cat_validation",
+        "asset_id": "tdm_map_id_24_cheshire_cat_validation",
         "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_24_chesire_cat_validation/r2.json",
-        "source_sha256": "e9b41991a97e78df98554310a1ad2bb311490100f1872adc4eac5cae724b4151",
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_24_cheshire_cat_validation/r2.json",
+        "source_sha256": "2f29b0127287fdeef5c43d851fe28414f6552995f5c8980ec2e9953e0a05c9b4",
         "semantic_digest": "5d8f2e729708716d3a17012db10a9eb6cd3309d2ee9d45eab6aa436d281e185c"
       },
       "resource_sha256": "56e4b59cfe412fdab0ff95b4e85cf84a8d70edfa3b0379cb89fd356d45d22a8c"

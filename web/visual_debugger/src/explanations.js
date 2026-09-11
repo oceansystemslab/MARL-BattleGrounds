@@ -36,7 +36,28 @@ const FULL_ONLY = Object.freeze({ compact: false, full: true });
 const TECHNICAL_FACT_HELP = Object.freeze({
   episode: Object.freeze({
     title: "Episode",
-    summary: "Identifies the authorized live episode represented by this frame.",
+    summary: "Identifies the recorded episode represented by this frame.",
+  }),
+  task_mode: Object.freeze({
+    title: "Task Mode",
+    summary: "The task whose rules govern this episode.",
+  }),
+  map: Object.freeze({
+    title: "Map",
+    summary: "The recorded technical map name. Its split is shown only when recorded.",
+  }),
+  observation_mode: Object.freeze({
+    title: "Observation Mode",
+    summary: "The policy observation mode used when this episode was recorded.",
+  }),
+  episode_limit: Object.freeze({
+    title: "Episode Limit",
+    summary: "The maximum number of transitions planned for this episode.",
+  }),
+  seeds: Object.freeze({
+    title: "Seeds",
+    summary:
+      "The recorded root seed and episode stream coordinate identify the random streams. Unknown means the value was not recorded.",
   }),
   artifact_digest_prefix: Object.freeze({
     title: "Artifact Digest Prefix",
@@ -74,6 +95,47 @@ const TECHNICAL_FACT_HELP = Object.freeze({
 });
 
 export { canonicalAgentIdentity } from "./agent-identity.js";
+
+/** @param {JsonRecord} event */
+export function explainDeathAnnouncement(event) {
+  return createSemanticDescriptor({
+    kind: "event",
+    id: `death-announcement:${event.eventId}`,
+    title: event.label,
+    tone: "information",
+    accent: "none",
+    summary:
+      "Kill contributors include direct damage and useful same-tick Priest healing of a damaging contributor. Credit is shared; it does not identify one final hitter.",
+    rows: [],
+    sections: event.members.map((/** @type {JsonRecord} */ member) => ({
+      title: member.title,
+      summary: "This agent died on the incoming transition.",
+      rows: [
+        {
+          label: "Killing Team",
+          value:
+            member.killingTeamId === null
+              ? "Unavailable"
+              : `Team ${member.killingTeamId === 1 ? "A" : "B"}`,
+          metadata: COMPACT_AND_FULL,
+        },
+        {
+          label: "Kill Contributors",
+          value:
+            member.contributors === null
+              ? "Unavailable — not recorded in this historical evidence."
+              : member.contributors
+                  .map((/** @type {JsonRecord} */ contributor) => contributor.title)
+                  .join("; "),
+          metadata: COMPACT_AND_FULL,
+        },
+      ],
+      metadata: COMPACT_AND_FULL,
+    })),
+    metadata: COMPACT_AND_FULL,
+    anchor: "pointer",
+  });
+}
 
 /**
  * Return finite help for one installed operational or Technical Frame fact.
@@ -227,7 +289,7 @@ function exactNumber(value) {
 /** @param {unknown} value */
 function tickCount(value) {
   const count = integer(value);
-  return count === null ? "Unavailable" : `${count} ${count === 1 ? "Tick" : "Ticks"}`;
+  return count === null ? "Unavailable" : `${count} ${count === 1 ? "tick" : "ticks"}`;
 }
 
 /** @param {JsonRecord} record */
@@ -715,7 +777,7 @@ function formattedStatusMechanicEffect(mechanics, statusId, magnitudeKind) {
   const difference = `${formatDisplayNumber(Math.abs(1 - magnitude) * 100)}%`;
   const multiplier = `×${formatDisplayNumber(magnitude)}`;
   if (magnitudeKind === "damage_multiplier") {
-    return `a factor of ${formatDisplayNumber(magnitude)} (${difference} ${magnitude >= 1 ? "more" : "less"} damage dealt)`;
+    return `a ${difference} ${magnitude >= 1 ? "increase" : "reduction"} (${multiplier})`;
   }
   if (magnitudeKind === "movement_multiplier") {
     return `a ${difference} movement ${magnitude <= 1 ? "reduction" : "increase"} (${multiplier})`;
@@ -724,7 +786,7 @@ function formattedStatusMechanicEffect(mechanics, statusId, magnitudeKind) {
     return `a ${difference} ${magnitude <= 1 ? "reduction" : "increase"} (${multiplier})`;
   }
   if (magnitudeKind === "movement_floor") {
-    return `a floor of ${formatDisplayNumber(magnitude * 100)}% of base movement speed (${multiplier})`;
+    return `${formatDisplayNumber(magnitude * 100)}% of base movement speed (${multiplier})`;
   }
   return null;
 }
@@ -755,10 +817,10 @@ function formattedAuraDocumentationEffect(presentation, multiplier) {
   if (exact === null) return null;
   const difference = `${formatDisplayNumber(Math.abs(1 - exact) * 100)}%`;
   if (presentation.effectKind === "damage_dealt") {
-    return `a ${difference} outgoing-damage ${exact >= 1 ? "increase" : "reduction"} per recorded emitter`;
+    return `a ${difference} damage ${exact >= 1 ? "bonus" : "reduction"}`;
   }
   if (presentation.effectKind === "damage_received") {
-    return `a ${difference} incoming-damage ${exact <= 1 ? "reduction" : "increase"} per recorded emitter`;
+    return exact <= 1 ? difference : null;
   }
   return null;
 }
@@ -847,7 +909,9 @@ function classDocumentationValueMap(mechanics) {
       ],
       [
         "damageMitigationFloor",
-        aura === null ? null : formattedMechanicNumber(aura.clamp_value),
+        aura === null || finiteNumber(aura.clamp_value) === null
+          ? null
+          : `${formatDisplayNumber(aura.clamp_value * 100)}%`,
       ],
     ];
   } else if (classId === 3) {
@@ -901,13 +965,7 @@ function classDocumentationValueMap(mechanics) {
         "poisonAntiHealDuration",
         formattedStatusMechanicDuration(mechanics, "rogue_poison_anti_heal"),
       ],
-      [
-        "baseMovementSpeed",
-        prefixedMechanicNumber(
-          "base movement speed of ",
-          mechanics.base_movement_speed,
-        ),
-      ],
+      ["baseMovementSpeed", formattedMechanicNumber(mechanics.base_movement_speed)],
       ["outOfCombatDelay", formattedMechanicTicks(mechanics.out_of_combat_delay_steps)],
     ];
   } else if (classId === 5) {
@@ -1050,16 +1108,16 @@ function documentationMechanicsRows(mechanics) {
     row("Basic Ability Radius", basicRadius, FULL_ONLY),
   ];
   if (/** @type {number} */ (basicDamage) > 0) {
-    rows.push(row("Basic Raw Damage", basicDamage, FULL_ONLY));
+    rows.push(row("Base Basic Damage", basicDamage, FULL_ONLY));
   }
   if (/** @type {number} */ (basicHealing) > 0) {
-    rows.push(row("Basic Raw Healing", basicHealing, FULL_ONLY));
+    rows.push(row("Base Basic Healing", basicHealing, FULL_ONLY));
   }
   rows.push(
     row("Out-of-Combat Delay", outOfCombatDelay, FULL_ONLY),
     row(
       "Out-of-Combat Regeneration",
-      `${formatDisplayNumber(/** @type {number} */ (regeneration) * 100)}% of maximum health per Tick`,
+      `${formatDisplayNumber(/** @type {number} */ (regeneration) * 100)}% of maximum health per tick`,
       FULL_ONLY,
     ),
   );
@@ -1121,12 +1179,12 @@ export function explainClassDocumentation(rawOwner, rawClassMechanics) {
   );
   if (/** @type {number} */ (finiteNumber(mechanics.ultimate_raw_damage)) > 0) {
     completeMechanicsRows.push(
-      row("Ultimate Raw Damage", mechanics.ultimate_raw_damage, FULL_ONLY),
+      row("Base Ultimate Damage", mechanics.ultimate_raw_damage, FULL_ONLY),
     );
   }
   if (/** @type {number} */ (finiteNumber(mechanics.ultimate_raw_healing)) > 0) {
     completeMechanicsRows.push(
-      row("Ultimate Raw Healing", mechanics.ultimate_raw_healing, FULL_ONLY),
+      row("Base Ultimate Healing", mechanics.ultimate_raw_healing, FULL_ONLY),
     );
   }
   if (authored !== null) {

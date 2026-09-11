@@ -1395,9 +1395,55 @@ export function authorizedPresentationTechnicalFacts(value) {
     }
     snapshot.push(Object.freeze([id, label, factValue]));
   }
-  return Object.freeze(
-    snapshot
-      .filter(([, , factValue]) => factValue !== null)
-      .map(([id, label, factValue]) => Object.freeze({ id, label, value: factValue })),
-  );
+  const facts = snapshot
+    .filter(([, , factValue]) => factValue !== null)
+    .map(([id, label, factValue]) => Object.freeze({ id, label, value: factValue }));
+  // Common episode facts are explicitly admitted researcher HUD metadata. They
+  // are shared across POVs and never taken from a spatial or actor-input fallback.
+  const match = value.match_summary;
+  if (match) {
+    if (!facts.some((fact) => fact.id === "episode")) {
+      facts.unshift(
+        Object.freeze({ id: "episode", label: "Episode", value: match.episode_id }),
+      );
+    }
+    facts.push(
+      Object.freeze({
+        id: "task_mode",
+        label: "Task Mode",
+        value: match.task_mode === 1 ? "TDM" : "Combat diagnostic",
+      }),
+    );
+    if (match.map) {
+      facts.push(
+        Object.freeze({ id: "map", label: "Map", value: match.map.technical_name }),
+      );
+    }
+    if (match.observation_mode) {
+      facts.push(
+        Object.freeze({
+          id: "observation_mode",
+          label: "Observation Mode",
+          value: match.observation_mode === "shared_obs" ? "SharedObs" : "NoSharedObs",
+        }),
+      );
+    }
+    if (match.episode_limit !== null && match.episode_limit !== undefined) {
+      facts.push(
+        Object.freeze({
+          id: "episode_limit",
+          label: "Episode Limit",
+          value: `${match.episode_limit} ticks`,
+        }),
+      );
+    }
+    facts.push(
+      Object.freeze({
+        id: "seeds",
+        label: "Seeds",
+        value: `Root ${match.root_seed ?? "unknown"} · Episode stream ${match.episode_seed ?? "unknown"}`,
+      }),
+    );
+  }
+  return Object.freeze(facts);
 }

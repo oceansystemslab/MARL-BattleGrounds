@@ -4,7 +4,11 @@ import {
 } from "./agent-identity.js";
 import { CHOREOGRAPHY_PAINT_FOOTPRINTS } from "./choreography-plan.js";
 import { formatCompactDisplayNumber, formatDisplayNumber } from "./display.js";
-import { explainActivation, explainNetHealth } from "./explanations.js";
+import {
+  explainActivation,
+  explainDeathAnnouncement,
+  explainNetHealth,
+} from "./explanations.js";
 import { createSvgIcon } from "./icons.js";
 import { routeMarkerPose } from "./routes.js";
 import { statusLifecyclePresentation } from "./semantic-vocabulary.js";
@@ -35,17 +39,6 @@ function humanizeEventName(value) {
 
 /** @param {Record<string, any>} event */
 function semanticEventCopy(event) {
-  if (event.cueSemantic === "death_announcement") {
-    return Object.freeze({
-      title: event.label,
-      summary: event.members
-        .map(
-          (/** @type {Record<string, string>} */ member) =>
-            `${member.title} has been killed.`,
-        )
-        .join(" "),
-    });
-  }
   if (event.cueSemantic === "agent_died") {
     return Object.freeze({
       title: "Agent Died",
@@ -88,6 +81,9 @@ function semanticEventCopy(event) {
  */
 export function explainChoreographyEvent(event) {
   const visibleEvent = paintAwareExplanationEvent(event);
+  if (visibleEvent.cueSemantic === "death_announcement") {
+    return explainDeathAnnouncement(visibleEvent);
+  }
   const semanticCopy = semanticEventCopy(visibleEvent);
   const lifecycleCopy =
     visibleEvent.kind === "status_lifecycle"
@@ -443,7 +439,6 @@ export class SvgChoreographyPainter {
    * } | null}
    */
   #renderEvent(ownerDocument, event, plan, options, animationSpecs) {
-    if (event.cueSemantic === "death_announcement" && options.settled) return null;
     if (event.kind === "semantic_pulse" && event.cueSemantic === "cooldown_started") {
       return null;
     }
@@ -1569,12 +1564,13 @@ export class SvgChoreographyPainter {
     });
   }
 
-  /** Bounded per-team HUD: at most five rows, on the existing transition clock.
+  /** Bounded team HUD with complete identities, on the existing transition clock.
    * @param {Document} ownerDocument @param {SVGElement} group @param {JsonRecord} event
    */
   #renderDeathAnnouncement(ownerDocument, group, event) {
     const card = svgElement(ownerDocument, "g", {
-      class: `combat-death-announcement combat-death-announcement--team-${event.teamId === 1 ? "a" : "b"}`,
+      class: `combat-death-announcement combat-death-announcement--${event.teamId === null ? "unattributed" : `team-${event.teamId === 1 ? "a" : "b"}`}`,
+      "data-team-side": event.teamSide,
       transform: `translate(${event.anchor.x - event.panelWidth / 2} ${event.anchor.y - event.panelHeight / 2})`,
     });
     card.append(
@@ -1590,17 +1586,53 @@ export class SvgChoreographyPainter {
       x: 10,
       y: 18,
     });
-    heading.textContent = `TEAM ${event.teamId === 1 ? "A" : "B"} · KILLED`;
+    heading.textContent = String(event.label).toUpperCase();
     card.append(heading);
-    event.members.forEach(
-      (/** @type {Record<string, string>} */ member, /** @type {number} */ index) => {
+    event.textRows.forEach(
+      (
+        /** @type {{lines: readonly string[], y: number}} */ row,
+        /** @type {number} */ memberIndex,
+      ) => {
+        const member = event.members[memberIndex];
+        const victim = svgElement(ownerDocument, "g", {
+          class: "combat-death-announcement__victim",
+          role: "img",
+          tabindex: "0",
+          "aria-label": `${member.title} — Kill Contributors`,
+        });
+        victim.append(
+          svgElement(ownerDocument, "rect", {
+            class: "combat-death-announcement__victim-hit",
+            x: 6,
+            y: row.y - 12,
+            width: event.panelWidth - 12,
+            height: row.lines.length * 14 + 6,
+          }),
+        );
         const label = svgElement(ownerDocument, "text", {
           class: "combat-death-announcement__agent",
           x: 10,
-          y: 39 + index * 20,
+          y: row.y,
         });
-        label.textContent = `${member.publicIdentity} · ${member.classLabel}`;
-        card.append(label);
+        row.lines.forEach((line, index) => {
+          const span = svgElement(ownerDocument, "tspan", {
+            x: 10,
+            y: row.y + index * 14,
+          });
+          span.textContent = line + (index < row.lines.length - 1 ? " " : "");
+          label.append(span);
+        });
+        victim.append(label);
+        registerTooltipOwner(
+          victim,
+          explainDeathAnnouncement({
+            ...event,
+            eventId: `${event.eventId}:victim:${memberIndex}`,
+            label: "Agent Died",
+            members: [member],
+          }),
+        );
+        card.append(victim);
       },
     );
     group.append(card);

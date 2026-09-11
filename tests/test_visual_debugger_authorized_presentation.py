@@ -1091,8 +1091,21 @@ def test_every_nested_wire_object_forbids_additional_properties() -> None:
     for name, definition in strict_definitions.items():
         assert definition["additionalProperties"] is False, name
         properties = set(cast(dict[str, object], definition["properties"]))
-        # The researcher HUD adds one backward-compatible optional death list.
-        optional: set[str] = {"deaths"} if name == "MatchSummaryV1" else set()
+        # Only the named historical HUD additions may omit a required field.
+        optional: set[str] = (
+            {
+                "deaths",
+                "map",
+                "observation_mode",
+                "episode_limit",
+                "root_seed",
+                "episode_seed",
+            }
+            if name == "MatchSummaryV1"
+            else {"killing_team_id", "contributors"}
+            if name == "MatchDeathV1"
+            else set()
+        )
         assert properties - optional == set(cast(list[str], definition["required"])), (
             name
         )

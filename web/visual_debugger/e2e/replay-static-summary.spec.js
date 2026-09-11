@@ -1020,7 +1020,7 @@ test("paused replay installs a complete deterministic static summary at both sup
     "aria-pressed",
     "false",
   );
-  await expect(page.locator("#visual-filter-count")).toHaveText("8 enabled");
+  await expect(page.locator("#visual-filter-count")).toHaveText("9 enabled");
   // This full-summary proof explicitly requests every paint family while
   // preserving its initial no-ranges and no-target-selection contract.
   for (const filterId of VISUAL_FILTER_IDS) {

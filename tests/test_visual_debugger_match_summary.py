@@ -6,7 +6,11 @@ from dataclasses import replace
 
 import pytest
 from scripts.dev.visual_debugger.control import create_session
-from scripts.dev.visual_debugger.match_summary import build_match_summary_v1
+from scripts.dev.visual_debugger.match_summary import (
+    MatchAgentV1,
+    MatchDeathV1,
+    build_match_summary_v1,
+)
 from scripts.dev.visual_debugger.model import DebuggerScenarioProvenance
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from tests.evaluation_fixtures import (
@@ -31,6 +35,11 @@ def test_match_summary_uses_captured_task_scores_policy_identity_and_result() ->
         context, trajectory.frames[1], trajectory.transitions[0].events
     )
     assert before.task_mode == 1
+    assert before.observation_mode == context.execution_information_mode
+    assert before.episode_limit == context.expected_horizon
+    assert before.root_seed == context.seed_protocol.root_seed
+    assert before.episode_seed == context.seed_protocol.episode_seed
+    assert before.map is not None and before.map.split is None
     assert (
         before.score_threshold
         == context.resolved_env_config.team_deathmatch_score_threshold
@@ -88,6 +97,63 @@ def test_match_summary_keeps_legacy_combat_diagnostic_truthful() -> None:
     )
     with pytest.raises(ValueError, match="episode context"):
         build_match_summary_v1(unrelated, trajectory.frames[0])
+
+
+def test_death_free_match_summary_skips_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trajectory = captured_evaluation_trajectory(transition_count=1)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("death-free frames must not enter numerical attribution")
+
+    monkeypatch.setattr(
+        "scripts.dev.visual_debugger.match_summary._death_contributors", forbidden
+    )
+    assert build_match_summary_v1(trajectory.context, trajectory.frames[0]).deaths == ()
+    assert (
+        build_match_summary_v1(
+            trajectory.context, trajectory.frames[1], trajectory.transitions[0].events
+        ).deaths
+        == ()
+    )
+
+
+def test_sparse_historical_death_events_do_not_invent_contributors() -> None:
+    trajectory = captured_team_deathmatch_threshold_trajectory()
+    events = tuple(
+        event
+        for event in trajectory.transitions[0].events
+        if event.event_type == "agent_died"
+    )
+    summary = build_match_summary_v1(trajectory.context, trajectory.frames[1], events)
+    assert len(summary.deaths) == 1
+    assert summary.deaths[0].killing_team_id is None
+    assert summary.deaths[0].contributors is None
+    # Historical presentation payloads lacking the new fields mean unknown.
+    assert (
+        MatchDeathV1(public_agent_id="old-victim", team_id=2, class_id=1).contributors
+        is None
+    )
+
+
+def test_match_death_rejects_incomplete_duplicate_or_friendly_credit() -> None:
+    contributor = MatchAgentV1(public_agent_id="source", team_id=1, class_id=5)
+    victim = {"public_agent_id": "victim", "team_id": 2, "class_id": 1}
+    with pytest.raises(ValueError, match="complete or explicitly unavailable"):
+        MatchDeathV1.model_validate({**victim, "killing_team_id": 1})
+    with pytest.raises(ValueError):
+        MatchDeathV1.model_validate(
+            {**victim, "killing_team_id": 1, "contributors": ()}
+        )
+    with pytest.raises(ValueError, match="unique"):
+        MatchDeathV1.model_validate(
+            {**victim, "killing_team_id": 1, "contributors": (contributor, contributor)}
+        )
+    with pytest.raises(ValueError, match="opposing killing team"):
+        MatchDeathV1.model_validate(
+            {**victim, "killing_team_id": 2, "contributors": (contributor,)}
+        )
 
 
 @pytest.mark.parametrize("scenario_id", range(1, 9))

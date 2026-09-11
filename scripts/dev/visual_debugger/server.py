@@ -24,6 +24,7 @@ _TOKEN_HEADER = "X-MARL-Debugger-Token"
 _MAX_COMMAND_BODY_BYTES = 64 * 1024
 _CLIENT_SOCKET_TIMEOUT_SECONDS = 2.0
 _METRIC_REPORT_ROUTE = "/api/replay/metric-report"
+_METRIC_CATALOG_ROUTE = "/api/replay/metrics/catalog.json"
 _METRIC_ANALYSIS_ROUTE = re.compile(
     r"/api/replay/metrics/([0-9]{1,9})/(cursor|final)\.(json|csv)"
 )
@@ -305,6 +306,7 @@ class HttpCoordinatorBinding:
     current_timeline: Callable[[], object] | None = None
     current_metric_report: Callable[[], HttpMetricReportResult] | None = None
     metric_analysis: Callable[[int, str, str], tuple[bytes, str | None]] | None = None
+    metric_catalog: Callable[[], bytes] | None = None
     episode_details: Callable[[], tuple[bytes, str]] | None = None
     result_status: Callable[[HttpCommandResult], HTTPStatus] = _default_result_status
     authoring: HttpAuthoringBinding | None = None
@@ -355,6 +357,10 @@ class HttpCoordinatorBinding:
             raise ValueError("live debugger mode cannot expose replay analysis.")
         if self.metric_analysis is not None and not callable(self.metric_analysis):
             raise TypeError("metric analysis must be callable")
+        if self.metric_catalog is not None and (
+            self.mode != "replay" or not callable(self.metric_catalog)
+        ):
+            raise ValueError("metric catalog requires a callable replay operation")
         if self.episode_details is not None and (
             self.mode != "replay" or not callable(self.episode_details)
         ):
@@ -755,9 +761,9 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         # Replay is the final coordinator generation. A long immutable analysis
         # read releases the router lock so cursor and POV commands stay usable.
         snapshot = self.debugger_server.coordinator_router.snapshot()
-        if (
-            snapshot.binding.mode == "replay"
-            and _METRIC_ANALYSIS_ROUTE.fullmatch(self.path) is not None
+        if snapshot.binding.mode == "replay" and (
+            _METRIC_ANALYSIS_ROUTE.fullmatch(self.path) is not None
+            or self.path == _METRIC_CATALOG_ROUTE
         ):
             self._handle_get(snapshot.binding)
             return
@@ -847,6 +853,23 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
             except Exception:
                 self._send_internal_error(coordinator)
             return
+        if route == _METRIC_CATALOG_ROUTE and coordinator.metric_catalog is not None:
+            if not self._authenticated(coordinator):
+                return
+            try:
+                payload = coordinator.metric_catalog()
+                if type(payload) is not bytes:
+                    raise TypeError("metric catalog must return bytes")
+                self._send_bytes(
+                    HTTPStatus.OK,
+                    payload,
+                    content_type=_METRIC_REPORT_CONTENT_TYPE,
+                )
+            except BrokenPipeError, ConnectionError, TimeoutError:
+                self.close_connection = True
+            except Exception:
+                self._send_internal_error(coordinator)
+            return
         metric_analysis = _METRIC_ANALYSIS_ROUTE.fullmatch(route)
         if metric_analysis is not None and coordinator.metric_analysis is not None:
             if not self._authenticated(coordinator):
@@ -863,7 +886,9 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
                     if (
                         filename is None
                         or re.fullmatch(
-                            r"tdm-metrics-(cursor|final)-frame-[0-9]+\.csv", filename
+                            r"tdm-metrics__episode-[A-Za-z0-9._-]{1,96}"
+                            r"__schema-[1-9][0-9]*__(cursor|final)__frame-[0-9]+\.csv",
+                            filename,
                         )
                         is None
                     ):

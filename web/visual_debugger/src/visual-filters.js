@@ -45,6 +45,7 @@ const INITIAL_VISUAL_FILTER_IDS = new Set([
   "resurrection_effects",
   "scrolling_battle_text",
   "respawn_wave",
+  "death_announcer",
 ]);
 
 export const VISUAL_FILTER_REGISTRY = Object.freeze(

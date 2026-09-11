@@ -179,6 +179,7 @@ def test_context_is_custom_debug_no_shared_and_keeps_exact_cp2_bindings() -> Non
     assert dict((row.name, row.value) for row in context.aggregation_keys) == {
         "action_source": "manual",
         "information_regime": "no_shared_obs",
+        "map_origin": "custom",
         "scenario": "arena_5v5",
         "scenario_kind": "custom",
         "team_a_controller": "manual",

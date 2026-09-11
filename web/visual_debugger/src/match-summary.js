@@ -15,6 +15,9 @@ export function matchSummaryView(presentation) {
   return Object.freeze({
     task: tdm ? "TDM" : "Combat diagnostic",
     taskMode: match.task_mode,
+    map: match.map
+      ? `${match.map.display_name}${match.map.split ? ` (${match.map.split[0].toUpperCase()}${match.map.split.slice(1)} Map)` : ""}`
+      : null,
     teams: match.teams.map(
       (/** @type {Record<string, any>} */ team, /** @type {number} */ index) =>
         Object.freeze({
@@ -53,7 +56,7 @@ export function renderMatchSummary(elements, presentation) {
     elements.taskSelect.disabled = true;
     return;
   }
-  elements.task.textContent = `Task mode: ${summary.task}`;
+  elements.task.textContent = `Task mode: ${summary.task}${summary.map ? ` · Map: ${summary.map}` : ""}`;
   elements.taskSelect.disabled = summary.taskMode !== 1;
   for (const [index, team] of summary.teams.entries()) {
     const root = elements.teams[index];

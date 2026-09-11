@@ -636,6 +636,15 @@ def build_debugger_evaluation_context_v1(
         AggregationKeyV1(name="team_b_controller", value=team_b_controller),
         AggregationKeyV1(name="tool", value="visual_debugger"),
     ]
+    if scenario.provenance is not None and scenario.provenance.map_id is not None:
+        from marl_battlegrounds.evaluation.map_identity import registered_map_metadata
+
+        # Frozen Pydantic models provide their runtime hash for this host cache.
+        aggregation_keys.extend(
+            registered_map_metadata(scenario.provenance.map_id, resolved_config)  # pyright: ignore[reportArgumentType]
+        )
+    else:
+        aggregation_keys.append(AggregationKeyV1(name="map_origin", value="custom"))
     if scenario.mode == "interactive":
         aggregation_keys.append(
             AggregationKeyV1(name="team_a_controller", value=team_a_controller)

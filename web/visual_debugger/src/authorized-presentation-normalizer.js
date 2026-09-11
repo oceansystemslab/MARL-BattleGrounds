@@ -4880,6 +4880,54 @@ export async function normalizeAuthorizedPresentationFrameV1(value) {
     ) {
       invalid("Match deaths must join unique identities in the researcher roster.");
     }
+    if (deaths.length > 0) {
+      const rosterById = new Map(
+        roster.map((/** @type {Record<string, any>} */ agent) => [
+          agent.public_agent_id,
+          agent,
+        ]),
+      );
+      const directory =
+        frame.researcher_space?.identity_directory ??
+        frame.current_endpoint.identity_directory;
+      const slotById = new Map(
+        directory.identities.map((/** @type {Record<string, any>} */ identity) => [
+          identity.public_agent_id,
+          (identity.team_id - 1) * 5 + identity.team_local_slot,
+        ]),
+      );
+      for (const death of deaths) {
+        const killingTeam = death.killing_team_id ?? null;
+        const contributors = death.contributors ?? null;
+        if ((killingTeam === null) !== (contributors === null)) {
+          invalid(
+            "Death attribution must provide both killing team and contributors, or neither.",
+          );
+        }
+        if (contributors === null) continue;
+        let previousSlot = -1;
+        if (killingTeam === death.team_id || contributors.length === 0) {
+          invalid("Death contributors must identify a nonempty opposing team.");
+        }
+        for (const contributor of contributors) {
+          const agent = rosterById.get(contributor.public_agent_id);
+          const slot = slotById.get(contributor.public_agent_id);
+          if (
+            !agent ||
+            agent.class_id !== contributor.class_id ||
+            agent.team_id !== contributor.team_id ||
+            contributor.team_id !== killingTeam ||
+            slot === undefined ||
+            slot <= previousSlot
+          ) {
+            invalid(
+              "Death contributors must join unique researcher identities in numeric agent order.",
+            );
+          }
+          previousSlot = slot;
+        }
+      }
+    }
     if (
       match.episode_id !== frame.source.episode_id ||
       match.source_frame_index !== frame.source.source_frame_index ||

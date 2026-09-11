@@ -373,6 +373,7 @@ def _run_browser_replay(
         current_presentation=service.current_presentation,
         current_metric_report=service.current_metric_report,
         metric_analysis=service.metric_analysis,
+        metric_catalog=service.metric_catalog,
         episode_details=service.episode_details,
     )
     return serve_browser_debugger(

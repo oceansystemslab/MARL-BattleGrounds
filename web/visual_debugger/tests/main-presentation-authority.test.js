@@ -1539,7 +1539,7 @@ test("main reuses only Submit for coherent scripted-live advancement", async () 
   assert.doesNotMatch(source, /advance-script-button/u);
   assert.match(
     source,
-    /"Apply authorized action",\s*"Submit an editable draft or advance an inspection-only scripted frame through the authoritative Python service\."/u,
+    /"Apply Authorized Action",\s*"Submit an editable draft or advance an inspection-only scripted frame through the authoritative Python service\."/u,
   );
   assert.match(
     source,

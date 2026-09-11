@@ -22,6 +22,7 @@ from marl_battlegrounds.core import combat
 from marl_battlegrounds.core.config import CANONICAL_PRODUCT_MOVEMENT_SCALE
 from marl_battlegrounds.core.types import MAX_OBSTACLE_SLOTS, EnvConfig, EnvState
 from marl_battlegrounds.evaluation.catalog import build_static_mechanics_catalog_v1
+from marl_battlegrounds.evaluation.map_identity import approved_map_id
 from marl_battlegrounds.evaluation.models import (
     AuraMechanicV1,
     ClassMechanicsV1,
@@ -337,6 +338,11 @@ def debugger_scenario_from_snapshot(
         for row in compiled.content.roster
         if row.team == "A" and row.team_local_slot <= compiled.content.team_a_size
     )
+    map_source = compiled.content.source_map_provenance
+    map_id = approved_map_id(
+        None if map_source is None else map_source.asset_id,
+        compiled.map_semantic_digest,
+    )
 
     def build_scenario() -> tuple[EnvConfig, EnvState]:
         return copy.deepcopy(compiled.config), copy.deepcopy(compiled.initial_state)
@@ -361,6 +367,7 @@ def debugger_scenario_from_snapshot(
             map_semantic_digest=compiled.map_semantic_digest,
             resolved_configuration_digest=compiled.resolved_configuration_digest,
             resolved_initial_state_digest=compiled.resolved_initial_state_digest,
+            map_id=map_id,
         ),
     )
 

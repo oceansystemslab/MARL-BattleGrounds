@@ -145,6 +145,11 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
         "outcome",
         "teams",
         "deaths",
+        "map",
+        "observation_mode",
+        "episode_limit",
+        "root_seed",
+        "episode_seed",
     }
     context = service.session.evaluation_context
     frame = service.session.current_evaluation_frame
@@ -152,6 +157,16 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
     assert match_summary["episode_id"] == context.identity.episode_id
     assert match_summary["source_frame_index"] == frame.frame_index
     assert match_summary["simulator_step_count"] == frame.simulator_step_count
+    assert match_summary["observation_mode"] == context.execution_information_mode
+    assert match_summary["episode_limit"] == context.expected_horizon
+    assert match_summary["root_seed"] == context.seed_protocol.root_seed
+    assert match_summary["episode_seed"] == context.seed_protocol.episode_seed
+    assert match_summary["map"] == {
+        "map_id": None,
+        "technical_name": context.identity.layout.identifier,
+        "display_name": "Custom Map",
+        "split": None,
+    }
     assert match_summary["task_mode"] == context.resolved_env_config.task_mode == 0
     assert match_summary["score_threshold"] == (
         context.resolved_env_config.team_deathmatch_score_threshold

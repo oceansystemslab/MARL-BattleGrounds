@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from marl_battlegrounds.evaluation.actor_projection import (
     NO_SHARED_OBS_ACTOR_PROJECTION_V2,
 )
+from marl_battlegrounds.evaluation.metric_catalog import METRIC_SCHEMA_VERSION
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV1,
@@ -336,6 +337,7 @@ class ReplayViewerService:
         self._bundle = bundle
         self._metric_analysis: ReplayAnalysis | None = None
         self._metric_analysis_lock = RLock()
+        self._metric_catalog_bytes: bytes | None = None
         self._replay = bundle.replay
         self._context = bundle.replay.header.context
         self._active_slots: tuple[int, ...] = tuple(
@@ -527,21 +529,41 @@ class ReplayViewerService:
         if scope not in ("cursor", "final") or format_ not in ("json", "csv"):
             raise ValueError("unsupported metric scope or format")
         self._bundle.frame_at(frame_index)
+        analysis = self._analyzed_metrics()
+        if format_ == "json":
+            summary = analysis.summary(frame_index, scope=scope)
+            statistics = cast(list[dict[str, object]], summary["statistics"])
+            # The CSV keeps its fixed schema. Transport only rows this roster can
+            # display; undefined ratios and reachable zeros remain available.
+            summary["statistics"] = [row for row in statistics if row["applicable"]]
+            return canonical_json_bytes(summary), None
+        selected = analysis.frame_count - 1 if scope == "final" else frame_index
+        episode = _safe_metric_report_filename(
+            self._context.identity.episode_id
+        ).removesuffix(_METRIC_REPORT_SUFFIX)
+        return (
+            analysis.csv(frame_index, scope=scope).encode("utf-8"),
+            f"tdm-metrics__episode-{episode}__schema-{METRIC_SCHEMA_VERSION}"
+            f"__{scope}__frame-{selected}.csv",
+        )
+
+    def _analyzed_metrics(self) -> ReplayAnalysis:
+        """Share one immutable analysis across values, downloads and search."""
         with self._metric_analysis_lock:
             if self._metric_analysis is None:
                 from marl_battlegrounds.evaluation.analysis import analyze_replay
 
                 self._metric_analysis = analyze_replay(self._bundle, full=True)
-            analysis = self._metric_analysis
-        if format_ == "json":
-            return canonical_json_bytes(
-                analysis.summary(frame_index, scope=scope)
-            ), None
-        selected = analysis.frame_count - 1 if scope == "final" else frame_index
-        return (
-            analysis.csv(frame_index, scope=scope).encode("utf-8"),
-            f"tdm-metrics-{scope}-frame-{selected}.csv",
-        )
+            return self._metric_analysis
+
+    def metric_catalog(self) -> bytes:
+        """Serialize all measurement descriptions once for this replay."""
+        with self._metric_analysis_lock:
+            if self._metric_catalog_bytes is None:
+                self._metric_catalog_bytes = canonical_json_bytes(
+                    self._analyzed_metrics().catalog()
+                )
+            return self._metric_catalog_bytes
 
     def current_presentation(self) -> PresentationResourceResultV1:
         """Build the authorized resource from one committed replay snapshot."""

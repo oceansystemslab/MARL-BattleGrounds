@@ -3319,6 +3319,6 @@ test("remote cooldown placement preserves the canonical badge in the shared rend
   expect(result.remoteDetails.tooltipHidden).toBe(false);
   expect(result.remoteDetails.tooltipTitle).toContain("Cooldown");
   expect(result.remoteDetails.tooltipTitle).toContain(result.remoteDetails.ownerLabel);
-  expect(result.remoteDetails.tooltipDetails).toContain("29 Ticks");
+  expect(result.remoteDetails.tooltipDetails).toContain("29 ticks");
   expect(result.restored).toEqual(result.ordinary);
 });

@@ -6,7 +6,11 @@ import { isAbsolute, join, resolve } from "node:path";
 import { expect, test } from "@playwright/test";
 import { formatDisplayNumber } from "../src/display.js";
 import { statusLifecyclePresentation } from "../src/semantic-vocabulary.js";
-import { CHOREOGRAPHY_ROOT, installWaapiAutopause } from "./support/choreography.js";
+import {
+  CHOREOGRAPHY_ROOT,
+  finishControllerClock,
+  installWaapiAutopause,
+} from "./support/choreography.js";
 import {
   REPOSITORY_ROOT,
   startDebugger,
@@ -385,9 +389,63 @@ async function cp5Slice5PlanAndDomSignature(page, rawPresentation) {
     const planEvents =
       plan === null ? [] : /** @type {Array<Record<string, any>>} */ (plan.events);
     const orderedEventIds = incomingRows.map(({ id }) => id);
-    const plannedAtomicIds = planEvents.flatMap((event) =>
-      Array.isArray(event.atomicEventIds) ? event.atomicEventIds : [event.eventId],
+    // Grouped HUD announcements summarize recorded deaths; they are separate
+    // presentation cues, not additional authoritative transition events.
+    const announcements = planEvents.filter(
+      (event) => event.cueSemantic === "death_announcement",
     );
+    const deaths = /** @type {Array<Record<string, any>>} */ (
+      presentation.match_summary?.deaths ?? []
+    );
+    const deathSides = [1, 2].filter((team) =>
+      deaths.some((death) => (death.killing_team_id ?? death.team_id) === team),
+    );
+    if (
+      JSON.stringify(announcements.map((event) => event.sideId)) !==
+      JSON.stringify(deathSides)
+    ) {
+      throw new Error("Death announcements lost or duplicated a recorded team.");
+    }
+    for (const announcement of announcements) {
+      const teamDeaths = deaths.filter(
+        (death) => (death.killing_team_id ?? death.team_id) === announcement.sideId,
+      );
+      if (
+        announcement.members.length !== teamDeaths.length ||
+        new Set(
+          announcement.members.map(
+            (/** @type {Record<string, any>} */ member) => member.publicIdentity,
+          ),
+        ).size !== teamDeaths.length ||
+        orderedEventIds.includes(announcement.eventId) ||
+        announcement.phaseEnd - announcement.phaseStart !== 1500
+      ) {
+        throw new Error("Death announcement membership, identity, or dwell changed.");
+      }
+      const knownTeam = teamDeaths.every(
+        (death) => death.killing_team_id === announcement.sideId,
+      )
+        ? announcement.sideId
+        : null;
+      if (
+        announcement.teamId !== knownTeam ||
+        announcement.members.some(
+          (/** @type {Record<string, any>} */ member, /** @type {number} */ index) =>
+            member.killingTeamId !== (teamDeaths[index].killing_team_id ?? null) ||
+            (member.contributors?.length ?? null) !==
+              (teamDeaths[index].contributors?.length ?? null),
+        )
+      ) {
+        throw new Error(
+          "Death announcement changed recorded killing-team attribution.",
+        );
+      }
+    }
+    const plannedAtomicIds = planEvents
+      .filter((event) => event.cueSemantic !== "death_announcement")
+      .flatMap((event) =>
+        Array.isArray(event.atomicEventIds) ? event.atomicEventIds : [event.eventId],
+      );
     if (JSON.stringify(plannedAtomicIds) !== JSON.stringify(orderedEventIds)) {
       throw new Error("Authorized plan lost, duplicated, or reordered an incoming ID.");
     }
@@ -440,6 +498,7 @@ async function cp5Slice5PlanAndDomSignature(page, rawPresentation) {
           transitionId: event.transitionId,
           authorityVocabulary: event.authorityVocabulary,
           kind: event.kind,
+          cueSemantic: event.cueSemantic ?? null,
           spatial: event.spatial,
           presentationSuppressed: event.presentationSuppressed ?? false,
           persistent: event.persistent ?? false,
@@ -807,7 +866,28 @@ async function expectRetiredMetadataAbsent(page) {
 const TECHNICAL_HELP = Object.freeze({
   episode: Object.freeze({
     label: "Episode",
-    summary: "Identifies the authorized live episode represented by this frame.",
+    summary: "Identifies the recorded episode represented by this frame.",
+  }),
+  task_mode: Object.freeze({
+    label: "Task Mode",
+    summary: "The task whose rules govern this episode.",
+  }),
+  map: Object.freeze({
+    label: "Map",
+    summary: "The recorded technical map name. Its split is shown only when recorded.",
+  }),
+  observation_mode: Object.freeze({
+    label: "Observation Mode",
+    summary: "The policy observation mode used when this episode was recorded.",
+  }),
+  episode_limit: Object.freeze({
+    label: "Episode Limit",
+    summary: "The maximum number of transitions planned for this episode.",
+  }),
+  seeds: Object.freeze({
+    label: "Seeds",
+    summary:
+      "The recorded root seed and episode stream coordinate identify the random streams. Unknown means the value was not recorded.",
   }),
   artifact_digest_prefix: Object.freeze({
     label: "Artifact Digest Prefix",
@@ -912,7 +992,31 @@ async function expectTechnicalFrameDom(page, presentation) {
       `Unsupported Technical Frame presentation kind ${String(presentation.presentation_kind)}.`,
     );
   }
-  const expected = specification.filter(([, field]) => technical[field] !== null);
+  /** @type {Array<[keyof typeof TECHNICAL_HELP, string]>} */
+  const expected = specification
+    .filter(([, field]) => technical[field] !== null)
+    .map(([id, field]) => [id, String(technical[field])]);
+  const match = presentation.match_summary;
+  if (match) {
+    if (!expected.some(([id]) => id === "episode")) {
+      expected.unshift(["episode", match.episode_id]);
+    }
+    expected.push(["task_mode", match.task_mode === 1 ? "TDM" : "Combat diagnostic"]);
+    if (match.map) expected.push(["map", match.map.technical_name]);
+    if (match.observation_mode) {
+      expected.push([
+        "observation_mode",
+        match.observation_mode === "shared_obs" ? "SharedObs" : "NoSharedObs",
+      ]);
+    }
+    if (match.episode_limit !== null && match.episode_limit !== undefined) {
+      expected.push(["episode_limit", `${match.episode_limit} ticks`]);
+    }
+    expected.push([
+      "seeds",
+      `Root ${match.root_seed ?? "unknown"} · Episode stream ${match.episode_seed ?? "unknown"}`,
+    ]);
+  }
   const frameField = specification.find(([id]) => id === "frame")?.[1];
   const incomingField = specification.find(([id]) => id === "incoming_transition")?.[1];
   if (frameField === undefined || incomingField === undefined) {
@@ -935,10 +1039,10 @@ async function expectTechnicalFrameDom(page, presentation) {
       })),
     ),
   ).toEqual(
-    expected.map(([id, field]) => ({
+    expected.map(([id, value]) => ({
       id,
       label: TECHNICAL_HELP[id].label,
-      value: String(technical[field]),
+      value,
       tabindex: "0",
     })),
   );
@@ -5527,7 +5631,9 @@ async function runCp5Slice5Proof(
         const incomingKindById = new Map(
           incomingEvents.map((event) => [event.event_id, event.event_kind]),
         );
-        for (const event of planEvents) {
+        for (const event of planEvents.filter(
+          (event) => event.cueSemantic !== "death_announcement",
+        )) {
           expect(event.transitionId).toBe(incoming.incoming_transition_id);
           expect(event.authorityVocabulary).toBe("event");
           expect(incomingKindById.get(event.eventId)).toBe(event.eventType);
@@ -7339,8 +7445,8 @@ test("real death and respawn keep one opaque Oracle body identity", async ({
       "Movement only",
       "Excluded as emitter and beneficiary",
       "The agent can move through other agents while shielded; collision resumes at the end of the shield's final transition.",
-      "3 Ticks",
-      "3 Ticks",
+      "3 ticks",
+      "3 ticks",
       "Agent ID 5 · Rogue · Team B",
     ],
   );
@@ -7457,7 +7563,9 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
     if (!deathEvent) {
       throw new Error("Authorized death event is unavailable.");
     }
-    const deathEffect = page.locator('.combat-effect[data-event-type="agent_died"]');
+    const deathEffect = page.locator(
+      '.combat-effect[data-event-type="agent_died"][data-cue-semantic="agent_died"]',
+    );
     await expect(deathEffect).toHaveCount(1);
     await expect(deathEffect).toHaveAttribute("data-event-id", deathEvent.event_id);
     await expect(deathEffect).toHaveAttribute("data-persistent", "true");
@@ -8204,8 +8312,9 @@ test("real Agent replay paints only locally authorized Oracle corpses without ch
 
 test("real Live NoShared paints a locally visible corpse as inspection-only Oracle evidence", async ({
   page,
-}) => {
+}, testInfo) => {
   test.setTimeout(120_000);
+  await installWaapiAutopause(page);
   const service = await startScriptedDebugger({ scenario: "death_respawn_cycle" });
   try {
     await openProduct(page, service.url, "live");
@@ -8225,6 +8334,53 @@ test("real Live NoShared paints a locally visible corpse as inspection-only Orac
         agent.life_state === "corpse" && agent.current_health === 0,
     );
     expect(oracleCorpse).toMatchObject({ life_state: "corpse", current_health: 0 });
+    const deaths = oracle.presentation.match_summary.deaths;
+    expect(deaths).toHaveLength(1);
+    expect(deaths[0].public_agent_id).toBe(oracleCorpse.public_agent_id);
+    expect(deaths[0].contributors.length).toBeGreaterThan(0);
+    const deathCard = page.locator(".combat-death-announcement");
+    await expect(deathCard).toHaveCount(1);
+    await expect(deathCard).toHaveClass(
+      new RegExp(`--team-${deaths[0].killing_team_id === 1 ? "a" : "b"}`, "u"),
+    );
+    await deathCard.evaluate(async (card) => {
+      const battlefield = card.closest("svg");
+      const animation = card.parentElement?.getAnimations()[0];
+      if (!battlefield || !animation?.effect)
+        throw new Error("Live death presentation clock is unavailable.");
+      const timing = animation.effect.getTiming();
+      const time = Number(timing.delay) + Number(timing.duration) / 2;
+      const animations = battlefield
+        .getAnimations({ subtree: true })
+        .filter(({ id }) => id.startsWith("mbg:"));
+      for (const owned of animations) {
+        owned.pause();
+        owned.currentTime = time;
+      }
+      await Promise.all(animations.map(({ ready }) => ready));
+    });
+    const victim = deathCard.locator(".combat-death-announcement__victim");
+    const victimTitle = expectedAgentIdentity(oracleCorpse, oracle.presentation).title;
+    await expect(victim).toHaveText(victimTitle);
+    await victim.locator("rect").hover();
+    await expect(page.locator("#visual-tooltip")).toContainText(victimTitle);
+    for (const contributor of deaths[0].contributors) {
+      await expect(page.locator("#visual-tooltip")).toContainText(
+        expectedAgentIdentity(contributor, oracle.presentation).title,
+      );
+    }
+    await page.mouse.move(0, 0);
+    await victim.focus();
+    await expect(page.locator("#visual-tooltip")).toContainText("Kill Contributors");
+    await page.screenshot({
+      path: testInfo.outputPath("live-death-contributors.png"),
+      fullPage: true,
+    });
+    await page.locator("#view-select").focus();
+    await page.screenshot({
+      path: testInfo.outputPath("live-compact-death.png"),
+      fullPage: true,
+    });
     const oraclePaint = await corpseBodyPaint(page, oracleCorpse.presentation_key);
     const oracleRevision = oracle.transport.revision;
     const oracleStep = oracle.transport.simulator_step_count;
@@ -8241,6 +8397,9 @@ test("real Live NoShared paints a locally visible corpse as inspection-only Orac
       "installed",
     );
 
+    // The HUD proof freezes the clock. Finish the rebuilt transition before
+    // the existing corpse-body checks, as ordinary playback would do.
+    await finishControllerClock(page, "cleanup");
     let agent = await corpsePresentationState(page);
     expect(agent.transport.frame_kind).toBe("actor_pov_live_debugger");
     expect(agent.presentation.presentation_kind).toBe("live_no_shared_obs_agent_pov");

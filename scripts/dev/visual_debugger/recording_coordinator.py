@@ -87,6 +87,7 @@ class RecordingDebuggerCoordinator:
             current_presentation=handoff.current_presentation,
             current_metric_report=handoff.current_metric_report,
             metric_analysis=handoff.metric_analysis,
+            metric_catalog=handoff.metric_catalog,
             episode_details=handoff.episode_details,
         )
         expected = self._router.snapshot()

@@ -25,7 +25,7 @@ and named file paths. Open one saved replay with:
 .venv/bin/python scripts/dev/replay_viewer.py --replay PATH_TO_REPLAY
 ```
 
-The viewer offers **Up to Current Tick** and **Final Episode**, plus scalar CSV
+The viewer offers **Up to Current Tick** and **Entire Episode**, plus scalar CSV
 and explicitly named episode-configuration exports. Historical replay files
 remain readable. A saved replay does not automatically request full metrics
 during execution.
@@ -57,6 +57,287 @@ Pandas is optional analysis software, not a simulator dependency. With file
 output, load `pd.read_csv(result.paths["full_metrics"])` instead; persisted full
 rows are not also retained in memory. Blank cells represent unavailable values;
 real zeros remain zero. See the [column dictionary](metric_columns.csv).
+
+Schema 12 contains 26 priority measurements and 11,152 full measurements (including
+priority), with the same headers for every supported roster. A full run table has
+11,182 columns, including 30 identity columns. A replay CSV has 11,201 columns,
+including 49 identity columns. The viewer has 27 topics and 43 tables. Different
+topics can share the same exported columns, always with the same display name.
+The full count reflects recipient and status dimensions, not that many
+independent scientific concepts; the
+[family summary](metric_specification.md#manuscript-family-summary)
+explains the grouping. Existing schema-1/2/3/4/5/6/7/8/9/10/11 CSV files remain unchanged. Resume
+rejects an older scalar schema before recovery, truncation, or writing; use a new
+run directory for schema 12. The replay format version is separate from its current
+analysis version.
+
+Choose a **Topic**, then **Totals** or **By Recipient** where both are useful.
+Totals contain team-wide and acting-agent measurements. By Recipient contains
+affected-agent totals and who did what to whom. Related tables do not repeat rows.
+Use **Find a Measurement** to search topics, plain names, related words, agent
+labels or exact CSV names. You can type the start of a word: `regen` finds
+regeneration and `crippl pois` finds Crippling Poison. Related phrases work too:
+`overhealing` finds excess healing and `spread out` finds teammate distances.
+Connecting words do not block a match: `damage received while slowed by rogue
+poison` finds the same measurements with or without `by`. `Damage taken` and
+`damage received` mean the same thing in search, as do `damage dealt` and
+`damage done`. You can stop typing at `damage tak`. The same rules apply across
+topics. Words such as `from`, `to`, `not`, `before` and `after` still matter;
+Team A and Team B remain different. Exact CSV names still come first.
+Search checks names and chosen keywords first. If none match, it checks the
+longer descriptions. This keeps a phrase such as “does not include regeneration”
+from filling a regeneration search with other healing measurements.
+
+Use Up/Down to highlight a result and Enter to open it; you can keep typing while
+moving through the list. Click outside or press Escape to close the list, then
+click the search box to reopen it with the same text. Search also finds columns
+that do not apply to this replay and explains why. Those columns remain in the
+fixed CSV even when their rows do not belong in this replay's table.
+
+Tables follow the recorded classes and active slots. Healing Done shows Priests
+as healers; Healing Received can show any class as a patient. A Mage's Healing
+Done row is hidden, but its zero CSV value and searchable definition stay.
+A Priest who has not healed yet keeps its zero row. Received Priest healing
+needs a friendly Priest; regeneration does not. These rules apply to all topics
+and both views, including totals, fractions and source-to-recipient details.
+They do not depend on an agent's current health, range or cooldowns.
+
+The [navigation table](metric_specification.md#find-a-measurement-by-topic-or-csv-name)
+lists every primary location. In the dictionary, `primary_topic` and `primary_view`
+give a column's CSV home; `gui_groups` lists the tables that show it. Column
+numbers include the 30 full-run identity fields or the 49 replay identity fields.
+`gui_text_by_topic` records extra descriptions and subtitles used in named
+Ultimate views. The display name stays the same in every topic. Extra context
+and clearer names do not add numerical measurements.
+For example, read only the columns from the healing recipient table:
+
+```python
+guide = pd.read_csv("docs/evaluation/metric_columns.csv")
+columns = guide.loc[
+    (guide["primary_topic"] == "Healing Done")
+    & (guide["primary_view"] == "By Recipient"),
+    "column",
+].tolist()
+healing = pd.read_csv(result.paths["full_metrics"], usecols=["episode_id", *columns])
+```
+
+This selection is optional; ordinary `pd.read_csv` still loads the complete run.
+Schema 8 changed column order. Schema 9 changed the healing term to **Excess**
+in column names, the dictionary and the viewer. Schema 10 removed 46 observed
+respawn-wait columns. **Respawning** shows each
+team's wave count, mean agents returned per wave, and mean waiting ticks. The
+wave count includes scheduled waves when nobody returns. The mean agents per
+wave includes those empty waves: one wave with no returning agents gives a mean
+of zero. Before any wave, that mean is blank. The
+mean wait counts only time seen in this recording, including waits already
+underway at its start or still open at its end. Death counts and time dead
+stay in **Deaths and Time Dead**. Earlier CSV files keep their original columns.
+Surviving names, values and blank-value rules stay the same. This cleanup makes
+no new speed claim.
+The schema-10 check matched all 11,100 retained measurements by name across five
+recorded boundaries: 55,500 values and their blank-value flags stayed exactly
+the same. Two separate reviews agreed on the 46 removals. Browser checks covered
+the six Respawning rows, their tooltips in both POVs, and matching CSV values.
+This change did not rerun or replace the performance measurements below.
+
+Schema 11 added 40 recipient measurements from counters already collected:
+Trap periods, the fraction broken by damage, mean time left when broken, and
+chances to save each agent with Priest healing. Team measurements stay intact.
+The recipient can be any active class; a rescue opportunity requires a Priest
+on that recipient's team. Initial Traps remain measurable without a Hunter.
+No new per-tick counters or counter updates were added. The wider final result and
+CSV contain more values; this update makes no new speed claim.
+
+These columns do not repeat the meaning of an existing column. The ten Trap
+break rates are calculated conveniences: each agent's broken Traps as a share
+of its Trap periods. Counts and rates are both kept for direct analysis.
+Two Hunters can make two Trap activations on one tick but create one Trap
+period. A rescue chance can be present even when no Priest actually makes the
+save. Team totals alone cannot show which agent these events concerned.
+
+The schema-11 checks preserved all 11,100 earlier measurements at five public
+trajectory boundaries: 55,500 values and their blank-value flags match exactly.
+Eight CPU/GPU correctness cases also pass, including simultaneous Hunter
+activations and combined Priest healing. The collector's 61 counter arrays stay
+unchanged. See `artifacts/m8-ultimate-topic-fixes/` for the raw comparisons and
+independent reviews. These checks do not repeat the performance matrix below.
+
+Schema 12 adds ten `agent_i_basic_rescue_participation` columns and two
+`team_{a,b}_basic_rescue_fraction` columns beside the Basic save counts.
+An agent's fraction is its Basic save contributions divided by all unique saves
+by its team, from any ability. A team's fraction counts each save helped by
+Basic healing once, then divides by all its unique saves, from any ability.
+If two Priests help with the team's only save, each can have participation
+`1.0` while the team still has only one save. Basic and Ultimate healing can
+both help with that same save, so their fractions can overlap. These fractions
+are blank when the team has no saves; inactive agents' shares are also blank.
+They count actual saves, not unused chances to save someone. See the
+[Basic healing-save definitions](metric_specification.md#schema-12-basic-healing-save-shares).
+
+The twelve shares reuse existing counts when the full result is built. They
+add no per-tick counters or counter updates. All 11,140 schema-11 column
+names and values remain. Clearer display names, explanations and row order
+are separate from these twelve added measurements. They change no simulation
+rule, action, observation or reward, and establish no new performance result.
+
+The schema-12 check compared all 11,140 earlier measurements at five public
+trajectory boundaries. All 55,700 values and their blank-value flags matched
+exactly, and all 61 counter arrays stayed unchanged. Focused cases for the
+Basic save shares passed on CPU and GPU, including shared saves, repeated
+Priests and zero denominators. These are correctness checks, not a new speed
+measurement. The saved evidence is in `artifacts/m8-six-section-fixes/`.
+
+Ultimate tables keep one display name for each column and its exact CSV link.
+Subtitles and tooltips add ability context. Four team activation rows reuse
+existing named-effect counts.
+Salvation keeps its individual activation rows; the previously removed team
+activation column is not restored. Shared death and save totals explain when
+they supply the all-ability denominator for a nearby participation fraction.
+Burst has no displayed kill fraction using Total Kills, so it omits that shared
+row. Total Kills stays in Episode Results and the CSV. A share of team Ultimate
+damage can include several classes. Effects on Team A describe what Team A's agents experienced,
+even when Team B applied the effects.
+
+The schema-8 checks compared all 11,146 old and new definitions by column name.
+Every number and blank-value flag also matched exactly across all 188 boundaries
+of one saved Cheshire Cat replay: 2,095,448 entries. Separate checks compared
+100,314 row-applicability decisions across nine rosters, including moved classes,
+repeated classes and inactive slots. This supports preservation for the checked
+cases; one recording cannot prove every possible game. Five GPU correctness
+cases also checked selected full collection, partial reset, contribution credit
+and healing precision. No speed benchmark was repeated for the navigation change.
+
+The schema-8 browser checks covered all 43 tables, both POVs, and CSV equality at current
+and entire-episode scope. Search reuses one catalog request across topic, scope,
+seek and POV changes. The independent review and raw check results are in
+`artifacts/m8-metric-navigation/`; start with `navigation-audit-review.json` and
+`values-comparison.json`. There are 39 nonempty primary CSV ranges: the Charge
+and Salvation tables reuse columns whose primary homes are elsewhere.
+
+Before schema 10, the class-filter audit independently reviewed all 11,146 columns and
+resolved every disagreement between two reviewers. The final shared list covers
+858,242 display decisions across 77 distinct rosters, including moved classes,
+repeated classes, missing classes and inactive slots. Both reviewers checked the
+code against that list with no differences. CSV data and numerical rules stay
+unchanged. These are roster checks, not extra games or a speed benchmark. The
+original reviews and resolved decisions are in
+`artifacts/m8-class-filter-audit/all-roles-consensus.json`.
+
+For that historical Cheshire Cat recording and catalog, the separate search response contained
+14,507,239 bytes of definitions and applicability information. It is loaded once
+and kept for that replay. This is extra host/browser storage and transfer, not
+new work inside the JAX simulation. It is not a measurement of peak browser RAM.
+
+Every number shown in the viewer has a CSV column. Hover over a measurement,
+or focus it with the keyboard, to find **CSV Column** and copy its exact name.
+The viewer shows amounts and counts with at most two decimal places. Fractions
+and ratios keep up to four. CSV exports keep the full stored values. Adding the
+same float32 values in different orders can leave tiny differences in the last
+digits; rounding the display does not change the recorded measurements.
+The help text says who did what. **From** is who acted; **To** is who was
+affected. **Numerator** names the amount being compared; **Denominator** names
+the total it is compared with. Team explanations name Team A or Team B.
+**Blank When** explains why there may be no number. For example, four Basic
+ability activations out of ten give `0.4`, or 40%. An agent that activated no
+Basic abilities has no Basic allocation fraction to calculate, so that
+fraction is blank.
+
+Allocation means the share of one agent's output that went to one target.
+Contribution compares that agent's output with its team's output to the same
+target. For example, `agent_5_to_agent_3_burst_damage_allocation_fraction` of
+`0.4336` means 43.36% of Agent 5's damage while Burst was active went to Agent 3.
+It does not mean Agent 5 supplied 43.36% of all damage Agent 3 received. Read
+the named ability, effect and time rule in both the Numerator and Denominator.
+For harmful-effect measurements, the recipient must already have that named
+effect at the start of the tick. Applying it later that tick does not count.
+
+Effective Priest healing means delivered healing minus healing above the
+health cap after that tick's damage. It can offset damage even when health
+does not rise or the ally still dies. The separate healing-save measurements
+require the ally to survive damage that would otherwise have killed it.
+**Total Effective Healing Received** also includes regeneration, so its
+guidance is context dependent, just like **Regenerated Healing**. Pure
+effective Priest-healing amounts keep their existing guidance. Amounts stay
+beside their fractions; received healing stays separate from supplied healing.
+
+Read a column name from left to right:
+`team_b_to_agent_1_basic_applications` counts how many times Team B used Basic
+abilities on Agent 1. `agent_5_to_agent_1_basic_applications` counts how many
+times Agent 5 did so. Attempts rejected by the game do not count. The viewer
+may call these uses **received from** Team B or Agent 5; each number still has
+just one CSV column. Formation uses `agent_0_and_agent_1_` for the two teammates'
+distance apart. See the
+[schema-3-to-4 naming rules](metric_specification.md#reading-source-and-recipient-names).
+
+Schema 5 removed 206 approved columns and grouped the remaining columns more
+clearly. Schema 6 added 12 Basic kill fractions. Schema 7 adds 20 columns for
+class Basic kill counts and fractions. Within each subject, All abilities come
+before Basic and then Ultimate, with each amount followed by its fractions.
+Surviving names and calculations stay the same. The
+[column dictionary](metric_columns.csv) uses the same
+descriptions, numerators and denominators as the viewer.
+
+`agent_i_basic_kill_participation` is the share of its team's kills that Agent `i`
+helped with its Basic ability. `team_a_basic_kill_fraction` and
+`team_b_basic_kill_fraction` are the share of each team's kills that had at least
+one Basic helper. Credit needs Basic damage on the tick the enemy dies, or useful
+Priest Basic healing of a teammate who damaged that enemy on that tick. A Mage
+Basic attack during Burst remains Basic help.
+
+Two Basic helpers can each get credit for the same kill, but the team counts it
+only once. Basic and Ultimate help can overlap: if both help with the team's only
+kill, both team fractions are `1.0`. They do not add up to the number of kills.
+These fractions are blank when that team has no kills. Inactive agent fractions
+are also blank. See the [schema-6 definitions](metric_specification.md#schema-6-additions-and-migration).
+
+Class Basic kills use names such as `team_a_mage_basic_kills` and
+`team_a_mage_basic_kill_fraction`. All five classes have these two columns on
+both teams. The count includes each enemy death once, even if several agents
+of that class helped with Basic abilities. The fraction uses this same count:
+**Numerator: Kills helped by that class's Basic abilities. Denominator: All kills
+by the named team.**
+
+If two Mages help with Basic attacks on one kill, the Mage count is one. If a
+Mage and a Warrior each help on that kill, both class counts are one. These
+class fractions can overlap with each other and with Ultimate help. Useful
+same-tick Priest Basic healing counts; healing that is all excess does not. Mage
+Basic attacks during Burst count too.
+
+A class present in an active slot has a real zero count if it has no Basic kill
+credit. Its fraction is zero when the team has kills, and blank when the team
+has none. If the class has no active agent on the team, both columns are blank.
+See the [schema-7 definitions](metric_specification.md#schema-7-class-basic-kills-and-migration).
+
+The existing single- and multiple-contributor kill counts and fractions appear
+in both **Kill Contributions** and **Team Coordination**. Both groups show the
+same values from the same CSV columns; no duplicate columns are added.
+Only damage and useful Priest healing on the enemy's death tick count as help.
+If Agent 0 damages an enemy on tick 1 and Agent 1 kills it alone on tick 2,
+the kill has one contributor. If a Priest also gives Agent 1 useful healing
+on tick 2, it has two. Healing that is all excess earns no kill credit.
+
+The viewer uses the recording's active slots, classes and ability target rules
+to omit structurally impossible detail. The CSV keeps every column across roster
+changes. A zero value, unused ability or undefined fraction is not a reason to
+hide an otherwise applicable measurement. Recipient-owned initial statuses remain
+relevant even when the recording has no current caster of that class.
+
+Download names identify the episode, scalar schema, scope, and frame. For a focused
+analysis, pandas can read only the columns needed:
+
+```python
+episodes = pd.read_csv(
+    result.paths["full_metrics"],
+    usecols=["episode_id", "agent_3_to_agent_8_ultimate_application_fraction"],
+)
+print(episodes["agent_3_to_agent_8_ultimate_application_fraction"].mean())
+```
+
+This example averages the per-episode fraction of Agent 3's Ultimate ability
+activations aimed at Agent 8. Using the summed counts instead weights by the
+number of activations. Both counts are exported; researchers choose the summary
+that answers their question. Reading a subset saves analysis memory without
+changing collection or the original CSV.
 
 ## Choose metrics and replays independently
 
@@ -95,6 +376,23 @@ Your trainer supplies actions, updates parameters and chooses when to log.
 An optional `RunWriter` accepts `info` from one step or the entire `infos` tree
 returned by a collected scan chunk. Call `writer.write(infos)` on the host;
 passing only the last step would lose earlier completions and replay packets.
+Full results use a fixed dense output shape, including on nonterminal steps and
+with sparse full selection. The following is retained schema-7 evidence, before
+schema 10 removed the wait fields. Schema 7 returned 55,730 logical bytes per lane
+(11,146 float32 values and boolean validity flags), 100 bytes more than schema 6.
+Retaining every full `info` in a 1,024-environment, 128-step scan therefore retained
+**6.80 GiB** of full-result arrays alone. This is separate from the 13,618-byte
+running collector per lane, observations, replay packets and learner memory.
+Schema 10 had 55,500 logical bytes per full output, or about 6.77 GiB for that
+same retained scan shape. Schema 11 added 200 output bytes per lane; schema 12
+adds another 60, giving 55,760 bytes and about 6.81 GiB for that scan shape.
+Neither change adds per-tick counters. The collector added 40 bytes in schema 7
+for a `(5, 2)` array of 32-bit class/team Basic kill counts. These are logical
+storage calculations, not measurements of peak memory or speed.
+Priority-only training with no full selection has no
+full-result subtree. Use bounded logging chunks when full
+collection is enabled; do not assume sparse episode selection also compacts the
+returned arrays.
 Initialize training recording with
 `RunWriter("runs/training", phase="training", pass_id="1")` so episodes are
 truthfully labelled as belonging to an evolving policy.
@@ -165,23 +463,327 @@ tournament's specified population weighting is handled by its report.
 
 ## Performance qualification
 
+For a focused full-metric CPU/GPU comparison, run:
+
 ```bash
 JAX_PLATFORMS=cuda,cpu XLA_PYTHON_CLIENT_PREALLOCATE=false \
   .venv/bin/python -m scripts.dev.benchmark_evaluation \
-  --sizes 64 128 256 512 1024 --repeats 5 \
-  --output artifacts/m8-performance
+  --metrics-only --map-id 20 --sizes 64 128 256 512 1024 --repeats 5 \
+  --output artifacts/m8-full-metric-performance
 ```
 
-This compares the full numerical pipeline on identical CPU/GPU facts, then
-measures native GPU rollouts with metrics disabled, priority, full, sparse full
-selection and selected replay capture. It reports compilation separately from
-repeated warm timings, transfer/persistence costs, real transitions, padding,
-memory and visible capacity failures. It does not silently substitute smaller
-batches. These measurements do not establish learner VRAM or the one-day
-competent-policy claim; those require actual training trials.
+This runs each batch's ALPHA-versus-BETA games **once**: 1,984 episode executions
+across five sizes. It then reuses the authoritative facts for the full numerical
+CPU/GPU comparison, without rerunning games for warm metric measurements.
+Compilation, first execution, warm measurements, host transfer, CSV writing and
+memory are reported separately. No smaller batches are substituted.
+Use a new output directory for each qualification. Keep the historical evidence
+directories below intact. The current schema needs its own measured results;
+the retained older results do not establish its speed or peak memory.
 
-### Measured result: RTX 5090, 2026-09-08
+For the broader rollout/capture qualification, omit `--metrics-only --map-id 20`.
+That developer profile cycles five maps with exploratory policies and varied
+rosters, and repeats complete GPU rollouts for none, priority, full, sparse full
+and selected replay capture. It is intentionally more expensive. Optional
+`--rollout-modes none full` narrows those repeated modes; without a measured
+`none` reference, added rollout time is unavailable.
 
+### Schema 5 column audit: 2026-09-10
+
+This historical column audit ran 84 complete GPU games: all 42 training maps,
+with ALPHA and BETA on both sides, canonical mirrored classes, and root seed zero. The
+games covered 17,034 ticks, with lengths from 151 to 300. No replays or run
+files were saved. The audit read full measurements in memory.
+
+This sample did not vary the class order. Its 4,517 always-blank columns and
+1,311 columns that were zero whenever defined were investigation clues, not a
+removal list. Several classes may share a team, a class may be absent, and any
+active slot may hold a different class. Separate checks of the game rules and
+roster tests are needed before removing a column.
+
+Schema 5 removed the 206 columns listed in the
+[metric specification](metric_specification.md#schema-5-removals), keeping
+11,114 numerical columns. Its full result was 1,030 logical bytes smaller per
+lane than schema 4. This is an output-size calculation, not a measured speedup.
+The running collector still needs its shared counts. No performance matrix was
+repeated for this change; the measurements below describe their named older
+schemas. They do not establish throughput or learning performance for schemas
+5 through 12. Schema 6's 12 additions brought its logical full output to 55,630
+bytes per lane. Schema 7 adds a further 100 output bytes per lane and 40 bytes
+of running counts. These are storage calculations, not new performance
+measurements; the schema-7 full output was 55,730 bytes per lane.
+
+The before/after check compared all surviving values by column name over
+30 cases and 1,631 replay boundaries. Every value and valid/blank flag matched
+exactly, covering 18,126,934 cells. Cases included complete episodes, all five
+classes moved through every slot, smaller and asymmetric teams, repeated
+classes, initial statuses, shields and accepted Ultimates. These are focused
+correctness checks, not an exhaustive game campaign. The raw results and source
+hashes are in `artifacts/m8-schema-5/after-numeric-check.json`; the exact removal
+and replacement list is in `artifacts/m8-schema-5/removals.json`.
+
+### Schema 3 full metrics: RTX 5090, 2026-09-09
+
+All five requested batches completed with **11,320 numerical columns** and
+11,350 run-table columns including identity. The comparison uses the same
+map-20, canonical mirrored 5v5, plain ALPHA/BETA workload and hardware as the
+preserved schema-2 results below: RTX 5090, Ryzen 9 9950X3D, JAX 0.10.1,
+CUDA 13, driver 580.173.02, with preallocation disabled.
+
+Exactly **1,984 episodes** were executed, once each. These deterministic policies
+again produced the same 172-transition match in every lane, with 128 padding
+slots in each fixed 300-step cohort: 341,248 real transitions and 253,952 padding
+slots overall. Every lane was simulated; the metric repeats reuse those facts.
+This homogeneous comparison does not establish varied-policy or learner throughput.
+
+The numerical measurements include initialization, collection over every real
+and padded slot, and full finalization on resident facts. Five synchronized warm
+executions give median (minimum–maximum) times. Integer results and validity
+match CPU/GPU exactly; float32 results pass the unchanged `rtol=3e-5, atol=0.002`
+comparison. Controlled effects now use float32 pairwise products and reductions.
+
+| Environments | GPU full metrics, ms | CPU full metrics, ms | GPU ms/episode | CPU ms/episode |
+| --- | --- | --- | --- | --- |
+| 64 | 8.227 (7.957–8.382) | 36.709 (36.104–37.501) | 0.1286 | 0.5736 |
+| 128 | 9.107 (8.914–9.148) | 61.226 (60.317–61.300) | 0.0712 | 0.4783 |
+| 256 | 10.267 (9.801–10.583) | 101.475 (99.716–103.041) | 0.0401 | 0.3964 |
+| 512 | 11.822 (11.429–12.038) | 167.586 (166.142–170.085) | 0.0231 | 0.3273 |
+| 1,024 | 13.900 (13.707–14.018) | 262.406 (260.566–264.210) | 0.0136 | 0.2563 |
+
+The 5.53-fold wider numerical output does not cause proportional computation.
+At 1,024 environments the GPU median is 1.2% above the retained schema-2 median
+(13.730 ms), with overlapping observed ranges. At smaller sizes the new medians
+are lower; CPU medians are lower at all five sizes. These are comparisons with
+preserved earlier measurements, not a simultaneous isolated attribution study.
+The implementation shares pair statistics and groups finalization by scope and
+measure instead of constructing a separate traced computation for every column.
+
+Compilation includes tracing and lowering. First execution excludes compilation.
+Simulation includes both policies, Core and benchmark fact retention; it is
+executed once and is not a warmed rollout with full metrics or a learning update.
+
+| Environments | GPU metric compile, s | GPU first metric execution, ms | CPU metric compile, s | CPU first metric execution, ms | Simulation compile, s | One simulation execution, s |
+| --- | --- | --- | --- | --- | --- | --- |
+| 64 | 3.343 | 14.595 | 2.149 | 38.198 | 4.135 | 14.078 |
+| 128 | 3.396 | 14.841 | 2.176 | 65.854 | 4.188 | 14.153 |
+| 256 | 3.498 | 15.698 | 2.366 | 102.280 | 4.558 | 14.176 |
+| 512 | 3.214 | 16.735 | 2.244 | 177.219 | 4.502 | 14.291 |
+| 1,024 | 3.118 | 19.161 | 2.228 | 265.599 | 4.303 | 15.541 |
+
+Wider output has a measurable transfer and persistence cost. Transfer and buffered
+CSV writing, including flush/fsync, are single measurements per batch outside
+the numerical repeats. Full CSV sizes below use decimal MB and include their
+header; directory sizes additionally include priority rows and run details.
+
+| Environments | Metric transfer, ms | CSV write + fsync, ms | Full CSV, MB | Run directory, MB | Worker RAM peak, GiB | Sampled worker VRAM, MiB | JAX live-allocation peak, MiB |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 64 | 1.653 | 104.066 | 3.903 | 3.929 | 2.189 | Unavailable | 256.113 |
+| 128 | 2.241 | 189.474 | 7.194 | 7.243 | 2.383 | 864 | 210.731 |
+| 256 | 2.534 | 361.247 | 13.777 | 13.871 | 2.672 | 1,120 | 395.712 |
+| 512 | 4.068 | 675.400 | 26.945 | 27.129 | 3.231 | 1,850 | 701.415 |
+| 1,024 | 7.360 | 1,400.194 | 53.278 | 53.643 | 4.387 | 2,874 | 1,410.347 |
+
+RAM is whole-worker maximum RSS. Process VRAM was sampled approximately once per
+second; sampling started after the 64-environment worker finished, so that value
+is unavailable. JAX's allocator peak is available for every batch and measures a
+different boundary, excluding driver/context costs. Short process-memory peaks
+may be missed. Benchmark workers retain facts, CPU copies and compiled programs;
+these figures are not learner memory requirements. The wider full CSV takes
+1.40 s to write at 1,024 episodes, versus 0.49 s for the preserved schema-2 suite.
+
+Logical storage must be distinguished from these observed peaks. The running
+collector occupies **13,578 bytes per environment**, versus 6,842 in schema 2.
+A full scalar result occupies **56,600 bytes**, versus 10,240. At 1,024 lanes,
+those are 13.26 MiB of counters and 55.27 MiB for one result batch. Retaining every
+result for a 128-step training chunk needs 6.91 GiB; sparse full selection does
+not shrink that fixed output shape. Priority-only collection avoids it.
+
+Replay inspection additionally retains a scalar result at every frame for fast
+seeking. One 172-transition replay needs 9,791,800 logical prefix bytes (9.34 MiB),
+including its initial frame. Retaining such indexes for all 1,024 episodes would
+need 9.34 GiB; this is a storage calculation, not an allocation made by the
+benchmark. The streaming full-episode collector does not require that history.
+The four independent replay audits prepared 190–234 frames in 3.79–8.25 seconds
+including replay loading and compilation, retaining 10.26–12.63 MiB of prefix
+arrays each. Those are single diagnostic readings, not warmed numerical timings;
+replay preparation and host presentation must not be advertised as the 8–14 ms
+batch reduction above. Subsequent seeking uses the prepared index.
+
+The viewer omits structurally impossible rows before JSON serialization while
+CSV preserves the fixed schema. On the same final 189-transition replay prefix,
+this reduces the response from 11,320 rows / 9.739 MB to 6,250 rows / 5.262 MB.
+Five serialization-only repetitions measured medians of 70.41 ms and 38.45 ms
+respectively (ranges 68.32–137.18 and 38.15–44.92 ms). Every retained row is exactly
+unchanged, including meaningful unavailable ratios. This measures serialization
+of already prepared summaries, not numerical collection or browser rendering;
+evidence is `artifacts/m8-schema-3-audit/summary-transport.json`.
+
+The approved comparison does not rerun native none/full rollout overhead,
+replay saving, tournament fitting or learner updates. Historical rollout evidence
+below remains historical. Neither sample efficiency nor the one-day competence
+claim follows from this measurement.
+
+Evidence is in `artifacts/m8-schema-3-performance/batch-N.json` and
+`sampled-gpu-memory.json`, with exact samples, trajectory identities, completion
+counts, compiler memory, source hashes and output paths. All five rows use the
+same unchanged sources. The sorted compact JSON hash of the production source
+hash map is `d4fb6cbb9d57beb0ed5aafe3189125ef80538d597d4adea1df505a1c8da7d196`;
+the benchmark driver SHA-256 is
+`45c5354c014115e75e5db1f383d7965e32dcf242532400df1de4c1d410713632`.
+Independent artifact review checks all 68 recorded source hashes, all CSV headers
+and episode identities, and all 4,063,232 retained schema-2 cells by name. Missingness
+agrees exactly; available values pass `rtol=1e-5, atol=1e-5`, with maximum absolute
+difference 0.0004883. Recorded action/position/health trace hashes match the earlier
+workload. CPU/GPU numerical agreement is asserted during the measured process;
+the CSV artifact audit does not claim to independently recheck CPU arrays that
+were not saved. See `artifacts/m8-schema-3-audit/independent-performance-audit.json`.
+The final roster review subsequently refined only class-view routing in
+`analysis.py` and `metric_catalog.py`. Collector, Core, writer and benchmark
+driver hashes remain identical; numerical names/order are unchanged and the
+roster CSVs match field-for-field except their analysis-source digest. Original
+measurement hashes are preserved, with the later presentation-source hashes
+recorded separately. This bridge uses hash/schema/result evidence and source
+review; a complete pre-correction source snapshot was not retained.
+
+### Schema 2 full metrics: RTX 5090, 2026-09-09
+
+All five sizes completed using the installed **2,048 numerical measurements**
+(2,078 run-table columns including identity). Hardware: RTX 5090, Ryzen 9 9950X3D,
+JAX 0.10.1, CUDA 13, driver 580.173.02; JAX preallocation disabled.
+The fixed map was `tdm_map_id_20_three_body_problem_test`, with canonical mirrored
+5v5 and plain ALPHA/BETA, without exploratory actions.
+
+Each lane was simulated, but these deterministic policies produced the same
+172-transition match in every lane. Each fixed 300-step cohort therefore has
+128 padded steps per lane. This is the requested homogeneous workload, not
+varied-trajectory or training-throughput evidence. Earlier varied-trajectory
+qualification and the semantic audits below supply separate correctness evidence.
+
+Numerical timing includes metric initialization, every padded transition update
+and full finalization on already-resident facts. It excludes simulation, loading,
+compilation, host transfer and formatting. Integer results and validity agreed
+exactly between CPU and GPU; float32 results passed `rtol=3e-5, atol=0.002`.
+Controlled-effect matrix products use `HIGHEST` precision. Five synchronized warm
+executions provide the median and observed min–max below.
+
+| Environments | GPU full metrics, ms | CPU full metrics, ms | GPU ms/episode | CPU ms/episode |
+| --- | --- | --- | --- | --- |
+| 64 | 9.872 (9.536–10.335) | 38.439 (35.850–38.523) | 0.1543 | 0.6006 |
+| 128 | 10.624 (10.315–10.839) | 71.160 (69.939–73.846) | 0.0830 | 0.5559 |
+| 256 | 11.829 (11.635–11.877) | 120.456 (120.190–125.093) | 0.0462 | 0.4705 |
+| 512 | 12.454 (11.848–12.932) | 206.584 (203.642–211.209) | 0.0243 | 0.4035 |
+| 1,024 | 13.730 (13.260–14.447) | 302.638 (299.954–305.415) | 0.0134 | 0.2955 |
+
+Compilation includes tracing, lowering and compilation of the measured function.
+The first execution excludes compilation. Initial setup/reset remains separate.
+The one simulation execution includes policies, Core and retained benchmark facts;
+it is not a warmed native-full-metric rollout or a learning update.
+
+| Environments | GPU metric compile, s | GPU first metric execution, ms | CPU metric compile, s | CPU first metric execution, ms | Simulation compile, s | One simulation execution, s |
+| --- | --- | --- | --- | --- | --- | --- |
+| 64 | 12.575 | 14.057 | 12.588 | 40.051 | 4.203 | 14.411 |
+| 128 | 12.815 | 14.098 | 8.906 | 71.271 | 4.229 | 14.485 |
+| 256 | 12.652 | 15.166 | 12.412 | 123.406 | 4.786 | 14.518 |
+| 512 | 12.568 | 15.740 | 5.418 | 209.708 | 4.640 | 14.637 |
+| 1,024 | 12.597 | 17.324 | 5.162 | 305.862 | 4.427 | 15.462 |
+
+Every scheduled episode completed: 341,248 real transitions and 253,952 padded
+transition slots in total. Transfer and durable CSV export are single measurements
+per batch, outside the numerical repeats. CSV directory sizes include metadata
+and priority rows as well as the self-contained full rows.
+
+| Environments | Real / padded transitions | Metric transfer, ms | CSV write + fsync, ms | CSV directory, MB | Worker RAM peak, GiB | Sampled worker VRAM, MiB | JAX live-allocation peak, MiB |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 64 | 11,008 / 8,192 | 2.171 | 51.130 | 0.980 | 3.572 | 866 | 256.113 |
+| 128 | 22,016 / 16,384 | 2.112 | 79.217 | 1.879 | 3.091 | 866 | 211.248 |
+| 256 | 44,032 / 32,768 | 1.887 | 142.613 | 3.678 | 3.792 | 1,122 | 395.712 |
+| 512 | 88,064 / 65,536 | 2.366 | 256.613 | 7.278 | 3.519 | 1,852 | 701.415 |
+| 1,024 | 176,128 / 131,072 | 3.088 | 489.487 | 14.476 | 4.583 | 2,876 | 1410.347 |
+
+RAM is whole-worker maximum RSS; VRAM is sampled once per second with
+`nvidia-smi`, so short peaks may be missed. JAX's allocator statistic measures a
+different boundary and excludes CUDA context/driver overhead. These workers
+retain benchmark-only histories and CPU copies, compiled programs and allocator
+pools. They are **not learner memory requirements**. For example, retaining
+128 steps of current observations at 1,024 environments alone uses 6.27 GiB,
+before model parameters, gradients, optimizer state and activations.
+
+The expanded native-rollout overhead and replay-publication timing campaign was
+not repeated after the user narrowed qualification to this fixed-map metric
+comparison. The retained schema-1 rollout results below are explicitly historical;
+they do not substitute for a schema-2 overhead measurement. No learning update,
+sample-efficiency or one-day competence claim follows from this benchmark.
+
+Raw evidence is in `artifacts/m8-followup-performance/fixed-map/batch-N.json`, with
+all samples, source hashes, actual trajectory hashes and compiler memory sizes.
+All five rows used identical production sources from the preserved schema-2 candidate;
+production hash-map digest:
+`a7715a204f3ff768e147392e355f2690901ce319e292f10f1dd55357033d8539`.
+Benchmark driver digest:
+`bc04db999667551567e458021be76c4d683467a4274b31e929e9d2c545628b33`.
+No measured source changed during execution. Independent review checked every
+CSV row, episode identity, header, execution count and source hash.
+
+### Historical schema-2 counter consolidation and replay-prefix evidence
+
+Removing the redundant status-application accumulator saves **360 logical bytes
+per full-enabled environment**, while preserving all 108 exported application
+columns. The collector moves from 5,072 to 4,712 bytes for the original suite.
+With the 660 new measurements it occupies **6,842 bytes**, a net increase of
+1,770 bytes over the original collector. This is array storage, not allocator or
+whole-process memory. The isolated consolidation did **not** demonstrate a
+consistent runtime improvement:
+
+| Environments | Original GPU, ms | Consolidated GPU, ms | Original CPU, ms | Consolidated CPU, ms |
+| --- | --- | --- | --- | --- |
+| 64 | 9.760 | 9.108 | 48.676 | 43.715 |
+| 128 | 10.648 | 10.898 | 83.778 | 86.199 |
+| 256 | 10.266 | 10.482 | 146.742 | 143.563 |
+
+These are five-repeat warm medians for the original 1,388 measurements on
+identical varied-map facts before/after consolidation. Full native rollout
+medians were 13.95–14.19 seconds across these cohorts, also without a consistent
+improvement. Every retained integer/validity cell and physical trajectory agreed;
+79 floating cells at B64 differed by at most 0.000244141 HP, and all retained
+cells at B128/B256 were bit-identical. The contended B256 attempt was excluded;
+the accepted row was rerun with an isolated worker. Raw samples, source hashes
+and the 621,824-cell comparison are in
+`artifacts/m8-followup-performance/{baseline,consolidated}/` and
+`variant-comparison.json`. Different workload/mode populations prevent a
+controlled whole-process memory comparison. Do not compare these varied-map
+rows to the expanded fixed-map rows as a controlled expansion speedup.
+
+For four complete saved episodes (189–233 transitions), warmed CPU preparation
+of **every prefix** took 39.00–52.08 ms originally, 44.98–50.64 ms after isolated
+consolidation, and 50.04–54.40 ms with all 2,048 measurements. These are ranges of
+per-replay medians over five repetitions. The expanded first cold analysis took
+8.92 seconds including JAX compilation; loading each large replay JSON took
+3.75–4.79 seconds separately. Final CSV formatting took about 1.1–1.2 ms.
+The prefix values and validity arrays occupy 1.95–2.40 MB per expanded replay.
+Seeking reads this prepared index rather than recalculating the whole history.
+
+```bash
+JAX_PLATFORMS=cpu .venv/bin/python -m scripts.dev.benchmark_replay_analysis \
+  --replays PATH_TO_REPLAY --repeats 5 \
+  --output artifacts/m8-prefix-analysis
+```
+
+The corresponding evidence is in `artifacts/m8-followup-performance/` under
+`baseline-prefixes`, `consolidated-prefixes` and `expanded-prefixes`. All
+1,197,844 retained prefix positions were bit-identical after isolated
+consolidation. The expanded collector preserved names/order/validity; eight
+Burst totals/fractions changed only floating reduction order, with maximum
+absolute difference 0.000122071. Independent raw-trajectory accounting checked
+all **1,767,424 scalar/validity positions** across the 863 prefix boundaries,
+including every new measure. Focused public-trajectory tests additionally cover
+smaller/asymmetric/repeated-class rosters, initial dead/status states, simultaneous
+healing/damage, support credit and partial resets. These expensive comparisons
+belong to development qualification, never ordinary episode collection.
+
+### Schema 1 baseline: RTX 5090, 2026-09-08
+
+These retained measurements cover the original 1,388-column suite, before the
+schema-2 additions. They are not substituted for the follow-up qualification.
 All five requested native batch sizes completed without microbatching. This run
 used an RTX 5090 (32,607 MiB reported), AMD Ryzen 9 9950X3D, JAX 0.10.1, CUDA 13
 and driver 580.173.02, with JAX preallocation disabled. Each cohort cycled the five
@@ -348,6 +950,13 @@ For CUDA integration on a clean committed checkout:
 ```bash
 scripts/dev/check_gpu.sh
 ```
+
+For an uncommitted development review, use `scripts/dev/check_gpu.sh --allow-dirty`.
+That runs the GPU correctness checks without staging or committing and does not
+qualify a release. The schema-3 review passed 3,980 Python tests, Python static
+checks, 506 frontend units, all 83 browser cases across eight profiles, and seven
+GPU diagnostic cases. The two corrected browser profiles and final catalog
+checks were rerun after their last changes; exact shard coverage is preserved.
 
 Before making a commit, finish formatting, stage the complete intended candidate
 and run `scripts/dev/check_before_commit.sh`. This runs both complete local gates

@@ -440,7 +440,16 @@ def test_persistence_keeps_scalar_tables_and_replays_independently(
         assert [row["episode_id"] for row in rows] == ["1"]
         assert rows[0]["agent_1_return"] == ""
         assert float(rows[0]["agent_0_return"]) == 0
-    assert len(list(result.paths["run_details"].parent.glob("replays/*.json"))) == 1
+    replays = list(result.paths["replays"].glob("*.json"))
+    assert len(replays) == 1
+    assert replays[0].name.startswith("tdm_custom_map_")
+    assert "__episode-2__seed-0__stream-2__a-random__b-random__" in replays[0].name
+    details = json.loads(result.paths["run_details"].read_text())
+    record = next(iter(details["passes"].values()))["replays"]["2"]
+    assert record["path"] == str(
+        replays[0].relative_to(result.paths["run_details"].parent)
+    )
+    assert record["canonical_digest_sha256"] in replays[0].name
 
 
 def test_resume_skips_durable_episodes_and_rejects_changed_inputs(

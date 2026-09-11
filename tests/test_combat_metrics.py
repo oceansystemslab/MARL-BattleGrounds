@@ -8,7 +8,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax import Array
-from tests.evaluation_fixtures import evaluation_env_config, neutral_action
+from scripts.dev.visual_debugger.match_summary import build_match_summary_v1
+from tests.evaluation_fixtures import (
+    evaluation_context,
+    evaluation_env_config,
+    neutral_action,
+)
 
 from marl_battlegrounds.core.axis_mappings import global_slot_to_target_action
 from marl_battlegrounds.core.config import resolve_agent_profile
@@ -23,10 +28,16 @@ from marl_battlegrounds.core.types import (
     Observation,
     Reward,
 )
+from marl_battlegrounds.evaluation.capture import (
+    capture_evaluation_transition_unit_v1,
+    capture_initial_evaluation_frame_v1,
+)
 from marl_battlegrounds.evaluation.combat_metrics import (
     CombatQuantities,
     combat_quantities,
 )
+from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
+from marl_battlegrounds.rendering.evaluation_adapter import build_visual_event_batch_v2
 
 _step = cast(
     Callable[..., tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]],
@@ -148,7 +159,7 @@ def test_proportional_overheal_only_credits_useful_priest_support(
     _, _, values = _advance(case, _actions((0, 5, False), (2, 0, False), (3, 0, False)))
     np.testing.assert_allclose(values.healing[[2, 3], 0], (8, 8))
     np.testing.assert_allclose(
-        values.wasted_healing[[2, 3], 0], ((16 - missing_health) / 2,) * 2
+        values.excess_healing[[2, 3], 0], ((16 - missing_health) / 2,) * 2
     )
     assert bool(values.kill_contributions[2, 5]) == (missing_health > 0)
     assert bool(values.kill_contributions[3, 5]) == (missing_health > 0)
@@ -170,7 +181,7 @@ def test_priest_support_does_not_propagate_recursively() -> None:
         ),
     )
     _, _, values = _advance(case, _actions((0, 5, False), (2, 0, False), (3, 2, False)))
-    assert values.healing[3, 2] > values.wasted_healing[3, 2]
+    assert values.healing[3, 2] > values.excess_healing[3, 2]
     assert values.kill_contributions[0, 5]
     assert values.kill_contributions[2, 5]
     assert not values.kill_contributions[3, 5]
@@ -218,6 +229,163 @@ def test_direct_and_priest_contributors_share_one_victim_without_extra_kills() -
     assert info.transition_facts.death_facts.is_newly_dead_by_recipient.sum() == 1
     np.testing.assert_array_equal(values.kill_contributions[:4, 5], True)
     assert values.kill_contributions.sum() == 4
+
+
+@pytest.mark.parametrize("missing_health", (0.0, 0.5, 16.0))
+@pytest.mark.parametrize("dying_priest", (False, True))
+def test_death_announcer_matches_public_direct_and_priest_credit(
+    missing_health: float, dying_priest: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recorded global events preserve support, excess and simultaneous deaths."""
+    config, state, mask = _start(
+        class_changes=((1, 1), (3, 5)),
+        arrange=lambda state: state._replace(
+            agent_positions=state.agent_positions.at[1]
+            .set((8.0, 3.5))
+            .at[3]
+            .set((5.0, 2.5))
+            .at[6]
+            .set((7.0, 2.5)),
+            current_health=state.current_health.at[0]
+            .set(80 - missing_health)
+            .at[2]
+            .set(1 if dying_priest else 50)
+            .at[5]
+            .set(1),
+        ),
+    )
+    state, observation, mask, _ = initialize_scenario_state(state, config)
+    context = evaluation_context(config=config, expected_horizon=4, with_scenario=True)
+    start = capture_initial_evaluation_frame_v1(context, state, observation, mask)
+    action = _actions(
+        (0, 5, False),
+        (1, 5, False),
+        (2, 0, False),
+        (3, 0, False),
+        *((6, 2, False),) if dying_priest else (),
+    )
+    successor, observation, reward, done, next_mask, info = _step(
+        config, state, mask, action, jax.random.key(1)
+    )
+    values = _quantities(config, state, mask, info)
+    transition, end = capture_evaluation_transition_unit_v1(
+        context,
+        start,
+        successor,
+        observation,
+        next_mask,
+        info.transition_facts,
+        reward,
+        done,
+    )
+    view = EvaluationTransitionViewV1(
+        context=context, start_frame=start, transition=transition, successor_frame=end
+    )
+    expected = (0, 1, 2, 3) if missing_health else (0, 1)
+    np.testing.assert_array_equal(
+        np.flatnonzero(values.kill_contributions[:, 5]), expected
+    )
+    assert (
+        bool(info.transition_facts.death_facts.is_newly_dead_by_recipient[2])
+        == dying_priest
+    )
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError(
+            "the HUD must not compute full metrics or rescue counterfactuals"
+        )
+
+    monkeypatch.setattr(
+        "marl_battlegrounds.evaluation.combat_metrics._available_priest_healing",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        "marl_battlegrounds.evaluation.combat_metrics.combat_quantities", forbidden
+    )
+    monkeypatch.setattr(
+        "marl_battlegrounds.evaluation.full_metrics.update_full", forbidden
+    )
+    for events in (transition.events, build_visual_event_batch_v2(view).events):
+        summary = build_match_summary_v1(context, end, events)
+        victims = {row.public_agent_id: row for row in summary.deaths}
+        for victim in np.flatnonzero(
+            info.transition_facts.death_facts.is_newly_dead_by_recipient
+        ):
+            death = victims[context.roster[victim].public_agent_id]
+            assert (
+                death.killing_team_id == 3 - context.roster[victim].configured_team_id
+            )
+            assert death.contributors is not None
+            assert tuple(row.public_agent_id for row in death.contributors) == tuple(
+                context.roster[source].public_agent_id
+                for source in np.flatnonzero(values.kill_contributions[:, victim])
+            )
+        # No successor-alive filter may remove a dying Priest's accepted support.
+        assert tuple(
+            row.public_agent_id
+            for row in victims[context.roster[5].public_agent_id].contributors or ()
+        ) == tuple(context.roster[source].public_agent_id for source in expected)
+    # A historical subset may omit support evidence. Known direct attackers
+    # alone must not masquerade as a complete list of Kill Contributors.
+    for omitted in ("source_healing_output", "recipient_health_resolution"):
+        incomplete = tuple(
+            event for event in transition.events if event.event_type != omitted
+        )
+        sparse = build_match_summary_v1(context, end, incomplete)
+        assert all(
+            row.killing_team_id is None and row.contributors is None
+            for row in sparse.deaths
+        )
+    credit_event = next(
+        event
+        for event in transition.events
+        if event.event_type == "lethal_damage_contribution"
+    )
+    incomplete_direct = tuple(
+        event for event in transition.events if event is not credit_event
+    )
+    incomplete_support = tuple(
+        event
+        for event in transition.events
+        if not (
+            event.event_type == "source_healing_output"
+            or (
+                event.event_type == "recipient_health_resolution"
+                and event.recipient_global_slot == 0
+            )
+        )
+    )
+    last_credit = next(
+        event
+        for event in reversed(transition.events)
+        if event.event_type == "lethal_damage_contribution"
+    )
+    incomplete_tail = tuple(
+        event for event in transition.events if event.ordinal < last_credit.ordinal
+    )
+    assert tuple(event.ordinal for event in incomplete_tail) == tuple(
+        range(len(incomplete_tail))
+    )
+    for incomplete in (incomplete_direct, incomplete_support, incomplete_tail):
+        sparse = build_match_summary_v1(context, end, incomplete)
+        assert sparse.deaths
+        assert all(
+            row.contributors is None and row.killing_team_id is None
+            for row in sparse.deaths
+        )
+    with pytest.raises(ValueError, match="incoming transition"):
+        build_match_summary_v1(
+            context,
+            end,
+            tuple(
+                event.model_copy(
+                    update={"transition_id": f"{end.episode_id}:transition:99"}
+                )
+                if event is credit_event
+                else event
+                for event in transition.events
+            ),
+        )
 
 
 def _combined_rescue_start(

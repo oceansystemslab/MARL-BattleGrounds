@@ -41,13 +41,52 @@ class CombatQuantities(NamedTuple):
     Priest contribution counts indicate useful participation, not solo causation.
     """
 
+    routing: Array
     damage: Array
     healing: Array
-    wasted_healing: Array
+    excess_healing: Array
     kill_contributions: Array
     rescue_opportunities: Array
     rescues: Array
     rescue_contributions: Array
+
+
+class CombatCredit(NamedTuple):
+    """Recipient excess and nonrecursive credit from observed combat effects."""
+
+    excess_healing_by_recipient: Array
+    useful_healing: Array
+    kill_contributions: Array
+
+
+def combat_credit(
+    class_ids: Array,
+    health_before: Array,
+    healing: Array,
+    routing: Array,
+    total_healing: Array,
+    total_damage: Array,
+    health_after: Array,
+    contributed_to_death: Array,
+) -> CombatCredit:
+    """Share observed direct/Priest credit without hypothetical rescue work.
+
+    Healing and routing are source/recipient ``[10, 10]`` matrices; other
+    arguments are ``[10]`` vectors from the same transition. Health is measured
+    before and immediately after simultaneous combat, before regeneration.
+    """
+    uncapped_health = health_before + (total_healing - total_damage)
+    excess = jnp.clip(uncapped_health - health_after, min=0, max=total_healing)
+    # Compare recipient totals before source rounding can create tiny false
+    # useful-healing residues. Entirely excess healing never earns support.
+    useful_healing = (
+        (healing > 0)
+        & (total_healing > excess)[None, :]
+        & (class_ids == PRIEST_CLASS_ID)[:, None]
+    )
+    direct = routing.astype(jnp.bool_) & contributed_to_death[:, None]
+    priest_support = jnp.any(useful_healing[:, :, None] & direct[None, :, :], axis=1)
+    return CombatCredit(excess, useful_healing, direct | priest_support)
 
 
 def _available_priest_healing(
@@ -110,7 +149,7 @@ def combat_quantities(
 
     ``state`` and ``action_mask`` are the decision-start pair that produced
     ``info``. All routing, modifiers, deaths and actual combat health come from
-    Core facts. Metric waste allocation is proportional to delivered healing;
+    Core facts. Metric excess allocation is proportional to delivered healing;
     natural regeneration never earns healing, kill-support or rescue credit.
     """
     facts = info.transition_facts
@@ -140,26 +179,20 @@ def combat_quantities(
 
     total_healing = combat.total_effective_healing_by_recipient
     total_damage = combat.total_effective_damage_by_recipient
-    uncapped_health = state.current_health + (total_healing - total_damage)
-    waste = jnp.clip(
-        uncapped_health - combat.health_after_combat_resolution_by_recipient,
-        min=0,
-        max=total_healing,
+    credit = combat_credit(
+        config.agent_profile.class_ids,
+        state.current_health,
+        healing,
+        routing,
+        total_healing,
+        total_damage,
+        combat.health_after_combat_resolution_by_recipient,
+        facts.death_facts.contributed_to_new_death_by_source,
     )
-    wasted_fraction = waste / jnp.where(total_healing > 0, total_healing, 1)
-    wasted_healing = healing * wasted_fraction[None, :]
-    # Decide useful participation from recipient waste, rather than subtracting
-    # two source-rounded amounts and creating tiny false useful-healing residues.
-    useful_healing = (
-        (healing > 0)
-        & (total_healing > waste)[None, :]
-        & (config.agent_profile.class_ids == PRIEST_CLASS_ID)[:, None]
+    excess_fraction = credit.excess_healing_by_recipient / jnp.where(
+        total_healing > 0, total_healing, 1
     )
-    direct = (
-        routing.astype(jnp.bool_)
-        & facts.death_facts.contributed_to_new_death_by_source[:, None]
-    )
-    priest_support = jnp.any(useful_healing[:, :, None] & direct[None, :, :], axis=1)
+    excess_healing = healing * excess_fraction[None, :]
 
     without_healing = _compute_health_after_simultaneous_damage_and_healing(
         total_damage, jnp.zeros_like(total_healing), state, config
@@ -178,11 +211,12 @@ def combat_quantities(
         & (combat.health_after_combat_resolution_by_recipient > 0)
     )
     return CombatQuantities(
+        routing=routing,
         damage=damage,
         healing=healing,
-        wasted_healing=wasted_healing,
-        kill_contributions=direct | priest_support,
+        excess_healing=excess_healing,
+        kill_contributions=credit.kill_contributions,
         rescue_opportunities=rescue_opportunities,
         rescues=rescues,
-        rescue_contributions=useful_healing & rescues[None, :],
+        rescue_contributions=credit.useful_healing & rescues[None, :],
     )

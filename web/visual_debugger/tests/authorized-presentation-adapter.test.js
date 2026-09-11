@@ -1514,7 +1514,7 @@ test("Pending Joint Action is one exact researcher-space row per live actor", as
   }
 });
 
-test("Technical Frame projects the exact final six-leaf allowlist atomically", async () => {
+test("Technical Frame preserves the six legacy allowlists without episode metadata", async () => {
   const liveShared = fixture.presentations.live_shared_obs_agent_pov;
   const cases = [
     [
@@ -1588,9 +1588,11 @@ test("Technical Frame projects the exact final six-leaf allowlist atomically", a
     ],
   ];
   for (const [kind, expected] of cases) {
-    const frame = await normalized(
-      /** @type {keyof typeof fixture.presentations} */ (kind),
+    const raw = structuredClone(
+      fixture.presentations[/** @type {keyof typeof fixture.presentations} */ (kind)],
     );
+    raw.match_summary = null;
+    const frame = await normalizeAuthorizedPresentationFrameV1(raw);
     const before = JSON.stringify(frame);
     const facts = authorizedPresentationTechnicalFacts(frame);
     assert.deepEqual(
@@ -1678,8 +1680,12 @@ test("Technical Frame projects the exact final six-leaf allowlist atomically", a
     ],
   ];
   for (const [kind, expected] of frameZeroCases) {
+    const raw = structuredClone(
+      fixture.state_cases[/** @type {keyof typeof fixture.state_cases} */ (kind)],
+    );
+    raw.match_summary = null;
     const facts = authorizedPresentationTechnicalFacts(
-      await normalizedState(/** @type {keyof typeof fixture.state_cases} */ (kind)),
+      await normalizeAuthorizedPresentationFrameV1(raw),
     );
     assert.deepEqual(
       facts.map(({ id, label, value }) => [id, label, value]),

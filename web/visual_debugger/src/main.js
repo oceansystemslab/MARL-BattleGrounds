@@ -8,6 +8,7 @@ import {
   getCurrentFrameAndPresentation,
   getCurrentPresentation,
   getReplayEpisodeDetails,
+  getReplayMetricCatalog,
   getReplayMetrics,
   getReplayTimeline,
   postCommand,
@@ -49,7 +50,14 @@ import {
 } from "./controls.js";
 import { explainAgent, explainLegality, explainTechnicalFact } from "./explanations.js";
 import { renderMatchSummary } from "./match-summary.js";
-import { renderMetricRows } from "./metrics-panel.js";
+import {
+  buildMetricSearchIndex,
+  findMeasurements,
+  renderMetricDefinition,
+  renderMetricNavigation,
+  renderMetricRows,
+  renderMetricSearchResults,
+} from "./metrics-panel.js";
 import {
   authorizedInspectorView,
   DebuggerPanels,
@@ -155,6 +163,15 @@ const elements = {
   metricPanel: requiredElement("evaluation-metrics"),
   metricScope: requiredElement("metric-scope"),
   metricSelection: requiredElement("metric-selection"),
+  metricView: requiredElement("metric-view"),
+  metricViewField: requiredElement("metric-view-field"),
+  metricSearchArea: requiredElement("metric-search-area"),
+  metricSearchContent: requiredElement("metric-search-content"),
+  metricSearch: requiredElement("metric-search"),
+  metricSearchStatus: requiredElement("metric-search-status"),
+  metricSearchResults: requiredElement("metric-search-results"),
+  metricSearchMore: requiredElement("metric-search-more"),
+  metricSearchDefinition: requiredElement("metric-search-definition"),
   metricStatus: requiredElement("metric-status"),
   metricProgress: requiredElement("metric-progress"),
   metricRows: requiredElement("metric-rows"),
@@ -535,17 +552,17 @@ try {
 const CONTROL_HELP = Object.freeze([
   [
     "[data-devclient-area]",
-    "DevClient area",
+    "DevClient Area",
     "Switch between the Combat Debugger, reusable Maps, and task-controlled Scenarios.",
   ],
   [
     "#devclient-scenario-select",
-    "Saved Debug asset",
+    "Saved Debug Asset",
     "Choose an execution-valid scenario or a map to inspect through the explicit default 5v5 TDM preview.",
   ],
   [
     "#devclient-scenario-load",
-    "Load Debug asset",
+    "Load Debug Asset",
     "Reopen, compile, and revalidate the selected scenario or map preview before replacing the current Debug session.",
   ],
   [
@@ -555,13 +572,13 @@ const CONTROL_HELP = Object.freeze([
   ],
   [
     "#metric-scope",
-    "Evaluation metric scope",
-    "Up to Current Tick includes only captured transitions through this tick. Final Episode includes the entire captured replay.",
+    "Evaluation Metric Scope",
+    "Up to Current Tick includes only captured transitions through this tick. Entire Episode includes the entire captured replay.",
   ],
   [
     "#metric-selection",
-    "Evaluation metric",
-    "Choose Team Overview or a group of scalar measurements. Metrics are researcher information and do not enter agent observations.",
+    "Evaluation Topic",
+    "Choose a topic, then its Totals or By Recipient view when available. Metrics are researcher information and do not enter agent observations.",
   ],
   [
     "#replay-episode-details-button",
@@ -570,54 +587,54 @@ const CONTROL_HELP = Object.freeze([
   ],
   [
     "#devclient-team-a-controller",
-    "Team A controller",
+    "Team A Controller",
     "Choose manual control, the scripted Team Deathmatch policy, or Random, then restart from the same snapshot.",
   ],
   [
     "#devclient-team-b-controller",
-    "Team B controller",
+    "Team B Controller",
     "Choose manual control, the scripted Team Deathmatch policy, or Random, then restart from the same snapshot.",
   ],
   [
     "#devclient-information-mode",
-    "Information mode",
+    "Information Mode",
     "Choose SharedObs or NoSharedObs, then restart from the same scenario snapshot and seed.",
   ],
   [
     "#authoring-saved-draft-select",
-    "Saved draft",
+    "Saved Draft",
     "Choose an exact saved revision for the active Map or Scenario Author tab.",
   ],
   [
     "#authoring-new-scenario-mode",
-    "Scenario starting point",
+    "Scenario Starting Point",
     "Start blank, copy a saved map, or duplicate a saved scenario.",
   ],
   [
     "#authoring-new-scenario-source",
-    "Scenario source asset",
+    "Scenario Source Asset",
     "Choose the exact saved revision to copy into a new independent scenario draft.",
   ],
-  ["#authoring-new", "New draft", "Create a new local map or scenario draft."],
-  ["#authoring-open", "Open draft", "Open an exact saved draft revision."],
+  ["#authoring-new", "New Draft", "Create a new local map or scenario draft."],
+  ["#authoring-open", "Open Draft", "Open an exact saved draft revision."],
   [
     "#authoring-delete-saved",
-    "Delete saved asset",
+    "Delete Saved Asset",
     "After confirmation, permanently delete the selected saved map or scenario and all of its revisions.",
   ],
   [
     "#authoring-save",
-    "Save draft",
+    "Save Draft",
     "Atomically save the complete draft at its current revision.",
   ],
   [
     "#authoring-save-as",
-    "Save draft as",
+    "Save Draft As",
     "Save the complete draft under a new safe asset identity.",
   ],
   [
     "#authoring-validate",
-    "Validate draft",
+    "Validate Draft",
     "Compile the current draft with host-authoritative rules and show linked problems.",
   ],
   [
@@ -627,50 +644,50 @@ const CONTROL_HELP = Object.freeze([
   ],
   [
     "[data-authoring-add]",
-    "Add obstacle",
+    "Add Obstacle",
     "Append a wall or pillar to the map's ordered active obstacle prefix.",
   ],
   [
     "#authoring-reset",
-    "Reset draft",
+    "Reset Draft",
     "Restore the latest new, opened, or successfully saved draft baseline. The reset is undoable.",
   ],
   [
     "#authoring-recenter",
-    "Recenter map",
+    "Recenter Map",
     "Fit the complete authored map in the canvas without changing draft content.",
   ],
   ["#authoring-undo", "Undo", "Undo the most recent browser-local edit."],
   ["#authoring-redo", "Redo", "Redo the most recently undone browser-local edit."],
   [
     "#authoring-duplicate",
-    "Duplicate obstacle",
+    "Duplicate Obstacle",
     "Append a copy of the selected wall or pillar.",
   ],
   [
     "#authoring-delete",
-    "Delete obstacle",
+    "Delete Obstacle",
     "Delete the selected wall or pillar and compact the ordered obstacle prefix.",
   ],
   [
     "#authoring-order-up",
-    "Move obstacle up",
+    "Move Obstacle Up",
     "Move the selected obstacle earlier in fixed-slot order.",
   ],
   [
     "#authoring-order-down",
-    "Move obstacle down",
+    "Move Obstacle Down",
     "Move the selected obstacle later in fixed-slot order.",
   ],
   [
     "#replay-timeline",
-    "Replay timeline",
+    "Replay Timeline",
     "Use the read-only transport and presentation controls to inspect recorded frames.",
     "composite",
   ],
   [
     "#view-select",
-    "Audience view",
+    "Audience View",
     "Switch between Oracle View and recipient-authorized views.",
   ],
   [
@@ -679,26 +696,26 @@ const CONTROL_HELP = Object.freeze([
     "Fetch and atomically install the latest authoritative frame.",
   ],
   ["#help-button", "Help", "Open the keyboard, recording, and replay controls guide."],
-  ["#help-close-button", "Close help", "Close the product help dialog."],
+  ["#help-close-button", "Close Help", "Close the product help dialog."],
   ["#exit-button", "Exit", "Ask the local Python service to close safely."],
   [
     "#recording-finish-button",
-    "Finish and review",
+    "Finish and Review",
     "Finalize the captured prefix, save it, and enter read-only review.",
   ],
   [
     "#recording-review-button",
-    "Review replay",
+    "Review Replay",
     "Enter read-only review for the saved replay.",
   ],
   [
     "#recording-retry-button",
-    "Retry save",
+    "Retry Save",
     "Retry publishing the same immutable replay bytes.",
   ],
   [
     "#recording-save-as-input",
-    "Save As basename",
+    "Save As Basename",
     "Enter a basename only; paths and overwrites are rejected.",
   ],
   [
@@ -708,59 +725,59 @@ const CONTROL_HELP = Object.freeze([
   ],
   [
     "#recording-discard-cancel-button",
-    "Keep recording",
+    "Keep Recording",
     "Cancel replacement and preserve the captured prefix.",
   ],
   [
     "#recording-discard-confirm-button",
-    "Discard and replace",
+    "Discard and Replace",
     "Confirm permanent loss of the unpublished prefix and start its named replacement.",
   ],
-  ["#replay-first-button", "Start replay tick", "Seek to settled replay tick zero."],
+  ["#replay-first-button", "Start Replay Tick", "Seek to settled replay tick zero."],
   [
     "#replay-back-ten-button",
-    "Back ten ticks",
+    "Back Ten Ticks",
     "Seek ten ticks backward with one clamped request.",
   ],
   [
     "#replay-previous-button",
-    "Previous replay frame",
+    "Previous Replay Frame",
     "Seek one captured frame backward.",
   ],
   [
     "#replay-play-pause-button",
-    "Replay playback",
+    "Replay Playback",
     "Start or pause serialized read-only autoplay.",
   ],
   [
     "#replay-next-button",
-    "Next replay frame",
+    "Next Replay Frame",
     "Advance exactly one captured replay frame.",
   ],
   [
     "#replay-forward-ten-button",
-    "Forward ten ticks",
+    "Forward Ten Ticks",
     "Seek ten ticks forward with one clamped request.",
   ],
-  ["#replay-last-button", "End replay tick", "Seek to the end of the captured prefix."],
+  ["#replay-last-button", "End Replay Tick", "Seek to the end of the captured prefix."],
   [
     "#replay-frame-slider",
-    "Replay tick",
+    "Replay Tick",
     "Preview locally without a request, then commit one exact captured-tick seek.",
   ],
   [
     "#replay-playback-rate",
-    "Replay playback speed",
+    "Replay Playback Speed",
     "Scale the complete replay presentation clock without changing artifact authority.",
   ],
   [
     "#command-target-select",
-    "Selected target",
+    "Selected Target",
     "Stage an authorized target for the controlled actor.",
   ],
   [
     "#submit-turn-button",
-    "Apply authorized action",
+    "Apply Authorized Action",
     "Submit an editable draft or advance an inspection-only scripted frame through the authoritative Python service.",
   ],
   [
@@ -791,16 +808,16 @@ const CONTROL_HELP = Object.freeze([
   [
     "#default-visual-filters-button",
     "Default Configuration",
-    "Restore the eight default effects and turn off Ranges and Death Announcer.",
+    "Restore the nine default effects, including Death Announcer, and turn off Ranges.",
   ],
   [
     ".diagnostics > summary",
-    "Technical frame",
+    "Technical Frame",
     "Inspect authorized wire and diagnostic details.",
   ],
   [
     "[data-key='Escape']",
-    "Clear target",
+    "Clear Target",
     "Clear the selected target and leave battlefield command focus.",
   ],
 ]);
@@ -1340,7 +1357,7 @@ function registerAuthorityAwareUtilityHelp() {
   registerControlHelpOwner(
     elements.replayRangesButton,
     "#replay-ranges-button",
-    "Replay ranges",
+    "Replay Ranges",
     agentPov
       ? "Show or hide locally authorized inspected-agent range overlays. This sends no replay command and does not switch Agent POV."
       : researcher
@@ -1360,12 +1377,12 @@ function registerAuthorityAwareUtilityHelp() {
   for (const [selector, title, oracleSummary] of [
     [
       "[data-key='Tab']:not([data-shift])",
-      "Next actor",
+      "Next Actor",
       "Move Oracle View control to the next active actor.",
     ],
     [
       "[data-key='Tab'][data-shift='true']",
-      "Previous actor",
+      "Previous Actor",
       "Move Oracle View control to the previous active actor.",
     ],
   ]) {
@@ -2731,6 +2748,117 @@ let replayMetricRequest = null;
 /** @type {{key: string, message: string} | null} */
 let replayMetricFailure = null;
 let replayMetricRenderKey = "";
+let replayMetricLoadedKey = "";
+let replayMetricGeneration = 0;
+/** @type {Record<string, any> | null} */
+let replayMetricCatalog = null;
+/** @type {ReturnType<typeof buildMetricSearchIndex>} */
+let replayMetricSearchIndex = [];
+let replayMetricCatalogPending = false;
+let replayMetricCatalogFailure = "";
+let replayMetricSearchLimit = 20;
+/** @type {HTMLButtonElement | null} */
+let replayMetricSearchActive = null;
+/** @type {string | null} */
+let replayMetricFocus = null;
+/** @type {number | null} */
+let replayMetricHighlightTimer = null;
+
+function clearReplayMetricHighlight() {
+  if (replayMetricHighlightTimer !== null) {
+    window.clearTimeout(replayMetricHighlightTimer);
+    replayMetricHighlightTimer = null;
+  }
+  for (const row of elements.metricRows.querySelectorAll(".metric-search-match")) {
+    row.classList.remove("metric-search-match");
+  }
+}
+
+/** @param {HTMLButtonElement | null} button */
+function setActiveMetricSearchResult(button) {
+  replayMetricSearchActive?.setAttribute("aria-selected", "false");
+  replayMetricSearchActive = button;
+  if (button) {
+    button.setAttribute("aria-selected", "true");
+    elements.metricSearch.setAttribute("aria-activedescendant", button.id);
+  } else {
+    elements.metricSearch.removeAttribute("aria-activedescendant");
+  }
+}
+
+/** @param {boolean} open */
+function setReplayMetricSearchOpen(open) {
+  elements.metricSearchContent.hidden = !open || !elements.metricSearch.value.trim();
+  elements.metricSearch.setAttribute(
+    "aria-expanded",
+    String(!elements.metricSearchContent.hidden),
+  );
+  if (elements.metricSearchContent.hidden) setActiveMetricSearchResult(null);
+}
+
+function renderReplayMetricSearch() {
+  if (replayMetricCatalog === null) return;
+  setActiveMetricSearchResult(null);
+  const query = elements.metricSearch.value.trim();
+  const matches = findMeasurements(replayMetricSearchIndex, query);
+  elements.metricSearchResults.hidden = !query;
+  elements.metricSearchMore.hidden = matches.length <= replayMetricSearchLimit;
+  elements.metricSearchStatus.textContent = query
+    ? `${Math.min(matches.length, replayMetricSearchLimit)} of ${matches.length} measurements found.`
+    : "Search includes every numerical CSV column, including those that do not apply to this roster.";
+  renderMetricSearchResults(
+    elements.metricSearchResults,
+    matches,
+    replayMetricCatalog.topics,
+    replayMetricSearchLimit,
+    selectReplayMeasurement,
+  );
+}
+
+/** @param {Record<string, any>} row */
+function selectReplayMeasurement(row) {
+  if (replayMetricCatalog === null) return;
+  setActiveMetricSearchResult(null);
+  clearReplayMetricHighlight();
+  replayMetricFocus = null;
+  if (!row.applicable) {
+    renderMetricDefinition(
+      elements.metricSearchDefinition,
+      row,
+      replayMetricCatalog.topics,
+    );
+    return;
+  }
+  elements.metricSearchDefinition.hidden = true;
+  elements.metricSelection.value = row.primary_topic;
+  renderMetricNavigation(
+    elements.metricSelection,
+    elements.metricView,
+    elements.metricViewField,
+    replayMetricCatalog.topics,
+  );
+  elements.metricView.value = row.primary_view;
+  replayMetricFocus = row.name;
+  renderReplayMetrics();
+}
+
+function focusReplayMeasurement() {
+  if (replayMetricFocus === null) return;
+  const row = elements.metricRows.querySelector(
+    `[data-metric="${CSS.escape(replayMetricFocus)}"]`,
+  );
+  if (row) {
+    clearReplayMetricHighlight();
+    row.classList.add("metric-search-match");
+    replayMetricHighlightTimer = window.setTimeout(() => {
+      row.classList.remove("metric-search-match");
+      replayMetricHighlightTimer = null;
+    }, 3000);
+    row.scrollIntoView({ block: "nearest" });
+    row.querySelector(".metric-measure").focus({ preventScroll: true });
+    replayMetricFocus = null;
+  }
+}
 
 function replayMetricContext() {
   const installed = installedPresentationAuthority();
@@ -2745,12 +2873,36 @@ function replayMetricContext() {
     digest,
     frameIndex,
     scope: /** @type {"cursor" | "final"} */ (scope),
-    key: `${digest}:${scope}:${scope === "final" ? "final" : frameIndex}`,
+    catalogKey: `${installed.presentation.source.source_session_id}:${digest}`,
+    key: `${installed.presentation.source.source_session_id}:${digest}:${scope}:${scope === "final" ? "final" : frameIndex}`,
   };
 }
 
 function renderReplayMetrics() {
   const context = replayMetricContext();
+  const loadedKey = context?.catalogKey ?? "";
+  if (loadedKey !== replayMetricLoadedKey) {
+    clearReplayMetricHighlight();
+    replayMetricLoadedKey = loadedKey;
+    replayMetricGeneration += 1;
+    replayMetricSummary = null;
+    replayMetricRequest = null;
+    replayMetricFailure = null;
+    replayMetricRenderKey = "";
+    replayMetricCatalog = null;
+    replayMetricSearchIndex = [];
+    replayMetricCatalogPending = false;
+    replayMetricCatalogFailure = "";
+    replayMetricFocus = null;
+    replayMetricSearchLimit = 20;
+    elements.metricSearch.value = "";
+    elements.metricSearch.disabled = true;
+    setReplayMetricSearchOpen(false);
+    elements.metricSearchResults.replaceChildren();
+    elements.metricSearchResults.hidden = true;
+    elements.metricSearchMore.hidden = true;
+    elements.metricSearchDefinition.hidden = true;
+  }
   elements.metricProgress.hidden = true;
   elements.metricRows.setAttribute("aria-busy", "false");
   elements.metricPanel.hidden =
@@ -2758,19 +2910,67 @@ function renderReplayMetrics() {
     installedPresentationAuthority()?.presentation.match_summary?.task_mode !== 1;
   if (context === null || elements.metricPanel.hidden || !elements.metricPanel.open)
     return;
+  const generation = replayMetricGeneration;
+  if (
+    replayMetricCatalog === null &&
+    !replayMetricCatalogPending &&
+    !replayMetricCatalogFailure
+  ) {
+    replayMetricCatalogPending = true;
+    elements.metricSearchStatus.textContent = "Preparing the measurement catalog.";
+    void getReplayMetricCatalog(state.token)
+      .then((catalog) => {
+        if (generation !== replayMetricGeneration) return;
+        if (catalog.source_replay_digest !== context.digest) {
+          throw new TypeError("Measurement catalog belongs to another replay.");
+        }
+        replayMetricCatalog = catalog;
+        replayMetricSearchIndex = buildMetricSearchIndex(
+          catalog.measurements,
+          catalog.topics,
+        );
+        elements.metricSearch.disabled = false;
+        renderMetricNavigation(
+          elements.metricSelection,
+          elements.metricView,
+          elements.metricViewField,
+          catalog.topics,
+        );
+        renderReplayMetricSearch();
+      })
+      .catch((error) => {
+        if (generation !== replayMetricGeneration) return;
+        replayMetricCatalogFailure =
+          error instanceof Error ? error.message : "Catalog request failed.";
+        elements.metricSearchStatus.textContent = `Search unavailable: ${replayMetricCatalogFailure}`;
+      })
+      .finally(() => {
+        if (generation !== replayMetricGeneration) return;
+        replayMetricCatalogPending = false;
+        renderReplayMetrics();
+      });
+  }
   if (replayMetricSummary?.key === context.key) {
     const summary = replayMetricSummary.summary;
-    const renderKey = `${context.key}:${elements.metricSelection.value}`;
+    renderMetricNavigation(
+      elements.metricSelection,
+      elements.metricView,
+      elements.metricViewField,
+      summary.topics,
+    );
+    const renderKey = `${context.key}:${elements.metricSelection.value}:${elements.metricView.value}`;
     if (renderKey !== replayMetricRenderKey) {
       renderMetricRows(
         elements.metricRows,
-        elements.metricSelection,
+        elements.metricSelection.value,
+        elements.metricView.value,
         summary,
         elements.metricDescription,
       );
       replayMetricRenderKey = renderKey;
     }
-    elements.metricStatus.textContent = `${summary.scope === "final" ? "Final Episode" : "Up to Current Tick"} · tick ${summary.simulator_step_count} · ${summary.statistics.length.toLocaleString()} scalar measurements.`;
+    elements.metricStatus.textContent = `${summary.scope === "final" ? "Entire Episode" : "Up to Current Tick"} · tick ${summary.simulator_step_count}`;
+    focusReplayMeasurement();
     return;
   }
   elements.metricRows.replaceChildren();
@@ -2786,6 +2986,7 @@ function renderReplayMetrics() {
   replayMetricRequest = context.key;
   void getReplayMetrics(state.token, context.frameIndex, context.scope)
     .then((summary) => {
+      if (generation !== replayMetricGeneration) return;
       if (summary.source_replay_digest !== context.digest) {
         throw new TypeError("Metric analysis belongs to another replay.");
       }
@@ -2793,6 +2994,7 @@ function renderReplayMetrics() {
       replayMetricFailure = null;
     })
     .catch((error) => {
+      if (generation !== replayMetricGeneration) return;
       replayMetricFailure = {
         key: context.key,
         message:
@@ -2802,6 +3004,7 @@ function renderReplayMetrics() {
       };
     })
     .finally(() => {
+      if (generation !== replayMetricGeneration) return;
       replayMetricRequest = null;
       renderReplayMetrics();
     });
@@ -3099,7 +3302,7 @@ function renderReplayMetadata(installed) {
     createSemanticDescriptor({
       kind: "control",
       id: "replay-artifact-reference",
-      title: "Replay artifact",
+      title: "Replay Artifact",
       tone: "information",
       accent: "none",
       summary: "Canonical identity for the loaded immutable replay artifact.",
@@ -3110,7 +3313,7 @@ function renderReplayMetadata(installed) {
           metadata: { compact: true, full: true },
         },
         {
-          label: "Canonical digest",
+          label: "Canonical Digest",
           value: String(reference.canonical_digest_sha256 ?? "Unavailable"),
           metadata: { compact: false, full: true },
         },
@@ -5588,11 +5791,15 @@ for (const control of [
   elements.metricPanel,
   elements.metricScope,
   elements.metricSelection,
+  elements.metricView,
 ]) {
   control.addEventListener(
     control === elements.metricPanel ? "toggle" : "change",
     () => {
       replayMetricFailure = null;
+      replayMetricCatalogFailure = "";
+      replayMetricFocus = null;
+      elements.metricSearchDefinition.hidden = true;
       if (
         control === elements.metricScope &&
         replayArtifactActionTransaction?.kind === "download_metrics"
@@ -5604,6 +5811,84 @@ for (const control of [
     },
   );
 }
+
+elements.metricSearch.addEventListener("input", () => {
+  replayMetricSearchLimit = 20;
+  elements.metricSearchDefinition.hidden = true;
+  renderReplayMetricSearch();
+  setReplayMetricSearchOpen(true);
+});
+for (const event of ["focus", "click"]) {
+  elements.metricSearch.addEventListener(event, () => setReplayMetricSearchOpen(true));
+}
+elements.metricSearchArea.addEventListener(
+  "focusout",
+  (/** @type {FocusEvent} */ event) => {
+    if (
+      event.relatedTarget !== null &&
+      !elements.metricSearchArea.contains(event.relatedTarget)
+    ) {
+      setReplayMetricSearchOpen(false);
+    }
+  },
+);
+document.addEventListener(
+  "pointerdown",
+  (event) => {
+    if (!elements.metricSearchArea.contains(event.target)) {
+      setReplayMetricSearchOpen(false);
+    }
+  },
+  true,
+);
+elements.metricSearchArea.addEventListener(
+  "keydown",
+  (/** @type {KeyboardEvent} */ event) => {
+    if (event.isComposing) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      elements.metricSearch.focus({ preventScroll: true });
+      setReplayMetricSearchOpen(false);
+      return;
+    }
+    if (
+      event.target !== elements.metricSearch ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey
+    ) {
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      const options = [...elements.metricSearchResults.querySelectorAll("button")];
+      if (!options.length) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setReplayMetricSearchOpen(true);
+      const index = options.indexOf(replayMetricSearchActive);
+      const down = event.key === "ArrowDown";
+      const next =
+        index < 0
+          ? down
+            ? 0
+            : options.length - 1
+          : Math.max(0, Math.min(options.length - 1, index + (down ? 1 : -1)));
+      const button = options[next];
+      setActiveMetricSearchResult(button);
+      button.scrollIntoView({ block: "nearest" });
+    } else if (event.key === "Enter" && replayMetricSearchActive) {
+      event.preventDefault();
+      event.stopPropagation();
+      replayMetricSearchActive.click();
+    }
+  },
+);
+elements.metricSearchMore.addEventListener("click", () => {
+  replayMetricSearchLimit += 20;
+  renderReplayMetricSearch();
+});
 
 elements.replayRangesButton.addEventListener("click", () => {
   if (!isReplayMode() || elements.replayRangesButton.disabled) {

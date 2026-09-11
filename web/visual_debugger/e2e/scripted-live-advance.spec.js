@@ -97,7 +97,7 @@ test("scripted live Submit advances once, installs T0, and seals at completion",
   );
   await submit.hover();
   await expect(page.locator("#visual-tooltip-title")).toHaveText(
-    "Apply authorized action",
+    "Apply Authorized Action",
   );
   await expect(page.locator("#reset-button")).toBeDisabled();
   await expect(page.locator("#command-target-select")).toBeDisabled();

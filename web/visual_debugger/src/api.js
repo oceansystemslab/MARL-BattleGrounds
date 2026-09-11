@@ -731,6 +731,160 @@ export function extractNotice(payload) {
   return null;
 }
 
+/** Validate shared metadata at the HTTP boundary.
+ * @param {unknown} topics
+ * @param {unknown} rows
+ * @param {boolean} withValues
+ */
+function validMetricMetadata(topics, rows, withValues) {
+  if (!Array.isArray(topics) || topics.length === 0 || !Array.isArray(rows))
+    return false;
+  /** @type {Map<string, Set<string>>} */
+  const views = new Map();
+  for (const topic of topics) {
+    if (
+      !isRecord(topic) ||
+      typeof topic.name !== "string" ||
+      !topic.name ||
+      views.has(topic.name) ||
+      typeof topic.label !== "string" ||
+      typeof topic.section !== "string" ||
+      typeof topic.description !== "string" ||
+      !Array.isArray(topic.views) ||
+      topic.views.length === 0 ||
+      topic.views.some(
+        (/** @type {unknown} */ view) =>
+          !isRecord(view) ||
+          !["totals", "recipients", "single"].includes(view.name) ||
+          typeof view.label !== "string",
+      )
+    )
+      return false;
+    const names = new Set(
+      topic.views.map((/** @type {{name:string}} */ view) => view.name),
+    );
+    if (names.size !== topic.views.length) return false;
+    views.set(topic.name, names);
+  }
+  return !rows.some(
+    (/** @type {unknown} */ row) =>
+      !isRecord(row) ||
+      typeof row.name !== "string" ||
+      typeof row.label !== "string" ||
+      typeof row.family !== "string" ||
+      typeof row.subject !== "string" ||
+      typeof row.unit !== "string" ||
+      (row.status !== null && typeof row.status !== "string") ||
+      typeof row.description !== "string" ||
+      typeof row.missing_when !== "string" ||
+      typeof row.guidance !== "string" ||
+      !row.guidance.trim() ||
+      typeof row.stem !== "string" ||
+      typeof row.subject_role !== "string" ||
+      (row.recipient_role !== null && typeof row.recipient_role !== "string") ||
+      (row.numerator !== null &&
+        (typeof row.numerator !== "string" || row.numerator.trim() === "")) ||
+      (row.denominator !== null &&
+        (typeof row.denominator !== "string" || row.denominator.trim() === "")) ||
+      (row.numerator === null) !== (row.denominator === null) ||
+      (row.unit === "fraction" && row.denominator === null) ||
+      typeof row.applicable !== "boolean" ||
+      !Number.isSafeInteger(row.order) ||
+      row.order < 0 ||
+      (!withValues &&
+        (!Array.isArray(row.search_terms) ||
+          row.search_terms.some(
+            (/** @type {unknown} */ term) => typeof term !== "string" || !term.trim(),
+          ) ||
+          (row.not_applicable_reason !== null &&
+            typeof row.not_applicable_reason !== "string") ||
+          (!row.applicable && !row.not_applicable_reason))) ||
+      !Array.isArray(row.locations) ||
+      row.locations.length === 0 ||
+      !isRecord(row.topic_order) ||
+      Object.keys(row.topic_order).some((topic) => !views.has(topic)) ||
+      (row.topic_text !== undefined &&
+        (!isRecord(row.topic_text) ||
+          Object.entries(row.topic_text).some(
+            ([topic, text]) =>
+              !row.locations.some(
+                (/** @type {{topic: string}} */ location) => location?.topic === topic,
+              ) ||
+              !isRecord(text) ||
+              Object.keys(text).length === 0 ||
+              Object.entries(text).some(
+                ([field, value]) =>
+                  !["description", "subtitle"].includes(field) ||
+                  typeof value !== "string" ||
+                  !value.trim(),
+              ),
+          ))) ||
+      row.locations.some(
+        (/** @type {unknown} */ location) =>
+          !isRecord(location) ||
+          !views.get(location.topic)?.has(location.view) ||
+          !Array.isArray(row.topic_order[location.topic]) ||
+          row.topic_order[location.topic].length === 0 ||
+          row.topic_order[location.topic].some(
+            (/** @type {unknown} */ part) => !Number.isSafeInteger(part),
+          ),
+      ) ||
+      !row.locations.some(
+        (/** @type {{topic: string, view: string}} */ location) =>
+          location.topic === row.primary_topic && location.view === row.primary_view,
+      ) ||
+      !Array.isArray(row.subjects) ||
+      ![
+        "episode",
+        "team",
+        "agent",
+        "team_recipient",
+        "source_recipient",
+        "ally_pair",
+      ].includes(row.scope) ||
+      !["higher", "lower", "descriptive"].includes(row.direction) ||
+      (withValues
+        ? typeof row.valid !== "boolean" ||
+          (row.valid
+            ? typeof row.value !== "number" || !Number.isFinite(row.value)
+            : row.value !== null)
+        : Object.hasOwn(row, "value") || Object.hasOwn(row, "valid")),
+  );
+}
+
+/** Read every static definition for the loaded replay.
+ * @param {string | null} token
+ * @returns {Promise<Record<string, any>>}
+ */
+export async function getReplayMetricCatalog(token) {
+  const response = await fetchWithTimeout("/api/replay/metrics/catalog.json", {
+    method: "GET",
+    headers: authorizationHeaders(token),
+    cache: "no-store",
+    credentials: "omit",
+    redirect: "error",
+  });
+  if (!response.ok) {
+    await decodeReplayResponse(response);
+    throw new DebuggerApiError("Measurement catalog request failed.", {
+      status: response.status,
+    });
+  }
+  const catalog = await response.json();
+  if (
+    !isRecord(catalog) ||
+    !/^[0-9a-f]{64}$/u.test(catalog.source_replay_digest) ||
+    !/^[0-9a-f]{64}$/u.test(catalog.analysis_source_digest) ||
+    catalog.metric_schema_id !== "marlbg.tdm.scalar" ||
+    !Number.isSafeInteger(catalog.metric_schema_version) ||
+    catalog.metric_schema_version < 1 ||
+    !validMetricMetadata(catalog.topics, catalog.measurements, false)
+  ) {
+    throw new TypeError("Invalid replay measurement catalog.");
+  }
+  return catalog;
+}
+
 /**
  * Read cached offline analysis for an explicit replay cursor and scope.
  * @param {string | null} token
@@ -767,7 +921,7 @@ export async function getReplayMetrics(token, frameIndex, scope, format = "json"
   if (format === "csv") {
     const disposition = response.headers.get("content-disposition");
     const match =
-      /^attachment; filename="(tdm-metrics-(cursor|final)-frame-([0-9]+)\.csv)"$/u.exec(
+      /^attachment; filename="(tdm-metrics__episode-[A-Za-z0-9._-]{1,96}__schema-[1-9][0-9]*__(cursor|final)__frame-([0-9]+)\.csv)"$/u.exec(
         disposition ?? "",
       );
     if (
@@ -793,36 +947,7 @@ export async function getReplayMetrics(token, frameIndex, scope, format = "json"
     (scope === "final" && summary.frame_index !== summary.captured_transition_count) ||
     !/^[0-9a-f]{64}$/u.test(summary.source_replay_digest) ||
     !/^[0-9a-f]{64}$/u.test(summary.analysis_source_digest) ||
-    !Array.isArray(summary.families) ||
-    summary.families.some(
-      (/** @type {unknown} */ family) =>
-        !isRecord(family) ||
-        typeof family.name !== "string" ||
-        typeof family.label !== "string" ||
-        typeof family.description !== "string",
-    ) ||
-    !Array.isArray(summary.statistics) ||
-    summary.statistics.some(
-      (/** @type {unknown} */ row) =>
-        !isRecord(row) ||
-        typeof row.name !== "string" ||
-        typeof row.label !== "string" ||
-        typeof row.family !== "string" ||
-        typeof row.subject !== "string" ||
-        typeof row.unit !== "string" ||
-        (row.status !== null && typeof row.status !== "string") ||
-        typeof row.description !== "string" ||
-        typeof row.missing_when !== "string" ||
-        !Array.isArray(row.subjects) ||
-        !["episode", "team", "agent", "source_recipient", "ally_pair"].includes(
-          row.scope,
-        ) ||
-        !["higher", "lower", "descriptive"].includes(row.direction) ||
-        typeof row.valid !== "boolean" ||
-        (row.valid
-          ? typeof row.value !== "number" || !Number.isFinite(row.value)
-          : row.value !== null),
-    )
+    !validMetricMetadata(summary.topics, summary.statistics, true)
   ) {
     throw new TypeError("Invalid replay metric summary.");
   }

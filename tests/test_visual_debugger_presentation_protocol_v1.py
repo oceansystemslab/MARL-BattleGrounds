@@ -1700,13 +1700,29 @@ def test_recursive_schema_is_closed_required_and_key_catalog_is_exhaustive() -> 
     }
     encountered_key_fields: set[str] = set()
     one_of_count = 0
-    # The additive global HUD field defaults empty for old presentation payloads.
-    # This is the sole optional field; every other recursive requirement remains.
-    optional_fields = {"root.$defs.MatchSummaryV1": {"deaths"}}
+    # Additive researcher HUD metadata remains absent in historical presentations.
+    # Only these named compatibility fields may omit a recursive requirement.
+    optional_fields = {
+        "root.$defs.MatchSummaryV1": {
+            "deaths",
+            "map",
+            "observation_mode",
+            "episode_limit",
+            "root_seed",
+            "episode_seed",
+        },
+        "root.$defs.MatchDeathV1": {"killing_team_id", "contributors"},
+    }
     death_properties = cast(
         dict[str, object], definitions["MatchDeathV1"]["properties"]
     )
-    assert set(death_properties) == {"public_agent_id", "team_id", "class_id"}
+    assert set(death_properties) == {
+        "public_agent_id",
+        "team_id",
+        "class_id",
+        "killing_team_id",
+        "contributors",
+    }
     summary_properties = cast(
         dict[str, dict[str, object]], definitions["MatchSummaryV1"]["properties"]
     )

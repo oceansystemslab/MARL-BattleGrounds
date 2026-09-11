@@ -259,7 +259,7 @@ test("authorized replay inspector keeps researcher selection separate from trans
     );
     assert.equal(
       semanticSection(inspector.owner_descriptor, "Class Overview").summary,
-      "The Mage is a ranged damage dealer with the lowest canonical maximum health and highest canonical basic raw damage. Burst temporarily amplifies the Mage's outgoing damage.",
+      "The Mage has the highest Basic damage per tick in the game, which is further enhanced by its own passive and Ultimate (Burst) damage amplification effects. This skill set makes the Mage the game’s ranged “Artillery” class. Despite its high damage output, it is also the most vulnerable: the Mage has the lowest health in the game, making it a “Glass Cannon” that is reliant on strong team formations and allies for protection.",
     );
     assert.deepEqual(
       semanticSection(inspector.owner_descriptor, "Authored Tactical Guide").rows.map(
@@ -278,7 +278,7 @@ test("authorized replay inspector keeps researcher selection separate from trans
         "Observation Radius",
         "Basic Target",
         "Basic Ability Radius",
-        "Basic Raw Damage",
+        "Base Basic Damage",
         "Out-of-Combat Delay",
         "Out-of-Combat Regeneration",
         "Ultimate Name",
@@ -320,36 +320,36 @@ test("all five certified class cards use the exact documentation section contrac
     [
       1,
       [
-        "For 5 Ticks, Burst multiplies this Mage's outgoing damage by a factor of 1.5 (50% more damage dealt), beginning with the successor decision.",
-        "An eligible unshielded Mage emits Sorcerer's Empowerment. Eligible unshielded same-team agents within a radius of 2, including the Mage, receive a 15% outgoing-damage increase per recorded emitter; overlapping emitters multiply up to 1.32.",
+        "For 5 ticks, Burst applies a 50% increase (×1.5) to this Mage's damage, starting on the next tick.",
+        "While alive and without a spawn shield, the Mage emits Sorcerer's Empowerment. It strengthens the attacks of living teammates within a radius of 2 who also have no spawn shield, including the Mage itself. Each aura provides a 15% damage bonus. Overlapping auras multiply their damage bonuses, up to 1.32 times normal damage.",
       ],
     ],
     [
       2,
       [
-        "Charge moves the Warrior toward an enemy target during the Charge phase before ordinary movement. The accepted ultimate also applies 20 raw damage before source and recipient damage modifiers, 1 Tick of stun, and a 50% movement reduction (×0.5) for 5 Ticks.",
-        "An eligible unshielded Warrior emits Guardian's Barrier. Eligible unshielded same-team agents within a radius of 2, including the Warrior, receive a 15% incoming-damage reduction per recorded emitter; overlapping emitters multiply down to 0.72.",
+        "Charge moves the Warrior toward an enemy before normal movement. It deals 20 base damage, stuns for 1 tick, and applies a 50% movement reduction (×0.5) for 5 ticks. Damage bonuses and reductions affect the damage dealt.",
+        "While alive and without a spawn shield, the Warrior emits Guardian's Barrier. It protects living teammates within a radius of 2 who also have no spawn shield, including the Warrior itself. Each barrier reduces incoming damage by 15%. When barriers overlap, each reduces the damage left after the others, down to 72.25% of the original incoming damage.",
       ],
     ],
     [
       3,
       [
-        "Freezing Trap applies 10 raw damage to an enemy target before source and recipient damage modifiers and applies a stun for 4 Ticks. Accepted positive raw damage ends an existing trap before any same-transition reapplication.",
-        "Every accepted Hunter basic applies Serrated Arrows for 1 Tick, imposing a 15% movement reduction (×0.85). Later accepted Hunter basics refresh the remaining duration.",
+        "Freezing Trap deals 10 base damage to one enemy and stuns it for 4 ticks. Damage bonuses and reductions affect the damage dealt. Damage breaks an existing trap.",
+        "Each successful Hunter Basic attack applies Serrated Arrows, causing a 15% movement reduction (×0.85) for 1 tick. Further Basic attacks refresh the slow.",
       ],
     ],
     [
       4,
       [
-        "Crippling Poison applies 36 raw damage to an enemy target before source and recipient damage modifiers, a stun for 1 Tick, a 50% movement reduction (×0.5) for 5 Ticks, and a 50% reduction (×0.5) to incoming healing and out-of-combat regeneration for 4 Ticks.",
-        "This Rogue's base movement speed of 1.3 is the highest in the certified profile. After 3 Ticks without combat participation, it becomes eligible for the displayed Out-of-Combat Regeneration on each transition tick.",
+        "Crippling Poison deals 36 base damage to one enemy, stuns it for 1 tick, and applies a 50% movement reduction (×0.5) for 5 ticks. It also applies a 50% reduction (×0.5) to healing and out-of-combat regeneration for 4 ticks. Damage bonuses and reductions affect the damage dealt.",
+        "Phantom's Quickness gives the Rogue a base movement speed of 1.3, the highest in the game. After 3 ticks out of combat, it regenerates health each tick at the rate shown under Out-of-Combat Regeneration.",
       ],
     ],
     [
       5,
       [
-        "Holy Word: Salvation applies 200 raw healing to a same-team target before recipient healing modifiers and maximum-health clamping.",
-        "Every accepted Priest basic applies Blessing of Freedom to its same-team target, including the Priest where same-team targeting permits it, for 1 Tick. Freedom limits how far slow effects can reduce ordinary movement, using a floor of 85% of base movement speed (×0.85); it does not override stun.",
+        "Holy Word: Salvation heals one ally for 200, before healing reductions and the maximum-health limit.",
+        "Each successful use of the Priest's Basic healing ability applies Blessing of Freedom to its target for 1 tick. The Priest can target itself. Freedom prevents slows from reducing movement below 85% of base movement speed (×0.85), but it does not prevent stuns.",
       ],
     ],
   ]);
@@ -434,6 +434,16 @@ test("all five certified class cards use the exact documentation section contrac
       descriptions[1],
     );
     assert.doesNotMatch(JSON.stringify(descriptor), /\{\{|Unavailable/u);
+    assert.doesNotMatch(
+      [
+        descriptor.summary,
+        ...descriptor.sections.map((section) => section.summary),
+        ...mechanicsRows.map(
+          (/** @type {Record<string, any>} */ row) => `${row.label} ${row.value}`,
+        ),
+      ].join(" "),
+      /\b(canonical|configured|raw|positive|certified)\b|base movement speed of base|below a floor|by a \d+%/iu,
+    );
     assert.equal(Object.isFrozen(descriptor), true);
   }
 });
@@ -1017,11 +1027,17 @@ test("authorized roster exposes one native key-only action with isolated fact ow
         "presentation",
         "replay_oracle",
         [
+          "episode",
           "artifact_digest_prefix",
           "frame",
           "simulator_step",
           "incoming_transition",
           "ordinary_movement_distance_scale",
+          "task_mode",
+          "map",
+          "observation_mode",
+          "episode_limit",
+          "seeds",
         ],
       ],
       [
@@ -1040,10 +1056,16 @@ test("authorized roster exposes one native key-only action with isolated fact ow
         "state",
         "replay_oracle_frame_zero",
         [
+          "episode",
           "artifact_digest_prefix",
           "frame",
           "simulator_step",
           "ordinary_movement_distance_scale",
+          "task_mode",
+          "map",
+          "observation_mode",
+          "episode_limit",
+          "seeds",
         ],
       ],
       ["state", "replay_no_shared_frame_zero", ["frame", "simulator_step"]],

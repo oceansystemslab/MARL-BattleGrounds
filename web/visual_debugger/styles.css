@@ -96,7 +96,8 @@ body {
 }
 
 button,
-select {
+select,
+input[type="search"] {
   min-height: 2.25rem;
   border: 1px solid var(--border);
   border-radius: 0.5rem;
@@ -111,13 +112,15 @@ button {
 }
 
 button:hover:not(:disabled),
-select:hover:not(:disabled) {
+select:hover:not(:disabled),
+input[type="search"]:hover:not(:disabled) {
   border-color: var(--border-bright);
   background: var(--surface-soft);
 }
 
 button:focus-visible,
 select:focus-visible,
+input[type="search"]:focus-visible,
 summary:focus-visible,
 .battlefield:focus-visible,
 [data-tooltip-owner][tabindex="0"]:focus-visible {
@@ -126,7 +129,8 @@ summary:focus-visible,
 }
 
 button:disabled,
-select:disabled {
+select:disabled,
+input[type="search"]:disabled {
   cursor: not-allowed;
   opacity: 0.48;
 }
@@ -1520,7 +1524,8 @@ select {
   pointer-events: fill;
 }
 
-.combat-respawn-wave__panel {
+.combat-respawn-wave__panel,
+.combat-death-announcement__panel {
   pointer-events: all;
 }
 
@@ -1939,6 +1944,9 @@ select {
 .combat-death-announcement--team-b {
   color: var(--team-b);
 }
+.combat-death-announcement--unattributed {
+  color: var(--text-muted);
+}
 .combat-death-announcement__panel {
   fill: rgb(8 15 29 / 96%);
   stroke: currentColor;
@@ -1954,9 +1962,19 @@ select {
 }
 .combat-death-announcement__agent {
   fill: var(--text);
-  font-family: inherit;
+  font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 700;
+  pointer-events: none;
+}
+.combat-death-announcement__victim-hit {
+  fill: transparent;
+  pointer-events: all;
+}
+.combat-death-announcement__victim:hover .combat-death-announcement__victim-hit,
+.combat-death-announcement__victim:focus-visible
+  .combat-death-announcement__victim-hit {
+  fill: rgb(255 255 255 / 6%);
 }
 
 .agent {
@@ -3798,9 +3816,32 @@ html[data-team-a-controller="random_valid"] .roster-row[data-team="team-a"] {
 }
 
 .metric-table {
+  display: block;
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: 0.8rem;
+}
+
+.metric-table thead,
+.metric-table tbody {
+  display: block;
+  scrollbar-gutter: stable;
+}
+
+.metric-table thead {
+  overflow: hidden;
+}
+
+.metric-table tbody {
+  max-height: min(30rem, 55vh);
+  overflow: auto;
+}
+
+.metric-table tr {
+  display: table;
+  width: 100%;
+  table-layout: fixed;
 }
 
 .metrics-progress {
@@ -3832,8 +3873,6 @@ html[data-team-a-controller="random_valid"] .roster-row[data-team="team-a"] {
 }
 
 .metric-table th {
-  position: sticky;
-  top: 0;
   background: var(--surface);
   color: var(--text-muted);
   font-weight: 400;
@@ -3852,26 +3891,91 @@ html[data-team-a-controller="random_valid"] .roster-row[data-team="team-a"] {
   margin: 0.3rem 0 0.7rem;
 }
 
-/* Scope and group controls stay visible while only the measurements scroll. */
+/* Metric controls stay outside the scrolling measurement table. */
 #evaluation-metrics .disclosure-body {
   max-height: none;
   overflow: visible;
 }
 
 #metric-rows {
-  max-height: min(30rem, 55vh);
-  overflow: auto;
-  scrollbar-gutter: stable;
   border-top: 1px solid var(--border);
 }
 
-.metric-table td:first-child {
-  width: 32%;
+.metric-search {
+  margin-bottom: 0.75rem;
+}
+
+#metric-search {
+  width: 100%;
+  box-sizing: border-box;
+  margin-block: 0.3rem;
+  padding: 0.45rem 0.7rem;
+}
+
+.metric-search-results {
+  list-style: none;
+  margin: 0.4rem 0;
+  padding: 0;
+  max-height: min(20rem, 40vh);
+  overflow: auto;
+}
+
+.metric-search-results button {
+  display: grid;
+  gap: 0.25rem;
+  width: 100%;
+  padding: 0.6rem;
+  text-align: left;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.metric-search-results code,
+.metric-search-results small {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.metric-search-results button[aria-selected="true"] {
+  background: var(--surface-soft);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.metric-search-definition {
+  margin-top: 0.6rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.metric-search-definition dt {
+  margin-top: 0.5rem;
   color: var(--text-muted);
 }
 
+.metric-search-definition dd {
+  margin: 0.15rem 0 0;
+}
+
+.metric-table tr.metric-search-match {
+  background: rgb(240 255 79 / 10%);
+  outline: 2px solid #f0ff4f;
+  outline-offset: -2px;
+}
+
+.metric-table th:first-child,
+.metric-table td:first-child {
+  width: 30%;
+  color: var(--text-muted);
+}
+
+.metric-table th:nth-child(2),
 .metric-table td:nth-child(2) {
-  width: 48%;
+  width: 43%;
 }
 
 .metric-table small {
@@ -3883,7 +3987,15 @@ html[data-team-a-controller="random_valid"] .roster-row[data-team="team-a"] {
 .metric-table .metric-value,
 .metric-table th:last-child {
   text-align: right;
-  white-space: nowrap;
+  width: 27%;
+}
+
+.metric-table .metric-section th {
+  width: 100%;
+  text-align: left;
+  padding-top: 0.7rem;
+  color: var(--text);
+  font-weight: 600;
 }
 
 .metric-measure {

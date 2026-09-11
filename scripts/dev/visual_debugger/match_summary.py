@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import re
-from typing import Annotated, Literal, Self, cast
+from collections.abc import Callable
+from functools import cache
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from marl_battlegrounds.evaluation.map_identity import RecordedMap, recorded_map
 from marl_battlegrounds.evaluation.models import (
     AgentDiedEventV1,
     AssignedPolicySlot,
@@ -16,12 +19,23 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
     EvaluationEpisodeContextV2,
     EvaluationFrameV1,
+    LethalDamageContributionEventV1,
+    RecipientHealthResolutionEventV1,
+    SourceHealingOutputEventV1,
     TeamDeathmatchCompletedEventV1,
 )
 from marl_battlegrounds.rendering.scene import (
     AgentDiedEventV2,
+    LethalDamageContributionEventV2,
+    RecipientHealthResolutionEventV2,
+    SourceHealingOutputEventV2,
     TeamDeathmatchCompletedEventV2,
 )
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
+    from marl_battlegrounds.evaluation.combat_metrics import CombatCredit
 
 type MatchOutcome = Literal[
     "in_progress", "team_a_win", "team_b_win", "draw", "not_applicable"
@@ -41,10 +55,36 @@ class MatchTeamV1(_MatchModel):
     checkpoint_digests: tuple[Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")], ...]
 
 
-class MatchDeathV1(_MatchModel):
+class MatchAgentV1(_MatchModel):
     public_agent_id: _Name
     team_id: Literal[1, 2]
     class_id: Literal[1, 2, 3, 4, 5]
+
+
+class MatchDeathV1(MatchAgentV1):
+    killing_team_id: Literal[1, 2] | None = Field(default_factory=lambda: None)
+    contributors: tuple[MatchAgentV1, ...] | None = Field(
+        default_factory=lambda: None, min_length=1, max_length=5
+    )
+
+    @model_validator(mode="after")
+    def _validate_credit(self) -> Self:
+        if (self.killing_team_id is None) != (self.contributors is None):
+            raise ValueError(
+                "death attribution must be complete or explicitly unavailable"
+            )
+        if self.contributors is not None:
+            if self.killing_team_id == self.team_id or any(
+                row.team_id != self.killing_team_id for row in self.contributors
+            ):
+                raise ValueError(
+                    "kill contributors must belong to the opposing killing team"
+                )
+            if len({row.public_agent_id for row in self.contributors}) != len(
+                self.contributors
+            ):
+                raise ValueError("kill contributors must be unique for each victim")
+        return self
 
 
 class MatchSummaryV1(_MatchModel):
@@ -58,6 +98,19 @@ class MatchSummaryV1(_MatchModel):
     outcome: MatchOutcome
     teams: tuple[MatchTeamV1, MatchTeamV1]
     deaths: tuple[MatchDeathV1, ...] = Field(default_factory=tuple, max_length=10)
+    map: RecordedMap | None = Field(default_factory=lambda: None)
+    observation_mode: Literal["shared_obs", "no_shared_obs"] | None = Field(
+        default_factory=lambda: None
+    )
+    episode_limit: Annotated[int, Field(gt=0)] | None = Field(
+        default_factory=lambda: None
+    )
+    root_seed: Annotated[int, Field(ge=0, le=2**32 - 1)] | None = Field(
+        default_factory=lambda: None
+    )
+    episode_seed: Annotated[int, Field(ge=0, le=2**32 - 1)] | None = Field(
+        default_factory=lambda: None
+    )
 
     @model_validator(mode="after")
     def _validate_task(self) -> Self:
@@ -82,6 +135,162 @@ _CONTROLLER_NAMES = {
     "reactive_tdm": "Reactive TDM ALPHA",
     "scenario_5": "Reactive TDM BETA",
 }
+
+
+@cache
+def _combat_credit() -> Callable[..., CombatCredit]:
+    """Load the shared calculation only when a death needs attribution."""
+    import jax
+
+    from marl_battlegrounds.evaluation.combat_metrics import combat_credit
+
+    return cast("Callable[..., CombatCredit]", jax.jit(combat_credit))
+
+
+def _death_contributors(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrameV1,
+    incoming_events: tuple[object, ...],
+    dead_slots: set[int],
+) -> dict[int, tuple[MatchAgentV1, ...]]:
+    """Decode only observed credit inputs; sparse historical evidence stays unknown.
+
+    Full global events already carry transition-start health and delivered effects.
+    The tiny shared calculation runs on CPU, without reconstructing simulator
+    state, computing full metrics or evaluating hypothetical rescue actions.
+    """
+    # Canonical global bundles start at zero and contain every event in order.
+    # A sparse historical subset cannot establish complete support attribution.
+    if tuple(getattr(event, "ordinal", None) for event in incoming_events) != tuple(
+        range(len(incoming_events))
+    ):
+        return {}
+    import numpy as np
+
+    routing = np.zeros((10, 10), dtype=np.float32)
+    healing = np.zeros_like(routing)
+    contributed = np.zeros(10, dtype=np.bool_)
+    health_before = np.zeros(10, dtype=np.float32)
+    health_after = np.zeros(10, dtype=np.float32)
+    total_healing = np.zeros(10, dtype=np.float32)
+    total_damage = np.zeros(10, dtype=np.float32)
+    attributed_damage = np.zeros(10, dtype=np.float32)
+    healing_sources: set[int] = set()
+    health_recipients: set[int] = set()
+    for event in incoming_events:
+        if not isinstance(
+            event,
+            (
+                LethalDamageContributionEventV1,
+                LethalDamageContributionEventV2,
+                SourceHealingOutputEventV1,
+                SourceHealingOutputEventV2,
+                RecipientHealthResolutionEventV1,
+                RecipientHealthResolutionEventV2,
+            ),
+        ):
+            continue
+        if (
+            event.transition_id
+            != f"{frame.episode_id}:transition:{frame.frame_index - 1}"
+        ):
+            raise ValueError(
+                "kill credit must belong to the frame's incoming transition"
+            )
+        recipient = event.recipient_global_slot
+        if recipient is None:
+            raise ValueError("kill credit effects require their recorded recipient")
+        if isinstance(
+            event, (RecipientHealthResolutionEventV1, RecipientHealthResolutionEventV2)
+        ):
+            if recipient in health_recipients:
+                raise ValueError(
+                    "kill credit cannot repeat a recipient health resolution"
+                )
+            health_recipients.add(recipient)
+            health_before[recipient] = event.transition_start_health
+            health_after[recipient] = event.health_after_combat_resolution
+            total_healing[recipient] = event.total_effective_healing
+            total_damage[recipient] = event.total_effective_damage
+            continue
+        source = event.source_global_slot
+        roster = context.roster[source]
+        if not roster.configured_active:
+            raise ValueError("kill credit effects require an active recorded source")
+        routing[source, recipient] = 1
+        if isinstance(event, (SourceHealingOutputEventV1, SourceHealingOutputEventV2)):
+            if source in healing_sources:
+                raise ValueError("kill credit cannot repeat a source healing output")
+            healing_sources.add(source)
+            healing[source, recipient] = np.float32(
+                event.source_modified_healing_output
+            ) * np.float32(event.recipient_healing_modifier)
+        else:
+            if contributed[source] or recipient not in dead_slots:
+                raise ValueError(
+                    "direct contribution must uniquely join an incoming death"
+                )
+            if (
+                roster.configured_team_id
+                == context.roster[recipient].configured_team_id
+            ):
+                raise ValueError("direct contribution must belong to the opposing team")
+            if event.attributed_death_damage <= 0:
+                raise ValueError(
+                    "direct contribution requires positive recorded damage"
+                )
+            contributed[source] = True
+            attributed_damage[recipient] += np.float32(event.attributed_death_damage)
+    if not contributed.any():
+        return {}
+    # Missing source or recipient records can hide useful Priest support. Never
+    # present an apparently complete contributor list from partial evidence.
+    recorded_healing = healing.sum(axis=0)
+    affected = set(np.flatnonzero(recorded_healing > 0)) | dead_slots
+    dead = sorted(dead_slots)
+    if (
+        not affected.issubset(health_recipients)
+        or not np.allclose(recorded_healing, total_healing, rtol=1e-6, atol=1e-5)
+        # A removed final contribution can leave a contiguous ordinal prefix.
+        # Every delivered damage amount on a lethal recipient earns direct credit.
+        or not np.allclose(
+            attributed_damage[dead], total_damage[dead], rtol=1e-6, atol=1e-5
+        )
+    ):
+        return {}
+    inputs = (
+        np.asarray([row.class_id for row in context.roster], dtype=np.int32),
+        health_before,
+        healing,
+        routing,
+        total_healing,
+        total_damage,
+        health_after,
+        contributed,
+    )
+    # Explicit CPU placement avoids touching the researcher's training GPU.
+    import jax
+
+    cpu = cast(Any, jax.devices("cpu")[0])
+    credit = _combat_credit()(*jax.device_put(inputs, cpu))
+    contributions = cast("NDArray[np.bool_]", np.asarray(credit.kill_contributions))
+    result: dict[int, tuple[MatchAgentV1, ...]] = {}
+    for recipient in sorted(dead_slots):
+        rows = tuple(
+            MatchAgentV1(
+                public_agent_id=context.roster[source].public_agent_id,
+                team_id=cast(
+                    "Literal[1, 2]", context.roster[source].configured_team_id
+                ),
+                class_id=cast(
+                    "Literal[1, 2, 3, 4, 5]", context.roster[source].class_id
+                ),
+            )
+            for source in np.flatnonzero(contributions[:, recipient])
+        )
+        if rows:
+            result[recipient] = rows
+    return result
 
 
 def _controller_name(
@@ -154,9 +363,22 @@ def build_match_summary_v1(
             )
         outcome = completed[0].outcome
     deaths: list[MatchDeathV1] = []
-    for event in incoming_events:
-        if not isinstance(event, (AgentDiedEventV1, AgentDiedEventV2)):
-            continue
+    death_events = tuple(
+        event
+        for event in incoming_events
+        if isinstance(event, (AgentDiedEventV1, AgentDiedEventV2))
+    )
+    contributors = (
+        _death_contributors(
+            context,
+            frame,
+            incoming_events,
+            {event.recipient_global_slot for event in death_events},
+        )
+        if death_events
+        else {}
+    )
+    for event in death_events:
         if (
             event.transition_id
             != f"{frame.episode_id}:transition:{frame.frame_index - 1}"
@@ -165,11 +387,14 @@ def build_match_summary_v1(
                 "match death must belong to the frame's incoming transition"
             )
         roster = context.roster[event.recipient_global_slot]
+        credit = contributors.get(event.recipient_global_slot)
         deaths.append(
             MatchDeathV1(
                 public_agent_id=roster.public_agent_id,
                 team_id=cast("Literal[1, 2]", roster.configured_team_id),
                 class_id=cast("Literal[1, 2, 3, 4, 5]", roster.class_id),
+                killing_team_id=None if credit is None else credit[0].team_id,
+                contributors=credit,
             )
         )
     teams: list[MatchTeamV1] = []
@@ -213,4 +438,9 @@ def build_match_summary_v1(
         outcome=outcome,
         teams=(teams[0], teams[1]),
         deaths=tuple(deaths),
+        map=recorded_map(context),
+        observation_mode=context.execution_information_mode,
+        episode_limit=context.expected_horizon,
+        root_seed=context.seed_protocol.root_seed,
+        episode_seed=context.seed_protocol.episode_seed,
     )

@@ -2571,7 +2571,17 @@
         "match_summary": {
           "deaths": [],
           "episode_id": "service-shared",
+          "episode_limit": 2,
+          "episode_seed": 2,
+          "map": {
+            "display_name": "Map name unavailable",
+            "map_id": null,
+            "split": null,
+            "technical_name": "layout"
+          },
+          "observation_mode": "shared_obs",
           "outcome": "not_applicable",
+          "root_seed": 1,
           "schema_version": 1,
           "score_threshold": 0,
           "scores": [
@@ -4745,7 +4755,17 @@
         "match_summary": {
           "deaths": [],
           "episode_id": "service-shared",
+          "episode_limit": 2,
+          "episode_seed": 2,
+          "map": {
+            "display_name": "Map name unavailable",
+            "map_id": null,
+            "split": null,
+            "technical_name": "layout"
+          },
+          "observation_mode": "shared_obs",
           "outcome": "not_applicable",
+          "root_seed": 1,
           "schema_version": 1,
           "score_threshold": 0,
           "scores": [
@@ -7078,7 +7098,17 @@
         "match_summary": {
           "deaths": [],
           "episode_id": "debugger-episode:3e3381dbe49ca4fc35a3e2153bd4b3f2366a741b0b501ccdf086063920fdcf02",
+          "episode_limit": 300,
+          "episode_seed": 2120194100,
+          "map": {
+            "display_name": "Custom Map",
+            "map_id": null,
+            "split": null,
+            "technical_name": "resolved-debugger-environment"
+          },
+          "observation_mode": "no_shared_obs",
           "outcome": "not_applicable",
+          "root_seed": 0,
           "schema_version": 1,
           "score_threshold": 0,
           "scores": [
@@ -9995,7 +10025,17 @@
         "match_summary": {
           "deaths": [],
           "episode_id": "debugger-episode:3e3381dbe49ca4fc35a3e2153bd4b3f2366a741b0b501ccdf086063920fdcf02",
+          "episode_limit": 300,
+          "episode_seed": 2120194100,
+          "map": {
+            "display_name": "Custom Map",
+            "map_id": null,
+            "split": null,
+            "technical_name": "resolved-debugger-environment"
+          },
+          "observation_mode": "no_shared_obs",
           "outcome": "not_applicable",
+          "root_seed": 0,
           "schema_version": 1,
           "score_threshold": 0,
           "scores": [
@@ -12877,7 +12917,17 @@
         "match_summary": {
           "deaths": [],
           "episode_id": "debugger-episode:8b3e29cc2654e2460f3f438cb4d3bb4981e28c67c0d23ed4b00a84627422d7d8",
+          "episode_limit": 300,
+          "episode_seed": 2120194100,
+          "map": {
+            "display_name": "Custom Map",
+            "map_id": null,
+            "split": null,
+            "technical_name": "resolved-debugger-environment"
+          },
+          "observation_mode": "shared_obs",
           "outcome": "not_applicable",
+          "root_seed": 0,
           "schema_version": 1,
           "score_threshold": 0,
           "scores": [
@@ -15001,7 +15051,17 @@
         "match_summary": {
           "deaths": [],
           "episode_id": "service-complete",
+          "episode_limit": 2,
+          "episode_seed": 2,
+          "map": {
+            "display_name": "Map name unavailable",
+            "map_id": null,
+            "split": null,
+            "technical_name": "layout"
+          },
+          "observation_mode": "no_shared_obs",
           "outcome": "not_applicable",
+          "root_seed": 1,
           "schema_version": 1,
           "score_threshold": 0,
           "scores": [
@@ -17656,7 +17716,17 @@
         "match_summary": {
           "deaths": [],
           "episode_id": "service-complete",
+          "episode_limit": 2,
+          "episode_seed": 2,
+          "map": {
+            "display_name": "Map name unavailable",
+            "map_id": null,
+            "split": null,
+            "technical_name": "layout"
+          },
+          "observation_mode": "no_shared_obs",
           "outcome": "not_applicable",
+          "root_seed": 1,
           "schema_version": 1,
           "score_threshold": 0,
           "scores": [
@@ -19601,7 +19671,17 @@
         "match_summary": {
           "deaths": [],
           "episode_id": "service-shared",
+          "episode_limit": 2,
+          "episode_seed": 2,
+          "map": {
+            "display_name": "Map name unavailable",
+            "map_id": null,
+            "split": null,
+            "technical_name": "layout"
+          },
+          "observation_mode": "shared_obs",
           "outcome": "not_applicable",
+          "root_seed": 1,
           "schema_version": 1,
           "score_threshold": 0,
           "scores": [
@@ -25867,7 +25947,17 @@
       "match_summary": {
         "deaths": [],
         "episode_id": "debugger-episode:8b3e29cc2654e2460f3f438cb4d3bb4981e28c67c0d23ed4b00a84627422d7d8",
+        "episode_limit": 300,
+        "episode_seed": 2120194100,
+        "map": {
+          "display_name": "Custom Map",
+          "map_id": null,
+          "split": null,
+          "technical_name": "resolved-debugger-environment"
+        },
+        "observation_mode": "shared_obs",
         "outcome": "not_applicable",
+        "root_seed": 0,
         "schema_version": 1,
         "score_threshold": 0,
         "scores": [
@@ -30471,7 +30561,17 @@
       "match_summary": {
         "deaths": [],
         "episode_id": "episode-001",
+        "episode_limit": 3,
+        "episode_seed": 2,
+        "map": {
+          "display_name": "Map name unavailable",
+          "map_id": null,
+          "split": null,
+          "technical_name": "layout"
+        },
+        "observation_mode": "no_shared_obs",
         "outcome": "not_applicable",
+        "root_seed": 1,
         "schema_version": 1,
         "score_threshold": 0,
         "scores": [
@@ -34153,7 +34253,17 @@
       "match_summary": {
         "deaths": [],
         "episode_id": "debugger-episode:3e3381dbe49ca4fc35a3e2153bd4b3f2366a741b0b501ccdf086063920fdcf02",
+        "episode_limit": 300,
+        "episode_seed": 2120194100,
+        "map": {
+          "display_name": "Custom Map",
+          "map_id": null,
+          "split": null,
+          "technical_name": "resolved-debugger-environment"
+        },
+        "observation_mode": "no_shared_obs",
         "outcome": "not_applicable",
+        "root_seed": 0,
         "schema_version": 1,
         "score_threshold": 0,
         "scores": [
@@ -41826,7 +41936,17 @@
       "match_summary": {
         "deaths": [],
         "episode_id": "browser-corpse-overlay-no_shared_obs",
+        "episode_limit": 2,
+        "episode_seed": 2,
+        "map": {
+          "display_name": "Map name unavailable",
+          "map_id": null,
+          "split": null,
+          "technical_name": "layout"
+        },
+        "observation_mode": "no_shared_obs",
         "outcome": "not_applicable",
+        "root_seed": 1,
         "schema_version": 1,
         "score_threshold": 0,
         "scores": [
@@ -46729,7 +46849,17 @@
       "match_summary": {
         "deaths": [],
         "episode_id": "browser-corpse-overlay-no_shared_obs",
+        "episode_limit": 2,
+        "episode_seed": 2,
+        "map": {
+          "display_name": "Map name unavailable",
+          "map_id": null,
+          "split": null,
+          "technical_name": "layout"
+        },
+        "observation_mode": "no_shared_obs",
         "outcome": "not_applicable",
+        "root_seed": 1,
         "schema_version": 1,
         "score_threshold": 0,
         "scores": [
@@ -48604,7 +48734,17 @@
       "match_summary": {
         "deaths": [],
         "episode_id": "episode-001",
+        "episode_limit": 3,
+        "episode_seed": 2,
+        "map": {
+          "display_name": "Map name unavailable",
+          "map_id": null,
+          "split": null,
+          "technical_name": "layout"
+        },
+        "observation_mode": "no_shared_obs",
         "outcome": "not_applicable",
+        "root_seed": 1,
         "schema_version": 1,
         "score_threshold": 0,
         "scores": [
@@ -49683,7 +49823,17 @@
       "match_summary": {
         "deaths": [],
         "episode_id": "episode-001",
+        "episode_limit": 3,
+        "episode_seed": 2,
+        "map": {
+          "display_name": "Map name unavailable",
+          "map_id": null,
+          "split": null,
+          "technical_name": "layout"
+        },
+        "observation_mode": "no_shared_obs",
         "outcome": "not_applicable",
+        "root_seed": 1,
         "schema_version": 1,
         "score_threshold": 0,
         "scores": [
@@ -50524,7 +50674,17 @@
       "match_summary": {
         "deaths": [],
         "episode_id": "episode-001",
+        "episode_limit": 3,
+        "episode_seed": 2,
+        "map": {
+          "display_name": "Map name unavailable",
+          "map_id": null,
+          "split": null,
+          "technical_name": "layout"
+        },
+        "observation_mode": "no_shared_obs",
         "outcome": "not_applicable",
+        "root_seed": 1,
         "schema_version": 1,
         "score_threshold": 0,
         "scores": [

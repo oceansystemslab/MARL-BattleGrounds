@@ -37,27 +37,30 @@ const cases = [
     },
     expected: {
       overview:
-        "The Mage is a ranged damage dealer with the lowest canonical maximum health and highest canonical basic raw damage. Burst temporarily amplifies the Mage's outgoing damage.",
+        "The Mage has the highest Basic damage per tick in the game, which is further enhanced by its own passive and Ultimate (Burst) damage amplification effects. This skill set makes the Mage the game’s ranged “Artillery” class. Despite its high damage output, it is also the most vulnerable: the Mage has the lowest health in the game, making it a “Glass Cannon” that is reliant on strong team formations and allies for protection.",
       tacticalGuideRows: [
-        { label: "Role", value: "Ranged Damage · Damage Amplification" },
+        {
+          label: "Role",
+          value: "Primary Damage Dealer · Burst Damage · Damage Amplification",
+        },
         {
           label: "Primary Strength",
-          value: "Highest basic raw damage among canonical damage-dealing classes.",
+          value: "Highest Basic damage among damage-dealing classes.",
         },
         {
           label: "Primary Weakness",
-          value: "Lowest canonical maximum health; glass cannon.",
+          value: "Lowest maximum health; glass cannon.",
         },
       ],
       ultimate: {
         name: "Burst",
         description:
-          "For <Burst Duration>, Burst multiplies this Mage's outgoing damage by <Burst Damage Effect>, beginning with the successor decision.",
+          "For <Burst Duration>, Burst applies <Burst Damage Effect> to this Mage's damage, starting on the next tick.",
       },
       passive: {
         name: "Sorcerer's Empowerment (Mage Damage Amplification Aura)",
         description:
-          "An eligible unshielded Mage emits Sorcerer's Empowerment. Eligible unshielded same-team agents within <Aura Radius>, including the Mage, receive <Per-Emitter Damage Amplification Effect>; overlapping emitters multiply up to <Damage Amplification Ceiling>.",
+          "While alive and without a spawn shield, the Mage emits Sorcerer's Empowerment. It strengthens the attacks of living teammates within <Aura Radius> who also have no spawn shield, including the Mage itself. Each aura provides <Per-Emitter Damage Amplification Effect>. Overlapping auras multiply their damage bonuses, up to <Damage Amplification Ceiling> times normal damage.",
       },
     },
   },
@@ -74,28 +77,27 @@ const cases = [
     },
     expected: {
       overview:
-        "The Warrior has the highest canonical maximum health. Charge moves the Warrior toward an enemy target and applies raw damage, stun, and slow.",
+        "The Warrior has the highest maximum health in the game—twice that of the next-highest classes—so it is the game’s melee “Tank”/“Guardian” class. The Warrior thrives on the front line where it can initiate engagements, provide passive damage mitigation to allies, and body-block or peel aggressors. The Warrior’s Ultimate (Charge) propels it toward an enemy, instantaneously applying considerable damage, a stun, and a slow. With relatively low follow-up damage, the Warrior is reliant on its allies to secure kills.",
       tacticalGuideRows: [
         {
           label: "Role",
-          value: "Frontline Damage · Stun · Slow · Damage Mitigation",
+          value: "Tank · Frontline Damage · Damage Mitigation",
         },
-        { label: "Primary Strength", value: "Highest canonical maximum health." },
+        { label: "Primary Strength", value: "Highest maximum health." },
         {
           label: "Primary Weakness",
-          value:
-            "Second-lowest positive basic raw damage among canonical damage-dealing classes.",
+          value: "Second-lowest Basic damage among damage-dealing classes.",
         },
       ],
       ultimate: {
         name: "Charge",
         description:
-          "Charge moves the Warrior toward an enemy target during the Charge phase before ordinary movement. The accepted ultimate also applies <Ultimate Raw Damage> raw damage before source and recipient damage modifiers, <Charge Stun Duration> of stun, and <Charge Slow Effect> for <Charge Slow Duration>.",
+          "Charge moves the Warrior toward an enemy before normal movement. It deals <Ultimate Raw Damage> base damage, stuns for <Charge Stun Duration>, and applies <Charge Slow Effect> for <Charge Slow Duration>. Damage bonuses and reductions affect the damage dealt.",
       },
       passive: {
         name: "Guardian's Barrier (Warrior Damage Mitigation Aura)",
         description:
-          "An eligible unshielded Warrior emits Guardian's Barrier. Eligible unshielded same-team agents within <Aura Radius>, including the Warrior, receive <Per-Emitter Damage Mitigation Effect>; overlapping emitters multiply down to <Damage Mitigation Floor>.",
+          "While alive and without a spawn shield, the Warrior emits Guardian's Barrier. It protects living teammates within <Aura Radius> who also have no spawn shield, including the Warrior itself. Each barrier reduces incoming damage by <Per-Emitter Damage Mitigation Effect>. When barriers overlap, each reduces the damage left after the others, down to <Damage Mitigation Floor> of the original incoming damage.",
       },
     },
   },
@@ -104,33 +106,32 @@ const cases = [
     values: {
       ultimateRawDamage: "<Ultimate Raw Damage>",
       trapStunDuration: "<Trap Stun Duration>",
-      hunterBasicSlowDuration: "<Hunter Basic Slow Duration>",
       hunterBasicMovementEffect: "<Hunter Basic Movement Effect>",
+      hunterBasicSlowDuration: "<Hunter Basic Slow Duration>",
     },
     expected: {
       overview:
-        "The Hunter is a ranged damage dealer and disabler. Its basic applies a slow, and Freezing Trap applies raw damage and the longest canonical configured stun.",
+        "The Hunter is the game’s ranged “Crowd Controller” class. Its job is to use its superior Basic attack and observation range to scout out and slow or disable enemies to help its allies win engagements. The Hunter’s low damage makes it reliant on allies to secure kills, but its Ultimate (Freezing Trap) is the longest stun in the game and, if timed well, can change the tide of battle—but be careful not to break it!",
       tacticalGuideRows: [
-        { label: "Role", value: "Disabler · Crowd Controller" },
+        { label: "Role", value: "Disabler · Crowd Controller · Scout" },
         {
           label: "Primary Strength",
-          value: "Longest canonical configured stun duration.",
+          value: "Longest stun duration.",
         },
         {
           label: "Primary Weakness",
-          value:
-            "Lowest positive basic raw damage among canonical damage-dealing classes.",
+          value: "Lowest Basic damage among damage-dealing classes.",
         },
       ],
       ultimate: {
         name: "Freezing Trap",
         description:
-          "Freezing Trap applies <Ultimate Raw Damage> raw damage to an enemy target before source and recipient damage modifiers and applies a stun for <Trap Stun Duration>. Accepted positive raw damage ends an existing trap before any same-transition reapplication.",
+          "Freezing Trap deals <Ultimate Raw Damage> base damage to one enemy and stuns it for <Trap Stun Duration>. Damage bonuses and reductions affect the damage dealt. Damage breaks an existing trap.",
       },
       passive: {
         name: "Serrated Arrows",
         description:
-          "Every accepted Hunter basic applies Serrated Arrows for <Hunter Basic Slow Duration>, imposing <Hunter Basic Movement Effect>. Later accepted Hunter basics refresh the remaining duration.",
+          "Each successful Hunter Basic attack applies Serrated Arrows, causing <Hunter Basic Movement Effect> for <Hunter Basic Slow Duration>. Further Basic attacks refresh the slow.",
       },
     },
   },
@@ -148,28 +149,27 @@ const cases = [
     },
     expected: {
       overview:
-        "The Rogue has the highest canonical base movement speed. Crippling Poison applies raw damage, stun, slow, and anti-heal.",
+        "Having the highest base movement speed in the game—alongside a high-damage Ultimate (Crippling Poison) that also stuns, slows, and applies an anti-heal effect—the Rogue is the melee “Assassin” class. Because it is a melee class and lacks a gap closer like the Warrior’s “Charge” Ultimate, it is heavily reliant on surrounding obstacles and advancing allies to execute flanking maneuvers without being counterattacked.",
       tacticalGuideRows: [
-        { label: "Role", value: "Fast Damage · Stun · Slow · Anti-Heal" },
+        { label: "Role", value: "Ambusher · Flanker · Assassin · Anti-Heal" },
         {
           label: "Primary Strength",
-          value: "Highest canonical base movement speed.",
+          value: "Highest base movement speed.",
         },
         {
           label: "Primary Weakness",
-          value:
-            "Melee class that lacks a gap closer like the Warrior's 'Charge', so is heavily reliant on surrounding obstacles to execute flanking/ambush maneuvers and secure kills.",
+          value: "Short attack range with no gap closer.",
         },
       ],
       ultimate: {
         name: "Crippling Poison",
         description:
-          "Crippling Poison applies <Ultimate Raw Damage> raw damage to an enemy target before source and recipient damage modifiers, a stun for <Poison Stun Duration>, <Poison Slow Effect> for <Poison Slow Duration>, and <Poison Anti-Heal Effect> to incoming healing and out-of-combat regeneration for <Poison Anti-Heal Duration>.",
+          "Crippling Poison deals <Ultimate Raw Damage> base damage to one enemy, stuns it for <Poison Stun Duration>, and applies <Poison Slow Effect> for <Poison Slow Duration>. It also applies <Poison Anti-Heal Effect> to healing and out-of-combat regeneration for <Poison Anti-Heal Duration>. Damage bonuses and reductions affect the damage dealt.",
       },
       passive: {
         name: "Phantom's Quickness",
         description:
-          "This Rogue's <Base Movement Speed> is the highest in the certified profile. After <Out-of-Combat Delay> without combat participation, it becomes eligible for the displayed Out-of-Combat Regeneration on each transition tick.",
+          "Phantom's Quickness gives the Rogue a base movement speed of <Base Movement Speed>, the highest in the game. After <Out-of-Combat Delay> out of combat, it regenerates health each tick at the rate shown under Out-of-Combat Regeneration.",
       },
     },
   },
@@ -182,24 +182,24 @@ const cases = [
     },
     expected: {
       overview:
-        "The Priest is the only canonical class with positive raw healing and cannot deal raw damage. Its basic and Ultimate target same-team agents.",
+        "The Priest is the game’s ranged “Healer” class. It cannot deal damage, so it relies on strong team formations and allies for protection. Its Ultimate (Holy Word: Salvation) delivers a massive amount of healing in a single tick, allowing it to save allies who would otherwise die in emergency situations.",
       tacticalGuideRows: [
         { label: "Role", value: "Healer · Medic" },
         {
           label: "Primary Strength",
-          value: "Only canonical class with positive raw healing.",
+          value: "Only class with healing abilities.",
         },
-        { label: "Primary Weakness", value: "Cannot deal raw damage." },
+        { label: "Primary Weakness", value: "Cannot deal damage." },
       ],
       ultimate: {
         name: "Holy Word: Salvation",
         description:
-          "Holy Word: Salvation applies <Ultimate Raw Healing> raw healing to a same-team target before recipient healing modifiers and maximum-health clamping.",
+          "Holy Word: Salvation heals one ally for <Ultimate Raw Healing>, before healing reductions and the maximum-health limit.",
       },
       passive: {
         name: "Blessing of Freedom",
         description:
-          "Every accepted Priest basic applies Blessing of Freedom to its same-team target, including the Priest where same-team targeting permits it, for <Freedom Duration>. Freedom limits how far slow effects can reduce ordinary movement, using <Freedom Movement Floor>; it does not override stun.",
+          "Each successful use of the Priest's Basic healing ability applies Blessing of Freedom to its target for <Freedom Duration>. The Priest can target itself. Freedom prevents slows from reducing movement below <Freedom Movement Floor>, but it does not prevent stuns.",
       },
     },
   },

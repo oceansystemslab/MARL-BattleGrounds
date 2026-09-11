@@ -145,12 +145,13 @@ the browser. It offers settled exact-frame summaries, serialized playback,
 eight playback rates, configurable visual effects,
 provenance-bearing PNG export, current scores and participants, and offline
 evaluation metrics across visual POVs. Open **TDM Evaluation Metrics** below
-the class details to select **Up to Current Tick** or **Final Episode**.
+the class details to select **Up to Current Tick** or **Entire Episode**.
 **Download Metrics CSV** exports scalar values at that boundary. New replay
 recordings have no metric-JSON sidecar dependency; historical recordings remain
 readable. Full metrics are computed only when requested, using the same numerical
-authority as evaluation. Default filters highlight combat effects, and an optional
-Death Announcer is off initially.
+authority as evaluation. Nine default effects include Death Announcer; Ranges
+remain off. **Default Configuration** restores this selection. Death announcements
+remain visible for 1.5 seconds at normal playback speed.
 It cannot stage or submit simulator actions.
 
 See the [Replay Viewer guide](docs/dev/replay_viewer.md) for artifact selection,

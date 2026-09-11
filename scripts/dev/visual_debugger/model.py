@@ -179,12 +179,17 @@ class DebuggerScenarioProvenance:
     map_semantic_digest: str
     resolved_configuration_digest: str
     resolved_initial_state_digest: str
+    map_id: int | None = None
 
     def __post_init__(self) -> None:
         if self.source_kind not in ("current_buffer", "saved_draft"):
             raise ValueError("unknown authored scenario source kind.")
         if not self.source_identity:
             raise ValueError("source_identity must be nonempty.")
+        if self.map_id is not None and (
+            type(self.map_id) is not int or not 0 <= self.map_id <= 51
+        ):
+            raise ValueError("map_id must identify an approved TDM map.")
         for name, value in (
             ("scenario_semantic_digest", self.scenario_semantic_digest),
             ("map_semantic_digest", self.map_semantic_digest),

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import csv
+import io
 import json
 import subprocess
 import sys
@@ -2892,12 +2894,27 @@ def test_agent_presentations_exclude_privileged_fields_and_canonical_values(
         "outcome",
         "teams",
         "deaths",
+        "map",
+        "observation_mode",
+        "episode_limit",
+        "root_seed",
+        "episode_seed",
     }
     context = replay.header.context
     frame = replay.frames[raw.cursor.frame_index]
     assert match_summary["episode_id"] == context.identity.episode_id
     assert match_summary["source_frame_index"] == frame.frame_index
     assert match_summary["simulator_step_count"] == frame.simulator_step_count
+    assert match_summary["observation_mode"] == context.execution_information_mode
+    assert match_summary["episode_limit"] == context.expected_horizon
+    assert match_summary["root_seed"] == context.seed_protocol.root_seed
+    assert match_summary["episode_seed"] == context.seed_protocol.episode_seed
+    assert match_summary["map"] == {
+        "map_id": None,
+        "technical_name": context.identity.layout.identifier,
+        "display_name": "Map name unavailable",
+        "split": None,
+    }
     assert match_summary["task_mode"] == context.resolved_env_config.task_mode
     assert match_summary["scores"] == list(frame.snapshot.team_deathmatch_scores)
     assert match_summary["deaths"] == [
@@ -4965,17 +4982,51 @@ def test_metric_analysis_is_cached_across_scopes_cursors_and_pov(
     monkeypatch.setattr(analysis_module, "analyze_replay", analyze)
     service = ReplayViewerService(service_cases.shared.bundle)
     sidecar = service.current_metric_report()
+    catalog_bytes = service.metric_catalog()
+    catalog = json.loads(catalog_bytes)
+    assert len(catalog["measurements"]) == 11152
+    assert any(not row["applicable"] for row in catalog["measurements"])
+    assert all(
+        "value" not in row and "valid" not in row for row in catalog["measurements"]
+    )
+    assert all(
+        (row["not_applicable_reason"] is None) == row["applicable"]
+        for row in catalog["measurements"]
+    )
     initial, filename = service.metric_analysis(0, "cursor", "json")
     assert filename is None
-    assert json.loads(initial)["completion"] is None
+    initial_summary = json.loads(initial)
+    assert initial_summary["completion"] is None
+    assert initial_summary["statistics"]
+    assert all(row["applicable"] for row in initial_summary["statistics"])
+    # Scope filtering reduces transport only. Reachable undefined values remain
+    # in the UI response and the download retains the full fixed scalar schema.
+    assert any(not row["valid"] for row in initial_summary["statistics"])
     _apply(
         service, ReplayAbsoluteSeekCommandV1(frame_index=1), command_id="analysis-seek"
     )
     _apply(service, ReplaySetViewCommandV1(view_mode="pov"), command_id="analysis-pov")
     final, filename = service.metric_analysis(1, "final", "csv")
-    assert filename == "tdm-metrics-final-frame-2.csv"
+    assert filename is not None
+    assert filename.startswith("tdm-metrics__episode-")
+    assert f"__schema-{replay_service_module.METRIC_SCHEMA_VERSION}__" in filename
+    assert filename.endswith("__final__frame-2.csv")
     assert b"metric_schema_id" in final
+    for row in initial_summary["statistics"]:
+        assert row["name"].encode() in final.splitlines()[0]
     assert service.metric_analysis(0, "cursor", "json")[0] == initial
+    assert service.metric_catalog() is catalog_bytes
+    catalog_names = [row["name"] for row in catalog["measurements"]]
+    catalog_name_set = set(catalog_names)
+    assert catalog_names == [
+        name
+        for name in next(csv.reader(io.StringIO(final.decode())))
+        if name in catalog_name_set
+    ]
+    assert catalog["source_replay_digest"] == initial_summary["source_replay_digest"]
+    assert (
+        catalog["analysis_source_digest"] == initial_summary["analysis_source_digest"]
+    )
     assert len(calls) == 1
     assert service.current_frame().cursor.frame_index == 1
     assert service.current_metric_report() == sidecar
@@ -4996,6 +5047,8 @@ def test_metric_analysis_failure_does_not_fault_replay_or_change_sidecar(
     service = ReplayViewerService(service_cases.metric_missing.bundle)
     frame = service.current_frame()
     original = service.current_metric_report()
+    with pytest.raises(RuntimeError, match="injected offline"):
+        service.metric_catalog()
     with pytest.raises(RuntimeError, match="injected offline"):
         service.metric_analysis(0, "cursor", "json")
     assert service.current_frame() == frame

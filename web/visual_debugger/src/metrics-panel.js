@@ -1,30 +1,425 @@
-/** Catalog-driven presentation. Numerical values and applicability belong to Python. */
+/** Show the catalog's words and numbers. Python decides which rows apply. */
 import { registerTooltipOwner } from "./tooltip.js";
+
+const TOOLTIP_UNITS = Object.freeze({
+  health: "Health points (HP)",
+  steps: "Ticks",
+  agent_steps: "Ticks added across agents",
+  pair_steps: "Pair measurements",
+  fraction: "Share: 1 means 100%",
+  indicator: "1 means yes; 0 means no",
+  ratio: "One number divided by another",
+  distance: "Map distance units",
+  score: "Points",
+});
 
 /** @param {string} value */
 export function metricLabel(value) {
   return value.replaceAll("_", " ").replace(/\b\w/gu, (letter) => letter.toUpperCase());
 }
 
-/** @param {Record<string, any>} summary @param {string} selection */
-export function selectedMetricRows(summary, selection) {
-  const rows = summary.statistics.filter((/** @type {Record<string, any>} */ row) =>
-    selection === "overview"
-      ? row.family === "priority" && ["team", "episode"].includes(row.scope)
-      : row.family === selection,
+/** @param {Record<string, any>} row */
+function metricSection(row) {
+  if (row.scope === "team" || row.scope === "episode") return 0;
+  if (row.scope === "team_recipient" || row.subject_role === "recipient") return 2;
+  if (row.scope === "source_recipient") return 3;
+  if (row.scope === "ally_pair") return 4;
+  return 1;
+}
+
+/** @param {Record<string, any>} row @param {string} topic */
+function metricText(row, topic) {
+  const text = row.topic_text?.[topic];
+  if (!text) return row;
+  // Topic context can explain a measurement, but cannot rename or change it.
+  return {
+    ...row,
+    ...(text.description === undefined ? {} : { description: text.description }),
+    ...(text.subtitle === undefined ? {} : { subtitle: text.subtitle }),
+  };
+}
+
+/** @param {Record<string, any>} summary @param {string} topic @param {string} view */
+export function selectedMetricRows(summary, topic, view) {
+  const rows = summary.statistics.filter(
+    (/** @type {Record<string, any>} */ row) =>
+      row.applicable !== false &&
+      row.locations.some(
+        (/** @type {{topic: string, view: string}} */ location) =>
+          location.topic === topic && location.view === view,
+      ),
   );
-  // Keep teams together before agent detail, with numerical slot ordering.
-  const rank = (/** @type {Record<string, any>} */ row) =>
-    row.scope === "team" ? 0 : row.scope === "episode" ? 1 : 2;
-  return rows.sort(
-    (
-      /** @type {Record<string, any>} */ first,
-      /** @type {Record<string, any>} */ second,
-    ) =>
-      rank(first) - rank(second) ||
-      (first.subjects[0] ?? 0) - (second.subjects[0] ?? 0) ||
-      (first.subjects[1] ?? 0) - (second.subjects[1] ?? 0),
+  // Python owns topic order, including related rows and their section order.
+  return rows
+    .sort(
+      (
+        /** @type {Record<string, any>} */ first,
+        /** @type {Record<string, any>} */ second,
+      ) => {
+        const a = first.topic_order[topic];
+        const b = second.topic_order[topic];
+        for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+          const difference = (a[index] ?? 0) - (b[index] ?? 0);
+          if (difference) return difference;
+        }
+        return first.order - second.order;
+      },
+    )
+    .map((/** @type {Record<string, any>} */ row) => metricText(row, topic));
+}
+
+/**
+ * @param {HTMLSelectElement} selection
+ * @param {HTMLSelectElement} view
+ * @param {HTMLElement} viewField
+ * @param {Record<string, any>[]} topics
+ */
+export function renderMetricNavigation(selection, view, viewField, topics) {
+  const inventory = JSON.stringify(topics);
+  if (selection.dataset.inventory !== inventory) {
+    const selected = selection.value;
+    /** @type {Map<string, HTMLOptGroupElement>} */
+    const sections = new Map();
+    for (const topic of topics) {
+      let section = sections.get(topic.section);
+      if (!section) {
+        section = document.createElement("optgroup");
+        section.label = topic.section;
+        sections.set(topic.section, section);
+      }
+      section.append(new Option(topic.label, topic.name));
+    }
+    selection.replaceChildren(...sections.values());
+    selection.value = topics.some((topic) => topic.name === selected)
+      ? selected
+      : topics[0].name;
+    selection.dataset.inventory = inventory;
+  }
+  const topic = topics.find((item) => item.name === selection.value);
+  if (!topic) throw new TypeError("Unknown measurement topic.");
+  const views = JSON.stringify(topic.views);
+  if (view.dataset.inventory !== views) {
+    const selected = view.value;
+    view.replaceChildren(
+      ...topic.views.map(
+        (/** @type {{name: string, label: string}} */ item) =>
+          new Option(item.label, item.name),
+      ),
+    );
+    view.value = topic.views.some(
+      (/** @type {{name: string}} */ item) => item.name === selected,
+    )
+      ? selected
+      : topic.views[0].name;
+    view.dataset.inventory = views;
+  }
+  viewField.hidden = topic.views.length === 1;
+}
+
+/** @param {string} value */
+function searchWords(value) {
+  return value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+// Match ordinary singular/plural words without guessing at class or ability names.
+const SEARCH_SINGULARS = new Map(
+  [
+    ["abilities", "ability"],
+    ["statuses", "status"],
+    ...[
+      "activation",
+      "agent",
+      "application",
+      "assist",
+      "attack",
+      "break",
+      "contribution",
+      "count",
+      "death",
+      "effect",
+      "fraction",
+      "heal",
+      "kill",
+      "recipient",
+      "rescue",
+      "save",
+      "share",
+      "step",
+      "target",
+      "team",
+      "tick",
+      "trap",
+      "use",
+    ].map((word) => [`${word}s`, word]),
+  ].map(([plural, singular]) => [plural, singular]),
+);
+
+// Keep direction, timing and negation words. Keep "a" when it names Team A.
+const SEARCH_CONNECTORS = new Set([
+  "an",
+  "the",
+  "by",
+  "of",
+  "for",
+  "about",
+  "is",
+  "are",
+  "was",
+  "were",
+  "this",
+  "that",
+  "these",
+  "those",
+]);
+
+// These phrases mean the same thing. Other keywords may only be related.
+/** @type {[string, string[]][]} */
+const SEARCH_EQUIVALENTS = [
+  ["damage received", ["damage taken", "damage suffered", "incoming damage"]],
+  ["damage done", ["damage dealt", "damage inflicted", "outgoing damage"]],
+  ["healing received", ["healing taken", "incoming healing"]],
+  ["healing done", ["healing given", "healing provided", "outgoing healing"]],
+];
+const SEARCH_PHRASES = SEARCH_EQUIVALENTS.flatMap(([replacement, phrases]) =>
+  phrases.map((phrase) => ({
+    phrase,
+    replacement,
+    wordCount: phrase.split(" ").length,
+    pattern: new RegExp(`\\b${phrase}\\b`, "gu"),
+  })),
+);
+
+/** @param {string} value @param {boolean} [query] */
+function searchText(value, query = false) {
+  const words = searchWords(value).split(" ");
+  let text = words
+    .filter(
+      (word, i) =>
+        !SEARCH_CONNECTORS.has(word) && (word !== "a" || words[i - 1] === "team"),
+    )
+    .join(" ");
+  for (const { phrase, replacement, pattern, wordCount } of SEARCH_PHRASES) {
+    // A researcher can stop typing at "damage tak" or "incoming dam".
+    if (query) {
+      const tailWords = text.split(" ").slice(-wordCount);
+      const tail = tailWords.join(" ");
+      if (
+        tailWords.length === wordCount &&
+        (tailWords.at(-1) ?? "").length >= 3 &&
+        phrase.startsWith(tail)
+      ) {
+        text = text.slice(0, -tail.length) + replacement;
+      }
+    }
+    text = text.replace(pattern, replacement);
+  }
+  return text;
+}
+
+/** Match row names only; keep reviewed keyword phrases and descriptions unchanged.
+ * @param {string} value
+ */
+function searchTerms(value) {
+  return searchWords(value)
+    .split(" ")
+    .map((word) => SEARCH_SINGULARS.get(word) ?? word)
+    .join(" ");
+}
+
+/** @param {Record<string, any>[]} measurements @param {Record<string, any>[]} [topics] */
+export function buildMetricSearchIndex(measurements, topics = []) {
+  const topicNames = new Map(topics.map((topic) => [topic.name, topic.label]));
+  return [...new Map(measurements.map((row) => [row.name, row])).values()]
+    .sort((a, b) => a.order - b.order)
+    .map((source) => {
+      const row = metricText(source, source.primary_topic);
+      const alternatives = Object.values(source.topic_text ?? {});
+      return {
+        row,
+        name: searchWords(row.name),
+        label: searchTerms(searchText(row.label)).split(" "),
+        subject: ` ${searchTerms(searchText(row.subject ?? ""))} `,
+        ownText: ` ${searchTerms(
+          searchText([row.label, row.subject ?? "", row.unit ?? ""].join(" ")),
+        )} `,
+        text: ` ${searchText(
+          [
+            row.name,
+            row.label,
+            row.subject ?? "",
+            row.unit ?? "",
+            ...(row.search_terms ?? []),
+            ...(row.locations ?? []).map(
+              (/** @type {{topic: string}} */ location) =>
+                topicNames.get(location.topic) ?? "",
+            ),
+          ].join(" "),
+        )} `,
+        description: ` ${searchText(
+          [
+            source.description,
+            ...alternatives.map((text) => text.description ?? ""),
+          ].join(" "),
+        )} `,
+      };
+    });
+}
+
+/**
+ * @param {ReturnType<typeof buildMetricSearchIndex>} index
+ * @param {string} query
+ */
+export function findMeasurements(index, query) {
+  const words = searchWords(query);
+  const text = searchText(query, true);
+  if (!text) return [];
+  const tokens = text.split(" ").map((word) => ` ${word}${word.length < 3 ? " " : ""}`);
+  const ownTokens = searchTerms(text)
+    .split(" ")
+    .map((word) => ` ${word}${word.length < 3 ? " " : ""}`);
+  const direct = index.filter(
+    (item) =>
+      ownTokens.every((token) => item.ownText.includes(token)) ||
+      tokens.every((token) => item.text.includes(token)),
   );
+  const matches = direct.length
+    ? direct
+    : index.filter((item) =>
+        tokens.every(
+          (token) => item.text.includes(token) || item.description.includes(token),
+        ),
+      );
+  // Prefer the recorded subject: Warrior deaths before deaths from Warrior effects.
+  return matches
+    .map((item) => {
+      const named = ownTokens.every((token) => item.ownText.includes(token));
+      return {
+        row: item.row,
+        exact: Number(item.name === words),
+        subjectMatches: ownTokens.reduce(
+          (count, token) => count + Number(item.subject.includes(token)),
+          0,
+        ),
+        named: Number(named),
+        complete: Number(
+          named &&
+            item.label.every((word) =>
+              ownTokens.some((token) => ` ${word} `.startsWith(token)),
+            ),
+        ),
+      };
+    })
+    .sort(
+      (a, b) =>
+        b.exact - a.exact ||
+        b.subjectMatches - a.subjectMatches ||
+        b.complete - a.complete ||
+        b.named - a.named ||
+        a.row.order - b.row.order,
+    )
+    .map((item) => item.row);
+}
+
+/** @param {Record<string, any>} row @param {Record<string, any>[]} topics */
+function primaryLocationLabel(row, topics) {
+  const topic = topics.find((item) => item.name === row.primary_topic);
+  if (!topic) throw new TypeError("Unknown primary measurement topic.");
+  const view = topic.views.find(
+    (/** @type {{name: string}} */ item) => item.name === row.primary_view,
+  );
+  return topic.views.length === 1 ? topic.label : `${topic.label}: ${view.label}`;
+}
+
+/**
+ * @param {HTMLElement} container
+ * @param {Record<string, any>[]} matches
+ * @param {Record<string, any>[]} topics
+ * @param {number} limit
+ * @param {(row: Record<string, any>) => void} select
+ */
+export function renderMetricSearchResults(container, matches, topics, limit, select) {
+  const list = document.createElement("ol");
+  list.className = "metric-search-results";
+  list.setAttribute("role", "presentation");
+  for (const row of matches.slice(0, limit)) {
+    const item = document.createElement("li");
+    item.setAttribute("role", "presentation");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.id = `metric-search-option-${row.order}`;
+    button.tabIndex = -1;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", "false");
+    button.dataset.measurement = row.name;
+    button.append(
+      element("strong", row.label),
+      element("span", row.subject),
+      element("code", row.name),
+      element("small", primaryLocationLabel(row, topics)),
+    );
+    if (!row.applicable)
+      button.append(element("small", "Not applicable to this roster"));
+    button.addEventListener("click", () => select(row));
+    item.append(button);
+    list.append(item);
+  }
+  container.replaceChildren(list);
+}
+
+/** @param {HTMLElement} container @param {Record<string, any>} row @param {Record<string, any>[]} topics */
+export function renderMetricDefinition(container, row, topics) {
+  row = metricText(row, row.primary_topic);
+  const title = element("strong", row.label);
+  const fields = document.createElement("dl");
+  for (const { label, value } of metricTooltipRows(row)) {
+    fields.append(element("dt", label), element("dd", value));
+  }
+  container.replaceChildren(
+    title,
+    element("p", row.subject),
+    element("p", row.description),
+    element("p", row.not_applicable_reason ?? "Not applicable to this roster."),
+    element("p", `Primary location: ${primaryLocationLabel(row, topics)}.`),
+    fields,
+  );
+  container.hidden = false;
+  container.focus();
+}
+
+/** @param {Record<string, any>} row */
+export function metricTooltipRows(row) {
+  const directed = row.scope === "source_recipient" || row.scope === "team_recipient";
+  const rows = [
+    ["CSV Column", row.name],
+    [
+      "Unit",
+      TOOLTIP_UNITS[/** @type {keyof typeof TOOLTIP_UNITS} */ (row.unit)] ??
+        metricLabel(row.unit),
+    ],
+  ];
+  if (directed) {
+    rows.push(
+      [
+        "From",
+        row.scope === "team_recipient"
+          ? `Team ${row.subjects[0] === 1 ? "A" : "B"}`
+          : `Agent ID ${row.subjects[0]}`,
+      ],
+      ["To", `Agent ID ${row.subjects[1]}`],
+    );
+  }
+  if (row.denominator) {
+    rows.push(["Numerator", row.numerator], ["Denominator", row.denominator]);
+  }
+  rows.push(["How to Read It", row.guidance], ["Blank When", row.missing_when]);
+  return rows.map(([label, value]) => ({
+    label,
+    value,
+    metadata: { compact: true, full: true },
+  }));
 }
 
 /** @param {string} tag @param {string} text */
@@ -36,38 +431,20 @@ function element(tag, text) {
 
 /**
  * @param {HTMLElement} container
- * @param {HTMLSelectElement} selection
+ * @param {string} topicName
+ * @param {string} view
  * @param {Record<string, any>} summary
  * @param {HTMLElement} description
  */
-export function renderMetricRows(container, selection, summary, description) {
-  const families = summary.families;
-  const inventory = families
-    .map((/** @type {Record<string, string>} */ family) => family.name)
-    .join("|");
-  if (selection.dataset.inventory !== inventory) {
-    const selected = selection.value;
-    selection.replaceChildren(
-      ...families.map(
-        (/** @type {Record<string, string>} */ family) =>
-          new Option(family.label, family.name),
-      ),
-    );
-    selection.value = families.some(
-      (/** @type {Record<string, string>} */ family) => family.name === selected,
-    )
-      ? selected
-      : "overview";
-    selection.dataset.inventory = inventory;
-  }
-  const rows = selectedMetricRows(summary, selection.value);
+export function renderMetricRows(container, topicName, view, summary, description) {
+  const rows = selectedMetricRows(summary, topicName, view);
   const available = rows.filter(
     (/** @type {Record<string, any>} */ row) => row.valid,
   ).length;
-  const family = families.find(
-    (/** @type {Record<string, string>} */ item) => item.name === selection.value,
+  const topic = summary.topics.find(
+    (/** @type {Record<string, string>} */ item) => item.name === topicName,
   );
-  description.textContent = `${family.description} ${available} of ${rows.length} measurements available.`;
+  description.textContent = `${topic.description} ${available} of ${rows.length} measurements available.`;
   const table = document.createElement("table");
   table.className = "metric-table";
   const head = document.createElement("thead");
@@ -80,7 +457,29 @@ export function renderMetricRows(container, selection, summary, description) {
   head.append(headings);
   table.append(head);
   const body = document.createElement("tbody");
+  body.tabIndex = 0;
+  body.setAttribute("aria-label", "Scrollable metric values");
+  let previousSection = -1;
   for (const row of rows) {
+    const section = metricSection(row);
+    if (section !== previousSection) {
+      const headingRow = document.createElement("tr");
+      headingRow.className = "metric-section";
+      const heading = element(
+        "th",
+        [
+          "Episode and Team Totals",
+          "Agent Details",
+          "Recipient Totals",
+          "Source-to-Recipient Details",
+          "Ally Pair Details",
+        ][section],
+      );
+      heading.setAttribute("colspan", "3");
+      headingRow.append(heading);
+      body.append(headingRow);
+      previousSection = section;
+    }
     const tr = document.createElement("tr");
     tr.dataset.metric = row.name;
     const subject = element("td", row.subject);
@@ -88,43 +487,22 @@ export function renderMetricRows(container, selection, summary, description) {
     const label = element("span", row.label);
     label.tabIndex = 0;
     label.className = "metric-measure";
-    const direction =
-      row.direction === "higher"
-        ? "Higher Is Better"
-        : row.direction === "lower"
-          ? "Lower Is Better"
-          : "No Preferred Direction";
+    const subtitle = row.subtitle ?? row.status;
     registerTooltipOwner(label, {
       kind: "metric",
       tone: "neutral",
       accent: "none",
       id: `metric:${row.name}`,
       title: row.label,
-      summary: row.status ? `${row.status}. ${row.description}` : row.description,
-      rows: [
-        {
-          label: "Unit",
-          value: metricLabel(row.unit),
-          metadata: { compact: true, full: true },
-        },
-        {
-          label: "Interpretation",
-          value: direction,
-          metadata: { compact: true, full: true },
-        },
-        {
-          label: "Unavailable When",
-          value: row.missing_when,
-          metadata: { compact: true, full: true },
-        },
-      ],
+      summary: subtitle ? `${subtitle}. ${row.description}` : row.description,
+      rows: metricTooltipRows(row),
       sections: [],
       metadata: { compact: true, full: true },
       anchor: "element",
     });
     measure.append(label);
-    if (row.status) {
-      const status = element("div", row.status);
+    if (subtitle) {
+      const status = element("div", subtitle);
       status.className = "metric-condition";
       measure.append(status);
     }
@@ -133,14 +511,29 @@ export function renderMetricRows(container, selection, summary, description) {
     );
     const value = element(
       "td",
-      row.valid ? row.value.toLocaleString("en-GB", { maximumFractionDigits: 4 }) : "—",
+      row.valid
+        ? row.value.toLocaleString("en-GB", {
+            maximumFractionDigits:
+              row.unit === "fraction" || row.unit === "ratio" ? 4 : 2,
+          })
+        : "—",
     );
     value.className = "metric-value";
     value.dataset.value = row.valid ? String(row.value) : "";
     if (!row.valid)
-      value.setAttribute("aria-label", `Unavailable. ${row.missing_when}`);
+      value.setAttribute(
+        "aria-label",
+        `Unavailable. Possible reasons: ${row.missing_when}`,
+      );
     tr.append(subject, measure, value);
     body.append(tr);
+  }
+  if (rows.length === 0) {
+    const empty = document.createElement("tr");
+    const message = element("td", "No applicable measurements for this roster.");
+    message.setAttribute("colspan", "3");
+    empty.append(message);
+    body.append(empty);
   }
   table.append(body);
   container.replaceChildren(table);

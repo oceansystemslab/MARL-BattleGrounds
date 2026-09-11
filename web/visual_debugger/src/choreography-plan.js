@@ -762,6 +762,7 @@ function chargeDirectionMarkerProgresses(
  * @returns {ReadonlyArray<Record<string, any>> | null}
  */
 function layoutCrossPhaseEvents(events, surface, sceneByKey) {
+  const deathPanelRects = [];
   /** @type {Record<string, any>[]} */
   const requests = [];
   /** @type {Map<string, Record<string, any>>} */
@@ -794,7 +795,20 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
   };
 
   for (const [eventIndex, event] of events.entries()) {
-    if (!event.spatial || event.cueSemantic === "death_announcement") {
+    if (!event.spatial) continue;
+    if (event.cueSemantic === "death_announcement") {
+      // Static replay retains the HUD alongside every other transition cue.
+      deathPanelRects.push({
+        layoutKey: crossPhaseLayoutKey(event.eventId, "hud"),
+        bounds: {
+          left: event.anchor.x - event.panelWidth / 2,
+          right: event.anchor.x + event.panelWidth / 2,
+          top: event.anchor.y - event.panelHeight / 2,
+          bottom: event.anchor.y + event.panelHeight / 2,
+          width: event.panelWidth,
+          height: event.panelHeight,
+        },
+      });
       continue;
     }
     if (event.kind === "activation") {
@@ -967,7 +981,7 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
   const layout = layoutCrossPhaseOccupancy(
     /** @type {any} */ ({
       viewport: surface.viewportBounds,
-      protectedRects: crossPhaseProtectedRects(surface),
+      protectedRects: [...crossPhaseProtectedRects(surface), ...deathPanelRects],
       requests,
     }),
   );
@@ -1311,7 +1325,7 @@ function scheduleChoreography(events) {
       events.some(
         (event) => event.cueSemantic === "death_announcement" && event.spatial,
       )
-        ? 1000
+        ? 1500
         : FAMILY_DWELL_MS[family];
     windows.set(family, { start: cursor, end: cursor + duration });
     cursor += duration;
@@ -2776,37 +2790,54 @@ function buildAuthorizedPresentationChoreographyPlan(
       ? surface?.viewportBounds
       : null;
   if (viewport) {
-    for (const teamId of [1, 2]) {
+    for (const sideId of [1, 2]) {
       const members = deaths
-        .filter((death) => death.team_id === teamId)
-        .map((death) =>
-          canonicalAgentIdentity({
-            ...death,
-            display_agent_id: authorizedPresentationAgentDisplayId(
-              presentation,
-              death.public_agent_id,
-            ),
-          }),
-        );
+        .filter((death) => (death.killing_team_id ?? death.team_id) === sideId)
+        .map((death) => {
+          const identity = (/** @type {Record<string, any>} */ agent) =>
+            canonicalAgentIdentity({
+              ...agent,
+              display_agent_id: authorizedPresentationAgentDisplayId(
+                presentation,
+                agent.public_agent_id,
+              ),
+            });
+          return Object.freeze({
+            ...identity(death),
+            killingTeamId: death.killing_team_id ?? null,
+            contributors:
+              death.contributors == null
+                ? null
+                : Object.freeze(death.contributors.map(identity)),
+          });
+        });
       if (members.length === 0) continue;
+      // Historical deaths remain neutral when attribution was not recorded.
+      // Mixed evidence shares a side bucket, never a third card or a queue.
+      const teamId = members.every((member) => member.killingTeamId === sideId)
+        ? sideId
+        : null;
       const width = Math.min(220, (viewport.width - 24) / 2);
-      const height = 30 + members.length * 20;
+      const { rows, height } = deathAnnouncementRows(members, width);
       planned.push(
         Object.freeze({
-          eventId: `${transitionId}:death-announcement:${teamId}`,
+          eventId: `${transitionId}:death-announcement:${sideId}`,
           eventType: "agent_died",
           kind: "semantic_pulse",
           cueSemantic: "death_announcement",
           teamId,
-          teamIndex: teamId - 1,
-          teamSide: teamId === 1 ? "left" : "right",
-          label: `Team ${teamId === 1 ? "A" : "B"} Deaths`,
+          teamIndex: teamId === null ? null : teamId - 1,
+          teamSide: sideId === 1 ? "left" : "right",
+          sideId,
+          label:
+            teamId === null ? "Agent Deaths" : `Team ${teamId === 1 ? "A" : "B"} Kills`,
           members: Object.freeze(members),
+          textRows: rows,
           panelWidth: width,
           panelHeight: height,
           anchor: Object.freeze({
             x:
-              teamId === 1
+              sideId === 1
                 ? viewport.left + 8 + width / 2
                 : viewport.right - 8 - width / 2,
             y: viewport.top + 48 + height / 2,
@@ -2849,6 +2880,41 @@ function buildAuthorizedPresentationChoreographyPlan(
       persistentNodes: Math.min(persistentNodeUpperBound, 512),
     }),
   });
+}
+
+/**
+ * Lay out complete identities with the painter's fixed monospace text size.
+ * Wrapped lines increase the reserved panel height; no names are clipped.
+ * @param {ReadonlyArray<Record<string, any>>} members
+ * @param {number} width
+ */
+function deathAnnouncementRows(members, width) {
+  const limit = Math.max(1, Math.floor((width - 20) / 6.8));
+  /** @type {Array<Readonly<{lines: readonly string[], y: number}>>} */
+  const rows = [];
+  let height = 30;
+  for (const member of members) {
+    const lines = [];
+    let line = "";
+    for (const word of member.title.split(/\s+/u)) {
+      if (line && line.length + word.length + 1 > limit) {
+        lines.push(line);
+        line = "";
+      }
+      const pieces = word.match(new RegExp(`.{1,${limit}}`, "gu")) ?? [];
+      for (const piece of pieces) {
+        if (line.length === limit) {
+          lines.push(line);
+          line = "";
+        }
+        line += `${line ? " " : ""}${piece}`;
+      }
+    }
+    if (line) lines.push(line);
+    rows.push(Object.freeze({ lines: Object.freeze(lines), y: height + 9 }));
+    height += lines.length * 14 + 6;
+  }
+  return { rows: Object.freeze(rows), height };
 }
 
 /**

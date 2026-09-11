@@ -44,6 +44,7 @@ const INITIAL_FILTERS = new Set([
   "resurrection_effects",
   "scrolling_battle_text",
   "respawn_wave",
+  "death_announcer",
 ]);
 const INITIAL_DISABLED_FILTERS = FILTER_IDS.filter((id) => !INITIAL_FILTERS.has(id));
 const FILTER_INPUT = 'input[type="checkbox"][data-visual-filter-id]';

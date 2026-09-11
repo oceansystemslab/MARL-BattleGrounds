@@ -10,6 +10,8 @@ import {
   getCurrentFrameAndPresentation,
   getCurrentPresentation,
   getReplayEpisodeDetails,
+  getReplayMetricCatalog,
+  getReplayMetrics,
   getReplayTimeline,
   postCommand,
   postReplayCommand,
@@ -691,6 +693,230 @@ test("episode details download authenticates one JSON attachment and rejects mis
       /Invalid episode details attachment/u,
     );
     assert.equal(requests, 2);
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("replay metrics accept recipient totals and require clear metadata and versioned CSV names", async () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const row = {
+    name: "team_a_agent_5_basic_applications",
+    stem: "basic_applications",
+    label: "Basic Ability Activations",
+    family: "abilities",
+    primary_topic: "abilities",
+    primary_view: "recipients",
+    locations: [{ topic: "abilities", view: "recipients" }],
+    topic_order: { abilities: [-1, 1, 5] },
+    subject: "Team A → Agent ID 5 · Hunter · Team B",
+    subject_role: "team",
+    recipient_role: "recipient",
+    scope: "team_recipient",
+    subjects: [1, 5],
+    description: "How many times Team A used Basic abilities on Agent ID 5.",
+    missing_when: "The source team or recipient is inactive.",
+    numerator: null,
+    denominator: null,
+    unit: "count",
+    status: null,
+    direction: "descriptive",
+    guidance: "Context dependent for Team A.",
+    applicable: true,
+    order: 26,
+    valid: true,
+    value: 0,
+  };
+  const summary = {
+    scope: "cursor",
+    frame_index: 1,
+    simulator_step_count: 1,
+    source_replay_digest: "a".repeat(64),
+    analysis_source_digest: "b".repeat(64),
+    topics: [
+      {
+        name: "abilities",
+        label: "Ability Activations",
+        section: "Results and Actions",
+        description: "Allowed uses.",
+        views: [
+          { name: "totals", label: "Totals" },
+          { name: "recipients", label: "By Recipient" },
+        ],
+      },
+    ],
+    statistics: [row],
+  };
+  /** @type {Record<string, any>} */
+  let payload = summary;
+  let filename = "tdm-metrics__episode-episode-001__schema-3__cursor__frame-1.csv";
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      clearTimeout: globalThis.clearTimeout,
+      setTimeout: globalThis.setTimeout,
+      fetch: async (/** @type {string} */ path, /** @type {RequestInit} */ options) => {
+        assert.deepEqual(options.headers, { "X-MARL-Debugger-Token": "capability" });
+        const csv = path.endsWith(".csv");
+        return new Response(
+          csv ? "episode_id\nepisode-001\n" : JSON.stringify(payload),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": csv ? "text/csv; charset=utf-8" : "application/json",
+              "Cache-Control": "no-store",
+              ...(csv
+                ? { "Content-Disposition": `attachment; filename="${filename}"` }
+                : {}),
+            },
+          },
+        );
+      },
+    },
+  });
+  try {
+    assert.deepEqual(await getReplayMetrics("capability", 1, "cursor"), summary);
+    for (const topic_text of [
+      {},
+      { abilities: { description: "Team A's activations on Agent ID 5." } },
+      { abilities: { subtitle: "Charge" } },
+      {
+        abilities: {
+          description: "Team A's activations on Agent ID 5.",
+          subtitle: "Charge",
+        },
+      },
+    ]) {
+      payload = { ...summary, statistics: [{ ...row, topic_text }] };
+      assert.deepEqual(await getReplayMetrics("capability", 1, "cursor"), payload);
+    }
+    for (const unit of ["fraction", "ratio", "steps"]) {
+      payload = {
+        ...summary,
+        statistics: [
+          {
+            ...row,
+            unit,
+            numerator: "How many agents returned in Team A respawn waves.",
+            denominator: "How many respawn waves Team A had.",
+          },
+        ],
+      };
+      assert.deepEqual(await getReplayMetrics("capability", 1, "cursor"), payload);
+    }
+    for (const invalid of [
+      { applicable: "false" },
+      { locations: [1] },
+      { locations: [{ topic: "missing", view: "totals" }] },
+      { locations: [{ topic: "abilities", view: "missing" }] },
+      { primary_view: "totals" },
+      { topic_order: {} },
+      { topic_order: { abilities: [1.5] } },
+      { topic_order: { abilities: [1], unknown_topic: [2] } },
+      { topic_text: [] },
+      { topic_text: null },
+      { topic_text: { missing: { label: "A label" } } },
+      { topic_text: { abilities: {} } },
+      { topic_text: { abilities: { label: row.label } } },
+      {
+        topic_text: {
+          abilities: {
+            label: "Basic Ability Activations on This Target",
+            description: "Team A's activations on Agent ID 5.",
+          },
+        },
+      },
+      { topic_text: { abilities: { label: " " } } },
+      { topic_text: { abilities: { description: 3 } } },
+      { topic_text: { abilities: { subtitle: " " } } },
+      { topic_text: { abilities: { status: "A different effect" } } },
+      { topic_text: { abilities: { value: 3 } } },
+      { topic_text: { abilities: { denominator: "A different denominator" } } },
+      { denominator: 3 },
+      { numerator: 3 },
+      { numerator: "Only a numerator." },
+      { denominator: "Only a denominator." },
+      { numerator: "", denominator: "A count." },
+      { numerator: "A count.", denominator: " " },
+      { unit: "fraction" },
+      { recipient_role: 5 },
+      { order: -1 },
+      { scope: "unknown" },
+    ]) {
+      payload = { ...summary, statistics: [{ ...row, ...invalid }] };
+      await assert.rejects(
+        getReplayMetrics("capability", 1, "cursor"),
+        /Invalid replay metric summary/u,
+      );
+    }
+    const { value: _value, valid: _valid, ...metadata } = row;
+    const catalog = {
+      source_replay_digest: summary.source_replay_digest,
+      analysis_source_digest: summary.analysis_source_digest,
+      metric_schema_id: "marlbg.tdm.scalar",
+      metric_schema_version: 12,
+      topics: summary.topics,
+      measurements: [
+        {
+          ...metadata,
+          applicable: false,
+          not_applicable_reason: "Agent 5 is inactive.",
+          search_terms: ["cast count"],
+        },
+      ],
+    };
+    payload = catalog;
+    assert.deepEqual(await getReplayMetricCatalog("capability"), catalog);
+    for (const invalid of [
+      { ...catalog, measurements: [row] },
+      {
+        ...catalog,
+        measurements: [{ ...catalog.measurements[0], search_terms: [false] }],
+      },
+      {
+        ...catalog,
+        measurements: [
+          {
+            ...catalog.measurements[0],
+            topic_text: { abilities: { label: row.label } },
+          },
+        ],
+      },
+      {
+        ...catalog,
+        measurements: [{ ...metadata, applicable: false, not_applicable_reason: null }],
+      },
+      { ...catalog, metric_schema_version: 0 },
+      { ...catalog, source_replay_digest: "wrong" },
+      {
+        ...catalog,
+        topics: [
+          { ...catalog.topics[0], views: [{ name: "missing", label: "Missing" }] },
+        ],
+      },
+    ]) {
+      payload = invalid;
+      await assert.rejects(
+        getReplayMetricCatalog("capability"),
+        /Invalid replay measurement catalog/u,
+      );
+    }
+    assert.equal(
+      (await getReplayMetrics("capability", 1, "cursor", "csv")).filename,
+      filename,
+    );
+    for (const invalid of [
+      "tdm-metrics-cursor-frame-1.csv",
+      "tdm-metrics__episode-../episode__schema-3__cursor__frame-1.csv",
+      "tdm-metrics__episode-episode-001__schema-3__cursor__frame-2.csv",
+    ]) {
+      filename = invalid;
+      await assert.rejects(
+        getReplayMetrics("capability", 1, "cursor", "csv"),
+        /Invalid metric CSV response/u,
+      );
+    }
   } finally {
     if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
     else Reflect.deleteProperty(globalThis, "window");

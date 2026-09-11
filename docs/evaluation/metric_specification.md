@@ -25,8 +25,76 @@ tests. Formulas may be implemented only by their named owner.
 
 ## Current scalar TDM contract
 
-The current schema is `marlbg.tdm.scalar@1`: **26 priority numeric columns** and
-**1,388 full numeric columns**, with priority included in full. Column order and
+### Manuscript family summary
+
+The table below groups measurements by what they tell us. A group can have many
+columns because it records numbers for different teams, agents, targets, or
+statuses. For example, damage from Agent 0 to Agent 5 and damage from Agent 0 to
+Agent 6 need separate columns. They describe the same kind of measurement.
+Each row of a run table describes one episode. Each numerical column is counted
+once here, even if several viewer groups show it. The data dictionary also lists
+the columns that identify the run, episode, and agents.
+
+<!-- metric-family-summary:start -->
+| Measurement family | Numerical columns | What the family describes |
+| --- | ---: | --- |
+| Episode results | 26 | Episode length, outcomes, returns, scores, kills, and deaths. |
+| Ability use and action acceptance | 748 | How often abilities were used, who they targeted, and which actions the game rejected. |
+| Deaths and respawning | 48 | Who died, how long agents were dead, and when they returned. |
+| Kills and coordination | 746 | Who helped kill each enemy, who killed alone, and whether attackers chose the same target. |
+| Damage | 538 | Who dealt damage, who took it, which ability dealt it, and each agent's share. |
+| Healing and excess | 2,028 | Who healed whom, which ability was used, how much healing was useful or excess, and automatic health recovery. |
+| Effects on controlled recipients | 3,592 | Damage, healing, and kill credit when the affected agent already had a named harmful status. |
+| Status applications, duration, and Freedom | 1,532 | Who applied each status, who had it and for how long, and when Freedom protected movement. |
+| Trap breaks | 218 | Who was trapped, who broke each Trap with damage, and how much Trap time remained. |
+| Burst | 520 | Damage dealt during Burst, who took it, and who helped with kills while Burst was active. |
+| Auras | 556 | Who gave and received aura coverage, extra damage from Mage auras, and damage blocked by Warrior auras. |
+| Poison healing prevention | 12 | Priest healing prevented on affected agents and teams. |
+| Lethal-damage rescues | 544 | Who could be saved from lethal damage, who survived, and which healers and abilities helped. |
+| Formation | 44 | Distances between living teammates and how many times each pair was measured. |
+| **Total** | **11,152** | **Unique numerical columns; shared viewer appearances are counted once.** |
+<!-- metric-family-summary:end -->
+
+Allocation asks where an agent's output went. Contribution asks how much that
+agent supplied compared with its team. Suppose Agent 3 deals 100 damage, with
+40 going to Agent 8. Team A deals 80 damage to Agent 8, including Agent 3's 40.
+Then 40% of Agent 3's damage went to Agent 8, and Agent 3 supplied 50% of Team A's
+damage to Agent 8.
+
+Keep the named ability, effect and time rule on both sides of each fraction.
+For example, `agent_5_to_agent_3_burst_damage_allocation_fraction` divides
+Agent 5's Burst-active damage to Agent 3 by all Agent 5's damage while Burst
+was active. A value of `0.4336` means 43.36% went to Agent 3. It does not say
+Agent 5 supplied 43.36% of the damage Agent 3 received. Damage or healing to
+agents with a named harmful effect checks each recipient at the start of the
+tick; an effect first applied later that tick does not count.
+
+Named effects also retain distinct meanings when their counts coincide: two
+Charges produce two Charge activations, two Charge Slow applications, and two Charge
+Stun applications. These are descriptions of the same two casts, not six casts.
+Several teammates can get credit for the same kill. If two agents both helped
+with the only kill, each has 100% participation. Adding these gives 200%; it
+does not mean there were two kills.
+If two Mages deal damage while Burst is active and kill one enemy together,
+that is two Burst kill contributions but one enemy killed with Burst help.
+Only damage and useful Priest healing on that enemy's death tick earn kill
+credit. Earlier damage does not turn a later one-helper kill into a shared kill.
+
+A blank CSV cell means the value does not apply or cannot be calculated. For
+example, an inactive agent has no measurements. An agent that made no casts has
+no share of casts on a target: there is no total to divide by. An active agent
+that could deal damage but dealt none has a real zero.
+
+Averaging episode fractions gives every episode the same weight. Dividing the
+total count by the total number of chances gives each chance the same weight.
+For example, 1/1 and 1/9 average to about 55.6%, but 2/10 is 20%. Choose the
+question you want to answer; the tables provide the counts for both.
+
+### Schema and compatibility
+
+The current schema is `marlbg.tdm.scalar@12`: **26 priority numeric columns** and
+**11,152 full numeric columns**, with priority included in full. The viewer has
+27 topics and 43 tables; different topics can show the same exported column. Column order and
 names remain identical across valid one-through-five-agent, asymmetric,
 permuted-class and repeated-class rosters. This schema supersedes the historical
 46-ID report catalog for new computation. It contains no KOTH or CTF metrics.
@@ -34,17 +102,457 @@ The former host `full=True` reducer factory and unused draft accumulator are
 retired. `build_tdm_metric_reducers()` retains only the five basic V1 outcome
 statistics needed to reproduce archived samples; new full computation uses
 `evaluate(..., metrics="full")` or the corresponding environment mode.
-Historical V1 component/report schemas and readers remain supported.
+Historical V1 component/report schemas and readers remain supported. Scalar
+schema 3 preserved all 2,048 schema-2 measurements and added 9,272 columns.
+Schema 4 changed relationship prefixes on 9,400 existing columns without adding
+or removing measurements, changing their meanings, or changing numerical order.
+Schema 5 removed 206 columns and put related full measurements next to each
+other. Surviving names and calculations stayed the same. It removed 158 values
+that are always zero or one when defined, 40 repeated self counts, and eight
+class totals that can be rebuilt from agent rows. The removal list does not
+depend on which classes appear in a sampled game. A class can move between
+slots, appear several times, or be absent; the remaining headers stay fixed.
+Schema 6 added 12 Basic kill fractions. It also placed the existing single- and
+multiple-contributor kill counts and fractions in both **Kill Contributions**
+and **Team Coordination**, using the same CSV columns in both groups. Schema 7
+adds 20 columns in total: a Basic kill count and share of all team kills for
+each class on each team. Schema 8 kept every measurement and changed full-column
+order to follow each column's primary topic and view. Schema 9 changed the healing
+term to **Excess**, including its CSV names and topic name. It kept all 11,146
+measurements in the same order, with the same values and rules for blank cells.
+Schema 10 removes 46 observed-respawn-wait columns. It keeps team wave counts,
+mean agents returned per wave, and mean observed waiting ticks under
+**Respawning**. Death counts and time dead remain in **Deaths and Time Dead**.
+Schema 11 added 40 recipient columns from existing counters: each agent's Trap
+period count, Trap-break fraction, mean Trap time left at a break, and chances
+for its team to save it with Priest healing. Existing names, values and relative
+order stay the same. An agent's rescue opportunity describes that agent as the
+patient; it does not claim that the agent is a Priest or can save someone else.
+Schema 12 adds 12 Basic healing-save shares using existing counts. It keeps all
+11,140 earlier column names and values. It also uses one clear display name per
+column in every topic, improves explanations, and puts related healing amounts
+and fractions together. A clearer name or an extra appearance in a topic is not
+a new measurement. These changes add no per-tick counters or counter updates.
+The full CSV is ordered by primary topic, then view, team, agent, recipient,
+and source-to-recipient detail; priority retains its original 26-value order.
+Within each subject, All abilities come before Basic and then Ultimate. Each
+amount is followed by its fractions, with allocation before contribution.
+The Viewer uses the same order and the same exported measurements.
+Existing CSV files are not rewritten. Incompatible schema resumption fails before
+recovery, truncation, or writing; start a new run when the schema changes.
 
-[The column data dictionary](metric_columns.csv) lists all **1,418 full-table
-columns**: 30 identity columns followed by 1,388 numerical measurements. Priority
+### Find a measurement by topic or CSV name
+
+Choose a **Topic**, then **Totals** or **By Recipient** when the topic has both.
+Totals show team-wide and acting-agent measurements. By Recipient shows totals
+for affected agents, then team-to-agent and agent-to-agent details. The two
+tables for one topic share no rows. Team Formation and ten other focused topics
+need only one table. Six headings keep the Topic dropdown easy to scan.
+
+Use **Find a Measurement** to search a plain name or an exact CSV column. Search
+covers all 11,152 numerical measurements, even ones that do not apply to this
+replay. An inapplicable result explains why and keeps its definition and CSV
+name available. It does not insert an impossible row into the table. A zero
+denominator is different: the measurement applies, but its fraction is blank.
+The search list has no tick values and is loaded once per replay analysis.
+
+The tables use the recorded classes and active slots to hide impossible roles.
+For example, a Priest can help save a Warrior: the Priest appears as the healer,
+and the Warrior appears as the saved ally. A Warrior cannot appear as a healing
+helper. Moving the Priest to another slot moves these rows with it.
+
+The same rule covers all topics. Solo kills and damage-caused Trap breaks need
+a damaging agent. Priest kill support needs a damaging teammate. Burst damage
+received needs an opposing Mage; aura coverage received needs a matching aura
+giver on the same team. Priest healing prevented by Poison needs a friendly
+Priest, but not a current Rogue: Poison may already be active when recording
+starts. Initial Trap, stun and Freedom rows also remain without their original
+caster. No filter uses the current score, observed zero values, range, cooldowns
+or whether an agent is currently alive. Healing Done shows Priests as healers;
+Damage Done shows agents whose recorded abilities can deal that damage. A
+capable agent keeps its zero amounts and blank fractions before it acts.
+Other classes still appear as patients when a friendly Priest can heal them.
+Regeneration and combined healing received remain visible without a Priest.
+An already-stunned Priest needs another Priest to heal it.
+
+Focus fire needs two damaging teammates. A shared kill needs two attackers,
+or an attacker and a Priest who helps through healing. Team Formation needs
+two active teammates. Match results, deaths, time dead and
+initial status records remain available even when no current agent can cause
+another such event.
+
+These are display rules. All CSV columns and their values remain available,
+and search explains why a measurement does not apply to the recorded roster.
+Rescue opportunities still use actual legal healing range at the start of the
+tick. They do not use personal observation range or a separate fixed radius.
+
+Exact CSV names come first. Otherwise, the measurement's own name and recorded
+agent come before mentions in related topics. Ordinary singular/plural words
+both work: Warrior death, Warrior deaths, and Warrior death counts find the
+Warrior's death count. You can also type the start of a word, such as regen.
+
+Each column has one fixed primary location in the CSV. Related topics can reuse
+it. For example, Kill Contributions owns the shared-kill counts that Team
+Coordination also shows. Excess Healing owns excess amounts and fractions, while
+the general healing tables reuse those measurements beside useful healing.
+Each shared column has the same display name in every topic. A subtitle or
+tooltip can explain why it appears there. Useful shared death and save totals
+name the all-ability denominator of the displayed participation fractions.
+Burst has no displayed kill fraction using Total Kills, so its table omits that
+shared row. Total Kills remains in Episode Results and in the CSV.
+Generic Ultimate damage stays under Damage Done when a slot changes class.
+An Ultimate table may use only columns whose primary locations are elsewhere;
+a zero in the table below means it adds no separate columns, not that its
+measurements have zero values.
+
+The column guide records `primary_topic`, `primary_view`, `gui_groups`,
+`full_run_column_number`, and `replay_column_number`. Column numbers start at
+one and include each export's own identity fields. These guide fields do not
+add measurements to the episode tables. The scientific family table above
+counts concepts separately from these navigation locations.
+
+<!-- metric-navigation:start -->
+| Topic | Primary columns in Totals | Primary columns By Recipient | Primary columns in single view |
+| --- | ---: | ---: | ---: |
+| Episode Results | — | — | 26 |
+| Ability Activations | 24 | 640 | — |
+| Accepted and Rejected Actions | — | — | 84 |
+| Damage Done | 46 | 450 | — |
+| Damage Received | — | — | 42 |
+| Damage to Enemies With Harmful Effects | 84 | 1120 | — |
+| Healing Done | 118 | 1050 | — |
+| Healing Received | — | — | 148 |
+| Excess Healing | 72 | 640 | — |
+| Healing to Allies With Harmful Effects | 84 | 1030 | — |
+| Priest Healing Saves | 74 | 470 | — |
+| Kill Contributions | 142 | 600 | — |
+| Kills of Enemies With Harmful Effects | 154 | 1120 | — |
+| Deaths and Time Dead | — | — | 42 |
+| Respawning | — | — | 6 |
+| Team Coordination | — | — | 4 |
+| Team Formation | — | — | 44 |
+| Aura Coverage | 72 | 480 | — |
+| Damage Added or Blocked by Auras | — | — | 4 |
+| Status Applications | 108 | 1280 | — |
+| Time With Status Effects | — | — | 108 |
+| Freedom Against Slows | — | — | 36 |
+| Burst (Mage Ultimate) | 50 | 470 | — |
+| Charge (Warrior Ultimate) | 0 | 0 | — |
+| Freezing Trap (Hunter Ultimate) | 28 | 190 | — |
+| Crippling Poison (Rogue Ultimate) | 2 | 10 | — |
+| Holy Word: Salvation (Priest Ultimate) | 0 | 0 | — |
+| **Total** | | | **11,152 unique measurements** |
+<!-- metric-navigation:end -->
+
+Schema 8 preserved all schema-7 names, definitions, calculations and blank-value
+rules. Schema 9 changed the excess-healing names only. Schema 10 removed 46 wait
+measurements, schema 11 added 40 recipient measurements, and schema 12 adds 12
+Basic healing-save shares. The full-run table has 30 identity fields plus 11,152
+measurements: 11,182 columns in total. Replay exports keep their 49 identity
+fields, giving 11,201 columns. Historical files stay untouched;
+the writer rejects older schemas before recovery or writing. Use names rather
+than old column positions when comparing exports across these versions.
+
+### Schema 12 Basic healing-save shares
+
+Schema 12 adds the matching Basic shares beside the existing Basic save counts.
+Here `i` is an agent slot from 0 to 9. Slots 0–4 belong to Team A; slots 5–9
+belong to Team B. `{a,b}` names the source team.
+
+| Added columns | Count | Meaning |
+| --- | ---: | --- |
+| `agent_i_basic_rescue_participation` | 10 | Numerator: Saves this Priest helped with its Basic healing. Denominator: All unique saves by its team, from any ability. |
+| `team_{a,b}_basic_rescue_fraction` | 2 | Numerator: Saves helped by at least one Basic heal from this team, counting each saved ally once per tick. Denominator: All unique saves by this team, from any ability. |
+
+A save means the ally survives a tick whose incoming damage alone would have
+killed it. A contributing Priest must supply useful healing on that tick.
+The source counts already record who helped. The team counts already count
+each saved ally once per tick. These fractions reuse those counts when the full
+result is built; the per-tick counters and their updates stay unchanged.
+
+If two Priests use Basic healing to help with the team's only save, each agent's
+Basic participation is `1.0`, and the team's Basic save fraction is `1.0`.
+There are two helpers and one save. If Basic and Ultimate healing both help
+with that save, both team ability fractions are `1.0`. The fractions can
+overlap; adding them does not give the number of saves.
+
+These fractions are blank when the team has no saves. Inactive agents' shares
+are also blank. The viewer shows healer rows only for Priests in active slots;
+moving or repeating Priests does not change the fixed CSV columns. These are
+shares of actual saves, not shares of rescue opportunities or proof that one
+Priest could save the ally alone. Existing recipient-specific Basic shares
+keep their own denominators: all unique saves of that recipient.
+
+The twelve values and their valid/blank flags add 60 logical bytes to each full
+result. Schema 12 has 55,760 logical output bytes per environment. This is a
+size calculation, not a speed or peak-memory measurement. Start a new run for
+schema 12; a schema-11 run cannot resume under the new header.
+
+### Schema 10 respawn cleanup
+
+Respawning has three columns per team: `respawn_waves`,
+`mean_agents_per_respawn_wave`, and `mean_observed_respawn_wait_steps`. Names
+start with `team_a_` or `team_b_`, giving six columns altogether. Waves count
+scheduled respawn times, including times when nobody returns. Mean agents per
+wave divides all returning agents by all those waves, including empty ones.
+For example, a wave with no returning agents counts as one wave with a mean
+of zero. Before the first wave, the mean is blank. Mean waiting ticks is blank
+when no waiting period was seen.
+
+Mean waiting ticks uses the dead time seen in this recording, divided by the
+number of waiting periods seen. It includes waits already underway at the start
+and waits still open at the selected tick. For example, two waits seen for
+two and four ticks give a mean of three ticks, even if one is still open. Each
+wait counts equally; this is not an average of individual agents' averages.
+
+Schema 10 removes all team and agent versions of `observed_respawn_waits`,
+`unfinished_respawn_waits`, and `unknown_start_respawn_waits`, plus the ten
+agent versions of `mean_observed_respawn_wait_steps`. That is 46 removed columns.
+The two team means stay. No individual-agent wait rows remain in this topic.
+This does not change death counts, time dead, respawn events or replay content.
+
+### Schema 7 class Basic kills and migration
+
+Schema 7 adds ten class Basic kill counts and ten fractions: one count and one
+fraction for each of the five classes on each team. In these names, `{a,b}` is
+`a` for Team A or `b` for Team B. `{class}` is `mage`, `warrior`, `hunter`,
+`rogue`, or `priest`.
+
+| Added columns | Count | Meaning |
+| --- | ---: | --- |
+| `team_{a,b}_{class}_basic_kills` | 10 | Kills helped by at least one Basic ability from this class on the named team. Each enemy death counts once. |
+| `team_{a,b}_{class}_basic_kill_fraction` | 10 | Numerator: Kills helped by this class's Basic abilities on the named team, counting each kill once. Denominator: All kills by the named team. |
+
+Credit needs Basic damage on the tick the enemy dies, or useful Priest Basic
+healing of a teammate who damaged that enemy on that tick. Healing that is all excess gives no credit. A Mage's Basic attack during Burst still gives Basic
+credit.
+
+Repeated classes do not multiply the count. If two Mages help with Basic attacks
+on one kill, their team's Mage Basic kill count rises by one. If a Mage and a
+Warrior each help with Basic attacks on that kill, both class counts rise by one.
+There is still only one kill. If it is the team's only kill, both class fractions
+are `1.0`. Class fractions can overlap with each other and with Ultimate help;
+adding these fractions does not give the number of kills.
+
+A class present in an active slot has a valid zero count if it has no Basic
+kill credit. Its fraction is zero if the team has kills, and blank if the team
+has no kills. If the team has no active agent of that class, both its count and
+fraction are unavailable.
+The denominator always includes all kills by the named team, regardless of
+which class or ability helped.
+
+The new running count uses a fixed `(5, 2)` array of 32-bit integers: one count
+per class and team, adding 40 logical bytes per full-enabled environment. The
+20 output values and their valid/blank flags add 100 logical bytes per full
+result. The schema-7 full result needed 55,730 logical bytes. These are storage
+calculations; they do not establish a change in speed or measured peak memory.
+
+Existing schema-1/2/3/4/5/6 files remain unchanged. A schema-7 writer rejects an
+older scalar schema before recovery, truncation, or writing. Start a new run
+directory to use the new columns; the replay file format is unchanged.
+
+### Schema 6 additions and migration
+
+This earlier schema added ten agent fractions and two team fractions, bringing
+its full output to 11,126 numerical columns and 11,156 run-table columns with
+identity. These measurements remain in schema 7. Here `i` is an agent slot from
+0 to 9. Slots 0–4 belong to Team A; slots 5–9 belong to Team B.
+
+| Added columns | Count | Meaning |
+| --- | ---: | --- |
+| `agent_i_basic_kill_participation` | 10 | Numerator: Kills this agent helped with its Basic ability. Denominator: All kills by its team. |
+| `team_a_basic_kill_fraction`, `team_b_basic_kill_fraction` | 2 | Numerator: Kills helped by at least one Basic ability on that team, counting each kill once. Denominator: All kills by that team. |
+
+Basic help means Basic damage on the tick the enemy dies, or useful Priest Basic
+healing of a teammate who damaged that enemy on that tick. Healing that is all excess gives no credit.
+A Mage's Basic attack while Burst is active still counts as Basic help.
+Several agents can earn credit for one kill, but the team's Basic count includes
+that kill only once. For example, if two agents help with Basic abilities on the
+team's only kill, each agent's Basic participation is `1.0` and the team's Basic
+kill fraction is also `1.0`.
+
+A kill can have both Basic and Ultimate help. If a Basic attack and an Ultimate
+help with the team's only kill, both team fractions are `1.0`. Adding them gives
+`2.0`, which does not mean there were two kills. These fractions are blank when
+the source team has no kills; an inactive agent's fraction is also blank.
+
+The existing single- and multiple-contributor kill counts and fractions appear
+in both **Kill Contributions** and **Team Coordination**. The groups share each
+measurement's one CSV column, so this adds no duplicate output columns.
+
+Schema 6 left existing schema-1/2/3/4/5 files unchanged and rejected an older
+scalar schema before recovery, truncation, or writing. Its additions did not
+change the replay file format. New runs now use schema 12, as described above.
+
+### Schema 5 removals
+
+This historical change followed the game rules, not a list of zeros from sampled
+games. Here `i` is any agent slot, and its matching team is A for slots 0–4 or B
+for slots 5–9. All surviving numerical names and meanings remain unchanged.
+
+| Removed measurements | Columns | What remains |
+| --- | ---: | --- |
+| Class-specific team Ultimate damage | 10 | Individual Ultimate damage and overall team Ultimate damage |
+| Mage team kills/fraction from activating Burst | 4 | Damage and kill credit while Burst is active |
+| Priest team Ultimate activations | 2 | Individual and overall team activations |
+| Self-healing while already under Charge Stun, Trap, or Poison Stun, including allocation/contribution | 90 | Other-source healing of stunned allies and general self-healing |
+| Burst self application allocation/contribution fractions | 20 | Named Burst activation counts |
+| Mage/Warrior self aura coverage/contribution fractions | 40 | Self covered time and changing self allocation fractions |
+| Burst self-pair and team-to-self application counts | 20 | The identical `agent_i_mage_burst_applications` count |
+| Mage/Warrior self aura eligible time | 20 | The identical self `_aura_covered_steps` count |
+| **Total** | **206** | |
+
+Burst targets its caster, and an eligible aura giver always covers itself.
+Their removed fractions are mathematically one whenever defined. The removed
+self-healing-under-stun amounts are zero: an already-stunned Priest cannot
+activate healing. A different Priest can still heal that stunned ally.
+
+The 516 repeated named-effect columns for Charge and Poison stay. They let a
+researcher select an effect by name. This exception concerns applications only;
+status durations and effects on controlled agents can differ.
+
+Unique class kills also stay. If two Warriors help kill one enemy, that is two
+individual contributions but one class kill. A Priest can earn kill credit by
+healing an attacker on the death tick, when some of that healing was effective.
+Class changes, repeated classes, inactive slots and missing classes do not
+justify dropping generic slot columns such as `agent_4_kill_contributions`.
+
+**Kills Helped by an Ultimate Activated That Tick** counts help from an Ultimate
+activated on the tick the enemy dies. That help can be damage, or Priest healing
+of an attacker when some of that healing is effective. A Mage's later Basic attack
+while Burst is active counts as Basic and Burst help, not as that Mage's Ultimate
+contribution. For example, a Mage killing alone with a Basic attack during Burst
+adds one Basic-assisted kill and one Burst-assisted kill, with no Ultimate-assisted
+kill. If a Warrior's Charge also helps with that kill, the Ultimate count rises
+by one too. There is still only one enemy death. These categories overlap; adding
+them does not give total kills. Credit does not prove the ability was needed to
+get the kill. This wording clarification leaves the CSV names and calculations
+unchanged.
+
+### Reading source and recipient names
+
+Read a name from left to right. Before `to` is the agent or team doing something
+(the source). After `to` is the agent it affects (the recipient). The rest names
+the measurement. Two teammates use `and` when neither acts on the other, such
+as their distance apart. The lower agent number comes first.
+
+| Schema 3 prefix | Schema 4 prefix | Relationship | Columns renamed |
+| --- | --- | --- | ---: |
+| `team_b_agent_1_` | `team_b_to_agent_1_` | Team B is the source; Agent 1 is the recipient. | 130 |
+| `agent_5_agent_1_` | `agent_5_to_agent_1_` | Agent 5 is the source; Agent 1 is the recipient. | 9,230 |
+| `agent_0_agent_1_` | `agent_0_and_agent_1_` | Unordered teammate pair, such as formation distance. | 40 |
+
+The examples illustrate each prefix rule across its entire scope. The other
+1,920 names, including all 26 priority names, remain unchanged. Old CSV files
+retain their original headers. The viewer's **CSV Column** tooltip identifies
+the installed schema's exact column; no second `from` alias is exported.
+
+Activating an ability and receiving its effect answer different questions.
+Agent 0 can **activate its Basic ability 87 times** while **Team A targets
+Agent 0 with Basic abilities 49 times**. `agent_0_basic_activations` counts the
+former; `team_a_to_agent_0_basic_applications` counts the latter. Each activation
+counts once. An attempt the game rejects does not count. Refreshing a status
+does not add another activation.
+
+If an agent uses its ability ten times and aims four uses at one target, its
+share on that target is **4/10 = 0.4, or 40%**. If the team aimed eight uses at
+that target, the agent supplied **4/8 = 0.5, or 50%** of them.
+
+Hover over a measurement, or use the keyboard to focus it, to read its meaning.
+**From** and **To** name the source and target. **Numerator** names the amount
+being compared; **Denominator** names the total it is compared with. For example,
+four Basic ability activations by Agent 3 on Agent 8 out of eight by Team A on
+Agent 8 give `0.5`, or `50%`. The help names Team A or Team B explicitly.
+**Blank When** explains when no number
+can be given. **CSV Column** gives the exact column to use in pandas. Fractions
+remain decimals in the viewer and CSV: `0.4` means `40%`.
+
+Every tooltip starts with a short definition for that row. For example:
+"How many times this agent used its Basic ability." Counting rules and brief
+examples follow where needed. The same wording appears in the generated column
+dictionary. Schema 9 uses the term Excess in names and explanations; the
+calculations stay unchanged.
+
+**How to Read It** judges the team named in the row. For example, more damage
+dealt is better for the attacking team; less damage received is better for the
+team taking it. Team B rows do not switch to Team A's point of view. The score
+difference names both sides: higher favors Team A and lower favors Team B.
+
+**Context dependent** means the number alone cannot tell us whether the team
+played better. A Warrior may take hits to protect teammates, so all its incoming
+damage amounts use this label. The viewer reads the class from the replay;
+it never assumes a particular slot is a Warrior. Whole-team damage received
+still uses "Lower is better."
+
+Damage to an already trapped enemy is context dependent: it hurts the enemy but
+can also free it from Trap. The same tradeoff applies to damage received while
+trapped, for every class. Other harmful-effect damage keeps its usual guidance.
+
+Excess healing is the part of delivered healing that does not fit under the
+recipient's maximum health, after damage on that tick. It is not a judgment
+about the action. Basic healing can still give Freedom when all its healing
+is excess. Basic and combined excess amounts and efficiency fractions are
+therefore context dependent.
+Ultimate-only excess amounts and efficiency fractions use "Lower is better":
+Holy Word: Salvation does not give Freedom. Shares showing where excess went
+remain context dependent.
+
+Effective Priest healing is delivered healing minus that health-cap excess.
+It can offset incoming damage even if health does not rise or the ally still
+dies. For example, an ally starting with 10 health who takes 30 damage and
+receives 5 healing still dies, but all 5 healing is effective. This amount
+does not count a successful save; the separate healing-save measurements do.
+
+Keep healing amounts separate from their fractions:
+
+| Measurement | How to Read It |
+| --- | --- |
+| Effective Priest healing amount, excluding regeneration | Higher is better |
+| Total Effective Healing Received, including regeneration | Context dependent |
+| Basic/combined effective-healing fraction | Context dependent |
+| Basic/combined excess-healing fraction | Context dependent |
+| Ultimate-only effective-healing fraction | Higher is better |
+| Ultimate-only excess-healing fraction | Lower is better |
+
+Example: a Priest gives 50 effective healing, then heals a full-health ally to
+give Freedom. The effective amount stays 50, but its fraction falls. That lower
+fraction does not mean the Freedom cast was bad. Each effective/excess pair
+sums to one when its shared delivered-healing denominator is nonzero. Both
+fractions are blank when that denominator is zero. Allocation and contribution
+shares remain contextual: they show where healing went, not how much was useful.
+
+Regenerated healing is context dependent. More can mean leaving a fight at a
+good time or avoiding fights too much. Total Effective Healing Received combines
+effective Priest healing with regeneration, so it is also context dependent.
+Without Priest healing, that total equals Regenerated Healing. The separate
+effective Priest-healing amounts keep their existing guidance.
+Fully accepted action counts and the acceptance rate
+use "Higher is better."
+
+Use these labels to compare similar situations, not to rank policies by every
+column. A contribution count shows how many kills or saves an agent
+helped with. Its participation fraction shows its share of those events. If a
+teammate gets another kill, that fraction can fall even though the team did
+better. Participation and target-allocation fractions are context dependent.
+Aura coverage and activation frequency are also context dependent: more coverage
+can limit positioning, and more casts can give only excess healing.
+
+[The column data dictionary](metric_columns.csv) lists all **11,182 full-table
+columns**: 30 identity columns followed by 11,152 numerical measurements. Priority
 tables have **56 columns**. The dictionary includes meaning, units, scope,
-subjects, missingness, priority/full membership, GUI label and defensible direction.
+subjects, subject/recipient roles, numerators, denominators, missingness, priority/full
+membership, GUI labels, relevant views, family and defensible direction.
+`gui_text_by_topic` contains extra descriptions and subtitles used when a named
+Ultimate table shares that column. Every topic uses the column's one display
+name. Extra context never changes its value, denominator or CSV name. The viewer
+builds this context once from the recorded classes.
 It uses the writer's identity order and `evaluation/metric_catalog.py`;
 `python -m scripts.dev.export_metric_dictionary --check` detects stale exports.
 In its `subjects` field, team scope uses Core IDs 1/2, agent scope uses slots 0–9,
-source/recipient scope orders source before recipient, and ally pairs are unordered
-pairs written with the lower slot first. Class IDs remain recorded row metadata.
+team-to-recipient scope uses a Core team ID followed by the recipient's global
+slot, source/recipient scope orders source before recipient, and ally pairs are
+unordered pairs written with the lower slot first. Class IDs remain recorded row
+metadata. The same exporter generates and checks the manuscript family counts.
 
 ### Selection and cost boundary
 
@@ -87,11 +595,19 @@ missing. Active flags are 0/1; fixed slot/team mapping is 0–4 Team A, 5–9 Te
 Unknown training history is never filled with fabricated zero steps or run names.
 A training episode spanning parameter updates belongs to an evolving policy.
 
-Unavailable measurements are empty CSV cells; real zeros remain zero. An active
-Priest's Damage Done and an active Mage's Healing Done are valid zeros. Inactive
+Unavailable measurements are empty CSV cells; real zeros remain zero. In CSV,
+an active Priest's Damage Done and an active Mage's Healing Done are valid zeros.
+The Viewer hides those impossible-output rows but search still finds them. Inactive
 subjects, absent class-specific capabilities and zero-denominator rates/means are
-unavailable. Failures raise errors, never become empty cells. Column names encode
-slots, never class names, making curriculum comparisons directly joinable.
+unavailable. Failures raise errors, never become empty cells. Agent identities use
+fixed slots, making curriculum comparisons directly joinable; class names qualify
+class-specific effects and team summaries rather than replacing agent identity.
+Shared context in an Ultimate view requires the relevant class on the acting
+team: a healed recipient uses its own team, while a killed enemy's denominator
+uses the opposing team. Inactive slots cannot supply that class. Zero output
+remains visible when the recorded agent can produce it. Initial status and Trap
+records remain without a current caster. Poison prevention needs a friendly
+Priest, but not an opposing Rogue.
 
 `RunWriter.write(infos)` consumes all completion records and selected packets in
 a step or rollout chunk. `flush()` acknowledges durability; closing flushes.
@@ -105,36 +621,73 @@ exactly-once completion. Disk failures are also recorded when possible.
 - Deaths: agent/team counts, fractions, dead-agent steps and fractions of team dead time.
 - Kill contributions: direct damage on the authoritative lethal transition plus
   useful same-tick Priest healing of a direct contributor. Deduplicate each
-  Priest/enemy/transition; no recursive support chains or wasted-heal credit.
+  Priest/enemy/transition; no recursive support chains or credit for healing that is all excess.
+  Agent Basic participation divides that agent's Basic credit by all team kills.
+  Team Basic fractions count each Basic-helped kill once and use all team kills
+  as the denominator. Each class's Basic count also counts a kill once, even
+  with several helpers of that class, and its fraction uses all team kills.
+  Class credit, Basic help, and Ultimate help can overlap on one kill.
 - Damage/healing done: delivered after modifiers, before health caps, including
   overkill/overhealing. Source/recipient amounts are the sole amount authority;
   source/team/recipient totals derive from them. Regeneration is separate.
 - Received healing: delivered Priest healing and actual regeneration, with the
-  same combined denominator for component fractions. Waste is allocated among
+  same combined denominator for component fractions. Excess is allocated among
   simultaneously healing Priests in proportion to delivered healing.
 - Controlled recipients: transition-start status, including damage that breaks
   an existing Trap. New same-tick control is not retroactive. Status channels
   overlap and must not be summed as unique controlled time.
 - Coordination: mean per-tick Focus Fire Concentration over ticks with at least
   two damaging agents. Single/multiple contributor kill counts and fractions
-  include useful Priest support; focus fire remains about damaging agents.
+  count only damage and useful Priest healing on the enemy's death tick. They
+  exclude earlier help and appear in both Kill Contributions and Team
+  Coordination through shared CSV columns. Focus fire remains about damaging agents.
 - Action acceptance: submitted/fully accepted/rejected whole actions. Named
   rejection reasons can overlap and do not add to the number of rejected actions.
 - Control/status: application counts belong to the source; active steps belong
   to the affected recipient. Persistent merged effects get no invented caster.
+  Time with a slow does not prove the slow reduced movement: Freedom may protect
+  the agent. Team time adds each living affected agent's ticks. Two affected
+  teammates for one tick count as two agent ticks.
 - Trap breaks: damage-broken periods divided by all observed continuous Trap
-  periods, including initially active and still-open periods. Refresh alone
-  does not split a period; break/reapply does. Credit raw-damage contributors;
-  measure remaining duration at the aged break phase, not natural expiry.
-- Respawn: team waves and mean agents respawned per wave.
+  periods, including initially active and still-open periods. Two Hunters
+  trapping the same enemy on one tick produce two activations but one period.
+  A normal later Trap cast damages and breaks the old Trap before applying
+  another, or follows natural expiry. It starts a new period. Credit raw-damage
+  contributors; measure time left after the timer decreases. Natural expiry
+  is not a damage break. Recipient rows describe Traps on that agent, not Traps
+  broken by that agent. Team rows describe Traps on enemies of that team.
+- Respawn: each team's wave count, mean agents returned per wave, and mean
+  observed waiting ticks. Scheduled waves count even when nobody returns, and
+  those empty waves stay in the mean agents per wave. Waiting ticks include
+  time seen in waits already open at the start or still open at the selected
+  tick. Each wait counts equally.
+  Dead time remains in Deaths and Time Dead.
 - Burst: Mage damage while active, fraction of Mage damage, lethal-tick Burst
-  damage, and kill contributions during Burst.
-- Aura coverage: emitter coverage can overlap; unique team coverage counts a
-  recipient once. Combined Mage damage gain/Warrior prevention are team-level,
-  with no invented individual emitter shares.
-- Poison: affected-agent/team healing prevention; duration reuses status steps.
+  damage, and kill contributions during Burst. Amounts include all damage during
+  Burst, not only its extra damage. A source's lethal-tick allocation denominator
+  adds its damage to every enemy on the tick that enemy died. Recipient
+  contribution uses damage to that one enemy. Shared Deaths counts all abilities.
+- Aura coverage: several aura givers can cover the same ally; unique team
+  coverage counts that ally once per tick. Coverage fractions use time when
+  the giver and ally were alive and had no spawn shield, whether in range or
+  not. Allocation compares time covering this ally with all the giver's
+  covered ally ticks. Contribution compares that time with all ticks the ally
+  had coverage from any teammate of that aura class; these shares can overlap.
+  Combined Mage damage gain/Warrior prevention belong to the team, with no
+  invented shares for individual aura givers.
+- Poison: affected-agent/team **Priest Healing Prevented**; duration reuses status
+  steps. Poison must be present at tick start. The value is the reduction in
+  delivered Priest healing before the health cap, including healing that would
+  have been excess. A heal reduced from 8 to 4 contributes 4 even at full health.
+  This value excludes suppressed regeneration. Poison can reduce a Rogue's
+  regeneration on its final active tick because the Rogue's combat countdown can
+  expire first. Omitting regeneration-prevention and combined-prevention columns
+  is a deliberate reporting-scope decision, not an impossible-interaction claim.
 - Priest lethal damage rescue: team opportunities, saves and fraction; individual
-  rescue participation. Capability combines legal available healing under the
+  rescue participation, including matching Basic and Ultimate shares. Agent
+  ability participation uses that Priest's help divided by all unique team saves.
+  Team ability fractions count each helped save once and use all unique team saves.
+  Capability combines legal available healing under the
   existing masks and Core helpers against actual observed incoming damage;
   individual participation does not imply solo rescue capability.
 - Freedom: steps where Freedom reduces the applicable slow restriction, without
@@ -142,23 +695,125 @@ exactly-once completion. Disk failures are also recorded when possible.
 - Formation: transition-start living ally distances, with each eligible unordered
   pair counted once. Team mean is weighted by pair observations.
 
+### Historical schema-2 additions
+
+The following 660 measurements were added in schema 2. This table records that
+historical addition; the current family table and dictionary include schema 5's
+removals, the additions from schemas 6 and 7, schema 10's removal of 46
+observed-wait columns, schema 11's recipient columns, and schema 12's Basic save
+shares. Schema 10 keeps the two team means. Schema 4 updated
+directed prefixes as described above.
+
+| Addition | Numeric columns | Meaning |
+| --- | ---: | --- |
+| Effective healing and efficiency | 84 | Source/recipient/team effective amounts and fractions |
+| Individual solo kills | 20 | Counts and each agent's solo share of its own kill contributions |
+| Observed respawn waits | 48 | Mean dead time, observed periods, unfinished periods and unknown starts |
+| Ultimate targeting, output and contributions | 422 | Source/recipient applications, damage/healing, same-tick kill/rescue credit and Burst recipient damage |
+| Ultimate healing efficiency | 86 | Effective Ultimate amounts and effective/excess fractions |
+
+Effective Priest healing is delivered healing minus health-cap excess, allocated
+proportionally among simultaneous Priests. Source efficiency divides effective or
+excess healing by that source's delivered healing; recipient efficiency uses
+received Priest healing. Total effective healing received adds actual regeneration.
+Effective healing can offset simultaneous damage without increasing health or
+ensuring survival. CSV retains real zero amounts for active non-healers, while
+the Viewer hides their healing-output rows. Fractions with no delivered healing
+are unavailable.
+
+A solo kill has exactly one credited contributor. Useful same-tick Priest support
+adds a contributor; healing that is all excess does not. Solo kill fraction divides
+the agent's solo kills by its own kill contributions.
+
+Ultimate application fractions divide source/recipient applications by that
+source's Ultimate activations. Structurally impossible target relations are
+unavailable: Burst applies to its Mage, Priest targets allies, and the other
+classes target enemies. Reachable but unused recipients have zero applications;
+fractions additionally require a nonzero activation count. Temporary range,
+cooldown and control do not alter schema applicability.
+
+Direct Ultimate damage/healing retains delivered amounts; effective Ultimate
+healing subtracts its proportional share of excess. Mage Burst deals no immediate
+damage; later damage while Burst is active is recorded separately. Ultimate kill
+and rescue participation divide the agent's contributions by all team kills or
+rescues, respectively. Team counts deduplicate affected enemies or rescued allies.
+These values describe observed same-tick contributions, not proof of later causal
+effects. Persistent merged status effects have no invented individual caster.
+
+Basic effective and excess healing are accumulated directly over the 50 allied
+source–recipient pairs. Subtracting independently rounded total and Ultimate sums
+can invent tiny effective healing or erase tiny genuine excess, changing whether
+a percentage's denominator is zero. Direct accumulation preserves those meanings
+without a tolerance-based zero rule. The existing total and Ultimate statistics
+retain their accumulation order.
+
+Every measure has an explicit interpretation in the data dictionary. Directions
+refer to comparable conditions and the named effect; they are not universal policy
+rankings. For example, lower incoming damage is favorable in isolation, while a
+tank may deliberately absorb damage to protect teammates. Target allocation,
+formation, activity, opportunity counts and tactical composition remain contextual.
+Focus fire uses **Multi-Attacker Ticks**: two damaging agents sharing a target give
+100% concentration; attacking different targets gives 50%. It does not measure
+attack opportunities. Freedom eligibility requires Freedom, life, no stun and no
+spawn shield, including stationary or unslowed ticks. **Ally-Pair Distance
+Measurements** counts each living unordered pair: three allies produce three
+measurements per executed step.
+
 ### Column and presentation audit
 
-Recipient matrices are limited to requested damage/healing breakdowns; formation
-uses20 ally pairs. There is no universal agent/recipient/status/ability expansion,
-class-summary duplication, second agent-ID column or export of private counters.
-Team-to-recipient totals reuse received amount columns. Burst activations reuse
-Ultimate activations; poison duration reuses status steps. Requested complements
-remain: both scores/difference, and single/multiple contributor fractions. Full
-rows deliberately repeat priority values so each row is independently usable.
+Directed families cover Basic/Ultimate ability activations; all/Basic/Ultimate health output;
+total/Basic/Ultimate/Burst/solo kill credit; total/Basic/Ultimate rescue credit;
+nine named status applications; seven hostile-status damage/healing/kill families;
+Trap breaks; and Mage/Warrior aura coverage. Each uses only meaningful pairs.
+Controlled families do not add an ability axis. Formation uses 20 unordered ally
+pairs. The fixed schema covers all supported rosters, even when an episode leaves
+many class-specific columns unavailable.
 
-The Viewer groups these same values for readability, rather than displaying a
-1,388-column spreadsheet. Controls use **Up to Current Tick** and **Final Episode**.
+Application and amount allocation divides a source–recipient quantity by the
+source's total of that same quantity. Contribution divides it by the source
+team's corresponding quantity for that recipient. Event participation divides
+credited contributions by unique qualifying deaths, rescues, or breaks against
+that recipient. Pair healing efficiency divides effective or excess healing by
+delivered healing on that same pair. Aura coverage rate divides covered by
+eligible emitter–beneficiary steps; participation uses unique beneficiary coverage.
+All numerators and denominators are exported. The dictionary identifies each.
+
+Unique Basic, Ultimate and class-specific Ultimate event counts are deduplicated
+within each transition before accumulation. A kill can involve both a Basic and
+an Ultimate contributor, so team Basic events cannot be calculated by subtracting
+Ultimate events from all events. Priest support refers to the killed enemy for
+kill credit and to the saved ally for rescue credit, separately from the ally
+that received the healing application.
+
+Canonical received totals are reused where they already express a team's output
+to a recipient. Each canonical measurement has one CSV column. The approved
+named status-application columns are an explicit semantic exception: effects
+remain directly analyzable even when their counts equal class-filtered ability
+uses. Their totals and pairs derive from shared integer application matrices;
+there is no second running status-application accumulator. Poison duration reuses
+status steps. Both scores/difference and useful count/fraction complements remain.
+Full rows copy priority values so each row is independently usable.
+
+The Viewer offers **27 topics**, including the five named Ultimates. Sixteen
+topics have separate Totals and By Recipient tables; eleven have one table.
+Shared context references the same exported columns once per view. Paired views
+share no rows. Totals show teams before acting agents; recipient views show
+affected agents before source-to-recipient details. Tooltips identify the exact
+CSV name and denominator.
+Only structurally applicable rows are displayed, preserving meaningful zero
+amounts and undefined ratios. Controls use **Up to Current Tick** and **Entire Episode**.
+For example, a Mage cannot heal, so its Healing Done row is hidden. Its CSV
+column remains a valid zero, and search still finds it and explains why the
+row is hidden. A Priest who has not healed yet keeps its zero Healing Done row.
+Measurements about recipients can describe other classes: a Warrior can receive
+Priest healing or Burst damage when the relevant team has a capable source.
+Ultimate views order uses, relevant output, contributions and persistent effects
+within the common totals/detail hierarchy.
 One linear prefix index supports seeking without repeated history reductions;
 intermediate prefixes never disclose future outcomes or denominators. GUI values
 and CSV at the same boundary agree. Inapplicable/undefined cells explain their
-missingness. Formation, activity and contextual tactics have **No Preferred
-Direction** unless the catalog justifies a stronger interpretation.
+missingness. Formation, activity and contextual tactics are **Context dependent**
+unless the catalog justifies a stronger interpretation.
 
 ## Historical rationale and V1 registry
 
@@ -826,7 +1481,7 @@ private M6 source ledger preserves the line-level source trace.
 | Trap casts/triggers/placed uptime | Correct | Targeted applications, active steps, lifecycle episode endings, damage-break rate |
 | Anti-heal uptime/healing prevented | Retain combined value | Preserve healing exposure; no per-Rogue credit under overlap |
 | Ultimate use/conversion/kill within K | Activations retained; conversion conditional | Mechanic-native active-window association only |
-| Burst uptime/damage/deaths/waste | Retain active-window amounts; reject waste counterfactual | No hypothetical attacks or “kills caused” wording |
+| Burst uptime/damage/deaths/excess | Retain active-window amounts; reject excess counterfactual | No hypothetical attacks or “kills caused” wording |
 | Freedom uptime/effective time/movement recovered | Retain binding coverage; scenario for utility | No counterfactual distance fact |
 | Warrior tanking, Hunter low damage taken | Retain descriptive exposure | Not proof of tanking quality or kiting |
 | Peeling, kiting, flanking, body blocking, backline access, cornering, LOS/choke use, escape denial | Scenario | Context-dependent geometry behavior |

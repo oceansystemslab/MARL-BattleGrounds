@@ -576,6 +576,9 @@ def test_browser_replay_loads_resolves_then_injects_exact_server_binding(
                 "server should not request metric analysis in this test"
             )
 
+        def metric_catalog(self) -> bytes:
+            raise AssertionError("server should not request the catalog in this test")
+
         def episode_details(self) -> tuple[bytes, str]:
             raise AssertionError(
                 "server should not request episode details in this test"
@@ -669,6 +672,7 @@ def test_browser_replay_loads_resolves_then_injects_exact_server_binding(
     assert coordinator.current_presentation == service.current_presentation
     assert coordinator.current_metric_report == service.current_metric_report
     assert coordinator.metric_analysis == service.metric_analysis
+    assert coordinator.metric_catalog == service.metric_catalog
     assert coordinator.apply_command == service.apply_command
 
 
@@ -1188,6 +1192,9 @@ def test_sample_replay_injects_verified_bundle_without_reopening_source_path(
                 "server should not request metric analysis in this test"
             )
 
+        def metric_catalog(self) -> bytes:
+            raise AssertionError("server should not request the catalog in this test")
+
         def episode_details(self) -> tuple[bytes, str]:
             raise AssertionError(
                 "server should not request episode details in this test"
@@ -1246,6 +1253,7 @@ def test_sample_replay_injects_verified_bundle_without_reopening_source_path(
     assert observed["open_browser"] is False
     coordinator = cast(HttpCoordinatorBinding, observed["coordinator"])
     assert coordinator.metric_analysis == service.metric_analysis
+    assert coordinator.metric_catalog == service.metric_catalog
 
 
 def test_sample_replay_static_uses_the_verified_in_memory_artifact(

@@ -329,9 +329,9 @@ row.
 Visual Filters contains 19 independently controlled paint families plus Ranges.
 Initially enable Ultimate Ability Effects, Spawn Shield, Basic Ability Effects,
 Regeneration Effects, Death Effects, Resurrection Effects, Scrolling Battle
-Text and Respawn Wave. Ranges and Death Announcer start off, giving `8 enabled`.
+Text, Respawn Wave and Death Announcer. Ranges start off, giving `9 enabled`.
 Visual Filters and Roster start open; Enable All selects all 20 controls, and
-Default Configuration restores the initial selection.
+Default Configuration restores these nine effects with Ranges off.
 The complete inventory is:
 
 1. Aura Fields
@@ -354,9 +354,17 @@ The complete inventory is:
 18. Scrolling Battle Text
 19. Death Announcer
 
-Death Announcer shows authoritative deaths in compact Team A/Team B cards with
-up to five identities each. It is researcher context in both views; it adds no
-actor observations or battlefield visibility. Pausing or seeking clears it.
+Death Announcer names the killing team and shows a compact list of victims.
+Hover or focus a victim to see every associated **Kill Contributor**, including
+useful same-tick Priest support. Team A's kills appear in blue on the left and
+Team B's in red on the right. Contributor details use the same accessible
+event-information tooltip machinery as Respawn Wave. Missing historical credit
+is identified as unavailable rather than guessed.
+
+Notices last 1.5 seconds at normal presentation speed. Enabled cues remain visible
+when inspecting their paused/static transition; seek, restart and replacement
+clear the previous transition's notices. This global researcher HUD appears in
+both POVs and adds no actor observations or battlefield visibility.
 
 Duration Status Badges includes the white crossed-swords **In Combat** countdown.
 An overflow badge represents at least two hidden statuses. If only one remains,

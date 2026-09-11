@@ -1,168 +1,56 @@
 """Fixed scalar metrics against public Core trajectories and lifecycle facts."""
 
-from collections.abc import Callable
-from typing import NamedTuple, cast
+from typing import cast
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax import Array
-from tests.evaluation_fixtures import evaluation_env_config, neutral_action
+from tests.evaluation_fixtures import neutral_action
+from tests.full_metric_fixtures import (
+    actions as _actions,
+)
+from tests.full_metric_fixtures import (
+    advance as _advance,
+)
+from tests.full_metric_fixtures import (
+    assert_missing as _missing,
+)
+from tests.full_metric_fixtures import (
+    priority as _priority,
+)
+from tests.full_metric_fixtures import (
+    start_run as _start,
+)
+from tests.full_metric_fixtures import (
+    update_metrics as _update,
+)
+from tests.full_metric_fixtures import (
+    value as _value,
+)
+from tests.full_metric_fixtures import (
+    values as _values,
+)
 
-from marl_battlegrounds.core.axis_mappings import global_slot_to_target_action
-from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import (
     build_canonical_no_transition_info_object,
-    initialize_scenario_state,
     reset,
-    step,
 )
 from marl_battlegrounds.core.types import (
-    Action,
-    ActionMask,
-    DoneFlags,
-    EnvConfig,
     EnvState,
-    Info,
-    Observation,
-    Reward,
 )
 from marl_battlegrounds.evaluation.episode_metrics import (
     MetricValues,
-    PriorityTotals,
-    initialize_priority,
-    priority_values,
-    update_priority,
 )
 from marl_battlegrounds.evaluation.full_metrics import (
-    FullTotals,
     full_values,
     initialize_full,
-    update_full,
 )
 from marl_battlegrounds.evaluation.metric_catalog import (
-    FULL_METRIC_NAMES,
     METRIC_COLUMNS,
     PRIORITY_METRIC_NAMES,
     STATUS_NAMES,
 )
-
-_step = cast(
-    Callable[..., tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]],
-    jax.jit(step),
-)
-_update = cast(
-    Callable[[FullTotals, EnvConfig, EnvState, ActionMask, Info], FullTotals],
-    jax.jit(update_full),
-)
-_final = cast(
-    Callable[[FullTotals, EnvConfig, MetricValues], MetricValues], jax.jit(full_values)
-)
-_COLUMN_INDEX = {name: index for index, name in enumerate(FULL_METRIC_NAMES)}
-
-
-class _Run(NamedTuple):
-    config: EnvConfig
-    state: EnvState
-    mask: ActionMask
-    full: FullTotals
-    priority: PriorityTotals
-    initial_step: Array
-    outcome: Array
-
-
-def _start(
-    *,
-    team_sizes: tuple[int, int] = (3, 2),
-    classes: tuple[tuple[int, int], ...] = (),
-    arrange: Callable[[EnvState], EnvState] | None = None,
-) -> _Run:
-    config = evaluation_env_config(
-        team_sizes=team_sizes,
-        task_mode=1,
-        team_deathmatch_score_threshold=20,
-        max_steps=16,
-    )
-    class_ids = config.agent_profile.class_ids
-    for slot, class_id in classes:
-        class_ids = class_ids.at[slot].set(class_id)
-    config = config._replace(
-        agent_profile=resolve_agent_profile(
-            class_ids, jnp.asarray(team_sizes, jnp.int32)
-        )
-    )
-    state, _, _, _ = reset(config, jax.random.key(0))
-    positions = jnp.asarray(
-        [(6.0, 1.5 + 2 * slot) for slot in range(5)]
-        + [(9.0, 1.5 + 2 * slot) for slot in range(5)],
-        jnp.float32,
-    )
-    state = state._replace(
-        agent_positions=jnp.where(
-            config.agent_profile.active_mask[:, None], positions, 0
-        )
-    )
-    if arrange is not None:
-        state = arrange(state)
-    state, _, mask, _ = initialize_scenario_state(state, config)
-    return _Run(
-        config,
-        state,
-        mask,
-        initialize_full(config, state),
-        initialize_priority(),
-        state.step_count,
-        jnp.asarray(0, jnp.int32),
-    )
-
-
-def _actions(*choices: tuple[int, int, bool]) -> Action:
-    actions = neutral_action()
-    for source, recipient, ultimate in choices:
-        actions = actions._replace(
-            select_target=actions.select_target.at[source].set(
-                global_slot_to_target_action(source, recipient)
-            ),
-            use_ultimate=actions.use_ultimate.at[source].set(int(ultimate)),
-        )
-    return actions
-
-
-def _advance(run: _Run, actions: Action) -> tuple[_Run, Info]:
-    successor, _, reward, _, mask, info = _step(
-        run.config, run.state, run.mask, actions, jax.random.key(1)
-    )
-    return (
-        run._replace(
-            state=successor,
-            mask=mask,
-            full=_update(run.full, run.config, run.state, run.mask, info),
-            priority=update_priority(run.priority, reward, info),
-            outcome=info.transition_facts.team_deathmatch_facts.outcome,
-        ),
-        info,
-    )
-
-
-def _priority(run: _Run) -> MetricValues:
-    return priority_values(
-        run.config, run.state, run.initial_step, run.priority, run.outcome
-    )
-
-
-def _values(run: _Run) -> MetricValues:
-    return _final(run.full, run.config, _priority(run))
-
-
-def _value(values: MetricValues, name: str) -> float:
-    index = _COLUMN_INDEX[name]
-    assert bool(values.valid[index]), name
-    return float(values.values[index])
-
-
-def _missing(values: MetricValues, name: str) -> None:
-    assert not bool(values.valid[_COLUMN_INDEX[name]]), name
 
 
 def test_fixed_full_schema_preserves_priority_and_missingness_across_rosters() -> None:
@@ -173,10 +61,31 @@ def test_fixed_full_schema_preserves_priority_and_missingness_across_rosters() -
     compiled = (
         jax.jit(full_values).lower(first.full, first.config, _priority(first)).compile()
     )
-    for run in (first, second):
+    runs = [first, second]
+    # Each class occupies every slot once, using the same compiled finalizer.
+    for rotation in range(5):
+        classes = tuple((slot, (slot + rotation) % 5 + 1) for slot in range(10))
+        run, _ = _advance(_start(team_sizes=(5, 5), classes=classes), neutral_action())
+        runs.append(run)
+    for team_a, team_b in (
+        ((1, 5), (1, 5)),
+        ((1, 1, 1), (1, 1, 1)),
+        ((1, 2, 3, 4), (1, 2, 3, 4)),
+        ((5, 5, 5, 5, 5), (5, 5, 5, 5, 5)),
+        ((5, 5, 1), (1, 2)),
+    ):
+        classes = tuple(enumerate(team_a)) + tuple(
+            (5 + slot, class_id) for slot, class_id in enumerate(team_b)
+        )
+        run, _ = _advance(
+            _start(team_sizes=(len(team_a), len(team_b)), classes=classes),
+            neutral_action(),
+        )
+        runs.append(run)
+    for run in runs:
         values = cast(MetricValues, compiled(run.full, run.config, _priority(run)))
-        assert len(METRIC_COLUMNS) == 1388
-        assert values.values.shape == values.valid.shape == (1388,)
+        assert len(METRIC_COLUMNS) == 11152
+        assert values.values.shape == values.valid.shape == (11152,)
         assert values.values.dtype == jnp.float32 and values.valid.dtype == jnp.bool_
         assert bool(jnp.isfinite(values.values).all())
         np.testing.assert_array_equal(
@@ -185,37 +94,49 @@ def test_fixed_full_schema_preserves_priority_and_missingness_across_rosters() -
         np.testing.assert_array_equal(
             values.valid[: len(PRIORITY_METRIC_NAMES)], _priority(run).valid
         )
-        for column in METRIC_COLUMNS:
+        active = np.asarray(run.config.agent_profile.active_mask)
+        class_ids = np.asarray(run.config.agent_profile.class_ids)
+        valid = np.asarray(values.valid)
+        for index, column in enumerate(METRIC_COLUMNS):
+            if column.scope == "agent" and column.stem == "rescue_opportunities":
+                recipient = column.subjects[0]
+                team_start = recipient // 5 * 5
+                allies = slice(team_start, team_start + 5)
+                has_priest = bool((active[allies] & (class_ids[allies] == 5)).any())
+                assert bool(valid[index]) == (active[recipient] and has_priest)
+            if column.scope == "team_recipient" and not active[column.subjects[1]]:
+                assert not valid[index], column.name
             if column.scope in ("agent", "source_recipient", "ally_pair") and any(
-                not bool(run.config.agent_profile.active_mask[slot])
-                for slot in column.subjects
+                not active[slot] for slot in column.subjects
             ):
-                _missing(values, column.name)
+                assert not valid[index], column.name
             if column.required_class_id is not None:
                 subjects = (
                     range((column.subjects[0] - 1) * 5, column.subjects[0] * 5)
-                    if column.scope == "team"
+                    if column.scope in ("team", "team_recipient")
                     else column.subjects[:1]
                 )
                 if not any(
-                    bool(run.config.agent_profile.active_mask[slot])
-                    and int(run.config.agent_profile.class_ids[slot])
-                    == column.required_class_id
+                    active[slot] and class_ids[slot] == column.required_class_id
                     for slot in subjects
                 ):
-                    _missing(values, column.name)
+                    assert not valid[index], column.name
 
     values = _values(first)
     assert (
         _value(values, "agent_0_healing_done") == 0
     )  # Active non-healer: measured zero.
     assert _value(values, "agent_2_damage_done") == 0  # Active Priest: measured zero.
-    assert _value(values, "agent_0_agent_5_damage_done") == 0
+    assert _value(values, "agent_0_to_agent_5_damage_done") == 0
     _missing(values, "agent_0_damage_done_fraction")
-    _missing(values, "agent_0_agent_5_damage_done_fraction")
-    _missing(values, "agent_0_wasted_healing")  # Class-inapplicable, not zero.
+    _missing(values, "agent_0_to_agent_5_damage_done_fraction")
+    _missing(values, "agent_0_excess_healing")  # Class-inapplicable, not zero.
     _missing(values, "team_b_damage_from_mage_aura")
     _missing(values, "team_b_rescue_opportunities")
+    _missing(values, "agent_5_rescue_opportunities")
+    _missing(values, "agent_4_rescue_opportunities")
+    for recipient in (0, 1, 2):
+        assert _value(values, f"agent_{recipient}_rescue_opportunities") == 0
     _missing(values, "team_a_focus_fire_concentration")
     _missing(_values(second), "team_a_ally_distance_mean")
     assert _value(_values(second), "team_a_ally_distance_observations") == 0
@@ -247,7 +168,14 @@ def test_all_status_active_time_uses_decision_start_and_natural_expiry(
         )
 
     run = _start(classes=((5, 1),), arrange=arrange)
-    assert int(run.full["trap_periods"][0]) == int(duration > 0)
+    assert int(run.full["trap_periods"][5]) == int(duration > 0)
+    initial = _values(run)
+    assert _value(initial, "agent_5_trap_intervals") == int(duration > 0)
+    if duration:
+        assert _value(initial, "agent_5_trap_break_rate") == 0
+    else:
+        _missing(initial, "agent_5_trap_break_rate")
+    _missing(initial, "agent_5_trap_mean_remaining_steps_at_break")
     for transition in range(4):
         run, info = _advance(run, neutral_action())
         lifecycle = info.transition_facts.status_lifecycle_facts
@@ -259,7 +187,10 @@ def test_all_status_active_time_uses_decision_start_and_natural_expiry(
         assert _value(values, f"agent_5_{status}_active_steps") == expected
     assert _value(values, "team_a_trap_intervals") == int(duration > 0)
     assert _value(values, "team_a_trap_breaks") == 0
+    assert _value(values, "agent_5_trap_intervals") == int(duration > 0)
+    assert _value(values, "agent_5_trap_breaks") == 0
     _missing(values, "team_a_trap_mean_remaining_steps_at_break")
+    _missing(values, "agent_5_trap_mean_remaining_steps_at_break")
 
 
 @pytest.mark.parametrize(
@@ -298,15 +229,41 @@ def test_status_applications_bind_every_channel_to_the_accepted_source(
         else combat.basic_effect_is_activated_by_source
     )
     assert bool(activated[source])
-    expected = np.zeros((10, 9), dtype=np.int32)
-    expected[source, list(channels)] = 1
-    np.testing.assert_array_equal(run.full["applications"], expected)
+    assert "applications" not in run.full
     # Fresh applications cannot retroactively increase transition-start exposure.
     np.testing.assert_array_equal(run.full["active_steps"], 0)
     values = _values(run)
     for channel in channels:
         assert (
             _value(values, f"agent_{source}_{STATUS_NAMES[channel]}_applications") == 1
+        )
+        status = STATUS_NAMES[channel]
+        if status == "mage_burst":
+            # Burst acts on the caster. Its source count retains the whole fact.
+            assert _value(values, f"agent_{source}_ultimate_activations") == 1
+            continue
+        assert (
+            _value(values, f"agent_{source}_to_agent_{recipient}_{status}_applications")
+            == 1
+        )
+        team = "a" if source < 5 else "b"
+        assert (
+            _value(values, f"team_{team}_to_agent_{recipient}_{status}_applications")
+            == 1
+        )
+        assert (
+            _value(
+                values,
+                f"agent_{source}_to_agent_{recipient}_{status}_applications_allocation_fraction",
+            )
+            == 1
+        )
+        assert (
+            _value(
+                values,
+                f"agent_{source}_to_agent_{recipient}_{status}_applications_contribution_fraction",
+            )
+            == 1
         )
 
 
@@ -345,8 +302,42 @@ def test_trap_reapplication_follows_natural_expiry_or_damage_break(
     assert int(run.state.stun_durations[5, 1]) == max(4, duration - 1)
     values = _values(run)
     assert _value(values, "team_a_trap_intervals") == intervals
+    assert _value(values, "agent_5_trap_intervals") == intervals
+    assert _value(values, "agent_5_trap_breaks") == int(broken)
+    assert _value(values, "agent_5_trap_break_rate") == int(broken) / intervals
+    if broken:
+        assert _value(values, "agent_5_trap_mean_remaining_steps_at_break") == 2
+    else:
+        _missing(values, "agent_5_trap_mean_remaining_steps_at_break")
     assert _value(values, "agent_0_hunter_trap_applications") == 1
     assert _value(values, "agent_5_hunter_trap_active_steps") == int(duration > 0)
+
+
+def test_two_hunters_start_one_recipient_trap_period_with_two_applications() -> None:
+    run = _start(
+        classes=((0, 3), (1, 3)),
+        arrange=lambda state: state._replace(
+            agent_positions=state.agent_positions.at[0]
+            .set((7, 1.5))
+            .at[1]
+            .set((7, 2.5))
+        ),
+    )
+    run, info = _advance(run, _actions((0, 5, True), (1, 5, True)))
+    combat = info.transition_facts.combat_transition_facts
+    applied = combat.stun_is_applied_by_source_and_channel
+    np.testing.assert_array_equal(applied[:2, 1], True)
+    assert int(run.state.stun_durations[5, 1]) == 4
+    values = _values(run)
+    assert _value(values, "team_a_hunter_trap_applications") == 2
+    assert _value(values, "agent_5_trap_intervals") == 1
+    assert _value(values, "agent_5_trap_breaks") == 0
+    assert _value(values, "agent_5_trap_break_rate") == 0
+    assert _value(values, "agent_5_hunter_trap_active_steps") == 0
+    _missing(values, "agent_5_trap_mean_remaining_steps_at_break")
+    assert _value(values, "agent_6_trap_intervals") == 0
+    _missing(values, "agent_6_trap_break_rate")
+    _missing(values, "agent_4_trap_intervals")
 
 
 @pytest.mark.parametrize("lethal", (False, True))
@@ -377,10 +368,48 @@ def test_damage_break_then_fresh_trap_counts_two_periods_even_if_death_clears_ne
     assert _value(values, "team_a_trap_breaks") == 1
     assert _value(values, "team_a_trap_break_rate") == 0.5
     assert _value(values, "team_a_trap_mean_remaining_steps_at_break") == 2
+    assert _value(values, "agent_5_trap_intervals") == 2
+    assert _value(values, "agent_5_trap_break_rate") == 0.5
+    assert _value(values, "agent_5_trap_mean_remaining_steps_at_break") == 2
     assert _value(values, "agent_0_trap_break_contributions") == 1
     assert _value(values, "agent_1_trap_break_contributions") == 1
+    assert _value(values, "agent_5_trap_breaks") == 1
+    for source in (0, 1):
+        assert (
+            _value(values, f"agent_{source}_to_agent_5_trap_break_contributions") == 1
+        )
+        assert (
+            _value(
+                values,
+                f"agent_{source}_to_agent_5_trap_break_contributions_allocation_fraction",
+            )
+            == 1
+        )
+        assert (
+            _value(values, f"agent_{source}_to_agent_5_trap_break_participation") == 1
+        )
+        assert (
+            _value(values, f"agent_{source}_to_agent_5_damage_to_hunter_trap_recipient")
+            > 0
+        )
     assert _value(values, "team_a_kills_of_hunter_trap_recipient") == int(lethal)
     if lethal:
+        assert _value(values, "agent_5_deaths_while_hunter_trap") == 1
+        for source in (0, 1):
+            assert (
+                _value(
+                    values,
+                    f"agent_{source}_to_agent_5_kill_contributions_to_hunter_trap_recipient",
+                )
+                == 1
+            )
+            assert (
+                _value(
+                    values,
+                    f"agent_{source}_to_agent_5_kill_participation_in_hunter_trap_recipient",
+                )
+                == 1
+            )
         assert (
             _value(values, "agent_0_kill_participation_in_hunter_trap_recipient") == 1
         )
@@ -388,6 +417,17 @@ def test_damage_break_then_fresh_trap_counts_two_periods_even_if_death_clears_ne
             _value(values, "agent_1_kill_participation_in_hunter_trap_recipient") == 1
         )
         assert _value(values, "team_a_multi_contributor_kills") == 1
+    else:
+        run, info = _advance(run, _actions((0, 5, False)))
+        lifecycle = info.transition_facts.status_lifecycle_facts
+        assert bool(lifecycle.broken_by_damage_by_recipient_and_status_channel[5, 4])
+        values = _values(run)
+        assert _value(values, "agent_5_trap_intervals") == 2
+        assert _value(values, "agent_5_trap_breaks") == 2
+        assert _value(values, "agent_5_trap_break_rate") == 1
+        # The first break had two ticks left; the second had three.
+        assert _value(values, "agent_5_trap_mean_remaining_steps_at_break") == 2.5
+        assert _value(values, "team_a_trap_mean_remaining_steps_at_break") == 2.5
 
 
 @pytest.mark.parametrize("duration", (0, 1, 3))
@@ -452,6 +492,32 @@ def test_overlapping_control_effects_and_new_freedom_keep_their_own_epoch() -> N
         assert _value(
             values, f"agent_2_healing_to_{status}_recipient"
         ) == pytest.approx(healing)
+        assert _value(
+            values, f"agent_5_to_agent_0_damage_to_{status}_recipient"
+        ) == pytest.approx(damage)
+        assert _value(
+            values, f"agent_0_damage_received_while_{status}"
+        ) == pytest.approx(damage)
+        assert _value(
+            values, f"agent_2_to_agent_0_healing_to_{status}_recipient"
+        ) == pytest.approx(healing)
+        assert _value(
+            values, f"agent_0_healing_received_while_{status}"
+        ) == pytest.approx(healing)
+        assert (
+            _value(
+                values,
+                f"agent_2_to_agent_0_healing_to_{status}_recipient_allocation_fraction",
+            )
+            == 1
+        )
+        assert (
+            _value(
+                values,
+                f"agent_2_to_agent_0_healing_to_{status}_recipient_contribution_fraction",
+            )
+            == 1
+        )
     assert _value(values, "agent_0_freedom_eligible_steps") == 0
     assert int(run.state.priest_blessing_of_freedom_slow_floor_durations[0]) == 1
     before = run.state.agent_positions
@@ -494,6 +560,23 @@ def test_duplicate_aura_emitters_overlap_individually_but_team_time_is_unique() 
     assert _value(values, "team_a_mage_aura_covered_steps") == 3
     assert _value(values, "team_a_mage_aura_eligible_steps") == 3
     assert _value(values, "team_a_mage_aura_coverage") == 1
+    for source in (0, 1):
+        for recipient in (0, 1, 2):
+            prefix = f"agent_{source}_to_agent_{recipient}_mage_aura_"
+            assert _value(values, prefix + "covered_steps") == 1
+            assert _value(
+                values, prefix + "covered_steps_allocation_fraction"
+            ) == pytest.approx(1 / 3)
+            if source != recipient:
+                assert _value(values, prefix + "eligible_steps") == 1
+                assert _value(values, prefix + "coverage") == 1
+                # Both emitters covered this ally. Their shares can sum above
+                # one, while the team's covered time counts the ally once.
+                assert (
+                    _value(values, prefix + "covered_steps_contribution_fraction") == 1
+                )
+    assert _value(values, "agent_2_mage_aura_covered_recipient_steps") == 1
+    assert _value(values, "agent_3_mage_aura_covered_recipient_steps") == 0
     _missing(values, "agent_2_mage_aura_coverage")
     effects = info.transition_facts.combat_transition_facts
     gain = (
@@ -563,9 +646,9 @@ def test_formation_team_mean_weights_real_pair_observations_through_death() -> N
     # First tick observes distances 3,4,5; second only the surviving pair at 3.
     assert _value(values, "team_a_ally_distance_observations") == 4
     assert _value(values, "team_a_ally_distance_mean") == 3.75
-    assert _value(values, "agent_0_agent_1_ally_distance_observations") == 2
-    assert _value(values, "agent_0_agent_2_ally_distance_observations") == 1
-    assert _value(values, "agent_1_agent_2_ally_distance_mean") == 5
+    assert _value(values, "agent_0_and_agent_1_ally_distance_observations") == 2
+    assert _value(values, "agent_0_and_agent_2_ally_distance_observations") == 1
+    assert _value(values, "agent_1_and_agent_2_ally_distance_mean") == 5
     assert _value(values, "team_b_ally_distance_observations") == 0
     _missing(values, "team_b_ally_distance_mean")
 
@@ -608,6 +691,62 @@ def test_focus_fire_is_mean_of_eligible_tick_ratios_not_ratio_of_totals() -> Non
     assert _value(values, "team_a_focus_fire_steps") == 2
     assert _value(values, "team_a_focus_fire_concentration") == pytest.approx(5 / 6)
     assert _value(values, "team_a_focus_fire_concentration") != pytest.approx(4 / 5)
+
+
+@pytest.mark.parametrize(
+    ("healers", "blocked"),
+    ((0, False), (1, False), (2, False), (2, True)),
+)
+def test_recipient_rescue_opportunities_use_combined_legal_healing(
+    healers: int, blocked: bool
+) -> None:
+    run = _start(
+        team_sizes=(4, 2),
+        classes=((3, 5), (5, 1)),
+        arrange=lambda state: state._replace(
+            agent_positions=state.agent_positions.at[2]
+            .set((6, 2.5))
+            .at[3]
+            .set((7, 2.5)),
+            current_health=state.current_health.at[0].set(1),
+            ultimate_cooldowns=state.ultimate_cooldowns.at[2].set(5).at[3].set(5),
+            stun_durations=state.stun_durations.at[3, 0].set(int(blocked)),
+        ),
+    )
+    run = run._replace(config=run.config._replace(max_steps=1))
+    initial = _values(run)
+    assert _value(initial, "agent_0_rescue_opportunities") == 0
+    targets = _actions((2, 0, False), (3, 0, False)).select_target
+    mask = run.mask.select_target_use_ultimate_joint_mask
+    assert bool(mask[2, targets[2], 0])
+    assert bool(mask[3, targets[3], 0]) == (not blocked)
+    assert not bool(mask[2, targets[2], 1])
+    assert not bool(mask[3, targets[3], 1])
+    choices = ((5, 0, False), *((2, 0, False), (3, 0, False))[:healers])
+    run, info = _advance(run, _actions(*choices))
+    combat = info.transition_facts.combat_transition_facts
+    damage = float(combat.total_effective_damage_by_recipient[0])
+    healing = float(combat.total_effective_healing_by_recipient[0])
+    assert damage > 1
+    saved = healers == 2 and not blocked
+    assert (1 + healing > damage) == saved
+    assert bool(run.state.alive_mask[0]) == saved
+    values = _values(run)
+    # The chance belongs to the threatened Mage. Two available Priests still
+    # create one chance, even if neither Priest actually chooses to heal.
+    assert _value(values, "agent_0_rescue_opportunities") == int(not blocked)
+    assert _value(values, "team_a_rescue_opportunities") == int(not blocked)
+    assert _value(values, "agent_0_rescues") == int(saved)
+    for recipient in (1, 2, 3):
+        assert _value(values, f"agent_{recipient}_rescue_opportunities") == 0
+    _missing(values, "agent_4_rescue_opportunities")
+    _missing(values, "agent_5_rescue_opportunities")
+    assert int(run.state.step_count) == run.config.max_steps
+    no_transition = build_canonical_no_transition_info_object(run.state)
+    padded = _update(run.full, run.config, run.state, run.mask, no_transition)
+    after_padding = _values(run._replace(full=padded))
+    np.testing.assert_array_equal(after_padding.values, values.values)
+    np.testing.assert_array_equal(after_padding.valid, values.valid)
 
 
 def test_no_transition_facts_do_not_count_active_statuses_pairs_or_actions() -> None:

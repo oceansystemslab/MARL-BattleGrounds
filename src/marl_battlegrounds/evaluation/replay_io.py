@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -22,6 +23,9 @@ from typing import Literal, cast
 from pydantic import ValidationError
 
 from marl_battlegrounds.evaluation.models import (
+    AssignedPolicySlotV1,
+    AssignedPolicySlotV2,
+    EvaluationEpisodeContext,
     EvaluationFrameV1,
     EvaluationModel,
     EvaluationTransitionV1,
@@ -1170,6 +1174,56 @@ def load_replay(
         return LoadedReplay(legacy, report, "complete")
     finally:
         os.close(parent)
+
+
+def generated_replay_filename(
+    context: EvaluationEpisodeContext, digest: str, *, episode_id: int
+) -> str:
+    """Name generated files without changing explicit paths or scientific identity."""
+    from marl_battlegrounds.evaluation.map_identity import recorded_map
+
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError("replay filename requires its full SHA-256 digest")
+    if type(episode_id) is not int or episode_id < 1:
+        raise ValueError("replay filename requires a positive episode ID")
+
+    def label(value: str, limit: int) -> str:
+        text = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-") or "unknown"
+        return text[:limit]
+
+    map_info = recorded_map(context)
+    map_name = (
+        map_info.technical_name
+        if map_info.map_id is not None
+        else (
+            f"tdm_{'custom' if map_info.display_name == 'Custom Map' else 'recorded'}"
+            f"_map_{context.identity.layout.canonical_digest[:12]}"
+        )
+    )
+    seeds = context.seed_protocol
+    root_seed = "unknown" if seeds.root_seed is None else str(seeds.root_seed)
+    episode_seed = "unknown" if seeds.episode_seed is None else str(seeds.episode_seed)
+    first = (
+        f"{map_name}__episode-{label(str(episode_id), 20)}"
+        f"__seed-{root_seed}__stream-{episode_seed}"
+    )
+    last = f"__{digest}{REPLAY_FILE_SUFFIX_V1}"
+    # Reserve both team markers and shorten only display labels when needed.
+    policy_limit = min(24, (255 - len(first) - len(last) - 8) // 2)
+    if policy_limit < 1:
+        raise ValueError("map identity is too long for a safe replay filename")
+    teams = []
+    for start in (0, 5):
+        names = dict.fromkeys(
+            row.policy_id
+            for row in context.policy_assignments[start : start + 5]
+            if isinstance(row, (AssignedPolicySlotV1, AssignedPolicySlotV2))
+        )
+        teams.append(label("-".join(names), policy_limit))
+    filename = f"{first}__a-{teams[0]}__b-{teams[1]}{last}"
+    if not filename.isascii() or len(filename.encode("ascii")) > 255:
+        raise ValueError("generated replay filename exceeds the safe basename limit")
+    return filename
 
 
 def preflight_replay_destination(path: str | os.PathLike[str]) -> ReplayDestination:

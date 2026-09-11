@@ -327,6 +327,7 @@ def test_random_policy_recording_publishes_reloads_and_opens_in_replay(
     viewer = cast(ReplayViewerService, installed.service)
     assert finished.replay_handoff is viewer
     assert installed.binding.mode == "replay"
+    assert installed.binding.metric_catalog == viewer.metric_catalog
 
     loaded = load_replay_bundle_v1(
         tmp_path / "coordinator-arena_5v5.marlbg-replay.json",

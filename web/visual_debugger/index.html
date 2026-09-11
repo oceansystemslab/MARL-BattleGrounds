@@ -255,7 +255,7 @@
           disabled
         >Download Metrics CSV</button>
         <span id="replay-download-metrics-help" class="sr-only">
-          Download evaluation metrics for the selected cursor or final-episode scope.
+          Download evaluation metrics for the selected Up to Current Tick or Entire Episode scope.
         </span>
         <button id="replay-episode-details-button" type="button" disabled>Episode Details</button>
       </fieldset>
@@ -489,14 +489,28 @@
             <label for="metric-scope">Scope</label>
             <select id="metric-scope">
               <option value="cursor">Up to Current Tick</option>
-              <option value="final">Final Episode</option>
+              <option value="final">Entire Episode</option>
             </select>
-            <label for="metric-selection">Metric</label>
-            <select id="metric-selection"><option value="overview">Team Overview</option></select>
+            <label for="metric-selection">Topic</label>
+            <select id="metric-selection"><option value="priority">Episode Results</option></select>
+            <div id="metric-view-field" hidden>
+              <label for="metric-view">View</label>
+              <select id="metric-view"><option value="single">All Measurements</option></select>
+            </div>
+            <div id="metric-search-area" class="metric-search">
+              <label for="metric-search">Find a Measurement</label>
+              <input id="metric-search" type="search" role="combobox" placeholder="Name, CSV column, or meaning" autocomplete="off" aria-autocomplete="list" aria-expanded="false" aria-controls="metric-search-results" aria-describedby="metric-search-status" disabled>
+              <p id="metric-search-status" class="section-note" role="status">Search includes every numerical CSV column.</p>
+              <div id="metric-search-content" hidden>
+                <div id="metric-search-results" role="listbox" aria-label="Measurements" hidden></div>
+                <button id="metric-search-more" type="button" hidden>Show More</button>
+                <section id="metric-search-definition" class="metric-search-definition" aria-label="Measurement definition" tabindex="-1" hidden></section>
+              </div>
+            </div>
             <progress id="metric-progress" class="metrics-progress" aria-label="Preparing replay metrics" aria-describedby="metric-status" hidden></progress>
             <p id="metric-status" class="section-note" role="status">Open to analyze the captured replay.</p>
             <p id="metric-description" class="section-note"></p>
-            <section id="metric-rows" tabindex="0" aria-label="Evaluation metric measurements"></section>
+            <section id="metric-rows" aria-label="Evaluation metric measurements"></section>
             <p class="section-note">Metrics summarize the captured game.</p>
             <p class="section-note">Up to Current Tick excludes later transitions. Outcomes remain unavailable until completion. Hover or focus a measure for its definition and missing-value rules.</p>
           </div>

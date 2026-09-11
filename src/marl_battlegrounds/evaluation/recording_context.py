@@ -230,6 +230,15 @@ def build_recording_context(
         AggregationKeyV1(name="pass_id", value=pass_id),
         AggregationKeyV1(name="phase", value=phase),
     ]
+    if episode.get("map_id") is not None:
+        from marl_battlegrounds.evaluation.map_identity import registered_map_metadata
+
+        map_id = episode["map_id"]
+        if type(map_id) is not int:
+            raise ValueError("recorded map_id must be an integer")
+        aggregation_keys.extend(registered_map_metadata(map_id, resolved))  # pyright: ignore[reportArgumentType]
+    else:
+        aggregation_keys.append(AggregationKeyV1(name="map_origin", value="custom"))
     for team_index, team in enumerate(("team_a", "team_b")):
         descriptor = descriptors[team_index] if team_index < len(descriptors) else {}
         name = f"{team}_controller_identity"

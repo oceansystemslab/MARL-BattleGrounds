@@ -200,7 +200,13 @@ class RunWriter:
                     or self._details.get("metric_schema_version")
                     != METRIC_SCHEMA_VERSION
                 ):
-                    raise ValueError("run schema does not match this writer")
+                    raise ValueError(
+                        "run schema does not match this writer "
+                        "(recorded metric version "
+                        f"{self._details.get('metric_schema_version')}, "
+                        f"required {METRIC_SCHEMA_VERSION}); start a new run. "
+                        "Existing files have not been changed."
+                    )
                 self._recover_tables()
             self.run_id = str(self._details["run_id"])
             self._completed = {
@@ -412,6 +418,7 @@ class RunWriter:
         self._check_open()
         from marl_battlegrounds.evaluation.replay_io import (
             PreparedReplay,
+            generated_replay_filename,
             preflight_replay_destination,
             publish_prepared_replay,
         )
@@ -430,8 +437,10 @@ class RunWriter:
                     )
                 directory = self.run_dir / "replays"
                 directory.mkdir(exist_ok=True)
-                path = (
-                    directory / f"{replay.canonical_digest_sha256}.marlbg-replay.json"
+                path = directory / generated_replay_filename(
+                    replay.header.context,
+                    replay.canonical_digest_sha256,
+                    episode_id=episode_id,
                 )
                 if path.is_symlink():
                     raise ValueError("replay destination must not be a symbolic link")

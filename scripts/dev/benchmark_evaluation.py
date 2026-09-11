@@ -2,6 +2,8 @@
 
 Run with the CUDA environment, for example:
   python -m scripts.dev.benchmark_evaluation --output artifacts/m8-performance
+Add --metrics-only --map-id 20 to simulate each fixed-map ALPHA/BETA batch once,
+then compare CPU/GPU metric passes over those same facts.
 Each requested size uses a fresh process. No result silently substitutes a smaller
 batch. Full authoritative facts are retained only for this comparison, not by the
 production evaluator.
@@ -80,6 +82,7 @@ _POLICIES: dict[str, object] = {
     "team_a": "tdm-alpha-exploration-10pct",
     "team_b": "tdm-beta-exploration-10pct",
 }
+_ROLLOUT_MODES = ("none", "priority", "full", "sparse_full", "replay")
 
 
 def _exploratory_apply(name: str) -> PolicyApply:
@@ -118,8 +121,8 @@ def _source_hashes() -> dict[str, str]:
     }
 
 
-def _schedule(count: int) -> list[dict[str, object]]:
-    maps = CANONICAL_TDM_EVALUATION_MAP_IDS
+def _schedule(count: int, map_id: int | None = None) -> list[dict[str, object]]:
+    maps = CANONICAL_TDM_EVALUATION_MAP_IDS if map_id is None else (map_id,)
     return [
         {"episode_id": lane + 1, "seed_id": lane + 1, "map_id": maps[lane % len(maps)]}
         for lane in range(count)
@@ -143,8 +146,20 @@ def _platforms(tree: object) -> list[str]:
     )
 
 
-def _configs(count: int) -> EnvConfig:
+def _configs(count: int, map_id: int | None = None) -> EnvConfig:
     canonical = ("mage", "warrior", "hunter", "rogue", "priest")
+    if map_id is not None:
+        config = make_standard_team_deathmatch_config(
+            map_id=map_id,
+            team_a_roster=canonical,
+            team_b_roster=canonical,
+            max_steps=300,
+        )
+
+        def batch(value: Array | int | float | bool) -> Array:
+            return jnp.broadcast_to(value, (count, *jnp.shape(value)))
+
+        return jax.tree.map(batch, config)
     maps = CANONICAL_TDM_EVALUATION_MAP_IDS
     configurations = [
         make_standard_team_deathmatch_config(
@@ -158,8 +173,13 @@ def _configs(count: int) -> EnvConfig:
     return jax.tree.map(lambda *rows: jnp.stack(rows), *configurations)
 
 
-def _actions(state: EnvironmentState, env: Environment, tick: Array) -> Action:
-    first, second = _exploratory_apply("tdm-alpha"), _exploratory_apply("tdm-beta")
+def _actions(
+    state: EnvironmentState, env: Environment, tick: Array, *, exploration: bool = True
+) -> Action:
+    first, second = (
+        _exploratory_apply(name) if exploration else policy(name).apply
+        for name in ("tdm-alpha", "tdm-beta")
+    )
     actor_keys = _actor_keys(
         jax.random.key(42), state.episode_id, jnp.full_like(state.episode_id, tick)
     )
@@ -170,11 +190,13 @@ def _actions(state: EnvironmentState, env: Environment, tick: Array) -> Action:
     return jax.vmap(choose)(env._observations(state), state.action_mask, actor_keys)  # pyright: ignore[reportPrivateUsage]
 
 
-def _rollout(env: Environment, *, frozen_facts: bool = False) -> Callable[..., Any]:
+def _rollout(
+    env: Environment, *, frozen_facts: bool = False, exploration: bool = True
+) -> Callable[..., Any]:
     def run(initial: EnvironmentState) -> Tree:
         def transition(carry: Tree, tick: Array) -> tuple[Tree, Tree]:
             state, completion = carry
-            actions = _actions(state, env, tick)
+            actions = _actions(state, env, tick, exploration=exploration)
             keys = episode_keys(
                 jax.random.key(42),
                 state.episode_id,
@@ -249,9 +271,10 @@ def _measure(
     return result, {
         "compilation_seconds": compilation,
         "first_execution_ms": first * 1000,
-        "warm_median_ms": statistics.median(samples),
-        "warm_min_ms": min(samples),
-        "warm_max_ms": max(samples),
+        "execution_count": 1 + repeats,
+        "warm_median_ms": statistics.median(samples) if samples else None,
+        "warm_min_ms": min(samples) if samples else None,
+        "warm_max_ms": max(samples) if samples else None,
         "warm_samples_ms": samples,
         "compiler_memory_bytes": None
         if memory is None
@@ -281,7 +304,23 @@ def _notify(message: str) -> None:
     print(message, flush=True)
 
 
-def run_size(count: int, output: Path, repeats: int) -> dict[str, object]:
+def run_size(
+    count: int,
+    output: Path,
+    repeats: int,
+    rollout_modes: tuple[str, ...] = _ROLLOUT_MODES,
+    *,
+    metrics_only: bool = False,
+    map_id: int | None = None,
+) -> dict[str, object]:
+    if map_id is not None and not metrics_only:
+        raise ValueError("--map-id requires --metrics-only")
+    if metrics_only:
+        map_id = 20 if map_id is None else map_id
+        rollout_modes = ()
+    policies: dict[str, object] = (
+        {"team_a": "tdm-alpha", "team_b": "tdm-beta"} if metrics_only else _POLICIES
+    )
     gpu, cpu = cast(Any, jax.devices("gpu")[0]), cast(Any, jax.devices("cpu")[0])
     cpu_info = Path("/proc/cpuinfo")
     cpu_model = (
@@ -321,7 +360,7 @@ def run_size(count: int, output: Path, repeats: int) -> dict[str, object]:
         "precision": {
             "floating_accumulators": "float32",
             "integer_accumulators": "int32",
-            "controlled_effect_matmul": "HIGHEST",
+            "controlled_effect_arithmetic": "float32 pairwise products and reductions",
             "jax_enable_x64": cast(bool, jax.config.read("jax_enable_x64")),
             "float_comparison_rtol": 3e-5,
             "float_comparison_atol": 0.002,
@@ -329,9 +368,18 @@ def run_size(count: int, output: Path, repeats: int) -> dict[str, object]:
         "source_file_sha256": _source_hashes(),
         "jax": jax.__version__,
         "repeats": repeats,
-        "policies": _POLICIES,
-        "exploration_probability": 0.1,
-        "rosters": {"canonical_5v5": count - count // 16, "repeated_3v2": count // 16},
+        "benchmark_mode": "metrics_only" if metrics_only else "rollouts_and_metrics",
+        "rollout_modes": rollout_modes,
+        "native_gpu_rollouts": {},
+        "policies": policies,
+        "map_ids": list(CANONICAL_TDM_EVALUATION_MAP_IDS)
+        if map_id is None
+        else [map_id],
+        "exploration_probability": 0.0 if metrics_only else 0.1,
+        "rosters": {
+            "canonical_5v5": count if metrics_only else count - count // 16,
+            "repeated_3v2": 0 if metrics_only else count // 16,
+        },
     }
     output.mkdir(parents=True, exist_ok=True)
 
@@ -341,7 +389,7 @@ def run_size(count: int, output: Path, repeats: int) -> dict[str, object]:
     result["status"] = "running"
     save()
     with jax.default_device(gpu):
-        configs = _configs(count)
+        configs = _configs(count, map_id)
         ids = jnp.arange(1, count + 1, dtype=jnp.int32)
         env = make("tdm", num_envs=count, metrics="none")
         reset_keys = episode_keys(jax.random.key(42), ids, jnp.zeros_like(ids), 0)
@@ -355,7 +403,8 @@ def run_size(count: int, output: Path, repeats: int) -> dict[str, object]:
                 cast(tuple[Observations, EnvironmentState], jax.jit(reset)(configs))
             ),
         )
-        shapes = jax.eval_shape(_rollout(env, frozen_facts=True), initial)
+        generate_facts = _rollout(env, frozen_facts=True, exploration=not metrics_only)
+        shapes = jax.eval_shape(generate_facts, initial)
         result["frozen_output_bytes"] = _bytes(shapes)
         result["environment_state_bytes"] = _bytes(initial)
         result["observations_bytes"] = _bytes(observations)
@@ -368,13 +417,12 @@ def run_size(count: int, output: Path, repeats: int) -> dict[str, object]:
                 "frozen-fact comparison exceeds preflight VRAM budget; "
                 "native batch was not reduced"
             )
-        _notify(
-            f"B{count}: compiling/generating 300-step exploratory ALPHA/BETA episodes"
-        )
+        _notify(f"B{count}: generating ALPHA/BETA episodes (up to 300 steps)")
         (final, facts), generation = _measure(
-            _rollout(env, frozen_facts=True), (initial,), 1
+            generate_facts, (initial,), 0 if metrics_only else 1
         )
         result["fact_generation"] = generation
+        result["episode_executions"] = count * int(generation["execution_count"])
         result["action_rollout_128_bytes"] = (
             _bytes(
                 facts.info.transition_facts.action_acceptance_facts.accepted_joint_action
@@ -405,7 +453,7 @@ def run_size(count: int, output: Path, repeats: int) -> dict[str, object]:
             trace_hashes.append(digest.hexdigest())
         result["unique_semantic_trajectories"] = len(set(trace_hashes))
         result["trajectory_sha256"] = trace_hashes
-        if len(set(trace_hashes)) != count:
+        if not metrics_only and len(set(trace_hashes)) != count:
             raise AssertionError("benchmark contains repeated semantic trajectories")
         del semantic_traces
         _notify(f"B{count}: complete frozen-fact metrics on GPU")
@@ -420,6 +468,15 @@ def run_size(count: int, output: Path, repeats: int) -> dict[str, object]:
         started = time.perf_counter()
         host_values = jax.device_get(gpu_values)
         result["metric_host_transfer_ms"] = (time.perf_counter() - started) * 1000
+        result["full_accumulator_bytes"] = _bytes(gpu_values[0])
+        result["full_result_bytes"] = _bytes(gpu_values[2])
+        result["full_accumulator_bytes_per_episode"] = _bytes(gpu_values[0]) // count
+        result["full_result_bytes_per_episode"] = _bytes(gpu_values[2]) // count
+        # Replay inspection retains values and validity at every boundary; this
+        # is a storage calculation, not memory allocated by this benchmark.
+        result["estimated_full_prefix_bytes"] = (
+            sum(int(length) + 1 for length in lengths) * _bytes(gpu_values[2]) // count
+        )
         _notify(f"B{count}: identical frozen-fact metrics on CPU")
         cpu_args = jax.device_put((initial, final, facts), cpu)
         jax.block_until_ready(cpu_args)
@@ -450,18 +507,23 @@ def run_size(count: int, output: Path, repeats: int) -> dict[str, object]:
         started = time.perf_counter()
         with RunWriter(
             output / "csv",
-            policies=_POLICIES,
+            policies=policies,
             details={
                 "seed": 42,
                 "rng_protocol": "episode-fold-in-v1",
                 "num_envs": count,
             },
         ) as writer:
-            writer.register_episodes(_schedule(count))
+            writer.register_episodes(_schedule(count, map_id))
             writer.write(completed)
             writer.flush()
         result["full_csv_write_and_fsync_ms"] = (time.perf_counter() - started) * 1000
         result["csv_run_dir"] = str(writer.run_dir)
+        result["full_csv_bytes"] = writer.paths["full_metrics"].stat().st_size
+        result["priority_csv_bytes"] = writer.paths["priority_metrics"].stat().st_size
+        result["run_files_bytes"] = sum(
+            path.stat().st_size for path in writer.run_dir.rglob("*") if path.is_file()
+        )
         # Release the benchmark-only history before measuring streaming execution.
         del facts, cpu_args, cpu_values, gpu_values, host_values, final
         import gc
@@ -469,7 +531,7 @@ def run_size(count: int, output: Path, repeats: int) -> dict[str, object]:
         gc.collect()
         rollouts: dict[str, object] = {}
         baseline: float | None = None
-        for mode in ("none", "priority", "full", "sparse_full", "replay"):
+        for mode in rollout_modes:
             _notify(f"B{count}: native {mode} rollout")
             current = make(
                 "tdm",
@@ -496,6 +558,7 @@ def run_size(count: int, output: Path, repeats: int) -> dict[str, object]:
             (end, (terminal, packets)), timing = _measure(
                 _rollout(current), (state,), repeats
             )
+            result["episode_executions"] += count * int(timing["execution_count"])
             if not np.asarray(jax.device_get(end.done.done)).all():
                 raise AssertionError(f"{mode} did not complete every episode")
             for expected, actual in zip(
@@ -522,9 +585,9 @@ def run_size(count: int, output: Path, repeats: int) -> dict[str, object]:
                     raise AssertionError("unselected native full metrics were exposed")
             timing["same_requested_metrics_as_frozen_facts"] = True
             median = float(timing["warm_median_ms"])
-            if baseline is None:
+            if mode == "none":
                 baseline = median
-            timing["added_ms_vs_none"] = median - baseline
+            timing["added_ms_vs_none"] = None if baseline is None else median - baseline
             timing["transitions_per_second"] = int(lengths.sum()) * 1000 / median
             timing["state_bytes"] = _bytes(state)
             timing["capture_output_bytes"] = _bytes(packets)
@@ -537,7 +600,7 @@ def run_size(count: int, output: Path, repeats: int) -> dict[str, object]:
                 started = time.perf_counter()
                 with RunWriter(
                     output / "replays",
-                    policies=_POLICIES,
+                    policies=policies,
                     details={
                         "seed": 42,
                         "rng_protocol": "episode-fold-in-v1",
@@ -589,13 +652,44 @@ def main() -> int:
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument(
+        "--metrics-only",
+        action="store_true",
+        help="simulate each batch once with canonical 5v5 ALPHA/BETA, "
+        "then compare metrics only",
+    )
+    parser.add_argument(
+        "--map-id",
+        type=int,
+        choices=range(52),
+        metavar="ID",
+        help="fixed map for --metrics-only (default: 20)",
+    )
+    parser.add_argument(
+        "--rollout-modes",
+        nargs="+",
+        choices=_ROLLOUT_MODES,
+        default=list(_ROLLOUT_MODES),
+        help="native modes to measure; full CPU/GPU metric comparison always runs",
+    )
     parser.add_argument("--worker", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.repeats < 2 or any(size < 1 for size in args.sizes):
         parser.error("positive batch sizes and at least two warm repeats are required")
+    if args.map_id is not None and not args.metrics_only:
+        parser.error("--map-id requires --metrics-only")
+    # Preserve the reference-first ordering even when CLI selections differ.
+    rollout_modes = tuple(mode for mode in _ROLLOUT_MODES if mode in args.rollout_modes)
     args.output.mkdir(parents=True, exist_ok=True)
     if args.worker is not None:
-        run_size(args.worker, args.output, args.repeats)
+        run_size(
+            args.worker,
+            args.output,
+            args.repeats,
+            rollout_modes,
+            metrics_only=args.metrics_only,
+            map_id=args.map_id,
+        )
         return 0
     failed = False
     for size in args.sizes:
@@ -611,7 +705,13 @@ def main() -> int:
             str(args.repeats),
             "--output",
             str(args.output),
+            "--rollout-modes",
+            *rollout_modes,
         ]
+        if args.metrics_only:
+            command.append("--metrics-only")
+        if args.map_id is not None:
+            command.extend(("--map-id", str(args.map_id)))
         completed = subprocess.run(
             command,
             check=False,

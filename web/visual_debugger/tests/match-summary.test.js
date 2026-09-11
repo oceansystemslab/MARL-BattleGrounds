@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { authorizedPresentationTechnicalFacts } from "../src/authorized-presentation-adapter.js";
 import { normalizeAuthorizedPresentationFrameV1 } from "../src/authorized-presentation-normalizer.js";
 import { matchSummaryView } from "../src/match-summary.js";
 
@@ -98,5 +99,49 @@ test("all six production presentation pairs retain the same source-bound match e
       frame.source.source_simulator_step_count,
     );
     assert.ok(matchSummaryView(frame));
+    const facts = new Map(
+      authorizedPresentationTechnicalFacts(frame).map((row) => [row.id, row.value]),
+    );
+    assert.equal(facts.get("episode"), frame.source.episode_id);
+    assert.equal(facts.get("task_mode"), "Combat diagnostic");
+    assert.equal(
+      facts.get("observation_mode"),
+      frame.match_summary.observation_mode === "shared_obs"
+        ? "SharedObs"
+        : "NoSharedObs",
+    );
+    assert.equal(
+      facts.get("episode_limit"),
+      `${frame.match_summary.episode_limit} ticks`,
+    );
+    assert.equal(facts.get("map"), frame.match_summary.map.technical_name);
+    assert.equal(
+      facts.get("seeds"),
+      `Root ${frame.match_summary.root_seed} · Episode stream ${frame.match_summary.episode_seed}`,
+    );
   }
+});
+
+test("friendly map display and technical identity retain the explicitly recorded split", async () => {
+  const raw = structuredClone(fixture.presentations.replay_oracle);
+  raw.match_summary.map = {
+    map_id: 20,
+    technical_name: "tdm_map_id_20_three_body_problem_test",
+    display_name: "Three Body Problem",
+    split: "test",
+  };
+  raw.match_summary.root_seed = null;
+  raw.match_summary.episode_seed = null;
+  const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+  assert.equal(matchSummaryView(frame)?.map, "Three Body Problem (Test Map)");
+  const facts = new Map(
+    authorizedPresentationTechnicalFacts(frame).map((row) => [row.id, row.value]),
+  );
+  assert.equal(facts.get("map"), "tdm_map_id_20_three_body_problem_test");
+  assert.equal(facts.get("seeds"), "Root unknown · Episode stream unknown");
+  raw.match_summary.map.split = null;
+  assert.equal(
+    matchSummaryView(await normalizeAuthorizedPresentationFrameV1(raw))?.map,
+    "Three Body Problem",
+  );
 });

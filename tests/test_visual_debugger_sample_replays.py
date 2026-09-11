@@ -77,9 +77,12 @@ import sys
 from pathlib import Path
 
 import scripts.dev.generate_visual_debugger_sample_replays as generator
+import scripts.dev.visual_debugger.control as control
 from marl_battlegrounds.evaluation.models import CodeRevisionV1
 from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 from scripts.dev.visual_debugger.sample_replays import (
+    SAMPLE_REPLAYS,
+    load_verified_sample_replay,
     read_sample_replay_manifest_v1,
 )
 
@@ -99,6 +102,40 @@ if code_revision.model_dump(mode="json") != code_payload:
     raise SystemExit("historical code provenance is not canonical")
 if runtime_provenance.model_dump(mode="json") != runtime_payload:
     raise SystemExit("historical runtime provenance is not canonical")
+
+historical_map_origin = {
+    sample.source_scenario: any(
+        row.name == "map_origin"
+        for row in load_verified_sample_replay(
+            sample.name, directory=historical_directory
+        ).replay.header.context.aggregation_keys
+    )
+    for sample in SAMPLE_REPLAYS
+}
+build_context = control.build_debugger_evaluation_context_v1
+
+
+def controlled_context(*args, **kwargs):
+    context = build_context(*args, **kwargs)
+    scenario = next(
+        row.value for row in context.aggregation_keys if row.name == "scenario"
+    )
+    if not historical_map_origin[scenario]:
+        # Preserve the archived metadata contract in this historical reproduction
+        # only. Normal current generation still records its explicit custom origin.
+        origin = next(
+            row.value for row in context.aggregation_keys if row.name == "map_origin"
+        )
+        if origin != "custom":
+            raise RuntimeError(
+                "historical diagnostic unexpectedly claims an approved map"
+            )
+        context = context.model_copy(update={
+            "aggregation_keys": tuple(
+                row for row in context.aggregation_keys if row.name != "map_origin"
+            )
+        })
+    return context
 
 
 def controlled_revision(
@@ -125,6 +162,7 @@ def controlled_runtime(
 
 generator.discover_code_revision_v1 = controlled_revision
 generator.capture_debugger_runtime_provenance_v1 = controlled_runtime
+control.build_debugger_evaluation_context_v1 = controlled_context
 generated = generator.generate_sample_replays(output_directory)
 print(f"generated {len(generated['samples'])} sample replays")
 """

@@ -109,10 +109,24 @@ test("all semantic descriptors and nested projections are recursively immutable"
 
 test("Technical Frame and replay operational help use the exact finite vocabulary", () => {
   const expected = {
-    episode: [
-      "Episode",
-      "Identifies the authorized live episode represented by this frame.",
+    task_mode: ["Task Mode", "The task whose rules govern this episode."],
+    map: [
+      "Map",
+      "The recorded technical map name. Its split is shown only when recorded.",
     ],
+    observation_mode: [
+      "Observation Mode",
+      "The policy observation mode used when this episode was recorded.",
+    ],
+    episode_limit: [
+      "Episode Limit",
+      "The maximum number of transitions planned for this episode.",
+    ],
+    seeds: [
+      "Seeds",
+      "The recorded root seed and episode stream coordinate identify the random streams. Unknown means the value was not recorded.",
+    ],
+    episode: ["Episode", "Identifies the recorded episode represented by this frame."],
     artifact_digest_prefix: [
       "Artifact Digest Prefix",
       "These 12 hexadecimal characters locate the canonical Oracle replay without displaying its full hash.",
@@ -291,14 +305,14 @@ test("compact agent facts have one exact in-combat and out-of-combat allowlist",
         rowValue(descriptor, "Ultimate Status"),
         classId === 1
           ? "Ready"
-          : `On Cooldown (${classId - 1} ${classId === 2 ? "Tick" : "Ticks"})`,
+          : `On Cooldown (${classId - 1} ${classId === 2 ? "tick" : "ticks"})`,
       );
       assert.equal(
         rowValue(descriptor, "Combat Status"),
         inCombat ? "In Combat" : "Out of Combat",
       );
       if (inCombat) {
-        assert.equal(rowValue(descriptor, "Steps Until Out of Combat"), "2 Ticks");
+        assert.equal(rowValue(descriptor, "Steps Until Out of Combat"), "2 ticks");
       }
       assert.equal(descriptor.sections.length, 0);
       assert.equal(
@@ -464,11 +478,11 @@ test("all nine durable statuses preserve exact facts across audience and source 
     assert.equal(pov.summary, statusCase.effect);
     assert.equal(
       rowValue(researcher, "Effect Duration"),
-      `${statusCase.duration} ${statusCase.duration === 1 ? "Tick" : "Ticks"}`,
+      `${statusCase.duration} ${statusCase.duration === 1 ? "tick" : "ticks"}`,
     );
     assert.equal(
       rowValue(researcher, "Duration Remaining"),
-      `${Math.max(1, statusCase.duration - 1)} ${Math.max(1, statusCase.duration - 1) === 1 ? "Tick" : "Ticks"}`,
+      `${Math.max(1, statusCase.duration - 1)} ${Math.max(1, statusCase.duration - 1) === 1 ? "tick" : "ticks"}`,
     );
     if (statusCase.magnitudeLabel === null) {
       assert.equal(
@@ -618,10 +632,10 @@ test("Freezing Trap refresh and reapplication preserve configured duration and e
       AUTHORIZED_RECIPIENT,
       [SOURCE_A],
     );
-    assert.equal(rowValue(descriptor, "Effect Duration"), "4 Ticks");
+    assert.equal(rowValue(descriptor, "Effect Duration"), "4 ticks");
     assert.equal(
       rowValue(descriptor, "Duration Remaining"),
-      `${remaining} ${remaining === 1 ? "Tick" : "Ticks"}`,
+      `${remaining} ${remaining === 1 ? "tick" : "ticks"}`,
     );
     assert.equal(
       rowValue(descriptor, "Break Rule"),
@@ -661,8 +675,8 @@ test("POV status preserves effect facts while leaving source payloads unread", (
   );
 
   assert.equal(rowValue(descriptor, "Movement Effect"), "15% slower (×0.85)");
-  assert.equal(rowValue(descriptor, "Effect Duration"), "1 Tick");
-  assert.equal(rowValue(descriptor, "Duration Remaining"), "1 Tick");
+  assert.equal(rowValue(descriptor, "Effect Duration"), "1 tick");
+  assert.equal(rowValue(descriptor, "Duration Remaining"), "1 tick");
   assert.equal(
     descriptor.rows.some((row) => row.label === "Source"),
     false,
@@ -810,8 +824,8 @@ test("spawn shield view is exact across V1/V2/unavailable and every audience", (
           "Agent Collision Effect",
           "The agent can move through other agents while shielded; collision resumes at the end of the shield's final transition.",
         ],
-        ["Effect Duration", "3 Ticks"],
-        ["Duration Remaining", "3 Ticks"],
+        ["Effect Duration", "3 ticks"],
+        ["Duration Remaining", "3 ticks"],
         ["Recipient", owner],
       ],
     },
@@ -825,8 +839,8 @@ test("spawn shield view is exact across V1/V2/unavailable and every audience", (
       summary: null,
       rows: /** @param {string} owner */ (owner) => [
         ["Movement Speed", "2"],
-        ["Effect Duration", "3 Ticks"],
-        ["Duration Remaining", "3 Ticks"],
+        ["Effect Duration", "3 ticks"],
+        ["Duration Remaining", "3 ticks"],
         ["Recipient", owner],
       ],
     },
@@ -835,7 +849,7 @@ test("spawn shield view is exact across V1/V2/unavailable and every audience", (
       mechanics: { availability_kind: "unavailable" },
       summary: null,
       rows: /** @param {string} owner */ (owner) => [
-        ["Duration Remaining", "3 Ticks"],
+        ["Duration Remaining", "3 ticks"],
         ["Recipient", owner],
       ],
     },
@@ -981,7 +995,7 @@ test("five cooldown cards use canonical owners, Ultimate tokens, and exact rows"
             ["Recipient", canonical],
           ]
         : [
-            ["Remaining Cooldown", `${ticks} ${ticks === 1 ? "Tick" : "Ticks"}`],
+            ["Remaining Cooldown", `${ticks} ${ticks === 1 ? "tick" : "ticks"}`],
             ["Recipient", canonical],
           ],
     );
@@ -1483,9 +1497,9 @@ test("POV agent builder is byte-noninterfering with researcher-only extras", () 
     ],
   );
   assert.equal(rowValue(descriptor, "Effective Speed"), "1.25");
-  assert.equal(rowValue(descriptor, "Ultimate Status"), "On Cooldown (2 Ticks)");
+  assert.equal(rowValue(descriptor, "Ultimate Status"), "On Cooldown (2 ticks)");
   assert.equal(rowValue(descriptor, "Combat Status"), "In Combat");
-  assert.equal(rowValue(descriptor, "Steps Until Out of Combat"), "2 Ticks");
+  assert.equal(rowValue(descriptor, "Steps Until Out of Combat"), "2 ticks");
   assert.equal(descriptor.sections.length, 0);
   assert.doesNotMatch(
     fullText(descriptor),
@@ -1716,13 +1730,13 @@ test("overflow projects every hidden semantic item without slot-derived identity
   );
   assert.equal(descriptor.rows.length, 2);
   assert.equal(descriptor.title, "2 Hidden Statuses");
-  assert.match(descriptor.rows[0].value, /Effect Duration: 9 Ticks/u);
-  assert.match(descriptor.rows[0].value, /Duration Remaining: 7 Ticks/u);
+  assert.match(descriptor.rows[0].value, /Effect Duration: 9 ticks/u);
+  assert.match(descriptor.rows[0].value, /Duration Remaining: 7 ticks/u);
   assert.match(
     descriptor.rows[0].value,
     /Source: Agent ID alpha\/9001 · Hunter · Team A/u,
   );
-  assert.match(descriptor.rows[1].value, /Duration Remaining: 3 Ticks/u);
+  assert.match(descriptor.rows[1].value, /Duration Remaining: 3 ticks/u);
   assert.match(descriptor.rows[1].value, /Source: Unavailable in this artifact/u);
   assert.doesNotMatch(fullText(descriptor), /id_8|global.slot/u);
 });

@@ -153,7 +153,7 @@ def test_csv_headers_full_priority_copy_and_missing_values_survive_roster_change
         assert len(IDENTITY_COLUMNS) == 30
         assert priority_header == [*IDENTITY_COLUMNS, *PRIORITY_METRIC_NAMES]
         assert full_header == [*IDENTITY_COLUMNS, *FULL_METRIC_NAMES]
-        assert len(priority_header) == 30 + 26 and len(full_header) == 30 + 1388
+        assert len(priority_header) == 30 + 26 and len(full_header) == 30 + 11_152
         assert len(priority) == len(full) == 2
         for small, complete in zip(priority, full, strict=True):
             assert {name: complete[name] for name in priority_header} == small
@@ -166,7 +166,7 @@ def test_csv_headers_full_priority_copy_and_missing_values_survive_roster_change
         assert float(full[0]["agent_0_healing_done"]) == 0
         assert float(full[0]["agent_1_damage_done"]) == 0
         assert full[0]["agent_2_return"] == ""
-        assert full[0]["agent_0_wasted_healing"] == ""
+        assert full[0]["agent_0_excess_healing"] == ""
         assert full[0]["agent_0_damage_done_fraction"] == ""
         assert full[1]["agent_1_return"] == ""
         assert full[0]["config_id"] != full[1]["config_id"]
@@ -392,8 +392,48 @@ def test_resume_rejects_missing_or_corrupt_durable_artifacts(
         details = _details(writer.run_dir)
         details["metric_schema_version"] = METRIC_SCHEMA_VERSION + 1
         writer.paths["run_details"].write_text(json.dumps(details))
+        # Reject incompatible schemas before attempting interrupted-tail recovery.
+        with table.open("ab") as stream:
+            stream.write(b"unfinished row\n")
+    before = {
+        path.relative_to(writer.run_dir): path.read_bytes()
+        for path in writer.run_dir.rglob("*")
+        if path.is_file()
+    }
     with pytest.raises(ValueError):
         RunWriter(resume_from=writer.run_dir)
+    assert before == {
+        path.relative_to(writer.run_dir): path.read_bytes()
+        for path in writer.run_dir.rglob("*")
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize("old_version", range(1, METRIC_SCHEMA_VERSION))
+def test_old_scalar_schema_resume_preserves_unfinished_files(
+    tmp_path: Path, episodes: _Episodes, old_version: int
+) -> None:
+    """Schema incompatibility is rejected before interrupted-tail recovery."""
+    with RunWriter(tmp_path, buffer_size=1) as writer:
+        writer.write(episodes.full[0])
+    details = _details(writer.run_dir)
+    details["metric_schema_version"] = old_version
+    writer.paths["run_details"].write_text(json.dumps(details))
+    for key in ("priority_metrics", "full_metrics"):
+        with writer.paths[key].open("ab") as stream:
+            stream.write(b'"unfinished old-schema row')
+    before = {
+        path.relative_to(writer.run_dir): path.read_bytes()
+        for path in writer.run_dir.rglob("*")
+        if path.is_file()
+    }
+    with pytest.raises(ValueError, match="start a new run"):
+        RunWriter(resume_from=writer.run_dir)
+    assert before == {
+        path.relative_to(writer.run_dir): path.read_bytes()
+        for path in writer.run_dir.rglob("*")
+        if path.is_file()
+    }
 
 
 def test_resume_requires_matching_policy_identity_and_releases_failed_constructor_lock(
