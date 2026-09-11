@@ -3618,7 +3618,6 @@ test("all eight scenario identities and dense authoritative deaths render in bot
 test("TDM scores and offline metric exports follow the cursor across POV changes", async ({
   page,
 }) => {
-  test.setTimeout(180_000);
   if (artifacts === null) throw new Error("Replay fixtures are unavailable.");
   const viewer = await startReplayViewer({ replayPath: artifacts.tdm });
   /** @type {string[]} */
@@ -3937,7 +3936,6 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
 test("nonzero replay view changes preserve the cursor and playing intent", async ({
   page,
 }) => {
-  test.setTimeout(180_000);
   if (artifacts === null) throw new Error("Replay fixtures are unavailable.");
   for (const replayPath of [artifacts.complete, artifacts.shared]) {
     const viewer = await startReplayViewer({ replayPath, frameIndex: 1 });

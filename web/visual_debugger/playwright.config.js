@@ -6,7 +6,8 @@ export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
   retries: 0,
   workers: 1,
-  timeout: 180_000,
+  // A whole test has no time limit. Individual failed waits still report errors.
+  timeout: 0,
   expect: {
     timeout: 15_000,
     toHaveScreenshot: {

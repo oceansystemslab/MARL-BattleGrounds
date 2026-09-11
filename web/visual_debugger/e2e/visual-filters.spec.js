@@ -1476,7 +1476,6 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
 test("real maximum-status replay renders +2 without losing owner semantics", async ({
   page,
 }) => {
-  test.setTimeout(120_000);
   const replay = await startReplayViewer({
     scenario: "max_status_stack",
     includeStress: true,
@@ -1596,7 +1595,6 @@ test("real maximum-status replay renders +2 without losing owner semantics", asy
 test("amended regular and stress scenarios retain Oracle-Agent presentation continuity", async ({
   page,
 }) => {
-  test.setTimeout(600_000);
   const browserErrors = captureBrowserErrors(page);
   const scenarios = [
     { name: "ultimate_showcase", includeStress: false },

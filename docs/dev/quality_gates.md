@@ -184,10 +184,16 @@ not required-gate evidence when a lower layer proves the contract more directly.
 A browser case must protect a named North Star, require browser-native behavior,
 and justify its process/setup cost. Otherwise move it down or delete it.
 
-Required gates fail fast on the first actionable test failure. Missing-element
-actions use a short timeout instead of consuming the whole test timeout. Green
-coverage remains complete because fail-fast changes only red-run work, not the
-test inventory executed on a passing candidate.
+Required gates fail fast on the first actionable test failure. Whole browser
+tests have no time limit: a long sequence of successful steps must not fail just
+because it takes more than three minutes on a slower runner. Keep Playwright's
+top-level `timeout: 0`; do not add per-test time limits. The browser-inventory
+unit test also has no total time limit. This follows the user's 2026-09-11 decision.
+
+Individual actions, assertions, requests and process startup/cleanup still have
+bounded waits. These report a missing button, failed response or stuck process
+at the step that failed. Green coverage remains complete because fail-fast
+changes only red-run work, not the test inventory on a passing candidate.
 
 ## Development selection
 

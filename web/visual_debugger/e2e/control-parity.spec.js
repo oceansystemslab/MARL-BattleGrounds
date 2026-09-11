@@ -1084,7 +1084,6 @@ test("Agent keyboard battlefield activation rebinds focus to the authorized succ
 test("post-Charge Agent history stays installable through a reciprocal Charge", async ({
   page,
 }) => {
-  test.setTimeout(300_000);
   /** @type {Record<string, any>[]} */
   const commandRequests = [];
   /** @type {{path: string, status: number}[]} */

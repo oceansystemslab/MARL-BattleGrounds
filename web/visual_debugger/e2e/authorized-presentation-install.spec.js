@@ -4800,7 +4800,6 @@ async function runCp5Slice5Proof(
     cp4C3ShieldOnly || cp4ECaptureDirectory !== null,
     "CP5 Slice 5 causal/privacy proof is outside bounded CP4 capture modes.",
   );
-  test.setTimeout(900_000);
   await installWaapiAutopause(page);
   const checkedSampleBytesBefore = await cp5Slice5CheckedSampleSnapshot();
 
@@ -8049,7 +8048,6 @@ async function expectNoCorpseCommands(page, activate) {
 test("real Agent replay paints only locally authorized Oracle corpses without changing replay state", async ({
   page,
 }) => {
-  test.setTimeout(180_000);
   if (artifacts === null) {
     throw new Error("Authorized corpse replay artifacts are unavailable.");
   }
@@ -8313,7 +8311,6 @@ test("real Agent replay paints only locally authorized Oracle corpses without ch
 test("real Live NoShared paints a locally visible corpse as inspection-only Oracle evidence", async ({
   page,
 }, testInfo) => {
-  test.setTimeout(120_000);
   await installWaapiAutopause(page);
   const service = await startScriptedDebugger({ scenario: "death_respawn_cycle" });
   try {
