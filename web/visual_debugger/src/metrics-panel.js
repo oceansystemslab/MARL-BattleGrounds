@@ -31,12 +31,24 @@ function metricSection(row) {
 function metricText(row, topic) {
   const text = row.topic_text?.[topic];
   if (!text) return row;
-  // Topic context can explain a measurement, but cannot rename or change it.
-  return {
-    ...row,
-    ...(text.description === undefined ? {} : { description: text.description }),
-    ...(text.subtitle === undefined ? {} : { subtitle: text.subtitle }),
-  };
+  const fields = ["description", "subtitle"];
+  // Only the five named ability topics can change their row and tooltip words.
+  if (
+    [
+      "ultimate_mage",
+      "ultimate_warrior",
+      "ultimate_hunter",
+      "ultimate_rogue",
+      "ultimate_priest",
+    ].includes(topic)
+  ) {
+    fields.push("label", "numerator", "denominator", "guidance", "missing_when");
+  }
+  const result = { ...row };
+  for (const field of fields) {
+    if (text[field] !== undefined) result[field] = text[field];
+  }
+  return result;
 }
 
 /** @param {Record<string, any>} summary @param {string} topic @param {string} view */
@@ -116,212 +128,11 @@ export function renderMetricNavigation(selection, view, viewField, topics) {
   viewField.hidden = topic.views.length === 1;
 }
 
-/** @param {string} value */
-function searchWords(value) {
-  return value
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim();
-}
-
-// Match ordinary singular/plural words without guessing at class or ability names.
-const SEARCH_SINGULARS = new Map(
-  [
-    ["abilities", "ability"],
-    ["statuses", "status"],
-    ...[
-      "activation",
-      "agent",
-      "application",
-      "assist",
-      "attack",
-      "break",
-      "contribution",
-      "count",
-      "death",
-      "effect",
-      "fraction",
-      "heal",
-      "kill",
-      "recipient",
-      "rescue",
-      "save",
-      "share",
-      "step",
-      "target",
-      "team",
-      "tick",
-      "trap",
-      "use",
-    ].map((word) => [`${word}s`, word]),
-  ].map(([plural, singular]) => [plural, singular]),
-);
-
-// Keep direction, timing and negation words. Keep "a" when it names Team A.
-const SEARCH_CONNECTORS = new Set([
-  "an",
-  "the",
-  "by",
-  "of",
-  "for",
-  "about",
-  "is",
-  "are",
-  "was",
-  "were",
-  "this",
-  "that",
-  "these",
-  "those",
-]);
-
-// These phrases mean the same thing. Other keywords may only be related.
-/** @type {[string, string[]][]} */
-const SEARCH_EQUIVALENTS = [
-  ["damage received", ["damage taken", "damage suffered", "incoming damage"]],
-  ["damage done", ["damage dealt", "damage inflicted", "outgoing damage"]],
-  ["healing received", ["healing taken", "incoming healing"]],
-  ["healing done", ["healing given", "healing provided", "outgoing healing"]],
-];
-const SEARCH_PHRASES = SEARCH_EQUIVALENTS.flatMap(([replacement, phrases]) =>
-  phrases.map((phrase) => ({
-    phrase,
-    replacement,
-    wordCount: phrase.split(" ").length,
-    pattern: new RegExp(`\\b${phrase}\\b`, "gu"),
-  })),
-);
-
-/** @param {string} value @param {boolean} [query] */
-function searchText(value, query = false) {
-  const words = searchWords(value).split(" ");
-  let text = words
-    .filter(
-      (word, i) =>
-        !SEARCH_CONNECTORS.has(word) && (word !== "a" || words[i - 1] === "team"),
-    )
-    .join(" ");
-  for (const { phrase, replacement, pattern, wordCount } of SEARCH_PHRASES) {
-    // A researcher can stop typing at "damage tak" or "incoming dam".
-    if (query) {
-      const tailWords = text.split(" ").slice(-wordCount);
-      const tail = tailWords.join(" ");
-      if (
-        tailWords.length === wordCount &&
-        (tailWords.at(-1) ?? "").length >= 3 &&
-        phrase.startsWith(tail)
-      ) {
-        text = text.slice(0, -tail.length) + replacement;
-      }
-    }
-    text = text.replace(pattern, replacement);
-  }
-  return text;
-}
-
-/** Match row names only; keep reviewed keyword phrases and descriptions unchanged.
- * @param {string} value
- */
-function searchTerms(value) {
-  return searchWords(value)
-    .split(" ")
-    .map((word) => SEARCH_SINGULARS.get(word) ?? word)
-    .join(" ");
-}
-
-/** @param {Record<string, any>[]} measurements @param {Record<string, any>[]} [topics] */
-export function buildMetricSearchIndex(measurements, topics = []) {
-  const topicNames = new Map(topics.map((topic) => [topic.name, topic.label]));
-  return [...new Map(measurements.map((row) => [row.name, row])).values()]
-    .sort((a, b) => a.order - b.order)
-    .map((source) => {
-      const row = metricText(source, source.primary_topic);
-      const alternatives = Object.values(source.topic_text ?? {});
-      return {
-        row,
-        name: searchWords(row.name),
-        label: searchTerms(searchText(row.label)).split(" "),
-        subject: ` ${searchTerms(searchText(row.subject ?? ""))} `,
-        ownText: ` ${searchTerms(
-          searchText([row.label, row.subject ?? "", row.unit ?? ""].join(" ")),
-        )} `,
-        text: ` ${searchText(
-          [
-            row.name,
-            row.label,
-            row.subject ?? "",
-            row.unit ?? "",
-            ...(row.search_terms ?? []),
-            ...(row.locations ?? []).map(
-              (/** @type {{topic: string}} */ location) =>
-                topicNames.get(location.topic) ?? "",
-            ),
-          ].join(" "),
-        )} `,
-        description: ` ${searchText(
-          [
-            source.description,
-            ...alternatives.map((text) => text.description ?? ""),
-          ].join(" "),
-        )} `,
-      };
-    });
-}
-
-/**
- * @param {ReturnType<typeof buildMetricSearchIndex>} index
- * @param {string} query
- */
-export function findMeasurements(index, query) {
-  const words = searchWords(query);
-  const text = searchText(query, true);
-  if (!text) return [];
-  const tokens = text.split(" ").map((word) => ` ${word}${word.length < 3 ? " " : ""}`);
-  const ownTokens = searchTerms(text)
-    .split(" ")
-    .map((word) => ` ${word}${word.length < 3 ? " " : ""}`);
-  const direct = index.filter(
-    (item) =>
-      ownTokens.every((token) => item.ownText.includes(token)) ||
-      tokens.every((token) => item.text.includes(token)),
-  );
-  const matches = direct.length
-    ? direct
-    : index.filter((item) =>
-        tokens.every(
-          (token) => item.text.includes(token) || item.description.includes(token),
-        ),
-      );
-  // Prefer the recorded subject: Warrior deaths before deaths from Warrior effects.
-  return matches
-    .map((item) => {
-      const named = ownTokens.every((token) => item.ownText.includes(token));
-      return {
-        row: item.row,
-        exact: Number(item.name === words),
-        subjectMatches: ownTokens.reduce(
-          (count, token) => count + Number(item.subject.includes(token)),
-          0,
-        ),
-        named: Number(named),
-        complete: Number(
-          named &&
-            item.label.every((word) =>
-              ownTokens.some((token) => ` ${word} `.startsWith(token)),
-            ),
-        ),
-      };
-    })
-    .sort(
-      (a, b) =>
-        b.exact - a.exact ||
-        b.subjectMatches - a.subjectMatches ||
-        b.complete - a.complete ||
-        b.named - a.named ||
-        a.row.order - b.row.order,
-    )
-    .map((item) => item.row);
-}
+export {
+  buildMetricSearchIndex,
+  findMeasurements,
+  searchMeasurements,
+} from "./metric-search.js";
 
 /** @param {Record<string, any>} row @param {Record<string, any>[]} topics */
 function primaryLocationLabel(row, topics) {

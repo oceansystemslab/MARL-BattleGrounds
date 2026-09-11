@@ -805,6 +805,59 @@ test("replay metrics accept recipient totals and require clear metadata and vers
       };
       assert.deepEqual(await getReplayMetrics("capability", 1, "cursor"), payload);
     }
+    for (const topic of [
+      "ultimate_mage",
+      "ultimate_warrior",
+      "ultimate_hunter",
+      "ultimate_rogue",
+      "ultimate_priest",
+    ]) {
+      const topic_text = {
+        [topic]: {
+          label: "Total Ultimate Activations",
+          description: "How many times this agent used its Ultimate ability.",
+          subtitle: "Ultimate Ability",
+          numerator: "How many times this agent used its Ultimate on this target.",
+          denominator: "How many times this agent used its Ultimate.",
+          guidance: "Context dependent for Team A.",
+          missing_when: "No Ultimate was used.",
+        },
+      };
+      payload = {
+        ...summary,
+        topics: [{ ...summary.topics[0], name: topic }],
+        statistics: [
+          {
+            ...row,
+            primary_topic: topic,
+            locations: [{ topic, view: "recipients" }],
+            topic_order: { [topic]: [0] },
+            topic_text,
+          },
+        ],
+      };
+      assert.deepEqual(await getReplayMetrics("capability", 1, "cursor"), payload);
+      // An empty subtitle hides repeated effect text in a named ability table.
+      payload.statistics[0].topic_text[topic].subtitle = "";
+      assert.deepEqual(await getReplayMetrics("capability", 1, "cursor"), payload);
+      for (const field of ["label", "description"]) {
+        const original = payload.statistics[0].topic_text[topic][field];
+        payload.statistics[0].topic_text[topic][field] = "";
+        await assert.rejects(
+          getReplayMetrics("capability", 1, "cursor"),
+          /Invalid replay metric summary/u,
+        );
+        payload.statistics[0].topic_text[topic][field] = original;
+      }
+      for (const field of ["value", "status", "name", "applicable"]) {
+        payload.statistics[0].topic_text[topic][field] = "Cannot change meaning.";
+        await assert.rejects(
+          getReplayMetrics("capability", 1, "cursor"),
+          /Invalid replay metric summary/u,
+        );
+        delete payload.statistics[0].topic_text[topic][field];
+      }
+    }
     for (const invalid of [
       { applicable: "false" },
       { locations: [1] },
@@ -851,18 +904,41 @@ test("replay metrics accept recipient totals and require clear metadata and vers
       );
     }
     const { value: _value, valid: _valid, ...metadata } = row;
+    const classNames = ["Neutral", "Mage", "Warrior", "Hunter", "Rogue", "Priest"];
+    const agents = Array.from({ length: 10 }, (_, slot) => ({
+      slot,
+      class_id: (slot % 5) + 1,
+      class_name: classNames[(slot % 5) + 1],
+      team_id: slot < 5 ? 1 : 2,
+      active: slot !== 5,
+    }));
+    const searchFacts = {
+      kind: "activation",
+      ability: "basic",
+      status: null,
+      status_subject: null,
+      source_class_id: null,
+      recipient_class_id: null,
+      subject: "source",
+      source: "team",
+      relation: null,
+      qualifiers: [],
+    };
     const catalog = {
       source_replay_digest: summary.source_replay_digest,
       analysis_source_digest: summary.analysis_source_digest,
       metric_schema_id: "marlbg.tdm.scalar",
       metric_schema_version: 12,
       topics: summary.topics,
+      class_names: classNames,
+      agents,
       measurements: [
         {
           ...metadata,
           applicable: false,
           not_applicable_reason: "Agent 5 is inactive.",
           search_terms: ["cast count"],
+          search_facts: searchFacts,
         },
       ],
     };
@@ -888,6 +964,41 @@ test("replay metrics accept recipient totals and require clear metadata and vers
         measurements: [{ ...metadata, applicable: false, not_applicable_reason: null }],
       },
       { ...catalog, metric_schema_version: 0 },
+      { ...catalog, class_names: [] },
+      { ...catalog, class_names: ["Neutral", null] },
+      { ...catalog, agents: agents.slice(1) },
+      ...[
+        { slot: 1 },
+        { class_id: 99 },
+        { class_id: 1.5 },
+        { class_name: "Priest" },
+        { team_id: 2 },
+        { active: "true" },
+      ].map((patch) => ({
+        ...catalog,
+        agents: [{ ...agents[0], ...patch }, ...agents.slice(1)],
+      })),
+      ...[
+        null,
+        {},
+        { ...searchFacts, kind: "" },
+        { ...searchFacts, kind: "invented_metric" },
+        { ...searchFacts, ability: "passive" },
+        { ...searchFacts, status: 4 },
+        { ...searchFacts, status: "unrecorded_caster" },
+        { ...searchFacts, status_subject: "recipient" },
+        { ...searchFacts, status: "hunter_trap", status_subject: null },
+        { ...searchFacts, status: "hunter_trap", status_subject: "caster" },
+        { ...searchFacts, source_class_id: 0 },
+        { ...searchFacts, recipient_class_id: 1.5 },
+        { ...searchFacts, subject: "caster" },
+        { ...searchFacts, source: "guessed" },
+        { ...searchFacts, relation: "any" },
+        { ...searchFacts, qualifiers: [false] },
+      ].map((search_facts) => ({
+        ...catalog,
+        measurements: [{ ...catalog.measurements[0], search_facts }],
+      })),
       { ...catalog, source_replay_digest: "wrong" },
       {
         ...catalog,

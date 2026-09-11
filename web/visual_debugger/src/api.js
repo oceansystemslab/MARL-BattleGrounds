@@ -805,8 +805,15 @@ function validMetricMetadata(topics, rows, withValues) {
       Object.keys(row.topic_order).some((topic) => !views.has(topic)) ||
       (row.topic_text !== undefined &&
         (!isRecord(row.topic_text) ||
-          Object.entries(row.topic_text).some(
-            ([topic, text]) =>
+          Object.entries(row.topic_text).some(([topic, text]) => {
+            const namedAbility = [
+              "ultimate_mage",
+              "ultimate_warrior",
+              "ultimate_hunter",
+              "ultimate_rogue",
+              "ultimate_priest",
+            ].includes(topic);
+            return (
               !row.locations.some(
                 (/** @type {{topic: string}} */ location) => location?.topic === topic,
               ) ||
@@ -814,11 +821,25 @@ function validMetricMetadata(topics, rows, withValues) {
               Object.keys(text).length === 0 ||
               Object.entries(text).some(
                 ([field, value]) =>
-                  !["description", "subtitle"].includes(field) ||
+                  !(
+                    namedAbility
+                      ? [
+                          "label",
+                          "description",
+                          "subtitle",
+                          "numerator",
+                          "denominator",
+                          "guidance",
+                          "missing_when",
+                        ]
+                      : ["description", "subtitle"]
+                  ).includes(field) ||
                   typeof value !== "string" ||
-                  !value.trim(),
-              ),
-          ))) ||
+                  (!value.trim() &&
+                    !(namedAbility && field === "subtitle" && value === "")),
+              )
+            );
+          }))) ||
       row.locations.some(
         (/** @type {unknown} */ location) =>
           !isRecord(location) ||
@@ -878,11 +899,98 @@ export async function getReplayMetricCatalog(token) {
     catalog.metric_schema_id !== "marlbg.tdm.scalar" ||
     !Number.isSafeInteger(catalog.metric_schema_version) ||
     catalog.metric_schema_version < 1 ||
-    !validMetricMetadata(catalog.topics, catalog.measurements, false)
+    !validMetricMetadata(catalog.topics, catalog.measurements, false) ||
+    !validMetricSearchFacts(catalog)
   ) {
     throw new TypeError("Invalid replay measurement catalog.");
   }
   return catalog;
+}
+
+/** @param {Record<string, any>} catalog */
+function validMetricSearchFacts(catalog) {
+  const kinds = new Set([
+    "damage",
+    "healing",
+    "regeneration",
+    "excess_healing",
+    "effective_healing",
+    "kill",
+    "death",
+    "rescue",
+    "activation",
+    "action",
+    "respawn",
+    "formation",
+    "aura_coverage",
+    "aura_benefit",
+    "status_application",
+    "status_time",
+    "freedom",
+    "poison_prevention",
+    "trap_break",
+    "coordination",
+    "return",
+    "score",
+    "episode",
+    "outcome",
+  ]);
+  const statuses = new Set([
+    null,
+    "warrior_charge_slow",
+    "hunter_basic_slow",
+    "rogue_poison_slow",
+    "warrior_charge_stun",
+    "hunter_trap",
+    "rogue_poison_stun",
+    "rogue_poison_anti_heal",
+    "mage_burst",
+    "priest_freedom",
+  ]);
+  if (
+    !Array.isArray(catalog.class_names) ||
+    !catalog.class_names.length ||
+    catalog.class_names.some((name) => typeof name !== "string" || !name) ||
+    !Array.isArray(catalog.agents) ||
+    catalog.agents.length !== 10
+  )
+    return false;
+  if (
+    catalog.agents.some(
+      (agent, slot) =>
+        !isRecord(agent) ||
+        agent.slot !== slot ||
+        !Number.isSafeInteger(agent.class_id) ||
+        agent.class_id < 0 ||
+        agent.class_id >= catalog.class_names.length ||
+        agent.class_name !== catalog.class_names[agent.class_id] ||
+        agent.team_id !== (slot < 5 ? 1 : 2) ||
+        typeof agent.active !== "boolean",
+    )
+  )
+    return false;
+  return catalog.measurements.every((/** @type {Record<string, any>} */ row) => {
+    const facts = row.search_facts;
+    return (
+      isRecord(facts) &&
+      kinds.has(facts.kind) &&
+      [null, "basic", "ultimate", "burst"].includes(facts.ability) &&
+      statuses.has(facts.status) &&
+      (facts.status === null
+        ? facts.status_subject === null
+        : ["source", "recipient"].includes(facts.status_subject)) &&
+      [facts.source_class_id, facts.recipient_class_id].every(
+        (id) =>
+          id === null ||
+          (Number.isSafeInteger(id) && id > 0 && id < catalog.class_names.length),
+      ) &&
+      ["source", "recipient", "pair", "team", "episode"].includes(facts.subject) &&
+      ["none", "agent", "team", "class", "unknown"].includes(facts.source) &&
+      [null, "ally", "enemy", "self"].includes(facts.relation) &&
+      Array.isArray(facts.qualifiers) &&
+      facts.qualifiers.every((q) => typeof q === "string" && q.length > 0)
+    );
+  });
 }
 
 /**

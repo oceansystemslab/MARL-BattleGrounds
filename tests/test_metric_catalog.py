@@ -3,7 +3,7 @@
 import hashlib
 import re
 from collections import Counter
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, asdict
 from types import MappingProxyType
 
 import pytest
@@ -29,9 +29,253 @@ from marl_battlegrounds.evaluation.metric_catalog import (
     metric_locations,
     metric_order_key,
     metric_primary_location,
+    metric_search_facts,
     metric_topic_text,
     metric_view_order,
 )
+
+
+def test_search_facts_cover_the_fixed_catalog_without_changing_columns() -> None:
+    before = tuple(asdict(column) for column in METRIC_COLUMNS)
+    expected_keys = {
+        "kind",
+        "ability",
+        "status",
+        "status_subject",
+        "source_class_id",
+        "recipient_class_id",
+        "subject",
+        "source",
+        "relation",
+        "qualifiers",
+    }
+    kinds = {
+        "damage",
+        "healing",
+        "regeneration",
+        "excess_healing",
+        "effective_healing",
+        "kill",
+        "death",
+        "rescue",
+        "activation",
+        "action",
+        "respawn",
+        "formation",
+        "aura_coverage",
+        "aura_benefit",
+        "status_application",
+        "status_time",
+        "freedom",
+        "poison_prevention",
+        "trap_break",
+        "coordination",
+        "return",
+        "score",
+        "episode",
+        "outcome",
+    }
+    seen_kinds: set[object] = set()
+    for column in METRIC_COLUMNS:
+        facts = metric_search_facts(column)
+        assert set(facts) == expected_keys
+        assert facts["kind"] in kinds
+        seen_kinds.add(facts["kind"])
+        assert facts["ability"] in (None, "basic", "ultimate", "burst")
+        assert facts["status"] in (None, *STATUS_NAMES)
+        assert facts["status_subject"] in (None, "source", "recipient")
+        assert (facts["status"] is None) == (facts["status_subject"] is None)
+        assert isinstance(facts["qualifiers"], list)
+        if column.unit == "fraction":
+            assert "fraction" in facts["qualifiers"]
+        assert facts["subject"] in ("source", "recipient", "pair", "team", "episode")
+        assert facts["source"] in ("none", "agent", "team", "class", "unknown")
+        assert facts["relation"] in (None, "ally", "enemy", "self")
+        for field in ("source_class_id", "recipient_class_id"):
+            assert facts[field] in (None, 1, 2, 3, 4, 5)
+        if column.scope in ("source_recipient", "team_recipient"):
+            assert facts["subject"] == "source"
+        if column.scope == "ally_pair":
+            assert facts["subject"] == "pair"
+            assert facts["source"] == "none"
+    assert seen_kinds == kinds
+    assert tuple(asdict(column) for column in METRIC_COLUMNS) == before
+
+
+def test_search_facts_keep_healers_effects_and_recipients_distinct() -> None:
+    cases = {
+        "agent_0_regenerated_healing": {
+            "kind": "regeneration",
+            "source": "none",
+            "source_class_id": None,
+            "subject": "recipient",
+        },
+        "agent_0_healing_received": {
+            "kind": "healing",
+            "source_class_id": None,
+            "qualifiers": ["combined"],
+        },
+        "team_a_effective_healing_received": {
+            "kind": "effective_healing",
+            "source_class_id": None,
+            "qualifiers": ["combined"],
+        },
+        "agent_0_priest_healing_received": {
+            "kind": "healing",
+            "source": "class",
+            "source_class_id": 5,
+            "recipient_class_id": None,
+            "relation": "ally",
+            "qualifiers": ["priest"],
+        },
+        "agent_0_to_agent_1_basic_effective_healing_done": {
+            "kind": "effective_healing",
+            "ability": "basic",
+            "source": "agent",
+            "source_class_id": 5,
+            "recipient_class_id": None,
+        },
+        "team_b_ultimate_excess_healing": {
+            "kind": "excess_healing",
+            "ability": "ultimate",
+            "source": "team",
+            "source_class_id": 5,
+        },
+        "team_a_priest_holy_word_salvation_applications": {
+            "kind": "activation",
+            "ability": "ultimate",
+            "source": "team",
+            "source_class_id": 5,
+            "status": None,
+            "status_subject": None,
+            "subject": "source",
+        },
+        "agent_0_damage_received_while_hunter_basic_slow": {
+            "kind": "damage",
+            "ability": None,
+            "source_class_id": None,
+            "status": "hunter_basic_slow",
+            "status_subject": "recipient",
+            "relation": "enemy",
+        },
+        "agent_0_healing_received_while_hunter_trap": {
+            "kind": "healing",
+            "source_class_id": 5,
+            "status": "hunter_trap",
+            "recipient_class_id": None,
+        },
+        "agent_0_hunter_trap_active_steps": {
+            "kind": "status_time",
+            "source": "unknown",
+            "source_class_id": None,
+            "recipient_class_id": None,
+            "relation": None,
+            "status_subject": "recipient",
+        },
+        "agent_0_to_agent_5_hunter_trap_applications": {
+            "kind": "status_application",
+            "source": "agent",
+            "source_class_id": 3,
+            "ability": "ultimate",
+            "status": "hunter_trap",
+            "status_subject": "recipient",
+        },
+        "agent_0_burst_damage_received": {
+            "kind": "damage",
+            "source": "class",
+            "source_class_id": 1,
+            "recipient_class_id": None,
+            "ability": "burst",
+            "relation": "enemy",
+            "status_subject": "source",
+        },
+        "team_a_damage_done": {
+            "kind": "damage",
+            "source": "team",
+            "source_class_id": None,
+        },
+        "team_a_mage_basic_kills": {
+            "kind": "kill",
+            "ability": "basic",
+            "source_class_id": 1,
+        },
+        "team_a_ultimate_kills": {
+            "kind": "kill",
+            "ability": "ultimate",
+            "source_class_id": None,
+        },
+        "agent_0_deaths_while_hunter_trap": {
+            "kind": "death",
+            "subject": "recipient",
+            "source_class_id": None,
+        },
+        "agent_0_to_agent_5_basic_kill_contributions": {
+            "kind": "kill",
+            "subject": "source",
+            "ability": "basic",
+            "source_class_id": None,
+            "relation": "enemy",
+        },
+        "agent_0_rescues": {
+            "kind": "rescue",
+            "subject": "recipient",
+            "source_class_id": 5,
+            "ability": None,
+            "relation": "ally",
+        },
+        "agent_0_mage_aura_covered_recipient_steps": {
+            "kind": "aura_coverage",
+            "subject": "recipient",
+            "source_class_id": 1,
+            "recipient_class_id": None,
+            "relation": "ally",
+        },
+        "team_a_damage_from_mage_aura": {
+            "kind": "aura_benefit",
+            "source": "class",
+            "source_class_id": 1,
+        },
+        "agent_0_healing_prevented_by_poison": {
+            "kind": "poison_prevention",
+            "source": "unknown",
+            "source_class_id": None,
+            "status": "rogue_poison_anti_heal",
+        },
+        "agent_0_freedom_protected_steps": {
+            "kind": "freedom",
+            "source": "unknown",
+            "source_class_id": None,
+            "status": "priest_freedom",
+        },
+    }
+    for name, expected in cases.items():
+        facts = metric_search_facts(METRIC_COLUMNS_BY_NAME[name])
+        assert {field: facts[field] for field in expected} == expected, name
+
+
+def test_search_pair_facts_use_the_directed_registry_for_every_amount_and_share() -> (
+    None
+):
+    for metric in DIRECTED_METRICS:
+        stems = (metric.amount, metric.allocation, metric.contribution)
+        columns = (
+            column
+            for column in METRIC_COLUMNS
+            if column.scope == "source_recipient" and column.stem in stems
+        )
+        for column in columns:
+            facts = metric_search_facts(column)
+            assert facts["source"] == "agent", column.name
+            assert facts["relation"] == (
+                None if metric.relation == "all" else metric.relation
+            ), column.name
+            assert facts["recipient_class_id"] is None, column.name
+            if metric.required_class_id is not None:
+                assert facts["source_class_id"] == metric.required_class_id, column.name
+            if metric.status_channel is not None:
+                assert facts["status"] == STATUS_NAMES[metric.status_channel], (
+                    column.name
+                )
 
 
 def test_priority_order_matches_the_public_result_vector() -> None:
@@ -60,8 +304,8 @@ def test_priority_order_matches_the_public_result_vector() -> None:
 
 
 def test_fixed_catalog_has_unique_names_and_immutable_complete_definitions() -> None:
-    assert len(FULL_METRIC_NAMES) == len(set(FULL_METRIC_NAMES)) == 11152
-    assert METRIC_SCHEMA_VERSION == 12
+    assert len(FULL_METRIC_NAMES) == len(set(FULL_METRIC_NAMES)) == 11158
+    assert METRIC_SCHEMA_VERSION == 13
     additions = {
         f"agent_{slot}_{stem}"
         for slot in range(10)
@@ -81,8 +325,24 @@ def test_fixed_catalog_has_unique_names_and_immutable_complete_definitions() -> 
     }
     assert len(basic_shares) == 12
     assert basic_shares <= set(FULL_METRIC_NAMES)
-    # Schema 12 changes the full order, but keeps every schema-11 name.
-    surviving = sorted(set(FULL_METRIC_NAMES) - basic_shares)
+    ability_counts = {
+        f"team_{team}_{stem}"
+        for team in ("a", "b")
+        for stem in (
+            "warrior_charge_applications",
+            "rogue_poison_applications",
+            "priest_holy_word_salvation_applications",
+        )
+    }
+    assert len(ability_counts) == 6
+    assert ability_counts <= set(FULL_METRIC_NAMES)
+    earlier_names = [name for name in FULL_METRIC_NAMES if name not in ability_counts]
+    # Every earlier name and its relative position stays unchanged.
+    assert len(earlier_names) == 11152
+    assert hashlib.sha256("\n".join(earlier_names).encode()).hexdigest() == (
+        "5217c631d20da81f7e90ba5ef3d17a7a244bdda986c6983a64a387ca7f41296e"
+    )
+    surviving = sorted(set(earlier_names) - basic_shares)
     assert len(surviving) == 11140
     assert hashlib.sha256("\n".join(surviving).encode()).hexdigest() == (
         "29575079c8dd13c532367461619660b9c219ced7d8db2d44bd6ab9f6a3ab8852"
@@ -290,7 +550,7 @@ def test_applicability_distinguishes_general_zeros_from_class_specific_absence()
 def test_family_budget_retains_requested_counts_without_duplicate_aliases() -> None:
     assert dict(FAMILY_COLUMN_COUNTS) == {
         "priority": 26,
-        "abilities": 664,
+        "abilities": 670,
         "deaths": 42,
         "kill_contributions": 734,
         "damage_done": 46,
@@ -890,7 +1150,7 @@ def test_ultimate_views_reuse_columns_without_inventing_mixed_class_team_totals(
             assert group in groups(name)
     for name, order in (
         ("agent_1_ultimate_activations", 0),
-        ("team_a_warrior_charge_slow_applications", 0),
+        ("team_a_warrior_charge_applications", 0),
         ("agent_1_to_agent_5_ultimate_application_fraction", 0),
         ("agent_1_ultimate_damage_done", 1),
         ("team_a_burst_damage", 1),
@@ -998,32 +1258,74 @@ def test_ultimate_views_reuse_columns_without_inventing_mixed_class_team_totals(
         )
 
     for topic, stem, ability in (
-        ("ultimate_mage", "mage_burst_applications", "Burst"),
-        ("ultimate_warrior", "warrior_charge_slow_applications", "Charge"),
-        ("ultimate_hunter", "hunter_trap_applications", "Freezing Trap"),
-        ("ultimate_rogue", "rogue_poison_slow_applications", "Crippling Poison"),
+        ("ultimate_mage", "mage_burst_applications", "Mage Burst"),
+        ("ultimate_warrior", "warrior_charge_applications", "Warrior Charge"),
+        ("ultimate_hunter", "hunter_trap_applications", "Hunter Trap"),
+        ("ultimate_rogue", "rogue_poison_applications", "Rogue Poison"),
     ):
         column = METRIC_COLUMNS_BY_NAME[f"team_b_{stem}"]
         text = metric_topic_text(column, topic, canonical)
-        assert "label" not in text
-        assert "subtitle" not in text
+        assert text.get("label", column.label) == f"{ability} Applications"
+        assert text["subtitle"] == ""
         assert "Team B" in text["description"]
         assert ability in text["description"]
-        assert column.status_channel is not None
-        assert column.label == STATUS_LABELS[column.status_channel] + " Applications"
+        if column.status_channel is not None:
+            assert (
+                column.label == STATUS_LABELS[column.status_channel] + " Applications"
+            )
         assert metric_topic_text(column, "status_applications", canonical) == {}
+    for team in ("a", "b"):
+        for class_id, stem, topic, ability in (
+            (2, "warrior_charge_applications", "ultimate_warrior", "Warrior Charge"),
+            (4, "rogue_poison_applications", "ultimate_rogue", "Rogue Poison"),
+            (
+                5,
+                "priest_holy_word_salvation_applications",
+                "ultimate_priest",
+                "Priest Salvation",
+            ),
+        ):
+            column = METRIC_COLUMNS_BY_NAME[f"team_{team}_{stem}"]
+            assert column.scope == "team" and column.family == "abilities"
+            assert (
+                column.required_class_id == class_id and column.status_channel is None
+            )
+            assert column.numerator is None and column.denominator is None
+            assert metric_primary_location(column) == (topic, "totals")
+            assert metric_locations(column, canonical) == ((topic, "totals"),)
+            text = metric_topic_text(column, topic, canonical)
+            assert text.get("label", column.label) == f"{ability} Applications"
+            assert text["subtitle"] == ""
+            assert "Each activation counts once" in text["description"]
+        for stem in (
+            "warrior_charge_slow",
+            "warrior_charge_stun",
+            "rogue_poison_slow",
+            "rogue_poison_stun",
+            "rogue_poison_anti_heal",
+        ):
+            column = METRIC_COLUMNS_BY_NAME[f"team_{team}_{stem}_applications"]
+            assert column.status_channel is not None
+            assert (
+                column.label == STATUS_LABELS[column.status_channel] + " Applications"
+            )
+            assert metric_locations(column, canonical) == (
+                ("status_applications", "totals"),
+            )
+            assert metric_topic_text(column, "status_applications", canonical) == {}
     permuted = (5, 3, 1, 4, 2, 2, 5, 4, 1, 3)
     for slot, topic, ability in (
-        (0, "ultimate_priest", "Salvation"),
-        (1, "ultimate_hunter", "Freezing Trap"),
-        (2, "ultimate_mage", "Burst"),
-        (3, "ultimate_rogue", "Crippling Poison"),
-        (4, "ultimate_warrior", "Charge"),
+        (0, "ultimate_priest", "Priest Salvation"),
+        (1, "ultimate_hunter", "Hunter Trap"),
+        (2, "ultimate_mage", "Mage Burst"),
+        (3, "ultimate_rogue", "Rogue Poison"),
+        (4, "ultimate_warrior", "Warrior Charge"),
     ):
         activation = METRIC_COLUMNS_BY_NAME[f"agent_{slot}_ultimate_activations"]
         text = metric_topic_text(activation, topic, permuted)
         assert ability in text["description"]
-        assert set(text) <= {"description", "subtitle"}
+        assert text["label"] == f"{ability} Applications"
+        assert set(text) <= {"label", "description", "subtitle"}
         if topic == "ultimate_mage":
             assert "itself" in text["description"]
             continue
@@ -1236,10 +1538,20 @@ def test_dropdown_inventory_has_twenty_nine_distinct_groups() -> None:
         assert groups and len(groups) == len(set(groups))
         assert set(groups) <= set(METRIC_GROUPS)
         for group in groups:
-            assert set(metric_topic_text(column, group, classes)) <= {
-                "description",
-                "subtitle",
-            }
+            text = metric_topic_text(column, group, classes)
+            if group in ULTIMATE_GROUP_BY_CLASS.values():
+                assert set(text) <= {
+                    "label",
+                    "description",
+                    "subtitle",
+                    "numerator",
+                    "denominator",
+                    "guidance",
+                    "missing_when",
+                }
+                assert all("Ultimate" not in value for value in text.values())
+            else:
+                assert set(text) <= {"description", "subtitle"}
     for slot, status, ultimate in (
         (0, "mage_burst", "ultimate_mage"),
         (1, "warrior_charge_stun", "ultimate_warrior"),
@@ -1445,7 +1757,7 @@ def test_generated_dictionary_and_manuscript_summary_match_catalog() -> None:
     assert Path("docs/evaluation/metric_columns.csv").read_text() == dictionary_csv()
     specification = Path("docs/evaluation/metric_specification.md").read_text()
     assert family_summary_markdown() in specification
-    assert "**11,152**" in family_summary_markdown()
+    assert "**11,158**" in family_summary_markdown()
 
 
 def test_topics_match_the_approved_researcher_questions() -> None:

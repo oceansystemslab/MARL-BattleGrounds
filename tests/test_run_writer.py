@@ -153,7 +153,7 @@ def test_csv_headers_full_priority_copy_and_missing_values_survive_roster_change
         assert len(IDENTITY_COLUMNS) == 30
         assert priority_header == [*IDENTITY_COLUMNS, *PRIORITY_METRIC_NAMES]
         assert full_header == [*IDENTITY_COLUMNS, *FULL_METRIC_NAMES]
-        assert len(priority_header) == 30 + 26 and len(full_header) == 30 + 11_152
+        assert len(priority_header) == 30 + 26 and len(full_header) == 30 + 11_158
         assert len(priority) == len(full) == 2
         for small, complete in zip(priority, full, strict=True):
             assert {name: complete[name] for name in priority_header} == small

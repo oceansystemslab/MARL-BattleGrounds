@@ -32,6 +32,7 @@ from tests.full_metric_fixtures import (
     values as _values,
 )
 
+from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import (
     build_canonical_no_transition_info_object,
     reset,
@@ -84,8 +85,8 @@ def test_fixed_full_schema_preserves_priority_and_missingness_across_rosters() -
         runs.append(run)
     for run in runs:
         values = cast(MetricValues, compiled(run.full, run.config, _priority(run)))
-        assert len(METRIC_COLUMNS) == 11152
-        assert values.values.shape == values.valid.shape == (11152,)
+        assert len(METRIC_COLUMNS) == 11158
+        assert values.values.shape == values.valid.shape == (11158,)
         assert values.values.dtype == jnp.float32 and values.valid.dtype == jnp.bool_
         assert bool(jnp.isfinite(values.values).all())
         np.testing.assert_array_equal(
@@ -140,6 +141,60 @@ def test_fixed_full_schema_preserves_priority_and_missingness_across_rosters() -
     _missing(values, "team_a_focus_fire_concentration")
     _missing(_values(second), "team_a_ally_distance_mean")
     assert _value(_values(second), "team_a_ally_distance_observations") == 0
+
+
+def test_named_team_applications_count_only_active_sources_of_that_class() -> None:
+    run = _start()
+    # Distinct source totals expose a wrong team, source or class reduction.
+    # These are reducer inputs, not a claim that this matrix is a public event.
+    applications = jnp.arange(1, 101, dtype=jnp.int32).reshape(10, 10)
+    totals = {**run.full, "ultimate_applications": applications}
+    for classes, sizes in (
+        ((1, 2, 3, 4, 5) * 2, (5, 5)),
+        ((5, 4, 1, 2, 3, 3, 5, 4, 1, 2), (5, 5)),
+        ((5, 5, 1, 2, 2, 1, 3, 4, 5, 5), (5, 5)),
+        ((4, 4, 2, 2, 5, 5, 5, 4, 4, 2), (5, 5)),
+        ((5, 2, 5, 5, 5, 1, 5, 3, 5, 5), (2, 3)),
+        ((5, 5, 5, 5, 5, 1, 5, 5, 5, 5), (1, 1)),
+        ((1, 2, 3, 4, 1) * 2, (5, 5)),
+    ):
+        profile = resolve_agent_profile(
+            jnp.asarray(classes, jnp.int32), jnp.asarray(sizes, jnp.int32)
+        )
+        current = run._replace(
+            config=run.config._replace(agent_profile=profile), full=totals
+        )
+        values = _values(current)
+        active = np.asarray(profile.active_mask)
+        sources = np.asarray(profile.class_ids)
+        for team, slots in (("a", range(5)), ("b", range(5, 10))):
+            for class_id, stem, status in (
+                (2, "warrior_charge_applications", "warrior_charge_slow_applications"),
+                (4, "rogue_poison_applications", "rogue_poison_slow_applications"),
+                (5, "priest_holy_word_salvation_applications", None),
+            ):
+                name = f"team_{team}_{stem}"
+                matching_sources = [
+                    slot for slot in slots if active[slot] and sources[slot] == class_id
+                ]
+                expected = sum(
+                    int(applications[slot].sum()) for slot in matching_sources
+                )
+                if matching_sources:
+                    assert _value(values, name) == expected
+                    assert _value(values, name) != _value(
+                        values, f"team_{team}_ultimate_activations"
+                    )
+                    if status is not None:
+                        assert _value(values, name) == _value(
+                            values, f"team_{team}_{status}"
+                        )
+                else:
+                    _missing(values, name)
+                index = next(
+                    i for i, column in enumerate(METRIC_COLUMNS) if column.name == name
+                )
+                assert int(values.values[index]) == expected
 
 
 @pytest.mark.parametrize("duration", (0, 1, 3))

@@ -4984,7 +4984,7 @@ def test_metric_analysis_is_cached_across_scopes_cursors_and_pov(
     sidecar = service.current_metric_report()
     catalog_bytes = service.metric_catalog()
     catalog = json.loads(catalog_bytes)
-    assert len(catalog["measurements"]) == 11152
+    assert len(catalog["measurements"]) == 11158
     assert any(not row["applicable"] for row in catalog["measurements"])
     assert all(
         "value" not in row and "valid" not in row for row in catalog["measurements"]

@@ -24,7 +24,7 @@ type MetricScope = Literal[
 type MetricDirection = Literal["higher", "lower", "descriptive"]
 
 METRIC_SCHEMA_ID = "marlbg.tdm.scalar"
-METRIC_SCHEMA_VERSION = 12
+METRIC_SCHEMA_VERSION = 13
 
 _BURST_KILL_NOTE = (
     "A Mage's Basic attack during Burst counts as Basic and Burst help. "
@@ -1145,12 +1145,18 @@ def _directed_metrics() -> tuple[DirectedMetric, ...]:
 
 
 DIRECTED_METRICS = _directed_metrics()
+ULTIMATE_TEAM_ABILITY_STEMS = MappingProxyType(
+    {
+        2: "warrior_charge_applications",
+        4: "rogue_poison_applications",
+        5: "priest_holy_word_salvation_applications",
+    }
+)
 ULTIMATE_TEAM_ACTIVATION_STEMS = MappingProxyType(
     {
         1: "mage_burst_applications",
-        2: "warrior_charge_slow_applications",
         3: "hunter_trap_applications",
-        4: "rogue_poison_slow_applications",
+        **ULTIMATE_TEAM_ABILITY_STEMS,
     }
 )
 ULTIMATE_CLASS_NAMES = ("mage", "warrior", "hunter", "rogue", "priest")
@@ -1197,6 +1203,8 @@ def metric_groups(column: MetricColumn, class_ids: tuple[int, ...]) -> tuple[str
     Inactive slots have class ID zero in this presentation roster.
     """
     primary = _RETIRED_GROUPS.get(column.family, column.family)
+    if column.stem in ULTIMATE_TEAM_ABILITY_STEMS.values():
+        primary = ULTIMATE_GROUP_BY_CLASS[cast(int, column.required_class_id)]
     groups = [primary]
     if column.scope == "team" and column.stem == "deaths":
         groups.append("deaths")
@@ -1241,7 +1249,9 @@ def metric_groups(column: MetricColumn, class_ids: tuple[int, ...]) -> tuple[str
         if group not in groups:
             groups.append(group)
     effect_class: int | None = None
-    if column.family == "status_applications":
+    if column.family == "status_applications" or (
+        column.stem in ULTIMATE_TEAM_ABILITY_STEMS.values()
+    ):
         if column.scope == "team":
             effect_class = next(
                 (
@@ -1315,6 +1325,8 @@ def metric_primary_location(column: MetricColumn) -> tuple[str, str]:
     """Give a column one fixed CSV home, independent of the recorded roster."""
     if column.priority:
         topic = "priority"
+    elif column.stem in ULTIMATE_TEAM_ABILITY_STEMS.values():
+        topic = ULTIMATE_GROUP_BY_CLASS[cast(int, column.required_class_id)]
     elif column.scope == "team" and column.family == "healing_received":
         topic = "healing_received"
     elif "excess" in column.stem:
@@ -1359,6 +1371,13 @@ def metric_locations(
 
 
 _ULTIMATE_NAMES = ("Burst", "Charge", "Freezing Trap", "Crippling Poison", "Salvation")
+_ULTIMATE_TOPIC_NAMES = (
+    "Mage Burst",
+    "Warrior Charge",
+    "Hunter Trap",
+    "Rogue Poison",
+    "Priest Salvation",
+)
 
 
 def metric_topic_text(
@@ -1368,13 +1387,13 @@ def metric_topic_text(
     if topic not in ULTIMATE_GROUP_BY_CLASS.values():
         return {}
     class_id = next(k for k, value in ULTIMATE_GROUP_BY_CLASS.items() if value == topic)
-    ability = _ULTIMATE_NAMES[class_id - 1]
+    ability = _ULTIMATE_TOPIC_NAMES[class_id - 1]
     stem = column.stem
     team = (
         "Team A"
         if (
             column.subjects[0] == 1
-            if column.scope == "team"
+            if column.scope in ("team", "team_recipient")
             else column.subjects[0] < 5
         )
         else "Team B"
@@ -1384,8 +1403,7 @@ def metric_topic_text(
         description = (
             f"How many times {team}'s {ULTIMATE_CLASS_NAMES[class_id - 1].title()}s "
             f"activated {ability}. "
-            "Each activation counts once, even if it applies several effects. "
-            "This named effect count also counts those activations."
+            "Each activation counts once, even if it applies several effects."
         )
     elif stem in ("ultimate_activations", "ultimate_applications"):
         target = " on this target" if column.scope == "source_recipient" else ""
@@ -1453,7 +1471,95 @@ def metric_topic_text(
             " Count this helper once per enemy death. Other agents can help with "
             "the same death. This does not prove the ability was needed for the kill."
         )
-    return {"description": description} if description != column.description else {}
+    original = {
+        "label": column.label,
+        "description": column.description,
+        "numerator": column.numerator,
+        "denominator": column.denominator,
+        "guidance": metric_guidance(column, class_ids)[1],
+        "missing_when": column.missing_when,
+    }
+    text = {**original, "description": description}
+    if stem == "ultimate_activations" or (
+        column.scope == "team" and stem == ULTIMATE_TEAM_ACTIVATION_STEMS.get(class_id)
+    ):
+        text["label"] = f"{ability} Applications"
+    elif stem == "ultimate_applications":
+        text["label"] = f"{ability} Applications on Recipient"
+
+    # These shared team totals include other classes. Name the source's ability
+    # separately from the combined count used to divide it.
+    if stem == "ultimate_application_contribution_fraction":
+        text["label"] = (
+            f"{ability} Share of {team}'s Combined Applications on Recipient"
+        )
+        text["description"] = (
+            f"What share of {team}'s combined ability applications on this target "
+            f"came from this agent's {ability}. The team total includes "
+            "Mage Burst, Warrior Charge, Hunter Trap, Rogue Poison and Priest "
+            "Salvation. Each allowed use counts once. For example, 4 of the "
+            "team's 8 applications gives 4/8 = 0.5 (50%)."
+        )
+        text["denominator"] = (
+            f"All applications by {team} on this target across Mage Burst, "
+            "Warrior Charge, Hunter Trap, Rogue Poison and Priest Salvation"
+        )
+    elif stem == "ultimate_damage_done_contribution_fraction":
+        text["label"] = (
+            f"{ability} Share of {team}'s Combined Ability Damage to Recipient"
+        )
+        text["description"] = (
+            f"What share of {team}'s combined ability damage to this target came "
+            f"from this agent's {ability}. The team total includes direct damage "
+            "from Warrior Charge, Hunter Trap and Rogue Poison. Counts damage "
+            "after damage boosts and defenses, including damage beyond the "
+            "enemy's remaining health."
+        )
+        text["denominator"] = (
+            f"All direct Warrior Charge, Hunter Trap and Rogue Poison damage "
+            f"{team} dealt this target, including this agent's damage"
+        )
+    if column.denominator and text["denominator"] != column.denominator:
+        denominator = cast(str, text["denominator"])
+        for old, new in (
+            (column.denominator, denominator),
+            (
+                column.denominator[:1].lower() + column.denominator[1:],
+                denominator[:1].lower() + denominator[1:],
+            ),
+        ):
+            text["missing_when"] = cast(str, text["missing_when"]).replace(old, new)
+
+    def name_ability(value: str) -> str:
+        # Received healing already names Priest; keep that class name once.
+        value = value.replace("Ultimate Effective Priest", "Effective Priest Salvation")
+        value = value.replace("Ultimate Priest", "Priest Salvation")
+        value = re.sub(r"\ban Ultimate\b", ability, value)
+        value = re.sub(r"\bUltimates?\b(?: [Aa]bilit(?:y|ies))?", ability, value)
+        for pattern, name in zip(
+            (
+                r"\b(?:Mage )?Burst\b",
+                r"\b(?:Warrior )?Charge\b",
+                r"\b(?:Hunter )?(?:Freezing )?Trap\b",
+                r"\b(?:Rogue )?(?:Crippling )?Poison\b",
+                r"\b(?:Priest )?Salvation\b",
+            ),
+            _ULTIMATE_TOPIC_NAMES,
+            strict=True,
+        ):
+            value = re.sub(pattern, name, value)
+        return value
+
+    result = {
+        field: named
+        for field, value in text.items()
+        if value is not None and (named := name_ability(value)) != original[field]
+    }
+    if stem == "ultimate_activations" or (
+        column.scope == "team" and stem == ULTIMATE_TEAM_ACTIVATION_STEMS.get(class_id)
+    ):
+        result["subtitle"] = ""
+    return result
 
 
 def _row_order(
@@ -2304,6 +2410,21 @@ def _build_columns() -> tuple[MetricColumn, ...]:
             f"{ability.title()} abilities, added together. Using an ability again "
             "counts once even if its effect is already there. A use the game "
             "does not allow does not count.",
+            direction="descriptive",
+        )
+
+    for class_id, stem in ULTIMATE_TEAM_ABILITY_STEMS.items():
+        add(
+            stem,
+            f"{_ULTIMATE_TOPIC_NAMES[class_id - 1]} Applications",
+            "abilities",
+            "count",
+            f"How many times {ULTIMATE_CLASS_NAMES[class_id - 1].title()}s on "
+            f"this team used {_ULTIMATE_NAMES[class_id - 1]}, added together. "
+            "Each allowed use counts once. A rejected action does not count.",
+            scopes=("team",),
+            required_class_id=class_id,
+            subject_role="source",
             direction="descriptive",
         )
 
@@ -5604,3 +5725,227 @@ _METRIC_SEARCH_TERMS = _build_metric_search_terms()
 def metric_search_terms(column: MetricColumn) -> tuple[str, ...]:
     """Other words researchers can use to find this measurement."""
     return _METRIC_SEARCH_TERMS.get(column.stem, ())
+
+
+_SEARCH_DIRECTED_PAIRS = MappingProxyType(
+    {
+        stem: metric
+        for metric in DIRECTED_METRICS
+        for stem in (metric.amount, metric.allocation, metric.contribution)
+        if stem is not None
+    }
+)
+_SEARCH_KIND_BY_FAMILY = MappingProxyType(
+    {
+        "abilities": "activation",
+        "action_acceptance": "action",
+        "damage_done": "damage",
+        "recipient_damage": "damage",
+        "damage_received": "damage",
+        "controlled_damage": "damage",
+        "healing_done": "healing",
+        "recipient_healing": "healing",
+        "healing_received": "healing",
+        "controlled_healing": "healing",
+        "excess_healing": "excess_healing",
+        "priest_rescue": "rescue",
+        "coordination": "coordination",
+        "kill_contributions": "kill",
+        "controlled_kills": "kill",
+        "deaths": "death",
+        "respawn": "respawn",
+        "formation": "formation",
+        "aura_coverage": "aura_coverage",
+        "aura_benefits": "aura_benefit",
+        "status_applications": "status_application",
+        "status_active_steps": "status_time",
+        "freedom": "freedom",
+        "trap_breaks": "trap_break",
+        "poison": "poison_prevention",
+    }
+)
+
+
+def metric_search_facts(column: MetricColumn) -> dict[str, object]:
+    """Describe search meaning without changing a scalar or guessing its actors.
+
+    A class inside a status name names the effect, not its recorded caster.
+    Source and recipient slots stay in the existing scope and subjects fields.
+    These facts belong only in the once-per-replay catalog, never tick summaries.
+    """
+    stem, family, scope = column.stem, column.family, column.scope
+    contexts = (
+        (_SEARCH_DIRECTED_PAIRS[stem],)
+        if scope == "source_recipient" and stem in _SEARCH_DIRECTED_PAIRS
+        else _DIRECTED_CONTEXTS.get((scope, stem), ())
+    )
+    relations = {metric.relation for metric in contexts}
+    relation = next(iter(relations)) if len(relations) == 1 else None
+    if relation == "all":
+        relation = None
+    subject = (
+        "episode"
+        if scope == "episode"
+        else "pair"
+        if scope == "ally_pair"
+        else "source"
+        if scope in ("source_recipient", "team_recipient")
+        else "recipient"
+        if column.subject_role == "recipient"
+        else "team"
+        if scope == "team" and family == "priority"
+        else "source"
+    )
+    if family == "priority":
+        kind = (
+            "outcome"
+            if stem in ("win", "draw", "loss")
+            else "episode"
+            if stem == "episode_length"
+            else "score"
+            if stem in ("score", "score_difference")
+            else "kill"
+            if stem == "kills"
+            else "death"
+            if stem == "deaths"
+            else "return"
+        )
+        if kind == "death":
+            subject = "recipient"
+        elif kind == "kill":
+            subject = "source"
+    elif family == "burst":
+        kind = "damage" if "damage" in stem else "kill"
+    else:
+        kind = _SEARCH_KIND_BY_FAMILY[family]
+    if family == "controlled_kills" and subject == "recipient":
+        kind = "death"
+    if kind == "healing":
+        if stem.startswith(("regenerated_", "regeneration_")):
+            kind = "regeneration"
+        elif "excess" in stem:
+            kind = "excess_healing"
+        elif "effective" in stem:
+            kind = "effective_healing"
+    if family == "coordination" and "kill" in stem:
+        kind = "kill"
+
+    ability = next(
+        (
+            name
+            for name in ("basic", "ultimate", "burst")
+            if stem.startswith(name + "_")
+        ),
+        None,
+    )
+    if family == "status_applications" and contexts:
+        ability = "basic" if contexts[0].requires_basic_target else "ultimate"
+    if stem in ULTIMATE_TEAM_ABILITY_STEMS.values():
+        ability = "ultimate"
+    if family == "kill_contributions" and column.required_class_id is not None:
+        # Class-specific team kill counts still name their actual ability.
+        ability = next(
+            (name for name in ("basic", "ultimate") if f"_{name}_" in stem), ability
+        )
+
+    status = (
+        STATUS_NAMES[column.status_channel]
+        if column.status_channel is not None
+        else "hunter_trap"
+        if family == "trap_breaks"
+        else "priest_freedom"
+        if family == "freedom"
+        else "rogue_poison_anti_heal"
+        if family == "poison"
+        else "mage_burst"
+        if family == "burst"
+        else None
+    )
+    source_class = column.required_class_id if subject != "recipient" else None
+    recipient_class = column.required_class_id if subject == "recipient" else None
+    if source_class is None and contexts:
+        source_classes = {metric.required_class_id for metric in contexts}
+        if len(source_classes) == 1:
+            source_class = next(iter(source_classes))
+    qualifiers: list[str] = [stem] if kind == "outcome" else []
+    combined = family == "healing_received" and stem in (
+        "healing_received",
+        "healing_received_fraction",
+        "effective_healing_received",
+    )
+    if combined:
+        qualifiers.append("combined")
+    elif kind in ("healing", "effective_healing", "excess_healing", "rescue"):
+        source_class, relation = 5, "ally"
+        qualifiers.append("priest")
+    if family == "burst":
+        source_class, relation = 1, "enemy"
+    if family == "aura_coverage":
+        relation = "ally"
+        if contexts:
+            source_class = contexts[0].required_class_id
+    if kind in ("damage", "kill", "death", "trap_break"):
+        relation = "enemy"
+    elif family == "formation" or combined:
+        relation = "ally"
+
+    source = (
+        "agent"
+        if scope in ("agent", "source_recipient") and subject == "source"
+        else "class"
+        if subject == "recipient" and source_class is not None
+        else "team"
+    )
+    if family in ("status_active_steps", "freedom", "poison"):
+        source, source_class, relation = "unknown", None, None
+    elif kind in (
+        "regeneration",
+        "formation",
+        "episode",
+        "outcome",
+        "return",
+        "score",
+        "respawn",
+    ):
+        source, source_class = "none", None
+    elif family == "aura_benefits":
+        source, relation = "class", "ally"
+
+    for word, qualifier in (
+        ("allocation", "allocation"),
+        ("contribution", "contribution"),
+        ("participation", "participation"),
+        ("fraction", "fraction"),
+        ("solo", "solo"),
+        ("single_contributor", "solo"),
+        ("multi_contributor", "multi"),
+        ("eligible", "eligible"),
+        ("covered", "covered"),
+        ("prevented", "prevented"),
+        ("interval", "interval"),
+        ("opportunities", "opportunity"),
+        ("accepted", "accepted"),
+        ("rejected", "rejected"),
+        ("rejections", "rejected"),
+        ("submitted", "submitted"),
+    ):
+        if word in stem and qualifier not in qualifiers:
+            qualifiers.append(qualifier)
+    if "contributing_to_kill" in stem:
+        qualifiers.append("death_tick")
+    if column.unit == "fraction" and "fraction" not in qualifiers:
+        qualifiers.append("fraction")
+    return {
+        "kind": kind,
+        "ability": ability,
+        "status": status,
+        "status_subject": (
+            None if status is None else "source" if family == "burst" else "recipient"
+        ),
+        "source_class_id": source_class,
+        "recipient_class_id": recipient_class,
+        "subject": subject,
+        "source": source,
+        "relation": relation,
+        "qualifiers": qualifiers,
+    }

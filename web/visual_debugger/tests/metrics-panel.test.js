@@ -1,12 +1,183 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  buildMetricSearchIndex,
+  buildMetricSearchIndex as buildIndex,
   findMeasurements,
   metricLabel,
   metricTooltipRows,
   selectedMetricRows,
 } from "../src/metrics-panel.js";
+
+const classNames = ["Neutral", "Mage", "Warrior", "Hunter", "Rogue", "Priest"];
+const testAgents = [1, 2, 2, 4, 5, 1, 2, 2, 4, 5].map((class_id, slot) => ({
+  slot,
+  class_id,
+  class_name: classNames[class_id],
+  team_id: slot < 5 ? 1 : 2,
+  active: true,
+}));
+
+/** Test facts are declared here, independently of labels and descriptions.
+ * @param {string} kind @param {string} subject
+ * @param {Record<string, any>} [extra]
+ */
+function facts(kind, subject, extra = {}) {
+  return {
+    kind,
+    subject,
+    ability: null,
+    status: null,
+    status_subject: extra.status ? "recipient" : null,
+    source_class_id: null,
+    recipient_class_id: null,
+    source: subject === "source" ? "agent" : "team",
+    relation: null,
+    qualifiers: [],
+    ...extra,
+  };
+}
+
+/** @type {Record<string, Record<string, any>>} */
+const searchRows = {
+  agent_7_basic_kills: {
+    scope: "agent",
+    subjects: [7],
+    search_facts: facts("kill", "source", { ability: "basic", relation: "enemy" }),
+  },
+  other: {
+    scope: "team",
+    subjects: [1],
+    search_facts: facts("coordination", "source", { source: "team" }),
+  },
+  first_basic: {
+    scope: "agent",
+    subjects: [0],
+    search_facts: facts("activation", "source", { ability: "basic" }),
+  },
+  agent_3_ultimate_damage_done: {
+    scope: "agent",
+    subjects: [3],
+    search_facts: facts("damage", "source", { ability: "ultimate", relation: "enemy" }),
+  },
+  agent_8_healing_prevented_by_poison: {
+    scope: "agent",
+    subjects: [8],
+    search_facts: facts("poison_prevention", "recipient", {
+      source: "unknown",
+      status: "rogue_poison_anti_heal",
+    }),
+  },
+  agent_4_ultimate_healing_done: {
+    scope: "agent",
+    subjects: [4],
+    search_facts: facts("healing", "source", {
+      ability: "ultimate",
+      source_class_id: 5,
+      relation: "ally",
+      qualifiers: ["priest"],
+    }),
+  },
+  agent_4_regenerated_healing: {
+    scope: "agent",
+    subjects: [4],
+    search_facts: facts("regeneration", "recipient", { source: "none" }),
+  },
+  agent_2_damage_received_while_rogue_poison_slow: {
+    scope: "agent",
+    subjects: [2],
+    search_facts: facts("damage", "recipient", {
+      status: "rogue_poison_slow",
+      relation: "enemy",
+    }),
+  },
+  agent_2_damage_done: {
+    scope: "agent",
+    subjects: [2],
+    search_facts: facts("damage", "source", { relation: "enemy" }),
+  },
+  agent_2_healing_done: {
+    scope: "agent",
+    subjects: [2],
+    search_facts: facts("healing", "source", {
+      source_class_id: 5,
+      relation: "ally",
+      qualifiers: ["priest"],
+    }),
+  },
+  agent_2_healing_received: {
+    scope: "agent",
+    subjects: [2],
+    search_facts: facts("healing", "recipient", {
+      qualifiers: ["combined"],
+      relation: "ally",
+    }),
+  },
+  agent_0_deaths_while_warrior_charge_slow: {
+    scope: "agent",
+    subjects: [0],
+    search_facts: facts("death", "recipient", {
+      status: "warrior_charge_slow",
+      relation: "enemy",
+    }),
+  },
+  agent_2_rescues: {
+    scope: "agent",
+    subjects: [2],
+    search_facts: facts("rescue", "recipient", {
+      source: "class",
+      source_class_id: 5,
+      relation: "ally",
+      qualifiers: ["priest"],
+    }),
+  },
+  agent_2_kill_contributions_per_death: {
+    scope: "agent",
+    subjects: [2],
+    search_facts: facts("kill", "source", {
+      relation: "enemy",
+      qualifiers: ["contribution"],
+    }),
+  },
+  agent_4_kill_contributions: {
+    scope: "agent",
+    subjects: [4],
+    search_facts: facts("kill", "source", {
+      relation: "enemy",
+      qualifiers: ["contribution"],
+    }),
+  },
+  agent_2_deaths_while_hunter_basic_slow: {
+    scope: "agent",
+    subjects: [2],
+    search_facts: facts("death", "recipient", {
+      status: "hunter_basic_slow",
+      relation: "enemy",
+    }),
+  },
+  ...Object.fromEntries(
+    [0, 2, 7].map((slot) => [
+      `agent_${slot}_deaths`,
+      {
+        scope: "agent",
+        subjects: [slot],
+        search_facts: facts("death", "recipient", { relation: "enemy" }),
+      },
+    ]),
+  ),
+};
+
+/** @param {Record<string, any>[]} rows @param {Record<string, any>[]} [topics] */
+function buildMetricSearchIndex(rows, topics = []) {
+  return buildIndex(
+    rows.map((row) => {
+      assert(searchRows[row.name], `Missing test facts for ${row.name}`);
+      return { ...row, ...searchRows[row.name] };
+    }),
+    topics,
+    testAgents,
+    classNames,
+  );
+}
 
 test("metric locations keep paired views disjoint and use the server order", () => {
   const rows = [
@@ -83,6 +254,7 @@ test("metric locations keep paired views disjoint and use the server order", () 
     [
       {
         ...rows[1],
+        label: "Salvation Healing",
         description: "How much healing this Priest gave with Salvation.",
         subtitle: "Holy Word: Salvation",
       },
@@ -111,7 +283,7 @@ test("metric locations keep paired views disjoint and use the server order", () 
   const summary = { statistics: [activation] };
   const ultimate = selectedMetricRows(summary, "ultimate_warrior", "totals")[0];
   assert.equal(ultimate.subtitle, "Charge");
-  assert.equal(ultimate.label, activation.label);
+  assert.equal(ultimate.label, "Ultimate Ability Activations");
   assert.equal(ultimate.status, "Warrior Charge Slow");
   assert.deepEqual(selectedMetricRows(summary, "status_applications", "totals"), [
     activation,
@@ -187,19 +359,19 @@ test("measurement search includes inactive rows and ranks exact CSV names before
     },
   ];
   const index = buildMetricSearchIndex(rows);
-  assert.equal(index.length, 3);
+  assert.equal(index.entries.length, 3);
   assert.deepEqual(
     findMeasurements(index, "  AGENT_7_BASIC_KILLS ").map((row) => row.name),
-    [named.name, "other"],
+    [named.name],
   );
   assert.deepEqual(
     findMeasurements(index, "agent 7 basic kills").map((row) => row.name),
-    [named.name, "other"],
+    [named.name],
   );
   assert.equal(findMeasurements(index, "agent 7 basic kills")[0].applicable, false);
   assert.deepEqual(
     findMeasurements(index, "basic").map((row) => row.name),
-    ["other", "first_basic", named.name],
+    ["first_basic", named.name],
   );
   assert.deepEqual(
     findMeasurements(index, "ability used").map((row) => row.name),
@@ -466,11 +638,8 @@ test("measurement search includes inactive rows and ranks exact CSV names before
   for (const query of ["warrior deaths", "warrior death", "warrior death counts"]) {
     const matches = findMeasurements(countIndex, query).map((row) => row.name);
     assert.deepEqual(matches.slice(0, 2), ["agent_2_deaths", "agent_7_deaths"]);
-    assert(
-      matches.indexOf("agent_2_deaths_while_hunter_basic_slow") <
-        matches.indexOf("agent_0_deaths_while_warrior_charge_slow"),
-    );
-    assert(matches.includes("agent_0_deaths_while_warrior_charge_slow"));
+    assert(matches.includes("agent_2_deaths_while_hunter_basic_slow"));
+    assert(!matches.includes("agent_0_deaths_while_warrior_charge_slow"));
   }
   assert.equal(
     findMeasurements(countIndex, "warrior deaths").some(
@@ -493,6 +662,281 @@ test("measurement search includes inactive rows and ranks exact CSV names before
       findMeasurements(countIndex, query).map((row) => row.name),
       ["agent_4_kill_contributions"],
     );
+  }
+
+  // Topic context can show a total beside an ability without giving that ability
+  // credit for the total. These facts also keep the status on its actual owner.
+  const attributionIndex = buildIndex(
+    [
+      ...["win", "draw", "loss"].flatMap((outcome) =>
+        [1, 2].map((team) => ({
+          name: `team_${team === 1 ? "a" : "b"}_${outcome}`,
+          label: metricLabel(outcome),
+          unit: "indicator",
+          scope: "team",
+          subjects: [team],
+          search_facts: facts("outcome", "team", {
+            source: "none",
+            qualifiers: [outcome],
+          }),
+        })),
+      ),
+      {
+        name: "team_a_return",
+        label: "Team Return",
+        scope: "team",
+        subjects: [1],
+        search_facts: facts("return", "team", { source: "none" }),
+      },
+      ...[
+        { kind: "damage", stem: "damage_done", relation: "enemy" },
+        { kind: "healing", stem: "healing_done", relation: "ally" },
+      ].flatMap(({ kind, stem, relation }) => [
+        {
+          name: `team_a_${stem}`,
+          label: metricLabel(stem),
+          unit: "health",
+          scope: "team",
+          subjects: [1],
+          search_facts: facts(kind, "source", { source: "team", relation }),
+        },
+        {
+          name: `agent_4_to_agent_0_${stem}_allocation_fraction`,
+          label: `${metricLabel(stem)} Allocation`,
+          unit: "fraction",
+          scope: "source_recipient",
+          subjects: [4, 0],
+          search_facts: facts(kind, "source", {
+            relation,
+            qualifiers: ["allocation", "fraction"],
+          }),
+        },
+      ]),
+      ...[
+        [0, 9],
+        [4, 5],
+      ].map(([source, recipient]) => ({
+        name: `agent_${source}_to_agent_${recipient}_damage_done`,
+        label: "Damage Done to Recipient",
+        unit: "health",
+        scope: "source_recipient",
+        subjects: [source, recipient],
+        search_facts: facts("damage", "source", { relation: "enemy" }),
+      })),
+      {
+        name: "team_a_kills",
+        label: "Total Kills",
+        scope: "team",
+        subjects: [1],
+        locations: [{ topic: "ultimate_warrior" }],
+        search_facts: facts("kill", "source", { source: "team", relation: "enemy" }),
+      },
+      {
+        name: "team_a_warrior_charge_slow_applications",
+        label: "Warrior Charge Slow Applications",
+        scope: "team",
+        subjects: [1],
+        search_facts: facts("status_application", "source", {
+          source: "team",
+          source_class_id: 2,
+          ability: "ultimate",
+          status: "warrior_charge_slow",
+          status_subject: "recipient",
+        }),
+      },
+      {
+        name: "team_a_warrior_charge_applications",
+        label: "Warrior Charge Applications",
+        scope: "team",
+        subjects: [1],
+        locations: [{ topic: "ultimate_warrior" }],
+        search_facts: facts("activation", "source", {
+          source: "team",
+          source_class_id: 2,
+          ability: "ultimate",
+        }),
+      },
+      {
+        name: "team_a_damage_to_warrior_charge_slow_recipient",
+        label: "Damage to Enemies Slowed by Warrior Charge",
+        unit: "health",
+        scope: "team",
+        subjects: [1],
+        search_facts: facts("damage", "source", {
+          source: "team",
+          relation: "enemy",
+          status: "warrior_charge_slow",
+          status_subject: "recipient",
+        }),
+      },
+      {
+        name: "agent_6_to_agent_0_ultimate_applications",
+        label: "Ultimate Ability Activations on Recipient",
+        scope: "source_recipient",
+        subjects: [6, 0],
+        locations: [{ topic: "ultimate_warrior" }],
+        search_facts: facts("activation", "source", {
+          ability: "ultimate",
+          source_class_id: 2,
+          relation: "enemy",
+        }),
+      },
+      {
+        name: "team_a_warrior_ultimate_kills",
+        label: "Kills Helped by Charge",
+        scope: "team",
+        subjects: [1],
+        locations: [{ topic: "ultimate_warrior" }],
+        search_facts: facts("kill", "source", {
+          source: "team",
+          relation: "enemy",
+          ability: "ultimate",
+          source_class_id: 2,
+        }),
+      },
+      {
+        name: "agent_0_burst_damage_received",
+        label: "Damage Received From Mages With Burst",
+        scope: "agent",
+        subjects: [0],
+        locations: [{ topic: "ultimate_mage" }],
+        search_facts: facts("damage", "recipient", {
+          source: "class",
+          source_class_id: 1,
+          relation: "enemy",
+          ability: "burst",
+          status: "mage_burst",
+          status_subject: "source",
+        }),
+      },
+      {
+        name: "agent_0_rescue_opportunities",
+        label: "Chances to Save This Agent",
+        scope: "agent",
+        subjects: [0],
+        locations: [{ topic: "ultimate_priest" }],
+        search_facts: facts("rescue", "recipient", {
+          source: "class",
+          source_class_id: 5,
+          relation: "ally",
+          qualifiers: ["priest", "opportunity"],
+        }),
+      },
+      {
+        name: "agent_0_rescues",
+        label: "Times Rescued",
+        scope: "agent",
+        subjects: [0],
+        locations: [{ topic: "ultimate_priest" }],
+        search_facts: facts("rescue", "recipient", {
+          source: "class",
+          source_class_id: 5,
+          relation: "ally",
+          qualifiers: ["priest"],
+        }),
+      },
+      {
+        name: "agent_4_to_agent_0_ultimate_rescue_contributions",
+        label: "Ultimate Rescue Contributions to Recipient",
+        scope: "source_recipient",
+        subjects: [4, 0],
+        locations: [{ topic: "ultimate_priest" }],
+        search_facts: facts("rescue", "source", {
+          ability: "ultimate",
+          source_class_id: 5,
+          relation: "ally",
+          qualifiers: ["priest", "contribution"],
+        }),
+      },
+      {
+        name: "agent_4_basic_rescue_participation",
+        label: "Share of Saves Helped by Basic Healing",
+        unit: "fraction",
+        scope: "agent",
+        subjects: [4],
+        search_facts: facts("rescue", "source", {
+          ability: "basic",
+          source_class_id: 5,
+          relation: "ally",
+          qualifiers: ["priest", "participation", "fraction"],
+        }),
+      },
+      {
+        name: "agent_4_basic_rescue_contributions",
+        label: "Basic Rescue Contributions",
+        scope: "agent",
+        subjects: [4],
+        search_facts: facts("rescue", "source", {
+          ability: "basic",
+          source_class_id: 5,
+          relation: "ally",
+          qualifiers: ["priest", "contribution"],
+        }),
+      },
+    ].map((row, order) => ({
+      applicable: true,
+      unit: "count",
+      locations: [],
+      ...row,
+      order,
+    })),
+    [],
+    testAgents,
+    classNames,
+  );
+  /** @type {[string, string[]][]} */
+  const attributionQueries = [
+    [
+      "warrior charge count",
+      [
+        "team_a_warrior_charge_applications",
+        "agent_6_to_agent_0_ultimate_applications",
+      ],
+    ],
+    ["team a warrior charge count", ["team_a_warrior_charge_applications"]],
+    ["team b warrior charge count", ["agent_6_to_agent_0_ultimate_applications"]],
+    [
+      "team a warrior charge",
+      [
+        "team_a_warrior_charge_applications",
+        "team_a_warrior_ultimate_kills",
+        "team_a_kills",
+      ],
+    ],
+    ["warrior charge slow count", ["team_a_warrior_charge_slow_applications"]],
+    ["warrior charge slow applications", ["team_a_warrior_charge_slow_applications"]],
+    ["warrior charge kills", ["team_a_warrior_ultimate_kills"]],
+    ["damage received by mage while burst", []],
+    ["damage taken while burst is active", []],
+    ["mage rescue opportunities", ["agent_0_rescue_opportunities"]],
+    [
+      "priest salvation saves to mage",
+      ["agent_4_to_agent_0_ultimate_rescue_contributions"],
+    ],
+    ["priest salvation rescue opportunities", []],
+    ["rescue opportunities from priest to mage", []],
+    ["priest basic save share", ["agent_4_basic_rescue_participation"]],
+    ["agent 4 basic rescue share", ["agent_4_basic_rescue_participation"]],
+    ["win", ["team_a_win", "team_b_win"]],
+    ["draw", ["team_a_draw", "team_b_draw"]],
+    ["loss", ["team_a_loss", "team_b_loss"]],
+    ["draw for team a", ["team_a_draw"]],
+    ["loss by team b", ["team_b_loss"]],
+    ["reward for team a", ["team_a_return"]],
+    ["damage from mage and priest", []],
+    ["damage to mage and priest", []],
+  ];
+  for (const [query, expected] of attributionQueries) {
+    assert.deepEqual(
+      findMeasurements(attributionIndex, query).map((row) => row.name),
+      expected,
+      query,
+    );
+  }
+  for (const query of ["damage", "healing", "kills"]) {
+    const ordinary = findMeasurements(attributionIndex, query);
+    assert(ordinary.some((row) => row.scope === "team" && row.unit !== "fraction"));
+    assert.deepEqual(findMeasurements(attributionIndex, `all ${query}`), ordinary);
   }
 });
 

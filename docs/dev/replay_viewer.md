@@ -360,14 +360,48 @@ affected-agent totals and team-to-agent or agent-to-agent details. Related views
 share no rows. Different topics can reuse an existing measurement to help explain
 it; this does not add a CSV column or calculation.
 
-**Find a Measurement** searches all 11,100 numerical columns by topic, measurement
-name, related words, agent label or exact CSV name. The start of a word works too:
-`regen` finds regeneration; `crippl pois` finds Crippling Poison. Chosen keywords
-also connect `overhealing` to excess healing and `spread out` to teammate distances.
-Names and keywords are checked first. Descriptions are used only when those have
-no matches, so descriptions that exclude an effect do not crowd out that effect's
-own measurements. An exact CSV match comes first; other matches keep the column
-order. Search also explains columns that do not apply to the recorded roster.
+Inside the five named Ultimate topics, rows and tooltips use **Mage Burst**,
+**Warrior Charge**, **Hunter Trap**, **Rogue Poison** and **Priest Salvation**.
+Other topics keep their shared measurement names. When a share uses a combined
+team total, its tooltip still names all abilities included in that total. These
+local wording changes do not change the numbers.
+
+Schema 13 adds **Warrior Charge Applications**, **Rogue Poison Applications**
+and **Priest Salvation Applications** for each team: six new columns. Their CSV
+names are `team_{a,b}_warrior_charge_applications`,
+`team_{a,b}_rogue_poison_applications` and
+`team_{a,b}_priest_holy_word_salvation_applications`. These team rows appear only
+in their named Ultimate topics. All existing CSV names remain unchanged,
+including Slow, Stun and Anti-Heal application columns. Status Applications
+keeps those separate effect rows. Mage Burst and Hunter Trap retain their
+existing team application columns. Earlier CSV files stay
+untouched. See the [schema-13 column contract](../evaluation/metric_specification.md#schema-13-team-ability-application-columns).
+
+**Find a Measurement** searches all 11,158 numerical columns. An exact CSV name
+is checked first and returns that column, including one that does not apply to
+the recorded roster. Other searches use measurement names, topics, related words
+and recorded agent identities. The start of a word works too: `regen` finds
+regeneration; `crippl pois` finds Crippling Poison. `Overhealing` finds excess
+healing, and `spread out` finds teammate distances.
+
+Search keeps who acts and who receives the effect separate. For example,
+`healing from Priest to Mage` differs from `healing from Mage to Priest`.
+`Damage received by Priest from Warrior` asks for the Warrior's damage to the
+Priest. Add a team or an agent ID to make the identity more specific. A class
+named inside an effect does not identify that effect's recorded caster:
+`damage received while slowed by Rogue Poison` describes the damaged agent's
+status. It does not say which Rogue caused the slow.
+
+Search checks the kind of measurement and these roles before looking at related
+words. A description cannot turn regeneration into damage or reverse the giver
+and receiver. Applicable results come before inapplicable results; direct names
+come before related detail. Search explains why an inapplicable column cannot
+apply. Searching an ability name puts its own applications and effects before
+shared context such as Total Kills. `Team A Charge` means Team A's Charge
+actions; `Charge Slow Count` asks for the separate Slow application count.
+It supports common measurement questions, not arbitrary English. Conditions
+such as `damage without poison` or `damage after poison` show a clear explanation
+instead of guessing a different measurement.
 Applicable matches open their table and focus the named measure.
 A bright yellow outline and light tint mark the row for three seconds. Choosing
 another result moves the cue; choosing the same result starts its three seconds
@@ -394,7 +428,8 @@ proof of strategic reasoning.
 
 **Download Metrics CSV** exports one wide row for the selected boundary, using
 the same scalar names, order and values as the run tables; unavailable cells are
-empty. Boundary provenance includes scope, local frame index, actual simulator
+empty. Schema 13 exports 11,207 columns: 49 identity fields and 11,158 numerical
+measurements. Boundary provenance includes scope, local frame index, actual simulator
 tick and captured roster/policy identities. **Episode Details** downloads the
 recorded episode, policy, completion and runtime metadata as JSON without copying
 the trajectory or requiring a metrics sidecar. Older V1 replays can be analyzed

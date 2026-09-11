@@ -64,6 +64,7 @@ from marl_battlegrounds.evaluation.metric_catalog import (
     metric_locations,
     metric_order_key,
     metric_primary_location,
+    metric_search_facts,
     metric_search_terms,
     metric_topic_text,
 )
@@ -628,17 +629,30 @@ class ReplayAnalysis:
 
     def catalog(self) -> dict[str, object]:
         """Describe every numerical CSV column without choosing a replay tick."""
+        class_names = self.context.static_mechanics_catalog.class_name_by_id
         return {
             "metric_schema_id": METRIC_SCHEMA_ID,
             "metric_schema_version": METRIC_SCHEMA_VERSION,
             "source_replay_digest": self.source_replay_digest,
             "analysis_source_digest": self.analysis_source_digest,
             "topics": self._topics,
+            "class_names": class_names,
+            "agents": [
+                {
+                    "slot": agent.global_slot,
+                    "class_id": agent.class_id,
+                    "class_name": class_names[agent.class_id],
+                    "team_id": 1 if agent.global_slot < 5 else 2,
+                    "active": agent.configured_active,
+                }
+                for agent in self.context.roster
+            ],
             "measurements": [
                 {
                     **row,
                     "not_applicable_reason": reason,
                     "search_terms": metric_search_terms(column),
+                    "search_facts": metric_search_facts(column),
                 }
                 for column, row, reason in zip(
                     self.columns,

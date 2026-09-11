@@ -52,7 +52,7 @@ import { explainAgent, explainLegality, explainTechnicalFact } from "./explanati
 import { renderMatchSummary } from "./match-summary.js";
 import {
   buildMetricSearchIndex,
-  findMeasurements,
+  searchMeasurements,
   renderMetricDefinition,
   renderMetricNavigation,
   renderMetricRows,
@@ -2753,7 +2753,7 @@ let replayMetricGeneration = 0;
 /** @type {Record<string, any> | null} */
 let replayMetricCatalog = null;
 /** @type {ReturnType<typeof buildMetricSearchIndex>} */
-let replayMetricSearchIndex = [];
+let replayMetricSearchIndex = buildMetricSearchIndex([]);
 let replayMetricCatalogPending = false;
 let replayMetricCatalogFailure = "";
 let replayMetricSearchLimit = 20;
@@ -2800,11 +2800,12 @@ function renderReplayMetricSearch() {
   if (replayMetricCatalog === null) return;
   setActiveMetricSearchResult(null);
   const query = elements.metricSearch.value.trim();
-  const matches = findMeasurements(replayMetricSearchIndex, query);
+  const { matches, message } = searchMeasurements(replayMetricSearchIndex, query);
   elements.metricSearchResults.hidden = !query;
   elements.metricSearchMore.hidden = matches.length <= replayMetricSearchLimit;
   elements.metricSearchStatus.textContent = query
-    ? `${Math.min(matches.length, replayMetricSearchLimit)} of ${matches.length} measurements found.`
+    ? (message ??
+      `${Math.min(matches.length, replayMetricSearchLimit)} of ${matches.length} measurements found.`)
     : "Search includes every numerical CSV column, including those that do not apply to this roster.";
   renderMetricSearchResults(
     elements.metricSearchResults,
@@ -2890,7 +2891,7 @@ function renderReplayMetrics() {
     replayMetricFailure = null;
     replayMetricRenderKey = "";
     replayMetricCatalog = null;
-    replayMetricSearchIndex = [];
+    replayMetricSearchIndex = buildMetricSearchIndex([]);
     replayMetricCatalogPending = false;
     replayMetricCatalogFailure = "";
     replayMetricFocus = null;
@@ -2928,6 +2929,8 @@ function renderReplayMetrics() {
         replayMetricSearchIndex = buildMetricSearchIndex(
           catalog.measurements,
           catalog.topics,
+          catalog.agents,
+          catalog.class_names,
         );
         elements.metricSearch.disabled = false;
         renderMetricNavigation(

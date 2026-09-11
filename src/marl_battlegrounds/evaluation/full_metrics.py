@@ -22,6 +22,7 @@ from marl_battlegrounds.core.env import (
     _aggregate_health_effects_and_basic_passives_by_global_slot,  # pyright: ignore[reportPrivateUsage]
 )
 from marl_battlegrounds.core.types import (
+    PRIEST_CLASS_ID,
     ActionMask,
     EnvConfig,
     EnvState,
@@ -37,6 +38,7 @@ from marl_battlegrounds.evaluation.metric_catalog import (
     STATUS_CLASS_IDS,
     STATUS_NAMES,
     ULTIMATE_CLASS_NAMES,
+    ULTIMATE_TEAM_ABILITY_STEMS,
     MetricScope,
 )
 
@@ -678,6 +680,7 @@ def full_values(
             _team_sum(totals["actions"][:, 1]), _team_sum(totals["actions"][:, 0])
         ),
     )
+    class_ultimate_applications: dict[int, MetricValues] = {}
     for channel, status in enumerate(STATUS_NAMES):
         class_id = STATUS_CLASS_IDS[channel]
         activation = (1, 0, 1, 1, 1, 1, 1, 1, 0)[channel]
@@ -688,7 +691,22 @@ def full_values(
             0,
         )
         amount(f"{status}_applications", applications)
+        if activation == 1:
+            class_ultimate_applications[class_id] = data[
+                ("team", f"{status}_applications")
+            ]
         amount(f"{status}_active_steps", totals["active_steps"][:, channel])
+    priest_applications = jnp.where(
+        config.agent_profile.active_mask
+        & (config.agent_profile.class_ids == PRIEST_CLASS_ID),
+        totals["activations"][:, 1],
+        0,
+    )
+    class_ultimate_applications[PRIEST_CLASS_ID] = _available(
+        _team_sum(priest_applications)
+    )
+    for class_id, stem in ULTIMATE_TEAM_ABILITY_STEMS.items():
+        add(stem, team=class_ultimate_applications[class_id])
     add(
         "trap_intervals",
         agent=_available(stored["trap_periods"]),

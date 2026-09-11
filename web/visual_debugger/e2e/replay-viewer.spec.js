@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { copyFile, mkdir, readFile, rm } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 import { expect, test } from "@playwright/test";
+import { buildMetricSearchIndex, findMeasurements } from "../src/metric-search.js";
 import { VISUAL_FILTER_IDS } from "../src/visual-filters.js";
 import { installWaapiAutopause } from "./support/choreography.js";
 import {
@@ -2117,14 +2118,65 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
     const catalogResult = await catalogResponse;
     expect(catalogResult.status()).toBe(200);
     const catalog = await catalogLoaded;
-    expect(catalog.metric_schema_version).toBe(12);
-    expect(catalog.measurements).toHaveLength(11152);
+    expect(catalog.metric_schema_version).toBe(13);
+    expect(catalog.measurements).toHaveLength(11158);
     expect(
       catalog.measurements.every(
         (/** @type {Record<string, any>} */ row) =>
           !("value" in row) && !("valid" in row),
       ),
     ).toBe(true);
+    // Test the complete catalog, including rows that compete with the right answer.
+    const searchIndex = buildMetricSearchIndex(
+      catalog.measurements,
+      catalog.topics,
+      catalog.agents,
+      catalog.class_names,
+    );
+    for (const row of catalog.measurements) {
+      expect(
+        findMeasurements(searchIndex, row.name).map((found) => found.name),
+      ).toEqual([row.name]);
+    }
+    for (const queries of [
+      ["damage taken by priest from rogue", "damage dealt by rogue to priest"],
+      ["team a priest healing to mage", "team a priest healing mage"],
+      ["mage and priest distance", "priest and mage distance"],
+    ]) {
+      const first = findMeasurements(searchIndex, queries[0])
+        .map((row) => row.name)
+        .sort();
+      expect(first.length).toBeGreaterThan(0);
+      for (const query of queries.slice(1))
+        expect(
+          findMeasurements(searchIndex, query)
+            .map((row) => row.name)
+            .sort(),
+        ).toEqual(first);
+    }
+    const directedDamage = findMeasurements(
+      searchIndex,
+      "damage taken by priest from rogue",
+    );
+    for (const row of directedDamage) {
+      expect(row.scope).toBe("source_recipient");
+      expect(catalog.agents[row.subjects[0]].class_name).toBe("Rogue");
+      expect(catalog.agents[row.subjects[1]].class_name).toBe("Priest");
+      expect(row.stem).toContain("damage");
+      expect([
+        "damage_done",
+        "recipient_damage",
+        "controlled_damage",
+        "burst",
+      ]).toContain(row.family);
+    }
+    for (const query of [
+      "damage after poison",
+      "damage not received",
+      "team a team b priest damage",
+      "agent 10 healing",
+    ])
+      expect(findMeasurements(searchIndex, query)).toEqual([]);
     await expect(page.locator("#metric-search")).toBeEnabled();
     await expect(page.locator("#metric-rows table")).toBeVisible();
     await expect(page.locator("#metric-selection")).toHaveValue("priority");
@@ -2196,11 +2248,11 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
                     location.topic === topic && location.view === view,
                 ),
             )
-            .map((/** @type {{name: string, label: string}} */ row) => [
+            .map((/** @type {Record<string, any>} */ row) => [
               row.name,
-              row.label,
+              row.topic_text?.[topic]?.label ?? row.label,
             ]);
-          // The catalog gives each CSV column one name in every topic and POV.
+          // Only the five ability views have approved local wording.
           expect([...shown].sort()).toEqual(declared.sort());
           if (view === "totals" && ["healing_done", "excess_healing"].includes(topic)) {
             expect(
@@ -2328,41 +2380,19 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
       await installReplayView(page, pov);
       // These expectations come from the fixture's agents, not from the catalog.
       // A shared count keeps its meaning when an Ultimate table shows it.
-      for (const [topic, team, activation, enemy, ability, status] of [
+      for (const [topic, team, activation, enemy, status] of /** @type {const} */ ([
+        ["ultimate_mage", "a", "team_a_mage_burst_applications", "5", "Mage Burst"],
+        ["ultimate_warrior", "a", "team_a_warrior_charge_applications", "5", null],
+        ["ultimate_hunter", "b", "team_b_hunter_trap_applications", "0", "Hunter Trap"],
+        ["ultimate_rogue", "b", "team_b_rogue_poison_applications", "0", null],
         [
-          "ultimate_mage",
+          "ultimate_priest",
           "a",
-          "team_a_mage_burst_applications",
+          "team_a_priest_holy_word_salvation_applications",
           "5",
-          "Burst",
-          "Mage Burst",
+          null,
         ],
-        [
-          "ultimate_warrior",
-          "a",
-          "team_a_warrior_charge_slow_applications",
-          "5",
-          "Charge",
-          "Warrior Charge Slow",
-        ],
-        [
-          "ultimate_hunter",
-          "b",
-          "team_b_hunter_trap_applications",
-          "0",
-          "Freezing Trap",
-          "Hunter Trap",
-        ],
-        [
-          "ultimate_rogue",
-          "b",
-          "team_b_rogue_poison_slow_applications",
-          "0",
-          "Crippling Poison",
-          "Rogue Poison Slow",
-        ],
-        ["ultimate_priest", "a", "agent_2_ultimate_activations", "5", "", ""],
-      ]) {
+      ])) {
         for (const view of ["totals", "recipients"]) {
           await selectMetricTable(page, topic, view);
           const metricNames = await page
@@ -2375,19 +2405,17 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
             await expect(
               page.locator(`[data-metric="${activation}"] .metric-measure`),
             ).toHaveText(
-              status ? `${status} Applications` : "Ultimate Ability Activations",
+              `${{ ultimate_mage: "Mage Burst", ultimate_warrior: "Warrior Charge", ultimate_hunter: "Hunter Trap", ultimate_rogue: "Rogue Poison", ultimate_priest: "Priest Salvation" }[topic]} Applications`,
             );
             const subtitle = page.locator(
               `[data-metric="${activation}"] .metric-condition`,
             );
-            if (ability) {
-              await expect(subtitle).toHaveText(status);
-              expect(
-                catalog.measurements.find(
-                  (/** @type {{name: string}} */ row) => row.name === activation,
-                ).status,
-              ).toBe(status);
-            } else await expect(subtitle).toHaveCount(0);
+            await expect(subtitle).toHaveCount(0);
+            expect(
+              catalog.measurements.find(
+                (/** @type {{name: string}} */ row) => row.name === activation,
+              ).status,
+            ).toBe(status);
             const teamKills = page.locator(
               `[data-metric="team_${team}_kills"] .metric-measure`,
             );
@@ -2404,33 +2432,31 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
         }
       }
       await selectMetricTable(page, "status_applications");
-      for (const [stem, team, effect] of [
-        ["warrior_charge_slow", "a", "Warrior Charge Slow"],
-        ["warrior_charge_stun", "a", "Warrior Charge Stun"],
-        ["rogue_poison_slow", "b", "Rogue Poison Slow"],
-        ["rogue_poison_stun", "b", "Rogue Poison Stun"],
-        ["rogue_poison_anti_heal", "b", "Rogue Poison Anti-Heal"],
-        ["hunter_trap", "b", "Hunter Trap"],
-        ["mage_burst", "a", "Mage Burst"],
+      for (const [name, effect] of [
+        ["team_a_warrior_charge_slow_applications", "Warrior Charge Slow"],
+        ["team_a_warrior_charge_stun_applications", "Warrior Charge Stun"],
+        ["team_b_rogue_poison_slow_applications", "Rogue Poison Slow"],
+        ["team_b_rogue_poison_stun_applications", "Rogue Poison Stun"],
+        ["team_b_rogue_poison_anti_heal_applications", "Rogue Poison Anti-Heal"],
+        ["team_b_hunter_trap_applications", "Hunter Trap"],
+        ["team_a_mage_burst_applications", "Mage Burst"],
       ]) {
         await expect(
-          page.locator(
-            `[data-metric="team_${team}_${stem}_applications"] .metric-condition`,
-          ),
+          page.locator(`#metric-rows [data-metric="${name}"] .metric-condition`),
         ).toHaveText(effect);
       }
       await selectMetricTable(page, "ultimate_warrior");
       await page.setViewportSize({ width: 640, height: 900 });
       const narrowMeasure = page.locator(
-        '[data-metric="team_a_warrior_charge_slow_applications"] .metric-measure',
+        '[data-metric="team_a_warrior_charge_applications"] .metric-measure',
       );
       if (pov === "researcher") await narrowMeasure.hover();
       else await narrowMeasure.focus();
       await expect(page.locator("#visual-tooltip")).toContainText(
-        "Warrior Charge Slow. How many times",
+        "How many times Team A's Warriors activated Warrior Charge",
       );
       await expect(page.locator("#visual-tooltip")).toContainText(
-        "This named effect count also counts those activations.",
+        "Each activation counts once",
       );
       const narrowTooltip = await page.locator("#visual-tooltip").boundingBox();
       expect(narrowTooltip).not.toBeNull();
@@ -2447,9 +2473,12 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
       await selectMetricTable(page, "ultimate_hunter", "recipients");
       for (const [stem, label] of [
         ["trap_intervals", "Times This Agent Was Trapped"],
-        ["trap_breaks", "Times a Trap on This Agent Was Broken"],
+        ["trap_breaks", "Times a Hunter Trap on This Agent Was Broken"],
         ["trap_break_rate", "Share of This Agent's Traps Broken by Damage"],
-        ["trap_mean_remaining_steps_at_break", "Mean Trap Time Left When Broken"],
+        [
+          "trap_mean_remaining_steps_at_break",
+          "Mean Hunter Trap Time Left When Broken",
+        ],
       ]) {
         const name = `agent_0_${stem}`;
         const measure = page.locator(`[data-metric="${name}"] .metric-measure`);
@@ -2461,7 +2490,7 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
             "Two Hunters trapping it on the same tick start one period",
           );
           await expect(page.locator("#visual-tooltip")).toContainText(
-            "A later Trap cast breaks the old Trap or follows expiry",
+            "A later Hunter Trap cast breaks the old Hunter Trap or follows expiry",
           );
           await page.screenshot({
             path: testInfo.outputPath(`trap-period-tooltip-${pov}.png`),
@@ -2493,7 +2522,7 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
       if (pov === "researcher") await poisonMeasure.hover();
       else await poisonMeasure.focus();
       await expect(page.locator("#visual-tooltip")).toContainText(
-        "Poison must already be active at the start of the tick",
+        "Rogue Poison must already be active at the start of the tick",
       );
       await expect(page.locator("#visual-tooltip")).toContainText(
         "before the maximum-health limit",
@@ -2846,6 +2875,41 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
         "agent_1_deaths",
       );
     }
+    /** @type {number[]} */
+    const searchPaintMs = [];
+    for (let repeat = 0; repeat < 6; repeat++) {
+      for (const query of [
+        "damage taken by priest from rogue",
+        "team a priest healing to mage",
+        "regen",
+        "crippling poison",
+      ]) {
+        const elapsed = await metricSearch.evaluate(async (element, text) => {
+          const start = performance.now();
+          const input = /** @type {HTMLInputElement} */ (element);
+          input.value = text;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          await new Promise((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve)),
+          );
+          return performance.now() - start;
+        }, query);
+        if (repeat > 0) searchPaintMs.push(elapsed);
+      }
+    }
+    const searchTimingPath = testInfo.outputPath("search-first-paint-ms.json");
+    await writeFile(
+      searchTimingPath,
+      JSON.stringify({
+        samples: searchPaintMs,
+        definition:
+          "Input event through two animation frames, after one warm pass. Includes matching and painting results.",
+      }),
+    );
+    await testInfo.attach("search-first-paint-ms", {
+      path: searchTimingPath,
+      contentType: "application/json",
+    });
     let slowedDamageResults;
     for (const query of [
       "damage received while slowed rogue poison",
@@ -2878,6 +2942,10 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
       "listbox",
     );
     await expect(searchResults).toHaveCount(20);
+    await expect(searchResults.first()).toHaveAttribute(
+      "data-measurement",
+      "team_b_rogue_poison_applications",
+    );
     const poisonResults = await searchResults.allTextContents();
     await metricSearch.fill("crip pois");
     await expect(searchResults).toHaveText(poisonResults);
@@ -3705,7 +3773,7 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
       );
       if (heldCsv !== null) await page.locator("#evaluation-metrics > summary").click();
       expect(download.suggestedFilename()).toBe(
-        `tdm-metrics__episode-episode-001__schema-12__${scope}__frame-${frameIndex}.csv`,
+        `tdm-metrics__episode-episode-001__schema-13__${scope}__frame-${frameIndex}.csv`,
       );
       const path = await download.path();
       if (path === null) throw new Error("Metric CSV has no local path.");
@@ -3719,7 +3787,7 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
       const cells = rows[0].split(",");
       expect(names).toContain("agent_9_class_id");
       // Replay exports retain their 49 replay/agent identity fields. The run
-      // writer's separate CSV uses 30; both expose the same 11,152 measurements.
+      // writer's separate CSV uses 30; both expose the same 11,158 measurements.
       const replayIdentity = [
         "episode_id",
         "scope",
@@ -3737,9 +3805,9 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
         ).flat(),
       ];
       expect(names.slice(0, 49)).toEqual(replayIdentity);
-      expect(names.slice(49)).toHaveLength(11152);
-      expect(new Set(names).size).toBe(11201);
-      expect(cells[names.indexOf("metric_schema_version")]).toBe("12");
+      expect(names.slice(49)).toHaveLength(11158);
+      expect(new Set(names).size).toBe(11207);
+      expect(cells[names.indexOf("metric_schema_version")]).toBe("13");
       const selectedTopic = await page.locator("#metric-selection").inputValue();
       const selectedView = await page.locator("#metric-view").inputValue();
       let checkedTables = 0;

@@ -58,17 +58,18 @@ output, load `pd.read_csv(result.paths["full_metrics"])` instead; persisted full
 rows are not also retained in memory. Blank cells represent unavailable values;
 real zeros remain zero. See the [column dictionary](metric_columns.csv).
 
-Schema 12 contains 26 priority measurements and 11,152 full measurements (including
+Schema 13 contains 26 priority measurements and 11,158 full measurements (including
 priority), with the same headers for every supported roster. A full run table has
-11,182 columns, including 30 identity columns. A replay CSV has 11,201 columns,
+11,188 columns, including 30 identity columns. A replay CSV has 11,207 columns,
 including 49 identity columns. The viewer has 27 topics and 43 tables. Different
-topics can share the same exported columns, always with the same display name.
+topics can share the same exported columns. Only the five named Ultimate topics
+may use their ability's name in row labels and tooltips.
 The full count reflects recipient and status dimensions, not that many
 independent scientific concepts; the
 [family summary](metric_specification.md#manuscript-family-summary)
-explains the grouping. Existing schema-1/2/3/4/5/6/7/8/9/10/11 CSV files remain unchanged. Resume
+explains the grouping. Existing CSV files from schemas 1 through 12 stay unchanged. Resume
 rejects an older scalar schema before recovery, truncation, or writing; use a new
-run directory for schema 12. The replay format version is separate from its current
+run directory for schema 13. The replay format version is separate from its current
 analysis version.
 
 Choose a **Topic**, then **Totals** or **By Recipient** where both are useful.
@@ -84,9 +85,10 @@ poison` finds the same measurements with or without `by`. `Damage taken` and
 `damage done`. You can stop typing at `damage tak`. The same rules apply across
 topics. Words such as `from`, `to`, `not`, `before` and `after` still matter;
 Team A and Team B remain different. Exact CSV names still come first.
-Search checks names and chosen keywords first. If none match, it checks the
-longer descriptions. This keeps a phrase such as “does not include regeneration”
-from filling a regeneration search with other healing measurements.
+Search checks what is measured and who gives or receives it before matching
+names and keywords. It checks longer descriptions only within those matching
+roles and measurement kinds. A description cannot turn regeneration into
+damage or reverse the giver and receiver.
 
 Use Up/Down to highlight a result and Enter to open it; you can keep typing while
 moving through the list. Click outside or press Escape to close the list, then
@@ -106,8 +108,9 @@ The [navigation table](metric_specification.md#find-a-measurement-by-topic-or-cs
 lists every primary location. In the dictionary, `primary_topic` and `primary_view`
 give a column's CSV home; `gui_groups` lists the tables that show it. Column
 numbers include the 30 full-run identity fields or the 49 replay identity fields.
-`gui_text_by_topic` records extra descriptions and subtitles used in named
-Ultimate views. The display name stays the same in every topic. Extra context
+`gui_text_by_topic` records row and tooltip wording used in named Ultimate views.
+Only those five topics may replace the display name or the words explaining a
+numerator, denominator, guidance or blank value. Extra context
 and clearer names do not add numerical measurements.
 For example, read only the columns from the healing recipient table:
 
@@ -162,7 +165,7 @@ activations and combined Priest healing. The collector's 61 counter arrays stay
 unchanged. See `artifacts/m8-ultimate-topic-fixes/` for the raw comparisons and
 independent reviews. These checks do not repeat the performance matrix below.
 
-Schema 12 adds ten `agent_i_basic_rescue_participation` columns and two
+Schema 12 added ten `agent_i_basic_rescue_participation` columns and two
 `team_{a,b}_basic_rescue_fraction` columns beside the Basic save counts.
 An agent's fraction is its Basic save contributions divided by all unique saves
 by its team, from any ability. A team's fraction counts each save helped by
@@ -187,11 +190,49 @@ Basic save shares passed on CPU and GPU, including shared saves, repeated
 Priests and zero denominators. These are correctness checks, not a new speed
 measurement. The saved evidence is in `artifacts/m8-six-section-fixes/`.
 
-Ultimate tables keep one display name for each column and its exact CSV link.
-Subtitles and tooltips add ability context. Four team activation rows reuse
-existing named-effect counts.
-Salvation keeps its individual activation rows; the previously removed team
-activation column is not restored. Shared death and save totals explain when
+Schema 13 adds `team_{a,b}_warrior_charge_applications`,
+`team_{a,b}_rogue_poison_applications` and
+`team_{a,b}_priest_holy_word_salvation_applications`: one column per ability and
+team, six columns in total. Each counts allowed activations, including repeat
+uses and entirely excess Salvation healing. The totals reuse existing activation
+counts; no per-tick counter is added. A team with an active agent of that class
+and no uses has a real zero. A team with no active agent of that class has a blank.
+The new team columns appear only in their named Ultimate topics. Agent activation
+rows remain available.
+
+No existing CSV column is renamed. All Slow, Stun and Anti-Heal columns keep
+their exact names, meanings and Status Applications rows. The new Charge and
+Poison ability columns are separate from those effect measurements, even when
+their values are equal. Mage Burst and Hunter Trap keep their existing team
+ability application columns.
+See the [schema-13 contract](metric_specification.md#schema-13-team-ability-application-columns).
+
+The mapping audit checked exact CSV names and positions in all five ability
+tables across five roster layouts. Its 157 checks passed, including every
+earlier definition and the retained team status rows. Earlier checks of equal
+numbers did not establish that name contract. Charge and Poison needed separate
+ability columns, and Priest needed team Salvation counts. A separate
+ability-count search issue could select the wrong kind of row. The name audit
+is in `artifacts/m8-search-direction/ultimate-team-column-audit.json`; it does
+not qualify numerical replay values or browser behavior.
+
+Separate checks passed 718 search questions and all 55,790 exact CSV lookups
+across five recorded rosters. The 11,152 earlier values and their blank-value
+flags matched exactly in 18 before/after reducer cases. Both browser checks
+passed, including same-boundary CSV values, all 43 tables in both POVs, narrow
+tooltips and keyboard navigation. The saved reports and screenshots are in
+`artifacts/m8-search-direction/`.
+
+On the current machine, matching a question took a median 0.34 ms and a maximum
+21.71 ms. Twenty warmed browser inputs showed their results in 24.4–28.0 ms
+(median 26.4 ms), measured through two animation frames. Building the cached
+search index took 242.23 ms once. These measurements cover search only. They
+do not measure simulation, GPU rollouts or learner speed, and do not replace
+the retained evaluation performance results below.
+
+Ultimate tables use Mage Burst, Warrior Charge, Hunter Trap, Rogue Poison and
+Priest Salvation in local row and tooltip wording, with each row's exact CSV link.
+Other topics retain their shared display names. Shared death and save totals explain when
 they supply the all-ability denominator for a nearby participation fraction.
 Burst has no displayed kill fraction using Total Kills, so it omits that shared
 row. Total Kills stays in Episode Results and the CSV. A share of team Ultimate
@@ -385,8 +426,10 @@ Retaining every full `info` in a 1,024-environment, 128-step scan therefore reta
 running collector per lane, observations, replay packets and learner memory.
 Schema 10 had 55,500 logical bytes per full output, or about 6.77 GiB for that
 same retained scan shape. Schema 11 added 200 output bytes per lane; schema 12
-adds another 60, giving 55,760 bytes and about 6.81 GiB for that scan shape.
-Neither change adds per-tick counters. The collector added 40 bytes in schema 7
+added another 60, giving 55,760 bytes and about 6.81 GiB for that scan shape.
+Schema 13 adds 30 output bytes for the six team ability counts, giving 55,790
+bytes per lane. No old column is renamed or removed. These later changes
+add no per-tick counters. The collector added 40 bytes in schema 7
 for a `(5, 2)` array of 32-bit class/team Basic kill counts. These are logical
 storage calculations, not measurements of peak memory or speed.
 Priority-only training with no full selection has no
@@ -508,7 +551,7 @@ lane than schema 4. This is an output-size calculation, not a measured speedup.
 The running collector still needs its shared counts. No performance matrix was
 repeated for this change; the measurements below describe their named older
 schemas. They do not establish throughput or learning performance for schemas
-5 through 12. Schema 6's 12 additions brought its logical full output to 55,630
+5 through 13. Schema 6's 12 additions brought its logical full output to 55,630
 bytes per lane. Schema 7 adds a further 100 output bytes per lane and 40 bytes
 of running counts. These are storage calculations, not new performance
 measurements; the schema-7 full output was 55,730 bytes per lane.

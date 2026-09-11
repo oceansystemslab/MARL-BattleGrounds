@@ -41,7 +41,10 @@ from marl_battlegrounds.evaluation.metric_catalog import (
     METRIC_VIEW_LABELS,
     PRIORITY_METRIC_COLUMNS,
 )
-from marl_battlegrounds.evaluation.metrics import EvaluationEpisodeObserverV1
+from marl_battlegrounds.evaluation.metrics import (
+    EvaluationEpisodeCompletionV1,
+    EvaluationEpisodeObserverV1,
+)
 from marl_battlegrounds.evaluation.replay import (
     RuntimeProvenanceV1,
     build_replay_bundle_v1,
@@ -52,6 +55,73 @@ from marl_battlegrounds.tasks import (
     AgentClassName,
     make_standard_team_deathmatch_config,
 )
+
+
+def test_search_catalog_uses_recorded_rosters_without_numerical_analysis() -> None:
+    rosters: tuple[tuple[AgentClassName, ...], ...] = (
+        ("mage", "warrior", "hunter", "rogue", "priest"),
+        ("priest", "rogue", "mage", "warrior", "hunter"),
+        ("priest", "priest", "warrior"),
+        ("mage",),
+    )
+    for team_a, team_b in zip(rosters, reversed(rosters), strict=True):
+        context = evaluation_context(
+            config=make_standard_team_deathmatch_config(
+                map_id=20, team_a_roster=team_a, team_b_roster=team_b
+            )
+        )
+        completion = EvaluationEpisodeCompletionV1(
+            episode_id=context.identity.episode_id,
+            completion_state="partial",
+            expected_transition_count=1,
+            validated_transition_count=0,
+            last_valid_frame_index=0,
+            last_valid_frame_id=f"{context.identity.episode_id}:frame:0",
+            terminated=False,
+            truncated=False,
+            completion_bases=(),
+            end_or_failure_reason="Catalog-only test before any transition.",
+        )
+        analysis = ReplayAnalysis(
+            "source",
+            "analysis",
+            "not_recorded",
+            context,
+            completion,
+            METRIC_COLUMNS,
+            (),
+            np.empty((0, len(METRIC_COLUMNS)), np.float32),
+            np.empty((0, len(METRIC_COLUMNS)), np.bool_),
+        )
+        catalog = analysis.catalog()
+        assert analysis.frame_count == 0
+        assert catalog["class_names"] == (
+            context.static_mechanics_catalog.class_name_by_id
+        )
+        agents = cast(list[dict[str, object]], catalog["agents"])
+        assert len(agents) == 10
+        for slot, (row, agent) in enumerate(zip(agents, context.roster, strict=True)):
+            assert row == {
+                "slot": slot,
+                "class_id": agent.class_id,
+                "class_name": context.static_mechanics_catalog.class_name_by_id[
+                    agent.class_id
+                ],
+                "team_id": 1 if slot < 5 else 2,
+                "active": agent.configured_active,
+            }
+        rows = cast(list[dict[str, object]], catalog["measurements"])
+        assert len(rows) == len(METRIC_COLUMNS)
+        for row in rows:
+            assert "value" not in row and "valid" not in row
+            assert isinstance(row["search_facts"], dict)
+        by_name = {str(row["name"]): row for row in rows}
+        # Slot identity must survive an impossible source class or inactive slot.
+        assert by_name["agent_0_to_agent_1_healing_done"]["subjects"] == (0, 1)
+        for slot in range(10):
+            assert (
+                by_name[f"agent_{slot}_return"]["applicable"] == agents[slot]["active"]
+            )
 
 
 def test_replay_class_filters_keep_helpers_and_recipients_distinct() -> None:
@@ -458,8 +528,8 @@ def test_replay_scalar_prefixes_match_direct_metrics_and_wide_csv(
             for name, topic, ability in (
                 ("team_a_mage_burst_applications", "ultimate_mage", "Burst"),
                 ("agent_1_ultimate_activations", "ultimate_warrior", "Charge"),
-                ("agent_5_ultimate_activations", "ultimate_hunter", "Freezing Trap"),
-                ("agent_6_ultimate_activations", "ultimate_rogue", "Crippling Poison"),
+                ("agent_5_ultimate_activations", "ultimate_hunter", "Hunter Trap"),
+                ("agent_6_ultimate_activations", "ultimate_rogue", "Rogue Poison"),
                 ("agent_2_ultimate_activations", "ultimate_priest", "Salvation"),
             ):
                 text = cast(dict[str, dict[str, str]], by_name[name]["topic_text"])
@@ -595,6 +665,8 @@ def test_replay_scalar_prefixes_match_direct_metrics_and_wide_csv(
     for row in measurements:
         assert "value" not in row and "valid" not in row
         assert isinstance(row["search_terms"], tuple)
+        assert isinstance(row["search_facts"], dict)
+        assert "search_facts" not in summary_by_name[str(row["name"])]
         assert (row["not_applicable_reason"] is None) is row["applicable"]
         assert row["applicable"] == summary_by_name[str(row["name"])]["applicable"]
         text = cast(dict[str, dict[str, str]], row.get("topic_text", {}))
@@ -603,10 +675,32 @@ def test_replay_scalar_prefixes_match_direct_metrics_and_wide_csv(
             location["topic"]
             for location in cast(list[dict[str, str]], row["locations"])
         }
-        for variant in text.values():
-            assert variant and set(variant) <= {"label", "description"}
-            for value in variant.values():
-                assert value and value[0].isupper()
+        for topic, variant in text.items():
+            allowed = (
+                {
+                    "label",
+                    "description",
+                    "subtitle",
+                    "numerator",
+                    "denominator",
+                    "guidance",
+                    "missing_when",
+                }
+                if topic
+                in {
+                    "ultimate_mage",
+                    "ultimate_warrior",
+                    "ultimate_hunter",
+                    "ultimate_rogue",
+                    "ultimate_priest",
+                }
+                else {"description", "subtitle"}
+            )
+            assert variant and set(variant) <= allowed
+            for field, value in variant.items():
+                assert (field == "subtitle" and value == "") or (
+                    value and value[0].isupper()
+                )
     assert catalog_by_name["agent_3_return"]["not_applicable_reason"] == (
         "Agent ID 3 is inactive in this replay."
     )
