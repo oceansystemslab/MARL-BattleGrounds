@@ -96,7 +96,7 @@ def test_live_frame_zero_presentation_is_exact_and_repeatable(view_mode: str) ->
     before_revision = service.revision
     before_observer_count = service.evaluation_validated_transition_count
     before_command_count = service.command_cache_size
-    before_observer = service._evaluation_observer  # pyright: ignore[reportPrivateUsage]
+    before_epoch = service.session.current_evaluation_frame
     before_command_records = dict(
         service._command_records  # pyright: ignore[reportPrivateUsage]
     )
@@ -133,7 +133,7 @@ def test_live_frame_zero_presentation_is_exact_and_repeatable(view_mode: str) ->
     assert service.revision == before_revision
     assert service.evaluation_validated_transition_count == before_observer_count
     assert service.command_cache_size == before_command_count
-    assert service._evaluation_observer is before_observer  # pyright: ignore[reportPrivateUsage]
+    assert service.session.current_evaluation_frame is before_epoch
     assert service._command_records == before_command_records  # pyright: ignore[reportPrivateUsage]
     assert service.shutting_down is before_shutting_down
     assert service.faulted is before_faulted
@@ -602,7 +602,7 @@ def test_live_packaging_exception_leaves_committed_service_untouched(
     before_raw = service.current_frame()
     before_session = service.session
     before_revision = service.revision
-    before_observer = service._evaluation_observer  # pyright: ignore[reportPrivateUsage]
+    before_epoch = service.session.current_evaluation_frame
     before_observer_count = service.evaluation_validated_transition_count
     before_commands = dict(
         service._command_records  # pyright: ignore[reportPrivateUsage]
@@ -625,7 +625,7 @@ def test_live_packaging_exception_leaves_committed_service_untouched(
     assert service.current_frame() is before_raw
     assert service.session is before_session
     assert service.revision == before_revision
-    assert service._evaluation_observer is before_observer  # pyright: ignore[reportPrivateUsage]
+    assert service.session.current_evaluation_frame is before_epoch
     assert service.evaluation_validated_transition_count == before_observer_count
     assert service._command_records == before_commands  # pyright: ignore[reportPrivateUsage]
     assert service.shutting_down is before_shutting_down
@@ -685,7 +685,7 @@ def test_changed_live_command_categories_require_a_buildable_candidate_presentat
     before_raw = service.current_frame()
     before_session = service.session
     before_revision = service.revision
-    before_observer = service._evaluation_observer  # pyright: ignore[reportPrivateUsage]
+    before_epoch = service.session.current_evaluation_frame
     before_observer_count = service.evaluation_validated_transition_count
     before_command_count = service.command_cache_size
     real_builder = getattr(service_module, builder_name)
@@ -715,7 +715,7 @@ def test_changed_live_command_categories_require_a_buildable_candidate_presentat
     assert service.current_frame() is before_raw
     assert service.session is before_session
     assert service.revision == before_revision
-    assert service._evaluation_observer is before_observer  # pyright: ignore[reportPrivateUsage]
+    assert service.session.current_evaluation_frame is before_epoch
     assert service.evaluation_validated_transition_count == before_observer_count
     assert service.command_cache_size == before_command_count + 1
     assert service.current_presentation() == before_presentation

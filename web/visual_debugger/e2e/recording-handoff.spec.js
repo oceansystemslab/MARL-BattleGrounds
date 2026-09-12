@@ -380,7 +380,7 @@ async function expectSavedArtifacts(replayPath, metricPath, transitionCount) {
   expect(replay.bytes.byteLength).toBeGreaterThan(0);
   expect(replay.value).toMatchObject({
     schema_id: "marl_battlegrounds.evaluation.replay_artifact",
-    schema_version: 2,
+    schema_version: 3,
     header: {
       recorded_transition_count: transitionCount,
       recorded_frame_count: transitionCount + 1,

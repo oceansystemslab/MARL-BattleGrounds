@@ -6,7 +6,9 @@ from typing import cast
 
 from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
+    EvaluationFrame,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     EvaluationTransitionV1,
     StaticMechanicsCatalogV1,
     canonical_digest_sha256,
@@ -35,7 +37,9 @@ from marl_battlegrounds.rendering.authorized_presentation import (
     oracle_presentation_key_v1,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
+    SharedObsSourceMaterialProjection,
     SharedObsSourceMaterialProjectionV1,
+    SharedObsSourceMaterialProjectionV2,
 )
 from marl_battlegrounds.rendering.pov_scene import (
     ActorPovAnalyzerProjectionV1,
@@ -378,8 +382,8 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
     raw_frame: ActorPovReplayViewerFrameV1,
     *,
     global_context: EvaluationEpisodeContext,
-    current_global_frame: EvaluationFrameV1,
-    previous_global_frame: EvaluationFrameV1 | None,
+    current_global_frame: EvaluationFrame,
+    previous_global_frame: EvaluationFrame | None,
     public_catalog: StaticMechanicsCatalogV1,
     source_authority_epoch: int,
     incoming_visual_events: VisualEventBatchV2 | None,
@@ -506,7 +510,10 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
             authority_session_id=raw_frame.viewer_session_id,
             frame_index=frame_index - 1,
         )
-        if type(previous_global_frame) is not EvaluationFrameV1:
+        if (
+            type(previous_global_frame) is not EvaluationFrameV1
+            and type(previous_global_frame) is not EvaluationFrameV2
+        ):
             raise TypeError(
                 "non-initial NoSharedObs replays require the exact prior global frame."
             )
@@ -623,18 +630,18 @@ def build_replay_shared_obs_authorized_presentation_v1(
     raw_frame: SharedObsAgentPovReplayViewerFrameV1,
     *,
     global_context: EvaluationEpisodeContext,
-    current_global_frame: EvaluationFrameV1,
-    previous_global_frame: EvaluationFrameV1 | None,
+    current_global_frame: EvaluationFrame,
+    previous_global_frame: EvaluationFrame | None,
     public_catalog: StaticMechanicsCatalogV1,
     source_authority_epoch: int,
     authorized_recipient_global_slot: int,
-    current_recipient_source_material: SharedObsSourceMaterialProjectionV1,
+    current_recipient_source_material: SharedObsSourceMaterialProjection,
     current_active_nonrecipient_source_material: tuple[
-        SharedObsSourceMaterialProjectionV1, ...
+        SharedObsSourceMaterialProjection, ...
     ],
-    previous_recipient_source_material: SharedObsSourceMaterialProjectionV1 | None,
+    previous_recipient_source_material: SharedObsSourceMaterialProjection | None,
     previous_active_nonrecipient_source_material: tuple[
-        SharedObsSourceMaterialProjectionV1, ...
+        SharedObsSourceMaterialProjection, ...
     ],
     incoming_visual_events: VisualEventBatchV2 | None,
     incoming_transition: EvaluationTransitionV1 | None,
@@ -696,17 +703,27 @@ def build_replay_shared_obs_authorized_presentation_v1(
     if (
         type(current_recipient_source_material)
         is not SharedObsSourceMaterialProjectionV1
+        and type(current_recipient_source_material)
+        is not SharedObsSourceMaterialProjectionV2
     ):
         raise TypeError("current recipient source must use its exact SharedObs root.")
     if (
         type(current_active_nonrecipient_source_material) is not tuple
         or any(
-            type(row) is not SharedObsSourceMaterialProjectionV1
+            type(row)
+            not in (
+                SharedObsSourceMaterialProjectionV1,
+                SharedObsSourceMaterialProjectionV2,
+            )
             for row in current_active_nonrecipient_source_material
         )
         or type(previous_active_nonrecipient_source_material) is not tuple
         or any(
-            type(row) is not SharedObsSourceMaterialProjectionV1
+            type(row)
+            not in (
+                SharedObsSourceMaterialProjectionV1,
+                SharedObsSourceMaterialProjectionV2,
+            )
             for row in previous_active_nonrecipient_source_material
         )
     ):
@@ -785,6 +802,8 @@ def build_replay_shared_obs_authorized_presentation_v1(
         if (
             type(previous_recipient_source_material)
             is not SharedObsSourceMaterialProjectionV1
+            and type(previous_recipient_source_material)
+            is not SharedObsSourceMaterialProjectionV2
         ):
             raise TypeError(
                 "non-initial SharedObs frames require an exact prior source."
@@ -804,7 +823,10 @@ def build_replay_shared_obs_authorized_presentation_v1(
     else:
         if type(incoming_visual_events) is not VisualEventBatchV2:
             raise TypeError("non-initial SharedObs frames require exact visual events.")
-        if type(previous_global_frame) is not EvaluationFrameV1:
+        if (
+            type(previous_global_frame) is not EvaluationFrameV1
+            and type(previous_global_frame) is not EvaluationFrameV2
+        ):
             raise TypeError(
                 "non-initial SharedObs replays require the exact prior global frame."
             )
@@ -935,7 +957,7 @@ def build_replay_shared_obs_authorized_presentation_v1(
 
 def build_replay_oracle_authorized_presentation_v1(
     context: EvaluationEpisodeContext,
-    current_frame: EvaluationFrameV1,
+    current_frame: EvaluationFrame,
     raw_frame: ResearcherReplayViewerFrameV1,
     *,
     source_authority_epoch: int,
@@ -949,12 +971,15 @@ def build_replay_oracle_authorized_presentation_v1(
             "raw_frame must be the exact ResearcherReplayViewerFrameV1 root."
         )
     evaluation_context_type(context)
-    if type(current_frame) is not EvaluationFrameV1:
+    if (
+        type(current_frame) is not EvaluationFrameV1
+        and type(current_frame) is not EvaluationFrameV2
+    ):
         raise TypeError("current_frame must be the exact EvaluationFrameV1 root.")
     context = evaluation_context_type(context).model_validate(
         context.model_dump(mode="python")
     )
-    current_frame = EvaluationFrameV1.model_validate(
+    current_frame = type(current_frame).model_validate(
         current_frame.model_dump(mode="python")
     )
     reference = raw_frame.artifact_summary.replay_reference

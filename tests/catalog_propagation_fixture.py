@@ -15,10 +15,10 @@ from scripts.dev.visual_debugger.scenarios import get_scenario
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.evaluation.capture import (
-    capture_initial_evaluation_frame_v1,
+    capture_initial_evaluation_frame_v2,
 )
 from marl_battlegrounds.evaluation.models import (
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContext,
     StaticMechanicsCatalogV1,
     canonical_digest_sha256,
 )
@@ -62,7 +62,7 @@ def _display_grid_sum(value: float, delta: float) -> float:
 
 
 def catalog_propagation_values(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
 ) -> CatalogPropagationExpectationV1:
     """Read the five mechanics varied by the cross-boundary proof."""
     catalog = context.static_mechanics_catalog
@@ -87,7 +87,7 @@ def catalog_propagation_values(
 
 
 def _derived_expectation(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
 ) -> CatalogPropagationExpectationV1:
     """Derive a distinct reasonable variation from the validated source catalog."""
     source = catalog_propagation_values(context)
@@ -129,10 +129,10 @@ def _derived_expectation(
     return expected
 
 
-def replace_catalog_propagation_values(
-    original_context: EvaluationEpisodeContextV1,
+def replace_catalog_propagation_values[ContextT: EvaluationEpisodeContext](
+    original_context: ContextT,
     expected: CatalogPropagationExpectationV1,
-) -> EvaluationEpisodeContextV1:
+) -> ContextT:
     """Return a fully revalidated context with one reasonable Mage tune."""
     catalog_payload = original_context.static_mechanics_catalog.model_dump(mode="json")
 
@@ -173,12 +173,12 @@ def replace_catalog_propagation_values(
     context_payload["static_mechanics_catalog"] = mutated_catalog.model_dump(
         mode="json"
     )
-    return EvaluationEpisodeContextV1.model_validate_json(json.dumps(context_payload))
+    return type(original_context).model_validate_json(json.dumps(context_payload))
 
 
-def derive_catalog_propagation_context(
-    original_context: EvaluationEpisodeContextV1,
-) -> tuple[EvaluationEpisodeContextV1, CatalogPropagationExpectationV1]:
+def derive_catalog_propagation_context[ContextT: EvaluationEpisodeContext](
+    original_context: ContextT,
+) -> tuple[ContextT, CatalogPropagationExpectationV1]:
     """Apply one source-relative variation and return its exact expectations."""
     expected = _derived_expectation(original_context)
     context = replace_catalog_propagation_values(original_context, expected)
@@ -201,7 +201,7 @@ def build_catalog_propagation_fixture() -> tuple[
         verbose_logging=False,
     )
     context, expected = derive_catalog_propagation_context(session.evaluation_context)
-    initial_frame = capture_initial_evaluation_frame_v1(
+    initial_frame = capture_initial_evaluation_frame_v2(
         context,
         session.state,
         session.observation,

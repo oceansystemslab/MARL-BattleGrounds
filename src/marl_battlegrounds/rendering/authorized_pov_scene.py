@@ -23,11 +23,19 @@ from marl_battlegrounds.evaluation.models import (
 )
 from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
+    ActorPovAdjacentTransitionSlice,
     ActorPovAdjacentTransitionSliceV1,
+    ActorPovAdjacentTransitionSliceV2,
+    ActorPovAxisMapping,
     ActorPovAxisMappingV1,
+    ActorPovAxisMappingV2,
+    ActorPovCurrentSlice,
     ActorPovCurrentSliceV1,
-    ActorPovFrameV1,
+    ActorPovCurrentSliceV2,
+    ActorPovFrame,
+    ActorPovReplayContent,
     ActorPovReplayContentV1,
+    ActorPovReplayContentV2,
     ActorPovSpawnLifecycleV1,
 )
 from marl_battlegrounds.evaluation.wire_shapes import (
@@ -55,14 +63,17 @@ from marl_battlegrounds.rendering.authorized_presentation import (
 from marl_battlegrounds.rendering.evaluation_adapter import (
     SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION,
     SharedObsBaseSensorFrameV1,
+    SharedObsBaseSensorFrameV2,
     SharedObsBaseSensorSceneV1,
     SharedObsSensorSourceAvailabilityV1,
+    SharedObsSourceMaterialProjection,
     SharedObsSourceMaterialProjectionV1,
+    SharedObsSourceMaterialProjectionV2,
     _shared_obs_base_sensor_scene,  # pyright: ignore[reportPrivateUsage]
 )
 from marl_battlegrounds.rendering.evaluation_wire_features import (
     DecodedAgentFeatureRowV1,
-    decode_agent_feature_row_v1,
+    decode_agent_feature_row,
 )
 from marl_battlegrounds.rendering.pov_scene import (
     ActorPovProjectionIndexV1,
@@ -79,9 +90,9 @@ from marl_battlegrounds.rendering.vocabulary import (
 
 type NoSharedObsPovSourceV1 = (
     ActorPovProjectionIndexV1
-    | ActorPovReplayContentV1
-    | ActorPovCurrentSliceV1
-    | ActorPovAdjacentTransitionSliceV1
+    | ActorPovReplayContent
+    | ActorPovCurrentSlice
+    | ActorPovAdjacentTransitionSlice
 )
 
 _STRICT_SHARED_WIRE_CONFIG = ConfigDict(
@@ -461,12 +472,12 @@ class SharedObsAuthorizedScenePartsV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _SourceSelectionV1:
-    frame: ActorPovFrameV1
+    frame: ActorPovFrame
     public_agent_id: str
     selected_team_local_slot: int
     configured_team_id: int
     class_id: int
-    axis_mapping: ActorPovAxisMappingV1
+    axis_mapping: ActorPovAxisMapping
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -479,7 +490,7 @@ class _AuthorizedRowV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _SharedSourceHeaderV1:
-    projection: SharedObsSourceMaterialProjectionV1
+    projection: SharedObsSourceMaterialProjection
     source_global_slot: int
     source_public_agent_id: str
 
@@ -501,15 +512,18 @@ def _validated_catalog(
 
 
 def _validate_shared_projection_declaration(
-    projection: SharedObsSourceMaterialProjectionV1,
+    projection: SharedObsSourceMaterialProjection,
 ) -> None:
     """Validate used identity declarations without diagnostic branches."""
-    if type(projection) is not SharedObsSourceMaterialProjectionV1:
+    if (
+        type(projection) is not SharedObsSourceMaterialProjectionV1
+        and type(projection) is not SharedObsSourceMaterialProjectionV2
+    ):
         raise TypeError("SharedObs source material must use its exact projection root.")
     if (
         type(projection.schema_version) is not int
         or projection.schema_version
-        != SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION
+        != (2 if type(projection) is SharedObsSourceMaterialProjectionV2 else 1)
         or projection.disclosure_label != _SHARED_SOURCE_MATERIAL_DISCLOSURE_V1
         or projection.observation_materialization != "source_material_only"
         or projection.exact_actor_input_export_available is not False
@@ -518,13 +532,16 @@ def _validate_shared_projection_declaration(
     frame = projection.base_sensor_frame
     scene = projection.base_sensor_scene
     if (
-        type(frame) is not SharedObsBaseSensorFrameV1
-        or type(scene) is not SharedObsBaseSensorSceneV1
-    ):
+        (
+            type(frame) is not SharedObsBaseSensorFrameV1
+            and type(frame) is not SharedObsBaseSensorFrameV2
+        )
+        and type(frame) is not SharedObsBaseSensorFrameV2
+    ) or type(scene) is not SharedObsBaseSensorSceneV1:
         raise ValueError("SharedObs source uses an invalid frame or scene root.")
     if (
         type(frame.schema_version) is not int
-        or frame.schema_version != SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION
+        or frame.schema_version != projection.schema_version
         or frame.observation_materialization != "source_material_only"
         or type(frame.episode_id) is not str
         or not frame.episode_id.strip()
@@ -558,12 +575,15 @@ def _validate_shared_projection_declaration(
 
 
 def _shared_public_id_by_global_slot(
-    projection: SharedObsSourceMaterialProjectionV1,
+    projection: SharedObsSourceMaterialProjection,
 ) -> dict[int, str]:
     """Read only the declared identity topology, never a unit feature row."""
-    if type(projection.axis_mapping) is not ActorPovAxisMappingV1:
+    if (
+        type(projection.axis_mapping) is not ActorPovAxisMappingV1
+        and type(projection.axis_mapping) is not ActorPovAxisMappingV2
+    ):
         raise ValueError("SharedObs source axis must use the exact POV mapping.")
-    validated_axis = ActorPovAxisMappingV1.model_validate(
+    validated_axis = type(projection.axis_mapping).model_validate(
         projection.axis_mapping.model_dump(mode="python")
     )
     if validated_axis != projection.axis_mapping:
@@ -607,9 +627,9 @@ def _shared_public_id_by_global_slot(
 
 
 def _shared_source_header(
-    projection: SharedObsSourceMaterialProjectionV1,
+    projection: SharedObsSourceMaterialProjection,
     *,
-    recipient_projection: SharedObsSourceMaterialProjectionV1,
+    recipient_projection: SharedObsSourceMaterialProjection,
     recipient_public_id_by_slot: dict[int, str],
     recipient_topology_by_slot: dict[int, SharedObsSensorSourceAvailabilityV1],
 ) -> _SharedSourceHeaderV1:
@@ -681,7 +701,7 @@ def _shared_source_header(
 
 
 def _validate_shared_unit_axes(
-    projection: SharedObsSourceMaterialProjectionV1,
+    projection: SharedObsSourceMaterialProjection,
 ) -> None:
     """Validate only the self/visible unit containers this source contributes."""
     frame = projection.base_sensor_frame
@@ -710,7 +730,7 @@ def _validate_shared_unit_axes(
 
 
 def _validated_recipient_topology(
-    projection: SharedObsSourceMaterialProjectionV1,
+    projection: SharedObsSourceMaterialProjection,
 ) -> tuple[
     tuple[SharedObsSensorSourceAvailabilityV1, ...],
     dict[int, SharedObsSensorSourceAvailabilityV1],
@@ -796,8 +816,11 @@ def _validated_recipient_topology(
     ):
         raise ValueError("SharedObs recipient scene self does not join topology.")
     _validate_shared_unit_axes(projection)
-    self_decoded = decode_agent_feature_row_v1(
-        projection.base_sensor_frame.self_features
+    self_decoded = decode_agent_feature_row(
+        projection.base_sensor_frame.self_features,
+        schema_version=projection.base_sensor_frame.schema_version,
+        team_id=self_row.sensor_source_configured_team_id,
+        is_enemy=False,
     )
     if (
         not self_decoded.configured_active
@@ -825,21 +848,23 @@ def _validated_recipient_topology(
 
 def _validated_source(source: NoSharedObsPovSourceV1) -> NoSharedObsPovSourceV1:
     """Revalidate exact POV roots before any row is selected or decoded."""
-    if type(source) is ActorPovAdjacentTransitionSliceV1:
-        return ActorPovAdjacentTransitionSliceV1.model_validate(
-            source.model_dump(mode="python")
-        )
-    if type(source) is ActorPovCurrentSliceV1:
-        return ActorPovCurrentSliceV1.model_validate(source.model_dump(mode="python"))
-    if type(source) is ActorPovReplayContentV1:
-        validated = ActorPovReplayContentV1.model_validate(
-            source.model_dump(mode="python")
-        )
+    if (
+        type(source) is ActorPovAdjacentTransitionSliceV1
+        or type(source) is ActorPovAdjacentTransitionSliceV2
+    ):
+        return type(source).model_validate(source.model_dump(mode="python"))
+    if type(source) is ActorPovCurrentSliceV1 or type(source) is ActorPovCurrentSliceV2:
+        return type(source).model_validate(source.model_dump(mode="python"))
+    if (
+        type(source) is ActorPovReplayContentV1
+        or type(source) is ActorPovReplayContentV2
+    ):
+        validated = type(source).model_validate(source.model_dump(mode="python"))
         # The index constructor additionally checks the declared model tree and
         # content digest, then remains reusable by interactive callers.
         return build_actor_pov_projection_index_v1(validated)
     if type(source) is ActorPovProjectionIndexV1:
-        validated_content = ActorPovReplayContentV1.model_validate(
+        validated_content = type(source.content).model_validate(
             source.content.model_dump(mode="python")
         )
         return build_actor_pov_projection_index_v1(validated_content)
@@ -867,7 +892,10 @@ def _select_source(
             class_id=content.class_id,
             axis_mapping=content.axis_mapping,
         )
-    if type(source) is ActorPovReplayContentV1:
+    if (
+        type(source) is ActorPovReplayContentV1
+        or type(source) is ActorPovReplayContentV2
+    ):
         if type(frame_index) is not int or not 0 <= frame_index < len(source.frames):
             raise IndexError("frame_index is outside the captured POV prefix.")
         return _SourceSelectionV1(
@@ -878,7 +906,7 @@ def _select_source(
             class_id=source.class_id,
             axis_mapping=source.axis_mapping,
         )
-    if type(source) is ActorPovCurrentSliceV1:
+    if type(source) is ActorPovCurrentSliceV1 or type(source) is ActorPovCurrentSliceV2:
         if frame_index is not None and frame_index != source.frame.frame_index:
             raise ValueError(
                 "a live current slice accepts only its own canonical frame index."
@@ -891,7 +919,10 @@ def _select_source(
             class_id=source.class_id,
             axis_mapping=source.axis_mapping,
         )
-    if type(source) is ActorPovAdjacentTransitionSliceV1:
+    if (
+        type(source) is ActorPovAdjacentTransitionSliceV1
+        or type(source) is ActorPovAdjacentTransitionSliceV2
+    ):
         if type(frame_index) is not int or frame_index not in (
             source.start_frame.frame_index,
             source.successor_frame.frame_index,
@@ -1324,7 +1355,7 @@ def _shared_authorized_row(
 
 
 def _shared_projection_contributions(
-    projection: SharedObsSourceMaterialProjectionV1,
+    projection: SharedObsSourceMaterialProjection,
     *,
     source: SharedObsAuthorizedSensorSourceV1,
     source_global_slot: int,
@@ -1345,7 +1376,14 @@ def _shared_projection_contributions(
         raise ValueError("SharedObs admitted source self identity changed.")
     self_row = _shared_authorized_row(
         public_agent_id=self_public_id,
-        decoded=decode_agent_feature_row_v1(frame.self_features),
+        decoded=decode_agent_feature_row(
+            frame.self_features,
+            schema_version=frame.schema_version,
+            team_id=topology_by_global_slot[
+                source_global_slot
+            ].sensor_source_configured_team_id,
+            is_enemy=False,
+        ),
         topology=topology_by_global_slot[source_global_slot],
         recipient_public_agent_id=recipient_public_agent_id,
         recipient_team_id=recipient_team_id,
@@ -1390,7 +1428,12 @@ def _shared_projection_contributions(
                 _SharedContributionV1(
                     row=_shared_authorized_row(
                         public_agent_id=public_agent_id,
-                        decoded=decode_agent_feature_row_v1(raw_row),
+                        decoded=decode_agent_feature_row(
+                            raw_row,
+                            schema_version=frame.schema_version,
+                            team_id=topology.sensor_source_configured_team_id,
+                            is_enemy=relation_axis == "enemy",
+                        ),
                         topology=topology,
                         recipient_public_agent_id=recipient_public_agent_id,
                         recipient_team_id=recipient_team_id,
@@ -1454,7 +1497,10 @@ def build_no_shared_obs_authorized_scene_v1(
     validated_source = _validated_source(source)
     selection = _select_source(validated_source, frame_index=frame_index)
     frame = selection.frame
-    if type(validated_source) is ActorPovAdjacentTransitionSliceV1:
+    if (
+        type(validated_source) is ActorPovAdjacentTransitionSliceV1
+        or type(validated_source) is ActorPovAdjacentTransitionSliceV2
+    ):
         # A nonzero start endpoint intentionally has no prior incoming
         # transition.  Decode only its battlefield facts; do not fabricate a
         # legacy AnalyzerProjection incoming identity.
@@ -1483,7 +1529,12 @@ def build_no_shared_obs_authorized_scene_v1(
             frame_index=frame_index,
         ).scene
     lifecycle = frame.spawn_lifecycle
-    self_decoded = decode_agent_feature_row_v1(frame.self_features)
+    self_decoded = decode_agent_feature_row(
+        frame.self_features,
+        schema_version=frame.schema_version,
+        team_id=selection.configured_team_id,
+        is_enemy=False,
+    )
     if (
         self_decoded.team_id != selection.configured_team_id
         or self_decoded.class_id != selection.class_id
@@ -1522,7 +1573,12 @@ def build_no_shared_obs_authorized_scene_v1(
             continue
         if body.public_agent_id in seen_public_ids:
             raise ValueError("authorized POV rows repeat one public identity.")
-        decoded = decode_agent_feature_row_v1(raw_row)
+        decoded = decode_agent_feature_row(
+            raw_row,
+            schema_version=frame.schema_version,
+            team_id=body.team_id,
+            is_enemy=body.relation == "enemy",
+        )
         relative_team_index = 0 if body.relation == "ally" else 1
         expected_team_id = _absolute_team_id(
             recipient_team_id=selection.configured_team_id,
@@ -1698,10 +1754,10 @@ def build_no_shared_obs_authorized_scene_v1(
 
 
 def build_shared_obs_authorized_scene_v1(
-    recipient_source_material: SharedObsSourceMaterialProjectionV1,
+    recipient_source_material: SharedObsSourceMaterialProjection,
     *,
     all_active_nonrecipient_source_material: tuple[
-        SharedObsSourceMaterialProjectionV1, ...
+        SharedObsSourceMaterialProjection, ...
     ],
     public_catalog: StaticMechanicsCatalogV1,
     authority_session_id: str,
@@ -1759,7 +1815,11 @@ def build_shared_obs_authorized_scene_v1(
             raise ValueError("inactive SharedObs lifecycle rows must remain empty.")
 
     if type(all_active_nonrecipient_source_material) is not tuple or any(
-        type(source) is not SharedObsSourceMaterialProjectionV1
+        type(source)
+        not in (
+            SharedObsSourceMaterialProjectionV1,
+            SharedObsSourceMaterialProjectionV2,
+        )
         for source in all_active_nonrecipient_source_material
     ):
         raise TypeError(

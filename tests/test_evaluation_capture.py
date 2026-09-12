@@ -14,9 +14,10 @@ import pytest
 from numpy.typing import NDArray
 from pydantic import ValidationError
 from tests.evaluation_fixtures import evaluation_context, evaluation_env_config
+from tests.evaluation_fixtures import historical_reset as reset
+from tests.evaluation_fixtures import historical_step as step
 
 import marl_battlegrounds.evaluation.capture as capture_module
-from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
     CONTEXT_FEATURE_CURRENT_TIMESTEP,
     CONTEXT_FEATURE_EPISODE_HORIZON,
@@ -209,6 +210,8 @@ def _assert_frame_copies_every_dynamic_leaf(
         )
 
     for field_name in Observation._fields:
+        if field_name == "self_ally_index":
+            continue  # The old observation contract did not contain this leaf.
         source_value = getattr(host_observation, field_name)
         model_value = getattr(frame.base_observation, field_name)
         if field_name in ("previous_timestep_actions", "spawn_lifecycle"):

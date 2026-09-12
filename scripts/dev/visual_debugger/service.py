@@ -6,7 +6,6 @@ from secrets import token_urlsafe
 from threading import RLock
 from typing import Literal, cast
 
-from marl_battlegrounds.evaluation.metrics import EvaluationEpisodeObserverV1
 from marl_battlegrounds.rendering.evaluation_adapter import (
     build_visual_event_batch_v2,
 )
@@ -59,7 +58,6 @@ from scripts.dev.visual_debugger.protocol import (
 )
 from scripts.dev.visual_debugger.recording import (
     DebuggerRecordingCloseCauseV1,
-    DebuggerReplayRecorderV1,
 )
 from scripts.dev.visual_debugger.replay_recorder import DebuggerReplayRecorder
 from scripts.dev.visual_debugger.replay_service import ReplayViewerService
@@ -145,7 +143,7 @@ class DebuggerService:
         preset: Preset | Literal["technical", "debug"],
         include_stress: bool,
         session_id: str | None = None,
-        recorder: DebuggerReplayRecorderV1 | DebuggerReplayRecorder | None = None,
+        recorder: DebuggerReplayRecorder | None = None,
     ) -> None:
         if session.scenario_name in STRESS_SCENARIOS and not include_stress:
             msg = (
@@ -168,24 +166,17 @@ class DebuggerService:
             tuple[str, str],
             _CommandRecord,
         ] = OrderedDict()
-        self._recorder: DebuggerReplayRecorderV1 | DebuggerReplayRecorder | None = (
-            self._validated_recorder(
-                self._session,
-                recorder,
-            )
-        )
-        self._evaluation_observer: EvaluationEpisodeObserverV1 | None = (
-            self._new_evaluation_observer(self._session)
-            if self._recorder is None
-            else None
+        self._recorder: DebuggerReplayRecorder | None = self._validated_recorder(
+            self._session,
+            recorder,
         )
         self._frame = self._build_frame()
 
     @staticmethod
     def _validated_recorder(
         session: DebuggerSession,
-        recorder: DebuggerReplayRecorderV1 | DebuggerReplayRecorder | None,
-    ) -> DebuggerReplayRecorderV1 | DebuggerReplayRecorder | None:
+        recorder: DebuggerReplayRecorder | None,
+    ) -> DebuggerReplayRecorder | None:
         if recorder is None:
             if session.evaluation_context.capture_profile != "debug":
                 raise ValueError(
@@ -193,7 +184,7 @@ class DebuggerService:
                 )
             return None
         raw_recorder = cast(object, recorder)
-        if type(raw_recorder) not in (DebuggerReplayRecorderV1, DebuggerReplayRecorder):
+        if type(raw_recorder) is not DebuggerReplayRecorder:
             raise TypeError("recorder must be an exact supported debugger recorder.")
         if session.evaluation_context.capture_profile != "evaluation_metric_complete":
             raise ValueError("recording sessions require metric-complete capture.")
@@ -208,25 +199,6 @@ class DebuggerService:
                 "recorder must own the current open debugger episode prefix."
             )
         return recorder
-
-    @staticmethod
-    def _new_evaluation_observer(
-        session: DebuggerSession,
-    ) -> EvaluationEpisodeObserverV1:
-        """Start an unretaining zero-reducer observer for one session epoch."""
-        if session.evaluation_context.capture_profile != "debug":
-            raise ValueError("live debugger observers require the debug profile.")
-        observer = EvaluationEpisodeObserverV1(
-            session.evaluation_context,
-            reducers=(),
-        )
-        observer.start(session.current_evaluation_frame)
-        if (
-            observer.retained_frames is not None
-            or observer.retained_transitions is not None
-        ):
-            raise AssertionError("debug observers must not retain trajectory history.")
-        return observer
 
     @property
     def session(self) -> DebuggerSession:
@@ -259,12 +231,10 @@ class DebuggerService:
                 raw_frame=candidate_frame,
                 view_mode=self._view_mode,
             )
-            candidate_observer = self._new_evaluation_observer(candidate_session)
 
             self._session = candidate_session
             self._revision = candidate_revision
             self._frame = candidate_frame
-            self._evaluation_observer = candidate_observer
             self._command_records.clear()
             return candidate_session
 
@@ -282,25 +252,25 @@ class DebuggerService:
 
     @property
     def evaluation_validated_transition_count(self) -> int:
-        """Return immutable observer progress without exposing its mutator."""
+        """Return the count from the committed episode frame."""
         with self._lock:
             if self._recorder is not None:
                 return self._recorder.validated_transition_count
-            observer = self._evaluation_observer
-            if observer is None:
-                raise AssertionError("unrecorded service is missing its observer.")
-            return observer.validated_transition_count
+            return self._session.current_evaluation_frame.frame_index
 
     @property
     def evaluation_observer_lifecycle_state(self) -> str:
-        """Return the service-owned observer lifecycle label."""
+        """Return whether the committed episode is open or finished."""
         with self._lock:
             if self._recorder is not None:
                 return self._recorder.observer_lifecycle_state
-            observer = self._evaluation_observer
-            if observer is None:
-                raise AssertionError("unrecorded service is missing its observer.")
-            return observer.lifecycle_state
+            incoming = self._session.incoming_evaluation_view
+            if self._session.reached_declared_horizon or (
+                incoming is not None
+                and (incoming.transition.terminated or incoming.transition.truncated)
+            ):
+                return "sealed"
+            return "open"
 
     @property
     def recording_status(self) -> RecordingStatusV1 | None:
@@ -413,10 +383,7 @@ class DebuggerService:
     def _validated_transition_count(self) -> int:
         if self._recorder is not None:
             return self._recorder.validated_transition_count
-        observer = self._evaluation_observer
-        if observer is None:
-            raise AssertionError("unrecorded service is missing its observer.")
-        return observer.validated_transition_count
+        return self._session.current_evaluation_frame.frame_index
 
     @property
     def shutting_down(self) -> bool:
@@ -1723,13 +1690,15 @@ class DebuggerService:
                 )
                 raise
 
-            candidate_observer = self._evaluation_observer
             if dispatched.transition_applied is not None:
                 transition_view = dispatched.transition_applied
                 if (
                     candidate_session.current_evaluation_frame
                     != transition_view.successor_frame
                     or candidate_session.evaluation_context != transition_view.context
+                    or transition_view.context != self._session.evaluation_context
+                    or transition_view.start_frame
+                    != self._session.current_evaluation_frame
                     or self._validated_transition_count()
                     != transition_view.transition.transition_index
                 ):
@@ -1745,19 +1714,10 @@ class DebuggerService:
                         "candidate transition and committed observer epoch diverged"
                     )
                 try:
-                    if self._recorder is None:
-                        if self._evaluation_observer is None:
-                            raise AssertionError(
-                                "unrecorded service is missing its observer."
-                            )
-                        self._evaluation_observer.append(
-                            transition_view.transition,
-                            transition_view.successor_frame,
-                        )
-                    else:
+                    if self._recorder is not None:
                         self._recorder.append(
                             transition_view.transition,
-                            transition_view.successor_frame,
+                            candidate_session.current_evaluation_frame,
                         )
                 except Exception as error:
                     recorder = self._recorder
@@ -1808,21 +1768,6 @@ class DebuggerService:
                         close_cause="processing_failure",
                         candidates=processing_failure_candidates,
                     )
-            elif dispatched.episode_restarted and self._recorder is None:
-                try:
-                    candidate_observer = self._new_evaluation_observer(
-                        candidate_session
-                    )
-                except Exception:
-                    self._faulted = True
-                    self._remember_command(
-                        command_key,
-                        _CommandRecord(
-                            fingerprint=fingerprint,
-                            shutdown_requested=False,
-                        ),
-                    )
-                    raise
 
             if (
                 confirmed_discard
@@ -1839,7 +1784,6 @@ class DebuggerService:
             if dispatched.changed:
                 self._revision = candidate_revision
                 self._frame = candidate_frame
-            self._evaluation_observer = candidate_observer
             self._recorder = candidate_recorder
             self._command_records = candidate_command_records
             if endpoint_candidates is not None:

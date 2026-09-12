@@ -28,7 +28,7 @@ from marl_battlegrounds.policies.reactive_common import (
     refine_movement,
 )
 from marl_battlegrounds.policies.shared_obs import (
-    SharedObsSensorSourceBankV1,
+    SharedObsSensorSourceBankV2,
     compose_shared_obs_unit_features,
 )
 
@@ -139,12 +139,12 @@ def _priest_direction(
     ally_living: Array,
     enemies: Array,
     enemy_living: Array,
-    recipient_global_slot: Array,
+    self_ally_index: Array,
     center_direction: Array,
 ) -> tuple[Array, Array]:
     """Keep healing-oriented retreat separate from peaceful nearest-ally spacing."""
     origin = centers(self_features)
-    self_row = recipient_global_slot % MAX_AGENTS_PER_TEAM
+    self_row = self_ally_index
     ally_row = lowest_health_row(allies, ally_living, break_ties_by_max_health=True)
     ally_delta = centers(allies[ally_row]) - origin
     ally_distance = jnp.sqrt(jnp.sum(jnp.square(ally_delta)))
@@ -185,9 +185,8 @@ def reactive_tdm_alpha_policy(
     recipient_observation: Observation,
     recipient_action_mask: ActionMask,
     actor_key: Array,
-    source_bank: SharedObsSensorSourceBankV1,
+    source_bank: SharedObsSensorSourceBankV2,
     recipient_source_availability: Array,
-    recipient_global_slot: Array,
 ) -> ActorAction:
     """Choose one complete team-agnostic action; no RNG or history is consumed."""
     del actor_key
@@ -195,7 +194,6 @@ def reactive_tdm_alpha_policy(
         recipient_observation,
         source_bank,
         recipient_source_availability,
-        recipient_global_slot,
     )
     ally_living = living_candidates(allies, ally_visible)
     enemy_living = living_candidates(enemies, enemy_visible)
@@ -236,7 +234,7 @@ def reactive_tdm_alpha_policy(
         ally_living,
         enemies,
         enemy_living,
-        recipient_global_slot,
+        recipient_observation.self_ally_index,
         center_direction,
     )
     direction = jnp.where(is_priest, priest_direction, attack_direction)

@@ -6,9 +6,9 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from marl_battlegrounds.core.types import MAX_AGENT_SLOTS, EnvConfig, Observation
+from marl_battlegrounds.core.types import EnvConfig, Observation
 from marl_battlegrounds.policies.shared_obs import (
-    SharedObsSensorSourceBankV1,
+    SharedObsSensorSourceBankV2,
     build_default_shared_obs_information_availability,
     build_shared_obs_sensor_source_bank,
     mask_source_bank_for_recipient,
@@ -18,16 +18,14 @@ from marl_battlegrounds.policies.shared_obs import (
 class ActorInput(NamedTuple):
     """One actor's existing observation and admitted SharedObs source material.
 
-    ``build_actor_input`` returns a leading ten-actor axis on every leaf. Taking
-    one actor row gives the observation, source bank, availability row and global
-    slot already accepted by the six-argument SharedObs policy interface. Masks
-    and RNG keys remain separate policy arguments. NoSharedObs stays unchanged.
+    ``build_actor_input`` returns a leading ten-actor routing axis on every leaf.
+    Taking one actor row gives only its observation, five-source bank and local
+    availability row. Masks and RNG keys remain separate policy arguments.
     """
 
     observation: Observation
-    source_bank: SharedObsSensorSourceBankV1
+    source_bank: SharedObsSensorSourceBankV2
     source_availability: Array
-    global_slot: Array
 
 
 class Observations(NamedTuple):
@@ -63,14 +61,18 @@ def build_actor_input(observation: Observation, config: EnvConfig) -> ActorInput
         config.agent_profile.active_mask, config.agent_profile.team_ids
     )
     source_bank = build_shared_obs_sensor_source_bank(observation)
-    authorized_banks = jax.vmap(mask_source_bank_for_recipient, in_axes=(None, 0))(
-        source_bank, availability
-    )
+    team_availability = jnp.stack((availability[:5, :5], availability[5:, 5:]))
+    authorized_banks = jax.vmap(
+        jax.vmap(mask_source_bank_for_recipient, in_axes=(None, 0))
+    )(source_bank, team_availability)
+
+    def actor_rows(value: Array) -> Array:
+        return value.reshape((10, *value.shape[2:]))
+
     return ActorInput(
         observation=observation,
-        source_bank=authorized_banks,
-        source_availability=availability,
-        global_slot=jnp.arange(MAX_AGENT_SLOTS, dtype=jnp.int32),
+        source_bank=jax.tree.map(actor_rows, authorized_banks),
+        source_availability=team_availability.reshape((10, 5)),
     )
 
 

@@ -2003,7 +2003,7 @@ def test_agent_endpoint_factories_derive_exact_axis_from_accepted_mapping(
         authority="cp2-5-b-axis-factory",
     )
     mapping = index.content.axis_mapping
-    mapping_before = TypeAdapter(ActorPovAxisMappingV1).dump_json(mapping)
+    mapping_before = TypeAdapter(type(mapping)).dump_json(mapping)
     parts_before = TypeAdapter(type(current)).dump_json(current)
     endpoint = build_no_shared_obs_authorized_current_endpoint_v1(
         parts=current,
@@ -2028,7 +2028,7 @@ def test_agent_endpoint_factories_derive_exact_axis_from_accepted_mapping(
         )
         == ("same_team",) * 5 + ("opponent",) * 5
     )
-    assert TypeAdapter(ActorPovAxisMappingV1).dump_json(mapping) == mapping_before
+    assert TypeAdapter(type(mapping)).dump_json(mapping) == mapping_before
     assert TypeAdapter(type(current)).dump_json(current) == parts_before
 
     visible_ids = {row.public_agent_id for row in current.scene.agents}
@@ -2080,7 +2080,7 @@ def test_agent_endpoint_factories_derive_exact_axis_from_accepted_mapping(
         frame_index=1,
         authority="cp2-5-b-shared-axis-factory",
     )
-    shared_mapping_before = TypeAdapter(ActorPovAxisMappingV1).dump_json(
+    shared_mapping_before = TypeAdapter(type(shared_source.axis_mapping)).dump_json(
         shared_source.axis_mapping
     )
     shared_endpoint = build_shared_obs_authorized_current_endpoint_v1(
@@ -2091,7 +2091,9 @@ def test_agent_endpoint_factories_derive_exact_axis_from_accepted_mapping(
         shared_source.axis_mapping.target_action_recipient_public_agent_id_by_id
     )
     assert (
-        TypeAdapter(ActorPovAxisMappingV1).dump_json(shared_source.axis_mapping)
+        TypeAdapter(type(shared_source.axis_mapping)).dump_json(
+            shared_source.axis_mapping
+        )
         == shared_mapping_before
     )
 

@@ -14,11 +14,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from marl_battlegrounds.evaluation.replay_io import LoadedReplayBundleV1
+    from marl_battlegrounds.evaluation.replay_io import (
+        LoadedReplay,
+        LoadedReplayBundleV1,
+    )
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 SAMPLE_REPLAY_DIRECTORY = _REPOSITORY_ROOT / "examples" / "replays" / "v1"
+CURRENT_SAMPLE_REPLAY_DIRECTORY = (
+    _REPOSITORY_ROOT / "artifacts" / "visual-debugger-samples" / "v3"
+)
+CURRENT_SAMPLE_REPLAY_MANIFEST_SCHEMA_VERSION = 2
+CURRENT_SAMPLE_REPLAY_GENERATOR_ID = "visual-debugger-sample-replays-v2"
 SAMPLE_REPLAY_MANIFEST_PATH = SAMPLE_REPLAY_DIRECTORY / "manifest.json"
 SAMPLE_REPLAY_MANIFEST_SCHEMA_ID = (
     "marl_battlegrounds.visual_debugger.sample_replay_manifest"
@@ -41,7 +49,7 @@ class SampleReplayVerificationError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class SampleReplayDefinition:
-    """One stable launch name and its immutable checked-in artifact pair."""
+    """One stable launch name and its registered member filenames."""
 
     name: str
     display_name: str
@@ -84,13 +92,16 @@ class SampleReplayDefinition:
 
 
 @dataclass(frozen=True, slots=True)
-class VerifiedSampleReplaySetV1:
+class VerifiedSampleReplaySet:
     """One manifest snapshot and its complete in-memory replay bundle set."""
 
     manifest: Mapping[str, object]
     sample_rows: tuple[Mapping[str, object], ...]
-    bundles: tuple[LoadedReplayBundleV1, ...]
+    bundles: tuple[LoadedReplayBundleV1 | LoadedReplay, ...]
     file_names: frozenset[str]
+
+
+VerifiedSampleReplaySetV1 = VerifiedSampleReplaySet
 
 
 SAMPLE_REPLAYS: tuple[SampleReplayDefinition, ...] = (
@@ -166,7 +177,7 @@ def _require_exact_keys(
 ) -> None:
     if set(value) != expected:
         raise SampleReplayVerificationError(
-            f"{label} members differ from the V1 manifest contract"
+            f"{label} members differ from the declared manifest contract"
         )
 
 
@@ -187,7 +198,7 @@ def _reject_nonfinite_json_constant(value: str) -> object:
 def canonical_sample_replay_manifest_json_bytes_v1(
     manifest: Mapping[str, object],
 ) -> bytes:
-    """Return the exact readable, sorted V1 manifest byte representation."""
+    """Return the exact readable, sorted bytes for either manifest version."""
     return (
         json.dumps(
             manifest,
@@ -486,6 +497,8 @@ def _verified_member_bytes(
 def _validate_manifest_sample_row(
     sample: SampleReplayDefinition,
     raw_row: object,
+    *,
+    schema_version: int,
 ) -> Mapping[str, object]:
     row = _require_mapping(raw_row, label=f"sample {sample.name}")
     _require_exact_keys(
@@ -500,8 +513,8 @@ def _validate_manifest_sample_row(
             "frame_count",
             "event_kind_coverage",
             "replay",
-            "metric_report",
-        },
+        }
+        | ({"metric_report"} if schema_version == 1 else set()),
         label=f"sample {sample.name}",
     )
     seed = _require_exact_nonnegative_int(
@@ -548,12 +561,13 @@ def _validate_manifest_sample_row(
         max_size_bytes=SAMPLE_REPLAY_MAX_MEMBER_SIZE_BYTES,
         label=f"sample {sample.name} replay",
     )
-    _validated_member_metadata(
-        row["metric_report"],
-        expected_file_name=sample.metric_report_file_name,
-        max_size_bytes=SAMPLE_REPLAY_MAX_MEMBER_SIZE_BYTES,
-        label=f"sample {sample.name} metric report",
-    )
+    if schema_version == 1:
+        _validated_member_metadata(
+            row["metric_report"],
+            expected_file_name=sample.metric_report_file_name,
+            max_size_bytes=SAMPLE_REPLAY_MAX_MEMBER_SIZE_BYTES,
+            label=f"sample {sample.name} metric report",
+        )
     return row
 
 
@@ -604,8 +618,13 @@ def _read_sample_replay_manifest_from_directory_descriptor(
     )
     if (
         manifest["schema_id"] != SAMPLE_REPLAY_MANIFEST_SCHEMA_ID
-        or schema_version != SAMPLE_REPLAY_MANIFEST_SCHEMA_VERSION
-        or manifest["generator_id"] != SAMPLE_REPLAY_GENERATOR_ID
+        or schema_version not in (1, 2)
+        or manifest["generator_id"]
+        != (
+            SAMPLE_REPLAY_GENERATOR_ID
+            if schema_version == 1
+            else CURRENT_SAMPLE_REPLAY_GENERATOR_ID
+        )
     ):
         raise SampleReplayVerificationError(
             "sample replay manifest identity is unsupported"
@@ -647,17 +666,18 @@ def _read_sample_replay_manifest_from_directory_descriptor(
     )
     from pydantic import ValidationError
 
-    from marl_battlegrounds.evaluation.models import CodeRevisionV1
+    from marl_battlegrounds.evaluation.models import CodeRevisionV1, CodeRevisionV2
     from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 
     try:
-        code_revision = CodeRevisionV1.model_validate(raw_code_revision)
+        code_type = CodeRevisionV1 if schema_version == 1 else CodeRevisionV2
+        code_revision = code_type.model_validate(raw_code_revision)
         runtime_provenance = RuntimeProvenanceV1.model_validate_json(
             _canonical_json_value_bytes(raw_runtime_provenance)
         )
     except ValidationError as error:
         raise SampleReplayVerificationError(
-            "sample manifest provenance does not satisfy the strict V1 schemas"
+            "sample manifest provenance does not satisfy its strict versioned schemas"
         ) from error
     if (
         _canonical_json_value_bytes(code_revision.model_dump(mode="json"))
@@ -677,7 +697,7 @@ def _read_sample_replay_manifest_from_directory_descriptor(
     if len(sample_values) != len(SAMPLE_REPLAYS):
         raise SampleReplayVerificationError("sample manifest registry size mismatch")
     rows = tuple(
-        _validate_manifest_sample_row(sample, raw_row)
+        _validate_manifest_sample_row(sample, raw_row, schema_version=schema_version)
         for sample, raw_row in zip(
             SAMPLE_REPLAYS,
             sample_values,
@@ -687,10 +707,10 @@ def _read_sample_replay_manifest_from_directory_descriptor(
     return manifest, rows, manifest_identity
 
 
-def read_sample_replay_manifest_v1(
+def read_sample_replay_manifest(
     directory: Path = SAMPLE_REPLAY_DIRECTORY,
 ) -> tuple[Mapping[str, object], tuple[Mapping[str, object], ...]]:
-    """Read one strict V1 manifest snapshot from a held directory descriptor."""
+    """Read one versioned manifest snapshot from a held directory descriptor."""
     if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
         directory,
         Path,
@@ -744,7 +764,9 @@ def _load_verified_sample_replay_from_snapshot(
     manifest: Mapping[str, object],
     row: Mapping[str, object],
     directory_descriptor: int,
-) -> tuple[LoadedReplayBundleV1, tuple[tuple[str, _FileIdentity, str], ...]]:
+) -> tuple[
+    LoadedReplayBundleV1 | LoadedReplay, tuple[tuple[str, _FileIdentity, str], ...]
+]:
     name = sample.name
     replay_payload, replay_identity = _verified_member_bytes(
         row["replay"],
@@ -753,18 +775,35 @@ def _load_verified_sample_replay_from_snapshot(
         max_size_bytes=SAMPLE_REPLAY_MAX_MEMBER_SIZE_BYTES,
         label=f"sample {name} replay",
     )
-    metric_payload, metric_identity = _verified_member_bytes(
-        row["metric_report"],
-        expected_file_name=sample.metric_report_file_name,
-        directory_descriptor=directory_descriptor,
-        max_size_bytes=SAMPLE_REPLAY_MAX_MEMBER_SIZE_BYTES,
-        label=f"sample {name} metric report",
-    )
+    historical = manifest["schema_version"] == 1
+    member_identities = [
+        (sample.replay_file_name, replay_identity, f"sample {name} replay")
+    ]
+    metric_payload: bytes | None = None
+    if historical:
+        metric_payload, metric_identity = _verified_member_bytes(
+            row["metric_report"],
+            expected_file_name=sample.metric_report_file_name,
+            directory_descriptor=directory_descriptor,
+            max_size_bytes=SAMPLE_REPLAY_MAX_MEMBER_SIZE_BYTES,
+            label=f"sample {name} metric report",
+        )
+        member_identities.append(
+            (
+                sample.metric_report_file_name,
+                metric_identity,
+                f"sample {name} metric report",
+            )
+        )
 
+    from marl_battlegrounds.evaluation.models import (
+        CodeRevisionV2,
+        canonical_json_bytes,
+    )
     from marl_battlegrounds.evaluation.replay_io import (
         ReplayLoadError,
         canonical_metric_report_artifact_json_bytes_v1,
-        canonical_replay_json_bytes_v1,
+        load_replay,
         load_replay_bundle_v1,
     )
 
@@ -774,13 +813,22 @@ def _load_verified_sample_replay_from_snapshot(
         ) as temporary:
             private_directory = Path(temporary)
             private_replay_path = private_directory / sample.replay_file_name
-            private_metric_path = private_directory / sample.metric_report_file_name
-            _write_private_member(private_metric_path, metric_payload)
+            if metric_payload is not None:
+                _write_private_member(
+                    private_directory / sample.metric_report_file_name, metric_payload
+                )
             _write_private_member(private_replay_path, replay_payload)
-            loaded = load_replay_bundle_v1(
-                private_replay_path,
-                require_metric_report=True,
-                max_file_size_bytes=SAMPLE_REPLAY_MAX_MEMBER_SIZE_BYTES,
+            loaded = (
+                load_replay_bundle_v1(
+                    private_replay_path,
+                    require_metric_report=True,
+                    max_file_size_bytes=SAMPLE_REPLAY_MAX_MEMBER_SIZE_BYTES,
+                )
+                if historical
+                else load_replay(
+                    private_replay_path,
+                    max_file_size_bytes=SAMPLE_REPLAY_MAX_MEMBER_SIZE_BYTES,
+                )
             )
     except ReplayLoadError as error:
         raise SampleReplayVerificationError(
@@ -790,22 +838,61 @@ def _load_verified_sample_replay_from_snapshot(
         raise SampleReplayVerificationError(
             f"sample {name!r} could not enter the private validation boundary"
         ) from error
-    if loaded.status != "complete" or loaded.metric_report_artifact is None:
+    expected_replay_version = 1 if historical else 3
+    if loaded.replay.schema_version != expected_replay_version:
+        raise SampleReplayVerificationError(
+            f"sample {name!r} replay version differs from its manifest"
+        )
+    if historical and (
+        loaded.status != "complete" or loaded.metric_report_artifact is None
+    ):
         raise SampleReplayVerificationError(
             f"sample {name!r} requires a complete replay and metric sidecar"
         )
-    if canonical_replay_json_bytes_v1(loaded.replay) != replay_payload:
+    if not historical and loaded.replay.completion.completion_state != "complete":
+        raise SampleReplayVerificationError(
+            f"sample {name!r} requires a completed replay"
+        )
+    if canonical_json_bytes(loaded.replay) != replay_payload:
         raise SampleReplayVerificationError(
             f"sample {name!r} replay changed during public validation"
         )
-    if (
-        canonical_metric_report_artifact_json_bytes_v1(loaded.metric_report_artifact)
+    if metric_payload is not None and (
+        loaded.metric_report_artifact is None
+        or canonical_metric_report_artifact_json_bytes_v1(loaded.metric_report_artifact)
         != metric_payload
     ):
         raise SampleReplayVerificationError(
             f"sample {name!r} metric report changed during public validation"
         )
     replay = loaded.replay
+    if not historical:
+        from marl_battlegrounds.evaluation.validation import (
+            validate_evaluation_transition_unit,
+            validate_initial_evaluation_frame,
+        )
+
+        # Samples retain the V1 verifier's event/fact checks without metric work.
+        try:
+            validate_initial_evaluation_frame(replay.header.context, replay.frames[0])
+            for start, transition, successor in zip(
+                replay.frames[:-1], replay.transitions, replay.frames[1:], strict=True
+            ):
+                validate_evaluation_transition_unit(
+                    replay.header.context, start, transition, successor
+                )
+            tail = replay.transitions[-1] if replay.transitions else None
+            if (
+                tail is not None
+                and tail.owning_task_end_reason is not None
+                and replay.completion.end_or_failure_reason
+                != tail.owning_task_end_reason
+            ):
+                raise ValueError("completion reason differs from the final task result")
+        except (TypeError, ValueError) as error:
+            raise SampleReplayVerificationError(
+                f"sample {name!r} failed replay semantic validation"
+            ) from error
     scenario_rows = tuple(
         aggregation.value
         for aggregation in replay.header.context.aggregation_keys
@@ -821,6 +908,7 @@ def _load_verified_sample_replay_from_snapshot(
     if (
         len(scenario_rows) != 1
         or scenario_rows[0] != sample.source_scenario
+        or replay.header.context.seed_protocol.root_seed != sample.seed
         or row["transition_count"] != len(replay.transitions)
         or row["frame_count"] != len(replay.frames)
         or row["event_kind_coverage"] != event_kinds
@@ -829,9 +917,13 @@ def _load_verified_sample_replay_from_snapshot(
             f"sample {name!r} scientific manifest facts are stale"
         )
     provenance = cast(Mapping[str, object], manifest["demo_provenance"])
-    if _canonical_json_value_bytes(
-        replay.header.context.code_revision.model_dump(mode="json")
-    ) != _canonical_json_value_bytes(
+    recorded_revision = replay.header.context.code_revision.model_dump(mode="json")
+    if not historical:
+        # V2 adds only the explicit schema marker when all Git facts are known.
+        recorded_revision = CodeRevisionV2.model_validate(recorded_revision).model_dump(
+            mode="json"
+        )
+    if _canonical_json_value_bytes(recorded_revision) != _canonical_json_value_bytes(
         provenance["code_revision"]
     ) or _canonical_json_value_bytes(
         replay.header.runtime_provenance.model_dump(mode="json")
@@ -839,33 +931,18 @@ def _load_verified_sample_replay_from_snapshot(
         raise SampleReplayVerificationError(
             f"sample {name!r} artifact provenance differs from its manifest"
         )
-    _require_unchanged_regular_entry(
-        directory_descriptor,
-        sample.replay_file_name,
-        replay_identity,
-        label=f"sample {name} replay",
-    )
-    _require_unchanged_regular_entry(
-        directory_descriptor,
-        sample.metric_report_file_name,
-        metric_identity,
-        label=f"sample {name} metric report",
-    )
-    return loaded, (
-        (sample.replay_file_name, replay_identity, f"sample {name} replay"),
-        (
-            sample.metric_report_file_name,
-            metric_identity,
-            f"sample {name} metric report",
-        ),
-    )
+    for file_name, identity, label in member_identities:
+        _require_unchanged_regular_entry(
+            directory_descriptor, file_name, identity, label=label
+        )
+    return loaded, tuple(member_identities)
 
 
 def load_verified_sample_replay(
     name: str,
     *,
     directory: Path = SAMPLE_REPLAY_DIRECTORY,
-) -> LoadedReplayBundleV1:
+) -> LoadedReplayBundleV1 | LoadedReplay:
     """Return one complete in-memory bundle bound to one manifest snapshot."""
     if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
         directory,
@@ -905,9 +982,9 @@ def load_verified_sample_replay(
         _close_sample_replay_directory(directory_descriptor)
 
 
-def load_verified_sample_replay_set_v1(
+def load_verified_sample_replay_set(
     directory: Path = SAMPLE_REPLAY_DIRECTORY,
-) -> VerifiedSampleReplaySetV1:
+) -> VerifiedSampleReplaySet:
     """Load the complete registered set against one immutable directory view."""
     if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
         directory,
@@ -955,7 +1032,7 @@ def load_verified_sample_replay_set_v1(
             label="sample replay manifest",
         )
         _require_unchanged_directory(directory_descriptor, directory_identity)
-        return VerifiedSampleReplaySetV1(
+        return VerifiedSampleReplaySet(
             manifest=manifest,
             sample_rows=rows,
             bundles=bundles,
@@ -965,7 +1042,34 @@ def load_verified_sample_replay_set_v1(
         _close_sample_replay_directory(directory_descriptor)
 
 
+def read_sample_replay_manifest_v1(
+    directory: Path = SAMPLE_REPLAY_DIRECTORY,
+) -> tuple[Mapping[str, object], tuple[Mapping[str, object], ...]]:
+    """Read the historical manifest without reinterpreting current formats."""
+    manifest, rows = read_sample_replay_manifest(directory)
+    if manifest["schema_version"] != 1:
+        raise SampleReplayVerificationError(
+            "historical sample reader requires manifest V1"
+        )
+    return manifest, rows
+
+
+def load_verified_sample_replay_set_v1(
+    directory: Path = SAMPLE_REPLAY_DIRECTORY,
+) -> VerifiedSampleReplaySet:
+    """Verify the historical pairs with their original sidecar requirement."""
+    loaded = load_verified_sample_replay_set(directory)
+    if loaded.manifest["schema_version"] != 1:
+        raise SampleReplayVerificationError(
+            "historical sample reader requires manifest V1"
+        )
+    return loaded
+
+
 __all__ = [
+    "CURRENT_SAMPLE_REPLAY_DIRECTORY",
+    "CURRENT_SAMPLE_REPLAY_GENERATOR_ID",
+    "CURRENT_SAMPLE_REPLAY_MANIFEST_SCHEMA_VERSION",
     "SAMPLE_REPLAYS",
     "SAMPLE_REPLAY_DEMO_PROVENANCE_NOTICE",
     "SAMPLE_REPLAY_DIRECTORY",
@@ -977,12 +1081,15 @@ __all__ = [
     "SAMPLE_REPLAY_MAX_MEMBER_SIZE_BYTES",
     "SampleReplayDefinition",
     "SampleReplayVerificationError",
+    "VerifiedSampleReplaySet",
     "VerifiedSampleReplaySetV1",
     "canonical_sample_replay_manifest_json_bytes_v1",
     "get_sample_replay",
     "iter_sample_replays",
     "load_verified_sample_replay",
+    "load_verified_sample_replay_set",
     "load_verified_sample_replay_set_v1",
     "read_bounded_regular_file_v1",
+    "read_sample_replay_manifest",
     "read_sample_replay_manifest_v1",
 ]

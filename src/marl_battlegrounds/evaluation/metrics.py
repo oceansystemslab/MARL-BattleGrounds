@@ -31,7 +31,10 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
     EvaluationEpisodeContextV1,
     EvaluationEpisodeContextV2,
+    EvaluationEpisodeContextV3,
+    EvaluationFrame,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     EvaluationModel,
     EvaluationTransitionV1,
     SchemaVersionEntryV1,
@@ -1132,14 +1135,29 @@ class EvaluationTransitionViewV1:
     """One fully validated context/start/transition/successor consumer view."""
 
     context: EvaluationEpisodeContext
-    start_frame: EvaluationFrameV1
+    start_frame: EvaluationFrame
     transition: EvaluationTransitionV1
-    successor_frame: EvaluationFrameV1
+    successor_frame: EvaluationFrame
 
     def __post_init__(self) -> None:
-        if type(self.context) is EvaluationEpisodeContextV2:
+        if type(self.context) in (
+            EvaluationEpisodeContextV2,
+            EvaluationEpisodeContextV3,
+        ):
             # V2 carries captured facts; this view joins records without replaying
             # the legacy simulator/metric semantic-validation pipeline.
+            expected_frame = (
+                EvaluationFrameV2
+                if type(self.context) is EvaluationEpisodeContextV3
+                else EvaluationFrameV1
+            )
+            if (
+                type(self.start_frame) is not expected_frame
+                or type(self.successor_frame) is not expected_frame
+            ):
+                raise ValueError(
+                    "transition view frame versions must match their context"
+                )
             episode_id = self.context.identity.episode_id
             if (
                 self.start_frame.episode_id != episode_id
@@ -1173,9 +1191,9 @@ class EvaluationTransitionViewV1:
 
 def _view_from_owned_records(
     context: EvaluationEpisodeContext,
-    start_frame: EvaluationFrameV1,
+    start_frame: EvaluationFrame,
     transition: EvaluationTransitionV1,
-    successor_frame: EvaluationFrameV1,
+    successor_frame: EvaluationFrame,
 ) -> EvaluationTransitionViewV1:
     """Reuse the observer's validated records without repeating unit validation."""
     view = object.__new__(EvaluationTransitionViewV1)
@@ -1633,13 +1651,15 @@ class EvaluationEpisodeObserverV1:
 
         # Validation is authoritative physical/artifact evidence and commits
         # independently from reducer progress.
-        self._current_frame = view.successor_frame
+        # This observer accepts only V1 contexts and validated V1 frames.
+        successor = cast(EvaluationFrameV1, view.successor_frame)
+        self._current_frame = successor
         self._last_transition = view.transition
         self._validated_transition_count += 1
         if self._retained_transitions is not None:
             self._retained_transitions.append(view.transition)
         if self._retained_frames is not None:
-            self._retained_frames.append(view.successor_frame)
+            self._retained_frames.append(successor)
 
         states = self._reducer_states
         state_types = self._reducer_state_types

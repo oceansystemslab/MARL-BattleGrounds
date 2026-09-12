@@ -20,7 +20,9 @@ from marl_battlegrounds.evaluation.models import (
     ActionAcceptanceFactsV1,
     ActionMaskV1,
     EvaluationEpisodeContext,
+    EvaluationFrame,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     EvaluationTransitionV1,
     JointActionV1,
     TransitionFactsV1,
@@ -28,10 +30,14 @@ from marl_battlegrounds.evaluation.models import (
 )
 from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
+    ActorPovAxisMapping,
     ActorPovAxisMappingV1,
+    ActorPovAxisMappingV2,
+    ActorPovCurrentSlice,
     ActorPovCurrentSliceV1,
+    ActorPovCurrentSliceV2,
     ActorPovTransitionV1,
-    validate_actor_pov_replay_content_v1,
+    validate_actor_pov_replay_content,
 )
 from marl_battlegrounds.evaluation.wire_shapes import (
     MAX_AGENT_SLOTS_V1,
@@ -51,10 +57,12 @@ from marl_battlegrounds.rendering.authorized_presentation import (
     SubmittedActionTupleV1,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
-    SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION,
     SharedObsBaseSensorFrameV1,
+    SharedObsBaseSensorFrameV2,
     SharedObsBaseSensorSceneV1,
+    SharedObsSourceMaterialProjection,
     SharedObsSourceMaterialProjectionV1,
+    SharedObsSourceMaterialProjectionV2,
 )
 from marl_battlegrounds.rendering.evaluation_wire_features import (
     AGENT_FEATURE_ACTIVE_V1,
@@ -693,10 +701,10 @@ def _validated_context(
     )
 
 
-def _validated_frame(frame: EvaluationFrameV1) -> EvaluationFrameV1:
-    if type(frame) is not EvaluationFrameV1:
+def _validated_frame(frame: EvaluationFrame) -> EvaluationFrame:
+    if type(frame) is not EvaluationFrameV1 and type(frame) is not EvaluationFrameV2:
         raise TypeError("current_frame must be the exact EvaluationFrameV1 root.")
-    return EvaluationFrameV1.model_validate(frame.model_dump(mode="python"))
+    return type(frame).model_validate(frame.model_dump(mode="python"))
 
 
 def _validated_transition(
@@ -925,7 +933,7 @@ def _oracle_target_public_axis(
 
 def _oracle_current_join(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     scene: AuthorizedBattlefieldSceneV1,
 ) -> dict[int, AuthorizedAgentV1]:
     if frame.episode_id != context.identity.episode_id:
@@ -957,7 +965,7 @@ def _oracle_current_join(
 
 def _oracle_decision_mask(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     scene: AuthorizedBattlefieldSceneV1,
     *,
     actor_internal_slot: int,
@@ -985,13 +993,16 @@ def _oracle_decision_mask(
 def _pov_decision_mask(
     *,
     owner: AuthorizedAgentV1,
-    axis_mapping: ActorPovAxisMappingV1,
+    axis_mapping: ActorPovAxisMapping,
     mask: ActorPovActionMaskV1,
     scene: AuthorizedBattlefieldSceneV1,
 ) -> AuthorizedDecisionMaskV1:
-    if type(axis_mapping) is not ActorPovAxisMappingV1:
+    if (
+        type(axis_mapping) is not ActorPovAxisMappingV1
+        and type(axis_mapping) is not ActorPovAxisMappingV2
+    ):
         raise TypeError("axis_mapping must be the exact ActorPovAxisMappingV1 root.")
-    validated_axis = ActorPovAxisMappingV1.model_validate(
+    validated_axis = type(axis_mapping).model_validate(
         axis_mapping.model_dump(mode="python")
     )
     validated_mask = _validated_pov_mask(mask)
@@ -1064,7 +1075,7 @@ def _validate_outgoing_epoch(
 
 def build_replay_oracle_inspection_v1(
     context: EvaluationEpisodeContext,
-    current_frame: EvaluationFrameV1,
+    current_frame: EvaluationFrame,
     current_scene: AuthorizedBattlefieldSceneV1,
     *,
     inspection_internal_slot: int | None,
@@ -1148,14 +1159,14 @@ def build_replay_oracle_inspection_v1(
 
 
 def _validate_no_shared_current(
-    source: ActorPovCurrentSliceV1 | ActorPovProjectionIndexV1,
+    source: ActorPovCurrentSlice | ActorPovProjectionIndexV1,
     current: NoSharedObsAuthorizedScenePartsV1,
-) -> tuple[ActorPovAxisMappingV1, ActorPovActionMaskV1, AuthorizedAgentV1]:
+) -> tuple[ActorPovAxisMapping, ActorPovActionMaskV1, AuthorizedAgentV1]:
     if type(current) is not NoSharedObsAuthorizedScenePartsV1:
         raise TypeError("current must be exact NoSharedObs scene parts.")
     current.__post_init__()
     if type(source) is ActorPovProjectionIndexV1:
-        validate_actor_pov_replay_content_v1(source.content)
+        validate_actor_pov_replay_content(source.content)
         content = source.content
         index = current.source_frame_index
         if not 0 <= index < len(content.frames):
@@ -1164,10 +1175,10 @@ def _validate_no_shared_current(
         axis_mapping = content.axis_mapping
         source_episode_id = content.episode_id
         source_public_id = content.public_agent_id
-    elif type(source) is ActorPovCurrentSliceV1:
-        validated = ActorPovCurrentSliceV1.model_validate(
-            source.model_dump(mode="python")
-        )
+    elif (
+        type(source) is ActorPovCurrentSliceV1 or type(source) is ActorPovCurrentSliceV2
+    ):
+        validated = type(source).model_validate(source.model_dump(mode="python"))
         frame = validated.frame
         axis_mapping = validated.axis_mapping
         source_episode_id = validated.episode_id
@@ -1260,13 +1271,16 @@ def build_replay_no_shared_obs_inspection_v1(
 
 def _validate_shared_current(
     current: SharedObsAuthorizedScenePartsV1,
-    recipient_source_material: SharedObsSourceMaterialProjectionV1,
+    recipient_source_material: SharedObsSourceMaterialProjection,
     *,
     authorized_recipient_global_slot: int,
-) -> tuple[ActorPovAxisMappingV1, ActorPovActionMaskV1, AuthorizedAgentV1, int]:
+) -> tuple[ActorPovAxisMapping, ActorPovActionMaskV1, AuthorizedAgentV1, int]:
     if type(current) is not SharedObsAuthorizedScenePartsV1:
         raise TypeError("current must be exact SharedObs authorized scene parts.")
-    if type(recipient_source_material) is not SharedObsSourceMaterialProjectionV1:
+    if (
+        type(recipient_source_material) is not SharedObsSourceMaterialProjectionV1
+        and type(recipient_source_material) is not SharedObsSourceMaterialProjectionV2
+    ):
         raise TypeError("recipient source material must use its exact SharedObs root.")
     _require_python_int(
         authorized_recipient_global_slot,
@@ -1294,26 +1308,36 @@ def _validate_shared_current(
     if (
         type(recipient_source_material.schema_version) is not int
         or recipient_source_material.schema_version
-        != SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION
+        != (
+            2
+            if type(recipient_source_material) is SharedObsSourceMaterialProjectionV2
+            else 1
+        )
         or recipient_source_material.observation_materialization
         != "source_material_only"
         or recipient_source_material.exact_actor_input_export_available is not False
     ):
         raise ValueError("SharedObs recipient declaration is not canonical.")
-    if type(recipient_source_material.axis_mapping) is not ActorPovAxisMappingV1:
+    if (
+        type(recipient_source_material.axis_mapping) is not ActorPovAxisMappingV1
+        and type(recipient_source_material.axis_mapping) is not ActorPovAxisMappingV2
+    ):
         raise ValueError("SharedObs axis mapping must use its exact V1 root.")
-    axis_mapping = ActorPovAxisMappingV1.model_validate(
+    axis_mapping = type(recipient_source_material.axis_mapping).model_validate(
         recipient_source_material.axis_mapping.model_dump(mode="python")
     )
     frame = recipient_source_material.base_sensor_frame
     source_scene = recipient_source_material.base_sensor_scene
-    if type(frame) is not SharedObsBaseSensorFrameV1:
+    if (
+        type(frame) is not SharedObsBaseSensorFrameV1
+        and type(frame) is not SharedObsBaseSensorFrameV2
+    ):
         raise ValueError("SharedObs base frame must use its exact scalar root.")
     if type(source_scene) is not SharedObsBaseSensorSceneV1:
         raise ValueError("SharedObs base scene must use its exact scalar root.")
     if (
         type(frame.schema_version) is not int
-        or frame.schema_version != SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION
+        or frame.schema_version != recipient_source_material.schema_version
         or frame.observation_materialization != "source_material_only"
     ):
         raise ValueError("SharedObs base-frame declaration is not canonical.")
@@ -1422,7 +1446,12 @@ def _validate_shared_current(
     ):
         raise ValueError("SharedObs self features do not retain identity columns.")
     if (
-        frame.self_features[AGENT_FEATURE_TEAM_ID_V1] != float(self_actor.team_id)
+        frame.self_features[AGENT_FEATURE_TEAM_ID_V1]
+        != (float(self_actor.team_id) if frame.schema_version == 1 else 0.0)
+        or (
+            type(frame) is SharedObsBaseSensorFrameV2
+            and frame.self_ally_index != authorized_team_local_slot
+        )
         or frame.self_features[AGENT_FEATURE_ACTIVE_V1] != 1.0
         or frame.self_features[AGENT_FEATURE_CLASS_ID_V1] != float(self_actor.class_id)
     ):
@@ -1469,7 +1498,7 @@ def _validate_shared_current(
 
 def build_replay_shared_obs_inspection_v1(
     current: SharedObsAuthorizedScenePartsV1,
-    recipient_source_material: SharedObsSourceMaterialProjectionV1,
+    recipient_source_material: SharedObsSourceMaterialProjection,
     *,
     authorized_recipient_global_slot: int,
     outgoing_transition: EvaluationTransitionV1 | None,
@@ -1604,7 +1633,7 @@ def _oracle_target_action_for_internal_slot(
 
 def build_live_oracle_draft_inspection_v1(
     context: EvaluationEpisodeContext,
-    current_frame: EvaluationFrameV1,
+    current_frame: EvaluationFrame,
     current_scene: AuthorizedBattlefieldSceneV1,
     *,
     controlled_internal_slot: int,
@@ -1649,7 +1678,7 @@ def build_live_oracle_draft_inspection_v1(
 
 
 def build_live_no_shared_obs_draft_inspection_v1(
-    source: ActorPovCurrentSliceV1,
+    source: ActorPovCurrentSlice,
     current: NoSharedObsAuthorizedScenePartsV1,
     *,
     draft_move_action: int,
@@ -1657,7 +1686,10 @@ def build_live_no_shared_obs_draft_inspection_v1(
     draft_armed_lane: DraftArmedLaneV1,
 ) -> LiveDraftInspectionPresentationV1:
     """Build one fixed-recipient NoSharedObs live draft."""
-    if type(source) is not ActorPovCurrentSliceV1:
+    if (
+        type(source) is not ActorPovCurrentSliceV1
+        and type(source) is not ActorPovCurrentSliceV2
+    ):
         raise TypeError("source must be the exact ActorPovCurrentSliceV1 root.")
     axis_mapping, mask, actor = _validate_no_shared_current(source, current)
     decision_mask = _pov_decision_mask(
@@ -1678,7 +1710,7 @@ def build_live_no_shared_obs_draft_inspection_v1(
 
 def build_live_shared_obs_draft_inspection_v1(
     current: SharedObsAuthorizedScenePartsV1,
-    recipient_source_material: SharedObsSourceMaterialProjectionV1,
+    recipient_source_material: SharedObsSourceMaterialProjection,
     *,
     authorized_recipient_global_slot: int,
     draft_move_action: int,

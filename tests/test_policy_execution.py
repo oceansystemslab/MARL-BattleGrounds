@@ -20,9 +20,11 @@ from marl_battlegrounds.core.types import (
     EnvConfig,
     Observation,
 )
+from marl_battlegrounds.environment import make
 from marl_battlegrounds.evaluation.policy_execution import (
     Policy,
     PolicyApply,
+    PolicyExecution,
     PolicyTree,
     apply_policies,
     freeze_variables,
@@ -47,6 +49,82 @@ from marl_battlegrounds.policies.shared_obs import (
     build_shared_obs_sensor_source_bank,
     execute_shared_obs_team_policy,
 )
+
+
+@pytest.mark.parametrize("execution", ["jax", "host"])
+def test_every_source_subset_is_redacted_at_the_actual_policy_boundary(
+    execution: PolicyExecution,
+) -> None:
+    """Every allowed subset reaches both teams in the same five-source layout."""
+    config = evaluation_env_config(team_sizes=(5, 5))
+    _, observation, mask, _ = core.reset(config, jax.random.key(0))
+    # Nonzero synthetic objective rows make omitted objective redaction visible.
+    observation = observation._replace(
+        objective_features=jnp.broadcast_to(
+            jnp.arange(1, 11, dtype=jnp.float32)[:, None, None], (10, 8, 12)
+        )
+    )
+    compact = build_observations(observation, config)
+    keys = jax.random.split(jax.random.key(12), 10)
+
+    def inspect(
+        variables: PolicyTree,
+        memory: PolicyTree,
+        actor: ActorInput,
+        action_mask: ActionMask,
+        key: Array,
+    ) -> tuple[ActorAction, PolicyTree]:
+        del variables, memory, action_mask, key
+        assert ActorInput._fields == (
+            "observation",
+            "source_bank",
+            "source_availability",
+        )
+        zero = jnp.asarray(0, dtype=jnp.int32)
+        return ActorAction(zero, zero, zero), actor
+
+    run = cast(
+        Callable[..., tuple[Action, ActorInput, ActorInput]],
+        (
+            jax.jit(
+                apply_policies,
+                static_argnums=(0, 1),
+                static_argnames=("execution_a", "execution_b"),
+            )
+            if execution == "jax"
+            else apply_policies
+        ),
+    )
+    unmasked = build_shared_obs_sensor_source_bank(observation)
+    for bits in range(32):
+        selected = (jnp.asarray(bits) & (1 << (jnp.arange(10) % 5))) != 0
+        availability = compact.source_availability & selected[None, :]
+        _, team_a, team_b = run(
+            inspect,
+            inspect,
+            (),
+            (),
+            (),
+            (),
+            compact._replace(source_availability=availability),
+            mask,
+            keys,
+            execution_a=execution,
+            execution_b=execution,
+        )
+        for team_index, delivered in enumerate((team_a, team_b)):
+            start = team_index * 5
+            expected = np.asarray(availability[start : start + 5, start : start + 5])
+            np.testing.assert_array_equal(delivered.source_availability, expected)
+            for actual_leaf, raw_leaf in zip(
+                delivered.source_bank, unmasked, strict=True
+            ):
+                raw = np.broadcast_to(
+                    np.asarray(raw_leaf[team_index]), np.asarray(actual_leaf).shape
+                )
+                actual = np.asarray(actual_leaf)
+                np.testing.assert_array_equal(actual[expected], raw[expected])
+                assert not actual[~expected].any()
 
 
 def _assert_tree(actual: object, expected: object) -> None:
@@ -134,8 +212,9 @@ def test_host_actor_receives_exact_authorized_reference_and_both_teams_same_epoc
         key: Array,
     ) -> tuple[ActorAction, PolicyTree]:
         del variables, key
-        slot = int(actor.global_slot)
-        seen.append(slot)
+        slot = len(seen)  # Test-only call order, outside the delivered input.
+        seen.append(int(actor.observation.self_ally_index))
+        assert not hasattr(actor, "global_slot")
 
         def row(value: Array) -> Array:
             return value[slot]
@@ -161,7 +240,7 @@ def test_host_actor_receives_exact_authorized_reference_and_both_teams_same_epoc
         execution_a="host",
         execution_b="host",
     )
-    assert seen == list(range(10))
+    assert seen == [0, 1, 2, 0, 0, 0, 1, 0, 0, 0]
     compact_bytes = sum(
         leaf.nbytes for leaf in jax.tree.leaves(build_observations(observation, config))
     )
@@ -185,7 +264,10 @@ def test_dynamic_variables_and_recurrent_memory_do_not_retrace_or_share_actors()
         del action_mask, key
         traces.append(1)
         zero = jnp.asarray(0, jnp.int32)
-        return ActorAction(variables, zero, zero), memory + actor.global_slot + 1
+        return (
+            ActorAction(variables, zero, zero),
+            memory + actor.observation.self_ally_index + 1,
+        )
 
     run = cast(
         Callable[..., tuple[Action, PolicyTree, PolicyTree]],
@@ -221,12 +303,108 @@ def test_dynamic_variables_and_recurrent_memory_do_not_retrace_or_share_actors()
     assert len(traces) == trace_count
     np.testing.assert_array_equal(first.move, np.zeros(10))
     np.testing.assert_array_equal(second.move, [1] * 5 + [2] * 5)
-    np.testing.assert_array_equal(next_a, 2 * np.arange(1, 6))
-    np.testing.assert_array_equal(next_b, 2 * np.arange(6, 11))
+    np.testing.assert_array_equal(next_a, 2 * np.asarray([1, 2, 3, 1, 1]))
+    np.testing.assert_array_equal(next_b, 2 * np.asarray([1, 2, 1, 1, 1]))
     batched = jnp.stack((next_a, next_b))
     reset = select_policy_carry(jnp.asarray([True, False]), initial, batched)
     np.testing.assert_array_equal(reset[0], np.zeros(5))
     np.testing.assert_array_equal(reset[1], next_b)
+
+
+def test_recurrent_mixture_scan_and_partial_reset_reuse_compilation() -> None:
+    """Dynamic weights and rosters share one program through real episode resets."""
+    env = make("tdm", num_envs=2, metrics="none")
+
+    def stack(first: Array, second: Array) -> Array:
+        return jnp.stack((first, second))
+
+    configs = jax.tree.map(
+        stack,
+        evaluation_env_config(team_sizes=(3, 2), max_steps=1),
+        evaluation_env_config(team_sizes=(1, 5), max_steps=3),
+    )
+    traces: list[int] = []
+
+    def mixture(
+        variables: PolicyTree,
+        memory: PolicyTree,
+        actor: ActorInput,
+        mask: ActionMask,
+        key: Array,
+    ) -> tuple[ActorAction, PolicyTree]:
+        del key
+        choice = variables[actor.observation.self_ally_index % 2]
+        move = jnp.where(mask.move_mask[choice], choice, 0).astype(jnp.int32)
+        zero = jnp.int32(0)
+        return ActorAction(move, zero, zero), memory + 1
+
+    @jax.jit
+    def run(key: Array, settings: EnvConfig, weights: Array, memory: Array) -> object:
+        traces.append(1)
+        observations, state = env.reset(key, settings, episode_id=jnp.asarray([11, 12]))
+
+        def advance(
+            carry: PolicyTree, step_key: Array
+        ) -> tuple[PolicyTree, PolicyTree]:
+            obs, current, memory_a, memory_b = carry
+            finished = current.done.done
+            obs, current = env.reset(
+                step_key,
+                settings,
+                episode_id=current.episode_id + finished.astype(jnp.int32) * 10,
+                state=current,
+                reset_mask=finished,
+            )
+            memory_a = select_policy_carry(finished, jnp.zeros_like(memory_a), memory_a)
+            memory_b = select_policy_carry(finished, jnp.zeros_like(memory_b), memory_b)
+            actions, next_a, next_b = jax.vmap(
+                apply_policies, in_axes=(None, None, None, None, 0, 0, 0, 0, 0)
+            )(
+                mixture,
+                mixture,
+                weights,
+                weights[::-1],
+                memory_a,
+                memory_b,
+                obs,
+                current.action_mask,
+                jax.random.split(step_key, (2, 10)),
+            )
+            result = env.step(step_key, current, actions)
+            return (result[0], result[1], next_a, next_b), (result[4].completed, next_a)
+
+        return jax.lax.scan(
+            advance, (observations, state, memory, memory), jax.random.split(key, 5)
+        )
+
+    initial_memory = jnp.zeros((2, 5), dtype=jnp.int32)
+    first = cast(
+        PolicyTree, run(jax.random.key(1), configs, jnp.asarray([0, 1]), initial_memory)
+    )
+    changed = jax.tree.map(
+        stack,
+        evaluation_env_config(team_sizes=(5, 1), max_steps=1),
+        evaluation_env_config(team_sizes=(2, 3), max_steps=3),
+    )
+    second = cast(
+        PolicyTree,
+        run(jax.random.key(9), changed, jnp.asarray([2, 3]), initial_memory + 7),
+    )
+    assert traces == [1]
+    expected_completed = [
+        [True, False],
+        [True, False],
+        [True, True],
+        [True, False],
+        [True, False],
+    ]
+    for result in (first, second):
+        np.testing.assert_array_equal(result[1][0], expected_completed)
+        np.testing.assert_array_equal(result[0][2], [[1] * 5, [2] * 5])
+        np.testing.assert_array_equal(result[0][3], [[1] * 5, [2] * 5])
+        np.testing.assert_array_equal(result[0][1].core_state.step_count, [1, 2])
+        assert result[0][1].priority is None
+        assert result[0][1].full is None
 
 
 def test_mutable_variables_are_snapshotted_and_unknown_controller_fails() -> None:

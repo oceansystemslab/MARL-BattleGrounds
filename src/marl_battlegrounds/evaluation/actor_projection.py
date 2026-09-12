@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING, Final, cast
 
 from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
+    EvaluationEpisodeContextV3,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     VersionedIdentityV1,
     evaluation_context_type,
 )
@@ -17,21 +19,31 @@ from marl_battlegrounds.evaluation.wire_shapes import (
 )
 
 if TYPE_CHECKING:
-    from marl_battlegrounds.policies.shared_obs import SharedObsSensorSourceBankV1
+    from marl_battlegrounds.policies.shared_obs import (
+        SharedObsSensorSourceBankV1,
+        SharedObsSensorSourceBankV2,
+    )
 
 NO_SHARED_OBS_ACTOR_PROJECTION_ID: Final = "base-observation-no-shared-obs"
-NO_SHARED_OBS_ACTOR_PROJECTION_VERSION: Final = 2
+NO_SHARED_OBS_ACTOR_PROJECTION_VERSION: Final = 3
 NO_SHARED_OBS_ACTOR_PROJECTION_V2: Final = VersionedIdentityV1(
     identifier=NO_SHARED_OBS_ACTOR_PROJECTION_ID,
-    version=NO_SHARED_OBS_ACTOR_PROJECTION_VERSION,
+    version=2,
 )
 SHARED_OBS_ACTOR_PROJECTION_ID: Final = (
     "base-observation-plus-authorized-sensor-source-bank"
 )
-SHARED_OBS_ACTOR_PROJECTION_VERSION: Final = 1
+SHARED_OBS_ACTOR_PROJECTION_VERSION: Final = 2
 SHARED_OBS_ACTOR_PROJECTION_V1: Final = VersionedIdentityV1(
     identifier=SHARED_OBS_ACTOR_PROJECTION_ID,
-    version=SHARED_OBS_ACTOR_PROJECTION_VERSION,
+    version=1,
+)
+
+NO_SHARED_OBS_ACTOR_PROJECTION_V3: Final = VersionedIdentityV1(
+    identifier=NO_SHARED_OBS_ACTOR_PROJECTION_ID, version=3
+)
+SHARED_OBS_ACTOR_PROJECTION_V2: Final = VersionedIdentityV1(
+    identifier=SHARED_OBS_ACTOR_PROJECTION_ID, version=2
 )
 
 type ActorClassIdsByTeamV2 = tuple[tuple[int, ...], ...]
@@ -210,12 +222,123 @@ def reconstruct_actor_class_ids_by_team_v2(
 __all__ = (
     "NO_SHARED_OBS_ACTOR_PROJECTION_ID",
     "NO_SHARED_OBS_ACTOR_PROJECTION_V2",
+    "NO_SHARED_OBS_ACTOR_PROJECTION_V3",
     "NO_SHARED_OBS_ACTOR_PROJECTION_VERSION",
     "SHARED_OBS_ACTOR_PROJECTION_ID",
     "SHARED_OBS_ACTOR_PROJECTION_V1",
+    "SHARED_OBS_ACTOR_PROJECTION_V2",
     "SHARED_OBS_ACTOR_PROJECTION_VERSION",
     "reconstruct_actor_class_ids_by_team_v2",
+    "reconstruct_actor_class_ids_by_team_v3",
     "reconstruct_class_ids_by_agent_by_team_v2",
+    "reconstruct_class_ids_by_agent_by_team_v3",
     "reconstruct_shared_obs_sensor_source_bank_v1",
+    "reconstruct_shared_obs_sensor_source_bank_v2",
     "validate_class_ids_by_agent_by_team_against_context_v1",
 )
+
+
+def _require_current_projection(context: EvaluationEpisodeContext) -> None:
+    if type(context) is not EvaluationEpisodeContextV3:
+        raise TypeError("current actor reconstruction requires context V3")
+    expected = (
+        SHARED_OBS_ACTOR_PROJECTION_V2
+        if context.execution_information_mode == "shared_obs"
+        else NO_SHARED_OBS_ACTOR_PROJECTION_V3
+    )
+    if context.actor_projection != expected:
+        raise ValueError("current actor projection does not match its information mode")
+
+
+def reconstruct_class_ids_by_agent_by_team_v3(
+    context: EvaluationEpisodeContext,
+) -> ClassIdsByAgentByTeamV2:
+    """Restore the unchanged static public class map from current context."""
+    _require_current_projection(context)
+    return _derive_class_ids_by_agent_by_team(context)
+
+
+def reconstruct_actor_class_ids_by_team_v3(
+    context: EvaluationEpisodeContext, global_slot: int
+) -> ActorClassIdsByTeamV2:
+    """Restore one actor's public class map without adding global IDs to input."""
+    _require_current_projection(context)
+    if type(global_slot) is not int or not 0 <= global_slot < MAX_AGENT_SLOTS_V1:
+        raise ValueError("global_slot must be an exact integer in [0, 10)")
+    return _derive_class_ids_by_agent_by_team(context)[global_slot]
+
+
+def reconstruct_shared_obs_sensor_source_bank_v2(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrameV2,
+    selected_global_slot: int,
+) -> SharedObsSensorSourceBankV2:
+    """Restore one current actor's authorized five-source bank from recorded rows."""
+    _require_current_projection(context)
+    if context.execution_information_mode != "shared_obs":
+        raise ValueError("SharedObs reconstruction requires shared_obs execution")
+    if (
+        type(frame) is not EvaluationFrameV2
+        or frame.episode_id != context.identity.episode_id
+    ):
+        raise ValueError("current source-bank frame must be V2 and join its context")
+    if (
+        type(selected_global_slot) is not int
+        or not 0 <= selected_global_slot < MAX_AGENT_SLOTS_V1
+    ):
+        raise ValueError("selected_global_slot must be an exact integer in [0, 10)")
+    availability = (
+        frame.shared_obs_information_availability_by_recipient_and_sensor_source
+    )
+    if availability is None:
+        raise ValueError("SharedObs reconstruction requires recorded availability")
+    recipient = context.roster[selected_global_slot]
+    for source_slot, admitted in enumerate(availability[selected_global_slot]):
+        source = context.roster[source_slot]
+        if admitted and (
+            source_slot == selected_global_slot
+            or not recipient.configured_active
+            or not source.configured_active
+            or recipient.configured_team_id != source.configured_team_id
+        ):
+            raise ValueError("recorded source availability includes a forbidden source")
+    import jax.numpy as jnp
+
+    from marl_battlegrounds.policies.shared_obs import (
+        build_shared_obs_team_source_bank_from_base_rows,
+        mask_source_bank_for_recipient,
+    )
+
+    rows = (
+        context.static_mechanics_catalog.global_slot_by_actor_and_ally_observation_row[
+            selected_global_slot
+        ]
+    )
+    base = frame.base_observation
+
+    self_rows = jnp.asarray(
+        tuple(base.self_features[index] for index in rows), dtype=jnp.float32
+    )
+    bank = build_shared_obs_team_source_bank_from_base_rows(
+        jnp.asarray(
+            tuple(base.ally_unit_features[index] for index in rows), dtype=jnp.float32
+        ),
+        jnp.asarray(
+            tuple(base.enemy_unit_features[index] for index in rows), dtype=jnp.float32
+        ),
+        jnp.asarray(
+            tuple(base.objective_features[index] for index in rows), dtype=jnp.float32
+        ),
+        jnp.asarray(
+            tuple(base.ally_visibility_mask[index] for index in rows), dtype=jnp.bool_
+        ),
+        jnp.asarray(
+            tuple(base.enemy_visibility_mask[index] for index in rows), dtype=jnp.bool_
+        ),
+        (self_rows[:, 4] == 1.0) & (self_rows[:, 5] == 1.0),
+    )
+    admitted = jnp.asarray(
+        tuple(availability[selected_global_slot][index] for index in rows),
+        dtype=jnp.bool_,
+    )
+    return mask_source_bank_for_recipient(bank, admitted)

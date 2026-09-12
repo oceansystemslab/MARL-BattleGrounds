@@ -5814,7 +5814,7 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
       "replay_reference.replay_schema_version",
     );
     if (
-      ![1, 2].includes(reference.replay_schema_version) ||
+      ![1, 2, 3].includes(reference.replay_schema_version) ||
       !/^[0-9a-f]{64}$/u.test(reference.context_digest_sha256) ||
       !/^[0-9a-f]{64}$/u.test(reference.trajectory_content_digest_sha256) ||
       !/^[0-9a-f]{64}$/u.test(reference.canonical_digest_sha256) ||

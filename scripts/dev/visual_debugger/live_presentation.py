@@ -14,13 +14,19 @@ from dataclasses import replace
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
+    EvaluationFrame,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     StaticMechanicsCatalogV1,
     evaluation_context_type,
 )
 from marl_battlegrounds.evaluation.pov import (
+    ActorPovAdjacentTransitionSlice,
     ActorPovAdjacentTransitionSliceV1,
+    ActorPovAdjacentTransitionSliceV2,
+    ActorPovCurrentSlice,
     ActorPovCurrentSliceV1,
+    ActorPovCurrentSliceV2,
 )
 from marl_battlegrounds.rendering.authorized_incoming import (
     build_live_no_shared_obs_incoming_summary_v1,
@@ -48,7 +54,7 @@ from marl_battlegrounds.rendering.authorized_presentation import (
     oracle_presentation_key_v1,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
-    SharedObsSourceMaterialProjectionV1,
+    SharedObsSourceMaterialProjection,
     build_shared_obs_authority_source_material_projection_v1,
     build_visual_event_batch_v2,
 )
@@ -212,11 +218,14 @@ def _require_shared_live_header(
 
 def _canonical_live_view(
     context: EvaluationEpisodeContext,
-    current_frame: EvaluationFrameV1,
+    current_frame: EvaluationFrame,
     incoming_transition_view: EvaluationTransitionViewV1 | None,
 ) -> EvaluationTransitionViewV1 | None:
     evaluation_context_type(context)
-    if type(current_frame) is not EvaluationFrameV1:
+    if (
+        type(current_frame) is not EvaluationFrameV1
+        and type(current_frame) is not EvaluationFrameV2
+    ):
         raise TypeError("current_frame must be the exact EvaluationFrameV1 root.")
     if current_frame.frame_index == 0:
         if incoming_transition_view is not None:
@@ -237,12 +246,12 @@ def _canonical_live_view(
 
 def _shared_obs_source_materials(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     *,
     recipient_global_slot: int,
 ) -> tuple[
-    SharedObsSourceMaterialProjectionV1,
-    tuple[SharedObsSourceMaterialProjectionV1, ...],
+    SharedObsSourceMaterialProjection,
+    tuple[SharedObsSourceMaterialProjection, ...],
 ]:
     sources = tuple(
         build_shared_obs_authority_source_material_projection_v1(
@@ -393,7 +402,7 @@ def _oracle_latest_transition_v1(
 
 
 def _no_shared_latest_transition_v1(
-    carrier: ActorPovAdjacentTransitionSliceV1 | None,
+    carrier: ActorPovAdjacentTransitionSlice | None,
     *,
     endpoint_action_axis: AgentPovActionAxisV1,
 ) -> NoSharedObsLatestTransitionV1 | None:
@@ -438,7 +447,7 @@ def _no_shared_latest_transition_v1(
 
 def build_live_oracle_authorized_presentation_v1(
     context: EvaluationEpisodeContext,
-    current_frame: EvaluationFrameV1,
+    current_frame: EvaluationFrame,
     incoming_transition_view: EvaluationTransitionViewV1 | None,
     raw_frame: ResearcherLiveDebuggerFrameV2,
 ) -> LiveOracleAuthorizedPresentationFrameV1:
@@ -689,13 +698,13 @@ def build_live_researcher_space_v1(
 
 
 def build_live_no_shared_obs_authorized_presentation_v1(
-    current_slice: ActorPovCurrentSliceV1,
-    incoming_carrier: ActorPovAdjacentTransitionSliceV1 | None,
+    current_slice: ActorPovCurrentSlice,
+    incoming_carrier: ActorPovAdjacentTransitionSlice | None,
     raw_frame: ActorPovLiveDebuggerFrameV2,
     *,
     global_context: EvaluationEpisodeContext,
-    current_global_frame: EvaluationFrameV1,
-    previous_global_frame: EvaluationFrameV1 | None,
+    current_global_frame: EvaluationFrame,
+    previous_global_frame: EvaluationFrame | None,
     public_catalog: StaticMechanicsCatalogV1,
     incoming_visual_events: VisualEventBatchV2 | None,
     researcher_space: LiveResearcherSpaceV1,
@@ -712,11 +721,14 @@ def build_live_no_shared_obs_authorized_presentation_v1(
         researcher=False,
     )
     _require_no_shared_used_containers(raw_frame)
-    if type(current_slice) is not ActorPovCurrentSliceV1:
+    if (
+        type(current_slice) is not ActorPovCurrentSliceV1
+        and type(current_slice) is not ActorPovCurrentSliceV2
+    ):
         raise TypeError("current_slice must be the exact ActorPovCurrentSliceV1 root.")
     if type(public_catalog) is not StaticMechanicsCatalogV1:
         raise TypeError("public_catalog must be the exact V1 catalog root.")
-    current_slice = ActorPovCurrentSliceV1.model_validate(
+    current_slice = type(current_slice).model_validate(
         current_slice.model_dump(mode="python")
     )
     expected_projection = build_actor_pov_analyzer_projection_v1(current_slice)
@@ -737,9 +749,12 @@ def build_live_no_shared_obs_authorized_presentation_v1(
             raise ValueError("live NoSharedObs frame zero cannot carry a carrier.")
         carrier = None
     else:
-        if type(incoming_carrier) is not ActorPovAdjacentTransitionSliceV1:
+        if (
+            type(incoming_carrier) is not ActorPovAdjacentTransitionSliceV1
+            and type(incoming_carrier) is not ActorPovAdjacentTransitionSliceV2
+        ):
             raise TypeError("nonzero live NoSharedObs frames require an exact carrier.")
-        carrier = ActorPovAdjacentTransitionSliceV1.model_validate(
+        carrier = type(incoming_carrier).model_validate(
             incoming_carrier.model_dump(mode="python")
         )
         if (
@@ -805,7 +820,10 @@ def build_live_no_shared_obs_authorized_presentation_v1(
             authority_session_id=raw_frame.session_id,
             frame_index=carrier.start_frame.frame_index,
         )
-        if type(previous_global_frame) is not EvaluationFrameV1:
+        if (
+            type(previous_global_frame) is not EvaluationFrameV1
+            and type(previous_global_frame) is not EvaluationFrameV2
+        ):
             raise TypeError(
                 "non-initial live NoSharedObs frames require the exact prior "
                 "global frame."
@@ -961,7 +979,7 @@ def build_live_no_shared_obs_authorized_presentation_v1(
 
 def build_live_shared_obs_authorized_presentation_v1(
     context: EvaluationEpisodeContext,
-    current_frame: EvaluationFrameV1,
+    current_frame: EvaluationFrame,
     incoming_transition_view: EvaluationTransitionViewV1 | None,
     raw_frame: SharedObsAgentPovLiveDebuggerFrameV2,
     *,

@@ -2,11 +2,8 @@
 
 from typing import Literal
 
-from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV1
-from marl_battlegrounds.evaluation.pov import (
-    ActorPovAxisMappingV1,
-    ActorPovCurrentSliceV1,
-)
+from marl_battlegrounds.evaluation.models import EvaluationEpisodeContext
+from marl_battlegrounds.evaluation.pov import ActorPovAxisMapping, ActorPovCurrentSlice
 from marl_battlegrounds.evaluation.wire_shapes import (
     NUM_MOVE_ACTIONS_V1,
     NUM_TARGET_ACTIONS_V1,
@@ -156,7 +153,7 @@ def _combat_configuration(session: DebuggerSession) -> CombatConfigurationV1:
 
 
 def _target_action_for_slot(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     actor_global_slot: int,
     target_global_slot: int | None,
 ) -> int:
@@ -175,7 +172,7 @@ def _target_action_for_slot(
 
 
 def _researcher_target_reference(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     *,
     actor_global_slot: int,
     target_action: int,
@@ -194,7 +191,7 @@ def _researcher_target_reference(
 
 
 def _researcher_action_card(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     *,
     actor_global_slot: int,
     move_action: int,
@@ -513,7 +510,7 @@ def _build_researcher_hud(
 
 
 def _pov_target_reference(
-    axis: ActorPovAxisMappingV1,
+    axis: ActorPovAxisMapping,
     target_action: int,
 ) -> ActorPovTargetReferenceV1:
     public_id = (
@@ -528,7 +525,7 @@ def _pov_target_reference(
 
 
 def _pov_action_card(
-    axis: ActorPovAxisMappingV1,
+    axis: ActorPovAxisMapping,
     *,
     move_action: int,
     target_action: int,
@@ -567,7 +564,7 @@ def _pov_action_card(
 
 def _pov_latest_transition(
     session: DebuggerSession,
-    slice_: ActorPovCurrentSliceV1,
+    slice_: ActorPovCurrentSlice,
 ) -> ActorPovLatestTransitionCardV1 | None:
     incoming = slice_.incoming_transition
     if incoming is None:
@@ -620,7 +617,7 @@ def _pov_latest_transition(
 
 def _build_pov_hud(
     session: DebuggerSession,
-    slice_: ActorPovCurrentSliceV1,
+    slice_: ActorPovCurrentSlice,
     *,
     revision: int,
 ) -> ActorPovHudFrameV1:

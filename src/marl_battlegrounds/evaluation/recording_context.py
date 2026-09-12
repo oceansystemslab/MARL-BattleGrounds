@@ -11,11 +11,11 @@ from pydantic import TypeAdapter
 
 from marl_battlegrounds.core.types import EnvConfig
 from marl_battlegrounds.evaluation.actor_projection import (
-    NO_SHARED_OBS_ACTOR_PROJECTION_V2,
-    SHARED_OBS_ACTOR_PROJECTION_V1,
+    NO_SHARED_OBS_ACTOR_PROJECTION_V3,
+    SHARED_OBS_ACTOR_PROJECTION_V2,
 )
 from marl_battlegrounds.evaluation.catalog import (
-    build_evaluation_episode_context_v2,
+    build_evaluation_episode_context_v3,
     build_resolved_env_config_v1,
 )
 from marl_battlegrounds.evaluation.models import (
@@ -24,7 +24,7 @@ from marl_battlegrounds.evaluation.models import (
     CodeRevisionV1,
     CodeRevisionV2,
     ContentAddressedIdentityV1,
-    EvaluationEpisodeContextV2,
+    EvaluationEpisodeContextV3,
     EvaluationEpisodeIdentityV1,
     EvaluationRole,
     EvaluationSeedProtocolV2,
@@ -133,7 +133,7 @@ def build_recording_context(
     episode: dict[str, object],
     policies: dict[str, object],
     details: dict[str, object],
-) -> tuple[EvaluationEpisodeContextV2, RuntimeProvenanceV1]:
+) -> tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]:
     """Build context from known facts; custom trainer seeds/history stay unknown."""
 
     config = restore_recording_config(config)
@@ -272,7 +272,7 @@ def build_recording_context(
         )
     ):
         raise ValueError("public_agent_id_by_global_slot must contain ten string IDs")
-    context = build_evaluation_episode_context_v2(
+    context = build_evaluation_episode_context_v3(
         identity=EvaluationEpisodeIdentityV1(
             run_id=_identifier(run_id),
             evaluation_id=f"{_identifier(phase)}:{_identifier(pass_id)}",
@@ -320,9 +320,9 @@ def build_recording_context(
         capture_profile="debug",
         execution_information_mode=mode,
         actor_projection=(
-            SHARED_OBS_ACTOR_PROJECTION_V1
+            SHARED_OBS_ACTOR_PROJECTION_V2
             if mode == "shared_obs"
-            else NO_SHARED_OBS_ACTOR_PROJECTION_V2
+            else NO_SHARED_OBS_ACTOR_PROJECTION_V3
         ),
         critic_information_regime=VersionedIdentityV1(
             identifier="not_applicable", version=1

@@ -6,13 +6,21 @@ from typing import Literal, cast
 
 from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
+    ActorPovAxisMapping,
     ActorPovAxisMappingV1,
+    ActorPovAxisMappingV2,
+    ActorPovCurrentSlice,
     ActorPovCurrentSliceV1,
+    ActorPovCurrentSliceV2,
+    ActorPovFrame,
     ActorPovFrameV1,
+    ActorPovFrameV2,
     ActorPovPresentationCueV1,
+    ActorPovReplayContent,
     ActorPovReplayContentV1,
+    ActorPovReplayContentV2,
     ActorPovTransitionV1,
-    validate_actor_pov_replay_content_v1,
+    validate_actor_pov_replay_content,
 )
 from marl_battlegrounds.rendering.evaluation_wire_features import (
     AGENT_FEATURE_ACTIVE_V1,
@@ -23,7 +31,6 @@ from marl_battlegrounds.rendering.evaluation_wire_features import (
     AGENT_FEATURE_MAX_HEALTH_V1,
     AGENT_FEATURE_RADIUS_V1,
     AGENT_FEATURE_STEPS_UNTIL_OUT_OF_COMBAT_V1,
-    AGENT_FEATURE_TEAM_ID_V1,
     AGENT_FEATURE_ULTIMATE_COOLDOWN_REMAINING_V1,
     AGENT_FEATURE_X_V1,
     AGENT_FEATURE_Y_V1,
@@ -39,6 +46,7 @@ from marl_battlegrounds.rendering.evaluation_wire_features import (
     OBSTACLE_FEATURE_WIDTH_V1,
     OBSTACLE_FEATURE_X_V1,
     OBSTACLE_FEATURE_Y_V1,
+    decode_agent_feature_row,
 )
 from marl_battlegrounds.rendering.scene import MapSceneV1, ObstacleSceneV1, Point2D
 
@@ -441,6 +449,9 @@ def _visible_bodies(
     rows: tuple[tuple[float, ...], ...],
     visibility: tuple[bool, ...],
     public_agent_ids: tuple[str, ...],
+    *,
+    schema_version: int,
+    configured_team_id: int,
 ) -> tuple[ActorPovVisibleBodySceneV1, ...]:
     bodies: list[ActorPovVisibleBodySceneV1] = []
     for observation_row, (row, visible) in enumerate(
@@ -460,12 +471,14 @@ def _visible_bodies(
                 public_agent_id=public_agent_ids[observation_row],
                 position=_point(row),
                 radius=row[AGENT_FEATURE_RADIUS_V1],
-                team_id=_decode_wire_int(
-                    row[AGENT_FEATURE_TEAM_ID_V1],
-                    name=f"{relation} row {observation_row} team",
-                    minimum=1,
-                    maximum=2,
-                ),
+                team_id=decode_agent_feature_row(
+                    row,
+                    schema_version=schema_version,
+                    team_id=configured_team_id
+                    if relation == "ally"
+                    else 3 - configured_team_id,
+                    is_enemy=relation == "enemy",
+                ).team_id,
                 class_id=_decode_wire_int(
                     row[AGENT_FEATURE_CLASS_ID_V1],
                     name=f"{relation} row {observation_row} class",
@@ -497,23 +510,26 @@ def _visible_bodies(
 class ActorPovProjectionIndexV1:
     """Once-validated POV content supporting O(1) frame projection."""
 
-    content: ActorPovReplayContentV1
+    content: ActorPovReplayContent
 
     def __post_init__(self) -> None:
-        if type(self.content) is not ActorPovReplayContentV1:
+        if (
+            type(self.content) is not ActorPovReplayContentV1
+            and type(self.content) is not ActorPovReplayContentV2
+        ):
             raise TypeError("content must be the exact ActorPovReplayContentV1 root.")
-        validate_actor_pov_replay_content_v1(self.content)
+        validate_actor_pov_replay_content(self.content)
 
 
 def build_actor_pov_projection_index_v1(
-    content: ActorPovReplayContentV1,
+    content: ActorPovReplayContent,
 ) -> ActorPovProjectionIndexV1:
     """Validate recipient content once before interactive frame selection."""
     return ActorPovProjectionIndexV1(content=content)
 
 
 def _build_actor_pov_battlefield_scene_v1(
-    frame: ActorPovFrameV1,
+    frame: ActorPovFrame,
     *,
     episode_id: str,
     selected_global_slot: int,
@@ -522,12 +538,15 @@ def _build_actor_pov_battlefield_scene_v1(
     configured_team_id: int,
     class_id: int,
     observation_materialization: Literal["exact_no_shared_obs_actor_input"],
-    axis_mapping: ActorPovAxisMappingV1,
+    axis_mapping: ActorPovAxisMapping,
 ) -> ActorPovBattlefieldSceneV1:
     """Decode one already-authorized recipient frame into battlefield facts."""
-    if type(frame) is not ActorPovFrameV1:
+    if type(frame) is not ActorPovFrameV1 and type(frame) is not ActorPovFrameV2:
         raise TypeError("selected POV frame must be the exact V1 root.")
-    if type(axis_mapping) is not ActorPovAxisMappingV1:
+    if (
+        type(axis_mapping) is not ActorPovAxisMappingV1
+        and type(axis_mapping) is not ActorPovAxisMappingV2
+    ):
         raise TypeError("POV axis mapping must be the exact V1 root.")
     self_row = frame.self_features
     if not _decode_wire_bool(
@@ -536,12 +555,12 @@ def _build_actor_pov_battlefield_scene_v1(
     ):
         raise ValueError("selected POV self row must remain configured active.")
     if (
-        _decode_wire_int(
-            self_row[AGENT_FEATURE_TEAM_ID_V1],
-            name="selected actor team",
-            minimum=1,
-            maximum=2,
-        )
+        decode_agent_feature_row(
+            self_row,
+            schema_version=frame.schema_version,
+            team_id=configured_team_id,
+            is_enemy=False,
+        ).team_id
         != configured_team_id
         or _decode_wire_int(
             self_row[AGENT_FEATURE_CLASS_ID_V1],
@@ -632,12 +651,16 @@ def _build_actor_pov_battlefield_scene_v1(
                 frame.ally_unit_features,
                 frame.ally_visibility_mask,
                 axis_mapping.ally_observation_row_public_agent_id_by_id,
+                schema_version=frame.schema_version,
+                configured_team_id=configured_team_id,
             ),
             *_visible_bodies(
                 "enemy",
                 frame.enemy_unit_features,
                 frame.enemy_visibility_mask,
                 axis_mapping.enemy_observation_row_public_agent_id_by_id,
+                schema_version=frame.schema_version,
+                configured_team_id=configured_team_id,
             ),
         ),
         spawn_pads=spawn_pads,
@@ -646,9 +669,7 @@ def _build_actor_pov_battlefield_scene_v1(
 
 
 def build_actor_pov_analyzer_projection_v1(
-    source: (
-        ActorPovProjectionIndexV1 | ActorPovReplayContentV1 | ActorPovCurrentSliceV1
-    ),
+    source: (ActorPovProjectionIndexV1 | ActorPovReplayContent | ActorPovCurrentSlice),
     *,
     frame_index: int | None = None,
 ) -> ActorPovAnalyzerProjectionV1:
@@ -667,12 +688,17 @@ def build_actor_pov_analyzer_projection_v1(
         class_id = content.class_id
         observation_materialization = content.observation_materialization
         axis_mapping = content.axis_mapping
-    elif type(source) is ActorPovReplayContentV1:
+    elif (
+        type(source) is ActorPovReplayContentV1
+        or type(source) is ActorPovReplayContentV2
+    ):
         return build_actor_pov_analyzer_projection_v1(
             build_actor_pov_projection_index_v1(source),
             frame_index=frame_index,
         )
-    elif type(source) is ActorPovCurrentSliceV1:
+    elif (
+        type(source) is ActorPovCurrentSliceV1 or type(source) is ActorPovCurrentSliceV2
+    ):
         if frame_index is not None and frame_index != source.frame.frame_index:
             raise ValueError(
                 "a live current slice accepts only its own canonical frame index."

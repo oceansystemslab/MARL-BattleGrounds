@@ -10,7 +10,10 @@ from marl_battlegrounds.evaluation.events import (
 )
 from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
+    EvaluationEpisodeContextV3,
+    EvaluationFrame,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     EvaluationModel,
     EvaluationTransitionV1,
     TransitionFactsV1,
@@ -51,7 +54,7 @@ def _require_inactive_slot_neutral(
 
 def _validate_inactive_frame_padding(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
 ) -> None:
     """Validate dynamic snapshot padding without reconstructing actor inputs."""
     snapshot = frame.snapshot
@@ -293,8 +296,15 @@ def validate_declared_model_tree(
 
 def _validate_frame_information_regime(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
 ) -> None:
+    expected_frame_type = (
+        EvaluationFrameV2
+        if type(context) is EvaluationEpisodeContextV3
+        else EvaluationFrameV1
+    )
+    if type(frame) is not expected_frame_type:
+        raise ValueError("frame version does not match the episode context")
     availability = (
         frame.shared_obs_information_availability_by_recipient_and_sensor_source
     )
@@ -322,7 +332,7 @@ def _validate_frame_information_regime(
 
 def _validate_task_context_projection(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
 ) -> None:
     """Reconcile every policy-visible task fact with snapshot/config authority."""
     config = context.resolved_env_config
@@ -375,9 +385,9 @@ def _validate_task_context_projection(
 
 def _derive_and_validate_team_deathmatch_authority_v1(
     context: EvaluationEpisodeContext,
-    start_frame: EvaluationFrameV1,
+    start_frame: EvaluationFrame,
     facts: TransitionFactsV1,
-    successor_frame: EvaluationFrameV1,
+    successor_frame: EvaluationFrame,
     canonical_reward_by_agent: tuple[float, ...],
     terminated: bool,
     truncated: bool,
@@ -440,17 +450,21 @@ def _derive_and_validate_team_deathmatch_authority_v1(
 
 def _validate_context_joined_frame(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     *,
     record_name: str,
-) -> EvaluationFrameV1:
+) -> EvaluationFrame:
     """Revalidate one frame and its context-owned semantic constraints."""
     frame = cast(
-        EvaluationFrameV1,
+        EvaluationFrame,
         validate_declared_model_tree(
             frame,
             record_name=record_name,
-            expected_type=EvaluationFrameV1,
+            expected_type=(
+                EvaluationFrameV2
+                if type(context) is EvaluationEpisodeContextV3
+                else EvaluationFrameV1
+            ),
         ),
     )
     episode_id = context.identity.episode_id
@@ -474,7 +488,7 @@ def _validate_context_joined_frame(
 
 def validate_context_joined_evaluation_frame_v1(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
 ) -> None:
     """Deeply validate one exact frame against its context-owned authority."""
     validate_declared_model_tree(
@@ -491,7 +505,7 @@ def validate_context_joined_evaluation_frame_v1(
 
 def validate_initial_evaluation_frame_v1(
     context: EvaluationEpisodeContext,
-    initial_frame: EvaluationFrameV1,
+    initial_frame: EvaluationFrame,
 ) -> None:
     """Validate the context-joined artifact frame at capture index zero.
 
@@ -535,9 +549,9 @@ def validate_initial_evaluation_frame_v1(
 
 def validate_evaluation_transition_unit_v1(
     context: EvaluationEpisodeContext,
-    start_frame: EvaluationFrameV1,
+    start_frame: EvaluationFrame,
     transition: EvaluationTransitionV1,
-    successor_frame: EvaluationFrameV1,
+    successor_frame: EvaluationFrame,
 ) -> None:
     """Validate one context/start/transition/successor semantic unit.
 
@@ -553,14 +567,14 @@ def validate_evaluation_transition_unit_v1(
 
 def _canonicalize_evaluation_transition_unit_v1(
     context: EvaluationEpisodeContext,
-    start_frame: EvaluationFrameV1,
+    start_frame: EvaluationFrame,
     transition: EvaluationTransitionV1,
-    successor_frame: EvaluationFrameV1,
+    successor_frame: EvaluationFrame,
 ) -> tuple[
     EvaluationEpisodeContext,
-    EvaluationFrameV1,
+    EvaluationFrame,
     EvaluationTransitionV1,
-    EvaluationFrameV1,
+    EvaluationFrame,
 ]:
     """Validate once and retain the detached copies for an internal consumer."""
     context = cast(
@@ -658,3 +672,9 @@ __all__ = [
     "validate_evaluation_transition_unit_v1",
     "validate_initial_evaluation_frame_v1",
 ]
+
+
+# The unchanged transition wire stays V1; frame admission follows its context.
+validate_initial_evaluation_frame = validate_initial_evaluation_frame_v1
+validate_context_joined_evaluation_frame = validate_context_joined_evaluation_frame_v1
+validate_evaluation_transition_unit = validate_evaluation_transition_unit_v1

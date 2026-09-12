@@ -36,7 +36,9 @@ from marl_battlegrounds.evaluation.models import (
 )
 from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
+    ActorPovAxisMapping,
     ActorPovAxisMappingV1,
+    ActorPovAxisMappingV2,
 )
 from marl_battlegrounds.rendering.authorized_incoming import (
     AgentIncomingObservationV1,
@@ -249,7 +251,7 @@ class ReplayOraclePresentationSourceIdentityV1(_PresentationProtocolModel):
     source_authority_epoch: _NonNegativeInt
     source_artifact_id: _ScientificId
     source_timeline_id: _ScientificId
-    source_replay_schema_version: Literal[1, 2]
+    source_replay_schema_version: Literal[1, 2, 3]
     source_context_digest_sha256: _Sha256Hex
     source_trajectory_content_digest_sha256: _Sha256Hex
     source_artifact_digest_sha256: _Sha256Hex
@@ -1721,7 +1723,7 @@ def build_oracle_authorized_current_endpoint_v1(
 def build_no_shared_obs_authorized_current_endpoint_v1(
     *,
     parts: NoSharedObsAuthorizedScenePartsV1,
-    axis_mapping: ActorPovAxisMappingV1,
+    axis_mapping: ActorPovAxisMapping,
 ) -> NoSharedObsAuthorizedCurrentEndpointV1:
     """Bind accepted NoShared parts to their trusted recorded action axis."""
     if type(parts) is not NoSharedObsAuthorizedScenePartsV1:
@@ -1762,7 +1764,7 @@ def build_no_shared_obs_authorized_current_endpoint_v1(
 def build_shared_obs_authorized_current_endpoint_v1(
     *,
     parts: SharedObsAuthorizedScenePartsV1,
-    axis_mapping: ActorPovAxisMappingV1,
+    axis_mapping: ActorPovAxisMapping,
 ) -> SharedObsAuthorizedCurrentEndpointV1:
     """Bind accepted Shared visual-union parts to the recipient source axis."""
     if type(parts) is not SharedObsAuthorizedScenePartsV1:
@@ -1803,16 +1805,17 @@ def build_shared_obs_authorized_current_endpoint_v1(
 
 
 def _agent_pov_action_axis_v1(
-    axis_mapping: ActorPovAxisMappingV1,
+    axis_mapping: ActorPovAxisMapping,
     *,
     owner_presentation_key: str,
     owner_public_agent_id: str,
 ) -> AgentPovActionAxisV1:
-    if type(axis_mapping) is not ActorPovAxisMappingV1:
+    if (
+        type(axis_mapping) is not ActorPovAxisMappingV1
+        and type(axis_mapping) is not ActorPovAxisMappingV2
+    ):
         raise TypeError("axis_mapping must use the exact accepted POV axis root.")
-    mapping = ActorPovAxisMappingV1.model_validate(
-        axis_mapping.model_dump(mode="python")
-    )
+    mapping = type(axis_mapping).model_validate(axis_mapping.model_dump(mode="python"))
     target_public_ids = mapping.target_action_recipient_public_agent_id_by_id
     if len(target_public_ids) != 11 or target_public_ids[0] is not None:
         raise ValueError("accepted POV target axis must retain target-none at zero.")

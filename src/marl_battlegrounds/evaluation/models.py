@@ -835,31 +835,124 @@ class EvaluationEpisodeContextV2(EvaluationModel):
             != REQUIRED_SCHEMA_BINDINGS_V2
         ):
             raise ValueError("schema_versions must equal the V2 context bindings")
-        if self.expected_horizon > self.resolved_env_config.maximum_episode_steps:
-            raise ValueError("expected_horizon cannot exceed maximum_episode_steps")
-        names = tuple(row.name for row in self.aggregation_keys)
-        if names != tuple(sorted(set(names))):
-            raise ValueError("aggregation keys must be unique and sorted by name")
-        _validate_context_rows(self)
-        _validate_context_seeds(self)
-        if (
-            self.capture_profile == "scenario_metric_complete"
-            and self.identity.scenario is None
-        ):
-            raise ValueError("scenario capture requires a scenario identity")
-        if self.scenario_name is not None and self.identity.scenario is None:
-            raise ValueError("scenario display name requires its recorded identity")
+        _validate_context_contents(self)
         return self
 
 
-type EvaluationEpisodeContext = EvaluationEpisodeContextV1 | EvaluationEpisodeContextV2
+class SchemaVersionEntryV3(EvaluationModel):
+    """One exact source version used by current context and frame records."""
+
+    schema_id: _AsciiIdentifier
+    schema_version: Annotated[int, Field(ge=1, le=3)]
+
+
+REQUIRED_SCHEMA_BINDINGS_V3 = tuple(
+    (
+        schema_id,
+        3
+        if schema_id == CONTEXT_SCHEMA_ID
+        else 2
+        if schema_id == FRAME_SCHEMA_ID
+        else version,
+    )
+    for schema_id, version in REQUIRED_SCHEMA_BINDINGS_V1
+)
+
+
+class EvaluationEpisodeContextV3(EvaluationModel):
+    """Episode context naming the exact relative policy-input contract."""
+
+    schema_id: Literal["marl_battlegrounds.evaluation.episode_context"] = (
+        CONTEXT_SCHEMA_ID
+    )
+    schema_version: Literal[3] = 3
+    identity: EvaluationEpisodeIdentityV1
+    schema_versions: tuple[SchemaVersionEntryV3, ...]
+    aggregation_keys: tuple[AggregationKeyV1, ...]
+    expected_horizon: _PositiveInt
+    resolved_env_config: ResolvedEnvConfigV1
+    static_mechanics_catalog: StaticMechanicsCatalogV1
+    roster: Annotated[
+        tuple[RosterSlotV1, ...],
+        Field(min_length=MAX_AGENT_SLOTS, max_length=MAX_AGENT_SLOTS),
+    ]
+    policy_assignments: Annotated[
+        tuple[PolicyAssignmentSlotV2, ...],
+        Field(min_length=MAX_AGENT_SLOTS, max_length=MAX_AGENT_SLOTS),
+    ]
+    seed_protocol: EvaluationSeedProtocolV1 | EvaluationSeedProtocolV2
+    capture_profile: CaptureProfile
+    execution_information_mode: ExecutionInformationMode
+    actor_projection: VersionedIdentityV1
+    critic_information_regime: VersionedIdentityV1
+    canonical_reward_mode: VersionedIdentityV1
+    shaping_configuration: ContentAddressedIdentityV1
+    code_revision: CodeRevisionV1 | CodeRevisionV2
+    scenario_name: _AsciiText | None = None
+
+    @model_validator(mode="after")
+    def _validate_context(self) -> EvaluationEpisodeContextV3:
+        if (
+            tuple((row.schema_id, row.schema_version) for row in self.schema_versions)
+            != REQUIRED_SCHEMA_BINDINGS_V3
+        ):
+            raise ValueError("schema_versions must equal the V3 context bindings")
+        from marl_battlegrounds.evaluation.actor_projection import (
+            NO_SHARED_OBS_ACTOR_PROJECTION_V3,
+            SHARED_OBS_ACTOR_PROJECTION_V2,
+        )
+
+        expected_projection = (
+            SHARED_OBS_ACTOR_PROJECTION_V2
+            if self.execution_information_mode == "shared_obs"
+            else NO_SHARED_OBS_ACTOR_PROJECTION_V3
+        )
+        if self.actor_projection != expected_projection:
+            raise ValueError(
+                "current context requires the matching relative-input projection"
+            )
+        _validate_context_contents(self)
+        return self
+
+
+type EvaluationEpisodeContext = (
+    EvaluationEpisodeContextV1 | EvaluationEpisodeContextV2 | EvaluationEpisodeContextV3
+)
+
+
+def _validate_context_contents(
+    context: EvaluationEpisodeContextV2 | EvaluationEpisodeContextV3,
+) -> None:
+    """Check the shared episode contract independently of its wire version."""
+    if context.expected_horizon > context.resolved_env_config.maximum_episode_steps:
+        raise ValueError("expected_horizon cannot exceed maximum_episode_steps")
+    names = tuple(row.name for row in context.aggregation_keys)
+    if names != tuple(sorted(set(names))):
+        raise ValueError("aggregation keys must be unique and sorted by name")
+    _validate_context_rows(context)
+    _validate_context_seeds(context)
+    if (
+        context.capture_profile == "scenario_metric_complete"
+        and context.identity.scenario is None
+    ):
+        raise ValueError("scenario capture requires a scenario identity")
+    if context.scenario_name is not None and context.identity.scenario is None:
+        raise ValueError("scenario display name requires its recorded identity")
 
 
 def evaluation_context_type(
     context: EvaluationEpisodeContext,
-) -> type[EvaluationEpisodeContextV1] | type[EvaluationEpisodeContextV2]:
-    """Accept exactly the two declared context roots, never an unknown subclass."""
-    if type(context) not in (EvaluationEpisodeContextV1, EvaluationEpisodeContextV2):
+) -> (
+    type[EvaluationEpisodeContextV1]
+    | type[EvaluationEpisodeContextV2]
+    | type[EvaluationEpisodeContextV3]
+):
+    """Accept exactly the declared context roots, never an unknown subclass."""
+    if type(context) not in (
+        EvaluationEpisodeContextV1,
+        EvaluationEpisodeContextV2,
+        EvaluationEpisodeContextV3,
+    ):
         raise TypeError("context must be an exact supported episode-context root")
     return type(context)
 
@@ -1231,6 +1324,38 @@ class BaseObservationV1(EvaluationModel):
         return self
 
 
+class BaseObservationV2(BaseObservationV1):
+    """Current recorded observations: relative enemy flag and local self index."""
+
+    self_ally_index: tuple[_TeamLocalSlot, ...]
+
+    @model_validator(mode="after")
+    def _validate_relative_identity(self) -> BaseObservationV2:
+        _require_tuple_shape(
+            self.self_ally_index, (MAX_AGENT_SLOTS,), field_name="self_ally_index"
+        )
+        for slot, row in enumerate(self.self_features):
+            if row[3] != 0.0:
+                raise ValueError("current self feature is_enemy must be zero")
+            expected_index = slot % MAX_AGENTS_PER_TEAM if row[4] == 1.0 else 0
+            if self.self_ally_index[slot] != expected_index:
+                raise ValueError(
+                    "self_ally_index must match the active actor's own-team row"
+                )
+            if any(candidate[3] != 0.0 for candidate in self.ally_unit_features[slot]):
+                raise ValueError("current ally feature is_enemy must be zero")
+            for visible, candidate in zip(
+                self.enemy_visibility_mask[slot],
+                self.enemy_unit_features[slot],
+                strict=True,
+            ):
+                if candidate[3] != float(visible):
+                    raise ValueError(
+                        "current enemy feature is_enemy must match visibility"
+                    )
+        return self
+
+
 class ActionMaskV1(EvaluationModel):
     """Exact fixed-slot action masks with authoritative joint combat legality."""
 
@@ -1294,21 +1419,60 @@ class EvaluationFrameV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_frame(self) -> EvaluationFrameV1:
-        expected_id = f"{self.episode_id}:frame:{self.frame_index}"
-        if self.frame_id != expected_id:
-            raise ValueError("frame_id must be derived from episode_id and frame_index")
-        availability = (
-            self.shared_obs_information_availability_by_recipient_and_sensor_source
-        )
-        if availability is not None:
-            _require_tuple_shape(
-                availability,
-                (MAX_AGENT_SLOTS, MAX_AGENT_SLOTS),
-                field_name=(
-                    "shared_obs_information_availability_by_recipient_and_sensor_source"
-                ),
-            )
+        _validate_frame_fields(self)
         return self
+
+
+class EvaluationFrameV2(EvaluationModel):
+    """One stable evaluation epoch and its same-epoch policy input material."""
+
+    schema_id: Literal["marl_battlegrounds.evaluation.frame"] = FRAME_SCHEMA_ID
+    schema_version: Literal[2] = 2
+    episode_id: _AsciiIdentifier
+    frame_index: _NonNegativeInt
+    frame_id: _AsciiIdentifier
+    simulator_step_count: _NonNegativeInt
+    snapshot: GlobalAnalysisSnapshotV1
+    base_observation: BaseObservationV2
+    action_mask: ActionMaskV1
+    shared_obs_information_availability_by_recipient_and_sensor_source: (
+        _BooleanMatrix | None
+    ) = None
+
+    @model_validator(mode="after")
+    def _validate_frame(self) -> EvaluationFrameV2:
+        _validate_frame_fields(self)
+        return self
+
+
+type EvaluationFrame = EvaluationFrameV1 | EvaluationFrameV2
+
+
+def evaluation_frame_type(
+    frame: EvaluationFrame,
+) -> type[EvaluationFrameV1] | type[EvaluationFrameV2]:
+    """Admit an exact historical or current frame, never an unknown subclass."""
+    if type(frame) not in (EvaluationFrameV1, EvaluationFrameV2):
+        raise TypeError("frame must be an exact supported evaluation frame")
+    return type(frame)
+
+
+def _validate_frame_fields(frame: EvaluationFrame) -> None:
+    """Validate shared epoch and recorded source-availability fields."""
+    expected_id = f"{frame.episode_id}:frame:{frame.frame_index}"
+    if frame.frame_id != expected_id:
+        raise ValueError("frame_id must be derived from episode_id and frame_index")
+    availability = (
+        frame.shared_obs_information_availability_by_recipient_and_sensor_source
+    )
+    if availability is not None:
+        _require_tuple_shape(
+            availability,
+            (MAX_AGENT_SLOTS, MAX_AGENT_SLOTS),
+            field_name=(
+                "shared_obs_information_availability_by_recipient_and_sensor_source"
+            ),
+        )
 
 
 class JointActionV1(EvaluationModel):
@@ -1967,6 +2131,7 @@ __all__ = [
     "GLOBAL_ANALYSIS_SNAPSHOT_SCHEMA_VERSION",
     "REQUIRED_SCHEMA_BINDINGS_V1",
     "REQUIRED_SCHEMA_BINDINGS_V2",
+    "REQUIRED_SCHEMA_BINDINGS_V3",
     "RESOLVED_ENV_CONFIG_SCHEMA_ID",
     "RESOLVED_ENV_CONFIG_SCHEMA_VERSION",
     "TRANSITION_FACTS_SCHEMA_ID",
@@ -1987,6 +2152,7 @@ __all__ = [
     "AuraMechanicV1",
     "AuraTransitionFactsV1",
     "BaseObservationV1",
+    "BaseObservationV2",
     "CaptureProfile",
     "ChargePhaseDisplacementEventV1",
     "ClassMechanicsV1",
@@ -2001,10 +2167,13 @@ __all__ = [
     "EvaluationEpisodeContext",
     "EvaluationEpisodeContextV1",
     "EvaluationEpisodeContextV2",
+    "EvaluationEpisodeContextV3",
     "EvaluationEpisodeIdentityV1",
     "EvaluationEventBaseV1",
     "EvaluationEventV1",
+    "EvaluationFrame",
     "EvaluationFrameV1",
+    "EvaluationFrameV2",
     "EvaluationModel",
     "EvaluationRole",
     "EvaluationSeedProtocolV1",
@@ -2031,6 +2200,7 @@ __all__ = [
     "RosterSlotV1",
     "SchemaVersionEntryV1",
     "SchemaVersionEntryV2",
+    "SchemaVersionEntryV3",
     "SourceDamageOutputEventV1",
     "SourceHealingOutputEventV1",
     "SpawnLifecycleObservationV1",
@@ -2053,4 +2223,5 @@ __all__ = [
     "canonical_digest_sha256",
     "canonical_json_bytes",
     "evaluation_context_type",
+    "evaluation_frame_type",
 ]

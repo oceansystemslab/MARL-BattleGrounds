@@ -20,9 +20,9 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_BASE_MOVEMENT_SPEED,
     AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
     AGENT_FEATURE_CLASS_ID,
+    AGENT_FEATURE_IS_ENEMY,
     AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
-    AGENT_FEATURE_TEAM_ID,
     AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
     AGENT_FEATURE_X,
     AGENT_FEATURE_Y,
@@ -288,9 +288,9 @@ def _assert_self_features_project_state(
         "obs.self_features.radius",
     )
     _assert_float_array_close(
-        obs.self_features[:, AGENT_FEATURE_TEAM_ID],
-        profile.team_ids.astype(jnp.float32),
-        "obs.self_features.team_id",
+        obs.self_features[:, AGENT_FEATURE_IS_ENEMY],
+        jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        "obs.self_features.is_enemy",
     )
     _assert_float_array_close(
         obs.self_features[:, AGENT_FEATURE_ACTIVE],

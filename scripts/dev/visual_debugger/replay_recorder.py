@@ -6,8 +6,9 @@ from pathlib import Path
 
 from marl_battlegrounds.evaluation.metrics import ObserverLifecycleState
 from marl_battlegrounds.evaluation.models import (
-    EvaluationEpisodeContextV1,
-    EvaluationFrameV1,
+    EvaluationEpisodeContextV3,
+    EvaluationFrame,
+    EvaluationFrameV2,
     EvaluationTransitionV1,
 )
 from marl_battlegrounds.evaluation.replay_io import (
@@ -22,10 +23,9 @@ from marl_battlegrounds.evaluation.replay_io import (
     preflight_replay_destination,
     publish_prepared_replay,
 )
-from marl_battlegrounds.evaluation.replay_v2 import (
-    ReplayArtifactV2,
-    build_replay_v2,
-    context_v2,
+from marl_battlegrounds.evaluation.replay_v3 import (
+    ReplayArtifactV3,
+    build_replay_v3,
 )
 from scripts.dev.visual_debugger.protocol import (
     RecordingLifecycleV1,
@@ -53,8 +53,8 @@ class DebuggerReplayRecorder:
         *,
         specification: DebuggerRecordingSpecificationV1,
         destination: ReplayDestination,
-        context: EvaluationEpisodeContextV1,
-        initial_frame: EvaluationFrameV1,
+        context: EvaluationEpisodeContextV3,
+        initial_frame: EvaluationFrameV2,
         scenario_name: str | None = None,
     ) -> None:
         if (
@@ -65,8 +65,8 @@ class DebuggerReplayRecorder:
                 "recording requires an exact specification and replay destination"
             )
         if (
-            type(context) is not EvaluationEpisodeContextV1
-            or type(initial_frame) is not EvaluationFrameV1
+            type(context) is not EvaluationEpisodeContextV3
+            or type(initial_frame) is not EvaluationFrameV2
         ):
             raise TypeError(
                 "recording requires an exact live context and initial frame"
@@ -104,7 +104,7 @@ class DebuggerReplayRecorder:
         self.close_cause: DebuggerRecordingCloseCauseV1 | None = None
         self._close_reason: str | None = None
         self._failed_append = False
-        self.replay: ReplayArtifactV2 | None = None
+        self.replay: ReplayArtifactV3 | None = None
         self.prepared_replay: PreparedReplay | None = None
         self.saved_bundle: SavedReplay | None = None
         self.verified_loaded_bundle: LoadedReplay | None = None
@@ -113,7 +113,7 @@ class DebuggerReplayRecorder:
         self._verify_existing = False
 
     @property
-    def current_frame(self) -> EvaluationFrameV1:
+    def current_frame(self) -> EvaluationFrame:
         return self._frames[-1]
 
     @property
@@ -200,12 +200,12 @@ class DebuggerReplayRecorder:
         )
 
     def append(
-        self, transition: EvaluationTransitionV1, successor_frame: EvaluationFrameV1
+        self, transition: EvaluationTransitionV1, successor_frame: EvaluationFrameV2
     ) -> None:
         """Retain the live bridge's facts after checking adjacent frame identities."""
         try:
             status = self.preview_status_after_append_v1(transition)
-            if type(successor_frame) is not EvaluationFrameV1:
+            if type(successor_frame) is not EvaluationFrameV2:
                 raise TypeError("recording append requires an exact successor frame")
             if (
                 transition.start_frame_id != self.current_frame.frame_id
@@ -235,7 +235,7 @@ class DebuggerReplayRecorder:
             self._close_reason = status.completion_reason
 
     def replacement_for(
-        self, context: EvaluationEpisodeContextV1, initial_frame: EvaluationFrameV1
+        self, context: EvaluationEpisodeContextV3, initial_frame: EvaluationFrameV2
     ) -> DebuggerReplayRecorder:
         if self.lifecycle not in ("recording", "sealed") or self.replay is not None:
             raise RuntimeError("only an unfinalized recording may be replaced")
@@ -274,8 +274,8 @@ class DebuggerReplayRecorder:
                 and self.close_cause != "processing_failure"
                 else None,
             )
-            self.replay = build_replay_v2(
-                context_v2(self.context, scenario_name=self.scenario_name),
+            self.replay = build_replay_v3(
+                self.context,
                 self._frames,
                 self._transitions,
                 runtime_provenance=self.specification.runtime_provenance,

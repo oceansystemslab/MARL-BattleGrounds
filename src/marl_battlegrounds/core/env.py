@@ -68,6 +68,7 @@ from marl_battlegrounds.core.geometry import (
     project_movement_with_geometry,
 )
 from marl_battlegrounds.core.types import (
+    AGENT_FEATURE_IS_ENEMY,
     CONTEXT_FEATURE_ALLY_TEAM_SIZE,
     CONTEXT_FEATURE_CURRENT_TIMESTEP,
     CONTEXT_FEATURE_ENEMY_TEAM_SIZE,
@@ -1175,6 +1176,11 @@ def _build_observation_and_action_mask(
         enemy_visibility_mask=enemy_visibility_mask,
         previous_timestep_actions=visibility_masked_previous_timestep_action_observation,
         spawn_lifecycle=spawn_lifecycle_observation,
+        self_ally_index=jnp.where(
+            config.agent_profile.active_mask,
+            jnp.arange(MAX_AGENT_SLOTS, dtype=jnp.int32) % MAX_AGENTS_PER_TEAM,
+            0,
+        ),
     )
 
     return current_observation, current_action_mask
@@ -1291,7 +1297,7 @@ def _build_self_features(
         (
             state.agent_positions,
             config.agent_profile.agent_radii[:, None],
-            config.agent_profile.team_ids[:, None],
+            jnp.zeros((MAX_AGENT_SLOTS, 1), dtype=jnp.float32),
             config.agent_profile.active_mask[:, None],
             state.alive_mask[:, None],
             class_ids[:, None],
@@ -1501,7 +1507,7 @@ def _build_enemy_features(self_features: Array) -> Array:
         self_features[TEAM_A_START:TEAM_A_END, :]
     )
 
-    return enemy_features
+    return enemy_features.at[:, :, AGENT_FEATURE_IS_ENEMY].set(1.0)
 
 
 def _mask_unit_features(unit_features: Array, visibility_mask: Array) -> Array:

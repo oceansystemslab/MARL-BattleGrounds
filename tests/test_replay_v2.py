@@ -13,7 +13,10 @@ from scripts.dev.visual_debugger.replay_protocol import (
 )
 from scripts.dev.visual_debugger.replay_recorder import DebuggerReplayRecorder
 from scripts.dev.visual_debugger.replay_service import ReplayViewerService
-from tests.evaluation_fixtures import captured_team_deathmatch_threshold_trajectory
+from tests.evaluation_fixtures import (
+    captured_team_deathmatch_threshold_trajectory,
+    current_captured_evaluation_trajectory,
+)
 from tests.test_evaluation_replay import runtime_provenance
 
 from marl_battlegrounds.evaluation.metrics import EvaluationEpisodeObserverV1
@@ -254,7 +257,7 @@ def test_current_recorder_saves_captured_facts_without_metric_observer(
     monkeypatch: pytest.MonkeyPatch,
     runtime_provenance: RuntimeProvenanceV1,
 ) -> None:
-    trajectory = captured_team_deathmatch_threshold_trajectory(
+    trajectory = current_captured_evaluation_trajectory(
         aggregation_keys=(AggregationKeyV1(name="action_source", value="manual"),)
     )
     path = tmp_path / "recorded.marlbg-replay.json"
@@ -275,7 +278,7 @@ def test_current_recorder_saves_captured_facts_without_metric_observer(
     recorder.append(trajectory.transitions[0], trajectory.frames[1])
     assert recorder.lifecycle == "sealed"
     assert recorder.finalize_and_save("endpoint") == "saved"
-    assert recorder.begin_review().replay.schema_version == 2
+    assert recorder.begin_review().replay.schema_version == 3
     assert recorder.begin_review().replay.frames == trajectory.frames
     assert recorder.begin_review().replay.transitions == trajectory.transitions
     assert tuple(tmp_path.iterdir()) == (path,)
@@ -290,7 +293,7 @@ def test_current_recorder_retries_same_bytes_after_uncertain_publication(
 ) -> None:
     import scripts.dev.visual_debugger.replay_recorder as module
 
-    trajectory = captured_team_deathmatch_threshold_trajectory(
+    trajectory = current_captured_evaluation_trajectory(
         aggregation_keys=(AggregationKeyV1(name="action_source", value="manual"),)
     )
     path = tmp_path / "retry.marlbg-replay.json"
@@ -455,7 +458,7 @@ def test_current_recording_live_command_hands_off_to_v2_viewer(
     )
     assert handoff.replay_handoff is not None
     assert recorder.saved_bundle is not None
-    assert recorder.begin_review().replay.schema_version == 2
+    assert recorder.begin_review().replay.schema_version == 3
     viewer = handoff.replay_handoff
     result = viewer.apply_command(
         ReplayCommandRequestV1(

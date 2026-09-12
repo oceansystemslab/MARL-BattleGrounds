@@ -1826,3 +1826,15 @@ test("replay-kind detection never aliases live frames", () => {
   );
   assert.equal(isReplayViewerFrame(null), false);
 });
+
+test("current replay references keep their recorded V3 identity", () => {
+  const raw = researcherFrame();
+  const reference = raw.artifact_summary.replay_reference;
+  reference.schema_version = 3;
+  reference.replay_schema_version = 3;
+  const normalized = normalizeReplayViewerFrameV1(raw);
+  assert.equal(normalized.artifact_summary.replay_reference.schema_version, 3);
+  assert.equal(normalized.artifact_summary.replay_reference.replay_schema_version, 3);
+  reference.replay_schema_version = 2;
+  assert.throws(() => normalizeReplayViewerFrameV1(raw), /artifact reference/u);
+});

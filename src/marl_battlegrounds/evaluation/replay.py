@@ -527,7 +527,12 @@ def _require_finalized_retained_observer(
         raise ValueError("observer validated count must equal retained transitions")
     if len(frames) != len(transitions) + 1:
         raise ValueError("retained replay history must have exactly T+1/T records")
-    return context, frames, transitions, finalized_report
+    return (
+        context,
+        frames,
+        transitions,
+        finalized_report,
+    )
 
 
 def _build_replay_bundle_v1(

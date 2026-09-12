@@ -10,6 +10,7 @@ from jax import Array
 from marl_battlegrounds.core.config import validate_product_env_config
 from marl_battlegrounds.core.env import initialize_scenario_state, step
 from marl_battlegrounds.core.types import (
+    AGENT_FEATURE_ACTIVE,
     MAGE_CLASS_ID,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
@@ -25,13 +26,14 @@ from marl_battlegrounds.core.types import (
     Observation,
 )
 from marl_battlegrounds.evaluation.capture import (
-    capture_evaluation_transition_unit_v1,
-    capture_initial_evaluation_frame_v1,
+    capture_evaluation_transition_unit_v2,
+    capture_initial_evaluation_frame_v2,
 )
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
     ActionMaskV1,
-    EvaluationEpisodeContextV1,
+    CodeRevisionV1,
+    EvaluationEpisodeContextV3,
     ExecutionInformationMode,
 )
 from marl_battlegrounds.evaluation.policy_execution import (
@@ -143,7 +145,7 @@ def make_neutral_joint_action() -> Action:
 
 
 def _validate_active_context_slot(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContextV3,
     global_slot: int,
     *,
     name: str,
@@ -164,7 +166,7 @@ def _active_context_slots(session: DebuggerSession) -> tuple[int, ...]:
 
 
 def _target_action_from_context(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContextV3,
     actor_global_slot: int,
     target_global_slot: int | None,
 ) -> int:
@@ -226,7 +228,7 @@ def lane_availability(
 
 
 def _default_pending_actions(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContextV3,
     action_mask: ActionMask | ActionMaskV1,
 ) -> tuple[PendingAction, ...]:
     """Build one exact fixed-slot draft tuple for a fresh decision epoch."""
@@ -269,7 +271,7 @@ def _replace_controlled_pending_action(
 
 
 def build_interactive_joint_action(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContextV3,
     pending_actions: tuple[PendingAction, ...],
     *,
     actor_global_slots: tuple[int, ...],
@@ -316,19 +318,6 @@ def build_interactive_joint_action(
     return Action(move=move, select_target=target, use_ultimate=ultimate)
 
 
-def _team_actor_action(action: Action, team_identity: int) -> ActorAction:
-    """Project one fixed team block from an already-built manual action."""
-    if team_identity not in (TEAM_A_ID, TEAM_B_ID):
-        raise ValueError("team_identity must be Team A or Team B")
-    start = 0 if team_identity == TEAM_A_ID else MAX_AGENTS_PER_TEAM
-    stop = start + MAX_AGENTS_PER_TEAM
-    return ActorAction(
-        move=action.move[start:stop],
-        select_target=action.select_target[start:stop],
-        use_ultimate=action.use_ultimate[start:stop],
-    )
-
-
 def _policy_keys(session: DebuggerSession) -> Array:
     """Derive role-correct actor keys without consuming the environment stream."""
     context = session.evaluation_context
@@ -368,6 +357,12 @@ def _policy_keys(session: DebuggerSession) -> Array:
     return actor_keys
 
 
+def _required_seed(seed: int | None) -> int:
+    if seed is None:
+        raise ValueError("Live debugger execution requires a recorded seed")
+    return seed
+
+
 def _manual_policy(
     variables: PolicyTree,
     carry: PolicyTree,
@@ -378,7 +373,13 @@ def _manual_policy(
     """Read a precommitted manual row through the same scalar actor interface."""
     del mask, key
     action = cast(Action, variables)
-    return ActorAction(*(value[actor.global_slot] for value in action)), carry
+    active = actor.observation.self_features[AGENT_FEATURE_ACTIVE] > 0.0
+    return ActorAction(
+        *(
+            jnp.where(active, value[actor.observation.self_ally_index], 0)
+            for value in action
+        )
+    ), carry
 
 
 def _configured_policy(
@@ -396,7 +397,11 @@ def _configured_policy(
             session.pending_actions,
             actor_global_slots=slots,
         )
-        return Policy("manual", _manual_policy, variables=action)
+        team_start = 0 if team_identity == TEAM_A_ID else MAX_AGENTS_PER_TEAM
+        local_action = Action(
+            *(value[team_start : team_start + MAX_AGENTS_PER_TEAM] for value in action)
+        )
+        return Policy("manual", _manual_policy, variables=local_action)
     if controller == "scenario_5" and team_identity != TEAM_B_ID:
         raise ValueError("scenario controller belongs to Team B")
     return policy(
@@ -445,9 +450,7 @@ def _build_configured_joint_action(session: DebuggerSession) -> Action:
     ):
         if controller == "manual":
             manual = _configured_policy(session, team_identity, controller)
-            actions.append(
-                _team_actor_action(cast(Action, manual.variables), team_identity)
-            )
+            actions.append(ActorAction(*cast(Action, manual.variables)))
         elif controller == "random_valid":
             actions.append(
                 cast(
@@ -467,7 +470,7 @@ def _build_configured_joint_action(session: DebuggerSession) -> Action:
 
 
 def build_scripted_joint_action(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContextV3,
     frame: ScenarioFrame,
 ) -> Action:
     """Build a potentially multi-actor scripted request from neutral defaults."""
@@ -644,12 +647,14 @@ def create_session(
         execution_information_mode=execution_information_mode,
         expected_horizon=_debugger_expected_horizon(scenario, config, state),
     )
-    next_key = jax.random.key(evaluation_context.seed_protocol.environment_seed)
+    next_key = jax.random.key(
+        _required_seed(evaluation_context.seed_protocol.environment_seed)
+    )
     information_availability = _initial_information_availability(
         config,
         execution_information_mode,
     )
-    initial_frame = capture_initial_evaluation_frame_v1(
+    initial_frame = capture_initial_evaluation_frame_v2(
         evaluation_context,
         state,
         observation,
@@ -946,7 +951,7 @@ def submit_joint_action(
             error,
         ) from error
     try:
-        transition, successor_frame = capture_evaluation_transition_unit_v1(
+        transition, successor_frame = capture_evaluation_transition_unit_v2(
             session.evaluation_context,
             session.current_evaluation_frame,
             next_state,
@@ -1138,8 +1143,8 @@ def _restart_session(
     )
     run_generation = session.run_generation + 1
     launch_specification = build_debugger_evaluation_launch_specification_v1(
-        root_seed=session.evaluation_context.seed_protocol.root_seed,
-        code_revision=session.evaluation_context.code_revision,
+        root_seed=_required_seed(session.evaluation_context.seed_protocol.root_seed),
+        code_revision=cast(CodeRevisionV1, session.evaluation_context.code_revision),
         capture_profile=cast(
             DebuggerCaptureProfileV1,
             session.evaluation_context.capture_profile,
@@ -1160,12 +1165,14 @@ def _restart_session(
         execution_information_mode=next_information_mode,
         expected_horizon=_debugger_expected_horizon(scenario, config, state),
     )
-    next_key = jax.random.key(evaluation_context.seed_protocol.environment_seed)
+    next_key = jax.random.key(
+        _required_seed(evaluation_context.seed_protocol.environment_seed)
+    )
     information_availability = _initial_information_availability(
         config,
         next_information_mode,
     )
-    initial_frame = capture_initial_evaluation_frame_v1(
+    initial_frame = capture_initial_evaluation_frame_v2(
         evaluation_context,
         state,
         observation,

@@ -547,3 +547,38 @@ def test_native_selected_metrics_match_full_across_chunks_and_resets(
         jax.random.fold_in(keys[0], 13), fresh, _idle()
     )
     _assert_tree_exact(_row(info.full, 0), expected_info.full)
+
+
+def test_partial_reset_restores_source_choices_only_in_reset_lanes() -> None:
+    env = make("tdm", num_envs=2, metrics="none")
+    config = _config()
+    _, state = env.reset(jax.random.key(0), config, episode_id=jnp.asarray([1, 2]))
+    default = state.source_availability
+    state = state._replace(source_availability=jnp.zeros_like(default))
+    observations = env.get_observations(state)
+    np.testing.assert_array_equal(observations.source_availability, 0)
+    observations, state = cast(
+        tuple[Observations, EnvironmentState],
+        jax.jit(env.reset)(
+            jax.random.key(1),
+            config,
+            episode_id=jnp.asarray([3, 4]),
+            state=state,
+            reset_mask=jnp.asarray([True, False]),
+        ),
+    )
+    np.testing.assert_array_equal(state.source_availability[0], default[0])
+    np.testing.assert_array_equal(state.source_availability[1], 0)
+    np.testing.assert_array_equal(
+        observations.source_availability, state.source_availability
+    )
+    next_observations, successor, _, _, info = cast(Step, jax.jit(env.step))(
+        jax.random.key(2), state, _idle(2)
+    )
+    np.testing.assert_array_equal(
+        successor.source_availability, state.source_availability
+    )
+    np.testing.assert_array_equal(
+        next_observations.source_availability, state.source_availability
+    )
+    assert info.replay is None and info.priority is None and info.full is None

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 from pydantic import Field, StringConstraints, model_validator
@@ -18,6 +18,7 @@ from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV2,
     EvaluationEpisodeContext,
     EvaluationEpisodeContextV2,
+    EvaluationFrame,
     EvaluationFrameV1,
     EvaluationModel,
     EvaluationTransitionV1,
@@ -48,6 +49,8 @@ def context_v2(
 ) -> EvaluationEpisodeContextV2:
     """Keep known legacy provenance when recording a new V2 artifact."""
     evaluation_context_type(context)
+    if context.schema_version not in (1, 2):
+        raise ValueError("legacy V2 recording cannot change a current input contract")
     if type(context) is EvaluationEpisodeContextV2:
         return (
             context
@@ -254,19 +257,19 @@ class ReplayArtifactReferenceV2(EvaluationModel):
         return self
 
 
-def build_replay_v2(
+def _build_replay_content(
     context: EvaluationEpisodeContext,
-    frames: Sequence[EvaluationFrameV1],
+    frames: Sequence[EvaluationFrame],
     transitions: Sequence[EvaluationTransitionV1],
     *,
     runtime_provenance: RuntimeProvenanceV1,
-    wrapper_stack: tuple[ReplayWrapperMetadataV1, ...] = (),
-    completion_state: CompletionState | None = None,
-    end_or_failure_reason: str | None = None,
-    failure_origin: RolloutFailureOrigin | None = None,
-) -> ReplayArtifactV2:
-    """Seal captured facts once; never compute metrics or repeat simulator rules."""
-    context = context_v2(context)
+    wrapper_stack: tuple[ReplayWrapperMetadataV1, ...],
+    completion_state: CompletionState | None,
+    end_or_failure_reason: str | None,
+    failure_origin: RolloutFailureOrigin | None,
+    header_type: type[EvaluationModel],
+) -> dict[str, object]:
+    """Share completion and content assembly across explicit replay versions."""
     frames = tuple(frames)
     transitions = tuple(transitions)
     if not frames or len(frames) != len(transitions) + 1:
@@ -307,17 +310,19 @@ def build_replay_v2(
         ),
         failure_origin=failure_origin,
     )
-    header = ReplayArtifactHeaderV2(
-        header_id=f"{episode_id}:replay-header",
-        context=context,
-        context_digest_sha256=canonical_digest_sha256(context),
-        expected_transition_count=context.expected_horizon,
-        recorded_transition_count=count,
-        recorded_frame_count=len(frames),
-        first_frame_id=frames[0].frame_id,
-        last_frame_id=frames[-1].frame_id,
-        runtime_provenance=runtime_provenance,
-        wrapper_stack=wrapper_stack,
+    header = header_type.model_validate(
+        {
+            "header_id": f"{episode_id}:replay-header",
+            "context": context,
+            "context_digest_sha256": canonical_digest_sha256(context),
+            "expected_transition_count": context.expected_horizon,
+            "recorded_transition_count": count,
+            "recorded_frame_count": len(frames),
+            "first_frame_id": frames[0].frame_id,
+            "last_frame_id": frames[-1].frame_id,
+            "runtime_provenance": runtime_provenance,
+            "wrapper_stack": wrapper_stack,
+        }
     )
     content: dict[str, object] = {
         "header": header,
@@ -325,6 +330,36 @@ def build_replay_v2(
         "frames": frames,
         "transitions": transitions,
     }
+    return content
+
+
+def build_replay_v2(
+    context: EvaluationEpisodeContext,
+    frames: Sequence[EvaluationFrameV1],
+    transitions: Sequence[EvaluationTransitionV1],
+    *,
+    runtime_provenance: RuntimeProvenanceV1,
+    wrapper_stack: tuple[ReplayWrapperMetadataV1, ...] = (),
+    completion_state: CompletionState | None = None,
+    end_or_failure_reason: str | None = None,
+    failure_origin: RolloutFailureOrigin | None = None,
+) -> ReplayArtifactV2:
+    """Seal captured facts once; never compute metrics or repeat simulator rules."""
+    context = context_v2(context)
+    if any(type(frame) is not EvaluationFrameV1 for frame in frames):
+        raise TypeError("legacy replay V2 requires exact V1 observation frames")
+    episode_id = context.identity.episode_id
+    content = _build_replay_content(
+        context,
+        frames,
+        transitions,
+        runtime_provenance=runtime_provenance,
+        wrapper_stack=wrapper_stack,
+        completion_state=completion_state,
+        end_or_failure_reason=end_or_failure_reason,
+        failure_origin=failure_origin,
+        header_type=ReplayArtifactHeaderV2,
+    )
     payload: dict[str, object] = {
         "schema_id": "marl_battlegrounds.evaluation.replay_artifact",
         "schema_version": 2,
@@ -339,6 +374,8 @@ def build_replay_v2(
 
 def replay_reference_v2(replay: ReplayArtifactV2) -> ReplayArtifactReferenceV2:
     """Build a reference to the actual canonical replay bytes."""
+    if type(replay) is not ReplayArtifactV2:
+        raise TypeError("V2 references require exact ReplayArtifactV2")
     return ReplayArtifactReferenceV2(
         artifact_id=replay.artifact_id,
         episode_id=replay.header.context.identity.episode_id,
@@ -364,21 +401,47 @@ def replay_from_packets(
         capture_evaluation_transition_unit_v1,
         capture_initial_evaluation_frame_v1,
     )
-    from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v1
-    from marl_battlegrounds.evaluation.recording_context import restore_recording_config
-    from marl_battlegrounds.policies.shared_obs import (
-        build_default_shared_obs_information_availability,
-    )
 
     if type(context) is not EvaluationEpisodeContextV2:
-        raise TypeError("packet capture requires the exact V2 context")
-    frames: list[EvaluationFrameV1] = []
+        raise TypeError("legacy packet capture requires exact context V2")
+    frames, transitions = _frames_from_packets(
+        context,
+        packets,
+        capture_initial=capture_initial_evaluation_frame_v1,
+        capture_transition=capture_evaluation_transition_unit_v1,
+    )
+    return build_replay_v2(
+        context,
+        frames,
+        transitions,
+        runtime_provenance=runtime_provenance,
+        wrapper_stack=wrapper_stack,
+        completion_state=completion_state,
+        end_or_failure_reason=end_or_failure_reason,
+        failure_origin=failure_origin,
+    )
+
+
+def _frames_from_packets[FrameT: EvaluationFrame](
+    context: EvaluationEpisodeContext,
+    packets: Iterable[ReplayPackets],
+    *,
+    capture_initial: Callable[..., FrameT],
+    capture_transition: Callable[..., tuple[EvaluationTransitionV1, FrameT]],
+) -> tuple[list[FrameT], list[EvaluationTransitionV1]]:
+    """Decode one packet stream with the requested exact observation capture."""
+    from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v1
+    from marl_battlegrounds.evaluation.recording_context import restore_recording_config
+
+    frames: list[FrameT] = []
     transitions: list[EvaluationTransitionV1] = []
     episode_id: int | None = None
     availability = None
     for packet in packets:
         if not bool(packet.valid):
             raise ValueError("spooled replay packets must be valid scalar rows")
+        if context.execution_information_mode == "shared_obs":
+            availability = packet.source_availability
         index = int(packet.transition_index)
         if index != len(transitions) or bool(packet.initial) != (index == 0):
             raise ValueError(
@@ -395,13 +458,8 @@ def replay_from_packets(
                 raise ValueError(
                     "initial replay packet configuration must match its context"
                 )
-            if context.execution_information_mode == "shared_obs":
-                availability = build_default_shared_obs_information_availability(
-                    packet.config.agent_profile.active_mask,
-                    packet.config.agent_profile.team_ids,
-                )
             frames.append(
-                capture_initial_evaluation_frame_v1(
+                capture_initial(
                     context,
                     packet.initial_state,
                     packet.initial_observation,
@@ -413,7 +471,7 @@ def replay_from_packets(
             raise ValueError("replay packets cannot mix episode identities")
         if transitions and (transitions[-1].terminated or transitions[-1].truncated):
             raise ValueError("replay packets cannot continue after completion")
-        transition, frame = capture_evaluation_transition_unit_v1(
+        transition, frame = capture_transition(
             context,
             frames[-1],
             packet.state,
@@ -424,15 +482,13 @@ def replay_from_packets(
             packet.done,
             successor_shared_obs_information_availability_by_recipient_and_sensor_source=availability,
         )
+        if transitions and availability is not None:
+            # Capture validated this matrix against the same frozen roster. It
+            # also completes the preceding frame's next-decision source choice.
+            field = "shared_obs_information_availability_by_recipient_and_sensor_source"
+            admitted = getattr(frame, field)
+            if getattr(frames[-1], field) != admitted:
+                frames[-1] = frames[-1].model_copy(update={field: admitted})
         transitions.append(transition)
         frames.append(frame)
-    return build_replay_v2(
-        context,
-        frames,
-        transitions,
-        runtime_provenance=runtime_provenance,
-        wrapper_stack=wrapper_stack,
-        completion_state=completion_state,
-        end_or_failure_reason=end_or_failure_reason,
-        failure_origin=failure_origin,
-    )
+    return frames, transitions

@@ -7,7 +7,7 @@ import pytest
 
 from marl_battlegrounds.evaluation import revision
 from marl_battlegrounds.evaluation.actor_projection import (
-    NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+    NO_SHARED_OBS_ACTOR_PROJECTION_V3,
 )
 from marl_battlegrounds.evaluation.models import (
     AggregationKeyV1,
@@ -324,7 +324,7 @@ def test_custom_trainer_unknown_history_and_seeds_stay_absent(mode: str) -> None
     assert context.seed_protocol.focal_policy_seed is None
     assert context.execution_information_mode == mode
     if mode == "no_shared_obs":
-        assert context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V2
+        assert context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V3
     learner = context.policy_assignments[0]
     assert isinstance(learner, AssignedPolicySlotV2)
     assert learner.lifecycle == "evolving"

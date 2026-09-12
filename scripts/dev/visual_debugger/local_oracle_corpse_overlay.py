@@ -16,7 +16,9 @@ from numpy.typing import NDArray
 
 from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
+    EvaluationFrame,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     ResolvedObstacleV1,
     evaluation_context_type,
 )
@@ -191,7 +193,7 @@ def _host_has_clear_line_of_sight_v1(
     return True
 
 
-def _status_durations(frame: EvaluationFrameV1, global_slot: int) -> tuple[int, ...]:
+def _status_durations(frame: EvaluationFrame, global_slot: int) -> tuple[int, ...]:
     snapshot = frame.snapshot
     return (
         *snapshot.slow_durations[global_slot],
@@ -204,7 +206,7 @@ def _status_durations(frame: EvaluationFrameV1, global_slot: int) -> tuple[int, 
 
 def _corpse_statuses(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     *,
     global_slot: int,
 ) -> tuple[AuthorizedStatusV1, ...]:
@@ -249,7 +251,7 @@ def _corpse_statuses(
 
 def _corpse_agent(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     *,
     global_slot: int,
     authority_session_id: str,
@@ -323,7 +325,7 @@ def _corpse_agent(
 
 def build_local_oracle_corpse_overlay_v1(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     base_scene: AuthorizedBattlefieldSceneV1,
     *,
     authority_session_id: str,
@@ -333,7 +335,7 @@ def build_local_oracle_corpse_overlay_v1(
 ) -> LocalOracleCorpseOverlayV1:
     """Authorize dead bodies visible to one or more living local sensors."""
     evaluation_context_type(context)
-    if type(frame) is not EvaluationFrameV1:
+    if type(frame) is not EvaluationFrameV1 and type(frame) is not EvaluationFrameV2:
         raise TypeError("frame must use the exact EvaluationFrameV1 root.")
     if type(base_scene) is not AuthorizedBattlefieldSceneV1:
         raise TypeError("base_scene must use the exact authorized scene root.")
@@ -472,7 +474,7 @@ def build_local_oracle_corpse_overlay_v1(
 def validate_local_oracle_corpse_overlay_against_source_v1(
     overlay: LocalOracleCorpseOverlayV1,
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     base_scene: AuthorizedBattlefieldSceneV1,
     *,
     authority_session_id: str,

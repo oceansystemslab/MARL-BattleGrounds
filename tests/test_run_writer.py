@@ -753,3 +753,31 @@ def test_owned_table_symlink_never_modifies_an_unrelated_file(
     finally:
         writer.close()
     assert unrelated.read_bytes() == original
+
+
+@pytest.mark.parametrize("recorded_contract", [None, {"shared_obs": {"version": 1}}])
+def test_resume_rejects_changed_input_contract_before_touching_files(
+    tmp_path: Path, recorded_contract: object
+) -> None:
+    with RunWriter(tmp_path) as writer:
+        run_dir = writer.run_dir
+    details_path = run_dir / "run_details.json"
+    details = json.loads(details_path.read_text())
+    if recorded_contract is None:
+        details.pop("actor_input_projections")
+    else:
+        details["actor_input_projections"] = recorded_contract
+    details_path.write_text(json.dumps(details))
+    before = {
+        path.relative_to(run_dir): path.read_bytes()
+        for path in run_dir.rglob("*")
+        if path.is_file()
+    }
+    with pytest.raises(ValueError, match="actor input contract differs"):
+        RunWriter(resume_from=run_dir)
+    after = {
+        path.relative_to(run_dir): path.read_bytes()
+        for path in run_dir.rglob("*")
+        if path.is_file()
+    }
+    assert before == after

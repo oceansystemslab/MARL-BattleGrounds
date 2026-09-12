@@ -30,7 +30,7 @@ from marl_battlegrounds.policies.reactive_tdm_alpha import (
     reactive_tdm_alpha_policy,
 )
 from marl_battlegrounds.policies.shared_obs import (
-    SharedObsSensorSourceBankV1,
+    SharedObsSensorSourceBankV2,
     compose_shared_obs_unit_features,
 )
 
@@ -105,9 +105,8 @@ def reactive_tdm_beta_policy(
     recipient_observation: Observation,
     recipient_action_mask: ActionMask,
     actor_key: Array,
-    source_bank: SharedObsSensorSourceBankV1,
+    source_bank: SharedObsSensorSourceBankV2,
     recipient_source_availability: Array,
-    recipient_global_slot: Array,
 ) -> ActorAction:
     """Inherit TDM, replacing only Rogue pursuit and radius-bounded combat."""
     baseline = reactive_tdm_alpha_policy(
@@ -116,13 +115,11 @@ def reactive_tdm_beta_policy(
         actor_key,
         source_bank,
         recipient_source_availability,
-        recipient_global_slot,
     )
     allies, enemies, ally_visible, enemy_visible = compose_shared_obs_unit_features(
         recipient_observation,
         source_bank,
         recipient_source_availability,
-        recipient_global_slot,
     )
     ally_living = living_candidates(allies, ally_visible)
     enemy_living = living_candidates(enemies, enemy_visible)
@@ -134,7 +131,7 @@ def reactive_tdm_beta_policy(
     )
     prey_row = lowest_health_row(enemies, prey_candidates)
     body_mask = jnp.concatenate((ally_living, enemy_living))
-    body_mask = body_mask.at[recipient_global_slot % MAX_AGENTS_PER_TEAM].set(False)
+    body_mask = body_mask.at[recipient_observation.self_ally_index].set(False)
     body_mask = body_mask.at[MAX_AGENTS_PER_TEAM + prey_row].set(False)
     pursuit_move = _body_aware_move(
         recipient_observation,

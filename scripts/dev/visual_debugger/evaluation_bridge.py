@@ -24,26 +24,26 @@ from marl_battlegrounds.core.types import (
     EnvConfig,
 )
 from marl_battlegrounds.evaluation.actor_projection import (
-    NO_SHARED_OBS_ACTOR_PROJECTION_V2,
-    SHARED_OBS_ACTOR_PROJECTION_V1,
+    NO_SHARED_OBS_ACTOR_PROJECTION_V3,
+    SHARED_OBS_ACTOR_PROJECTION_V2,
 )
 from marl_battlegrounds.evaluation.catalog import (
-    build_evaluation_episode_context_v1,
+    build_evaluation_episode_context_v3,
     build_evaluation_seed_protocol_v1,
     build_resolved_env_config_v1,
 )
 from marl_battlegrounds.evaluation.models import (
     AggregationKeyV1,
-    AssignedPolicySlotV1,
+    AssignedPolicySlotV2,
     CodeRevisionV1,
     ContentAddressedIdentityV1,
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContextV3,
     EvaluationEpisodeIdentityV1,
     EvaluationModel,
     EvaluationRole,
     ExecutionInformationMode,
     NotApplicablePolicySlotV1,
-    PolicyAssignmentSlotV1,
+    PolicyAssignmentSlotV2,
     VersionedIdentityV1,
     canonical_digest_sha256,
     canonical_json_bytes,
@@ -286,7 +286,7 @@ def _policy_assignments(
     action_contract_digest: str,
     reactive_tdm_identity: ContentAddressedIdentityV1 | None = None,
     scenario_controller_identity: ContentAddressedIdentityV1 | None = None,
-) -> tuple[PolicyAssignmentSlotV1, ...]:
+) -> tuple[PolicyAssignmentSlotV2, ...]:
     profile = config.agent_profile
     active = np.asarray(profile.active_mask, dtype=np.bool_)
     team_ids = np.asarray(profile.team_ids, dtype=np.int32)
@@ -294,7 +294,7 @@ def _policy_assignments(
     if not bool(active[focal_slot]):
         raise ValueError("scenario default actor must be configured active")
     focal_team_id = int(team_ids[focal_slot])
-    rows: list[PolicyAssignmentSlotV1] = []
+    rows: list[PolicyAssignmentSlotV2] = []
     for slot in range(MAX_AGENT_SLOTS):
         if not bool(active[slot]):
             rows.append(NotApplicablePolicySlotV1(global_slot=slot))
@@ -328,8 +328,9 @@ def _policy_assignments(
             algorithm_id = "not_applicable"
             execution_mode = "deterministic"
         rows.append(
-            AssignedPolicySlotV1(
+            AssignedPolicySlotV2(
                 global_slot=slot,
+                lifecycle="frozen",
                 evaluation_role=role,
                 policy_kind=policy_kind,
                 policy_id=f"debugger-action-source:{policy_kind}:slot:{slot}",
@@ -382,7 +383,7 @@ def build_debugger_evaluation_context_v1(
     team_b_controller: TeamBController,
     execution_information_mode: ExecutionInformationMode,
     expected_horizon: int | None = None,
-) -> EvaluationEpisodeContextV1:
+) -> EvaluationEpisodeContextV3:
     """Build the truthful custom, nonofficial CP2 context for one live episode.
 
     The eventual ``create_session``/restart integration must construct this
@@ -450,9 +451,9 @@ def build_debugger_evaluation_context_v1(
         else resolved_config.canonical_digest_sha256
     )
     actor_projection = (
-        SHARED_OBS_ACTOR_PROJECTION_V1
+        SHARED_OBS_ACTOR_PROJECTION_V2
         if execution_information_mode == "shared_obs"
-        else NO_SHARED_OBS_ACTOR_PROJECTION_V2
+        else NO_SHARED_OBS_ACTOR_PROJECTION_V3
     )
 
     def controller_identity(
@@ -596,7 +597,7 @@ def build_debugger_evaluation_context_v1(
     active_roles = {
         row.evaluation_role
         for row in assignments
-        if isinstance(row, AssignedPolicySlotV1)
+        if isinstance(row, AssignedPolicySlotV2)
     }
 
     def seed(namespace: str) -> int:
@@ -694,8 +695,9 @@ def build_debugger_evaluation_context_v1(
         )
     aggregation_keys.sort(key=lambda row: row.name)
 
-    return build_evaluation_episode_context_v1(
+    return build_evaluation_episode_context_v3(
         identity=identity,
+        scenario_name=scenario.name,
         aggregation_keys=tuple(aggregation_keys),
         expected_horizon=horizon,
         config=config,

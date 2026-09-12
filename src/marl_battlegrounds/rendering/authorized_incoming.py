@@ -22,8 +22,12 @@ from pydantic import ConfigDict, Field, TypeAdapter
 
 from marl_battlegrounds.evaluation.models import StaticMechanicsCatalogV1
 from marl_battlegrounds.evaluation.pov import (
+    ActorPovAdjacentTransitionSlice,
     ActorPovAdjacentTransitionSliceV1,
+    ActorPovAdjacentTransitionSliceV2,
+    ActorPovAxisMapping,
     ActorPovAxisMappingV1,
+    ActorPovAxisMappingV2,
     ActorPovEpisodeEndedCueV1,
     ActorPovOwnActionOutcomeCueV1,
     ActorPovOwnCooldownChangedCueV1,
@@ -1551,7 +1555,7 @@ def _cue_identity(cue: ActorPovPresentationCueV1) -> _CueIdentityV1:
 
 def _body_public_id(
     cue: ActorPovVisibleBodyObservationChangedCueV1,
-    axis_mapping: ActorPovAxisMappingV1,
+    axis_mapping: ActorPovAxisMapping,
 ) -> str:
     if cue.relation == "ally":
         return axis_mapping.ally_observation_row_public_agent_id_by_id[
@@ -1581,11 +1585,14 @@ def _compose_no_shared_obs_incoming_summary_v1(
     start: NoSharedObsAuthorizedScenePartsV1,
     transition: ActorPovTransitionV1,
     successor: NoSharedObsAuthorizedScenePartsV1,
-    axis_mapping: ActorPovAxisMappingV1,
+    axis_mapping: ActorPovAxisMapping,
 ) -> NoSharedObsIncomingSummaryV1:
     """Compose from a coherent index-owned transition; intentionally private."""
     _validate_no_shared_endpoints(start, transition, successor)
-    if type(axis_mapping) is not ActorPovAxisMappingV1:
+    if (
+        type(axis_mapping) is not ActorPovAxisMappingV1
+        and type(axis_mapping) is not ActorPovAxisMappingV2
+    ):
         raise TypeError("NoSharedObs cue compositor requires exact axis mapping.")
     start_by_public, successor_by_public = _validate_cross_epoch_agent_identity(
         start.scene.agents,
@@ -1811,19 +1818,20 @@ def build_replay_no_shared_obs_incoming_summary_v1(
 
 
 def build_live_no_shared_obs_incoming_summary_v1(
-    source: ActorPovAdjacentTransitionSliceV1,
+    source: ActorPovAdjacentTransitionSlice,
     *,
     public_catalog: StaticMechanicsCatalogV1,
     authority_session_id: str,
 ) -> NoSharedObsIncomingSummaryV1:
     """Build one live incoming summary from the exact adjacent POV carrier."""
-    if type(source) is not ActorPovAdjacentTransitionSliceV1:
+    if (
+        type(source) is not ActorPovAdjacentTransitionSliceV1
+        and type(source) is not ActorPovAdjacentTransitionSliceV2
+    ):
         raise TypeError(
             "NoSharedObs live incoming requires an exact adjacent POV slice."
         )
-    validated_source = ActorPovAdjacentTransitionSliceV1.model_validate(
-        source.model_dump(mode="python")
-    )
+    validated_source = type(source).model_validate(source.model_dump(mode="python"))
     start = build_no_shared_obs_authorized_scene_v1(
         validated_source,
         public_catalog=public_catalog,

@@ -18,7 +18,7 @@ from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV1,
     AssignedPolicySlotV2,
     ContentAddressedIdentityV1,
-    EvaluationFrameV1,
+    EvaluationFrame,
     EvaluationModel,
     EvaluationSeedProtocolV1,
     EvaluationSeedProtocolV2,
@@ -27,6 +27,7 @@ from marl_battlegrounds.evaluation.models import (
     RosterSlotV1,
     VersionedIdentityV1,
     canonical_digest_sha256,
+    evaluation_frame_type,
 )
 from marl_battlegrounds.evaluation.replay import (
     EvaluationMetricReportArtifactV1,
@@ -41,6 +42,11 @@ from marl_battlegrounds.evaluation.replay_v2 import (
     ReplayArtifactReferenceV2,
     ReplayArtifactV2,
     replay_reference_v2,
+)
+from marl_battlegrounds.evaluation.replay_v3 import (
+    ReplayArtifactReferenceV3,
+    ReplayArtifactV3,
+    replay_reference_v3,
 )
 from marl_battlegrounds.evaluation.validation import validate_declared_model_tree
 
@@ -71,6 +77,7 @@ SCENARIO_SEED_SCHEDULE_SCHEMA_ID = (
 SCENARIO_SCHEMA_VERSION: Literal[1] = 1
 SCENARIO_SCHEMA_VERSION_V2: Literal[2] = 2
 SCENARIO_SCHEMA_VERSION_V3: Literal[3] = 3
+SCENARIO_SCHEMA_VERSION_V4: Literal[4] = 4
 
 type ScenarioClassification = Literal["official", "custom"]
 type ScenarioEvaluationRole = Literal[
@@ -830,21 +837,21 @@ def resolved_initial_state_digest_sha256(
 
 
 def _resolved_initial_state_digest_from_validated_frame_v2(
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
 ) -> str:
     return resolved_initial_state_digest_sha256(
         frame.simulator_step_count, frame.snapshot
     )
 
 
-def resolved_initial_state_digest_sha256_v2(frame: EvaluationFrameV1) -> str:
+def resolved_initial_state_digest_sha256_v2(frame: EvaluationFrame) -> str:
     """Hash only the stable simulator epoch and privileged state at frame zero."""
     canonical_frame = cast(
-        EvaluationFrameV1,
+        EvaluationFrame,
         validate_declared_model_tree(
             frame,
             record_name="scenario resolved initial-state frame",
-            expected_type=EvaluationFrameV1,
+            expected_type=evaluation_frame_type(frame),
         ),
     )
     return _resolved_initial_state_digest_from_validated_frame_v2(canonical_frame)
@@ -1171,7 +1178,9 @@ class _ScenarioEvaluationRecordFields(EvaluationModel):
         self,
         specification: ResolvedScenarioSpecificationV2
         | ResolvedScenarioSpecificationV3,
-        replay_reference: ReplayArtifactReferenceV1 | ReplayArtifactReferenceV2,
+        replay_reference: ReplayArtifactReferenceV1
+        | ReplayArtifactReferenceV2
+        | ReplayArtifactReferenceV3,
     ) -> None:
         for result in self.measurement_results:
             _require_stable_nested_model(
@@ -1334,6 +1343,37 @@ class ScenarioEvaluationRecordV3(_ScenarioEvaluationRecordFields):
         return self
 
 
+def _require_schema_version_four(value: object) -> object:
+    if type(value) is not int or value != 4:
+        raise ValueError("schema_version must be the exact integer 4")
+    return value
+
+
+class ScenarioEvaluationRecordV4(_ScenarioEvaluationRecordFields):
+    """Replay-backed current scenario endpoint evidence."""
+
+    schema_version: Annotated[
+        Literal[4], BeforeValidator(_require_schema_version_four)
+    ] = 4
+    specification: ResolvedScenarioSpecificationV3
+    replay_reference: ReplayArtifactReferenceV3
+
+    @model_validator(mode="after")
+    def _validate_record(self) -> ScenarioEvaluationRecordV4:
+        _require_stable_nested_model(
+            self.specification,
+            record_name="scenario specification",
+            expected_types=(ResolvedScenarioSpecificationV3,),
+        )
+        _require_stable_nested_model(
+            self.replay_reference,
+            record_name="scenario replay reference",
+            expected_types=(ReplayArtifactReferenceV3,),
+        )
+        self._check_record(self.specification, self.replay_reference)
+        return self
+
+
 def _validate_scenario_evaluation_record_against_validated_replay_v2(
     canonical_record: ScenarioEvaluationRecordV2,
     replay: ReplayArtifactV1,
@@ -1356,8 +1396,10 @@ def _validate_scenario_evaluation_record_against_validated_replay_v2(
 
 
 def _validate_scenario_replay_joins(
-    canonical_record: ScenarioEvaluationRecordV2 | ScenarioEvaluationRecordV3,
-    replay: ReplayArtifactV1 | ReplayArtifactV2,
+    canonical_record: ScenarioEvaluationRecordV2
+    | ScenarioEvaluationRecordV3
+    | ScenarioEvaluationRecordV4,
+    replay: ReplayArtifactV1 | ReplayArtifactV2 | ReplayArtifactV3,
     assigned_type: type[AssignedPolicySlotV1] | type[AssignedPolicySlotV2],
 ) -> None:
     context = replay.header.context
@@ -1484,15 +1526,18 @@ def _validate_scenario_replay_joins(
 
 
 def _validate_official_scenario_replay_v2(
-    replay: ReplayArtifactV1 | ReplayArtifactV2,
+    replay: ReplayArtifactV1 | ReplayArtifactV2 | ReplayArtifactV3,
 ) -> None:
     from marl_battlegrounds.evaluation.catalog import (
         _validate_official_scenario_context_v2,  # pyright: ignore[reportPrivateUsage]
         _validate_official_scenario_context_v3,  # pyright: ignore[reportPrivateUsage]
+        _validate_official_scenario_context_v4,  # pyright: ignore[reportPrivateUsage]
     )
 
     context = replay.header.context
-    if isinstance(replay, ReplayArtifactV2):
+    if isinstance(replay, ReplayArtifactV3):
+        _validate_official_scenario_context_v4(replay.header.context, replay.frames[0])
+    elif isinstance(replay, ReplayArtifactV2):
         _validate_official_scenario_context_v3(replay.header.context, replay.frames[0])
     else:
         _validate_official_scenario_context_v2(replay.header.context, replay.frames[0])
@@ -1687,6 +1732,70 @@ def build_scenario_evaluation_record_v3(
     return record
 
 
+def validate_scenario_evaluation_record_v4(
+    record: ScenarioEvaluationRecordV4,
+    replay: ReplayArtifactV3,
+) -> None:
+    """Validate current endpoint evidence without loading or inventing metric JSON."""
+    canonical_record = cast(
+        ScenarioEvaluationRecordV4,
+        validate_declared_model_tree(
+            record,
+            record_name="scenario evaluation record",
+            expected_type=ScenarioEvaluationRecordV4,
+        ),
+    )
+    validate_declared_model_tree(
+        replay, record_name="scenario replay", expected_type=ReplayArtifactV3
+    )
+    if canonical_record.replay_reference != replay_reference_v3(replay):
+        raise ValueError("scenario replay reference does not match replay content")
+    _validate_scenario_replay_joins(canonical_record, replay, AssignedPolicySlotV2)
+
+
+def validate_official_scenario_evaluation_record_v4(
+    record: ScenarioEvaluationRecordV4,
+    replay: ReplayArtifactV3,
+) -> None:
+    """Validate current evidence and explicitly check live official product rules."""
+    validate_scenario_evaluation_record_v4(record, replay)
+    _validate_official_scenario_replay_v2(replay)
+
+
+def build_scenario_evaluation_record_v4(
+    specification: ResolvedScenarioSpecificationV3,
+    replay: ReplayArtifactV3,
+    *,
+    schedule_coordinate: int,
+    measurement_results: tuple[ScenarioMeasurementResultV1, ...],
+    violation_results: tuple[ScenarioViolationResultV1, ...],
+    predicate_result: ScenarioPredicateResultV1,
+) -> ScenarioEvaluationRecordV4:
+    """Join current scenario endpoints directly to their actual replay evidence."""
+    payload = {
+        "schema_id": SCENARIO_EVALUATION_RECORD_SCHEMA_ID,
+        "schema_version": 4,
+        "record_id": f"{replay.header.context.identity.episode_id}:scenario-evaluation",
+        "specification": specification,
+        "schedule_coordinate": schedule_coordinate,
+        "replay_reference": replay_reference_v3(replay),
+        "realized_initial_frame_digest_sha256": canonical_digest_sha256(
+            replay.frames[0]
+        ),
+        "measurement_results": measurement_results,
+        "violation_results": violation_results,
+        "predicate_result": predicate_result,
+    }
+    record = ScenarioEvaluationRecordV4.model_validate(
+        {
+            **payload,
+            "canonical_digest_sha256": canonical_digest_sha256(payload),
+        }
+    )
+    validate_official_scenario_evaluation_record_v4(record, replay)
+    return record
+
+
 __all__ = [
     "SCENARIO_EVALUATION_RECORD_SCHEMA_ID",
     "SCENARIO_MEASUREMENT_DEFINITION_SCHEMA_ID",
@@ -1695,6 +1804,7 @@ __all__ = [
     "SCENARIO_SCHEMA_VERSION",
     "SCENARIO_SCHEMA_VERSION_V2",
     "SCENARIO_SCHEMA_VERSION_V3",
+    "SCENARIO_SCHEMA_VERSION_V4",
     "SCENARIO_SEED_SCHEDULE_SCHEMA_ID",
     "SCENARIO_SPECIFICATION_SCHEMA_ID",
     "SCENARIO_VIOLATION_DEFINITION_SCHEMA_ID",
@@ -1710,6 +1820,7 @@ __all__ = [
     "ScenarioEvaluationRecordV1",
     "ScenarioEvaluationRecordV2",
     "ScenarioEvaluationRecordV3",
+    "ScenarioEvaluationRecordV4",
     "ScenarioEvaluationRole",
     "ScenarioFixedSlotRoleV2",
     "ScenarioMeasurementDefinitionV1",
@@ -1729,11 +1840,14 @@ __all__ = [
     "build_scenario_evaluation_record_v1",
     "build_scenario_evaluation_record_v2",
     "build_scenario_evaluation_record_v3",
+    "build_scenario_evaluation_record_v4",
     "resolved_initial_state_digest_sha256",
     "resolved_initial_state_digest_sha256_v2",
     "validate_official_scenario_evaluation_record_v2",
     "validate_official_scenario_evaluation_record_v3",
+    "validate_official_scenario_evaluation_record_v4",
     "validate_scenario_evaluation_record_v1",
     "validate_scenario_evaluation_record_v2",
     "validate_scenario_evaluation_record_v3",
+    "validate_scenario_evaluation_record_v4",
 ]

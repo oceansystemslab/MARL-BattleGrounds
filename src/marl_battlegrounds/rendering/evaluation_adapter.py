@@ -9,7 +9,7 @@ source evidence.
 
 from dataclasses import dataclass
 from math import isfinite
-from typing import Literal, TypedDict, cast
+from typing import Literal, TypedDict, cast, overload
 
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
@@ -42,7 +42,9 @@ from marl_battlegrounds.evaluation.models import (
 from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
     EvaluationEventV1,
+    EvaluationFrame,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     EvaluationTransitionV1,
     evaluation_context_type,
 )
@@ -96,7 +98,9 @@ from marl_battlegrounds.evaluation.models import (
 )
 from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
+    ActorPovAxisMapping,
     ActorPovAxisMappingV1,
+    ActorPovAxisMappingV2,
     ActorPovPreviousTimestepActionsV1,
     ActorPovSpawnLifecycleV1,
 )
@@ -126,7 +130,6 @@ from marl_battlegrounds.rendering.evaluation_wire_features import (
     AGENT_FEATURE_MAX_HEALTH_V1,
     AGENT_FEATURE_RADIUS_V1,
     AGENT_FEATURE_STEPS_UNTIL_OUT_OF_COMBAT_V1,
-    AGENT_FEATURE_TEAM_ID_V1,
     AGENT_FEATURE_ULTIMATE_COOLDOWN_REMAINING_V1,
     AGENT_FEATURE_X_V1,
     AGENT_FEATURE_Y_V1,
@@ -142,6 +145,7 @@ from marl_battlegrounds.rendering.evaluation_wire_features import (
     OBSTACLE_FEATURE_WIDTH_V1,
     OBSTACLE_FEATURE_X_V1,
     OBSTACLE_FEATURE_Y_V1,
+    decode_agent_feature_row,
 )
 from marl_battlegrounds.rendering.pov_scene import (
     ActorPovRespawnWaveSceneV1,
@@ -342,7 +346,7 @@ def _require_tuple_shape(
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class SharedObsBaseSensorFrameV1:
+class _SharedObsBaseSensorFrame:
     """One selected recipient's source-only base-sensor frame."""
 
     schema_version: int
@@ -367,7 +371,8 @@ class SharedObsBaseSensorFrameV1:
 
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or (
-            self.schema_version != SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION
+            self.schema_version
+            != (2 if type(self) is SharedObsBaseSensorFrameV2 else 1)
         ):
             raise ValueError("unknown SharedObs base-sensor frame version.")
         if self.observation_materialization != "source_material_only":
@@ -451,6 +456,28 @@ class SharedObsBaseSensorFrameV1:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class SharedObsBaseSensorFrameV1(_SharedObsBaseSensorFrame):
+    """Historical source material with physical team IDs in column three."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SharedObsBaseSensorFrameV2(_SharedObsBaseSensorFrame):
+    """Current source material with actor-relative relation flags."""
+
+    self_ally_index: int
+
+    def __post_init__(self) -> None:
+        super(SharedObsBaseSensorFrameV2, self).__post_init__()
+        if type(self.self_ally_index) is not int or not 0 <= self.self_ally_index < 5:
+            raise ValueError("self_ally_index must be an integer from zero to four.")
+        if self.self_features[3] != 0.0:
+            raise ValueError("self is_enemy must be zero.")
+
+
+type SharedObsBaseSensorFrame = SharedObsBaseSensorFrameV1 | SharedObsBaseSensorFrameV2
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsBaseSensorSceneV1:
     """Selected actor's base-sensor scene, explicitly not composed SharedObs."""
 
@@ -515,24 +542,25 @@ class SharedObsBaseSensorSceneV1:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class SharedObsSourceMaterialProjectionV1:
+class _SharedObsSourceMaterialProjection:
     """Non-exportable base-sensor and availability evidence for SharedObs."""
 
     schema_version: int
     disclosure_label: str
     observation_materialization: Literal["source_material_only"]
     exact_actor_input_export_available: Literal[False]
-    axis_mapping: ActorPovAxisMappingV1
+    axis_mapping: ActorPovAxisMapping
     ally_observation_row_global_slot_by_id: tuple[int, ...]
     enemy_observation_row_global_slot_by_id: tuple[int, ...]
-    base_sensor_frame: SharedObsBaseSensorFrameV1
+    base_sensor_frame: SharedObsBaseSensorFrame
     base_sensor_scene: SharedObsBaseSensorSceneV1
     incoming_transition_id: str | None
     sensor_source_availability: tuple[SharedObsSensorSourceAvailabilityV1, ...]
 
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or (
-            self.schema_version != SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION
+            self.schema_version
+            != (2 if type(self) is SharedObsSourceMaterialProjectionV2 else 1)
         ):
             raise ValueError("unknown SharedObs source-material projection version.")
         if self.disclosure_label != _SHARED_OBS_SOURCE_MATERIAL_DISCLOSURE:
@@ -541,9 +569,12 @@ class SharedObsSourceMaterialProjectionV1:
             raise ValueError("SharedObs projection must remain source material only.")
         if self.exact_actor_input_export_available is not False:
             raise ValueError("SharedObs exact actor-input export is unavailable.")
-        if type(self.axis_mapping) is not ActorPovAxisMappingV1:
+        if (
+            type(self.axis_mapping) is not ActorPovAxisMappingV1
+            and type(self.axis_mapping) is not ActorPovAxisMappingV2
+        ):
             raise ValueError("axis_mapping must be the exact actor POV mapping root.")
-        reconstructed_axis = ActorPovAxisMappingV1.model_validate(
+        reconstructed_axis = type(self.axis_mapping).model_validate(
             self.axis_mapping.model_dump(mode="python")
         )
         if reconstructed_axis != self.axis_mapping:
@@ -567,7 +598,10 @@ class SharedObsSourceMaterialProjectionV1:
             )
         ) != set(range(MAX_AGENT_SLOTS_V1)):
             raise ValueError("SharedObs relation axes must partition global slots.")
-        if type(self.base_sensor_frame) is not SharedObsBaseSensorFrameV1:
+        if (
+            type(self.base_sensor_frame) is not SharedObsBaseSensorFrameV1
+            and type(self.base_sensor_frame) is not SharedObsBaseSensorFrameV2
+        ):
             raise ValueError(
                 "base_sensor_frame must use its exact source-material root."
             )
@@ -584,6 +618,13 @@ class SharedObsSourceMaterialProjectionV1:
             != self.base_sensor_frame.public_agent_id
         ):
             raise ValueError("SharedObs base-sensor frame and scene do not join.")
+        if (
+            self.base_sensor_frame.schema_version != self.schema_version
+            or self.axis_mapping.schema_version != self.schema_version
+        ):
+            raise ValueError(
+                "SharedObs projection, frame and axes must use the same schema"
+            )
         expected_transition_id = (
             None
             if self.base_sensor_frame.frame_index == 0
@@ -677,13 +718,34 @@ class SharedObsSourceMaterialProjectionV1:
             raise ValueError("SharedObs base-sensor scene must derive from its frame.")
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SharedObsSourceMaterialProjectionV1(_SharedObsSourceMaterialProjection):
+    """Historical source material with physical team IDs in column three."""
+
+    axis_mapping: ActorPovAxisMappingV1
+    base_sensor_frame: SharedObsBaseSensorFrameV1
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SharedObsSourceMaterialProjectionV2(_SharedObsSourceMaterialProjection):
+    """Current source material with actor-relative relation flags."""
+
+    axis_mapping: ActorPovAxisMappingV2
+    base_sensor_frame: SharedObsBaseSensorFrameV2
+
+
+type SharedObsSourceMaterialProjection = (
+    SharedObsSourceMaterialProjectionV1 | SharedObsSourceMaterialProjectionV2
+)
+
+
 def _validate_projection_inputs(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     transition_view: EvaluationTransitionViewV1 | None,
 ) -> EvaluationTransitionViewV1 | None:
     evaluation_context_type(context)
-    if type(frame) is not EvaluationFrameV1:
+    if type(frame) is not EvaluationFrameV1 and type(frame) is not EvaluationFrameV2:
         raise TypeError("frame must be the exact EvaluationFrameV1 root.")
     if frame.episode_id != context.identity.episode_id:
         raise ValueError("selected frame must join the context episode.")
@@ -739,7 +801,7 @@ def _base_sensor_axis_mapping(
     context: EvaluationEpisodeContext,
     *,
     selected_global_slot: int,
-) -> ActorPovAxisMappingV1:
+) -> ActorPovAxisMapping:
     catalog = context.static_mechanics_catalog
 
     def public_id(global_slot: int) -> str:
@@ -754,7 +816,10 @@ def _base_sensor_axis_mapping(
     target_slots = catalog.global_recipient_slot_by_actor_and_target_action[
         selected_global_slot
     ]
-    return ActorPovAxisMappingV1(
+    axis_type = (
+        ActorPovAxisMappingV2 if context.schema_version == 3 else ActorPovAxisMappingV1
+    )
+    return axis_type(
         actor_projection_identifier=context.actor_projection.identifier,
         actor_projection_version=context.actor_projection.version,
         target_action_recipient_public_agent_id_by_id=tuple(
@@ -779,17 +844,30 @@ def _base_sensor_axis_mapping(
 
 
 def _base_sensor_frame(
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     *,
     selected_global_slot: int,
     public_agent_id: str,
-) -> SharedObsBaseSensorFrameV1:
+) -> SharedObsBaseSensorFrame:
     observation = frame.base_observation
     previous = observation.previous_timestep_actions
     lifecycle = observation.spawn_lifecycle
     mask = frame.action_mask
-    return SharedObsBaseSensorFrameV1(
-        schema_version=SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION,
+    frame_type = (
+        SharedObsBaseSensorFrameV2
+        if type(frame) is EvaluationFrameV2
+        else SharedObsBaseSensorFrameV1
+    )
+    fields: dict[str, int] = {}
+    if type(frame) is EvaluationFrameV2:
+        fields = {
+            "self_ally_index": frame.base_observation.self_ally_index[
+                selected_global_slot
+            ]
+        }
+    return frame_type(
+        **fields,
+        schema_version=frame.schema_version,
         observation_materialization="source_material_only",
         episode_id=frame.episode_id,
         public_agent_id=public_agent_id,
@@ -884,7 +962,7 @@ def _base_sensor_frame(
     )
 
 
-def _base_sensor_map_scene(frame: SharedObsBaseSensorFrameV1) -> MapSceneV1:
+def _base_sensor_map_scene(frame: SharedObsBaseSensorFrame) -> MapSceneV1:
     obstacles: list[ObstacleSceneV1] = []
     for obstacle_slot, row in enumerate(frame.map_obstacle_features):
         if not _decode_wire_bool(
@@ -935,6 +1013,8 @@ def _base_sensor_visible_bodies(
     rows: tuple[tuple[float, ...], ...],
     visibility: tuple[bool, ...],
     public_agent_ids: tuple[str, ...],
+    schema_version: int,
+    configured_team_id: int,
 ) -> tuple[ActorPovVisibleBodySceneV1, ...]:
     bodies: list[ActorPovVisibleBodySceneV1] = []
     for observation_row, (row, visible) in enumerate(
@@ -954,12 +1034,14 @@ def _base_sensor_visible_bodies(
                 public_agent_id=public_agent_ids[observation_row],
                 position=(row[AGENT_FEATURE_X_V1], row[AGENT_FEATURE_Y_V1]),
                 radius=row[AGENT_FEATURE_RADIUS_V1],
-                team_id=_decode_wire_int(
-                    row[AGENT_FEATURE_TEAM_ID_V1],
-                    name=f"{relation} row {observation_row} team",
-                    minimum=1,
-                    maximum=2,
-                ),
+                team_id=decode_agent_feature_row(
+                    row,
+                    schema_version=schema_version,
+                    team_id=configured_team_id
+                    if relation == "ally"
+                    else 3 - configured_team_id,
+                    is_enemy=relation == "enemy",
+                ).team_id,
                 class_id=_decode_wire_int(
                     row[AGENT_FEATURE_CLASS_ID_V1],
                     name=f"{relation} row {observation_row} class",
@@ -990,13 +1072,13 @@ def _base_sensor_visible_bodies(
 
 
 def _shared_obs_base_sensor_scene(
-    base_sensor_frame: SharedObsBaseSensorFrameV1,
+    base_sensor_frame: SharedObsBaseSensorFrame,
     *,
     selected_global_slot: int,
     selected_team_local_slot: int,
     configured_team_id: int,
     class_id: int,
-    axis_mapping: ActorPovAxisMappingV1,
+    axis_mapping: ActorPovAxisMapping,
 ) -> SharedObsBaseSensorSceneV1:
     self_row = base_sensor_frame.self_features
     if not _decode_wire_bool(
@@ -1005,12 +1087,12 @@ def _shared_obs_base_sensor_scene(
     ):
         raise ValueError("selected SharedObs actor must remain configured active.")
     if (
-        _decode_wire_int(
-            self_row[AGENT_FEATURE_TEAM_ID_V1],
-            name="selected actor team",
-            minimum=1,
-            maximum=2,
-        )
+        decode_agent_feature_row(
+            self_row,
+            schema_version=base_sensor_frame.schema_version,
+            team_id=configured_team_id,
+            is_enemy=False,
+        ).team_id
         != configured_team_id
         or _decode_wire_int(
             self_row[AGENT_FEATURE_CLASS_ID_V1],
@@ -1100,6 +1182,8 @@ def _shared_obs_base_sensor_scene(
                 public_agent_ids=(
                     axis_mapping.ally_observation_row_public_agent_id_by_id
                 ),
+                schema_version=base_sensor_frame.schema_version,
+                configured_team_id=configured_team_id,
             ),
             *_base_sensor_visible_bodies(
                 relation="enemy",
@@ -1108,6 +1192,8 @@ def _shared_obs_base_sensor_scene(
                 public_agent_ids=(
                     axis_mapping.enemy_observation_row_public_agent_id_by_id
                 ),
+                schema_version=base_sensor_frame.schema_version,
+                configured_team_id=configured_team_id,
             ),
         ),
         spawn_pads=spawn_pads,
@@ -1248,7 +1334,7 @@ def _incoming_status_sources(
     }
 
 
-def _status_durations(frame: EvaluationFrameV1, global_slot: int) -> tuple[int, ...]:
+def _status_durations(frame: EvaluationFrame, global_slot: int) -> tuple[int, ...]:
     snapshot = frame.snapshot
     return (
         *snapshot.slow_durations[global_slot],
@@ -1261,7 +1347,7 @@ def _status_durations(frame: EvaluationFrameV1, global_slot: int) -> tuple[int, 
 
 def _status_source_state_from_frame(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     evidence_by_key: dict[tuple[int, int], tuple[StatusSourceEvidenceSceneV2, ...]],
 ) -> StatusSourceEvidenceStateV2:
     catalog = context.static_mechanics_catalog
@@ -1298,7 +1384,7 @@ def _status_source_state_from_frame(
 
 def initialize_status_source_evidence_v2(
     context: EvaluationEpisodeContext,
-    initial_frame: EvaluationFrameV1,
+    initial_frame: EvaluationFrame,
 ) -> StatusSourceEvidenceStateV2:
     """Initialize frame-zero status evidence without inventing source agents."""
     _validate_projection_inputs(context, initial_frame, None)
@@ -1366,7 +1452,7 @@ def advance_status_source_evidence_v2(
 
 def build_status_source_evidence_index_v2(
     context: EvaluationEpisodeContext,
-    frames: tuple[EvaluationFrameV1, ...],
+    frames: tuple[EvaluationFrame, ...],
     transitions: tuple[EvaluationTransitionV1, ...],
 ) -> StatusSourceEvidenceIndexV2:
     """Build one O(T) replay index through the live replacement-state reducer."""
@@ -1396,7 +1482,7 @@ def build_status_source_evidence_index_v2(
 
 def _status_scenes(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     global_slot: int,
     source_evidence: dict[tuple[int, int], tuple[StatusSourceEvidenceSceneV2, ...]],
 ) -> tuple[StatusSceneV2, ...]:
@@ -1450,7 +1536,7 @@ def _incoming_respawn_event_ids(
 
 def _agent_scenes(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     transition_view: EvaluationTransitionViewV1 | None,
     status_source_evidence_state: StatusSourceEvidenceStateV2 | None = None,
 ) -> tuple[AgentSceneV2, ...]:
@@ -1539,7 +1625,7 @@ def _agent_scenes(
 
 def _aura_fields(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
 ) -> tuple[AuraFieldSceneV2, ...]:
     catalog = context.static_mechanics_catalog
     fields: list[AuraFieldSceneV2] = []
@@ -1595,7 +1681,7 @@ def _spawn_pads(
 
 def _respawn_waves(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
 ) -> tuple[RespawnWaveSceneV2, ...]:
     config = context.resolved_env_config
     return tuple(
@@ -1732,7 +1818,7 @@ def validate_oracle_scene_static_authority_v1(
 
 def _selection_projection(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     presentation: EvaluationScenePresentationStateV1,
 ) -> tuple[
     tuple[RangeSceneV1, ...],
@@ -1805,7 +1891,7 @@ def _selection_projection(
 
 def _observer_visibility_projection(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     presentation: EvaluationScenePresentationStateV1,
 ) -> tuple[ObserverVisibilitySceneV1, ...]:
     """Project one researcher's exact recorded base-sensor visibility row."""
@@ -1839,7 +1925,7 @@ def _observer_visibility_projection(
 
 def build_evaluation_battlefield_scene_v2(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     *,
     transition_view: EvaluationTransitionViewV1 | None = None,
     audience: Literal["researcher"] = "researcher",
@@ -1898,11 +1984,11 @@ def build_evaluation_battlefield_scene_v2(
 
 def _build_shared_obs_source_material_projection_v1(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     *,
     selected_global_slot: int,
     incoming_transition_id: str | None,
-) -> SharedObsSourceMaterialProjectionV1:
+) -> SharedObsSourceMaterialProjection:
     """Construct one projection after the caller validates its authority root."""
     if context.execution_information_mode != "shared_obs":
         raise ValueError(
@@ -1980,8 +2066,13 @@ def _build_shared_obs_source_material_projection_v1(
                 ],
             )
         )
-    return SharedObsSourceMaterialProjectionV1(
-        schema_version=SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION,
+    projection_type = (
+        SharedObsSourceMaterialProjectionV2
+        if type(frame) is EvaluationFrameV2
+        else SharedObsSourceMaterialProjectionV1
+    )
+    projection = cast(type[_SharedObsSourceMaterialProjection], projection_type)(
+        schema_version=frame.schema_version,
         disclosure_label=_SHARED_OBS_SOURCE_MATERIAL_DISCLOSURE,
         observation_materialization="source_material_only",
         exact_actor_input_export_available=False,
@@ -1993,15 +2084,46 @@ def _build_shared_obs_source_material_projection_v1(
         incoming_transition_id=incoming_transition_id,
         sensor_source_availability=tuple(source_rows),
     )
+    return cast(SharedObsSourceMaterialProjection, projection)
 
 
+@overload
 def build_shared_obs_source_material_projection_v1(
     context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     *,
     selected_global_slot: int,
     transition_view: EvaluationTransitionViewV1 | None = None,
-) -> SharedObsSourceMaterialProjectionV1:
+) -> SharedObsSourceMaterialProjectionV1: ...
+
+
+@overload
+def build_shared_obs_source_material_projection_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrameV2,
+    *,
+    selected_global_slot: int,
+    transition_view: EvaluationTransitionViewV1 | None = None,
+) -> SharedObsSourceMaterialProjectionV2: ...
+
+
+@overload
+def build_shared_obs_source_material_projection_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrame,
+    *,
+    selected_global_slot: int,
+    transition_view: EvaluationTransitionViewV1 | None = None,
+) -> SharedObsSourceMaterialProjection: ...
+
+
+def build_shared_obs_source_material_projection_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrame,
+    *,
+    selected_global_slot: int,
+    transition_view: EvaluationTransitionViewV1 | None = None,
+) -> SharedObsSourceMaterialProjection:
     """Project labelled base-sensor and availability evidence for SharedObs.
 
     This full-record researcher aid deliberately does not export or claim the
@@ -2018,12 +2140,39 @@ def build_shared_obs_source_material_projection_v1(
     )
 
 
+@overload
 def build_shared_obs_authority_source_material_projection_v1(
     context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     *,
     selected_global_slot: int,
-) -> SharedObsSourceMaterialProjectionV1:
+) -> SharedObsSourceMaterialProjectionV1: ...
+
+
+@overload
+def build_shared_obs_authority_source_material_projection_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrameV2,
+    *,
+    selected_global_slot: int,
+) -> SharedObsSourceMaterialProjectionV2: ...
+
+
+@overload
+def build_shared_obs_authority_source_material_projection_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrame,
+    *,
+    selected_global_slot: int,
+) -> SharedObsSourceMaterialProjection: ...
+
+
+def build_shared_obs_authority_source_material_projection_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrame,
+    *,
+    selected_global_slot: int,
+) -> SharedObsSourceMaterialProjection:
     """Build Shared visual-union authority without transition/history input."""
     validate_context_joined_evaluation_frame_v1(context, frame)
     incoming_transition_id = (
@@ -2390,7 +2539,7 @@ def build_visual_event_batch_v2(
 
 def build_researcher_analyzer_projection_v2(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     *,
     transition_view: EvaluationTransitionViewV1 | None = None,
     presentation: EvaluationScenePresentationStateV1 | None = None,
@@ -2433,10 +2582,14 @@ def build_researcher_analyzer_projection_v2(
 __all__ = [
     "SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION",
     "EvaluationScenePresentationStateV1",
+    "SharedObsBaseSensorFrame",
     "SharedObsBaseSensorFrameV1",
+    "SharedObsBaseSensorFrameV2",
     "SharedObsBaseSensorSceneV1",
     "SharedObsSensorSourceAvailabilityV1",
+    "SharedObsSourceMaterialProjection",
     "SharedObsSourceMaterialProjectionV1",
+    "SharedObsSourceMaterialProjectionV2",
     "advance_status_source_evidence_v2",
     "build_evaluation_battlefield_scene_v2",
     "build_researcher_analyzer_projection_v2",

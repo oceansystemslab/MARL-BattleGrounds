@@ -20,11 +20,11 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_DELAY_STEPS,
     AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_HEALTH_REGEN_FRACTION_PER_STEP,
     AGENT_FEATURE_CLASS_ID,
+    AGENT_FEATURE_IS_ENEMY,
     AGENT_FEATURE_MAX_HEALTH,
     AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
     AGENT_FEATURE_STEPS_UNTIL_OUT_OF_COMBAT,
-    AGENT_FEATURE_TEAM_ID,
     AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
     ENVIRONMENT_DIMENSIONS,
     MAGE_CLASS_ID,
@@ -201,7 +201,7 @@ def test_reset_initializes_dynamic_state_from_resolved_profile() -> None:
 
     static_columns = (
         (AGENT_FEATURE_RADIUS, profile.agent_radii),
-        (AGENT_FEATURE_TEAM_ID, profile.team_ids.astype(jnp.float32)),
+        (AGENT_FEATURE_IS_ENEMY, jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32)),
         (AGENT_FEATURE_ACTIVE, profile.active_mask.astype(jnp.float32)),
         (AGENT_FEATURE_CLASS_ID, profile.class_ids.astype(jnp.float32)),
         (AGENT_FEATURE_BASE_MOVEMENT_SPEED, profile.base_movement_speeds),

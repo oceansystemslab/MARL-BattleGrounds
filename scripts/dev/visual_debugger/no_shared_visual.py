@@ -1,11 +1,7 @@
-"""Visual-only NoSharedObs V1 adapter over canonical V2 episode records.
+"""Current exact NoSharedObs views and the historical V2 visual adapter.
 
-The evaluation context retains the canonical V2 actor-input identity so policy
-capture and reconstruction remain truthful.  The existing debugger renderer
-needs only the established V1 recipient-safe visual slice, which predates the
-public class-ID leaf added to the policy projection.  This module confines that
-presentation compatibility boundary; it never changes captured records or
-policy inputs.
+Current Context V3 keeps its relative flags and self index. Historical V2
+records retain the older visual-only route without claiming exact input export.
 """
 
 from marl_battlegrounds.evaluation.actor_projection import (
@@ -15,7 +11,7 @@ from marl_battlegrounds.evaluation.actor_projection import (
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
-    EvaluationFrameV1,
+    EvaluationFrame,
     VersionedIdentityV1,
     canonical_digest_sha256,
     evaluation_context_type,
@@ -23,9 +19,10 @@ from marl_battlegrounds.evaluation.models import (
 from marl_battlegrounds.evaluation.pov import (
     ACTOR_POV_CONTENT_SCHEMA_ID,
     ACTOR_POV_SCHEMA_VERSION,
-    ActorPovAdjacentTransitionSliceV1,
-    ActorPovCurrentSliceV1,
+    ActorPovAdjacentTransitionSlice,
+    ActorPovCurrentSlice,
     ActorPovEpisodeCompletionV1,
+    ActorPovReplayContent,
     ActorPovReplayContentV1,
     build_actor_pov_adjacent_transition_slice_v1,
     build_actor_pov_current_slice_v1,
@@ -48,7 +45,7 @@ def _visual_context_v1(
     evaluation_context_type(context)
     if context.execution_information_mode != "no_shared_obs":
         raise ValueError("NoSharedObs visual slices require no_shared_obs execution")
-    if context.actor_projection.version == 1:
+    if context.schema_version == 3 or context.actor_projection.version == 1:
         return context
     if (
         context.actor_projection.version != 1
@@ -60,12 +57,19 @@ def _visual_context_v1(
 
 def build_live_no_shared_obs_visual_current_slice_v1(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     *,
     global_slot: int,
     incoming_transition_view: EvaluationTransitionViewV1 | None = None,
-) -> ActorPovCurrentSliceV1:
+) -> ActorPovCurrentSlice:
     """Build the established visual slice without changing capture authority."""
+    if context.schema_version == 3:
+        return build_actor_pov_current_slice_v1(
+            context,
+            frame,
+            global_slot=global_slot,
+            incoming_transition_view=incoming_transition_view,
+        )
     visual_context = _visual_context_v1(context)
     visual_incoming = (
         None
@@ -89,10 +93,14 @@ def build_live_no_shared_obs_visual_adjacent_slice_v1(
     view: EvaluationTransitionViewV1,
     *,
     global_slot: int,
-) -> ActorPovAdjacentTransitionSliceV1:
+) -> ActorPovAdjacentTransitionSlice:
     """Build one visual incoming carrier over an unchanged transition unit."""
     if type(view) is not EvaluationTransitionViewV1:
         raise TypeError("visual transition requires exact EvaluationTransitionViewV1")
+    if view.context.schema_version == 3:
+        return build_actor_pov_adjacent_transition_slice_v1(
+            view, global_slot=global_slot
+        )
     visual_view = EvaluationTransitionViewV1(
         context=_visual_context_v1(view.context),
         start_frame=view.start_frame,
@@ -109,7 +117,7 @@ def build_replay_no_shared_obs_visual_content_v1(
     replay: ReplayArtifactV1 | ReplayArtifactV2,
     *,
     global_slot: int,
-) -> ActorPovReplayContentV1:
+) -> ActorPovReplayContent:
     """Build an ephemeral V1 renderer view over one canonical V2 replay.
 
     The returned content is the established recipient-safe visual subset.  It

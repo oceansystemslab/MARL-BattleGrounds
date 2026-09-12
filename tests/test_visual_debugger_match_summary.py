@@ -160,7 +160,7 @@ def test_match_death_rejects_incomplete_duplicate_or_friendly_credit() -> None:
 def test_scenario_pressure_display_name_uses_recorded_controller(
     scenario_id: int,
 ) -> None:
-    trajectory = captured_evaluation_trajectory(transition_count=0)
+    trajectory = captured_evaluation_trajectory(transition_count=0, with_scenario=True)
     variant = "beta" if scenario_id in (3, 5, 8) else "alpha"
     policy_id = (
         "scenario-5-pressure-controller"
@@ -188,12 +188,13 @@ def test_scenario_pressure_display_name_uses_recorded_controller(
             ),
         }
     )
-    summary = build_match_summary_v1(context, trajectory.frames[0])
-    assert (
-        summary.teams[1].display_name
-        == f"tdm-scenario-{scenario_id}-controller-{variant}"
-    )
-    assert summary.teams[1].policy_ids == (policy_id,)
+    for historical in (context, context_v2(context)):
+        summary = build_match_summary_v1(historical, trajectory.frames[0])
+        assert (
+            summary.teams[1].display_name
+            == f"tdm-scenario-{scenario_id}-controller-{variant}"
+        )
+        assert summary.teams[1].policy_ids == (policy_id,)
 
     # Exercise the real producer too: its policy IDs are slot-specific; the
     # controller descriptor belongs to algorithm_id, and authored scenario
@@ -229,23 +230,20 @@ def test_scenario_pressure_display_name_uses_recorded_controller(
     assert session.evaluation_context.identity.scenario.identifier == (
         "authored-team-deathmatch-scenario"
     )
-    for produced in (
-        session.evaluation_context,
-        context_v2(session.evaluation_context, scenario_name=scenario.name),
-    ):
-        actual = build_match_summary_v1(produced, session.current_evaluation_frame)
-        assert actual.teams[1].display_name == summary.teams[1].display_name
-        assert actual.teams[1].policy_ids == tuple(
-            f"debugger-action-source:{session.team_b_controller}:slot:{slot}"
-            for slot in range(5, 10)
-        )
-        assert all(
-            row.algorithm_id == policy_id
-            for row in produced.policy_assignments[5:]
-            if row.assignment_status == "assigned"
-        )
+    produced = session.evaluation_context
+    actual = build_match_summary_v1(produced, session.current_evaluation_frame)
+    assert actual.teams[1].display_name == summary.teams[1].display_name
+    assert actual.teams[1].policy_ids == tuple(
+        f"debugger-action-source:{session.team_b_controller}:slot:{slot}"
+        for slot in range(5, 10)
+    )
+    assert all(
+        row.algorithm_id == policy_id
+        for row in produced.policy_assignments[5:]
+        if row.assignment_status == "assigned"
+    )
 
-    current = context_v2(session.evaluation_context, scenario_name=scenario.name)
+    current = session.evaluation_context
     callable_name = f"tdm-{variant}"
     current = current.model_copy(
         update={

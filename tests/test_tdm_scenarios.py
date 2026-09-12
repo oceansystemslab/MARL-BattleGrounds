@@ -18,17 +18,17 @@ from marl_battlegrounds.evaluation.models import (
     AggregationKeyV1,
     AssignedPolicySlotV2,
     ContentAddressedIdentityV1,
-    EvaluationEpisodeContextV2,
+    EvaluationEpisodeContextV3,
     canonical_digest_sha256,
     canonical_json_bytes,
 )
 from marl_battlegrounds.evaluation.replay_io import (
     load_replay,
-    load_scenario_evaluation_record_v3,
+    load_scenario_evaluation_record_v4,
     save_replay,
-    save_scenario_evaluation_record_v3,
+    save_scenario_evaluation_record_v4,
 )
-from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactV2, build_replay_v2
+from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3, build_replay_v3
 from marl_battlegrounds.evaluation.run_writer import IDENTITY_COLUMNS
 from marl_battlegrounds.evaluation.scenario import ResolvedScenarioSpecificationV3
 from marl_battlegrounds.evaluation.tdm_scenarios import (
@@ -108,12 +108,12 @@ def test_all_eight_scenarios_join_packaged_content_and_roundtrip_evidence(
     replay_path = tmp_path / "episode.marlbg-replay.json"
     record_path = tmp_path / "episode.marlbg-scenario.json"
     save_replay(replay, replay_path)
-    save_scenario_evaluation_record_v3(record, replay, record_path)
+    save_scenario_evaluation_record_v4(record, replay, record_path)
     reloaded = load_replay(replay_path).replay
-    assert isinstance(reloaded, ReplayArtifactV2)
+    assert isinstance(reloaded, ReplayArtifactV3)
     assert reloaded == replay
     assert (
-        load_scenario_evaluation_record_v3(record_path, source_replay=reloaded)
+        load_scenario_evaluation_record_v4(record_path, source_replay=reloaded)
         == record
     )
     assert not list(tmp_path.glob("*.marlbg-metrics.json"))
@@ -193,9 +193,9 @@ def test_resealed_changed_definition_cannot_enter_official_tdm_results(
 
 
 def _replace_context(
-    replay: ReplayArtifactV2, context: EvaluationEpisodeContextV2
-) -> ReplayArtifactV2:
-    return build_replay_v2(
+    replay: ReplayArtifactV3, context: EvaluationEpisodeContextV3
+) -> ReplayArtifactV3:
+    return build_replay_v3(
         context,
         replay.frames,
         replay.transitions,
@@ -221,7 +221,7 @@ def test_changed_opponent_content_is_rejected_even_with_valid_replay_joins(
                 name=row.name,
                 value=canonical_json_bytes(changed_pressure).decode("ascii"),
             )
-    changed_context = EvaluationEpisodeContextV2.model_validate(
+    changed_context = EvaluationEpisodeContextV3.model_validate(
         {**context.model_dump(mode="python"), "aggregation_keys": tuple(keys)}
     )
     changed = _replace_context(evidence.replay, changed_context)
@@ -254,13 +254,14 @@ def test_current_evidence_versions_reject_coercion_and_historical_mixing(
         if envelope == "specification"
         else evidence.record
     )
-    for version in (True, "3", 3.0, 2):
+    expected = original.schema_version
+    for version in (True, str(expected), float(expected), expected - 1):
         payload = original.model_dump(
             mode="python", exclude={"canonical_digest_sha256"}
         )
         payload["schema_version"] = version
         payload["canonical_digest_sha256"] = canonical_digest_sha256(payload)
-        with pytest.raises(ValueError, match="exact integer 3"):
+        with pytest.raises(ValueError, match=f"exact integer {expected}"):
             type(original).model_validate(payload)
 
 
@@ -273,7 +274,7 @@ def test_changed_policy_role_cannot_join_frozen_scenario() -> None:
     assignments[1] = assignment.model_copy(
         update={"evaluation_role": "cooperative_partner"}
     )
-    changed_context = EvaluationEpisodeContextV2.model_validate(
+    changed_context = EvaluationEpisodeContextV3.model_validate(
         {
             **context.model_dump(mode="python"),
             "policy_assignments": tuple(assignments),

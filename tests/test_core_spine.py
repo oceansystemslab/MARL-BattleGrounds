@@ -25,10 +25,10 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_HEALTH_REGEN_FRACTION_PER_STEP,
     AGENT_FEATURE_CLASS_ID,
     AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
+    AGENT_FEATURE_IS_ENEMY,
     AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
     AGENT_FEATURE_STEPS_UNTIL_OUT_OF_COMBAT,
-    AGENT_FEATURE_TEAM_ID,
     AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
     AGENT_FEATURE_X,
     AGENT_FEATURE_Y,
@@ -320,6 +320,7 @@ def _zero_observation() -> Observation:
         ),
     )
     return Observation(
+        self_ally_index=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
         self_features=jnp.zeros(
             shape=(MAX_AGENT_SLOTS, SELF_FEATURES), dtype=jnp.float32
         ),
@@ -708,7 +709,7 @@ def test_static_shape_constants_are_consistent() -> None:
         AGENT_FEATURE_X,
         AGENT_FEATURE_Y,
         AGENT_FEATURE_RADIUS,
-        AGENT_FEATURE_TEAM_ID,
+        AGENT_FEATURE_IS_ENEMY,
         AGENT_FEATURE_ACTIVE,
         AGENT_FEATURE_ALIVE,
         AGENT_FEATURE_CLASS_ID,

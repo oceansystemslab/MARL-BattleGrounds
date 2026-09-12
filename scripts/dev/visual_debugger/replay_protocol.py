@@ -15,8 +15,11 @@ from pydantic import (
 
 from marl_battlegrounds.evaluation.replay import ReplayArtifactReferenceV1
 from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactReferenceV2
+from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactReferenceV3
 from marl_battlegrounds.rendering.evaluation_adapter import (
+    SharedObsSourceMaterialProjection,
     SharedObsSourceMaterialProjectionV1,
+    SharedObsSourceMaterialProjectionV2,
 )
 from marl_battlegrounds.rendering.pov_scene import ActorPovAnalyzerProjectionV1
 from marl_battlegrounds.rendering.scene import ResearcherAnalyzerProjectionV2
@@ -170,7 +173,11 @@ class ReplayArtifactSummaryV1(_ReplayProtocolModel):
     """Path-free replay provenance and bounded captured-prefix counts."""
 
     schema_version: Literal[1] = REPLAY_VIEWER_PROTOCOL_SCHEMA_VERSION
-    replay_reference: ReplayArtifactReferenceV1 | ReplayArtifactReferenceV2
+    replay_reference: (
+        ReplayArtifactReferenceV1
+        | ReplayArtifactReferenceV2
+        | ReplayArtifactReferenceV3
+    )
     expected_transition_count: _PositiveInt
     recorded_transition_count: _NonNegativeInt
     recorded_frame_count: _PositiveInt
@@ -186,6 +193,7 @@ class ReplayArtifactSummaryV1(_ReplayProtocolModel):
         if type(self.replay_reference) not in (
             ReplayArtifactReferenceV1,
             ReplayArtifactReferenceV2,
+            ReplayArtifactReferenceV3,
         ):
             raise ValueError(
                 "replay_reference must be an exact supported replay reference."
@@ -1089,7 +1097,7 @@ class SharedObsSourceMaterialReplayViewerFrameV1(_ReplayViewerFrameBaseV1):
     incoming_transition_id: _ScientificId | None
     completion: ReplayCompletionBadgeV1
     processing: ReplayProcessingBadgeV1
-    projection: SharedObsSourceMaterialProjectionV1
+    projection: SharedObsSourceMaterialProjection
 
     @model_validator(mode="after")
     def _validate_frame(self) -> Self:
@@ -1121,7 +1129,10 @@ class SharedObsSourceMaterialReplayViewerFrameV1(_ReplayViewerFrameBaseV1):
         )
         if self.incoming_transition_id != expected_transition_id:
             raise ValueError("incoming source-material transition is invalid.")
-        if type(self.projection) is not SharedObsSourceMaterialProjectionV1:
+        if (
+            type(self.projection) is not SharedObsSourceMaterialProjectionV1
+            and type(self.projection) is not SharedObsSourceMaterialProjectionV2
+        ):
             raise ValueError(
                 "projection must be exact SharedObsSourceMaterialProjectionV1."
             )

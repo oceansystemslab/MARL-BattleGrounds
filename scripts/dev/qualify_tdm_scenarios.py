@@ -26,15 +26,15 @@ from marl_battlegrounds.evaluation.models import (
 from marl_battlegrounds.evaluation.policy_execution import controller_identity, policy
 from marl_battlegrounds.evaluation.replay_io import (
     load_replay,
-    load_scenario_evaluation_record_v3,
-    save_scenario_evaluation_record_v3,
+    load_scenario_evaluation_record_v4,
+    save_scenario_evaluation_record_v4,
 )
-from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactV2, build_replay_v2
+from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3, build_replay_v3
 from marl_battlegrounds.evaluation.revision import discover_code_revision_v2
 from marl_battlegrounds.evaluation.run_writer import IDENTITY_COLUMNS, RunWriter
 from marl_battlegrounds.evaluation.scenario import (
     ResolvedScenarioSpecificationV3,
-    ScenarioEvaluationRecordV3,
+    ScenarioEvaluationRecordV4,
 )
 from marl_battlegrounds.evaluation.tdm_scenarios import (
     TDM_BETA_SCENARIO_IDS,
@@ -51,8 +51,8 @@ class QualificationEpisode:
     """Current endpoint evidence and optional complete scalar metric row."""
 
     specification: ResolvedScenarioSpecificationV3
-    replay: ReplayArtifactV2
-    record: ScenarioEvaluationRecordV3
+    replay: ReplayArtifactV3
+    record: ScenarioEvaluationRecordV4
     full_metrics: Columns
 
 
@@ -125,7 +125,7 @@ def capture_tdm_qualification_episode(
     replay = result.replays[0]
     full_metrics = result.full_metrics
     if stop_after is not None and stop_after < len(replay.transitions):
-        replay = build_replay_v2(
+        replay = build_replay_v3(
             replay.header.context,
             replay.frames[: stop_after + 1],
             replay.transitions[:stop_after],
@@ -188,8 +188,8 @@ def qualify_tdm_scenarios(destination: Path) -> dict[str, object]:
                 scenario_id, coordinate, specification, _ = planned[int(episode_id)]
                 replay_path = paths["run_details"].parent / reference["path"]
                 replay = load_replay(replay_path).replay
-                if not isinstance(replay, ReplayArtifactV2):
-                    raise TypeError("current qualification requires replay V2")
+                if not isinstance(replay, ReplayArtifactV3):
+                    raise TypeError("current qualification requires replay V3")
                 record = build_tdm_scenario_evaluation_record(
                     scenario_id,
                     specification,
@@ -198,9 +198,9 @@ def qualify_tdm_scenarios(destination: Path) -> dict[str, object]:
                 )
                 stem = f"scenario-{scenario_id}-coordinate-{coordinate}"
                 record_path = destination / f"{stem}.marlbg-scenario.json"
-                save_scenario_evaluation_record_v3(record, replay, record_path)
+                save_scenario_evaluation_record_v4(record, replay, record_path)
                 if (
-                    load_scenario_evaluation_record_v3(
+                    load_scenario_evaluation_record_v4(
                         record_path, source_replay=replay
                     )
                     != record

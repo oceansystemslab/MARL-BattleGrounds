@@ -12,6 +12,7 @@ from scripts.dev.visual_debugger.match_summary import build_match_summary_v1
 from tests.evaluation_fixtures import (
     evaluation_context,
     evaluation_env_config,
+    historical_observation,
     neutral_action,
 )
 
@@ -256,7 +257,9 @@ def test_death_announcer_matches_public_direct_and_priest_credit(
     )
     state, observation, mask, _ = initialize_scenario_state(state, config)
     context = evaluation_context(config=config, expected_horizon=4, with_scenario=True)
-    start = capture_initial_evaluation_frame_v1(context, state, observation, mask)
+    start = capture_initial_evaluation_frame_v1(
+        context, state, historical_observation(config, observation), mask
+    )
     action = _actions(
         (0, 5, False),
         (1, 5, False),
@@ -272,7 +275,7 @@ def test_death_announcer_matches_public_direct_and_priest_credit(
         context,
         start,
         successor,
-        observation,
+        historical_observation(config, observation),
         next_mask,
         info.transition_facts,
         reward,

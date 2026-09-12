@@ -20,8 +20,9 @@ from marl_battlegrounds.evaluation.models import (
     canonical_json_bytes,
 )
 from marl_battlegrounds.evaluation.pov import (
-    ActorPovReplayContentV1,
+    ActorPovReplayContent,
     export_actor_pov_replay_v1,
+    export_actor_pov_replay_v2,
 )
 from marl_battlegrounds.evaluation.replay import (
     ReplayArtifactReferenceV1,
@@ -38,9 +39,14 @@ from marl_battlegrounds.evaluation.replay_v2 import (
     ReplayArtifactV2,
     replay_reference_v2,
 )
+from marl_battlegrounds.evaluation.replay_v3 import (
+    ReplayArtifactReferenceV3,
+    ReplayArtifactV3,
+    replay_reference_v3,
+)
 from marl_battlegrounds.rendering.evaluation_adapter import (
     EvaluationScenePresentationStateV1,
-    SharedObsSourceMaterialProjectionV1,
+    SharedObsSourceMaterialProjection,
     build_researcher_analyzer_projection_v2,
     build_shared_obs_authority_source_material_projection_v1,
     build_status_source_evidence_index_v2,
@@ -170,7 +176,7 @@ class _CommandRecord:
 
 @dataclass(frozen=True, slots=True)
 class _PovCacheEntry:
-    content: ActorPovReplayContentV1
+    content: ActorPovReplayContent
     completion: ActorPovReplayCompletionBadgeV1
     projection_index: ActorPovProjectionIndexV1
     timeline: ActorPovReplayTimelineV1
@@ -189,8 +195,10 @@ def _safe_metric_report_filename(episode_id: str) -> str:
 
 def _replay_reference(
     bundle: LoadedReplayBundle,
-) -> ReplayArtifactReferenceV1 | ReplayArtifactReferenceV2:
+) -> ReplayArtifactReferenceV1 | ReplayArtifactReferenceV2 | ReplayArtifactReferenceV3:
     replay = bundle.replay
+    if type(replay) is ReplayArtifactV3:
+        return replay_reference_v3(replay)
     if type(replay) is ReplayArtifactV2:
         return replay_reference_v2(replay)
     return ReplayArtifactReferenceV1(
@@ -221,7 +229,7 @@ def _completion_badge(bundle: LoadedReplayBundle) -> ReplayCompletionBadgeV1:
 
 
 def _processing_badge(bundle: LoadedReplayBundle) -> ReplayProcessingBadgeV1:
-    if type(bundle.replay) is ReplayArtifactV2:
+    if type(bundle.replay) in (ReplayArtifactV2, ReplayArtifactV3):
         return ReplayProcessingBadgeV1(
             status="not_requested", processed_transition_count=0
         )
@@ -239,7 +247,7 @@ def _processing_badge(bundle: LoadedReplayBundle) -> ReplayProcessingBadgeV1:
 
 
 def _pov_completion_badge(
-    content: ActorPovReplayContentV1,
+    content: ActorPovReplayContent,
 ) -> ActorPovReplayCompletionBadgeV1:
     completion = content.completion
     return ActorPovReplayCompletionBadgeV1(
@@ -381,7 +389,7 @@ class ReplayViewerService:
             recorded_frame_count=len(self._replay.frames),
             metric_report_availability=(
                 "not_recorded"
-                if type(bundle.replay) is ReplayArtifactV2
+                if type(bundle.replay) in (ReplayArtifactV2, ReplayArtifactV3)
                 else "available"
                 if bundle.metric_report_artifact is not None
                 else "missing"
@@ -657,7 +665,7 @@ class ReplayViewerService:
                 if frame_index == 0:
                     previous_recipient = None
                     previous_nonrecipient: tuple[
-                        SharedObsSourceMaterialProjectionV1, ...
+                        SharedObsSourceMaterialProjection, ...
                     ] = ()
                     incoming_transition = None
                 else:
@@ -1345,7 +1353,12 @@ class ReplayViewerService:
         cached = cache.get(global_slot)
         if cached is not None:
             return cached
-        if (
+        if type(self._replay) is ReplayArtifactV3:
+            content = export_actor_pov_replay_v2(
+                self._replay, global_slot=global_slot
+            ).content
+            exact_actor_input_export_available = True
+        elif (
             type(self._replay) is ReplayArtifactV2
             or self._context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V2
         ):
@@ -1410,8 +1423,8 @@ class ReplayViewerService:
         frame_index: int,
         recipient_global_slot: int,
     ) -> tuple[
-        SharedObsSourceMaterialProjectionV1,
-        tuple[SharedObsSourceMaterialProjectionV1, ...],
+        SharedObsSourceMaterialProjection,
+        tuple[SharedObsSourceMaterialProjection, ...],
     ]:
         """Build one uncached, same-epoch fixed-recipient authority source set."""
         if self._context.execution_information_mode != "shared_obs":
@@ -1427,7 +1440,7 @@ class ReplayViewerService:
             raise RuntimeError("Shared authority recipient is not configured active")
         frame = self._replay.frames[frame_index]
 
-        def build(global_slot: int) -> SharedObsSourceMaterialProjectionV1:
+        def build(global_slot: int) -> SharedObsSourceMaterialProjection:
             return build_shared_obs_authority_source_material_projection_v1(
                 self._context,
                 frame,

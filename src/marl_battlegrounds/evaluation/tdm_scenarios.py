@@ -10,21 +10,21 @@ from marl_battlegrounds._tdm_assets import scenario_content
 from marl_battlegrounds.evaluation.catalog import build_roster_v1
 from marl_battlegrounds.evaluation.models import (
     ContentAddressedIdentityV1,
-    EvaluationFrameV1,
+    EvaluationFrame,
     EvaluationSeedProtocolV2,
     VersionedIdentityV1,
     canonical_digest_sha256,
 )
-from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactV2
+from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
 from marl_battlegrounds.evaluation.scenario import (
     ResolvedScenarioSpecificationV3,
-    ScenarioEvaluationRecordV3,
+    ScenarioEvaluationRecordV4,
     ScenarioMeasurementDefinitionV1,
     ScenarioMeasurementResultV1,
     ScenarioPredicateResultV1,
     ScenarioScalarValueV1,
     ScenarioSeedScheduleV3,
-    build_scenario_evaluation_record_v3,
+    build_scenario_evaluation_record_v4,
     resolved_initial_state_digest_sha256,
 )
 from marl_battlegrounds.policies.reactive_tdm_alpha import (
@@ -102,7 +102,7 @@ def build_tdm_scenario_specification(
     scenario_id: int,
     seed_schedule: ScenarioSeedScheduleV3,
     *,
-    initial_frame: EvaluationFrameV1 | None = None,
+    initial_frame: EvaluationFrame | None = None,
 ) -> ResolvedScenarioSpecificationV3:
     """Bind approved content to an explicit matched schedule and exact frame zero."""
     scenario = load_tdm_scenario(scenario_id)
@@ -180,11 +180,11 @@ def build_tdm_scenario_specification(
 def build_tdm_scenario_evaluation_record(
     scenario_id: int,
     specification: ResolvedScenarioSpecificationV3,
-    replay: ReplayArtifactV2,
+    replay: ReplayArtifactV3,
     *,
     schedule_coordinate: int,
-) -> ScenarioEvaluationRecordV3:
-    """Materialize the frozen reward endpoint and require all official V3 joins."""
+) -> ScenarioEvaluationRecordV4:
+    """Record the frozen reward endpoint and check its official replay joins."""
     expected = build_tdm_scenario_specification(
         scenario_id, specification.seed_schedule, initial_frame=replay.frames[0]
     )
@@ -242,7 +242,7 @@ def build_tdm_scenario_evaluation_record(
         if reward is not None
         else "Complete terminal TDM reward unavailable.",
     )
-    return build_scenario_evaluation_record_v3(
+    return build_scenario_evaluation_record_v4(
         specification,
         replay,
         schedule_coordinate=schedule_coordinate,

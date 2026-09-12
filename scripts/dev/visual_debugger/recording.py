@@ -21,6 +21,8 @@ from marl_battlegrounds.evaluation.metrics import (
 )
 from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV1,
+    AssignedPolicySlotV2,
+    EvaluationEpisodeContext,
     EvaluationEpisodeContextV1,
     EvaluationFrameV1,
     EvaluationModel,
@@ -219,7 +221,7 @@ def build_debugger_recording_specification_v1(
     return DebuggerRecordingSpecificationV1.model_validate(payload)
 
 
-def recording_action_source(context: EvaluationEpisodeContextV1) -> str:
+def recording_action_source(context: EvaluationEpisodeContext) -> str:
     rows = tuple(
         row.value for row in context.aggregation_keys if row.name == "action_source"
     )
@@ -228,10 +230,10 @@ def recording_action_source(context: EvaluationEpisodeContextV1) -> str:
     return rows[0]
 
 
-def recording_policy_execution_included(context: EvaluationEpisodeContextV1) -> bool:
+def recording_policy_execution_included(context: EvaluationEpisodeContext) -> bool:
     """Derive actual policy execution from exact per-slot assignments."""
     return any(
-        isinstance(row, AssignedPolicySlotV1)
+        isinstance(row, (AssignedPolicySlotV1, AssignedPolicySlotV2))
         and row.policy_kind in ("reactive_tdm", "random_valid", "scenario_5")
         for row in context.policy_assignments
     )

@@ -18,7 +18,7 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
     EvaluationEventBaseV1,
     EvaluationEventV1,
-    EvaluationFrameV1,
+    EvaluationFrame,
     HealthRegeneratedEventV1,
     LethalDamageContributionEventV1,
     OrdinaryMovementPhaseDisplacementEventV1,
@@ -168,9 +168,9 @@ def _basic_activation_recipient(
 
 def _validate_decoder_inputs(
     context: EvaluationEpisodeContext,
-    start_frame: EvaluationFrameV1,
+    start_frame: EvaluationFrame,
     facts: TransitionFactsV1,
-    successor_frame: EvaluationFrameV1,
+    successor_frame: EvaluationFrame,
 ) -> None:
     """Reject records that cannot represent one directly adjacent transition."""
     episode_id = context.identity.episode_id
@@ -376,7 +376,7 @@ def _append_health_output_candidates(
 
 def _append_health_resolution_candidates(
     candidates: list[_EventCandidate],
-    start_frame: EvaluationFrameV1,
+    start_frame: EvaluationFrame,
     facts: TransitionFactsV1,
 ) -> None:
     """Join affected recipient totals to transition-start health once."""
@@ -417,9 +417,9 @@ def _append_health_resolution_candidates(
 
 def _append_regeneration_candidates(
     candidates: list[_EventCandidate],
-    start_frame: EvaluationFrameV1,
+    start_frame: EvaluationFrame,
     facts: TransitionFactsV1,
-    successor_frame: EvaluationFrameV1,
+    successor_frame: EvaluationFrame,
 ) -> None:
     """Emit direct countdown lifecycle and realized regeneration facts."""
     regeneration = facts.regeneration_facts
@@ -481,9 +481,9 @@ def _append_regeneration_candidates(
 
 def _append_cooldown_candidates(
     candidates: list[_EventCandidate],
-    start_frame: EvaluationFrameV1,
+    start_frame: EvaluationFrame,
     facts: TransitionFactsV1,
-    successor_frame: EvaluationFrameV1,
+    successor_frame: EvaluationFrame,
 ) -> None:
     """Emit accepted starts and direct adjacent positive-to-zero readiness."""
     accepted_use_ultimate = (
@@ -760,7 +760,7 @@ def _append_respawn_candidates(
     candidates: list[_EventCandidate],
     context: EvaluationEpisodeContext,
     facts: TransitionFactsV1,
-    successor_frame: EvaluationFrameV1,
+    successor_frame: EvaluationFrame,
 ) -> None:
     """Emit shield expiry, due waves, and realized successor respawns."""
     for agent_global_slot, expired in enumerate(
@@ -822,9 +822,9 @@ def _append_respawn_candidates(
 
 def _derive_team_deathmatch_authority_v1(
     context: EvaluationEpisodeContext,
-    start_frame: EvaluationFrameV1,
+    start_frame: EvaluationFrame,
     facts: TransitionFactsV1,
-    successor_frame: EvaluationFrameV1,
+    successor_frame: EvaluationFrame,
 ) -> _TeamDeathmatchAuthorityV1:
     """Join TDM score, death, outcome, topology, and horizon authority."""
     task_mode = context.resolved_env_config.task_mode
@@ -929,9 +929,9 @@ def _derive_team_deathmatch_authority_v1(
 def _append_team_deathmatch_candidates(
     candidates: list[_EventCandidate],
     context: EvaluationEpisodeContext,
-    start_frame: EvaluationFrameV1,
+    start_frame: EvaluationFrame,
     facts: TransitionFactsV1,
-    successor_frame: EvaluationFrameV1,
+    successor_frame: EvaluationFrame,
 ) -> None:
     """Emit authoritative score edges followed by the sole completion event."""
     authority = _derive_team_deathmatch_authority_v1(
@@ -984,9 +984,9 @@ def _append_team_deathmatch_candidates(
 
 def decode_evaluation_events_v1(
     context: EvaluationEpisodeContext,
-    start_frame: EvaluationFrameV1,
+    start_frame: EvaluationFrame,
     facts: TransitionFactsV1,
-    successor_frame: EvaluationFrameV1,
+    successor_frame: EvaluationFrame,
 ) -> tuple[EvaluationEventV1, ...]:
     """Decode one fact record into a deterministic tuple of atomic V1 events."""
     _validate_decoder_inputs(context, start_frame, facts, successor_frame)

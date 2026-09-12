@@ -29,7 +29,7 @@ from marl_battlegrounds.evaluation.policy_execution import (
     freeze_variables,
     policy,
 )
-from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactV2
+from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
 from marl_battlegrounds.evaluation.run_writer import (
     IDENTITY_COLUMNS,
     MATCH_COLUMNS,
@@ -62,7 +62,7 @@ class TournamentResult:
     matchup_results: tuple[ResultRow, ...]
     map_results: tuple[ResultRow, ...]
     full_metrics: Columns
-    replays: tuple[ReplayArtifactV2, ...]
+    replays: tuple[ReplayArtifactV3, ...]
     metadata: dict[str, object]
     paths: dict[str, Path] | None
 
@@ -281,7 +281,7 @@ def run_tournament(
         passes: dict[str, object] = {}
         matches: list[ResultRow] = []
         full_tables: list[Columns] = []
-        replays: list[ReplayArtifactV2] = []
+        replays: list[ReplayArtifactV3] = []
         for index, ((first, second), group) in enumerate(sorted(groups.items()), 1):
             group_ids = {match.episode_id for match in group}
             result = evaluate_episodes(

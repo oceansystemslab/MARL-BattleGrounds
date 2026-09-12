@@ -1,6 +1,7 @@
 """Reactive TDM rules and accepted Scenario 1 and Scenario 2 witnesses."""
 
 from collections.abc import Callable
+from operator import itemgetter
 from pathlib import Path
 from typing import cast
 
@@ -72,7 +73,7 @@ from marl_battlegrounds.policies.reactive_tdm_alpha import (
 )
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsPolicy,
-    SharedObsSensorSourceBankV1,
+    SharedObsSensorSourceBankV2,
     build_default_shared_obs_information_availability,
     build_shared_obs_sensor_source_bank,
     execute_shared_obs_team_policy,
@@ -187,9 +188,13 @@ def _mask(*pairs: tuple[int, int], move: int | None = None) -> ActionMask:
     return ActionMask(moves, joint.any(axis=1), joint.any(axis=0), joint)
 
 
-def _empty_bank(scenario: CompiledDevScenarioV1) -> SharedObsSensorSourceBankV1:
+def _empty_bank(scenario: CompiledDevScenarioV1) -> SharedObsSensorSourceBankV2:
+    def empty_team(leaf: Array) -> Array:
+        return _zeros(leaf[1])
+
     return jax.tree.map(
-        _zeros, build_shared_obs_sensor_source_bank(scenario.observation)
+        empty_team,
+        build_shared_obs_sensor_source_bank(scenario.observation),
     )
 
 
@@ -203,8 +208,7 @@ def _act(
         mask if mask is not None else _mask(),
         jax.random.key(0),
         _empty_bank(scenario),
-        jnp.zeros(10, dtype=jnp.bool_),
-        jnp.int32(9),
+        jnp.zeros(5, dtype=jnp.bool_),
     )
 
 
@@ -403,6 +407,7 @@ def test_scalar_policy_is_team_agnostic_for_each_class(
     obs = _observation(scenario, class_id)
     own = obs.self_features
     obs = obs._replace(
+        self_ally_index=jnp.int32(0),
         ally_unit_features=jnp.zeros_like(obs.ally_unit_features).at[0].set(own),
         ally_visibility_mask=jnp.array([True, False, False, False, False]),
     )
@@ -410,9 +415,9 @@ def test_scalar_policy_is_team_agnostic_for_each_class(
     obs = _visible(obs, "enemy", 0, (8, 5), hp=20)
     mask = _mask((1, 0), (2, 0), (2, 1), (6, 0), (6, 1), (0, 1))
     bank = _empty_bank(scenario)
-    availability = jnp.zeros(10, dtype=jnp.bool_)
-    a = _POLICY(obs, mask, jax.random.key(1), bank, availability, jnp.int32(0))
-    b = _POLICY(obs, mask, jax.random.key(77), bank, availability, jnp.int32(5))
+    availability = jnp.zeros(5, dtype=jnp.bool_)
+    a = _POLICY(obs, mask, jax.random.key(1), bank, availability)
+    b = _POLICY(obs, mask, jax.random.key(77), bank, availability)
     _assert_exact(a, b)
 
 
@@ -506,28 +511,24 @@ def test_unavailable_shared_rows_and_unused_history_cannot_change_action(
 ) -> None:
     obs = _observation(scenario, ROGUE_CLASS_ID)
     bank = _empty_bank(scenario)
-    no_sources = jnp.zeros(10, dtype=jnp.bool_)
-    expected = _POLICY(obs, _mask(), jax.random.key(0), bank, no_sources, jnp.int32(9))
+    no_sources = jnp.zeros(5, dtype=jnp.bool_)
+    expected = _POLICY(obs, _mask(), jax.random.key(0), bank, no_sources)
     hostile = jax.tree.map(_ones, bank)
     changed = obs._replace(
         previous_timestep_actions=jax.tree.map(_ones, obs.previous_timestep_actions)
     )
-    actual = _POLICY(
-        changed, _mask(), jax.random.key(77), hostile, no_sources, jnp.int32(9)
-    )
+    actual = _POLICY(changed, _mask(), jax.random.key(77), hostile, no_sources)
     _assert_exact(actual, expected)
     sighting = _row(obs.self_features, xy=(13, 5))
     bank = bank._replace(
-        unit_features_by_sensor_source_and_global_slot=bank.unit_features_by_sensor_source_and_global_slot.at[
-            5, 0
+        unit_features_by_source_and_candidate=bank.unit_features_by_source_and_candidate.at[
+            0, 5
         ].set(sighting),
-        unit_visibility_by_sensor_source_and_global_slot=bank.unit_visibility_by_sensor_source_and_global_slot.at[
-            5, 0
+        unit_visibility_by_source_and_candidate=bank.unit_visibility_by_source_and_candidate.at[
+            0, 5
         ].set(True),
     )
-    actual = _POLICY(
-        obs, _mask(), jax.random.key(0), bank, no_sources.at[5].set(True), jnp.int32(9)
-    )
+    actual = _POLICY(obs, _mask(), jax.random.key(0), bank, no_sources.at[0].set(True))
     assert tuple(int(x) for x in actual) == (MOVE_EAST, 0, 0)
 
 
@@ -649,9 +650,8 @@ def test_scalar_eager_jit_team_parity_and_key_invariance(
         cast(Observation, _scalar(scenario.observation, 9)),
         cast(ActionMask, _scalar(scenario.action_mask, 9)),
         jax.random.key(0),
-        bank,
-        av[9],
-        jnp.int32(9),
+        jax.tree.map(itemgetter(1), bank),
+        av[9, 5:],
     )
     eager = reactive_tdm_alpha_policy(*args)
     _assert_exact(eager, _POLICY(*args))

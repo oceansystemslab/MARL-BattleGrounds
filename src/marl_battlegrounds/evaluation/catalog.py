@@ -82,12 +82,14 @@ from marl_battlegrounds.core.types import (
 )
 from marl_battlegrounds.evaluation.actor_projection import (
     SHARED_OBS_ACTOR_PROJECTION_V1,
+    SHARED_OBS_ACTOR_PROJECTION_V2,
 )
 from marl_battlegrounds.evaluation.models import (
     CATALOG_SCHEMA_ID,
     CATALOG_SCHEMA_VERSION,
     REQUIRED_SCHEMA_BINDINGS_V1,
     REQUIRED_SCHEMA_BINDINGS_V2,
+    REQUIRED_SCHEMA_BINDINGS_V3,
     RESOLVED_ENV_CONFIG_SCHEMA_ID,
     RESOLVED_ENV_CONFIG_SCHEMA_VERSION,
     AggregationKeyV1,
@@ -100,8 +102,11 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
     EvaluationEpisodeContextV1,
     EvaluationEpisodeContextV2,
+    EvaluationEpisodeContextV3,
     EvaluationEpisodeIdentityV1,
+    EvaluationFrame,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     EvaluationSeedProtocolV1,
     EvaluationSeedProtocolV2,
     ExecutionInformationMode,
@@ -113,6 +118,7 @@ from marl_battlegrounds.evaluation.models import (
     RosterSlotV1,
     SchemaVersionEntryV1,
     SchemaVersionEntryV2,
+    SchemaVersionEntryV3,
     StaticMechanicsCatalogV1,
     StatusMechanicV1,
     VersionedIdentityV1,
@@ -628,6 +634,52 @@ def build_evaluation_episode_context_v2(
     )
 
 
+def build_evaluation_episode_context_v3(
+    *,
+    identity: EvaluationEpisodeIdentityV1,
+    aggregation_keys: tuple[AggregationKeyV1, ...],
+    expected_horizon: int,
+    config: EnvConfig,
+    public_agent_id_by_global_slot: tuple[str, ...],
+    policy_assignments: tuple[PolicyAssignmentSlotV2, ...],
+    seed_protocol: EvaluationSeedProtocolV1 | EvaluationSeedProtocolV2,
+    capture_profile: CaptureProfile,
+    execution_information_mode: ExecutionInformationMode,
+    actor_projection: VersionedIdentityV1,
+    critic_information_regime: VersionedIdentityV1,
+    canonical_reward_mode: VersionedIdentityV1,
+    shaping_configuration: ContentAddressedIdentityV1,
+    code_revision: CodeRevisionV1 | CodeRevisionV2,
+    scenario_name: str | None = None,
+) -> EvaluationEpisodeContextV3:
+    """Build one context without inventing runner-owned provenance."""
+    validate_env_config(config)
+    if len(policy_assignments) != MAX_AGENT_SLOTS:
+        raise ValueError("policy_assignments must have length 10")
+    return EvaluationEpisodeContextV3(
+        identity=identity,
+        schema_versions=tuple(
+            SchemaVersionEntryV3(schema_id=name, schema_version=version)
+            for name, version in REQUIRED_SCHEMA_BINDINGS_V3
+        ),
+        aggregation_keys=aggregation_keys,
+        expected_horizon=expected_horizon,
+        resolved_env_config=build_resolved_env_config_v1(config),
+        static_mechanics_catalog=build_static_mechanics_catalog_v1(),
+        roster=build_roster_v1(config, public_agent_id_by_global_slot),
+        policy_assignments=policy_assignments,
+        seed_protocol=seed_protocol,
+        capture_profile=capture_profile,
+        execution_information_mode=execution_information_mode,
+        actor_projection=actor_projection,
+        critic_information_regime=critic_information_regime,
+        canonical_reward_mode=canonical_reward_mode,
+        shaping_configuration=shaping_configuration,
+        code_revision=code_revision,
+        scenario_name=scenario_name,
+    )
+
+
 _INT32_MIN = int(np.iinfo(np.int32).min)
 _INT32_MAX = int(np.iinfo(np.int32).max)
 
@@ -809,18 +861,38 @@ def _validate_official_scenario_context_v3(  # pyright: ignore[reportUnusedFunct
     _validate_official_scenario_context(context, initial_frame)
 
 
-def _validate_official_scenario_context(
-    context: EvaluationEpisodeContextV1 | EvaluationEpisodeContextV2,
-    initial_frame: EvaluationFrameV1,
+def _validate_official_scenario_context_v4(  # pyright: ignore[reportUnusedFunction]
+    context: EvaluationEpisodeContextV3,
+    initial_frame: EvaluationFrameV2,
 ) -> None:
-    if type(initial_frame) is not EvaluationFrameV1:
+    """Check current identity-blind scenario captures against official rules."""
+    if type(context) is not EvaluationEpisodeContextV3:
+        raise TypeError("context must be an EvaluationEpisodeContextV3")
+    _validate_official_scenario_context(context, initial_frame)
+
+
+def _validate_official_scenario_context(
+    context: EvaluationEpisodeContext,
+    initial_frame: EvaluationFrame,
+) -> None:
+    expected_frame = (
+        EvaluationFrameV2
+        if type(context) is EvaluationEpisodeContextV3
+        else EvaluationFrameV1
+    )
+    if type(initial_frame) is not expected_frame:
         raise TypeError(
             "initial_frame must be an EvaluationFrameV1, not "
             f"{type(initial_frame).__name__}"
         )
     if context.execution_information_mode != "shared_obs":
         raise ValueError("official scenario evaluation requires shared_obs execution")
-    if context.actor_projection != SHARED_OBS_ACTOR_PROJECTION_V1:
+    expected_projection = (
+        SHARED_OBS_ACTOR_PROJECTION_V2
+        if type(context) is EvaluationEpisodeContextV3
+        else SHARED_OBS_ACTOR_PROJECTION_V1
+    )
+    if context.actor_projection != expected_projection:
         raise ValueError(
             "official scenario evaluation requires "
             "base-observation-plus-authorized-sensor-source-bank version 1"
@@ -856,6 +928,7 @@ __all__ = [
     "build_code_revision_v1",
     "build_evaluation_episode_context_v1",
     "build_evaluation_episode_context_v2",
+    "build_evaluation_episode_context_v3",
     "build_evaluation_seed_protocol_v1",
     "build_resolved_env_config_v1",
     "build_roster_v1",

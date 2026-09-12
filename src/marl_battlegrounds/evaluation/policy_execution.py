@@ -100,7 +100,6 @@ def _shared_apply(function: SharedObsPolicy) -> PolicyApply:
             key,
             actor.source_bank,
             actor.source_availability,
-            actor.global_slot,
         ), carry
 
     return apply
@@ -197,7 +196,7 @@ def apply_policies(
     """Apply both teams from one epoch, returning one complete joint action.
 
     This function accepts one environment with ten actor rows. External ``vmap``
-    adds the environment axis. It derives a single transient source bank, then
+    adds the environment axis. It derives transient source banks once per team, then
     redacts immediately before each policy receives its scalar ``ActorInput``.
     """
     bank = build_shared_obs_sensor_source_bank(observations.observation)
@@ -209,6 +208,11 @@ def apply_policies(
         carry: PolicyTree,
         execution: PolicyExecution,
     ) -> tuple[ActorAction, PolicyTree]:
+        def take_bank(leaf: Array) -> Array:
+            return leaf[start // 5]
+
+        team_bank = jax.tree.map(take_bank, bank)
+
         def take(value: Array) -> Array:
             return value[start : start + 5]
 
@@ -217,14 +221,12 @@ def apply_policies(
             observation: Observation,
             mask: ActionMask,
             availability: Array,
-            slot: Array,
             key: Array,
         ) -> tuple[ActorAction, PolicyTree]:
             actor = ActorInput(
                 observation,
-                mask_source_bank_for_recipient(bank, availability),
+                mask_source_bank_for_recipient(team_bank, availability),
                 availability,
-                slot,
             )
             if execution == "host":
                 actor, mask = jax.device_get((actor, mask))
@@ -235,8 +237,7 @@ def apply_policies(
             carry,
             jax.tree.map(take, observations.observation),
             jax.tree.map(take, action_mask),
-            observations.source_availability[start : start + 5],
-            jnp.arange(start, start + 5, dtype=jnp.int32),
+            observations.source_availability[start : start + 5, start : start + 5],
             actor_keys[start : start + 5],
         )
         if execution == "jax":

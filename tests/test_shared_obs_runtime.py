@@ -1,5 +1,6 @@
 """Structured SharedObs composition, adapter, and provenance proofs."""
 
+from operator import itemgetter
 from typing import cast
 
 import jax
@@ -7,9 +8,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax import Array
-from tests.evaluation_fixtures import evaluation_context, evaluation_env_config
+from tests.evaluation_fixtures import (
+    evaluation_context,
+    evaluation_env_config,
+    historical_observation,
+)
 
-from marl_battlegrounds.core.axis_mappings import observation_relation_and_row
 from marl_battlegrounds.core.env import reset
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
@@ -48,8 +52,10 @@ from marl_battlegrounds.policies.random_valid import random_policy
 from marl_battlegrounds.policies.reactive_tdm_alpha import reactive_tdm_alpha_policy
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsSensorSourceBankV1,
+    SharedObsSensorSourceBankV2,
     build_default_shared_obs_information_availability,
     build_shared_obs_sensor_source_bank,
+    build_shared_obs_sensor_source_bank_from_base_rows,
     compose_shared_obs_unit_features,
     execute_shared_obs_team_policy,
 )
@@ -59,12 +65,11 @@ def _shared_random_policy(
     observation: Observation,
     action_mask: ActionMask,
     actor_key: Array,
-    source_bank: SharedObsSensorSourceBankV1,
+    source_bank: SharedObsSensorSourceBankV2,
     recipient_source_availability: Array,
-    recipient_global_slot: Array,
 ) -> ActorAction:
     """Test-only SharedObs ABI wrapper retaining canonical Random key sensitivity."""
-    del source_bank, recipient_source_availability, recipient_global_slot
+    del source_bank, recipient_source_availability
     return random_policy(observation, action_mask, actor_key)
 
 
@@ -91,6 +96,26 @@ def _scalar_actor(tree: object, global_slot: int) -> object:
     return jax.tree.map(_take_actor_row, tree)
 
 
+def _team_bank(observation: Observation, team: int = 0) -> SharedObsSensorSourceBankV2:
+    """Select the own-team source rows before calling an actor policy."""
+    return jax.tree.map(
+        itemgetter(team), build_shared_obs_sensor_source_bank(observation)
+    )
+
+
+def _historical_bank(observation: Observation) -> SharedObsSensorSourceBankV1:
+    """Build the explicitly historical Team-ID fixture's original source layout."""
+    return build_shared_obs_sensor_source_bank_from_base_rows(
+        observation.ally_unit_features,
+        observation.enemy_unit_features,
+        observation.objective_features,
+        observation.ally_visibility_mask,
+        observation.enemy_visibility_mask,
+        (observation.self_features[:, AGENT_FEATURE_ACTIVE] > 0)
+        & (observation.self_features[:, AGENT_FEATURE_ALIVE] > 0),
+    )
+
+
 def _assert_tree_exact(actual: object, expected: object) -> None:
     """Require exact structure, shape, dtype, and values."""
     assert jax.tree_util.tree_structure(actual) == jax.tree_util.tree_structure(
@@ -109,55 +134,58 @@ def _assert_tree_exact(actual: object, expected: object) -> None:
 
 
 def _bank_with_one_sighting(
-    source_bank: SharedObsSensorSourceBankV1,
+    source_bank: SharedObsSensorSourceBankV2,
     *,
     sensor_source: int,
     candidate: int,
     candidate_features: Array,
-) -> SharedObsSensorSourceBankV1:
+) -> SharedObsSensorSourceBankV2:
     """Return a bank whose selected source carries one explicit candidate row."""
     return source_bank._replace(
-        unit_features_by_sensor_source_and_global_slot=(
-            source_bank.unit_features_by_sensor_source_and_global_slot.at[
+        unit_features_by_source_and_candidate=(
+            source_bank.unit_features_by_source_and_candidate.at[
                 sensor_source, candidate
             ].set(candidate_features)
         ),
-        unit_visibility_by_sensor_source_and_global_slot=(
-            source_bank.unit_visibility_by_sensor_source_and_global_slot.at[
+        unit_visibility_by_source_and_candidate=(
+            source_bank.unit_visibility_by_source_and_candidate.at[
                 sensor_source, candidate
             ].set(True)
         ),
     )
 
 
-def test_source_bank_has_exact_closed_fields_shapes_dtypes_and_global_joins() -> None:
-    """Every source/candidate row is a lossless remap of authored base sensing."""
+def test_source_bank_has_exact_closed_fields_shapes_dtypes_and_relative_joins() -> None:
+    """Every team/source/candidate row preserves the authored relative sensing."""
     config = _tdm_config()
     _, observation, _, _ = reset(config, jax.random.key(0))
     bank = build_shared_obs_sensor_source_bank(observation)
 
-    assert SharedObsSensorSourceBankV1._fields == (
-        "unit_features_by_sensor_source_and_global_slot",
-        "unit_visibility_by_sensor_source_and_global_slot",
-        "objective_features_by_sensor_source",
+    assert SharedObsSensorSourceBankV2._fields == (
+        "unit_features_by_source_and_candidate",
+        "unit_visibility_by_source_and_candidate",
+        "objective_features_by_source",
     )
-    assert bank.unit_features_by_sensor_source_and_global_slot.shape == (
-        MAX_AGENT_SLOTS,
+    assert bank.unit_features_by_source_and_candidate.shape == (
+        2,
+        MAX_AGENTS_PER_TEAM,
         MAX_AGENT_SLOTS,
         UNIT_FEATURES,
     )
-    assert bank.unit_features_by_sensor_source_and_global_slot.dtype == jnp.float32
-    assert bank.unit_visibility_by_sensor_source_and_global_slot.shape == (
-        MAX_AGENT_SLOTS,
+    assert bank.unit_features_by_source_and_candidate.dtype == jnp.float32
+    assert bank.unit_visibility_by_source_and_candidate.shape == (
+        2,
+        MAX_AGENTS_PER_TEAM,
         MAX_AGENT_SLOTS,
     )
-    assert bank.unit_visibility_by_sensor_source_and_global_slot.dtype == jnp.bool_
-    assert bank.objective_features_by_sensor_source.shape == (
-        MAX_AGENT_SLOTS,
+    assert bank.unit_visibility_by_source_and_candidate.dtype == jnp.bool_
+    assert bank.objective_features_by_source.shape == (
+        2,
+        MAX_AGENTS_PER_TEAM,
         MAX_OBJECTIVE_SLOTS,
         OBJECTIVE_FEATURES,
     )
-    assert bank.objective_features_by_sensor_source.dtype == jnp.float32
+    assert bank.objective_features_by_source.dtype == jnp.float32
 
     for source in range(MAX_AGENT_SLOTS):
         source_living = bool(
@@ -165,8 +193,8 @@ def test_source_bank_has_exact_closed_fields_shapes_dtypes_and_global_joins() ->
             & (observation.self_features[source, AGENT_FEATURE_ALIVE] > 0.0)
         )
         for candidate in range(MAX_AGENT_SLOTS):
-            relation, row = observation_relation_and_row(source, candidate)
-            if relation == "ally":
+            row = candidate % MAX_AGENTS_PER_TEAM
+            if candidate < MAX_AGENTS_PER_TEAM:
                 expected_visible = bool(observation.ally_visibility_mask[source, row])
                 expected_features = observation.ally_unit_features[source, row]
             else:
@@ -175,8 +203,8 @@ def test_source_bank_has_exact_closed_fields_shapes_dtypes_and_global_joins() ->
             expected_visible = source_living and expected_visible
             assert (
                 bool(
-                    bank.unit_visibility_by_sensor_source_and_global_slot[
-                        source, candidate
+                    bank.unit_visibility_by_source_and_candidate[
+                        source // 5, source % 5, candidate
                     ]
                 )
                 is expected_visible
@@ -184,8 +212,8 @@ def test_source_bank_has_exact_closed_fields_shapes_dtypes_and_global_joins() ->
             if expected_visible:
                 np.testing.assert_array_equal(
                     np.asarray(
-                        bank.unit_features_by_sensor_source_and_global_slot[
-                            source, candidate
+                        bank.unit_features_by_source_and_candidate[
+                            source // 5, source % 5, candidate
                         ]
                     ),
                     np.asarray(expected_features),
@@ -193,8 +221,8 @@ def test_source_bank_has_exact_closed_fields_shapes_dtypes_and_global_joins() ->
             else:
                 assert bool(
                     jnp.all(
-                        bank.unit_features_by_sensor_source_and_global_slot[
-                            source, candidate
+                        bank.unit_features_by_source_and_candidate[
+                            source // 5, source % 5, candidate
                         ]
                         == 0.0
                     )
@@ -238,9 +266,9 @@ def test_dead_source_is_authorized_but_contributes_no_sensor_or_objective_rows()
     )
 
     assert bool(availability[0, 1])
-    assert not bool(jnp.any(bank.unit_visibility_by_sensor_source_and_global_slot[1]))
-    assert bool(jnp.all(bank.unit_features_by_sensor_source_and_global_slot[1] == 0.0))
-    assert bool(jnp.all(bank.objective_features_by_sensor_source[1] == 0.0))
+    assert not bool(jnp.any(bank.unit_visibility_by_source_and_candidate[0, 1]))
+    assert bool(jnp.all(bank.unit_features_by_source_and_candidate[0, 1] == 0.0))
+    assert bool(jnp.all(bank.objective_features_by_source[0, 1] == 0.0))
 
 
 def test_compositor_preserves_base_rows_and_ignores_every_unavailable_mutation() -> (
@@ -255,7 +283,7 @@ def test_compositor_preserves_base_rows_and_ignores_every_unavailable_mutation()
         enemy_visibility_mask=jnp.zeros_like(recipient.enemy_visibility_mask),
     )
     recipient_mask = cast(ActionMask, _scalar_actor(action_mask, 0))
-    bank = build_shared_obs_sensor_source_bank(observation)
+    bank = _team_bank(observation)
     bank = _bank_with_one_sighting(
         bank,
         sensor_source=1,
@@ -263,12 +291,11 @@ def test_compositor_preserves_base_rows_and_ignores_every_unavailable_mutation()
         candidate_features=observation.self_features[MAX_AGENTS_PER_TEAM],
     )
 
-    unavailable = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
+    unavailable = jnp.zeros((MAX_AGENTS_PER_TEAM,), dtype=jnp.bool_)
     base_composite = compose_shared_obs_unit_features(
         recipient,
         bank,
         unavailable,
-        jnp.asarray(0, dtype=jnp.int32),
     )
     np.testing.assert_array_equal(
         np.asarray(base_composite[0]), np.asarray(recipient.ally_unit_features)
@@ -285,7 +312,7 @@ def test_compositor_preserves_base_rows_and_ignores_every_unavailable_mutation()
 
     poisoned_unavailable = _bank_with_one_sighting(
         bank,
-        sensor_source=MAX_AGENTS_PER_TEAM,
+        sensor_source=4,
         candidate=MAX_AGENTS_PER_TEAM,
         candidate_features=jnp.full((UNIT_FEATURES,), 123.0, dtype=jnp.float32),
     )
@@ -294,7 +321,6 @@ def test_compositor_preserves_base_rows_and_ignores_every_unavailable_mutation()
             recipient,
             poisoned_unavailable,
             unavailable,
-            jnp.asarray(0, dtype=jnp.int32),
         ),
         base_composite,
     )
@@ -304,7 +330,6 @@ def test_compositor_preserves_base_rows_and_ignores_every_unavailable_mutation()
         recipient,
         bank,
         admitted,
-        jnp.asarray(0, dtype=jnp.int32),
     )
     del ally, ally_visible, recipient_mask
     assert bool(enemy_visible[0])
@@ -318,16 +343,16 @@ def test_random_adapter_preserves_local_policy_actions_and_key_sensitivity() -> 
     """A test-only ABI wrapper preserves the unchanged policy's per-key output."""
     config = _tdm_config()
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
-    bank = build_shared_obs_sensor_source_bank(observation)
+    bank = _team_bank(observation)
     recipient = cast(Observation, _scalar_actor(observation, 0))
     recipient_mask = cast(ActionMask, _scalar_actor(action_mask, 0))
-    unavailable = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
+    unavailable = jnp.zeros((MAX_AGENTS_PER_TEAM,), dtype=jnp.bool_)
     moves: list[int] = []
     for seed in range(8):
         key = jax.random.key(seed)
         local = random_policy(recipient, recipient_mask, key)
         shared = _shared_random_policy(
-            recipient, recipient_mask, key, bank, unavailable, jnp.int32(0)
+            recipient, recipient_mask, key, bank, unavailable
         )
         _assert_tree_exact(shared, local)
         moves.append(int(shared.move))
@@ -338,13 +363,13 @@ def test_shared_adapter_ignores_cross_team_inactive_and_unavailable_mutations() 
     """Excluded source columns cannot perturb reactive action bytes."""
     config = _tdm_config(team_sizes=(2, 1))
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
-    bank = build_shared_obs_sensor_source_bank(observation)
+    bank = _team_bank(observation)
     recipient = cast(Observation, _scalar_actor(observation, 0))
     recipient_mask = cast(ActionMask, _scalar_actor(action_mask, 0))
     availability = build_default_shared_obs_information_availability(
         config.agent_profile.active_mask,
         config.agent_profile.team_ids,
-    )[0]
+    )[0, :5]
     key = jax.random.key(29)
     baseline = reactive_tdm_alpha_policy(
         recipient,
@@ -352,11 +377,10 @@ def test_shared_adapter_ignores_cross_team_inactive_and_unavailable_mutations() 
         key,
         bank,
         availability,
-        jnp.asarray(0, dtype=jnp.int32),
     )
 
     changed = bank
-    for excluded_source in (4, MAX_AGENTS_PER_TEAM):
+    for excluded_source in (3, 4):
         changed = _bank_with_one_sighting(
             changed,
             sensor_source=excluded_source,
@@ -368,8 +392,8 @@ def test_shared_adapter_ignores_cross_team_inactive_and_unavailable_mutations() 
             ),
         )
     changed = changed._replace(
-        objective_features_by_sensor_source=jnp.full_like(
-            changed.objective_features_by_sensor_source,
+        objective_features_by_source=jnp.full_like(
+            changed.objective_features_by_source,
             99_999.0,
         )
     )
@@ -379,7 +403,6 @@ def test_shared_adapter_ignores_cross_team_inactive_and_unavailable_mutations() 
         key,
         changed,
         availability,
-        jnp.asarray(0, dtype=jnp.int32),
     )
     _assert_tree_exact(actual, baseline)
 
@@ -417,7 +440,7 @@ def test_source_bank_and_shared_scalar_adapter_match_eager_jit_and_vmap() -> Non
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
     eager_bank = build_shared_obs_sensor_source_bank(observation)
     compiled_bank = cast(
-        SharedObsSensorSourceBankV1,
+        SharedObsSensorSourceBankV2,
         jax.jit(build_shared_obs_sensor_source_bank)(observation),
     )
     _assert_tree_exact(compiled_bank, eager_bank)
@@ -447,15 +470,15 @@ def test_source_bank_and_shared_scalar_adapter_match_eager_jit_and_vmap() -> Non
     availability = build_default_shared_obs_information_availability(
         config.agent_profile.active_mask,
         config.agent_profile.team_ids,
-    )[0]
+    )[0, :5]
     key = jax.random.key(37)
+    actor_bank = jax.tree.map(itemgetter(0), eager_bank)
     eager_decision = reactive_tdm_alpha_policy(
         recipient,
         recipient_mask,
         key,
-        eager_bank,
+        actor_bank,
         availability,
-        jnp.asarray(0, dtype=jnp.int32),
     )
     compiled_decision = cast(
         object,
@@ -463,9 +486,8 @@ def test_source_bank_and_shared_scalar_adapter_match_eager_jit_and_vmap() -> Non
             recipient,
             recipient_mask,
             key,
-            eager_bank,
+            actor_bank,
             availability,
-            jnp.asarray(0, dtype=jnp.int32),
         ),
     )
     _assert_tree_exact(compiled_decision, eager_decision)
@@ -473,9 +495,8 @@ def test_source_bank_and_shared_scalar_adapter_match_eager_jit_and_vmap() -> Non
         recipient,
         recipient_mask,
         key,
-        eager_bank,
+        actor_bank,
         availability,
-        jnp.asarray(0, dtype=jnp.int32),
     )
     jaxpr_text = str(closed_jaxpr)
     assert closed_jaxpr.jaxpr.eqns
@@ -489,7 +510,7 @@ def test_shared_adapter_cannot_bypass_the_recipient_exact_action_mask() -> None:
     """Arbitrary admitted source material cannot create an unsupported action."""
     config = _tdm_config()
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
-    bank = build_shared_obs_sensor_source_bank(observation)
+    bank = _team_bank(observation)
     availability = build_default_shared_obs_information_availability(
         config.agent_profile.active_mask,
         config.agent_profile.team_ids,
@@ -511,8 +532,7 @@ def test_shared_adapter_cannot_bypass_the_recipient_exact_action_mask() -> None:
         stay_only,
         jax.random.key(23),
         bank,
-        availability[0],
-        jnp.asarray(0, dtype=jnp.int32),
+        availability[0, :5],
     )
     assert int(action.move) == MOVE_STAY
     assert int(action.select_target) == 0
@@ -523,34 +543,21 @@ def _forbidden_bank_reader_policy(
     recipient_observation: Observation,
     recipient_action_mask: ActionMask,
     key: Array,
-    source_bank: SharedObsSensorSourceBankV1,
+    source_bank: SharedObsSensorSourceBankV2,
     recipient_source_availability: Array,
-    recipient_global_slot: Array,
 ) -> ActorAction:
-    """Deliberately ignore availability and inspect one cross-team raw source."""
-    del recipient_observation, key, recipient_source_availability
-    cross_team_source = jnp.where(
-        recipient_global_slot < MAX_AGENTS_PER_TEAM,
-        MAX_AGENTS_PER_TEAM,
-        0,
-    )
+    """Ignore availability and inspect the actor's forbidden shared self source."""
+    del key, recipient_source_availability
+    forbidden_source = recipient_observation.self_ally_index
     leaked = jnp.logical_or(
         jnp.any(
-            source_bank.unit_features_by_sensor_source_and_global_slot[
-                cross_team_source
-            ]
-            != 0.0
+            source_bank.unit_features_by_source_and_candidate[forbidden_source] != 0.0
         ),
         jnp.logical_or(
             jnp.any(
-                source_bank.unit_visibility_by_sensor_source_and_global_slot[
-                    cross_team_source
-                ]
+                source_bank.unit_visibility_by_source_and_candidate[forbidden_source]
             ),
-            jnp.any(
-                source_bank.objective_features_by_sensor_source[cross_team_source]
-                != 0.0
-            ),
+            jnp.any(source_bank.objective_features_by_source[forbidden_source] != 0.0),
         ),
     )
     requested = jnp.where(leaked, 3, MOVE_STAY).astype(jnp.int32)
@@ -581,12 +588,12 @@ def test_teammate_only_same_epoch_sighting_can_change_movement_intent() -> None:
         .set(5.0)
     )
     bank = _bank_with_one_sighting(
-        build_shared_obs_sensor_source_bank(observation),
+        _team_bank(observation),
         sensor_source=1,
         candidate=MAX_AGENTS_PER_TEAM,
         candidate_features=candidate_features,
     )
-    unavailable = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
+    unavailable = jnp.zeros((MAX_AGENTS_PER_TEAM,), dtype=jnp.bool_)
     admitted = unavailable.at[1].set(True)
 
     without_source = reactive_tdm_alpha_policy(
@@ -595,7 +602,6 @@ def test_teammate_only_same_epoch_sighting_can_change_movement_intent() -> None:
         jax.random.key(0),
         bank,
         unavailable,
-        jnp.asarray(0, dtype=jnp.int32),
     )
     with_source = reactive_tdm_alpha_policy(
         recipient,
@@ -603,7 +609,6 @@ def test_teammate_only_same_epoch_sighting_can_change_movement_intent() -> None:
         jax.random.key(0),
         bank,
         admitted,
-        jnp.asarray(0, dtype=jnp.int32),
     )
     without_move = int(without_source.move)
     with_move = int(with_source.move)
@@ -713,18 +718,14 @@ def test_executor_masks_all_unavailable_bank_fields_before_arbitrary_policy() ->
         config.agent_profile.team_ids,
     )
     poisoned = bank._replace(
-        unit_features_by_sensor_source_and_global_slot=(
-            bank.unit_features_by_sensor_source_and_global_slot.at[
-                MAX_AGENTS_PER_TEAM
-            ].set(77.0)
+        unit_features_by_source_and_candidate=(
+            jnp.full_like(bank.unit_features_by_source_and_candidate, 77.0)
         ),
-        unit_visibility_by_sensor_source_and_global_slot=(
-            bank.unit_visibility_by_sensor_source_and_global_slot.at[
-                MAX_AGENTS_PER_TEAM
-            ].set(True)
+        unit_visibility_by_source_and_candidate=(
+            jnp.ones_like(bank.unit_visibility_by_source_and_candidate)
         ),
-        objective_features_by_sensor_source=(
-            bank.objective_features_by_sensor_source.at[MAX_AGENTS_PER_TEAM].set(99.0)
+        objective_features_by_source=(
+            jnp.full_like(bank.objective_features_by_source, 99.0)
         ),
     )
 
@@ -762,6 +763,7 @@ def test_rollout_availability_and_host_reconstruction_preserve_exact_provenance(
     """Capture stores base rows and matrix, then reconstructs no second copy."""
     config = _tdm_config()
     state, observation, action_mask, _ = reset(config, jax.random.key(0))
+    observation = historical_observation(config, observation)
     availability = build_default_shared_obs_information_availability(
         config.agent_profile.active_mask,
         config.agent_profile.team_ids,
@@ -779,7 +781,7 @@ def test_rollout_availability_and_host_reconstruction_preserve_exact_provenance(
         availability,
     )
     reconstructed = reconstruct_shared_obs_sensor_source_bank_v1(context, frame)
-    live = build_shared_obs_sensor_source_bank(observation)
+    live = _historical_bank(observation)
     _assert_tree_exact(reconstructed, live)
     assert frame.shared_obs_information_availability_by_recipient_and_sensor_source == (
         tuple(tuple(bool(value) for value in row) for row in np.asarray(availability))
@@ -791,6 +793,7 @@ def test_host_reconstruction_uses_recorded_relation_mapping() -> None:
     """A valid recorded row permutation remains the reconstruction authority."""
     config = _tdm_config()
     state, observation, action_mask, _ = reset(config, jax.random.key(0))
+    observation = historical_observation(config, observation)
     base_context = evaluation_context(
         execution_information_mode="shared_obs",
         config=config,
@@ -865,7 +868,7 @@ def test_host_reconstruction_uses_recorded_relation_mapping() -> None:
     reconstructed = reconstruct_shared_obs_sensor_source_bank_v1(context, frame)
     _assert_tree_exact(
         reconstructed,
-        build_shared_obs_sensor_source_bank(observation),
+        _historical_bank(observation),
     )
 
 
@@ -875,7 +878,7 @@ def test_shared_projection_identity_and_reconstruction_fail_closed() -> None:
         SHARED_OBS_ACTOR_PROJECTION_ID
         == "base-observation-plus-authorized-sensor-source-bank"
     )
-    assert SHARED_OBS_ACTOR_PROJECTION_VERSION == 1
+    assert SHARED_OBS_ACTOR_PROJECTION_VERSION == 2
     assert (
         VersionedIdentityV1(
             identifier="base-observation-plus-authorized-sensor-source-bank",
@@ -895,6 +898,7 @@ def test_shared_projection_identity_and_reconstruction_fail_closed() -> None:
 
     config = _tdm_config()
     state, observation, action_mask, _ = reset(config, jax.random.key(0))
+    observation = historical_observation(config, observation)
     context = evaluation_context(
         execution_information_mode="shared_obs",
         config=config,

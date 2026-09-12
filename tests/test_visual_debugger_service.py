@@ -1,7 +1,7 @@
 """Focused revision, idempotency, and concurrency proofs for DebuggerService."""
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from threading import Lock
 from typing import Literal
@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import pytest
 import scripts.dev.visual_debugger.control as control_module
 import scripts.dev.visual_debugger.input as input_module
-import scripts.dev.visual_debugger.recording as recording_module
+import scripts.dev.visual_debugger.replay_recorder as recording_module
 import scripts.dev.visual_debugger.service as service_module
 from scripts.dev.visual_debugger.control import (
     create_session,
@@ -59,121 +59,21 @@ from scripts.dev.visual_debugger.protocol import (
     ViewMode,
 )
 from scripts.dev.visual_debugger.recording import (
-    DebuggerReplayRecorderV1,
     build_debugger_recording_specification_v1,
 )
 from scripts.dev.visual_debugger.replay_protocol import ResearcherReplayViewerFrameV1
+from scripts.dev.visual_debugger.replay_recorder import DebuggerReplayRecorder
 from scripts.dev.visual_debugger.scenarios import get_scenario, list_scenarios
 from scripts.dev.visual_debugger.service import DebuggerService
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.core.types import EnvConfig, EnvState
-from marl_battlegrounds.evaluation.metrics import (
-    EvaluationEpisodeCompletionV1,
-    EvaluationMetricReducerStateV1,
-    EvaluationMetricReducerV1,
-    EvaluationProcessingStatusV1,
-    EvaluationTransitionViewV1,
-    SufficientStatisticDraftV1,
-)
-from marl_battlegrounds.evaluation.models import (
-    EvaluationEpisodeContextV1,
-    EvaluationFrameV1,
-)
+from marl_battlegrounds.evaluation.metrics import EvaluationEpisodeObserverV1
 from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 from marl_battlegrounds.evaluation.replay_io import (
     ReplaySaveError,
-    preflight_replay_bundle_destination_v1,
+    preflight_replay_destination,
 )
-
-
-class _FailingReducerState(EvaluationMetricReducerStateV1):
-    """Frozen test reducer state for a post-validation processing failure."""
-
-
-class _HorizonFailingReducerState(EvaluationMetricReducerStateV1):
-    """Frozen reducer progress before a failure on the exact horizon unit."""
-
-    processed_transition_count: int = 0
-
-
-@dataclass(slots=True)
-class _FailingAdvanceReducer:
-    """Fail only after the recorder observer commits a valid transition unit."""
-
-    reducer_id: str = "test.service-processing-failure"
-    reducer_version: int = 1
-
-    def initialize(
-        self,
-        context: EvaluationEpisodeContextV1,
-        initial_frame: EvaluationFrameV1,
-    ) -> EvaluationMetricReducerStateV1:
-        del context, initial_frame
-        return _FailingReducerState(
-            reducer_id=self.reducer_id,
-            reducer_version=self.reducer_version,
-        )
-
-    def advance(
-        self,
-        previous_state: EvaluationMetricReducerStateV1,
-        view: EvaluationTransitionViewV1,
-    ) -> EvaluationMetricReducerStateV1:
-        del previous_state, view
-        raise RuntimeError("private reducer failure detail")
-
-    def finalize(
-        self,
-        state: EvaluationMetricReducerStateV1,
-        completion: EvaluationEpisodeCompletionV1,
-        processing_status: EvaluationProcessingStatusV1,
-    ) -> tuple[SufficientStatisticDraftV1, ...]:
-        del state, completion, processing_status
-        return ()
-
-
-@dataclass(slots=True)
-class _HorizonFailingAdvanceReducer:
-    """Advance one unit, then fail after CP2 validates the horizon unit."""
-
-    reducer_id: str = "test.service-horizon-processing-failure"
-    reducer_version: int = 1
-
-    def initialize(
-        self,
-        context: EvaluationEpisodeContextV1,
-        initial_frame: EvaluationFrameV1,
-    ) -> EvaluationMetricReducerStateV1:
-        del context, initial_frame
-        return _HorizonFailingReducerState(
-            reducer_id=self.reducer_id,
-            reducer_version=self.reducer_version,
-        )
-
-    def advance(
-        self,
-        previous_state: EvaluationMetricReducerStateV1,
-        view: EvaluationTransitionViewV1,
-    ) -> EvaluationMetricReducerStateV1:
-        if not isinstance(previous_state, _HorizonFailingReducerState):
-            raise TypeError("unexpected horizon reducer state")
-        if view.successor_frame.frame_index == view.context.expected_horizon:
-            raise RuntimeError("private horizon reducer failure detail")
-        return _HorizonFailingReducerState(
-            reducer_id=self.reducer_id,
-            reducer_version=self.reducer_version,
-            processed_transition_count=previous_state.processed_transition_count + 1,
-        )
-
-    def finalize(
-        self,
-        state: EvaluationMetricReducerStateV1,
-        completion: EvaluationEpisodeCompletionV1,
-        processing_status: EvaluationProcessingStatusV1,
-    ) -> tuple[SufficientStatisticDraftV1, ...]:
-        del state, completion, processing_status
-        return ()
 
 
 def _service(
@@ -243,7 +143,6 @@ def _recording_service(
     tmp_path: Path,
     scenario_name: str = "arena_5v5",
     *,
-    reducers: tuple[EvaluationMetricReducerV1, ...] = (),
     view_mode: ViewMode = "researcher",
     maximum_episode_steps: int | None = None,
     team_a_controller: TeamController = "manual",
@@ -251,7 +150,7 @@ def _recording_service(
     execution_information_mode: Literal[
         "shared_obs", "no_shared_obs"
     ] = "no_shared_obs",
-) -> tuple[DebuggerService, DebuggerReplayRecorderV1]:
+) -> tuple[DebuggerService, DebuggerReplayRecorder]:
     debug_launch = debugger_test_launch_specification()
     launch = build_debugger_evaluation_launch_specification_v1(
         root_seed=debug_launch.root_seed,
@@ -278,7 +177,7 @@ def _recording_service(
         show_ranges=True,
         verbose_logging=False,
     )
-    recorder = DebuggerReplayRecorderV1(
+    recorder = DebuggerReplayRecorder(
         specification=build_debugger_recording_specification_v1(
             action_source_kind=debugger_action_source_kind_v1(
                 scenario,
@@ -292,12 +191,11 @@ def _recording_service(
                 )
             ),
         ),
-        destination=preflight_replay_bundle_destination_v1(
+        destination=preflight_replay_destination(
             tmp_path / "episode.marlbg-replay.json"
         ),
         context=session.evaluation_context,
         initial_frame=session.current_evaluation_frame,
-        reducers=reducers,
     )
     return (
         DebuggerService(
@@ -329,7 +227,7 @@ def _request(
 
 def _close_recording_in_lifecycle(
     service: DebuggerService,
-    recorder: DebuggerReplayRecorderV1,
+    recorder: DebuggerReplayRecorder,
     lifecycle: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -344,15 +242,15 @@ def _close_recording_in_lifecycle(
 
         monkeypatch.setattr(
             recording_module,
-            "publish_prepared_replay_bundle_v1",
+            "publish_prepared_replay",
             fail_publish,
         )
     elif lifecycle == "saved":
 
-        def fail_review(_self: DebuggerReplayRecorderV1) -> object:
+        def fail_review(_self: DebuggerReplayRecorder) -> object:
             raise RuntimeError("private closed-lifecycle review setup detail")
 
-        monkeypatch.setattr(DebuggerReplayRecorderV1, "begin_review", fail_review)
+        monkeypatch.setattr(DebuggerReplayRecorder, "begin_review", fail_review)
     elif lifecycle != "reviewing":
         raise AssertionError(f"unsupported closed lifecycle {lifecycle!r}")
 
@@ -772,7 +670,7 @@ def test_terminal_pov_submit_retains_draft_without_appending_stale_transition(
     monkeypatch.setattr(control_module, "step", step_spy)
     monkeypatch.setattr(
         control_module,
-        "capture_evaluation_transition_unit_v1",
+        "capture_evaluation_transition_unit_v2",
         capture_spy,
     )
 
@@ -1431,8 +1329,8 @@ def test_recording_service_never_constructs_parallel_debug_observer(
         raise AssertionError("recording service constructed a parallel observer")
 
     monkeypatch.setattr(
-        DebuggerService,
-        "_new_evaluation_observer",
+        EvaluationEpisodeObserverV1,
+        "__init__",
         forbidden_debug_observer,
     )
     service, recorder = _recording_service(tmp_path)
@@ -1643,10 +1541,10 @@ def test_exact_horizon_truncation_auto_saves_as_complete_declared_horizon(
     assert endpoint.payload.frame.recording is not None
     assert endpoint.payload.frame.recording.completion_state == "complete"
     assert endpoint.payload.frame.recording.completion_reason is None
-    bundle = recorder.bundle
-    assert bundle is not None
-    assert bundle.replay.completion.truncated is True
-    assert bundle.replay.completion.completion_bases == ("declared_horizon",)
+    replay = recorder.replay
+    assert replay is not None
+    assert replay.completion.truncated is True
+    assert replay.completion.completion_bases == ("declared_horizon",)
     assert recorder.publication_outcome == "saved"
 
 
@@ -2007,10 +1905,10 @@ def test_begin_review_failure_retains_saved_reviewable_state(
 ) -> None:
     service, recorder = _recording_service(tmp_path)
 
-    def fail_review(_self: DebuggerReplayRecorderV1) -> object:
+    def fail_review(_self: DebuggerReplayRecorder) -> object:
         raise RuntimeError("injected review failure")
 
-    monkeypatch.setattr(DebuggerReplayRecorderV1, "begin_review", fail_review)
+    monkeypatch.setattr(DebuggerReplayRecorder, "begin_review", fail_review)
     result = service.apply_command(
         _request(
             "finish-with-review-failure",
@@ -2047,10 +1945,10 @@ def test_endpoint_persistence_failure_preserves_committed_prefix_then_save_as(
             detail="injected endpoint publication failure",
         )
 
-    actual_publish = recording_module.publish_prepared_replay_bundle_v1
+    actual_publish = recording_module.publish_prepared_replay
     monkeypatch.setattr(
         recording_module,
-        "publish_prepared_replay_bundle_v1",
+        "publish_prepared_replay",
         fail_publish,
     )
     failed = service.apply_command(
@@ -2069,7 +1967,7 @@ def test_endpoint_persistence_failure_preserves_committed_prefix_then_save_as(
 
     monkeypatch.setattr(
         recording_module,
-        "publish_prepared_replay_bundle_v1",
+        "publish_prepared_replay",
         actual_publish,
     )
     recovered = service.apply_command(
@@ -2092,7 +1990,7 @@ def test_exit_waits_for_durable_save_and_retry_before_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, recorder = _recording_service(tmp_path)
-    actual_publish = recording_module.publish_prepared_replay_bundle_v1
+    actual_publish = recording_module.publish_prepared_replay
 
     def fail_publish(*_args: object, **_kwargs: object) -> object:
         raise ReplaySaveError(
@@ -2103,7 +2001,7 @@ def test_exit_waits_for_durable_save_and_retry_before_shutdown(
 
     monkeypatch.setattr(
         recording_module,
-        "publish_prepared_replay_bundle_v1",
+        "publish_prepared_replay",
         fail_publish,
     )
     failed_exit = service.apply_command(
@@ -2119,7 +2017,7 @@ def test_exit_waits_for_durable_save_and_retry_before_shutdown(
 
     monkeypatch.setattr(
         recording_module,
-        "publish_prepared_replay_bundle_v1",
+        "publish_prepared_replay",
         actual_publish,
     )
     retried_exit = service.apply_command(
@@ -2139,7 +2037,7 @@ def test_retry_save_opens_review_without_replaying_finalization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, recorder = _recording_service(tmp_path)
-    actual_publish = recording_module.publish_prepared_replay_bundle_v1
+    actual_publish = recording_module.publish_prepared_replay
     calls = 0
 
     def fail_once(*args: object, **kwargs: object) -> object:
@@ -2155,7 +2053,7 @@ def test_retry_save_opens_review_without_replaying_finalization(
 
     monkeypatch.setattr(
         recording_module,
-        "publish_prepared_replay_bundle_v1",
+        "publish_prepared_replay",
         fail_once,
     )
     failed = service.apply_command(
@@ -2196,7 +2094,7 @@ def test_keyboard_interrupt_closeout_retries_then_uses_recovery_copy(
         )
     )
     assert isinstance(submitted.payload, CommandResponseV2)
-    actual_publish = recording_module.publish_prepared_replay_bundle_v1
+    actual_publish = recording_module.publish_prepared_replay
     calls = 0
 
     def fail_twice(*args: object, **kwargs: object) -> object:
@@ -2212,7 +2110,7 @@ def test_keyboard_interrupt_closeout_retries_then_uses_recovery_copy(
 
     monkeypatch.setattr(
         recording_module,
-        "publish_prepared_replay_bundle_v1",
+        "publish_prepared_replay",
         fail_twice,
     )
     closed = service.close_recording_for_keyboard_interrupt()
@@ -2233,7 +2131,7 @@ def test_keyboard_interrupt_ordinary_retry_success_skips_recovery_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, recorder = _recording_service(tmp_path)
-    actual_publish = recording_module.publish_prepared_replay_bundle_v1
+    actual_publish = recording_module.publish_prepared_replay
     calls = 0
 
     def fail_once(*args: object, **kwargs: object) -> object:
@@ -2249,7 +2147,7 @@ def test_keyboard_interrupt_ordinary_retry_success_skips_recovery_copy(
 
     monkeypatch.setattr(
         recording_module,
-        "publish_prepared_replay_bundle_v1",
+        "publish_prepared_replay",
         fail_once,
     )
     closed = service.close_recording_for_keyboard_interrupt()
@@ -2277,7 +2175,7 @@ def test_keyboard_interrupt_closeout_failure_stays_recoverable_and_coherent(
 
     monkeypatch.setattr(
         recording_module,
-        "publish_prepared_replay_bundle_v1",
+        "publish_prepared_replay",
         fail_publish,
     )
     closed = service.close_recording_for_keyboard_interrupt()
@@ -2475,7 +2373,7 @@ def test_typed_transition_failure_saves_last_prefix_with_exact_origin(
     elif boundary == "capture":
         monkeypatch.setattr(
             control_module,
-            "capture_evaluation_transition_unit_v1",
+            "capture_evaluation_transition_unit_v2",
             fail,
         )
     else:
@@ -2499,11 +2397,11 @@ def test_typed_transition_failure_saves_last_prefix_with_exact_origin(
     assert recorder.lifecycle == "saved"
     assert failed.payload.frame.recording == recorder.status
     assert not service.faulted
-    bundle = recorder.bundle
-    assert bundle is not None
-    assert bundle.replay.completion.completion_state == "failed"
-    assert bundle.replay.completion.failure_origin == expected_origin
-    assert bundle.replay.completion.end_or_failure_reason == expected_reason
+    replay = recorder.replay
+    assert replay is not None
+    assert replay.completion.completion_state == "failed"
+    assert replay.completion.failure_origin == expected_origin
+    assert replay.completion.end_or_failure_reason == expected_reason
     assert isinstance(duplicate.payload, CommandResponseV2)
     assert duplicate.payload.result == "duplicate"
     assert duplicate.replay_handoff is None
@@ -2514,7 +2412,7 @@ def test_typed_transition_failure_with_save_failure_stays_recoverable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, recorder = _recording_service(tmp_path)
-    actual_publish = recording_module.publish_prepared_replay_bundle_v1
+    actual_publish = recording_module.publish_prepared_replay
 
     def fail_step(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("private simulator failure detail")
@@ -2529,7 +2427,7 @@ def test_typed_transition_failure_with_save_failure_stays_recoverable(
     monkeypatch.setattr(control_module, "step", fail_step)
     monkeypatch.setattr(
         recording_module,
-        "publish_prepared_replay_bundle_v1",
+        "publish_prepared_replay",
         fail_publish,
     )
     failed = service.apply_command(
@@ -2550,7 +2448,7 @@ def test_typed_transition_failure_with_save_failure_stays_recoverable(
 
     monkeypatch.setattr(
         recording_module,
-        "publish_prepared_replay_bundle_v1",
+        "publish_prepared_replay",
         actual_publish,
     )
     recovered = service.apply_command(
@@ -2577,7 +2475,7 @@ def test_transition_result_packaging_failure_saves_uncommitted_candidate_prefix(
     )
     initial_session = service.session
     tracked_step = Mock(wraps=control_module.step)
-    tracked_capture = Mock(wraps=control_module.capture_evaluation_transition_unit_v1)
+    tracked_capture = Mock(wraps=control_module.capture_evaluation_transition_unit_v2)
 
     def fail_packaging(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("private transition packaging detail")
@@ -2585,7 +2483,7 @@ def test_transition_result_packaging_failure_saves_uncommitted_candidate_prefix(
     monkeypatch.setattr(control_module, "step", tracked_step)
     monkeypatch.setattr(
         control_module,
-        "capture_evaluation_transition_unit_v1",
+        "capture_evaluation_transition_unit_v2",
         tracked_capture,
     )
     monkeypatch.setattr(input_module, "_result", fail_packaging)
@@ -2610,12 +2508,12 @@ def test_transition_result_packaging_failure_saves_uncommitted_candidate_prefix(
     assert recorder.lifecycle == "saved"
     assert failed.payload.frame.recording == recorder.status
     assert not service.faulted
-    bundle = recorder.bundle
-    assert bundle is not None
-    assert bundle.replay.completion.validated_transition_count == 0
-    assert bundle.replay.completion.completion_state == "failed"
-    assert bundle.replay.completion.failure_origin == "validation"
-    assert bundle.replay.completion.end_or_failure_reason == "validation_failure"
+    replay = recorder.replay
+    assert replay is not None
+    assert replay.completion.validated_transition_count == 0
+    assert replay.completion.completion_state == "failed"
+    assert replay.completion.failure_origin == "validation"
+    assert replay.completion.end_or_failure_reason == "validation_failure"
     assert isinstance(duplicate.payload, CommandResponseV2)
     assert duplicate.payload.result == "duplicate"
     assert tracked_step.call_count == 1
@@ -2630,13 +2528,13 @@ def test_recorder_precommit_append_failure_closes_old_prefix_as_validation_failu
     initial_session = service.session
 
     def fail_append(
-        _self: DebuggerReplayRecorderV1,
+        _self: DebuggerReplayRecorder,
         *_args: object,
         **_kwargs: object,
     ) -> None:
         raise ValueError("private invalid transition unit")
 
-    monkeypatch.setattr(DebuggerReplayRecorderV1, "append", fail_append)
+    monkeypatch.setattr(DebuggerReplayRecorder, "append", fail_append)
     failed = service.apply_command(
         _request(
             "recorder-validation-failure",
@@ -2649,19 +2547,24 @@ def test_recorder_precommit_append_failure_closes_old_prefix_as_validation_failu
     assert service.session is initial_session
     assert recorder.validated_transition_count == 0
     assert recorder.lifecycle == "saved"
-    bundle = recorder.bundle
-    assert bundle is not None
-    assert bundle.replay.completion.failure_origin == "validation"
+    replay = recorder.replay
+    assert replay is not None
+    assert replay.completion.failure_origin == "validation"
     assert not service.faulted
 
 
 def test_recorder_processing_failure_commits_validated_unit_then_closes_prefix(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service, recorder = _recording_service(
-        tmp_path,
-        reducers=(_FailingAdvanceReducer(),),
-    )
+    service, recorder = _recording_service(tmp_path)
+    actual_append = DebuggerReplayRecorder.append
+
+    def fail_after_append(*args: object, **kwargs: object) -> None:
+        actual_append(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        raise RuntimeError("private post-append failure detail")
+
+    monkeypatch.setattr(DebuggerReplayRecorder, "append", fail_after_append)
     result = service.apply_command(
         _request(
             "reducer-processing-failure",
@@ -2682,25 +2585,32 @@ def test_recorder_processing_failure_commits_validated_unit_then_closes_prefix(
     assert result.payload.frame.recording.completion_reason == (
         "evaluation_processing_failure"
     )
-    bundle = recorder.bundle
-    assert bundle is not None
-    assert bundle.replay.processing_status.status == "failed"
-    assert bundle.replay.processing_status.processed_transition_count == 0
-    assert bundle.replay.completion.validated_transition_count == 1
+    replay = recorder.replay
+    assert replay is not None
+    assert replay.completion.end_or_failure_reason == "evaluation_processing_failure"
+    assert replay.completion.validated_transition_count == 1
     assert not service.faulted
 
 
-def test_horizon_reducer_failure_preserves_complete_rollout_and_failed_processing(
+def test_horizon_append_failure_preserves_complete_rollout(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, recorder = _recording_service(
         tmp_path,
         "basic_support",
-        reducers=(_HorizonFailingAdvanceReducer(),),
     )
+    actual_append = DebuggerReplayRecorder.append
+
+    def fail_after_endpoint(*args: object, **kwargs: object) -> None:
+        actual_append(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        if recorder.lifecycle == "sealed":
+            raise RuntimeError("private endpoint append failure detail")
+
+    monkeypatch.setattr(DebuggerReplayRecorder, "append", fail_after_endpoint)
     first = service.apply_command(
         _request(
-            "horizon-reducer-first",
+            "horizon-append-first",
             base_revision=0,
             command=KeyboardCommandV1(key="n"),
         )
@@ -2725,18 +2635,12 @@ def test_horizon_reducer_failure_preserves_complete_rollout_and_failed_processin
     assert endpoint.payload.frame.recording is not None
     assert endpoint.payload.frame.recording.completion_state == "complete"
     assert endpoint.payload.frame.recording.completion_reason is None
-    bundle = recorder.bundle
-    assert bundle is not None
-    completion = bundle.replay.completion
+    replay = recorder.replay
+    assert replay is not None
+    completion = replay.completion
     assert completion.completion_state == "complete"
     assert completion.validated_transition_count == 2
     assert completion.completion_bases == ("declared_horizon",)
     assert completion.terminated is False
     assert completion.truncated is False
-    processing = bundle.replay.processing_status
-    assert processing.status == "failed"
-    assert processing.processed_transition_count == 1
-    assert processing.failure is not None
-    assert processing.failure.stage == "reducer_advance"
-    assert processing.failure.attempted_transition_index == 1
     assert not service.faulted

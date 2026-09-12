@@ -239,11 +239,12 @@ adapter.
 [Amendment A25](../design/specification_amendments.md#a25-sharedobs-only-canonical-benchmark-execution)
 supersedes the earlier forward dual-regime benchmark plan. Official baseline
 training and evaluation, controlled scenarios, tournament and cross-play
-cells, ratings, leaderboards, and Paper 1 reports require:
+cells, ratings, leaderboards, and Paper 1 reports require the current relative
+input projection introduced by A37:
 
 ```text
 execution_information_mode = shared_obs
-actor_projection = base-observation-plus-authorized-sensor-source-bank@1
+actor_projection = base-observation-plus-authorized-sensor-source-bank@2
 ```
 
 Every official replay frame must carry exactly the availability matrix derived
@@ -732,8 +733,8 @@ assignments as well as the approved geometric symmetry.
 
 `python -m scripts.dev.qualify_tdm_scenarios <new-directory>` exercises all
 eight packaged definitions at two fixed schedule coordinates through the shared
-`evaluate_episodes` executor, current scalar metrics, replay V2 and scenario
-record V3. One RunWriter run retains one full scalar CSV row per episode. Team A
+`evaluate_episodes` executor, current scalar metrics, replay V3 and scenario
+record V4. One RunWriter run retains one full scalar CSV row per episode. Team A
 uses ALPHA as a pipeline control; Team B uses the approved ALPHA/BETA pressure
 binding. Before capture, the context binds the actual built-in callable's
 versioned controller descriptor separately from its frozen variables digest,
@@ -1063,8 +1064,8 @@ Scenario and actor-POV companions use the same finite canonical JSON,
 descriptor-bound nonsymlink path walk, size/depth limits, and atomic no-clobber
 publication. A POV save must validate its completed replay reference. A
 historical V1/V2 scenario save or load validates both its replay and metric-report
-evidence joins. Current V3 scenario records join replay V2 directly and have no
-metric-report field. A structurally valid but foreign record is not accepted as
+evidence joins. Historical V3 scenario records join replay V2 directly. Current
+V4 scenario records join replay V3. Neither family has a metric-report field. A structurally valid but foreign record is not accepted as
 a local scenario result.
 
 Canonical V2 scenario loading and saving remain JAX-free and establish artifact
@@ -1122,9 +1123,12 @@ Evaluation frames store base observations and masks once. They do not duplicate
 materialized SharedObs. SharedObs actor inputs remain reproducible from the
 same-epoch base sensor projections, source-axis/provenance mapping, required
 recipient-by-source availability inputs, and recorded actor-input projection
-version. A19's structured source bank may be reconstructed on demand from
-those authorities, using the recorded source/global-slot mappings rather than
-the current code's mapping constants. Current replay capture derives availability
+version. Historical source banks use their recorded source/global-slot mappings
+rather than current code constants. Current banks use five own-team sources and
+ten relative candidates: five allies, then five enemies. Their feature shape is
+`(5, 10, 58)`, visibility shape is `(5, 10)`, objective shape is `(5, 8, 12)`,
+and source-availability shape is `(5,)`. The selected actor's own observation
+arrives separately; its own source row is unavailable. Current replay capture derives availability
 from the captured active mask and team IDs through the same canonical topology
 helper used by policy input construction. Saved availability matrices remain the
 authority when reading historical artifacts. Learned encoder tensors remain a
@@ -1150,11 +1154,27 @@ it for `no_shared_obs`. Diagonal, cross-team, inactive-recipient, and
 inactive-source entries are false. Neither regime stores a materialized
 SharedObs actor-input projection in the evaluation frame.
 
-This V1 mode and its compatible actor projection are episode-wide context
-authorities, not per-assignment fields. All configured active policy
-assignments must therefore be homogeneous. The current V1 context, replay, and
-metric-report family is immutable and rejects implicit mixed execution. A25
-removes mixed-regime V2 from the current roadmap without changing V1.
+The recorded availability matrix is routing metadata. A policy receives only
+its five own-team source entries, with every unavailable source cleared. Global
+slots, hard team IDs, roster ownership and catalog mappings stay outside the
+current policy input. Feature column 3 means `is_enemy`: self and allies are
+zero, visible enemies are one, and unseen rows remain zero. Existing visibility
+and activity masks distinguish hidden enemies from allies and unused padding.
+`self_ally_index` is a scalar own-team row number from 0 to 4; inactive actors
+receive zero. Shared networks normally condition on `self_features`.
+
+The current contract uses base observation/frame V2, episode context V3,
+SharedObs projection V2, NoSharedObs projection V3 and replay V3. Historical
+records keep their original team-number feature and projection meaning. A run
+cannot resume with a different input contract. See
+[A37](../design/specification_amendments.md#a37-relative-policy-identity-and-versioned-recordings)
+and the [policy input guide](workflows.md#policy-inputs).
+
+Execution mode and compatible projection remain episode-wide context
+authorities, not per-assignment fields. All configured active policy assignments
+must therefore be homogeneous. The historical V1 context, replay and metric
+report families remain immutable. Their version numbers do not authorize mixed
+execution.
 
 Milestone 6 evaluation records use a single normalized authority for submitted
 and accepted actions inside `TransitionFactsV1.action_acceptance_facts`; the

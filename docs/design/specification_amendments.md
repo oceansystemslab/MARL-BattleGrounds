@@ -1171,6 +1171,10 @@ otherwise change.
 
 ## A19. SharedObs structured runtime advancement
 
+The global-slot policy payload described below is historical. A37 replaces its
+current execution layout and callback identity argument. V1 recordings keep the
+layout below for exact historical reconstruction.
+
 **Classification:** accepted milestone-ownership advancement without a core
 observation or simulator change.
 **Supersedes:** the timing clauses in A1, A12, A13, and A17 that defer the
@@ -2567,3 +2571,64 @@ the exact file/function, reason, behavioral impact and proposed scope. A host
 reimplementation of simulator rules is not an acceptable way around that gate.
 No Core change is currently planned. Existing action/observation, policy,
 controller and simulator semantics remain authoritative.
+
+## A37. Relative Policy Identity And Versioned Recordings
+
+**Accepted change — 2026-09-12.** This supersedes earlier clauses that expose a
+hard team ID or global slot in current policy inputs. Simulator routing,
+configuration, transition facts and recording metadata retain their existing
+identities. This amendment does not alter collision, combat, masks, action
+meanings, rewards, random-key assignment or termination.
+
+The approved Core scope is limited to `core/types.py` and the observation
+builders in `core/env.py`. Feature column 3 becomes `AGENT_FEATURE_IS_ENEMY`:
+self and allies have zero, visible enemies have one, and the existing visibility
+mask still clears hidden rows. The feature width remains 58 and every other
+column keeps its meaning. `Observation.self_ally_index` is an `int32` local row
+0–4 for active actors, stable through death and respawn; inactive rows use zero.
+Activity masks distinguish padding. `self_features` remains the normal way a
+shared network conditions on its own class and state. The local index supports
+row lookup and is not automatically added as a network feature.
+
+`SpawnLifecycleObservation` is unchanged. Its own-team/opponent groups and
+existing active/alive/visibility information already distinguish hidden units
+and padding. Absolute world positions and map/spawn geometry retain their
+existing visibility contracts; removing simulator labels does not hide physical
+location or promise that a method cannot learn a side preference.
+
+Current `ActorInput` contains observation, source bank and source availability.
+SharedObs callbacks take five arguments: observation, action mask, key, bank and
+availability. NoSharedObs retains three arguments: observation, mask and key.
+No policy receives a global slot or hard team ID from these adapters.
+
+`SharedObsSensorSourceBankV2` gives each actor features `(5, 10, 58)`, visibility
+`(5, 10)` and objectives `(5, 8, 12)`, with availability `(5,)`. Sources are the
+five stable own-team positions; candidates are five allies followed by five
+enemies. Self is an unavailable shared source because its own view is supplied
+separately. Build team source data once from existing relative rows, then mask
+all unavailable material per recipient. Preserve authorized subsets, dead-source
+redaction, own-view precedence and lowest-source selection. Store compact
+observations during rollouts, not expanded actor banks. The recorder's existing
+global availability matrix remains metadata used to reconstruct local inputs.
+
+Changed payloads have explicit versions: base observation/frame V2, episode
+context V3, replay header/artifact/reference V3, SharedObs projection V2,
+NoSharedObs projection V3 and actor-POV V2. Scenario evaluation V4 binds the new
+replay reference while reusing unchanged scenario definitions and predicates.
+Other unchanged records retain their versions. Old V1/V2 readers preserve the
+original team-ID column, global source layout, identities and bytes. Current
+capture records actual delivered observation values, with no translation back
+to pretend historical inputs. Viewer ownership comes from roster metadata.
+Reject incompatible version combinations and changed-contract resumes.
+
+Ordinary evaluation continues to assign the first policy to simulator Team A.
+Team B training and diagnostic use remain supported. Raw team and agent metrics
+retain their physical identities. Broader tournament rules remain unresolved.
+Collision/ordering changes are deferred until the 12 trained policies undergo
+controlled slot-block testing. Equal real training steps at both spawn ends
+does not itself prove slot fairness.
+
+Acceptance requires exact preserved results for the two saved 2,000-game GPU
+schedules, separate matched-shape action/state/input comparisons, historical and
+current recording tests, and measured computation/storage costs. Source review
+alone cannot establish speed, sample efficiency, learned behavior or fairness.

@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from math import cos, radians, sin
+from operator import itemgetter
 from typing import cast
 
 import jax
@@ -54,7 +55,7 @@ from marl_battlegrounds.policies.reactive_tdm_beta import (
 )
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsPolicy,
-    SharedObsSensorSourceBankV1,
+    SharedObsSensorSourceBankV2,
     build_default_shared_obs_information_availability,
     build_shared_obs_sensor_source_bank,
     execute_shared_obs_team_policy,
@@ -151,9 +152,9 @@ def _mask(*pairs: tuple[int, int], moves: tuple[int, ...] | None = None) -> Acti
     return ActionMask(movement, joint.any(axis=1), joint.any(axis=0), joint)
 
 
-def _bank(scenario: CompiledDevScenarioV1) -> SharedObsSensorSourceBankV1:
+def _bank(scenario: CompiledDevScenarioV1) -> SharedObsSensorSourceBankV2:
     def zeros(leaf: Array) -> Array:
-        return jnp.zeros_like(leaf)
+        return jnp.zeros_like(leaf[1])
 
     return jax.tree.map(
         zeros, build_shared_obs_sensor_source_bank(scenario.observation)
@@ -172,8 +173,7 @@ def _act(
         _mask() if mask is None else mask,
         jax.random.key(0),
         _bank(scenario),
-        jnp.zeros(10, dtype=jnp.bool_),
-        jnp.int32(8),
+        jnp.zeros(5, dtype=jnp.bool_),
     )
 
 
@@ -542,42 +542,40 @@ def test_shared_priority_sighting_guides_movement_without_bypassing_own_mask(
     bank = _bank(scenario)
     prey = _row(obs.self_features, (13, 5), 40, prey_class)
     bank = bank._replace(
-        unit_features_by_sensor_source_and_global_slot=(
-            bank.unit_features_by_sensor_source_and_global_slot.at[5, 4].set(prey)
+        unit_features_by_source_and_candidate=(
+            bank.unit_features_by_source_and_candidate.at[0, 9].set(prey)
         ),
-        unit_visibility_by_sensor_source_and_global_slot=(
-            bank.unit_visibility_by_sensor_source_and_global_slot.at[5, 4].set(True)
+        unit_visibility_by_source_and_candidate=(
+            bank.unit_visibility_by_source_and_candidate.at[0, 9].set(True)
         ),
     )
-    unavailable = jnp.zeros(10, dtype=jnp.bool_)
-    available = unavailable.at[5].set(True)
+    unavailable = jnp.zeros(5, dtype=jnp.bool_)
+    available = unavailable.at[0].set(True)
     mask = _mask((6, 0))
     args = (obs, mask, jax.random.key(0), bank)
-    local = _POLICY(*args, unavailable, jnp.int32(8))
-    shared = _POLICY(*args, available, jnp.int32(8))
+    local = _POLICY(*args, unavailable)
+    shared = _POLICY(*args, available)
     assert int(local.move) == MOVE_WEST
     assert tuple(map(int, shared)) == (MOVE_EAST, 6, 0)
     # Neither another source nor a hidden row can change that admitted sighting.
     hostile = bank._replace(
-        unit_features_by_sensor_source_and_global_slot=(
-            bank.unit_features_by_sensor_source_and_global_slot.at[0].set(999)
+        unit_features_by_source_and_candidate=(
+            bank.unit_features_by_source_and_candidate.at[4].set(999)
         ),
-        unit_visibility_by_sensor_source_and_global_slot=(
-            bank.unit_visibility_by_sensor_source_and_global_slot.at[0].set(True)
+        unit_visibility_by_source_and_candidate=(
+            bank.unit_visibility_by_source_and_candidate.at[4].set(True)
         ),
     )
     _exact(
         shared,
-        _POLICY(obs, mask, jax.random.key(999), hostile, available, jnp.int32(8)),
+        _POLICY(obs, mask, jax.random.key(999), hostile, available),
     )
     hidden = bank._replace(
-        unit_visibility_by_sensor_source_and_global_slot=(
-            bank.unit_visibility_by_sensor_source_and_global_slot.at[5, 4].set(False)
+        unit_visibility_by_source_and_candidate=(
+            bank.unit_visibility_by_source_and_candidate.at[0, 9].set(False)
         ),
     )
-    _exact(
-        local, _POLICY(obs, mask, jax.random.key(0), hidden, available, jnp.int32(8))
-    )
+    _exact(local, _POLICY(obs, mask, jax.random.key(0), hidden, available))
 
 
 def test_determinism_eager_jit_team_parity_and_descriptor_freshness(
@@ -598,9 +596,8 @@ def test_determinism_eager_jit_team_parity_and_descriptor_freshness(
             cast(Observation, _scalar(obs, slot)),
             cast(ActionMask, _scalar(mask, slot)),
             keys[slot],
-            bank,
-            availability[slot],
-            jnp.int32(slot),
+            jax.tree.map(itemgetter(1), bank),
+            availability[slot, 5:],
         )
         eager = reactive_tdm_beta_policy(*args)
         _exact(eager, _POLICY(*args))

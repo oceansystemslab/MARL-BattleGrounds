@@ -13,7 +13,7 @@ privacy noninterference to be checked over canonical authorized-content bytes.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, TypedDict, cast
+from typing import Annotated, Literal, TypedDict, cast, overload
 
 from pydantic import BeforeValidator, Field, StringConstraints, model_validator
 
@@ -37,7 +37,9 @@ from marl_battlegrounds.evaluation.models import (
     TRANSITION_SCHEMA_ID,
     UNIT_FEATURES,
     EvaluationEpisodeContext,
+    EvaluationFrame,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     EvaluationModel,
     EvaluationTransitionV1,
     RosterSlotV1,
@@ -50,12 +52,18 @@ from marl_battlegrounds.evaluation.replay import (
     ReplayArtifactV1,
     validate_replay_artifact_v1,
 )
+from marl_battlegrounds.evaluation.replay_v3 import (
+    ReplayArtifactReferenceV3,
+    ReplayArtifactV3,
+    replay_reference_v3,
+)
 from marl_battlegrounds.evaluation.validation import (
     validate_declared_model_tree,
     validate_initial_evaluation_frame_v1,
 )
 
 ACTOR_POV_SCHEMA_VERSION: Literal[1] = 1
+ACTOR_POV_SCHEMA_VERSION_V2: Literal[2] = 2
 ACTOR_POV_COMPLETION_SCHEMA_ID = "marl_battlegrounds.evaluation.actor_pov_completion"
 ACTOR_POV_PREVIOUS_ACTIONS_SCHEMA_ID = (
     "marl_battlegrounds.evaluation.actor_pov_previous_actions"
@@ -98,6 +106,15 @@ _FEATURE_CURRENT_HEALTH = 12
 _FEATURE_ULTIMATE_COOLDOWN = 14
 _STATUS_FEATURE_START = 15
 _STATUS_FEATURE_STOP = 29
+
+
+def _require_schema_version_two(value: object) -> object:
+    if type(value) is not int or value != 2:
+        raise ValueError("schema_version must be the exact integer 2")
+    return value
+
+
+_SchemaVersionV2 = Annotated[Literal[2], BeforeValidator(_require_schema_version_two)]
 
 
 def _require_schema_version_one(value: object) -> object:
@@ -333,6 +350,87 @@ class ActorPovActionMaskV1(EvaluationModel):
         return self
 
 
+def _validate_axismapping[T: ActorPovAxisMappingV1 | ActorPovAxisMappingV2](
+    self: T,
+) -> T:
+    from marl_battlegrounds.evaluation.actor_projection import (
+        NO_SHARED_OBS_ACTOR_PROJECTION_V3,
+        SHARED_OBS_ACTOR_PROJECTION_V2,
+    )
+
+    if self.schema_version == 1:
+        if self.actor_projection_version != 1:
+            raise ValueError("POV V1 requires actor projection version 1")
+    elif (self.actor_projection_identifier, self.actor_projection_version) not in (
+        (
+            NO_SHARED_OBS_ACTOR_PROJECTION_V3.identifier,
+            NO_SHARED_OBS_ACTOR_PROJECTION_V3.version,
+        ),
+        (
+            SHARED_OBS_ACTOR_PROJECTION_V2.identifier,
+            SHARED_OBS_ACTOR_PROJECTION_V2.version,
+        ),
+    ):
+        raise ValueError("POV V2 requires the current actor projection")
+    for field_name, length in (
+        (
+            "target_action_recipient_public_agent_id_by_id",
+            NUM_TARGET_ACTIONS,
+        ),
+        (
+            "ally_observation_row_public_agent_id_by_id",
+            MAX_AGENTS_PER_TEAM,
+        ),
+        (
+            "enemy_observation_row_public_agent_id_by_id",
+            MAX_AGENTS_PER_TEAM,
+        ),
+        ("movement_action_name_by_id", NUM_MOVE_ACTIONS),
+        ("target_action_name_by_id", NUM_TARGET_ACTIONS),
+        ("use_ultimate_action_name_by_id", NUM_ULTIMATE_ACTIONS),
+        ("spawn_lifecycle_team_axis_name_by_id", NUM_TEAMS),
+    ):
+        _require_tuple_shape(
+            getattr(self, field_name),
+            (length,),
+            field_name=field_name,
+        )
+    _require_tuple_shape(
+        self.unit_direction_vector_by_movement_action,
+        (NUM_MOVE_ACTIONS, ENVIRONMENT_DIMENSIONS),
+        field_name="unit_direction_vector_by_movement_action",
+    )
+    expected_targets = (
+        None,
+        *self.ally_observation_row_public_agent_id_by_id,
+        *self.enemy_observation_row_public_agent_id_by_id,
+    )
+    if self.target_action_recipient_public_agent_id_by_id != expected_targets:
+        raise ValueError(
+            "POV target actions must align with ally/enemy observation rows"
+        )
+    all_relation_ids = (
+        *self.ally_observation_row_public_agent_id_by_id,
+        *self.enemy_observation_row_public_agent_id_by_id,
+    )
+    if len(set(all_relation_ids)) != MAX_AGENT_SLOTS:
+        raise ValueError("POV relation axes must partition public agent IDs")
+    for field_name in (
+        "movement_action_name_by_id",
+        "target_action_name_by_id",
+        "use_ultimate_action_name_by_id",
+    ):
+        values = getattr(self, field_name)
+        if len(set(values)) != len(values):
+            raise ValueError(f"{field_name} entries must be unique")
+    if self.spawn_lifecycle_team_axis_name_by_id != (
+        "Own Team",
+        "Opponent Team",
+    ):
+        raise ValueError("POV spawn-lifecycle axes must remain actor-relative")
+    return self
+
+
 class ActorPovAxisMappingV1(EvaluationModel):
     """Recipient-local categorical-axis vocabulary needed offline."""
 
@@ -365,65 +463,106 @@ class ActorPovAxisMappingV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_axes(self) -> ActorPovAxisMappingV1:
-        if self.actor_projection_version != ACTOR_POV_SCHEMA_VERSION:
-            raise ValueError("POV V1 requires actor projection version 1")
-        for field_name, length in (
-            (
-                "target_action_recipient_public_agent_id_by_id",
-                NUM_TARGET_ACTIONS,
-            ),
-            (
-                "ally_observation_row_public_agent_id_by_id",
-                MAX_AGENTS_PER_TEAM,
-            ),
-            (
-                "enemy_observation_row_public_agent_id_by_id",
-                MAX_AGENTS_PER_TEAM,
-            ),
-            ("movement_action_name_by_id", NUM_MOVE_ACTIONS),
-            ("target_action_name_by_id", NUM_TARGET_ACTIONS),
-            ("use_ultimate_action_name_by_id", NUM_ULTIMATE_ACTIONS),
-            ("spawn_lifecycle_team_axis_name_by_id", NUM_TEAMS),
-        ):
-            _require_tuple_shape(
-                getattr(self, field_name),
-                (length,),
-                field_name=field_name,
-            )
+        return _validate_axismapping(self)
+
+
+class ActorPovAxisMappingV2(EvaluationModel):
+    """Recipient-local categorical-axis vocabulary needed offline."""
+
+    schema_id: Literal["marl_battlegrounds.evaluation.actor_pov_axis_mapping"] = (
+        ACTOR_POV_AXIS_MAPPING_SCHEMA_ID
+    )
+    schema_version: _SchemaVersionV2 = 2
+    actor_projection_identifier: _AsciiIdentifier
+    actor_projection_version: Annotated[int, Field(gt=0)]
+    source_context_schema_id: Literal[
+        "marl_battlegrounds.evaluation.episode_context"
+    ] = CONTEXT_SCHEMA_ID
+    source_context_schema_version: Literal[3] = 3
+    source_frame_schema_id: Literal["marl_battlegrounds.evaluation.frame"] = (
+        FRAME_SCHEMA_ID
+    )
+    source_frame_schema_version: _SchemaVersionV2 = 2
+    source_transition_schema_id: Literal["marl_battlegrounds.evaluation.transition"] = (
+        TRANSITION_SCHEMA_ID
+    )
+    source_transition_schema_version: _SchemaVersionV1 = ACTOR_POV_SCHEMA_VERSION
+    target_action_recipient_public_agent_id_by_id: tuple[_AsciiIdentifier | None, ...]
+    ally_observation_row_public_agent_id_by_id: tuple[_AsciiIdentifier, ...]
+    enemy_observation_row_public_agent_id_by_id: tuple[_AsciiIdentifier, ...]
+    movement_action_name_by_id: tuple[_AsciiText, ...]
+    unit_direction_vector_by_movement_action: _FloatMatrix
+    target_action_name_by_id: tuple[_AsciiText, ...]
+    use_ultimate_action_name_by_id: tuple[_AsciiText, ...]
+    spawn_lifecycle_team_axis_name_by_id: tuple[_AsciiText, ...]
+
+    @model_validator(mode="after")
+    def _validate_axes(self) -> ActorPovAxisMappingV2:
+        return _validate_axismapping(self)
+
+
+def _validate_frame[T: ActorPovFrameV1 | ActorPovFrameV2](self: T) -> T:
+    expected_pov_id = (
+        f"{self.episode_id}:actor-pov:{self.public_agent_id}:frame:{self.frame_index}"
+    )
+    if self.pov_frame_id != expected_pov_id:
+        raise ValueError("POV frame ID is not canonical")
+    if self.source_frame_id != f"{self.episode_id}:frame:{self.frame_index}":
+        raise ValueError("POV source frame ID is not canonical")
+    for field_name, shape in (
+        ("self_features", (SELF_FEATURES,)),
+        ("ally_unit_features", (MAX_AGENTS_PER_TEAM, UNIT_FEATURES)),
+        ("enemy_unit_features", (MAX_AGENTS_PER_TEAM, UNIT_FEATURES)),
+        (
+            "map_obstacle_features",
+            (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
+        ),
+        ("objective_features", (MAX_OBJECTIVE_SLOTS, OBJECTIVE_FEATURES)),
+        ("context_features", (CONTEXT_FEATURES,)),
+        ("ally_visibility_mask", (MAX_AGENTS_PER_TEAM,)),
+        ("enemy_visibility_mask", (MAX_AGENTS_PER_TEAM,)),
+    ):
         _require_tuple_shape(
-            self.unit_direction_vector_by_movement_action,
-            (NUM_MOVE_ACTIONS, ENVIRONMENT_DIMENSIONS),
-            field_name="unit_direction_vector_by_movement_action",
+            getattr(self, field_name),
+            shape,
+            field_name=field_name,
         )
-        expected_targets = (
-            None,
-            *self.ally_observation_row_public_agent_id_by_id,
-            *self.enemy_observation_row_public_agent_id_by_id,
+    if isinstance(self, ActorPovFrameV2):
+        _require_tuple_shape(
+            self.class_ids_by_team,
+            (NUM_TEAMS, MAX_AGENTS_PER_TEAM),
+            field_name="class_ids_by_team",
         )
-        if self.target_action_recipient_public_agent_id_by_id != expected_targets:
-            raise ValueError(
-                "POV target actions must align with ally/enemy observation rows"
-            )
-        all_relation_ids = (
-            *self.ally_observation_row_public_agent_id_by_id,
-            *self.enemy_observation_row_public_agent_id_by_id,
-        )
-        if len(set(all_relation_ids)) != MAX_AGENT_SLOTS:
-            raise ValueError("POV relation axes must partition public agent IDs")
-        for field_name in (
-            "movement_action_name_by_id",
-            "target_action_name_by_id",
-            "use_ultimate_action_name_by_id",
+        if any(
+            not 0 <= value <= 5 for team in self.class_ids_by_team for value in team
         ):
-            values = getattr(self, field_name)
-            if len(set(values)) != len(values):
-                raise ValueError(f"{field_name} entries must be unique")
-        if self.spawn_lifecycle_team_axis_name_by_id != (
-            "Own Team",
-            "Opponent Team",
+            raise ValueError("POV class IDs must be between zero and five")
+        for classes, active in zip(
+            self.class_ids_by_team,
+            self.spawn_lifecycle.active_mask_by_team,
+            strict=True,
         ):
-            raise ValueError("POV spawn-lifecycle axes must remain actor-relative")
-        return self
+            if any(
+                (class_id != 0) != enabled
+                for class_id, enabled in zip(classes, active, strict=True)
+            ):
+                raise ValueError("POV class IDs must match the active roster")
+        if self.class_ids_by_team[0][self.self_ally_index] != int(
+            self.self_features[_FEATURE_CLASS_ID]
+        ):
+            raise ValueError("POV self class must join self_ally_index")
+        if self.self_features[_FEATURE_TEAM_ID] != 0.0:
+            raise ValueError("POV self is_enemy must be zero")
+        for relation, rows, visibility in (
+            (0.0, self.ally_unit_features, self.ally_visibility_mask),
+            (1.0, self.enemy_unit_features, self.enemy_visibility_mask),
+        ):
+            if any(
+                visible and row[_FEATURE_TEAM_ID] != relation
+                for row, visible in zip(rows, visibility, strict=True)
+            ):
+                raise ValueError("POV visible relation flags must match their axes")
+    return self
 
 
 class ActorPovFrameV1(EvaluationModel):
@@ -453,33 +592,39 @@ class ActorPovFrameV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_frame(self) -> ActorPovFrameV1:
-        expected_pov_id = (
-            f"{self.episode_id}:actor-pov:{self.public_agent_id}:frame:"
-            f"{self.frame_index}"
-        )
-        if self.pov_frame_id != expected_pov_id:
-            raise ValueError("POV frame ID is not canonical")
-        if self.source_frame_id != f"{self.episode_id}:frame:{self.frame_index}":
-            raise ValueError("POV source frame ID is not canonical")
-        for field_name, shape in (
-            ("self_features", (SELF_FEATURES,)),
-            ("ally_unit_features", (MAX_AGENTS_PER_TEAM, UNIT_FEATURES)),
-            ("enemy_unit_features", (MAX_AGENTS_PER_TEAM, UNIT_FEATURES)),
-            (
-                "map_obstacle_features",
-                (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
-            ),
-            ("objective_features", (MAX_OBJECTIVE_SLOTS, OBJECTIVE_FEATURES)),
-            ("context_features", (CONTEXT_FEATURES,)),
-            ("ally_visibility_mask", (MAX_AGENTS_PER_TEAM,)),
-            ("enemy_visibility_mask", (MAX_AGENTS_PER_TEAM,)),
-        ):
-            _require_tuple_shape(
-                getattr(self, field_name),
-                shape,
-                field_name=field_name,
-            )
-        return self
+        return _validate_frame(self)
+
+
+class ActorPovFrameV2(EvaluationModel):
+    """One recipient-sliced decision frame with no privileged snapshot."""
+
+    schema_id: Literal["marl_battlegrounds.evaluation.actor_pov_frame"] = (
+        ACTOR_POV_FRAME_SCHEMA_ID
+    )
+    schema_version: _SchemaVersionV2 = 2
+    episode_id: _AsciiIdentifier
+    public_agent_id: _AsciiIdentifier
+    frame_index: _NonNegativeInt
+    pov_frame_id: _AsciiIdentifier
+    source_frame_id: _AsciiIdentifier
+    simulator_step_count: _NonNegativeInt
+    self_ally_index: _TeamLocalSlot
+    class_ids_by_team: _IntegerMatrix
+    self_features: _FloatVector
+    ally_unit_features: _FloatMatrix
+    enemy_unit_features: _FloatMatrix
+    map_obstacle_features: _FloatMatrix
+    objective_features: _FloatMatrix
+    context_features: _FloatVector
+    ally_visibility_mask: _BooleanVector
+    enemy_visibility_mask: _BooleanVector
+    previous_timestep_actions: ActorPovPreviousTimestepActionsV1
+    spawn_lifecycle: ActorPovSpawnLifecycleV1
+    action_mask: ActorPovActionMaskV1
+
+    @model_validator(mode="after")
+    def _validate_frame(self) -> ActorPovFrameV2:
+        return _validate_frame(self)
 
 
 class ActorPovSubmittedActionV1(EvaluationModel):
@@ -724,6 +869,61 @@ class ActorPovTransitionV1(EvaluationModel):
         return self
 
 
+def _validate_currentslice[T: ActorPovCurrentSliceV1 | ActorPovCurrentSliceV2](
+    self: T,
+) -> T:
+    if self.selected_team_local_slot != (
+        self.selected_global_slot % MAX_AGENTS_PER_TEAM
+    ):
+        raise ValueError("POV team-local slot must follow the fixed team block")
+    expected_team_id = 1 if self.selected_global_slot < MAX_AGENTS_PER_TEAM else 2
+    if self.configured_team_id != expected_team_id:
+        raise ValueError("POV configured team must follow the fixed slot block")
+    if (
+        self.axis_mapping.ally_observation_row_public_agent_id_by_id[
+            self.selected_team_local_slot
+        ]
+        != self.public_agent_id
+    ):
+        raise ValueError("POV ally axis must place the selected public agent")
+    frame = self.frame
+    if (
+        isinstance(frame, ActorPovFrameV2)
+        and frame.self_ally_index != self.selected_team_local_slot
+    ):
+        raise ValueError("POV self index must match its selected local slot")
+    if (
+        frame.episode_id != self.episode_id
+        or frame.public_agent_id != self.public_agent_id
+    ):
+        raise ValueError("POV current frame must join the selected identity")
+    if frame.self_features[_FEATURE_ACTIVE] != 1.0:
+        raise ValueError("configured-active POV self rows require ACTIVE=1")
+    if frame.self_features[_FEATURE_ALIVE] not in (0.0, 1.0):
+        raise ValueError("POV self ALIVE must be exactly zero or one")
+    if frame.self_features[_FEATURE_TEAM_ID] != (
+        float(self.configured_team_id) if frame.schema_version == 1 else 0.0
+    ):
+        raise ValueError("POV self team feature must match current metadata")
+    if frame.self_features[_FEATURE_CLASS_ID] != float(self.class_id):
+        raise ValueError("POV self class feature must match current metadata")
+    incoming = self.incoming_transition
+    if frame.frame_index == 0:
+        if incoming is not None:
+            raise ValueError("POV frame zero cannot have an incoming transition")
+        return self
+    if incoming is None:
+        raise ValueError("non-initial POV frames require their incoming transition")
+    if (
+        incoming.episode_id != self.episode_id
+        or incoming.public_agent_id != self.public_agent_id
+        or incoming.transition_index != frame.frame_index - 1
+        or incoming.successor_pov_frame_id != frame.pov_frame_id
+    ):
+        raise ValueError("incoming POV transition must enter the current frame")
+    return self
+
+
 class ActorPovCurrentSliceV1(EvaluationModel):
     """One live recipient slice without a fabricated retained prefix.
 
@@ -755,52 +955,44 @@ class ActorPovCurrentSliceV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_current_slice(self) -> ActorPovCurrentSliceV1:
-        if self.selected_team_local_slot != (
-            self.selected_global_slot % MAX_AGENTS_PER_TEAM
-        ):
-            raise ValueError("POV team-local slot must follow the fixed team block")
-        expected_team_id = 1 if self.selected_global_slot < MAX_AGENTS_PER_TEAM else 2
-        if self.configured_team_id != expected_team_id:
-            raise ValueError("POV configured team must follow the fixed slot block")
-        if (
-            self.axis_mapping.ally_observation_row_public_agent_id_by_id[
-                self.selected_team_local_slot
-            ]
-            != self.public_agent_id
-        ):
-            raise ValueError("POV ally axis must place the selected public agent")
-        frame = self.frame
-        if (
-            frame.episode_id != self.episode_id
-            or frame.public_agent_id != self.public_agent_id
-        ):
-            raise ValueError("POV current frame must join the selected identity")
-        if frame.self_features[_FEATURE_ACTIVE] != 1.0:
-            raise ValueError("configured-active POV self rows require ACTIVE=1")
-        if frame.self_features[_FEATURE_ALIVE] not in (0.0, 1.0):
-            raise ValueError("POV self ALIVE must be exactly zero or one")
-        if frame.self_features[_FEATURE_TEAM_ID] != float(self.configured_team_id):
-            raise ValueError("POV self team feature must match current metadata")
-        if frame.self_features[_FEATURE_CLASS_ID] != float(self.class_id):
-            raise ValueError("POV self class feature must match current metadata")
-        incoming = self.incoming_transition
-        if frame.frame_index == 0:
-            if incoming is not None:
-                raise ValueError("POV frame zero cannot have an incoming transition")
-            return self
-        if incoming is None:
-            raise ValueError("non-initial POV frames require their incoming transition")
-        if (
-            incoming.episode_id != self.episode_id
-            or incoming.public_agent_id != self.public_agent_id
-            or incoming.transition_index != frame.frame_index - 1
-            or incoming.successor_pov_frame_id != frame.pov_frame_id
-        ):
-            raise ValueError("incoming POV transition must enter the current frame")
-        return self
+        return _validate_currentslice(self)
 
 
-def _adjacent_cue_endpoint(frame: ActorPovFrameV1) -> ActorPovFrameV1:
+class ActorPovCurrentSliceV2(EvaluationModel):
+    """One live recipient slice without a fabricated retained prefix.
+
+    The selected frame is sufficient at artifact frame zero.  Every later
+    frame carries exactly its incoming recipient-local transition, but never
+    earlier frames, privileged events, completion claims, or replay provenance.
+
+    This is a trusted in-memory projection, not a standalone persisted artifact:
+    only :func:`build_actor_pov_current_slice_v1` can revalidate the authoritative
+    coherent source records and rederive recipient-local cues.
+    """
+
+    schema_id: Literal["marl_battlegrounds.evaluation.actor_pov_current_slice"] = (
+        ACTOR_POV_CURRENT_SLICE_SCHEMA_ID
+    )
+    schema_version: _SchemaVersionV2 = 2
+    episode_id: _AsciiIdentifier
+    selected_global_slot: _GlobalSlot
+    selected_team_local_slot: _TeamLocalSlot
+    public_agent_id: _AsciiIdentifier
+    configured_team_id: _TeamId
+    class_id: _ClassId
+    observation_materialization: Literal["exact_no_shared_obs_actor_input"] = (
+        "exact_no_shared_obs_actor_input"
+    )
+    axis_mapping: ActorPovAxisMappingV2
+    frame: ActorPovFrameV2
+    incoming_transition: ActorPovTransitionV1 | None = None
+
+    @model_validator(mode="after")
+    def _validate_current_slice(self) -> ActorPovCurrentSliceV2:
+        return _validate_currentslice(self)
+
+
+def _adjacent_cue_endpoint(frame: ActorPovFrame) -> ActorPovFrame:
     """Zero masked relation rows before carrier-local cue derivation."""
     zero_row = (0.0,) * UNIT_FEATURES
     ally_rows = tuple(
@@ -825,6 +1017,107 @@ def _adjacent_cue_endpoint(frame: ActorPovFrameV1) -> ActorPovFrameV1:
             "enemy_unit_features": enemy_rows,
         }
     )
+
+
+def _validate_adjacenttransitionslice[
+    T: ActorPovAdjacentTransitionSliceV1 | ActorPovAdjacentTransitionSliceV2
+](self: T) -> T:
+    expected_local_slot = self.selected_global_slot % MAX_AGENTS_PER_TEAM
+    expected_team_id = 1 if self.selected_global_slot < MAX_AGENTS_PER_TEAM else 2
+    if self.selected_team_local_slot != expected_local_slot:
+        raise ValueError("POV team-local slot must follow the fixed team block")
+    if self.configured_team_id != expected_team_id:
+        raise ValueError("POV configured team must follow the fixed slot block")
+    if (
+        self.axis_mapping.ally_observation_row_public_agent_id_by_id[
+            self.selected_team_local_slot
+        ]
+        != self.public_agent_id
+    ):
+        raise ValueError("POV ally axis must place the selected public agent")
+
+    start = self.start_frame
+    transition = self.transition
+    successor = self.successor_frame
+    for endpoint_name, endpoint in (
+        ("start", start),
+        ("successor", successor),
+    ):
+        if (
+            endpoint.episode_id != self.episode_id
+            or endpoint.public_agent_id != self.public_agent_id
+        ):
+            raise ValueError(
+                f"POV {endpoint_name} frame must join the selected identity"
+            )
+        if (
+            isinstance(endpoint, ActorPovFrameV2)
+            and endpoint.self_ally_index != self.selected_team_local_slot
+        ):
+            raise ValueError("POV self index must match its selected local slot")
+        _require_selected_self_topology(
+            endpoint,
+            configured_team_id=self.configured_team_id,
+            class_id=self.class_id,
+        )
+        self_diagonal_is_visible = endpoint.ally_visibility_mask[
+            self.selected_team_local_slot
+        ]
+        if (
+            self_diagonal_is_visible
+            and endpoint.ally_unit_features[self.selected_team_local_slot]
+            != endpoint.self_features
+        ):
+            raise ValueError(
+                f"POV {endpoint_name} visible self row must join its ally axis slot"
+            )
+        lifecycle = endpoint.spawn_lifecycle
+        if not lifecycle.active_mask_by_team[0][
+            self.selected_team_local_slot
+        ] or lifecycle.alive_mask_by_team[0][self.selected_team_local_slot] != (
+            endpoint.self_features[_FEATURE_ALIVE] == 1.0
+        ):
+            raise ValueError(
+                f"POV {endpoint_name} self row must join its lifecycle slot"
+            )
+
+    if (
+        transition.episode_id != self.episode_id
+        or transition.public_agent_id != self.public_agent_id
+    ):
+        raise ValueError("POV adjacent transition must join selected identity")
+    if (
+        transition.transition_index != start.frame_index
+        or successor.frame_index != start.frame_index + 1
+        or transition.start_pov_frame_id != start.pov_frame_id
+        or transition.successor_pov_frame_id != successor.pov_frame_id
+    ):
+        raise ValueError("POV adjacent transition epochs do not join")
+    if successor.simulator_step_count != start.simulator_step_count + 1:
+        raise ValueError("POV adjacent endpoint simulator ticks are not adjacent")
+    cue_start = _adjacent_cue_endpoint(start)
+    cue_successor = _adjacent_cue_endpoint(successor)
+    expected_cues = _derive_cues(
+        episode_id=self.episode_id,
+        public_agent_id=self.public_agent_id,
+        transition_index=transition.transition_index,
+        team_local_slot=self.selected_team_local_slot,
+        start_frame=cue_start,
+        successor_frame=cue_successor,
+        has_any_rejection=(
+            transition.submitted_action_tuple_is_out_of_domain
+            or transition.in_domain_move_action_is_rejected
+            or transition.in_domain_combat_action_pair_is_rejected
+        ),
+        terminated=transition.terminated,
+        truncated=transition.truncated,
+        public_end_reason=transition.public_end_reason,
+    )
+    if transition.cues != expected_cues:
+        raise ValueError(
+            "POV adjacent cues must be derived exactly from their endpoints"
+        )
+    return self
 
 
 class ActorPovAdjacentTransitionSliceV1(EvaluationModel):
@@ -856,97 +1149,131 @@ class ActorPovAdjacentTransitionSliceV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_adjacent_slice(self) -> ActorPovAdjacentTransitionSliceV1:
-        expected_local_slot = self.selected_global_slot % MAX_AGENTS_PER_TEAM
-        expected_team_id = 1 if self.selected_global_slot < MAX_AGENTS_PER_TEAM else 2
-        if self.selected_team_local_slot != expected_local_slot:
-            raise ValueError("POV team-local slot must follow the fixed team block")
-        if self.configured_team_id != expected_team_id:
-            raise ValueError("POV configured team must follow the fixed slot block")
+        return _validate_adjacenttransitionslice(self)
+
+
+class ActorPovAdjacentTransitionSliceV2(EvaluationModel):
+    """One live recipient transition with both exact authorized endpoints.
+
+    The carrier is an in-memory evaluation-to-presentation seam, not a
+    persisted artifact.  It retains only the chosen recipient's recorded
+    actor-input frames, recipient-local transition, and actor-relative axes;
+    Oracle events and source-evidence roots are deliberately absent.
+    """
+
+    schema_id: Literal[
+        "marl_battlegrounds.evaluation.actor_pov_adjacent_transition_slice"
+    ] = ACTOR_POV_ADJACENT_TRANSITION_SLICE_SCHEMA_ID
+    schema_version: _SchemaVersionV2 = 2
+    episode_id: _AsciiIdentifier
+    selected_global_slot: _GlobalSlot
+    selected_team_local_slot: _TeamLocalSlot
+    public_agent_id: _AsciiIdentifier
+    configured_team_id: _TeamId
+    class_id: _ClassId
+    observation_materialization: Literal["exact_no_shared_obs_actor_input"] = (
+        "exact_no_shared_obs_actor_input"
+    )
+    axis_mapping: ActorPovAxisMappingV2
+    start_frame: ActorPovFrameV2
+    transition: ActorPovTransitionV1
+    successor_frame: ActorPovFrameV2
+
+    @model_validator(mode="after")
+    def _validate_adjacent_slice(self) -> ActorPovAdjacentTransitionSliceV2:
+        return _validate_adjacenttransitionslice(self)
+
+
+def _validate_replaycontent[T: ActorPovReplayContentV1 | ActorPovReplayContentV2](
+    self: T,
+) -> T:
+    if self.content_id != (
+        f"{self.episode_id}:actor-pov:{self.public_agent_id}:content"
+    ):
+        raise ValueError("POV content ID is not canonical")
+    if not self.frames or len(self.frames) != len(self.transitions) + 1:
+        raise ValueError("POV content requires exact T+1/T frame structure")
+    expected_team_local_slot = self.selected_global_slot % MAX_AGENTS_PER_TEAM
+    expected_team_id = 1 if self.selected_global_slot < MAX_AGENTS_PER_TEAM else 2
+    if self.selected_team_local_slot != expected_team_local_slot:
+        raise ValueError("POV team-local slot must follow the fixed team block")
+    if self.configured_team_id != expected_team_id:
+        raise ValueError("POV configured team must follow the fixed slot block")
+    if (
+        self.axis_mapping.ally_observation_row_public_agent_id_by_id[
+            self.selected_team_local_slot
+        ]
+        != self.public_agent_id
+    ):
+        raise ValueError("POV ally axis must place the selected public agent")
+    if self.completion.captured_transition_count != len(self.transitions):
+        raise ValueError("POV completion count must equal transition count")
+    for frame_index, frame in enumerate(self.frames):
         if (
-            self.axis_mapping.ally_observation_row_public_agent_id_by_id[
-                self.selected_team_local_slot
-            ]
-            != self.public_agent_id
+            isinstance(frame, ActorPovFrameV2)
+            and frame.self_ally_index != self.selected_team_local_slot
         ):
-            raise ValueError("POV ally axis must place the selected public agent")
-
-        start = self.start_frame
-        transition = self.transition
-        successor = self.successor_frame
-        for endpoint_name, endpoint in (
-            ("start", start),
-            ("successor", successor),
+            raise ValueError("POV self index must match its selected local slot")
+        if frame.frame_index != frame_index:
+            raise ValueError("POV frame positions must equal frame indices")
+        if (
+            frame.episode_id != self.episode_id
+            or frame.public_agent_id != self.public_agent_id
         ):
-            if (
-                endpoint.episode_id != self.episode_id
-                or endpoint.public_agent_id != self.public_agent_id
-            ):
-                raise ValueError(
-                    f"POV {endpoint_name} frame must join the selected identity"
-                )
-            _require_selected_self_topology(
-                endpoint,
-                configured_team_id=self.configured_team_id,
-                class_id=self.class_id,
-            )
-            self_diagonal_is_visible = endpoint.ally_visibility_mask[
-                self.selected_team_local_slot
-            ]
-            if (
-                self_diagonal_is_visible
-                and endpoint.ally_unit_features[self.selected_team_local_slot]
-                != endpoint.self_features
-            ):
-                raise ValueError(
-                    f"POV {endpoint_name} visible self row must join its ally axis slot"
-                )
-            lifecycle = endpoint.spawn_lifecycle
-            if not lifecycle.active_mask_by_team[0][
-                self.selected_team_local_slot
-            ] or lifecycle.alive_mask_by_team[0][self.selected_team_local_slot] != (
-                endpoint.self_features[_FEATURE_ALIVE] == 1.0
-            ):
-                raise ValueError(
-                    f"POV {endpoint_name} self row must join its lifecycle slot"
-                )
-
+            raise ValueError("POV frames must join content identity")
+        if frame.self_features[_FEATURE_ACTIVE] != 1.0:
+            raise ValueError("configured-active POV self rows require ACTIVE=1")
+        if frame.self_features[_FEATURE_ALIVE] not in (0.0, 1.0):
+            raise ValueError("POV self ALIVE must be exactly zero or one")
+        if frame.self_features[_FEATURE_TEAM_ID] != (
+            float(self.configured_team_id) if frame.schema_version == 1 else 0.0
+        ):
+            raise ValueError("POV self team feature must match content metadata")
+        if frame.self_features[_FEATURE_CLASS_ID] != float(self.class_id):
+            raise ValueError("POV self class feature must match content metadata")
+        if frame_index > 0 and frame.simulator_step_count != (
+            self.frames[frame_index - 1].simulator_step_count + 1
+        ):
+            raise ValueError("POV simulator epochs must be adjacent")
+    for transition_index, transition in enumerate(self.transitions):
+        if transition.transition_index != transition_index:
+            raise ValueError("POV transition positions must equal transition indices")
         if (
             transition.episode_id != self.episode_id
             or transition.public_agent_id != self.public_agent_id
         ):
-            raise ValueError("POV adjacent transition must join selected identity")
+            raise ValueError("POV transitions must join content identity")
+        if transition.start_pov_frame_id != self.frames[transition_index].pov_frame_id:
+            raise ValueError("POV transition must join its stored start frame")
         if (
-            transition.transition_index != start.frame_index
-            or successor.frame_index != start.frame_index + 1
-            or transition.start_pov_frame_id != start.pov_frame_id
-            or transition.successor_pov_frame_id != successor.pov_frame_id
+            transition.successor_pov_frame_id
+            != self.frames[transition_index + 1].pov_frame_id
         ):
-            raise ValueError("POV adjacent transition epochs do not join")
-        if successor.simulator_step_count != start.simulator_step_count + 1:
-            raise ValueError("POV adjacent endpoint simulator ticks are not adjacent")
-        cue_start = _adjacent_cue_endpoint(start)
-        cue_successor = _adjacent_cue_endpoint(successor)
-        expected_cues = _derive_cues(
-            episode_id=self.episode_id,
-            public_agent_id=self.public_agent_id,
-            transition_index=transition.transition_index,
-            team_local_slot=self.selected_team_local_slot,
-            start_frame=cue_start,
-            successor_frame=cue_successor,
-            has_any_rejection=(
-                transition.submitted_action_tuple_is_out_of_domain
-                or transition.in_domain_move_action_is_rejected
-                or transition.in_domain_combat_action_pair_is_rejected
-            ),
-            terminated=transition.terminated,
-            truncated=transition.truncated,
-            public_end_reason=transition.public_end_reason,
-        )
-        if transition.cues != expected_cues:
-            raise ValueError(
-                "POV adjacent cues must be derived exactly from their endpoints"
-            )
-        return self
+            raise ValueError("POV transition must join its stored successor frame")
+        if transition_index > 0:
+            previous = self.transitions[transition_index - 1]
+            if previous.terminated or previous.truncated:
+                raise ValueError("POV content cannot continue after done")
+    tail = self.transitions[-1] if self.transitions else None
+    terminated = False if tail is None else tail.terminated
+    truncated = False if tail is None else tail.truncated
+    if (
+        self.completion.terminated != terminated
+        or self.completion.truncated != truncated
+    ):
+        raise ValueError("POV completion done flags must equal its tail")
+    if (
+        tail is not None
+        and tail.public_end_reason is not None
+        and self.completion.public_end_or_failure_reason != tail.public_end_reason
+    ):
+        raise ValueError("POV tail end reason must agree with completion truth")
+    if self.canonical_digest_sha256 != canonical_digest_sha256(
+        self,
+        exclude={"canonical_digest_sha256"},
+    ):
+        raise ValueError("POV content digest is not canonical")
+    return self
 
 
 class ActorPovReplayContentV1(EvaluationModel):
@@ -974,91 +1301,52 @@ class ActorPovReplayContentV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_content(self) -> ActorPovReplayContentV1:
-        if self.content_id != (
-            f"{self.episode_id}:actor-pov:{self.public_agent_id}:content"
-        ):
-            raise ValueError("POV content ID is not canonical")
-        if not self.frames or len(self.frames) != len(self.transitions) + 1:
-            raise ValueError("POV content requires exact T+1/T frame structure")
-        expected_team_local_slot = self.selected_global_slot % MAX_AGENTS_PER_TEAM
-        expected_team_id = 1 if self.selected_global_slot < MAX_AGENTS_PER_TEAM else 2
-        if self.selected_team_local_slot != expected_team_local_slot:
-            raise ValueError("POV team-local slot must follow the fixed team block")
-        if self.configured_team_id != expected_team_id:
-            raise ValueError("POV configured team must follow the fixed slot block")
-        if (
-            self.axis_mapping.ally_observation_row_public_agent_id_by_id[
-                self.selected_team_local_slot
-            ]
-            != self.public_agent_id
-        ):
-            raise ValueError("POV ally axis must place the selected public agent")
-        if self.completion.captured_transition_count != len(self.transitions):
-            raise ValueError("POV completion count must equal transition count")
-        for frame_index, frame in enumerate(self.frames):
-            if frame.frame_index != frame_index:
-                raise ValueError("POV frame positions must equal frame indices")
-            if (
-                frame.episode_id != self.episode_id
-                or frame.public_agent_id != self.public_agent_id
-            ):
-                raise ValueError("POV frames must join content identity")
-            if frame.self_features[_FEATURE_ACTIVE] != 1.0:
-                raise ValueError("configured-active POV self rows require ACTIVE=1")
-            if frame.self_features[_FEATURE_ALIVE] not in (0.0, 1.0):
-                raise ValueError("POV self ALIVE must be exactly zero or one")
-            if frame.self_features[_FEATURE_TEAM_ID] != float(self.configured_team_id):
-                raise ValueError("POV self team feature must match content metadata")
-            if frame.self_features[_FEATURE_CLASS_ID] != float(self.class_id):
-                raise ValueError("POV self class feature must match content metadata")
-            if frame_index > 0 and frame.simulator_step_count != (
-                self.frames[frame_index - 1].simulator_step_count + 1
-            ):
-                raise ValueError("POV simulator epochs must be adjacent")
-        for transition_index, transition in enumerate(self.transitions):
-            if transition.transition_index != transition_index:
-                raise ValueError(
-                    "POV transition positions must equal transition indices"
-                )
-            if (
-                transition.episode_id != self.episode_id
-                or transition.public_agent_id != self.public_agent_id
-            ):
-                raise ValueError("POV transitions must join content identity")
-            if (
-                transition.start_pov_frame_id
-                != self.frames[transition_index].pov_frame_id
-            ):
-                raise ValueError("POV transition must join its stored start frame")
-            if (
-                transition.successor_pov_frame_id
-                != self.frames[transition_index + 1].pov_frame_id
-            ):
-                raise ValueError("POV transition must join its stored successor frame")
-            if transition_index > 0:
-                previous = self.transitions[transition_index - 1]
-                if previous.terminated or previous.truncated:
-                    raise ValueError("POV content cannot continue after done")
-        tail = self.transitions[-1] if self.transitions else None
-        terminated = False if tail is None else tail.terminated
-        truncated = False if tail is None else tail.truncated
-        if (
-            self.completion.terminated != terminated
-            or self.completion.truncated != truncated
-        ):
-            raise ValueError("POV completion done flags must equal its tail")
-        if (
-            tail is not None
-            and tail.public_end_reason is not None
-            and self.completion.public_end_or_failure_reason != tail.public_end_reason
-        ):
-            raise ValueError("POV tail end reason must agree with completion truth")
-        if self.canonical_digest_sha256 != canonical_digest_sha256(
-            self,
-            exclude={"canonical_digest_sha256"},
-        ):
-            raise ValueError("POV content digest is not canonical")
-        return self
+        return _validate_replaycontent(self)
+
+
+class ActorPovReplayContentV2(EvaluationModel):
+    """Canonical recipient-authorized content, independent of source provenance."""
+
+    schema_id: Literal["marl_battlegrounds.evaluation.actor_pov_content"] = (
+        ACTOR_POV_CONTENT_SCHEMA_ID
+    )
+    schema_version: _SchemaVersionV2 = 2
+    content_id: _AsciiIdentifier
+    canonical_digest_sha256: _Sha256Hex
+    episode_id: _AsciiIdentifier
+    selected_global_slot: _GlobalSlot
+    selected_team_local_slot: _TeamLocalSlot
+    public_agent_id: _AsciiIdentifier
+    configured_team_id: _TeamId
+    class_id: _ClassId
+    observation_materialization: Literal["exact_no_shared_obs_actor_input"] = (
+        "exact_no_shared_obs_actor_input"
+    )
+    axis_mapping: ActorPovAxisMappingV2
+    completion: ActorPovEpisodeCompletionV1
+    frames: tuple[ActorPovFrameV2, ...]
+    transitions: tuple[ActorPovTransitionV1, ...]
+
+    @model_validator(mode="after")
+    def _validate_content(self) -> ActorPovReplayContentV2:
+        return _validate_replaycontent(self)
+
+
+def _validate_replayartifact[T: ActorPovReplayArtifactV1 | ActorPovReplayArtifactV2](
+    self: T,
+) -> T:
+    if self.artifact_id != (
+        f"{self.content.episode_id}:actor-pov:{self.content.public_agent_id}"
+    ):
+        raise ValueError("POV artifact ID is not canonical")
+    if self.source_replay.episode_id != self.content.episode_id:
+        raise ValueError("POV content must join source replay episode")
+    if self.canonical_digest_sha256 != canonical_digest_sha256(
+        self,
+        exclude={"canonical_digest_sha256"},
+    ):
+        raise ValueError("POV artifact digest is not canonical")
+    return self
 
 
 class ActorPovReplayArtifactV1(EvaluationModel):
@@ -1075,23 +1363,61 @@ class ActorPovReplayArtifactV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_artifact(self) -> ActorPovReplayArtifactV1:
-        if self.artifact_id != (
-            f"{self.content.episode_id}:actor-pov:{self.content.public_agent_id}"
-        ):
-            raise ValueError("POV artifact ID is not canonical")
-        if self.source_replay.episode_id != self.content.episode_id:
-            raise ValueError("POV content must join source replay episode")
-        if self.canonical_digest_sha256 != canonical_digest_sha256(
-            self,
-            exclude={"canonical_digest_sha256"},
-        ):
-            raise ValueError("POV artifact digest is not canonical")
-        return self
+        return _validate_replayartifact(self)
+
+
+class ActorPovReplayArtifactV2(EvaluationModel):
+    """Recipient content wrapped in truthful full-replay provenance."""
+
+    schema_id: Literal["marl_battlegrounds.evaluation.actor_pov_artifact"] = (
+        ACTOR_POV_ARTIFACT_SCHEMA_ID
+    )
+    schema_version: _SchemaVersionV2 = 2
+    artifact_id: _AsciiIdentifier
+    canonical_digest_sha256: _Sha256Hex
+    source_replay: ReplayArtifactReferenceV3
+    content: ActorPovReplayContentV2
+
+    @model_validator(mode="after")
+    def _validate_artifact(self) -> ActorPovReplayArtifactV2:
+        return _validate_replayartifact(self)
+
+
+type ActorPovAxisMapping = ActorPovAxisMappingV1 | ActorPovAxisMappingV2
+
+type ActorPovFrame = ActorPovFrameV1 | ActorPovFrameV2
+
+type ActorPovCurrentSlice = ActorPovCurrentSliceV1 | ActorPovCurrentSliceV2
+
+type ActorPovAdjacentTransitionSlice = (
+    ActorPovAdjacentTransitionSliceV1 | ActorPovAdjacentTransitionSliceV2
+)
+
+type ActorPovReplayContent = ActorPovReplayContentV1 | ActorPovReplayContentV2
+
+type ActorPovReplayArtifact = ActorPovReplayArtifactV1 | ActorPovReplayArtifactV2
+
+
+def _actor_class_ids(
+    context: EvaluationEpisodeContext, global_slot: int
+) -> tuple[tuple[int, ...], ...] | None:
+    if context.schema_version != 3:
+        return None
+    from marl_battlegrounds.evaluation.actor_projection import (
+        reconstruct_actor_class_ids_by_team_v3,
+    )
+
+    return tuple(
+        tuple(int(value) for value in team)
+        for team in reconstruct_actor_class_ids_by_team_v3(context, global_slot)
+    )
 
 
 def _build_replay_reference_from_validated(
-    replay: ReplayArtifactV1,
-) -> ReplayArtifactReferenceV1:
+    replay: ReplayArtifactV1 | ReplayArtifactV3,
+) -> ReplayArtifactReferenceV1 | ReplayArtifactReferenceV3:
+    if type(replay) is ReplayArtifactV3:
+        return replay_reference_v3(replay)
     return ReplayArtifactReferenceV1(
         artifact_id=replay.artifact_id,
         episode_id=replay.header.context.identity.episode_id,
@@ -1103,103 +1429,123 @@ def _build_replay_reference_from_validated(
 
 
 def _slice_frame_from_source(
-    source: EvaluationFrameV1,
+    source: EvaluationFrame,
     *,
     global_slot: int,
     public_agent_id: str,
-) -> ActorPovFrameV1:
+    class_ids_by_team: tuple[tuple[int, ...], ...] | None = None,
+) -> ActorPovFrame:
     observation = source.base_observation
     previous = observation.previous_timestep_actions
     lifecycle = observation.spawn_lifecycle
     mask = source.action_mask
-    return ActorPovFrameV1(
-        episode_id=source.episode_id,
-        public_agent_id=public_agent_id,
-        frame_index=source.frame_index,
-        pov_frame_id=(
-            f"{source.episode_id}:actor-pov:{public_agent_id}:frame:"
-            f"{source.frame_index}"
-        ),
-        source_frame_id=source.frame_id,
-        simulator_step_count=source.simulator_step_count,
-        self_features=observation.self_features[global_slot],
-        ally_unit_features=observation.ally_unit_features[global_slot],
-        enemy_unit_features=observation.enemy_unit_features[global_slot],
-        map_obstacle_features=observation.map_obstacle_features[global_slot],
-        objective_features=observation.objective_features[global_slot],
-        context_features=observation.context_features[global_slot],
-        ally_visibility_mask=observation.ally_visibility_mask[global_slot],
-        enemy_visibility_mask=observation.enemy_visibility_mask[global_slot],
-        previous_timestep_actions=ActorPovPreviousTimestepActionsV1(
-            ally_move_actions_one_hot=(
-                previous.ally_previous_timestep_move_actions_one_hot[global_slot]
+    frame_type = (
+        ActorPovFrameV2 if type(source) is EvaluationFrameV2 else ActorPovFrameV1
+    )
+    current_fields: dict[str, object] = {}
+    if type(source) is EvaluationFrameV2:
+        current_fields = {
+            "self_ally_index": source.base_observation.self_ally_index[global_slot],
+            "class_ids_by_team": class_ids_by_team,
+        }
+    return frame_type.model_validate(
+        dict(
+            **current_fields,
+            episode_id=source.episode_id,
+            public_agent_id=public_agent_id,
+            frame_index=source.frame_index,
+            pov_frame_id=(
+                f"{source.episode_id}:actor-pov:{public_agent_id}:frame:"
+                f"{source.frame_index}"
             ),
-            enemy_move_actions_one_hot=(
-                previous.enemy_previous_timestep_move_actions_one_hot[global_slot]
+            source_frame_id=source.frame_id,
+            simulator_step_count=source.simulator_step_count,
+            self_features=observation.self_features[global_slot],
+            ally_unit_features=observation.ally_unit_features[global_slot],
+            enemy_unit_features=observation.enemy_unit_features[global_slot],
+            map_obstacle_features=observation.map_obstacle_features[global_slot],
+            objective_features=observation.objective_features[global_slot],
+            context_features=observation.context_features[global_slot],
+            ally_visibility_mask=observation.ally_visibility_mask[global_slot],
+            enemy_visibility_mask=observation.enemy_visibility_mask[global_slot],
+            previous_timestep_actions=ActorPovPreviousTimestepActionsV1(
+                ally_move_actions_one_hot=(
+                    previous.ally_previous_timestep_move_actions_one_hot[global_slot]
+                ),
+                enemy_move_actions_one_hot=(
+                    previous.enemy_previous_timestep_move_actions_one_hot[global_slot]
+                ),
+                ally_select_target_actions_one_hot=(
+                    previous.ally_previous_timestep_select_target_actions_one_hot[
+                        global_slot
+                    ]
+                ),
+                enemy_select_target_actions_one_hot=(
+                    previous.enemy_previous_timestep_select_target_actions_one_hot[
+                        global_slot
+                    ]
+                ),
+                ally_use_ultimate_actions_one_hot=(
+                    previous.ally_previous_timestep_use_ultimate_actions_one_hot[
+                        global_slot
+                    ]
+                ),
+                enemy_use_ultimate_actions_one_hot=(
+                    previous.enemy_previous_timestep_use_ultimate_actions_one_hot[
+                        global_slot
+                    ]
+                ),
             ),
-            ally_select_target_actions_one_hot=(
-                previous.ally_previous_timestep_select_target_actions_one_hot[
-                    global_slot
-                ]
+            spawn_lifecycle=ActorPovSpawnLifecycleV1(
+                spawn_pad_positions_by_team=(
+                    lifecycle.spawn_pad_positions_by_agent_by_team[global_slot]
+                ),
+                spawn_shield_actual_durations_by_team=(
+                    lifecycle.spawn_shield_actual_durations_by_agent_by_team[
+                        global_slot
+                    ]
+                ),
+                spawn_shield_configured_duration=(
+                    lifecycle.spawn_shield_configured_duration_by_agent[global_slot]
+                ),
+                spawn_shield_speed=(lifecycle.spawn_shield_speed_by_agent[global_slot]),
+                respawn_wave_period_step_count_by_team=(
+                    lifecycle.respawn_wave_period_step_count_by_agent_by_team[
+                        global_slot
+                    ]
+                ),
+                respawn_wave_countdowns_by_team=(
+                    lifecycle.respawn_wave_countdowns_by_agent_by_team[global_slot]
+                ),
+                active_mask_by_team=(
+                    lifecycle.active_mask_by_agent_by_team[global_slot]
+                ),
+                alive_mask_by_team=(lifecycle.alive_mask_by_agent_by_team[global_slot]),
             ),
-            enemy_select_target_actions_one_hot=(
-                previous.enemy_previous_timestep_select_target_actions_one_hot[
-                    global_slot
-                ]
+            action_mask=ActorPovActionMaskV1(
+                move=mask.move_mask[global_slot],
+                select_target=mask.select_target_mask[global_slot],
+                use_ultimate=mask.use_ultimate_mask[global_slot],
+                select_target_use_ultimate_joint=(
+                    mask.select_target_use_ultimate_joint_mask[global_slot]
+                ),
             ),
-            ally_use_ultimate_actions_one_hot=(
-                previous.ally_previous_timestep_use_ultimate_actions_one_hot[
-                    global_slot
-                ]
-            ),
-            enemy_use_ultimate_actions_one_hot=(
-                previous.enemy_previous_timestep_use_ultimate_actions_one_hot[
-                    global_slot
-                ]
-            ),
-        ),
-        spawn_lifecycle=ActorPovSpawnLifecycleV1(
-            spawn_pad_positions_by_team=(
-                lifecycle.spawn_pad_positions_by_agent_by_team[global_slot]
-            ),
-            spawn_shield_actual_durations_by_team=(
-                lifecycle.spawn_shield_actual_durations_by_agent_by_team[global_slot]
-            ),
-            spawn_shield_configured_duration=(
-                lifecycle.spawn_shield_configured_duration_by_agent[global_slot]
-            ),
-            spawn_shield_speed=(lifecycle.spawn_shield_speed_by_agent[global_slot]),
-            respawn_wave_period_step_count_by_team=(
-                lifecycle.respawn_wave_period_step_count_by_agent_by_team[global_slot]
-            ),
-            respawn_wave_countdowns_by_team=(
-                lifecycle.respawn_wave_countdowns_by_agent_by_team[global_slot]
-            ),
-            active_mask_by_team=(lifecycle.active_mask_by_agent_by_team[global_slot]),
-            alive_mask_by_team=(lifecycle.alive_mask_by_agent_by_team[global_slot]),
-        ),
-        action_mask=ActorPovActionMaskV1(
-            move=mask.move_mask[global_slot],
-            select_target=mask.select_target_mask[global_slot],
-            use_ultimate=mask.use_ultimate_mask[global_slot],
-            select_target_use_ultimate_joint=(
-                mask.select_target_use_ultimate_joint_mask[global_slot]
-            ),
-        ),
+        )
     )
 
 
 def _slice_frame(
-    replay: ReplayArtifactV1,
+    replay: ReplayArtifactV1 | ReplayArtifactV3,
     *,
     global_slot: int,
     public_agent_id: str,
     frame_index: int,
-) -> ActorPovFrameV1:
+) -> ActorPovFrame:
     return _slice_frame_from_source(
         replay.frames[frame_index],
         global_slot=global_slot,
         public_agent_id=public_agent_id,
+        class_ids_by_team=_actor_class_ids(replay.header.context, global_slot),
     )
 
 
@@ -1235,8 +1581,8 @@ def _derive_cues(
     public_agent_id: str,
     transition_index: int,
     team_local_slot: int,
-    start_frame: ActorPovFrameV1,
-    successor_frame: ActorPovFrameV1,
+    start_frame: ActorPovFrame,
+    successor_frame: ActorPovFrame,
     has_any_rejection: bool,
     terminated: bool,
     truncated: bool,
@@ -1384,8 +1730,8 @@ def _slice_transition_from_source(
     global_slot: int,
     team_local_slot: int,
     public_agent_id: str,
-    start_frame: ActorPovFrameV1,
-    successor_frame: ActorPovFrameV1,
+    start_frame: ActorPovFrame,
+    successor_frame: ActorPovFrame,
 ) -> ActorPovTransitionV1:
     acceptance = source.facts.action_acceptance_facts
     submitted = acceptance.submitted_joint_action
@@ -1441,13 +1787,13 @@ def _slice_transition_from_source(
 
 
 def _slice_transition(
-    replay: ReplayArtifactV1,
+    replay: ReplayArtifactV1 | ReplayArtifactV3,
     *,
     global_slot: int,
     team_local_slot: int,
     public_agent_id: str,
     transition_index: int,
-    frames: tuple[ActorPovFrameV1, ...],
+    frames: tuple[ActorPovFrame, ...],
 ) -> ActorPovTransitionV1:
     return _slice_transition_from_source(
         replay.transitions[transition_index],
@@ -1463,7 +1809,7 @@ def _axis_mapping_from_context(
     context: EvaluationEpisodeContext,
     *,
     global_slot: int,
-) -> ActorPovAxisMappingV1:
+) -> ActorPovAxisMapping:
     _require_actor_projection_v1(context)
     catalog = context.static_mechanics_catalog
     ally_slots = catalog.global_slot_by_actor_and_ally_observation_row[global_slot]
@@ -1473,35 +1819,40 @@ def _axis_mapping_from_context(
     def public_id(slot: int) -> str:
         return context.roster[slot].public_agent_id
 
-    return ActorPovAxisMappingV1(
-        actor_projection_identifier=context.actor_projection.identifier,
-        actor_projection_version=context.actor_projection.version,
-        target_action_recipient_public_agent_id_by_id=tuple(
-            None if slot is None else public_id(slot) for slot in target_slots
-        ),
-        ally_observation_row_public_agent_id_by_id=tuple(
-            public_id(slot) for slot in ally_slots
-        ),
-        enemy_observation_row_public_agent_id_by_id=tuple(
-            public_id(slot) for slot in enemy_slots
-        ),
-        movement_action_name_by_id=catalog.movement_action_name_by_id,
-        unit_direction_vector_by_movement_action=(
-            catalog.unit_direction_vector_by_movement_action
-        ),
-        target_action_name_by_id=catalog.target_action_name_by_id,
-        use_ultimate_action_name_by_id=catalog.use_ultimate_action_name_by_id,
-        spawn_lifecycle_team_axis_name_by_id=(
-            catalog.spawn_lifecycle_team_axis_name_by_id
-        ),
+    axis_type = (
+        ActorPovAxisMappingV2 if context.schema_version == 3 else ActorPovAxisMappingV1
+    )
+    return axis_type.model_validate(
+        dict(
+            actor_projection_identifier=context.actor_projection.identifier,
+            actor_projection_version=context.actor_projection.version,
+            target_action_recipient_public_agent_id_by_id=tuple(
+                None if slot is None else public_id(slot) for slot in target_slots
+            ),
+            ally_observation_row_public_agent_id_by_id=tuple(
+                public_id(slot) for slot in ally_slots
+            ),
+            enemy_observation_row_public_agent_id_by_id=tuple(
+                public_id(slot) for slot in enemy_slots
+            ),
+            movement_action_name_by_id=catalog.movement_action_name_by_id,
+            unit_direction_vector_by_movement_action=(
+                catalog.unit_direction_vector_by_movement_action
+            ),
+            target_action_name_by_id=catalog.target_action_name_by_id,
+            use_ultimate_action_name_by_id=catalog.use_ultimate_action_name_by_id,
+            spawn_lifecycle_team_axis_name_by_id=(
+                catalog.spawn_lifecycle_team_axis_name_by_id
+            ),
+        )
     )
 
 
 def _axis_mapping_from_replay(
-    replay: ReplayArtifactV1,
+    replay: ReplayArtifactV1 | ReplayArtifactV3,
     *,
     global_slot: int,
-) -> ActorPovAxisMappingV1:
+) -> ActorPovAxisMapping:
     return _axis_mapping_from_context(
         replay.header.context,
         global_slot=global_slot,
@@ -1510,12 +1861,14 @@ def _axis_mapping_from_replay(
 
 def _require_actor_projection_v1(context: EvaluationEpisodeContext) -> None:
     """Reject newer actor-input projections that POV V1 cannot materialize."""
-    if context.actor_projection.version != ACTOR_POV_SCHEMA_VERSION:
+    if context.actor_projection.version != (
+        3 if context.schema_version == 3 else ACTOR_POV_SCHEMA_VERSION
+    ):
         raise ValueError("actor POV V1 requires actor projection version 1")
 
 
 def _require_selected_self_topology(
-    frame: ActorPovFrameV1,
+    frame: ActorPovFrame,
     *,
     configured_team_id: int,
     class_id: int,
@@ -1525,7 +1878,9 @@ def _require_selected_self_topology(
         raise ValueError("configured-active POV self rows require ACTIVE=1")
     if row[_FEATURE_ALIVE] not in (0.0, 1.0):
         raise ValueError("POV self ALIVE must be exactly zero or one")
-    if row[_FEATURE_TEAM_ID] != float(configured_team_id):
+    if row[_FEATURE_TEAM_ID] != (
+        float(configured_team_id) if frame.schema_version == 1 else 0.0
+    ):
         raise ValueError("POV self team feature must match selected roster metadata")
     if row[_FEATURE_CLASS_ID] != float(class_id):
         raise ValueError("POV self class feature must match selected roster metadata")
@@ -1549,13 +1904,43 @@ def _selected_pov_roster_row(
     return roster
 
 
+@overload
 def build_actor_pov_current_slice_v1(
     context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     *,
     global_slot: int,
     incoming_transition_view: EvaluationTransitionViewV1 | None = None,
-) -> ActorPovCurrentSliceV1:
+) -> ActorPovCurrentSliceV1: ...
+
+
+@overload
+def build_actor_pov_current_slice_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrameV2,
+    *,
+    global_slot: int,
+    incoming_transition_view: EvaluationTransitionViewV1 | None = None,
+) -> ActorPovCurrentSliceV2: ...
+
+
+@overload
+def build_actor_pov_current_slice_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrame,
+    *,
+    global_slot: int,
+    incoming_transition_view: EvaluationTransitionViewV1 | None = None,
+) -> ActorPovCurrentSlice: ...
+
+
+def build_actor_pov_current_slice_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrame,
+    *,
+    global_slot: int,
+    incoming_transition_view: EvaluationTransitionViewV1 | None = None,
+) -> ActorPovCurrentSlice:
     """Build one exact live POV slice without retaining earlier trajectory units."""
     canonical_context = cast(
         EvaluationEpisodeContext,
@@ -1594,6 +1979,7 @@ def build_actor_pov_current_slice_v1(
             canonical_view.start_frame,
             global_slot=global_slot,
             public_agent_id=public_agent_id,
+            class_ids_by_team=_actor_class_ids(canonical_view.context, global_slot),
         )
         _require_selected_self_topology(
             start_slice,
@@ -1605,6 +1991,7 @@ def build_actor_pov_current_slice_v1(
             canonical_frame,
             global_slot=global_slot,
             public_agent_id=public_agent_id,
+            class_ids_by_team=_actor_class_ids(canonical_context, global_slot),
         )
         _require_selected_self_topology(
             successor_slice,
@@ -1624,25 +2011,33 @@ def build_actor_pov_current_slice_v1(
         canonical_frame,
         global_slot=global_slot,
         public_agent_id=public_agent_id,
+        class_ids_by_team=_actor_class_ids(canonical_context, global_slot),
     )
     _require_selected_self_topology(
         current_frame,
         configured_team_id=roster.configured_team_id,
         class_id=roster.class_id,
     )
-    return ActorPovCurrentSliceV1(
-        episode_id=canonical_context.identity.episode_id,
-        selected_global_slot=global_slot,
-        selected_team_local_slot=roster.team_local_slot,
-        public_agent_id=public_agent_id,
-        configured_team_id=roster.configured_team_id,
-        class_id=roster.class_id,
-        axis_mapping=_axis_mapping_from_context(
-            canonical_context,
-            global_slot=global_slot,
-        ),
-        frame=current_frame,
-        incoming_transition=incoming,
+    slice_type = (
+        ActorPovCurrentSliceV2
+        if type(canonical_frame) is EvaluationFrameV2
+        else ActorPovCurrentSliceV1
+    )
+    return slice_type.model_validate(
+        dict(
+            episode_id=canonical_context.identity.episode_id,
+            selected_global_slot=global_slot,
+            selected_team_local_slot=roster.team_local_slot,
+            public_agent_id=public_agent_id,
+            configured_team_id=roster.configured_team_id,
+            class_id=roster.class_id,
+            axis_mapping=_axis_mapping_from_context(
+                canonical_context,
+                global_slot=global_slot,
+            ),
+            frame=current_frame,
+            incoming_transition=incoming,
+        )
     )
 
 
@@ -1650,7 +2045,7 @@ def build_actor_pov_adjacent_transition_slice_v1(
     transition_view: EvaluationTransitionViewV1,
     *,
     global_slot: int,
-) -> ActorPovAdjacentTransitionSliceV1:
+) -> ActorPovAdjacentTransitionSlice:
     """Build one exact live recipient transition from a coherent CP2 view."""
     if type(transition_view) is not EvaluationTransitionViewV1:
         raise TypeError("transition_view must be the exact EvaluationTransitionViewV1")
@@ -1669,11 +2064,13 @@ def build_actor_pov_adjacent_transition_slice_v1(
         canonical_view.start_frame,
         global_slot=global_slot,
         public_agent_id=public_agent_id,
+        class_ids_by_team=_actor_class_ids(canonical_view.context, global_slot),
     )
     successor = _slice_frame_from_source(
         canonical_view.successor_frame,
         global_slot=global_slot,
         public_agent_id=public_agent_id,
+        class_ids_by_team=_actor_class_ids(canonical_view.context, global_slot),
     )
     _require_selected_self_topology(
         start,
@@ -1693,30 +2090,67 @@ def build_actor_pov_adjacent_transition_slice_v1(
         start_frame=_adjacent_cue_endpoint(start),
         successor_frame=_adjacent_cue_endpoint(successor),
     )
-    return ActorPovAdjacentTransitionSliceV1(
-        episode_id=canonical_view.context.identity.episode_id,
-        selected_global_slot=global_slot,
-        selected_team_local_slot=roster.team_local_slot,
-        public_agent_id=public_agent_id,
-        configured_team_id=roster.configured_team_id,
-        class_id=roster.class_id,
-        axis_mapping=_axis_mapping_from_context(
-            canonical_view.context,
-            global_slot=global_slot,
-        ),
-        start_frame=start,
-        transition=transition,
-        successor_frame=successor,
+    slice_type = (
+        ActorPovAdjacentTransitionSliceV2
+        if type(canonical_view.start_frame) is EvaluationFrameV2
+        else ActorPovAdjacentTransitionSliceV1
+    )
+    return slice_type.model_validate(
+        dict(
+            episode_id=canonical_view.context.identity.episode_id,
+            selected_global_slot=global_slot,
+            selected_team_local_slot=roster.team_local_slot,
+            public_agent_id=public_agent_id,
+            configured_team_id=roster.configured_team_id,
+            class_id=roster.class_id,
+            axis_mapping=_axis_mapping_from_context(
+                canonical_view.context,
+                global_slot=global_slot,
+            ),
+            start_frame=start,
+            transition=transition,
+            successor_frame=successor,
+        )
     )
 
 
+@overload
 def slice_actor_pov_current_frame_v1(
     context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
     *,
     global_slot: int,
     incoming_transition_view: EvaluationTransitionViewV1 | None = None,
-) -> ActorPovFrameV1:
+) -> ActorPovFrameV1: ...
+
+
+@overload
+def slice_actor_pov_current_frame_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrameV2,
+    *,
+    global_slot: int,
+    incoming_transition_view: EvaluationTransitionViewV1 | None = None,
+) -> ActorPovFrameV2: ...
+
+
+@overload
+def slice_actor_pov_current_frame_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrame,
+    *,
+    global_slot: int,
+    incoming_transition_view: EvaluationTransitionViewV1 | None = None,
+) -> ActorPovFrame: ...
+
+
+def slice_actor_pov_current_frame_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrame,
+    *,
+    global_slot: int,
+    incoming_transition_view: EvaluationTransitionViewV1 | None = None,
+) -> ActorPovFrame:
     """Return only the recipient-authorized current frame from the live seam."""
     return build_actor_pov_current_slice_v1(
         context,
@@ -1744,10 +2178,10 @@ def slice_actor_pov_current_transition_v1(
 
 
 def _export_from_validated_replay(
-    replay: ReplayArtifactV1,
+    replay: ReplayArtifactV1 | ReplayArtifactV3,
     *,
     global_slot: int,
-) -> ActorPovReplayArtifactV1:
+) -> ActorPovReplayArtifact:
     context = replay.header.context
     _require_actor_projection_v1(context)
     if context.execution_information_mode != "no_shared_obs":
@@ -1797,9 +2231,12 @@ def _export_from_validated_replay(
         completion_bases=source_completion.completion_bases,
         public_end_or_failure_reason=source_completion.end_or_failure_reason,
     )
+    current = type(replay) is ReplayArtifactV3
+    content_type = ActorPovReplayContentV2 if current else ActorPovReplayContentV1
+    artifact_type = ActorPovReplayArtifactV2 if current else ActorPovReplayArtifactV1
     content_payload: dict[str, object] = {
         "schema_id": ACTOR_POV_CONTENT_SCHEMA_ID,
-        "schema_version": ACTOR_POV_SCHEMA_VERSION,
+        "schema_version": 2 if current else ACTOR_POV_SCHEMA_VERSION,
         "content_id": f"{episode_id}:actor-pov:{public_agent_id}:content",
         "episode_id": episode_id,
         "selected_global_slot": global_slot,
@@ -1813,7 +2250,7 @@ def _export_from_validated_replay(
         "frames": frames,
         "transitions": transitions,
     }
-    content = ActorPovReplayContentV1.model_validate(
+    content = content_type.model_validate(
         {
             **content_payload,
             "canonical_digest_sha256": canonical_digest_sha256(content_payload),
@@ -1821,12 +2258,12 @@ def _export_from_validated_replay(
     )
     artifact_payload: dict[str, object] = {
         "schema_id": ACTOR_POV_ARTIFACT_SCHEMA_ID,
-        "schema_version": ACTOR_POV_SCHEMA_VERSION,
+        "schema_version": 2 if current else ACTOR_POV_SCHEMA_VERSION,
         "artifact_id": f"{episode_id}:actor-pov:{public_agent_id}",
         "source_replay": _build_replay_reference_from_validated(replay),
         "content": content,
     }
-    return ActorPovReplayArtifactV1.model_validate(
+    return artifact_type.model_validate(
         {
             **artifact_payload,
             "canonical_digest_sha256": canonical_digest_sha256(artifact_payload),
@@ -1891,7 +2328,10 @@ def export_actor_pov_replay_v1(
     if type(replay) is not ReplayArtifactV1:
         raise TypeError("actor POV export requires ReplayArtifactV1")
     validate_replay_artifact_v1(replay)
-    artifact = _export_from_validated_replay(replay, global_slot=global_slot)
+    artifact = cast(
+        ActorPovReplayArtifactV1,
+        _export_from_validated_replay(replay, global_slot=global_slot),
+    )
     validate_actor_pov_replay_artifact_v1(artifact)
     return artifact
 
@@ -1929,6 +2369,73 @@ def canonical_actor_pov_replay_json_bytes_v1(
     return canonical_json_bytes(artifact)
 
 
+def validate_actor_pov_replay_content(content: ActorPovReplayContent) -> None:
+    """Validate either supported POV schema and its unchanged local cues."""
+    if type(content) not in (ActorPovReplayContentV1, ActorPovReplayContentV2):
+        raise TypeError("actor POV content requires an exact supported root")
+    validate_declared_model_tree(
+        content, record_name="actor POV content", expected_type=type(content)
+    )
+    for index, transition in enumerate(content.transitions):
+        expected = _derive_cues(
+            episode_id=content.episode_id,
+            public_agent_id=content.public_agent_id,
+            transition_index=index,
+            team_local_slot=content.selected_team_local_slot,
+            start_frame=content.frames[index],
+            successor_frame=content.frames[index + 1],
+            has_any_rejection=(
+                transition.submitted_action_tuple_is_out_of_domain
+                or transition.in_domain_move_action_is_rejected
+                or transition.in_domain_combat_action_pair_is_rejected
+            ),
+            terminated=transition.terminated,
+            truncated=transition.truncated,
+            public_end_reason=transition.public_end_reason,
+        )
+        if transition.cues != expected:
+            raise ValueError("POV cues must be derived from their recorded endpoints")
+
+
+def export_actor_pov_replay_v2(
+    replay: ReplayArtifactV3, *, global_slot: int
+) -> ActorPovReplayArtifactV2:
+    """Export current actor inputs without changing their relation flags."""
+    from marl_battlegrounds.evaluation.replay_v3 import validate_replay_artifact_v3
+
+    if type(replay) is not ReplayArtifactV3:
+        raise TypeError("actor POV V2 export requires ReplayArtifactV3")
+    validate_replay_artifact_v3(replay)
+    artifact = _export_from_validated_replay(replay, global_slot=global_slot)
+    if type(artifact) is not ActorPovReplayArtifactV2:
+        raise TypeError("current replay must produce current actor POV")
+    validate_actor_pov_replay_artifact_v2(artifact)
+    return artifact
+
+
+def validate_actor_pov_replay_artifact_v2(artifact: ActorPovReplayArtifactV2) -> None:
+    validate_declared_model_tree(
+        artifact, record_name="actor POV replay", expected_type=ActorPovReplayArtifactV2
+    )
+    validate_actor_pov_replay_content(artifact.content)
+
+
+def validate_actor_pov_replay_against_replay_v2(
+    artifact: ActorPovReplayArtifactV2, replay: ReplayArtifactV3
+) -> None:
+    if artifact != export_actor_pov_replay_v2(
+        replay, global_slot=artifact.content.selected_global_slot
+    ):
+        raise ValueError("actor POV does not match its source replay")
+
+
+def canonical_actor_pov_replay_json_bytes_v2(
+    artifact: ActorPovReplayArtifactV2,
+) -> bytes:
+    validate_actor_pov_replay_artifact_v2(artifact)
+    return canonical_json_bytes(artifact)
+
+
 __all__ = [
     "ACTOR_POV_ADJACENT_TRANSITION_SLICE_SCHEMA_ID",
     "ACTOR_POV_ARTIFACT_SCHEMA_ID",
@@ -1936,14 +2443,23 @@ __all__ = [
     "ACTOR_POV_CONTENT_SCHEMA_ID",
     "ACTOR_POV_CURRENT_SLICE_SCHEMA_ID",
     "ACTOR_POV_SCHEMA_VERSION",
+    "ACTOR_POV_SCHEMA_VERSION_V2",
     "ActorPovAcceptedActionV1",
     "ActorPovActionMaskV1",
+    "ActorPovAdjacentTransitionSlice",
     "ActorPovAdjacentTransitionSliceV1",
+    "ActorPovAdjacentTransitionSliceV2",
+    "ActorPovAxisMapping",
     "ActorPovAxisMappingV1",
+    "ActorPovAxisMappingV2",
+    "ActorPovCurrentSlice",
     "ActorPovCurrentSliceV1",
+    "ActorPovCurrentSliceV2",
     "ActorPovEpisodeCompletionV1",
     "ActorPovEpisodeEndedCueV1",
+    "ActorPovFrame",
     "ActorPovFrameV1",
+    "ActorPovFrameV2",
     "ActorPovOwnActionOutcomeCueV1",
     "ActorPovOwnCooldownChangedCueV1",
     "ActorPovOwnHealthChangedCueV1",
@@ -1952,8 +2468,12 @@ __all__ = [
     "ActorPovOwnStatusChangedCueV1",
     "ActorPovPresentationCueV1",
     "ActorPovPreviousTimestepActionsV1",
+    "ActorPovReplayArtifact",
     "ActorPovReplayArtifactV1",
+    "ActorPovReplayArtifactV2",
+    "ActorPovReplayContent",
     "ActorPovReplayContentV1",
+    "ActorPovReplayContentV2",
     "ActorPovSpawnLifecycleV1",
     "ActorPovSubmittedActionV1",
     "ActorPovTransitionV1",
@@ -1962,10 +2482,15 @@ __all__ = [
     "build_actor_pov_current_slice_v1",
     "canonical_actor_pov_content_json_bytes_v1",
     "canonical_actor_pov_replay_json_bytes_v1",
+    "canonical_actor_pov_replay_json_bytes_v2",
     "export_actor_pov_replay_v1",
+    "export_actor_pov_replay_v2",
     "slice_actor_pov_current_frame_v1",
     "slice_actor_pov_current_transition_v1",
     "validate_actor_pov_replay_against_replay_v1",
+    "validate_actor_pov_replay_against_replay_v2",
     "validate_actor_pov_replay_artifact_v1",
+    "validate_actor_pov_replay_artifact_v2",
+    "validate_actor_pov_replay_content",
     "validate_actor_pov_replay_content_v1",
 ]

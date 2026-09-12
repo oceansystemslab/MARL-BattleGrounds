@@ -203,8 +203,26 @@ class DecodedAgentFeatureRowV1:
     out_of_combat_health_regeneration_fraction_per_step: float
 
 
-def decode_agent_feature_row_v1(
-    row: tuple[float, ...],
+def decode_agent_feature_row_v1(row: tuple[float, ...]) -> DecodedAgentFeatureRowV1:
+    """Decode the historical physical-team feature without changing its meaning."""
+    return _decode_agent_feature_row(row, team_id=None)
+
+
+def decode_agent_feature_row(
+    row: tuple[float, ...], *, schema_version: int, team_id: int, is_enemy: bool
+) -> DecodedAgentFeatureRowV1:
+    """Decode current relation rows using authorized display ownership."""
+    if schema_version == 1:
+        return decode_agent_feature_row_v1(row)
+    if schema_version != 2 or type(team_id) is not int or team_id not in (1, 2):
+        raise ValueError("agent row requires a supported schema and display team")
+    if len(row) != SELF_FEATURES_V1 or row[3] != float(is_enemy):
+        raise ValueError("agent is_enemy flag must match its observation relation")
+    return _decode_agent_feature_row(row, team_id=team_id)
+
+
+def _decode_agent_feature_row(
+    row: tuple[float, ...], *, team_id: int | None
 ) -> DecodedAgentFeatureRowV1:
     """Decode one frozen V1 row without consulting simulator or Oracle state."""
     if type(row) is not tuple or len(row) != SELF_FEATURES_V1:
@@ -270,7 +288,11 @@ def decode_agent_feature_row_v1(
     return DecodedAgentFeatureRowV1(
         position=position,
         radius=radius,
-        team_id=_wire_int(row[AGENT_FEATURE_TEAM_ID_V1], name="team ID", minimum=0),
+        team_id=(
+            _wire_int(row[AGENT_FEATURE_TEAM_ID_V1], name="team ID", minimum=0)
+            if team_id is None
+            else team_id
+        ),
         configured_active=_wire_bool(
             row[AGENT_FEATURE_ACTIVE_V1],
             name="configured active",
@@ -460,5 +482,6 @@ __all__ = [
     "OBSTACLE_FEATURE_X_V1",
     "OBSTACLE_FEATURE_Y_V1",
     "DecodedAgentFeatureRowV1",
+    "decode_agent_feature_row",
     "decode_agent_feature_row_v1",
 ]

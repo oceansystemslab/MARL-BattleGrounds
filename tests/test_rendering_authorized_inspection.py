@@ -39,6 +39,7 @@ from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
     ActorPovCurrentSliceV1,
     ActorPovEpisodeCompletionV1,
+    ActorPovFrame,
     ActorPovFrameV1,
     ActorPovReplayContentV1,
     ActorPovTransitionV1,
@@ -606,7 +607,7 @@ def _rebuild_pov_index(
 
 def _rederive_pov_transitions(
     source: ActorPovProjectionIndexV1,
-    frames: tuple[ActorPovFrameV1, ...],
+    frames: tuple[ActorPovFrame, ...],
     transitions: tuple[ActorPovTransitionV1, ...],
 ) -> tuple[ActorPovTransitionV1, ...]:
     derive_cues = vars(pov_module)["_derive_cues"]
@@ -634,15 +635,15 @@ def _rederive_pov_transitions(
 
 
 def _pov_frame_with_shifted_self_position(
-    frame: ActorPovFrameV1,
+    frame: ActorPovFrame,
     *,
     delta_x: float,
-) -> ActorPovFrameV1:
+) -> ActorPovFrame:
     payload = frame.model_dump(mode="python")
     self_features = list(frame.self_features)
     self_features[AGENT_FEATURE_X_V1] += delta_x
     payload["self_features"] = tuple(self_features)
-    return ActorPovFrameV1.model_validate(payload)
+    return type(frame).model_validate(payload)
 
 
 def _different_valid_pov_mask(mask: ActorPovActionMaskV1) -> ActorPovActionMaskV1:

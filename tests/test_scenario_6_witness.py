@@ -313,7 +313,7 @@ def test_warrior_is_new_information_and_hunter_is_the_only_charge_target(
         for actor in (0, 2, 4):
             scalar = jax.tree.map(itemgetter(actor), observation)
             _, _, _, enemies_visible = compose_shared_obs_unit_features(
-                scalar, bank, availability[actor], jnp.int32(actor)
+                scalar, jax.tree.map(itemgetter(0), bank), availability[actor, :5]
             )
             assert bool(enemies_visible[1]) == (tick == 1)
     charge_targets = np.flatnonzero(

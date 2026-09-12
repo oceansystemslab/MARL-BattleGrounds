@@ -26,9 +26,9 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
     AGENT_FEATURE_CLASS_ID,
     AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED,
+    AGENT_FEATURE_IS_ENEMY,
     AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
-    AGENT_FEATURE_TEAM_ID,
     AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
     AGENT_FEATURE_X,
     AGENT_FEATURE_Y,
@@ -606,8 +606,8 @@ def _assert_self_features_match_state_base_fields(
     )
     assert bool(
         jnp.allclose(
-            observation.self_features[:, AGENT_FEATURE_TEAM_ID],
-            config.agent_profile.team_ids.astype(jnp.float32),
+            observation.self_features[:, AGENT_FEATURE_IS_ENEMY],
+            jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
             atol=0.0,
             rtol=0.0,
         )
@@ -635,14 +635,17 @@ def _assert_unit_feature_row_matches_self_row(
     *,
     expected_global_slot: int,
     result_row: Array,
+    is_enemy: bool = False,
 ) -> None:
-    """Assert a visible relation-local candidate row matches its global self row."""
+    """Match candidate state, with the relation flag set for its observer."""
     assert result_row.shape == (UNIT_FEATURES,)
     assert observation.self_features[expected_global_slot].shape == (SELF_FEATURES,)
     assert bool(
         jnp.allclose(
             result_row,
-            observation.self_features[expected_global_slot],
+            observation.self_features[expected_global_slot]
+            .at[AGENT_FEATURE_IS_ENEMY]
+            .set(float(is_enemy)),
             atol=0.0,
             rtol=0.0,
         )
@@ -1391,6 +1394,7 @@ def test_spawn_shield_expiry_lifts_concealment_only_in_next_observation() -> Non
         next_observation,
         expected_global_slot=expiring_slot,
         result_row=next_observation.enemy_unit_features[0, 0],
+        is_enemy=True,
     )
 
 
@@ -1476,11 +1480,13 @@ def test_visible_candidate_rows_match_shared_self_feature_schema() -> None:
         observation,
         expected_global_slot=MAX_AGENTS_PER_TEAM,
         result_row=observation.enemy_unit_features[0, 0],
+        is_enemy=True,
     )
     _assert_unit_feature_row_matches_self_row(
         observation,
         expected_global_slot=MAX_AGENTS_PER_TEAM + 1,
         result_row=observation.enemy_unit_features[0, 1],
+        is_enemy=True,
     )
 
     _assert_unit_feature_row_matches_self_row(
@@ -1497,11 +1503,13 @@ def test_visible_candidate_rows_match_shared_self_feature_schema() -> None:
         observation,
         expected_global_slot=0,
         result_row=observation.enemy_unit_features[MAX_AGENTS_PER_TEAM, 0],
+        is_enemy=True,
     )
     _assert_unit_feature_row_matches_self_row(
         observation,
         expected_global_slot=1,
         result_row=observation.enemy_unit_features[MAX_AGENTS_PER_TEAM, 1],
+        is_enemy=True,
     )
 
 
@@ -1566,6 +1574,7 @@ def test_visible_candidate_rows_preserve_non_boolean_numeric_values() -> None:
         observation,
         expected_global_slot=candidate_slot,
         result_row=candidate_row,
+        is_enemy=True,
     )
 
 

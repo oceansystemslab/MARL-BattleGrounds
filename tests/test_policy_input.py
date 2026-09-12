@@ -5,16 +5,20 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax import Array
 from tests.evaluation_fixtures import evaluation_env_config
 
-from marl_battlegrounds.core.env import initialize_scenario_state, reset
+from marl_battlegrounds.core.env import initialize_scenario_state, reset, step
 from marl_battlegrounds.core.types import (
+    AGENT_FEATURE_ACTIVE,
+    AGENT_FEATURE_IS_ENEMY,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
     MAX_OBJECTIVE_SLOTS,
     OBJECTIVE_FEATURES,
     UNIT_FEATURES,
+    Action,
     ActionMask,
     EnvConfig,
     Observation,
@@ -27,12 +31,13 @@ from marl_battlegrounds.policies.input import (
 )
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsPolicy,
-    SharedObsSensorSourceBankV1,
+    SharedObsSensorSourceBankV2,
     build_default_shared_obs_information_availability,
     build_shared_obs_sensor_source_bank,
     execute_shared_obs_team_policy,
     mask_source_bank_for_recipient,
 )
+from marl_battlegrounds.tasks import make_standard_team_deathmatch_config
 
 
 def _assert_tree_exact(actual: object, expected: object) -> None:
@@ -51,13 +56,12 @@ def _echo_delivered_input(
     observation: Observation,
     action_mask: ActionMask,
     key: Array,
-    source_bank: SharedObsSensorSourceBankV1,
+    source_bank: SharedObsSensorSourceBankV2,
     source_availability: Array,
-    global_slot: Array,
 ) -> ActorInput:
     """Probe delivery only: return all input leaves instead of selecting an action."""
     del action_mask, key
-    return ActorInput(observation, source_bank, source_availability, global_slot)
+    return ActorInput(observation, source_bank, source_availability)
 
 
 def _dead_teammate_observation(config: EnvConfig) -> tuple[Observation, ActionMask]:
@@ -78,37 +82,38 @@ def test_actor_input_preserves_closed_fields_shapes_and_dtypes() -> None:
         "observation",
         "source_bank",
         "source_availability",
-        "global_slot",
     )
     assert actual.observation is observation
     bank = actual.source_bank
-    assert bank.unit_features_by_sensor_source_and_global_slot.shape == (
+    assert bank.unit_features_by_source_and_candidate.shape == (
         MAX_AGENT_SLOTS,
-        MAX_AGENT_SLOTS,
+        MAX_AGENTS_PER_TEAM,
         MAX_AGENT_SLOTS,
         UNIT_FEATURES,
     )
-    assert bank.unit_features_by_sensor_source_and_global_slot.dtype == jnp.float32
-    assert bank.unit_visibility_by_sensor_source_and_global_slot.shape == (
+    assert bank.unit_features_by_source_and_candidate.dtype == jnp.float32
+    assert bank.unit_visibility_by_source_and_candidate.shape == (
         MAX_AGENT_SLOTS,
-        MAX_AGENT_SLOTS,
+        MAX_AGENTS_PER_TEAM,
         MAX_AGENT_SLOTS,
     )
-    assert bank.unit_visibility_by_sensor_source_and_global_slot.dtype == jnp.bool_
-    assert bank.objective_features_by_sensor_source.shape == (
+    assert bank.unit_visibility_by_source_and_candidate.dtype == jnp.bool_
+    assert bank.objective_features_by_source.shape == (
         MAX_AGENT_SLOTS,
-        MAX_AGENT_SLOTS,
+        MAX_AGENTS_PER_TEAM,
         MAX_OBJECTIVE_SLOTS,
         OBJECTIVE_FEATURES,
     )
-    assert bank.objective_features_by_sensor_source.dtype == jnp.float32
-    assert actual.source_availability.shape == (MAX_AGENT_SLOTS, MAX_AGENT_SLOTS)
+    assert bank.objective_features_by_source.dtype == jnp.float32
+    assert actual.source_availability.shape == (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM)
     assert actual.source_availability.dtype == jnp.bool_
-    assert actual.global_slot.dtype == jnp.int32
-    np.testing.assert_array_equal(actual.global_slot, np.arange(MAX_AGENT_SLOTS))
+    assert actual.observation.self_ally_index.dtype == jnp.int32
+    np.testing.assert_array_equal(
+        actual.observation.self_ally_index, [0, 1, 2, 0, 0, 0, 1, 0, 0, 0]
+    )
 
 
-def test_actor_input_matches_legacy_delivery_for_both_teams_and_lifecycles() -> None:
+def test_actor_input_matches_direct_delivery_for_both_teams_and_lifecycles() -> None:
     config = evaluation_env_config()
     _, living_observation, living_mask, _ = reset(config, jax.random.key(0))
     dead_observation, dead_mask = _dead_teammate_observation(config)
@@ -152,12 +157,12 @@ def test_actor_input_removes_unavailable_and_dead_source_material() -> None:
     availability = np.asarray(actual.source_availability)
     assert availability[0, 1]  # Dead teammate remains authorized, with no sensing.
     assert not availability[0, 0]
-    assert not availability[0, MAX_AGENTS_PER_TEAM]
+    assert availability.shape[1] == MAX_AGENTS_PER_TEAM  # No opponent sources.
     assert not availability[3].any()  # Inactive recipient.
     for leaf in jax.tree.leaves(actual.source_bank):
         values = np.asarray(leaf)
         assert not np.any(values[~availability])
-        assert not np.any(values[:, 1])  # Dead source.
+        assert not np.any(values[:5, 1])  # Dead source on the first team.
         assert not np.any(values[:, 3])  # Inactive source.
 
     poisoned = observation._replace(
@@ -219,14 +224,21 @@ def test_compact_observations_reconstruct_authorized_inputs_without_stored_banks
     assert compact.source_availability.shape == (10, 10)
     assert compact.source_availability.dtype == jnp.bool_
     shared_bank = build_shared_obs_sensor_source_bank(compact.observation)
-    banks = jax.vmap(mask_source_bank_for_recipient, in_axes=(None, 0))(
-        shared_bank, compact.source_availability
+    local_availability = jnp.stack(
+        (compact.source_availability[:5, :5], compact.source_availability[5:, 5:])
     )
+    team_banks = jax.vmap(jax.vmap(mask_source_bank_for_recipient, in_axes=(None, 0)))(
+        shared_bank, local_availability
+    )
+
+    def flatten_actors(value: Array) -> Array:
+        return value.reshape((10, *value.shape[2:]))
+
+    banks = jax.tree.map(flatten_actors, team_banks)
     reconstructed = ActorInput(
         compact.observation,
         banks,
-        compact.source_availability,
-        jnp.arange(10, dtype=jnp.int32),
+        local_availability.reshape((10, 5)),
     )
     expected = build_actor_input(observation, config)
     _assert_tree_exact(reconstructed, expected)
@@ -235,11 +247,86 @@ def test_compact_observations_reconstruct_authorized_inputs_without_stored_banks
         return sum(np.asarray(leaf).nbytes for leaf in jax.tree.leaves(tree))
 
     assert byte_count(compact) == byte_count(observation) + 100
-    assert byte_count(compact) * 5 < byte_count(expected)
+    assert byte_count(expected) == byte_count(observation) + 10 * (
+        5 * 10 * 58 * 4 + 5 * 10 + 5 * 8 * 12 * 4 + 5
+    )
     assert compact.source_availability[0, 1]  # Authorized dead source remains empty.
     assert not compact.source_availability[
         0, 5
     ]  # Opponent source never becomes visible.
     for leaf in jax.tree.leaves(reconstructed.source_bank):
-        assert not np.asarray(leaf)[:, 1].any()
-        assert not np.asarray(leaf)[0, 5].any()
+        assert not np.asarray(leaf)[:5, 1].any()
+        assert np.asarray(leaf).shape[1] == 5
+
+
+@pytest.mark.parametrize("sizes", [(5, 5), (1, 5), (3, 2)])
+def test_same_physical_actors_receive_equal_inputs_after_team_block_exchange(
+    sizes: tuple[int, int],
+) -> None:
+    """Routing labels change; every actor's physical input and masks stay equal."""
+    config = evaluation_env_config(team_sizes=sizes)._replace(
+        spawn_shield_duration_steps=0
+    )
+    order = jnp.asarray([5, 6, 7, 8, 9, 0, 1, 2, 3, 4], dtype=jnp.int32)
+
+    def exchange(value: Array) -> Array:
+        return value[order]
+
+    profile = jax.tree.map(exchange, config.agent_profile)
+    profile = profile._replace(
+        team_ids=jnp.where(profile.active_mask, jnp.repeat(jnp.asarray([1, 2]), 5), 0)
+    )
+    exchanged = config._replace(
+        agent_profile=profile,
+        team_spawn_pad_positions=config.team_spawn_pad_positions[::-1],
+        team_respawn_wave_period_step_count=config.team_respawn_wave_period_step_count[
+            ::-1
+        ],
+    )
+    _, original, original_masks, _ = reset(config, jax.random.key(9))
+    _, swapped, swapped_masks, _ = reset(exchanged, jax.random.key(9))
+    original_inputs = build_actor_input(original, config)
+    swapped_inputs = build_actor_input(swapped, exchanged)
+    _assert_tree_exact(original_inputs, jax.tree.map(exchange, swapped_inputs))
+    _assert_tree_exact(original_masks, jax.tree.map(exchange, swapped_masks))
+
+
+def test_relation_flags_and_self_lookup_survive_hidden_rows_death_and_respawn() -> None:
+    """Repeated classes retain self lookup; unseen and unused rows remain distinct."""
+    config = make_standard_team_deathmatch_config(
+        map_id=12,
+        team_a_roster=("mage", "mage", "priest"),
+        team_b_roster=("hunter", "hunter"),
+        max_steps=20,
+    )
+    state, _, _, _ = reset(config, jax.random.key(0))
+    dead = jnp.asarray([1, 6], dtype=jnp.int32)
+    state = state._replace(
+        alive_mask=state.alive_mask.at[dead].set(False),
+        current_health=state.current_health.at[dead].set(0.0),
+    )
+    state, observation, mask, _ = initialize_scenario_state(state, config)
+    no_op = Action(*(jnp.zeros((10,), dtype=jnp.int32) for _ in range(3)))
+    expected_index = [0, 1, 2, 0, 0, 0, 1, 0, 0, 0]
+    for _ in range(6):
+        np.testing.assert_array_equal(observation.self_ally_index, expected_index)
+        np.testing.assert_array_equal(
+            observation.self_features[:, AGENT_FEATURE_IS_ENEMY], 0
+        )
+        np.testing.assert_array_equal(
+            observation.ally_unit_features[:, :, AGENT_FEATURE_IS_ENEMY], 0
+        )
+        np.testing.assert_array_equal(
+            observation.enemy_unit_features[:, :, AGENT_FEATURE_IS_ENEMY],
+            observation.enemy_visibility_mask.astype(jnp.float32),
+        )
+        assert not np.asarray(observation.enemy_unit_features)[
+            ~np.asarray(observation.enemy_visibility_mask)
+        ].any()
+        assert observation.spawn_lifecycle.active_mask_by_agent_by_team[0, 1, 1]
+        assert not observation.spawn_lifecycle.active_mask_by_agent_by_team[0, 1, 2]
+        assert observation.self_features[1, AGENT_FEATURE_ACTIVE] == 1
+        state, observation, _, _, mask, _ = step(
+            config, state, mask, no_op, jax.random.key(1)
+        )
+    assert bool(jnp.all(state.alive_mask[dead]))

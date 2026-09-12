@@ -48,7 +48,7 @@ from tests.test_visual_debugger_service import _service
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.core.env import initialize_scenario_state
-from marl_battlegrounds.evaluation.capture import capture_initial_evaluation_frame_v1
+from marl_battlegrounds.evaluation.capture import capture_initial_evaluation_frame_v2
 from marl_battlegrounds.evaluation.replay_io import (
     REPLAY_FILE_SUFFIX_V1,
     load_replay_bundle_v1,
@@ -143,7 +143,7 @@ def _live_corpse_overlay_frame() -> LiveNoSharedObsAuthorizedPresentationFrameV1
         authored_state,
         session.config,
     )
-    frame = capture_initial_evaluation_frame_v1(
+    frame = capture_initial_evaluation_frame_v2(
         session.evaluation_context,
         state,
         observation,

@@ -47,6 +47,65 @@ measurements below retain their original labels and source hashes.
 
 ## Evaluate and inspect
 
+### Policy Inputs
+
+`Policy.apply(variables, carry, actor_input, action_mask, key)` receives one
+actor's permitted view. `actor_input` contains `observation`, `source_bank` and
+`source_availability`. It has no simulator team ID or global slot number.
+
+Use `observation.self_features` for the actor's own class and current state.
+A shared network can use those features to choose different actions for different
+classes. `observation.self_ally_index` is a scalar integer from 0 to 4 that locates
+self among the five ally rows. It is a lookup aid; the adapter does not add it
+to a network's feature vector. It stays fixed through death and respawn.
+Inactive padding uses zero, distinguished by the existing activity mask.
+
+Unit rows still have 58 columns. Column 3 is now `is_enemy`: zero for self and
+allies, one for a visible enemy. Hidden enemy rows are still all zero. Use the
+ally/enemy grouping and visibility/activity masks to distinguish hidden enemies,
+allies and unused positions. The flag alone cannot make that distinction.
+
+Each SharedObs actor receives five own-team source positions. Source features
+have shape `(5, 10, 58)`, visibility `(5, 10)`, objectives `(5, 8, 12)` and
+availability `(5,)`. Candidate rows are five allies followed by five enemies.
+Self is an unavailable shared source because its own observation arrives
+separately. All unavailable source rows are cleared before the policy call.
+Dead teammates remain authorized but provide no sensor material.
+
+The direct SharedObs callback takes five arguments: observation, mask, key,
+source bank and availability. The old final global-slot argument is removed.
+The direct NoSharedObs callback still takes observation, mask and key. Routing
+and result files retain physical Team A/Team B and global agent identities;
+those metadata fields are outside method inputs. A normal `evaluate` call still
+assigns its first policy to Team A and its opponent to Team B.
+
+Custom source subsets belong in the wrapper state before actions are chosen:
+
+```python
+# chosen_sources is a Boolean (..., 10, 10) subset of the default availability.
+state = state._replace(source_availability=chosen_sources)
+observations = env.get_observations(state)
+```
+
+Pass these compact observations to `apply_policies` as usual, then pass the same
+state to `env.step`. Step keeps the chosen subset. You may change it before the
+next decision. A partial reset restores default availability only in reset lanes.
+Automatic replay capture uses the same state field, including when the subset
+changes across recorded chunks. Changing only a detached observation object
+would leave the recorder unaware of that change; keep the state as the source
+of truth. These are routing inputs; actor callbacks still receive only their
+five local source entries. Explicit low-level capture remains available.
+
+Current recordings version these changed inputs explicitly. Historical
+recordings retain their original team-ID feature meaning and remain readable.
+Run files record the current actor projection identities. Resuming with a missing
+or different input contract is rejected before any saved table is changed.
+An unchanged feature width does not make an old checkpoint compatible: reproduce
+old results with their original code, and revalidate checkpoints under the new
+input contract. This change makes no new learning or slot-fairness claim.
+
+### Run Evaluation
+
 ```bash
 JAX_PLATFORMS=cpu .venv/bin/python examples/evaluation.py evaluate \
   --episodes 4 --num-envs 4 --metrics full --save-replays 2 \

@@ -28,10 +28,9 @@ from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.service import DebuggerService
 
 import marl_battlegrounds.evaluation.capture as capture_module
-from marl_battlegrounds.evaluation.metrics import EvaluationEpisodeObserverV1
 from marl_battlegrounds.evaluation.models import (
     CodeRevisionV1,
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContextV3,
 )
 
 
@@ -145,7 +144,7 @@ def test_create_session_joins_launch_context_frame_zero_and_environment_seed() -
     assert bool(
         jnp.array_equal(
             session.key,
-            jax.random.key(context.seed_protocol.environment_seed),
+            jax.random.key(cast(int, context.seed_protocol.environment_seed)),
         )
     )
 
@@ -167,7 +166,7 @@ def test_one_core_step_has_one_cp2_capture_and_ui_only_input_has_none(
 ) -> None:
     session = _session()
     real_step = control_module.step
-    real_capture = control_module.capture_evaluation_transition_unit_v1
+    real_capture = control_module.capture_evaluation_transition_unit_v2
     calls = {"step": 0, "capture": 0}
 
     def counting_step(*args: object, **kwargs: object) -> object:
@@ -181,7 +180,7 @@ def test_one_core_step_has_one_cp2_capture_and_ui_only_input_has_none(
     monkeypatch.setattr(control_module, "step", counting_step)
     monkeypatch.setattr(
         control_module,
-        "capture_evaluation_transition_unit_v1",
+        "capture_evaluation_transition_unit_v2",
         counting_capture,
     )
 
@@ -269,7 +268,7 @@ def test_interactive_submit_passes_context_to_action_builder_and_config_to_core_
         **kwargs: object,
     ) -> object:
         assert context is session.evaluation_context
-        assert type(context) is EvaluationEpisodeContextV1
+        assert type(context) is EvaluationEpisodeContextV3
         observed["context"] = True
         return real_action_builder(context, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -300,14 +299,14 @@ def test_restart_builds_pending_rows_from_the_new_evaluation_context(
 ) -> None:
     session = _session()
     real_builder = control_module._default_pending_actions  # pyright: ignore[reportPrivateUsage]
-    observed_contexts: list[EvaluationEpisodeContextV1] = []
+    observed_contexts: list[EvaluationEpisodeContextV3] = []
 
     def checking_builder(
-        context: EvaluationEpisodeContextV1,
+        context: EvaluationEpisodeContextV3,
         *args: object,
         **kwargs: object,
     ) -> object:
-        assert type(context) is EvaluationEpisodeContextV1
+        assert type(context) is EvaluationEpisodeContextV3
         observed_contexts.append(context)
         return real_builder(context, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -589,104 +588,54 @@ def test_unmarked_submission_metadata_replacement_faults_before_any_commit(
     _assert_observer_evidence(service, expected_count=1)
 
 
-def test_service_builds_candidate_frame_before_appending_observer(
+def test_service_builds_candidate_frame_before_committing_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service()
+    initial = service.session
     real_build = service_module.build_debugger_frame
-    real_append = EvaluationEpisodeObserverV1.append
-    candidate_frame_built = False
-    append_observations: list[tuple[bool, int]] = []
+    built_counts: list[int] = []
 
     def observing_build(*args: object, **kwargs: object) -> object:
-        nonlocal candidate_frame_built
         result = real_build(*args, **kwargs)  # type: ignore[arg-type]
-        candidate_frame_built = True
+        assert service.session is initial
+        built_counts.append(service.evaluation_validated_transition_count)
         return result
 
-    def observing_append(
-        observer: EvaluationEpisodeObserverV1,
-        *args: object,
-        **kwargs: object,
-    ) -> None:
-        append_observations.append(
-            (candidate_frame_built, service.evaluation_validated_transition_count)
-        )
-        real_append(observer, *args, **kwargs)  # type: ignore[arg-type]
-
     monkeypatch.setattr(service_module, "build_debugger_frame", observing_build)
-    monkeypatch.setattr(EvaluationEpisodeObserverV1, "append", observing_append)
     result = service.apply_command(
-        _request(
-            "submit",
-            revision=0,
-            command=KeyboardCommandV1(key="Enter"),
-        )
+        _request("submit", revision=0, command=KeyboardCommandV1(key="Enter"))
     )
-
     assert result.outcome == "response"
-    assert append_observations == [(True, 0)]
+    assert built_counts and all(count == 0 for count in built_counts)
     _assert_observer_evidence(service, expected_count=1)
 
 
-def test_restart_starts_a_separate_observer_before_swapping_service_epoch(
+def test_restart_builds_candidate_before_replacing_committed_epoch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service()
-    advanced = service.apply_command(
-        _request(
-            "pre-reset-submit",
-            revision=0,
-            command=KeyboardCommandV1(key="Enter"),
-        )
+    service.apply_command(
+        _request("pre-reset-submit", revision=0, command=KeyboardCommandV1(key="Enter"))
     )
-    assert advanced.outcome == "response"
-    _assert_observer_evidence(service, expected_count=1)
-    initial_session = service.session
-    real_factory = service._new_evaluation_observer  # pyright: ignore[reportPrivateUsage]
-    candidate_frame_built = False
-    created_evidence: list[tuple[str, int, str]] = []
+    initial = service.session
     real_build = service_module.build_debugger_frame
+    built_counts: list[int] = []
 
     def observing_build(*args: object, **kwargs: object) -> object:
-        nonlocal candidate_frame_built
         result = real_build(*args, **kwargs)  # type: ignore[arg-type]
-        candidate_frame_built = True
+        assert service.session is initial
+        built_counts.append(service.evaluation_validated_transition_count)
         return result
 
-    def observing_factory(session: DebuggerSession) -> EvaluationEpisodeObserverV1:
-        assert candidate_frame_built
-        assert service.session is initial_session
-        observer = real_factory(session)
-        created_evidence.append(
-            (
-                observer.lifecycle_state,
-                observer.validated_transition_count,
-                observer.context.identity.episode_id,
-            )
-        )
-        return observer
-
     monkeypatch.setattr(service_module, "build_debugger_frame", observing_build)
-    monkeypatch.setattr(service, "_new_evaluation_observer", observing_factory)
     result = service.apply_command(
-        _request(
-            "reset",
-            revision=1,
-            command=ResetCommandV1(),
-        )
+        _request("reset", revision=1, command=ResetCommandV1())
     )
-
     assert result.outcome == "response"
-    assert created_evidence == [
-        (
-            "open",
-            0,
-            service.session.evaluation_context.identity.episode_id,
-        )
-    ]
-    assert service.session is not initial_session
-    assert service.session.run_generation == initial_session.run_generation + 1
+    assert built_counts and all(count == 1 for count in built_counts)
+    assert service.session is not initial
+    assert service.session.run_generation == initial.run_generation + 1
     _assert_observer_evidence(service, expected_count=0)
 
 

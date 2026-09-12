@@ -55,11 +55,15 @@ from marl_battlegrounds.evaluation.models import (
     ActionMaskV1,
     AuraTransitionFactsV1,
     BaseObservationV1,
+    BaseObservationV2,
     CombatTransitionFactsV1,
     DeathTransitionFactsV1,
     EvaluationEpisodeContext,
     EvaluationEpisodeContextV1,
+    EvaluationEpisodeContextV3,
+    EvaluationFrame,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     EvaluationTransitionV1,
     GlobalAnalysisSnapshotV1,
     JointActionV1,
@@ -73,6 +77,7 @@ from marl_battlegrounds.evaluation.models import (
     TeamDeathmatchTransitionFactsV1,
     TransitionFactsV1,
     evaluation_context_type,
+    evaluation_frame_type,
 )
 from marl_battlegrounds.evaluation.validation import (
     _derive_and_validate_team_deathmatch_authority_v1,  # pyright: ignore[reportPrivateUsage]
@@ -421,10 +426,10 @@ def _normalize_spawn_lifecycle_observation_v1(
     return SpawnLifecycleObservationV1.model_validate(payload)
 
 
-def _normalize_base_observation_v1(
+def _normalize_base_observation(
     source: Observation,
     context: EvaluationEpisodeContext,
-) -> BaseObservationV1:
+) -> BaseObservationV1 | BaseObservationV2:
     _require_exact_type(source, Observation, name="observation")
     specs = (
         ("self_features", (MAX_AGENT_SLOTS, SELF_FEATURES), _FLOAT32_DTYPE, True),
@@ -488,6 +493,21 @@ def _normalize_base_observation_v1(
         source.spawn_lifecycle,
         context,
     )
+    if type(context) is EvaluationEpisodeContextV3:
+        payload["self_ally_index"] = _array_payload(
+            source.self_ally_index,
+            name="observation.self_ally_index",
+            shape=(MAX_AGENT_SLOTS,),
+            dtype=_INT32_DTYPE,
+            category_count=MAX_AGENTS_PER_TEAM,
+        )
+        return BaseObservationV2.model_validate(payload)
+    for slot, row in enumerate(context.roster):
+        if source.self_features[slot, 3] != float(row.configured_team_id):
+            raise ValueError(
+                "legacy capture requires historical Team ID observations; "
+                "use current capture V2"
+            )
     return BaseObservationV1.model_validate(payload)
 
 
@@ -899,7 +919,7 @@ def normalize_transition_facts_v1(source: TransitionFacts) -> TransitionFactsV1:
     )
 
 
-def _build_evaluation_frame_v1_from_host(
+def _build_evaluation_frame_from_host(
     context: EvaluationEpisodeContext,
     *,
     frame_index: int,
@@ -907,7 +927,7 @@ def _build_evaluation_frame_v1_from_host(
     observation: Observation,
     action_mask: ActionMask,
     shared_obs_information_availability_by_recipient_and_sensor_source: (object | None),
-) -> EvaluationFrameV1:
+) -> EvaluationFrame:
     """Build one frame from an already-host bundle without transferring again."""
     evaluation_context_type(context)
     if type(frame_index) is not int or frame_index < 0:
@@ -923,14 +943,19 @@ def _build_evaluation_frame_v1_from_host(
         )
 
     episode_id = context.identity.episode_id
-    frame = EvaluationFrameV1.model_validate(
+    frame_model = (
+        EvaluationFrameV2
+        if type(context) is EvaluationEpisodeContextV3
+        else EvaluationFrameV1
+    )
+    frame = frame_model.model_validate(
         {
             "episode_id": episode_id,
             "frame_index": frame_index,
             "frame_id": f"{episode_id}:frame:{frame_index}",
             "simulator_step_count": simulator_step_count,
             "snapshot": snapshot,
-            "base_observation": _normalize_base_observation_v1(observation, context),
+            "base_observation": _normalize_base_observation(observation, context),
             "action_mask": _normalize_action_mask_v1(action_mask),
             "shared_obs_information_availability_by_recipient_and_sensor_source": (
                 availability_payload
@@ -941,7 +966,7 @@ def _build_evaluation_frame_v1_from_host(
     return frame
 
 
-def capture_initial_evaluation_frame_v1(
+def _capture_initial_evaluation_frame(
     context: EvaluationEpisodeContext,
     state: EnvState,
     observation: Observation,
@@ -949,7 +974,7 @@ def capture_initial_evaluation_frame_v1(
     shared_obs_information_availability_by_recipient_and_sensor_source: (
         object | None
     ) = None,
-) -> EvaluationFrameV1:
+) -> EvaluationFrame:
     """Capture frame zero through exactly one bundled device-to-host transfer."""
     evaluation_context_type(context)
     host_state, host_observation, host_action_mask, host_availability = cast(
@@ -963,7 +988,7 @@ def capture_initial_evaluation_frame_v1(
             )
         ),
     )
-    frame = _build_evaluation_frame_v1_from_host(
+    frame = _build_evaluation_frame_from_host(
         context,
         frame_index=0,
         state=host_state,
@@ -1012,9 +1037,9 @@ def _normalize_done_flags_v1(source: DoneFlags) -> tuple[bool, bool]:
     return terminated, truncated
 
 
-def capture_evaluation_transition_unit_v1(
+def _capture_evaluation_transition_unit(
     context: EvaluationEpisodeContext,
-    start_frame: EvaluationFrameV1,
+    start_frame: EvaluationFrame,
     successor_state: EnvState,
     successor_observation: Observation,
     successor_action_mask: ActionMask,
@@ -1025,10 +1050,10 @@ def capture_evaluation_transition_unit_v1(
     successor_shared_obs_information_availability_by_recipient_and_sensor_source: (
         object | None
     ) = None,
-) -> tuple[EvaluationTransitionV1, EvaluationFrameV1]:
+) -> tuple[EvaluationTransitionV1, EvaluationFrame]:
     """Capture one adjacent transition unit through one bundled device transfer."""
     evaluation_context_type(context)
-    _require_exact_type(start_frame, EvaluationFrameV1, name="start_frame")
+    evaluation_frame_type(start_frame)
     (
         host_successor_state,
         host_successor_observation,
@@ -1060,7 +1085,7 @@ def capture_evaluation_transition_unit_v1(
         ),
     )
 
-    successor_frame = _build_evaluation_frame_v1_from_host(
+    successor_frame = _build_evaluation_frame_from_host(
         context,
         frame_index=start_frame.frame_index + 1,
         state=host_successor_state,
@@ -1124,9 +1149,7 @@ def capture_evaluation_transition_unit_v1(
     return transition, successor_frame
 
 
-def reconstruct_env_state_v1(
-    frame: EvaluationFrameV1, *, host: bool = False
-) -> EnvState:
+def reconstruct_env_state_v1(frame: EvaluationFrame, *, host: bool = False) -> EnvState:
     """Restore captured state; host mode batches NumPy leaves before one transfer.
 
     Core NamedTuples describe the PyTree shape. Host leaves have the same values
@@ -1346,8 +1369,130 @@ reconstruct_transition_facts_v1 = _reconstruct_transition_facts
 
 __all__ = [
     "capture_evaluation_transition_unit_v1",
+    "capture_evaluation_transition_unit_v2",
     "capture_initial_evaluation_frame_v1",
+    "capture_initial_evaluation_frame_v2",
     "normalize_transition_facts_v1",
     "reconstruct_env_state_v1",
     "reconstruct_transition_facts_v1",
 ]
+
+
+def capture_initial_evaluation_frame_v1(
+    context: EvaluationEpisodeContext,
+    state: EnvState,
+    observation: Observation,
+    action_mask: ActionMask,
+    shared_obs_information_availability_by_recipient_and_sensor_source: (
+        object | None
+    ) = None,
+) -> EvaluationFrameV1:
+    """Capture exact V1 observation rows with one bundled transfer."""
+    if type(context) is EvaluationEpisodeContextV3:
+        raise ValueError("capture V1 requires matching episode context")
+    return cast(
+        EvaluationFrameV1,
+        _capture_initial_evaluation_frame(
+            context,
+            state,
+            observation,
+            action_mask,
+            shared_obs_information_availability_by_recipient_and_sensor_source,
+        ),
+    )
+
+
+def capture_initial_evaluation_frame_v2(
+    context: EvaluationEpisodeContext,
+    state: EnvState,
+    observation: Observation,
+    action_mask: ActionMask,
+    shared_obs_information_availability_by_recipient_and_sensor_source: (
+        object | None
+    ) = None,
+) -> EvaluationFrameV2:
+    """Capture exact V2 observation rows with one bundled transfer."""
+    if type(context) is not EvaluationEpisodeContextV3:
+        raise ValueError("capture V2 requires matching episode context")
+    return cast(
+        EvaluationFrameV2,
+        _capture_initial_evaluation_frame(
+            context,
+            state,
+            observation,
+            action_mask,
+            shared_obs_information_availability_by_recipient_and_sensor_source,
+        ),
+    )
+
+
+def capture_evaluation_transition_unit_v1(
+    context: EvaluationEpisodeContext,
+    start_frame: EvaluationFrameV1,
+    successor_state: EnvState,
+    successor_observation: Observation,
+    successor_action_mask: ActionMask,
+    transition_facts: TransitionFacts,
+    canonical_reward: Reward,
+    done_flags: DoneFlags,
+    *,
+    successor_shared_obs_information_availability_by_recipient_and_sensor_source: (
+        object | None
+    ) = None,
+) -> tuple[EvaluationTransitionV1, EvaluationFrameV1]:
+    """Capture exact V1 observation rows with one bundled transfer."""
+    if (
+        type(context) is EvaluationEpisodeContextV3
+        or type(start_frame) is not EvaluationFrameV1
+    ):
+        raise ValueError("capture V1 requires matching episode context and frame")
+    return cast(
+        tuple[EvaluationTransitionV1, EvaluationFrameV1],
+        _capture_evaluation_transition_unit(
+            context,
+            start_frame,
+            successor_state,
+            successor_observation,
+            successor_action_mask,
+            transition_facts,
+            canonical_reward,
+            done_flags,
+            successor_shared_obs_information_availability_by_recipient_and_sensor_source=successor_shared_obs_information_availability_by_recipient_and_sensor_source,
+        ),
+    )
+
+
+def capture_evaluation_transition_unit_v2(
+    context: EvaluationEpisodeContext,
+    start_frame: EvaluationFrameV2,
+    successor_state: EnvState,
+    successor_observation: Observation,
+    successor_action_mask: ActionMask,
+    transition_facts: TransitionFacts,
+    canonical_reward: Reward,
+    done_flags: DoneFlags,
+    *,
+    successor_shared_obs_information_availability_by_recipient_and_sensor_source: (
+        object | None
+    ) = None,
+) -> tuple[EvaluationTransitionV1, EvaluationFrameV2]:
+    """Capture exact V2 observation rows with one bundled transfer."""
+    if (
+        type(context) is not EvaluationEpisodeContextV3
+        or type(start_frame) is not EvaluationFrameV2
+    ):
+        raise ValueError("capture V2 requires matching episode context and frame")
+    return cast(
+        tuple[EvaluationTransitionV1, EvaluationFrameV2],
+        _capture_evaluation_transition_unit(
+            context,
+            start_frame,
+            successor_state,
+            successor_observation,
+            successor_action_mask,
+            transition_facts,
+            canonical_reward,
+            done_flags,
+            successor_shared_obs_information_availability_by_recipient_and_sensor_source=successor_shared_obs_information_availability_by_recipient_and_sensor_source,
+        ),
+    )

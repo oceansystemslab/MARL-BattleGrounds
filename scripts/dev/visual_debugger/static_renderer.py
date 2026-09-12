@@ -9,6 +9,7 @@ from marl_battlegrounds.rendering import render_scene_geometry
 if TYPE_CHECKING:
     from marl_battlegrounds.evaluation.replay import ReplayArtifactV1
     from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactV2
+    from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
     from scripts.dev.visual_debugger.evaluation_bridge import (
         DebuggerEvaluationLaunchSpecificationV1,
     )
@@ -88,13 +89,13 @@ def run_static_replay_renderer(
     """Validate, project, and render one canonical replay frame offline."""
     from marl_battlegrounds.evaluation.replay_io import (
         ReplayLoadError,
-        load_replay_artifact_v1,
+        load_replay,
     )
 
     if type(frame_index) is not int:
         raise ValueError("replay frame index must be a Python integer.")
     try:
-        replay = load_replay_artifact_v1(replay_path)
+        replay = load_replay(replay_path).replay
     except ReplayLoadError as exc:
         raise ValueError(f"Replay could not be loaded: {exc}") from exc
     return run_static_replay_artifact_renderer(
@@ -106,7 +107,7 @@ def run_static_replay_renderer(
 
 def run_static_replay_artifact_renderer(
     *,
-    replay: ReplayArtifactV1 | ReplayArtifactV2,
+    replay: ReplayArtifactV1 | ReplayArtifactV2 | ReplayArtifactV3,
     frame_index: int,
     show_ranges: bool,
 ) -> int:
@@ -114,13 +115,14 @@ def run_static_replay_artifact_renderer(
     from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
     from marl_battlegrounds.evaluation.replay import ReplayArtifactV1
     from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactV2
+    from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
     from marl_battlegrounds.rendering.evaluation_adapter import (
         EvaluationScenePresentationStateV1,
         build_researcher_analyzer_projection_v2,
         build_status_source_evidence_index_v2,
     )
 
-    if type(replay) not in (ReplayArtifactV1, ReplayArtifactV2):
+    if type(replay) not in (ReplayArtifactV1, ReplayArtifactV2, ReplayArtifactV3):
         raise TypeError("replay must be an exact supported replay artifact.")
     if type(frame_index) is not int:
         raise ValueError("replay frame index must be a Python integer.")

@@ -18,7 +18,7 @@ from marl_battlegrounds.evaluation.models import (
     ContentAddressedIdentityV1,
     EvaluationEpisodeContext,
     EvaluationEpisodeContextV2,
-    EvaluationFrameV1,
+    EvaluationFrame,
     LethalDamageContributionEventV1,
     RecipientHealthResolutionEventV1,
     SourceHealingOutputEventV1,
@@ -149,7 +149,7 @@ def _combat_credit() -> Callable[..., CombatCredit]:
 
 def _death_contributors(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     incoming_events: tuple[object, ...],
     dead_slots: set[int],
 ) -> dict[int, tuple[MatchAgentV1, ...]]:
@@ -337,7 +337,7 @@ def _controller_name(
 
 def build_match_summary_v1(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV1,
+    frame: EvaluationFrame,
     incoming_events: tuple[object, ...] = (),
 ) -> MatchSummaryV1:
     """Package recorded scores and task-authored outcomes without new game rules."""

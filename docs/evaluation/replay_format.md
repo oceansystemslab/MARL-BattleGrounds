@@ -1,19 +1,19 @@
 # Standard Evaluation Replay Format
 
-## Current single-file V2 recording
+## Current Single-File V3 Recording
 
-New recording uses `ReplayArtifactV2`: one context/header, authoritative initial
+New recording uses `ReplayArtifactV3`: one context/header, authoritative initial
 and successor frames, transitions and completion. It has no metric-report JSON
 reference and does not compute metrics to save a replay. `save_replay` publishes
 one canonical `.marlbg-replay.json` file without overwriting an existing artifact;
-`load_replay` explicitly dispatches supported versions. Original V1 bytes and
+`load_replay` explicitly dispatches supported versions. Original V1 and V2 bytes and
 strict versioned readers remain unchanged.
 
-V2 preserves essential resolved configuration, the ten-slot roster, observations,
+V3 preserves essential resolved configuration, the ten-slot roster, observations,
 action masks and transition facts. Optional policy/checkpoint/training and seed
 provenance represents unknown values as null. A frozen policy and an evolving
 training policy are distinguished. Recorded simulator/runtime identity remains
-separate from the current analysis identity. V2 does not introduce mixed actor
+separate from the current analysis identity. V3 does not introduce mixed actor
 information regimes; canonical new research remains SharedObs.
 
 Selected capture returns bounded per-step numeric packets. No episode-length
@@ -28,12 +28,30 @@ authority. CSV is the metric export; episode details/configuration are labelled
 separately. Historical metric sidecars may still be read by explicit legacy APIs,
 but new writing and analysis do not depend on them.
 
+Current records use `EvaluationEpisodeContextV3` and `EvaluationFrameV2`.
+Column 3 of each unit row is `is_enemy`: zero for self and allies, one for
+visible enemies. Hidden rows stay zero. The observation records each actor's
+`self_ally_index`, which points to its row among the five ally slots. Simulator
+Team A/Team B identities remain in the roster and transition records; they are
+not policy feature values.
+
+Current NoSharedObs uses actor projection 3. Its `ActorPovReplayArtifactV2`
+contains the exact actor rows, the self index and the public class roster.
+Current SharedObs uses actor projection 2. Its policy source bank has five
+own-team sources and ten candidate rows, ordered as allies then enemies. The
+Viewer's Shared source projection is version 2 and stays labelled as source
+material. It does not claim that this diagnostic view is the final policy input.
+
+The Viewer selects the reader from the recorded version. It uses roster metadata
+for Team A/Team B labels without changing raw observation rows. Historical replay
+and POV readers keep their original meanings, including physical team IDs in
+old feature rows. New recordings cannot be passed to the old capture writer.
+
 ## Historical V1 format
 
 The following sections retain the V1 wire contract and historical migration
 record. Their old in-place migration and sidecar rules apply to those historical
-versions; they do not override the separately versioned V2 recording above.
-
+versions; they do not override the separately versioned V3 recording above.
 
 This document defines the version-1 semantic replay normal form introduced in
 Milestone 6. It is a contract for evaluation evidence, not a renderer frame,
@@ -359,14 +377,14 @@ surface is:
   core-aware product/curated-state acceptance gate and canonical SharedObs
   mode, projection, and all-frame availability check.
 
-Current controlled-scenario captures use `ScenarioEvaluationRecordV3` with
-`ResolvedScenarioSpecificationV3`, `ScenarioSeedScheduleV3` and a V2 replay
+Current controlled-scenario captures use `ScenarioEvaluationRecordV4` with
+`ResolvedScenarioSpecificationV3`, `ScenarioSeedScheduleV3` and a V3 replay
 reference. Their endpoint/role/initial-state semantics are unchanged; named seed
 facts may be unknown and no metric-report reference is required. Use
-`save_scenario_evaluation_record_v3` / `load_scenario_evaluation_record_v3` for
-canonical artifact joins, then `validate_official_scenario_evaluation_record_v3`
+`save_scenario_evaluation_record_v4` / `load_scenario_evaluation_record_v4` for
+canonical artifact joins, then `validate_official_scenario_evaluation_record_v4`
 for live official eligibility. The latter reuses the same Core-backed product,
-curated-state and all-frame SharedObs checks as the historical V2 gate. Old V1/V2
+curated-state and all-frame SharedObs checks as the historical V2 gate. Old V1/V2/V3
 scenario files retain their original strict readers and report joins. Current
 full scalar rows live in the run CSV, independently of the replay file.
 

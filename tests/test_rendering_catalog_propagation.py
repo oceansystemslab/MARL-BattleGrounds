@@ -17,7 +17,6 @@ from tests.catalog_propagation_fixture import (
 )
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
-from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV1
 from marl_battlegrounds.rendering.scene import to_jsonable
 
 
@@ -98,7 +97,7 @@ def test_catalog_mechanic_mutation_is_relative_to_any_valid_source_catalog(
     assert expected.burst_multiplier == 1.96
     assert expected.aura_radius == 7.5
     assert expected.aura_multiplier == 1.19
-    assert varied_context == EvaluationEpisodeContextV1.model_validate_json(
+    assert varied_context == type(varied_context).model_validate_json(
         varied_context.model_dump_json()
     )
     assert varied_context.static_mechanics_catalog == type(

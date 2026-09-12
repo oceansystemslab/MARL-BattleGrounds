@@ -16,6 +16,10 @@ from uuid import uuid4
 
 import numpy as np
 
+from marl_battlegrounds.evaluation.actor_projection import (
+    NO_SHARED_OBS_ACTOR_PROJECTION_V3,
+    SHARED_OBS_ACTOR_PROJECTION_V2,
+)
 from marl_battlegrounds.evaluation.metric_catalog import (
     FULL_METRIC_NAMES,
     METRIC_SCHEMA_ID,
@@ -26,7 +30,7 @@ from marl_battlegrounds.evaluation.metric_catalog import (
 if TYPE_CHECKING:
     from marl_battlegrounds.core.types import EnvConfig
     from marl_battlegrounds.environment import EpisodeInfo
-    from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV2
+    from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV3
     from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
     from marl_battlegrounds.evaluation.replay_capture import ReplayPackets
     from marl_battlegrounds.evaluation.replay_recording import ReplayCollector
@@ -58,6 +62,10 @@ MATCH_COLUMNS = (
     *PRIORITY_METRIC_NAMES,
 )
 _SUMMARY_TABLES = ("tournament_results.csv", "matchup_results.csv", "map_results.csv")
+_INPUT_PROJECTIONS = {
+    "shared_obs": SHARED_OBS_ACTOR_PROJECTION_V2.model_dump(mode="json"),
+    "no_shared_obs": NO_SHARED_OBS_ACTOR_PROJECTION_V3.model_dump(mode="json"),
+}
 
 
 def _json_value(value: object) -> object:
@@ -178,6 +186,7 @@ class RunWriter:
                 "created_at": datetime.now(UTC).isoformat(),
                 "metric_schema_id": METRIC_SCHEMA_ID,
                 "metric_schema_version": METRIC_SCHEMA_VERSION,
+                "actor_input_projections": _INPUT_PROJECTIONS,
                 "configurations": {},
                 "passes": {},
                 "tables": {},
@@ -206,6 +215,11 @@ class RunWriter:
                         f"{self._details.get('metric_schema_version')}, "
                         f"required {METRIC_SCHEMA_VERSION}); start a new run. "
                         "Existing files have not been changed."
+                    )
+                if self._details.get("actor_input_projections") != _INPUT_PROJECTIONS:
+                    raise ValueError(
+                        "run actor input contract differs from this writer; "
+                        "start a new run. Existing files have not been changed."
                     )
                 self._recover_tables()
             self.run_id = str(self._details["run_id"])
@@ -379,7 +393,7 @@ class RunWriter:
 
     def _replay_context(
         self, packet: ReplayPackets
-    ) -> tuple[EvaluationEpisodeContextV2, RuntimeProvenanceV1]:
+    ) -> tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]:
         from marl_battlegrounds.evaluation.recording_context import (
             build_recording_context,
             capture_recording_provenance,

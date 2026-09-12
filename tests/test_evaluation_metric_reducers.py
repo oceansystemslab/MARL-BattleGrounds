@@ -12,11 +12,15 @@ from tests.evaluation_fixtures import (
     evaluation_env_config,
     neutral_action,
 )
+from tests.evaluation_fixtures import (
+    historical_initialize_scenario_state as initialize_scenario_state,
+)
+from tests.evaluation_fixtures import historical_reset as reset
+from tests.evaluation_fixtures import historical_step as step
 
 from marl_battlegrounds.core.axis_mappings import (
     GLOBAL_RECIPIENT_SLOT_BY_ACTOR_AND_TARGET_ACTION,
 )
-from marl_battlegrounds.core.env import initialize_scenario_state, reset, step
 from marl_battlegrounds.core.types import Action
 from marl_battlegrounds.evaluation.capture import (
     capture_evaluation_transition_unit_v1,

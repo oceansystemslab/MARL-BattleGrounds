@@ -29,15 +29,27 @@ from marl_battlegrounds.policies.actor import ActorAction
 
 
 class SharedObsSensorSourceBankV1(NamedTuple):
-    """Fixed global-source bank derived only from current base observations."""
+    """Historical global-source layout used when reading V1 recordings."""
 
     unit_features_by_sensor_source_and_global_slot: Array
     unit_visibility_by_sensor_source_and_global_slot: Array
     objective_features_by_sensor_source: Array
 
 
+class SharedObsSensorSourceBankV2(NamedTuple):
+    """Five own-team sources, with five ally then five enemy candidates.
+
+    An actor receives features ``(5, 10, 58)``, visibility ``(5, 10)`` and
+    objectives ``(5, 8, 12)``. No axis identifies a simulator team or global slot.
+    """
+
+    unit_features_by_source_and_candidate: Array
+    unit_visibility_by_source_and_candidate: Array
+    objective_features_by_source: Array
+
+
 SharedObsPolicy = Callable[
-    [Observation, ActionMask, Array, SharedObsSensorSourceBankV1, Array, Array],
+    [Observation, ActionMask, Array, SharedObsSensorSourceBankV2, Array],
     ActorAction,
 ]
 
@@ -116,26 +128,59 @@ def build_shared_obs_sensor_source_bank_from_base_rows(
     )
 
 
+def build_shared_obs_team_source_bank_from_base_rows(
+    ally_unit_features: Array,
+    enemy_unit_features: Array,
+    objective_features_by_source: Array,
+    ally_visibility_mask: Array,
+    enemy_visibility_mask: Array,
+    source_is_living: Array,
+) -> SharedObsSensorSourceBankV2:
+    """Join one team's already relative rows; dead sources provide no sensors.
+
+    Each input has five source rows. This same builder serves live policies and
+    recorded input reconstruction. It neither derives visibility nor reads state.
+    """
+    visibility = (
+        jnp.concatenate((ally_visibility_mask, enemy_visibility_mask), axis=1)
+        & source_is_living[:, None]
+    )
+    features = jnp.concatenate((ally_unit_features, enemy_unit_features), axis=1)
+    return SharedObsSensorSourceBankV2(
+        jnp.where(visibility[:, :, None], features, 0.0).astype(jnp.float32),
+        visibility,
+        jnp.where(
+            source_is_living[:, None, None], objective_features_by_source, 0.0
+        ).astype(jnp.float32),
+    )
+
+
 def build_shared_obs_sensor_source_bank(
     observation: Observation,
-) -> SharedObsSensorSourceBankV1:
-    """Remap current visibility-redacted relation rows to global candidate slots.
+) -> SharedObsSensorSourceBankV2:
+    """Prepare both teams once, with a leading two-team routing axis.
 
-    This function does not derive visibility or inspect state. Dead or inactive
-    sources contribute no ordinary sensor material, as proven by their authored
-    self lifecycle columns and visibility rows.
+    Select a team before delivering this bank to a policy. Actor inputs never
+    contain this outer routing axis. No global candidate bank is materialized.
     """
     source_is_living = jnp.logical_and(
         observation.self_features[:, AGENT_FEATURE_ACTIVE] > 0.0,
         observation.self_features[:, AGENT_FEATURE_ALIVE] > 0.0,
     )
-    return build_shared_obs_sensor_source_bank_from_base_rows(
+    inputs = (
         observation.ally_unit_features,
         observation.enemy_unit_features,
         observation.objective_features,
         observation.ally_visibility_mask,
         observation.enemy_visibility_mask,
         source_is_living,
+    )
+
+    def team_rows(value: Array) -> Array:
+        return value.reshape((2, MAX_AGENTS_PER_TEAM, *value.shape[1:]))
+
+    return jax.vmap(build_shared_obs_team_source_bank_from_base_rows)(
+        *jax.tree.map(team_rows, inputs)
     )
 
 
@@ -153,17 +198,17 @@ def build_default_shared_obs_information_availability(
 
 
 def _select_shared_unit_material(
-    source_bank: SharedObsSensorSourceBankV1,
+    source_bank: SharedObsSensorSourceBankV2,
     recipient_source_availability: Array,
 ) -> tuple[Array, Array]:
-    """Select the lowest-slot admitted source for every globally keyed candidate."""
+    """Select the lowest admitted own-team source for each relative candidate."""
     admitted = jnp.logical_and(
         recipient_source_availability[:, None],
-        source_bank.unit_visibility_by_sensor_source_and_global_slot,
+        source_bank.unit_visibility_by_source_and_candidate,
     )
     candidate_visible = jnp.any(admitted, axis=0)
     selected_source = jnp.argmax(admitted, axis=0).astype(jnp.int32)
-    candidate_features = source_bank.unit_features_by_sensor_source_and_global_slot[
+    candidate_features = source_bank.unit_features_by_source_and_candidate[
         selected_source,
         _GLOBAL_SLOTS,
     ]
@@ -177,19 +222,16 @@ def _select_shared_unit_material(
 
 def compose_shared_obs_unit_features(
     recipient_observation: Observation,
-    source_bank: SharedObsSensorSourceBankV1,
+    source_bank: SharedObsSensorSourceBankV2,
     recipient_source_availability: Array,
-    recipient_global_slot: Array,
 ) -> tuple[Array, Array, Array, Array]:
     """Union admitted teammate rows into recipient-relative unit feature axes."""
     shared_features, shared_visible = _select_shared_unit_material(
         source_bank,
         recipient_source_availability,
     )
-    ally_global_slots = _ALLY_GLOBAL_SLOTS[recipient_global_slot]
-    enemy_global_slots = _ENEMY_GLOBAL_SLOTS[recipient_global_slot]
-    shared_ally_visible = shared_visible[ally_global_slots]
-    shared_enemy_visible = shared_visible[enemy_global_slots]
+    shared_ally_visible = shared_visible[:MAX_AGENTS_PER_TEAM]
+    shared_enemy_visible = shared_visible[MAX_AGENTS_PER_TEAM:]
 
     ally_visible = jnp.logical_or(
         recipient_observation.ally_visibility_mask,
@@ -204,7 +246,7 @@ def compose_shared_obs_unit_features(
         recipient_observation.ally_unit_features,
         jnp.where(
             shared_ally_visible[:, None],
-            shared_features[ally_global_slots],
+            shared_features[:MAX_AGENTS_PER_TEAM],
             jnp.zeros_like(recipient_observation.ally_unit_features),
         ),
     ).astype(jnp.float32)
@@ -213,7 +255,7 @@ def compose_shared_obs_unit_features(
         recipient_observation.enemy_unit_features,
         jnp.where(
             shared_enemy_visible[:, None],
-            shared_features[enemy_global_slots],
+            shared_features[MAX_AGENTS_PER_TEAM:],
             jnp.zeros_like(recipient_observation.enemy_unit_features),
         ),
     ).astype(jnp.float32)
@@ -222,25 +264,25 @@ def compose_shared_obs_unit_features(
 
 
 def mask_source_bank_for_recipient(
-    source_bank: SharedObsSensorSourceBankV1,
+    source_bank: SharedObsSensorSourceBankV2,
     recipient_source_availability: Array,
-) -> SharedObsSensorSourceBankV1:
+) -> SharedObsSensorSourceBankV2:
     """Remove every unavailable source row before crossing the policy ABI."""
     source_available = jnp.asarray(recipient_source_availability, dtype=jnp.bool_)
-    return SharedObsSensorSourceBankV1(
-        unit_features_by_sensor_source_and_global_slot=jnp.where(
+    return SharedObsSensorSourceBankV2(
+        unit_features_by_source_and_candidate=jnp.where(
             source_available[:, None, None],
-            source_bank.unit_features_by_sensor_source_and_global_slot,
-            jnp.zeros_like(source_bank.unit_features_by_sensor_source_and_global_slot),
+            source_bank.unit_features_by_source_and_candidate,
+            0.0,
         ),
-        unit_visibility_by_sensor_source_and_global_slot=jnp.logical_and(
+        unit_visibility_by_source_and_candidate=jnp.logical_and(
             source_available[:, None],
-            source_bank.unit_visibility_by_sensor_source_and_global_slot,
+            source_bank.unit_visibility_by_source_and_candidate,
         ),
-        objective_features_by_sensor_source=jnp.where(
+        objective_features_by_source=jnp.where(
             source_available[:, None, None],
-            source_bank.objective_features_by_sensor_source,
-            jnp.zeros_like(source_bank.objective_features_by_sensor_source),
+            source_bank.objective_features_by_source,
+            0.0,
         ),
     )
 
@@ -250,12 +292,12 @@ def execute_shared_obs_team_policy(
     observation: Observation,
     action_mask: ActionMask,
     key: Array,
-    source_bank: SharedObsSensorSourceBankV1,
+    source_bank: SharedObsSensorSourceBankV2,
     information_availability: Array,
     policy: SharedObsPolicy,
     team_identity: int | Array,
 ) -> ActorAction:
-    """Map one scalar SharedObs policy over a fixed five-slot team block."""
+    """Route five actors to one policy, passing only own-team source positions."""
     start_index = jnp.where(team_identity == TEAM_A_ID, TEAM_A_START, TEAM_B_START)
 
     def _prune_tree(leaf: Array) -> Array:
@@ -264,26 +306,25 @@ def execute_shared_obs_team_policy(
     team_observation = jax.tree.map(_prune_tree, observation)
     team_action_mask = jax.tree.map(_prune_tree, action_mask)
     team_keys = jax.tree.map(_prune_tree, key)
-    team_availability = jax.lax.dynamic_slice_in_dim(
+    team_availability = jax.lax.dynamic_slice(
         information_availability,
-        start_index,
-        MAX_AGENTS_PER_TEAM,
+        (start_index, start_index),
+        (MAX_AGENTS_PER_TEAM, MAX_AGENTS_PER_TEAM),
     )
-    team_global_slots = jax.lax.dynamic_slice_in_dim(
-        _GLOBAL_SLOTS,
-        start_index,
-        MAX_AGENTS_PER_TEAM,
-    )
+
+    def take_bank(leaf: Array) -> Array:
+        return leaf[jnp.where(team_identity == TEAM_A_ID, 0, 1)]
+
+    team_bank = jax.tree.map(take_bank, source_bank)
 
     def _execute_recipient_policy(
         recipient_observation: Observation,
         recipient_action_mask: ActionMask,
         actor_key: Array,
         recipient_source_availability: Array,
-        recipient_global_slot: Array,
     ) -> ActorAction:
         authorized_source_bank = mask_source_bank_for_recipient(
-            source_bank,
+            team_bank,
             recipient_source_availability,
         )
         return policy(
@@ -292,12 +333,11 @@ def execute_shared_obs_team_policy(
             actor_key,
             authorized_source_bank,
             recipient_source_availability,
-            recipient_global_slot,
         )
 
     policy_vmap = jax.vmap(
         fun=_execute_recipient_policy,
-        in_axes=(0, 0, 0, 0, 0),
+        in_axes=(0, 0, 0, 0),
         out_axes=0,
     )
     return policy_vmap(
@@ -305,15 +345,16 @@ def execute_shared_obs_team_policy(
         team_action_mask,
         team_keys,
         team_availability,
-        team_global_slots,
     )
 
 
 __all__ = (
     "SharedObsPolicy",
     "SharedObsSensorSourceBankV1",
+    "SharedObsSensorSourceBankV2",
     "build_default_shared_obs_information_availability",
     "build_shared_obs_sensor_source_bank",
+    "build_shared_obs_team_source_bank_from_base_rows",
     "compose_shared_obs_unit_features",
     "execute_shared_obs_team_policy",
     "mask_source_bank_for_recipient",

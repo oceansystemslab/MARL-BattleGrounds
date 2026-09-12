@@ -36,6 +36,8 @@ from tests.evaluation_fixtures import (
     CapturedEvaluationTrajectory,
     captured_evaluation_trajectory,
     evaluation_env_config,
+    historical_initialize_scenario_state,
+    historical_reset,
     valid_shared_availability,
 )
 from tests.export_visual_debugger_replay_artifacts import build_corpse_overlay_bundle
@@ -49,6 +51,7 @@ from marl_battlegrounds.core.env import (
 from marl_battlegrounds.core.geometry import has_clear_line_of_sight
 from marl_battlegrounds.evaluation.capture import (
     capture_initial_evaluation_frame_v1,
+    capture_initial_evaluation_frame_v2,
 )
 from marl_battlegrounds.evaluation.models import (
     EvaluationFrameV1,
@@ -79,7 +82,7 @@ def _frame_with_agents(
     if trajectory.frames[0].frame_index != 0:
         raise ValueError("corpse-overlay fixture requires an initial evaluation frame.")
     config = evaluation_env_config()
-    state, observation, action_mask, _ = reset(config, jax.random.PRNGKey(0))
+    state, observation, action_mask, _ = historical_reset(config, jax.random.PRNGKey(0))
     availability = (
         valid_shared_availability(trajectory.context)
         if trajectory.context.execution_information_mode == "shared_obs"
@@ -107,9 +110,11 @@ def _frame_with_agents(
         alive_mask=updated_alive,
         current_health=updated_health,
     )
-    coherent_state, coherent_observation, coherent_mask, _ = initialize_scenario_state(
-        authored_state,
-        config,
+    coherent_state, coherent_observation, coherent_mask, _ = (
+        historical_initialize_scenario_state(
+            authored_state,
+            config,
+        )
     )
     return capture_initial_evaluation_frame_v1(
         trajectory.context,
@@ -253,7 +258,7 @@ def test_no_shared_corpse_projection_respects_static_line_of_sight() -> None:
         authored_state,
         session.config,
     )
-    frame = capture_initial_evaluation_frame_v1(
+    frame = capture_initial_evaluation_frame_v2(
         session.evaluation_context,
         coherent_state,
         coherent_observation,

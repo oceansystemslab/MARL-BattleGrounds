@@ -110,7 +110,7 @@ _FEATURE_NAMES_IN_ORDER: tuple[str, ...] = (
     "AGENT_FEATURE_X",
     "AGENT_FEATURE_Y",
     "AGENT_FEATURE_RADIUS",
-    "AGENT_FEATURE_TEAM_ID",
+    "AGENT_FEATURE_IS_ENEMY",
     "AGENT_FEATURE_ACTIVE",
     "AGENT_FEATURE_ALIVE",
     "AGENT_FEATURE_CLASS_ID",
@@ -850,7 +850,9 @@ def test_visible_candidates_match_shared_rows_and_hidden_rows_are_fully_zero() -
     assert bool(
         jnp.array_equal(
             observation.enemy_unit_features[0, 0],
-            observation.self_features[MAX_AGENTS_PER_TEAM],
+            observation.self_features[MAX_AGENTS_PER_TEAM]
+            .at[core_types.AGENT_FEATURE_IS_ENEMY]
+            .set(1.0),
         )
     )
     assert bool(jnp.all(observation.enemy_unit_features[0, 1] == 0.0))

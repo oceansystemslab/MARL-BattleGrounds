@@ -57,7 +57,7 @@ The public options are:
 
 | Option | Meaning |
 | --- | --- |
-| `--record-replay PATH` | Record one manual episode to a self-contained V2 replay, then offer read-only review. |
+| `--record-replay PATH` | Record one manual episode to a self-contained V3 replay, then offer read-only review. |
 | `--seed N` | Set the deterministic reset/step seed; default `0`. |
 | `--controlled-slot N` | Select an initially active global slot; otherwise use the arena default. |
 | `--static` | Render one stateless Matplotlib reset snapshot without a browser server. |
@@ -403,7 +403,7 @@ Recording retains one authoritative trajectory in memory. Each
 accepted submit still performs exactly one transition and one canonical
 capture; there is no per-transition replay-file write.
 
-- **Finish & Review** closes an open prefix, publishes its self-contained V2
+- **Finish & Review** closes an open prefix, publishes its self-contained V3
   replay without a metrics sidecar, and changes the same loopback
   page to settled read-only review at frame zero.
 - Task termination or the declared horizon closes and saves automatically.

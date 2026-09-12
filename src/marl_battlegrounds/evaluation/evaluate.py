@@ -37,7 +37,7 @@ from marl_battlegrounds.evaluation.metric_catalog import (
     METRIC_SCHEMA_VERSION,
     PRIORITY_METRIC_NAMES,
 )
-from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV2
+from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV3
 from marl_battlegrounds.evaluation.policy_execution import (
     Policy,
     PolicyApply,
@@ -56,7 +56,7 @@ from marl_battlegrounds.evaluation.recording_context import (
 from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 from marl_battlegrounds.evaluation.replay_capture import ReplayPackets
 from marl_battlegrounds.evaluation.replay_recording import ReplayCollector
-from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactV2
+from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
 from marl_battlegrounds.evaluation.run_writer import (
     IDENTITY_COLUMNS,
     RunWriter,
@@ -119,7 +119,7 @@ class EvaluationResult:
     metadata: dict[str, object]
     completed_episode_ids: tuple[int, ...] = ()
     paths: dict[str, Path] | None = None
-    replays: tuple[ReplayArtifactV2, ...] = ()
+    replays: tuple[ReplayArtifactV3, ...] = ()
 
 
 class _Completed(NamedTuple):
@@ -792,13 +792,13 @@ def evaluate_episodes(
         full = _MetricTable.create(
             FULL_METRIC_NAMES, full_ids if writer is None else ()
         )
-        replays: list[ReplayArtifactV2] = []
+        replays: list[ReplayArtifactV3] = []
         collector = None
         if env.replay_episodes and writer is None:
 
             def context(
                 packet: ReplayPackets,
-            ) -> tuple[EvaluationEpisodeContextV2, RuntimeProvenanceV1]:
+            ) -> tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]:
                 return build_recording_context(
                     packet.config,
                     run_id=run_id,

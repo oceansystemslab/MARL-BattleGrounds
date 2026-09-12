@@ -27,7 +27,8 @@ class ReplayPackets(NamedTuple):
 
     Initial fields are present only on the first valid transition. Later packets
     carry the successor and authoritative facts; the writer joins them to the
-    preceding frame. No episode-length buffer lives inside the environment.
+    preceding frame. Source availability belongs to the acting frame.
+    No episode-length buffer lives inside the environment.
     """
 
     valid: Array
@@ -44,6 +45,7 @@ class ReplayPackets(NamedTuple):
     reward: Reward
     done: DoneFlags
     info: Info
+    source_availability: Array
 
 
 def capture_packets(
@@ -96,4 +98,5 @@ def capture_packets(
         jax.tree.map(admitted, reward),
         jax.tree.map(admitted, after.done),
         jax.tree.map(admitted, info),
+        admitted(before.source_availability),
     )

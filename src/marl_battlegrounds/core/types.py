@@ -102,7 +102,7 @@ CONTEXT_FEATURE_CTF_CAPTURE_THRESHOLD = 18
 AGENT_FEATURE_X = 0
 AGENT_FEATURE_Y = 1
 AGENT_FEATURE_RADIUS = 2
-AGENT_FEATURE_TEAM_ID = 3
+AGENT_FEATURE_IS_ENEMY = 3
 AGENT_FEATURE_ACTIVE = 4
 AGENT_FEATURE_ALIVE = 5
 AGENT_FEATURE_CLASS_ID = 6
@@ -360,7 +360,8 @@ class Observation(NamedTuple):
 
     Unit features and visibility use stable observer-relative rows. Previous
     actions are a separate categorical family and do not extend the shared
-    agent-feature columns.
+    agent-feature columns. ``self_ally_index`` locates self in the five own-team
+    rows; it never identifies a simulator team or global slot.
     """
 
     self_features: Array
@@ -373,6 +374,7 @@ class Observation(NamedTuple):
     enemy_visibility_mask: Array
     previous_timestep_actions: PreviousTimestepActionObservation
     spawn_lifecycle: SpawnLifecycleObservation
+    self_ally_index: Array  # int32 (MAX_AGENT_SLOTS,), scalar for one actor.
 
 
 class Reward(NamedTuple):

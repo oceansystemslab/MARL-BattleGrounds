@@ -37,7 +37,10 @@ from marl_battlegrounds.evaluation.full_metrics import (
 )
 from marl_battlegrounds.evaluation.metric_catalog import FULL_METRIC_NAMES
 from marl_battlegrounds.evaluation.replay_capture import ReplayPackets, capture_packets
-from marl_battlegrounds.policies.input import Observations, build_observations
+from marl_battlegrounds.policies.input import Observations
+from marl_battlegrounds.policies.shared_obs import (
+    build_default_shared_obs_information_availability,
+)
 
 type MetricMode = Literal["none", "priority", "full"]
 type CoreStepResult = tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]
@@ -63,6 +66,7 @@ class EnvironmentState(NamedTuple):
     collect_replay: Array
     priority: PriorityTotals | None
     full: FullTotals | None
+    source_availability: Array  # Boolean recipient/source matrix; 10 by 10 per game.
 
 
 class EpisodeInfo(NamedTuple):
@@ -198,6 +202,9 @@ class Environment:
             initialize_full(config, core_state)
             if self.metrics == "full" or self.full_metrics_episodes
             else None,
+            build_default_shared_obs_information_availability(
+                config.agent_profile.active_mask, config.agent_profile.team_ids
+            ),
         )
 
     def reset(
@@ -274,12 +281,17 @@ class Environment:
 
             fresh = jax.tree.map(replace, fresh, state)
         _check_episode_ids(fresh.episode_id)
-        return self._observations(fresh), fresh
+        return self.get_observations(fresh), fresh
 
-    def _observations(self, state: EnvironmentState) -> Observations:
-        if self.num_envs is None:
-            return build_observations(state.observation, state.config)
-        return jax.vmap(build_observations)(state.observation, state.config)
+    def get_observations(self, state: EnvironmentState) -> Observations:
+        """Read the same compact inputs that automatic replay capture records.
+
+        For custom source subsets, replace ``state.source_availability`` before
+        calling this getter and choosing actions. Use a Boolean matrix shaped
+        ``(..., 10, 10)``. Only active same-team sources other than self may be true.
+        Step preserves that choice; reset restores the default in reset lanes.
+        """
+        return Observations(state.observation, state.source_availability)
 
     def _step_one(
         self, key: Array, state: EnvironmentState, actions: Action
@@ -328,6 +340,7 @@ class Environment:
             state.collect_replay,
             totals,
             state.full,
+            state.source_availability,
         )
         result = EpisodeInfo(
             state.episode_id,
@@ -457,7 +470,7 @@ class Environment:
                     capacity=min(self.num_envs or 1, len(self.replay_episodes)),
                 )
             )
-        return self._observations(successor), successor, reward, successor.done, info
+        return self.get_observations(successor), successor, reward, successor.done, info
 
 
 def make(

@@ -8,6 +8,13 @@ record to a user-selected destination.
 
 Manual live work belongs to the [Combat Debugger](combat_debugger.md).
 
+New recordings use replay V3. The Viewer also opens historical V1 and V2 files
+with their original meanings. Current policy rows use ally/enemy flags and a
+local self index. The Viewer keeps those values intact and reads Team A/Team B
+labels from the recorded roster. Changing the displayed actor or seeking to
+another frame does not change the saved observations or policy assignments.
+Current NoSharedObs actor exports use POV V2; historical POV V1 remains readable.
+
 ## Select exactly one input
 
 Every invocation must choose exactly one artifact, sample, scripted scenario,
@@ -80,7 +87,7 @@ unavailable with local artifacts or checked samples.
 
 Scenario materialization runs in a temporary child process with
 `JAX_PLATFORMS=cpu`. The child executes the registered commands and publishes one
-V2 replay containing the captured frames, facts and episode provenance. No metric
+V3 replay containing the captured frames, facts and episode provenance. No metric
 sidecar or full metric computation is required. The parent opens those bytes
 through the public loader before starting the Replay Viewer.
 The read-only viewer process does not import or run simulator control.
@@ -126,6 +133,29 @@ JAX_PLATFORMS=cpu uv run python \
   scripts/dev/generate_visual_debugger_sample_replays.py \
   --check --output-directory examples/replays/v1
 ```
+
+New generation writes manifest V2 and three self-contained Replay V3 files.
+It does not write metric sidecars or run metric reducers. The Viewer computes
+metrics later from the recorded facts. The checked V1 pairs stay unchanged and
+keep their original strict verification. Both versions use the same bounded
+file reads, held directory snapshot, hashes, source checks and event/fact
+validation. Current source provenance adds the explicit CodeRevision V2 marker;
+all recorded source facts must still match.
+
+```bash
+JAX_PLATFORMS=cpu uv run python \
+  scripts/dev/generate_visual_debugger_sample_replays.py --generate
+JAX_PLATFORMS=cpu uv run python \
+  scripts/dev/generate_visual_debugger_sample_replays.py \
+  --check --output-directory artifacts/visual-debugger-samples/v3
+```
+
+Generation defaults to `artifacts/visual-debugger-samples/v3`. Verification and
+sample launch defaults still use `examples/replays/v1`. Current generation
+writes four files instead of seven; each replay adds ten local self indices per
+frame and keeps the existing 58-column unit rows. Its semantic verification is
+one pass over the recorded transitions, as for the historical samples. This
+storage change and the skipped metric work do not establish a runtime speedup.
 
 Generation is maintainer-only and refuses overwrite. Generate into one new,
 absent directory only after scenario source, tests, and public documentation
@@ -469,7 +499,7 @@ scene-native Matplotlib adapter.
 Local artifacts, checked samples, and materialized replays pass whole-artifact
 validation before the server binds or a browser is opened. Historical V1
 companions are checked when present or required by the checked-sample contract;
-current V2 replays are self-contained.
+current V3 replays are self-contained.
 Invalid schemas, canonical bytes, hashes, event/frame joins, frame indices,
 POV recipients, symlinks, and unsupported paths fail closed.
 
@@ -497,7 +527,7 @@ Closing the tab does not stop Python; use **Exit Replay Viewer** or `Ctrl-C`.
   actions wait for a settled frame.
 - **Metrics unavailable:** inspect the analysis panel's error. A missing V1
   metrics sidecar does not prevent analysis from recorded facts or the Episode
-  Details download; current V2 recordings do not need a sidecar.
+  Details download; current V3 recordings do not need a sidecar.
 - **PNG export disabled:** pause playback and wait for the exact-frame summary
   to settle in a visible connected tab.
 - **Static Matplotlib import failed:** run `uv sync --extra viz`.

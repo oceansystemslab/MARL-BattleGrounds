@@ -67,6 +67,9 @@ print(result.paths)
 Variables stay frozen during evaluation; recurrent memory resets per actor and
 episode. The authorized SharedObs input remains structured. Custom encoders and
 training algorithms remain the researcher's choice.
+Actor inputs use self/ally/enemy roles and a local self row, with no simulator
+team ID or global slot. See the [input contract](docs/evaluation/workflows.md#policy-inputs)
+for shapes and the recording-version change.
 
 Metrics use `"none"`, `"priority"` (default), or `"full"`. Select extra full episodes
 with `full_metrics_episodes=range(1000, 50_001, 1000)` and replays independently

@@ -37,11 +37,11 @@ from tests.test_visual_debugger_service import (
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
     AgentDiedEventV1,
-    AssignedPolicySlotV1,
+    AssignedPolicySlotV2,
 )
 from marl_battlegrounds.evaluation.pov import (
-    ActorPovAdjacentTransitionSliceV1,
-    ActorPovCurrentSliceV1,
+    ActorPovAdjacentTransitionSlice,
+    ActorPovCurrentSlice,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import build_visual_event_batch_v2
 
@@ -199,7 +199,7 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
                 context.roster, context.policy_assignments, strict=True
             )
             if roster.configured_team_id == team["team_id"]
-            and isinstance(assignment, AssignedPolicySlotV1)
+            and isinstance(assignment, AssignedPolicySlotV2)
         )
         assert team["display_name"] == "Scripted scenario"
         assert team["policy_ids"] == list(
@@ -290,8 +290,8 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
 def _recipient_pair(
     service: DebuggerService,
 ) -> tuple[
-    ActorPovCurrentSliceV1,
-    ActorPovAdjacentTransitionSliceV1,
+    ActorPovCurrentSlice,
+    ActorPovAdjacentTransitionSlice,
     ActorPovLiveDebuggerFrameV2,
 ]:
     session = service.session

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -19,6 +20,7 @@ from scripts.dev.generate_visual_debugger_sample_replays import (
     generate_sample_replays,
     verify_sample_replays,
 )
+from scripts.dev.visual_debugger.model import DebuggerScenario
 from scripts.dev.visual_debugger.sample_replays import (
     SAMPLE_REPLAY_DIRECTORY,
     SAMPLE_REPLAY_MANIFEST_PATH,
@@ -33,13 +35,8 @@ from scripts.dev.visual_debugger.sample_replays import (
 
 import marl_battlegrounds.evaluation.replay_io as replay_io_module
 from marl_battlegrounds.evaluation.analysis import analyze_replay
-from marl_battlegrounds.evaluation.metrics import build_evaluation_observer_v1
-from marl_battlegrounds.evaluation.models import CodeRevisionV1
-from marl_battlegrounds.evaluation.reducers import (
-    TDM_BASIC_METRIC_IDS,
-    build_tdm_metric_reducers,
-)
-from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
+from marl_battlegrounds.evaluation.models import CodeRevisionV1, CodeRevisionV2
+from marl_battlegrounds.evaluation.replay import ReplayArtifactV1, RuntimeProvenanceV1
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _GENERATOR_SCRIPT = (
@@ -83,14 +80,17 @@ from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 from scripts.dev.visual_debugger.sample_replays import (
     SAMPLE_REPLAYS,
     load_verified_sample_replay,
-    read_sample_replay_manifest_v1,
+    read_sample_replay_manifest,
 )
 
 historical_directory = Path(sys.argv[1])
 output_directory = Path(sys.argv[2])
-manifest, _rows = read_sample_replay_manifest_v1(historical_directory)
+manifest, _rows = read_sample_replay_manifest(historical_directory)
 provenance = manifest["demo_provenance"]
-code_payload = provenance["code_revision"]
+code_payload = dict(provenance["code_revision"])
+if manifest["schema_version"] == 2:
+    if code_payload.pop("schema_version") != 2:
+        raise SystemExit("current source schema marker is invalid")
 runtime_payload = provenance["runtime_provenance"]
 code_revision = CodeRevisionV1.model_validate_json(
     json.dumps(code_payload, allow_nan=False, separators=(",", ":"), sort_keys=True)
@@ -232,6 +232,12 @@ def generated_sample_directories(
     return first, second
 
 
+@pytest.fixture(scope="module")
+def historical_sample_directories() -> tuple[Path, Path]:
+    """Keep the archived V1 sidecar and integrity contract under its existing tests."""
+    return SAMPLE_REPLAY_DIRECTORY, SAMPLE_REPLAY_DIRECTORY
+
+
 def _file_bytes_by_name(directory: Path) -> dict[str, bytes]:
     return {
         path.name: path.read_bytes()
@@ -295,7 +301,11 @@ def _stub_truthful_provenance_capture(
         package_version: str | None = None,
     ) -> CodeRevisionV1:
         assert package_version == "0.0.0"
-        return loaded.replay.header.context.code_revision
+        return CodeRevisionV1.model_validate(
+            loaded.replay.header.context.code_revision.model_dump(
+                exclude={"schema_version"}
+            )
+        )
 
     def fake_runtime(
         _revision: CodeRevisionV1,
@@ -341,17 +351,24 @@ def test_real_generator_is_byte_stable_and_publicly_reloadable(
     provenance = cast(dict[str, object], manifest["demo_provenance"])
     assert _file_bytes_by_name(first) == _file_bytes_by_name(second)
     assert verify_sample_replays(first) == verify_sample_replays(second)
-    expected_revision = CodeRevisionV1.model_validate(provenance["code_revision"])
+    expected_revision = CodeRevisionV2.model_validate(provenance["code_revision"])
     expected_runtime = RuntimeProvenanceV1.model_validate_json(
         json.dumps(provenance["runtime_provenance"])
     )
     for sample in SAMPLE_REPLAYS:
         loaded = load_verified_sample_replay(sample.name, directory=first)
-        assert loaded.status == "complete"
-        assert loaded.metric_report_artifact is not None
+        assert loaded.status == "not_recorded"
+        assert loaded.metric_report_artifact is None
+        assert loaded.replay.schema_version == 3
+        assert loaded.replay.completion.completion_state == "complete"
         assert len(loaded.replay.transitions) > 0
         assert len(loaded.replay.frames) == len(loaded.replay.transitions) + 1
-        assert loaded.replay.header.context.code_revision == expected_revision
+        assert (
+            CodeRevisionV2.model_validate(
+                loaded.replay.header.context.code_revision.model_dump(mode="python")
+            )
+            == expected_revision
+        )
         assert loaded.replay.header.runtime_provenance == expected_runtime
         assert expected_runtime.backend == "cpu"
         assert not expected_runtime.policy_execution_included
@@ -361,7 +378,7 @@ def test_fresh_samples_use_exact_researcher_geometry_and_event_union(
     generated_sample_directories: tuple[Path, Path],
 ) -> None:
     first, _second = generated_sample_directories
-    assert len(_file_bytes_by_name(first)) == 7
+    assert len(_file_bytes_by_name(first)) == 4
 
     observed_event_kinds: set[str] = set()
     for sample in SAMPLE_REPLAYS:
@@ -383,76 +400,115 @@ def test_fresh_samples_use_exact_researcher_geometry_and_event_union(
 def test_checked_samples_match_fresh_cpu_generation_scientific_truth(
     tmp_path: Path,
 ) -> None:
-    """Preserve historical facts while new recordings add critical metrics."""
+    """Preserve physical facts; change only the declared input and replay versions."""
     expected = _file_bytes_by_name(SAMPLE_REPLAY_DIRECTORY)
     assert len(expected) == 7
     historical_manifest = verify_sample_replays(SAMPLE_REPLAY_DIRECTORY)
-
     fresh = tmp_path / "fresh"
     _generate_samples_in_cpu_child(
         fresh,
         historical_provenance_directory=SAMPLE_REPLAY_DIRECTORY,
     )
-
     fresh_manifest = verify_sample_replays(fresh)
+    assert fresh_manifest["schema_version"] == 2
+    assert fresh_manifest["generator_id"] == "visual-debugger-sample-replays-v2"
+    assert len(_file_bytes_by_name(fresh)) == 4
     for sample in SAMPLE_REPLAYS:
         historical = load_verified_sample_replay(sample.name)
         current = load_verified_sample_replay(sample.name, directory=fresh)
-        old_artifact = historical.metric_report_artifact
-        new_artifact = current.metric_report_artifact
-        assert old_artifact is not None and new_artifact is not None
-        assert old_artifact.report.statistics == ()
+        assert type(historical.replay) is ReplayArtifactV1
+        assert historical.metric_report_artifact is not None
+        assert historical.metric_report_artifact.report.statistics == ()
+        assert current.metric_report_artifact is None
+        assert current.replay.schema_version == 3
+        assert current.replay.transitions == historical.replay.transitions
+        assert current.replay.completion == historical.replay.completion
 
-        # The legacy generator still qualifies its exact V1 report contract.
-        # Current scalar analysis has a separate schema and source identity.
-        analysis = analyze_replay(historical)
+        old_context = historical.replay.header.context.model_dump(mode="python")
+        expected_context = historical.replay.header.context.model_dump(mode="python")
+        expected_context["schema_version"] = 3
+        expected_context["scenario_name"] = sample.source_scenario
+        expected_context["actor_projection"]["version"] = 3
+        for binding in expected_context["schema_versions"]:
+            if binding["schema_id"].endswith("episode_context"):
+                binding["schema_version"] = 3
+            elif binding["schema_id"].endswith(".frame"):
+                binding["schema_version"] = 2
+        for assignment in expected_context["policy_assignments"]:
+            if assignment["assignment_status"] == "assigned":
+                assignment["callable_name"] = None
+                assignment["lifecycle"] = "frozen"
+                assignment["preprocessing"]["version"] = 3
         assert (
-            analysis.source_replay_digest == historical.replay.canonical_digest_sha256
+            current.replay.header.context.model_dump(mode="python") == expected_context
         )
-        assert analysis.original_metric_status == "empty"
-        legacy = build_evaluation_observer_v1(
-            historical.replay.header.context, reducers=build_tdm_metric_reducers()
-        )
-        legacy.start(historical.replay.frames[0])
-        for transition, frame in zip(
-            historical.replay.transitions, historical.replay.frames[1:], strict=True
+        assert old_context["code_revision"] == expected_context["code_revision"]
+        for old_frame, new_frame in zip(
+            historical.replay.frames, current.replay.frames, strict=True
         ):
-            legacy.append(transition, frame)
-        assert new_artifact.report == legacy.finalize(completion_state="complete")
-        assert {row.metric_id for row in new_artifact.report.statistics} == set(
-            TDM_BASIC_METRIC_IDS
+            expected_frame = old_frame.model_dump(mode="python")
+            expected_frame["schema_version"] = 2
+            observation = expected_frame["base_observation"]
+            observation["self_ally_index"] = tuple(
+                row.team_local_slot if row.configured_active else 0
+                for row in historical.replay.header.context.roster
+            )
+            for field in ("self_features", "ally_unit_features", "enemy_unit_features"):
+                material = observation[field]
+                if field == "self_features":
+                    observation[field] = tuple(
+                        (*row[:3], 0.0, *row[4:]) for row in material
+                    )
+                else:
+                    visibility = observation[
+                        "enemy_visibility_mask"
+                        if field == "enemy_unit_features"
+                        else "ally_visibility_mask"
+                    ]
+                    observation[field] = tuple(
+                        tuple(
+                            (
+                                *row[:3],
+                                float(field == "enemy_unit_features" and visible),
+                                *row[4:],
+                            )
+                            for row, visible in zip(rows, mask, strict=True)
+                        )
+                        for rows, mask in zip(material, visibility, strict=True)
+                    )
+            assert new_frame.model_dump(mode="python") == expected_frame
+
+        old_analysis = analyze_replay(historical)
+        new_analysis = analyze_replay(current)
+        assert old_analysis.original_metric_status == "empty"
+        assert new_analysis.original_metric_status == "not_recorded"
+        assert (
+            old_analysis.source_replay_digest
+            == historical.replay.canonical_digest_sha256
         )
         assert (
-            new_artifact.report.model_copy(update={"statistics": ()})
-            == old_artifact.report
+            new_analysis.source_replay_digest == current.replay.canonical_digest_sha256
         )
-        assert new_artifact.model_dump(
-            exclude={"canonical_digest_sha256", "report"}
-        ) == old_artifact.model_dump(exclude={"canonical_digest_sha256", "report"})
-
-        # Public verification above proves the new hashes and byte lengths.
-        # Every other replay field, including all physical facts, must be exact.
-        assert current.replay.metric_report_reference.model_dump(
-            exclude={"canonical_digest_sha256", "canonical_byte_length"}
-        ) == historical.replay.metric_report_reference.model_dump(
-            exclude={"canonical_digest_sha256", "canonical_byte_length"}
-        )
-        assert current.replay.model_dump(
-            exclude={"canonical_digest_sha256", "metric_report_reference"}
-        ) == historical.replay.model_dump(
-            exclude={"canonical_digest_sha256", "metric_report_reference"}
+        assert (
+            old_analysis.summary(old_analysis.frame_count - 1)["statistics"]
+            == new_analysis.summary(new_analysis.frame_count - 1)["statistics"]
         )
 
+    old_provenance = cast(dict[str, object], historical_manifest["demo_provenance"])
+    new_provenance = cast(dict[str, object], fresh_manifest["demo_provenance"])
+    expected_provenance = dict(old_provenance)
+    expected_provenance["code_revision"] = CodeRevisionV2.model_validate(
+        old_provenance["code_revision"]
+    ).model_dump(mode="json")
+    assert new_provenance == expected_provenance
     old_rows = cast(list[dict[str, object]], historical_manifest["samples"])
     new_rows = cast(list[dict[str, object]], fresh_manifest["samples"])
     for old_row, new_row in zip(old_rows, new_rows, strict=True):
-        for member in ("replay", "metric_report"):
-            old_member = cast(dict[str, object], old_row[member])
-            new_member = cast(dict[str, object], new_row[member])
-            new_member["sha256"] = old_member["sha256"]
-            if member == "metric_report":
-                new_member["byte_length"] = old_member["byte_length"]
-    assert fresh_manifest == historical_manifest
+        assert {
+            key: value
+            for key, value in old_row.items()
+            if key not in ("replay", "metric_report")
+        } == {key: value for key, value in new_row.items() if key != "replay"}
     assert _file_bytes_by_name(SAMPLE_REPLAY_DIRECTORY) == expected
 
 
@@ -522,7 +578,11 @@ def test_generator_captures_truthful_provenance_before_creating_output_parent(
         assert package_version == "0.0.0"
         assert not destination.parent.exists()
         events.append("source")
-        return loaded.replay.header.context.code_revision
+        return CodeRevisionV1.model_validate(
+            loaded.replay.header.context.code_revision.model_dump(
+                exclude={"schema_version"}
+            )
+        )
 
     def fake_runtime(
         revision: CodeRevisionV1,
@@ -665,10 +725,10 @@ def test_generation_failure_cleans_owned_staging_without_partial_publication(
 
 
 def test_load_boundary_rejects_tampered_member_before_public_load(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / "tampered"
     shutil.copytree(first, copied)
     sample = SAMPLE_REPLAYS[0]
@@ -681,10 +741,10 @@ def test_load_boundary_rejects_tampered_member_before_public_load(
 
 
 def test_load_boundary_requires_the_registered_metric_sidecar(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / "missing-sidecar"
     shutil.copytree(first, copied)
     sample = SAMPLE_REPLAYS[0]
@@ -697,12 +757,12 @@ def test_load_boundary_requires_the_registered_metric_sidecar(
 @pytest.mark.parametrize("boundary", ("light", "heavy"))
 @pytest.mark.parametrize("member", ("manifest", "replay", "metric"))
 def test_verifiers_reject_stationary_symlink_members_before_read(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
     boundary: str,
     member: str,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / f"{boundary}-symlink-{member}"
     shutil.copytree(first, copied)
     attacked = _member_path(copied, member)
@@ -724,13 +784,13 @@ def test_verifiers_reject_stationary_symlink_members_before_read(
     ),
 )
 def test_verifiers_reject_oversized_members_before_read(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
     boundary: str,
     member: str,
     size_limit: int,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / f"{boundary}-oversized-{member}"
     shutil.copytree(first, copied)
     attacked = _member_path(copied, member)
@@ -744,12 +804,12 @@ def test_verifiers_reject_oversized_members_before_read(
 @pytest.mark.parametrize("boundary", ("light", "heavy"))
 @pytest.mark.parametrize("member", ("manifest", "replay", "metric"))
 def test_verifiers_reject_fifo_members_without_blocking(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
     boundary: str,
     member: str,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / f"{boundary}-fifo-{member}"
     shutil.copytree(first, copied)
     attacked = _member_path(copied, member)
@@ -891,11 +951,11 @@ def test_bounded_reader_fails_closed_without_no_follow_support(
 
 
 def test_sample_load_stays_bound_to_opened_bytes_during_path_replacement(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / "replacement-race"
     shutil.copytree(first, copied)
     sample = SAMPLE_REPLAYS[0]
@@ -931,11 +991,11 @@ def test_sample_load_stays_bound_to_opened_bytes_during_path_replacement(
 
 
 def test_sample_load_rejects_member_replacement_after_verified_read(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / "post-read-replacement-race"
     shutil.copytree(first, copied)
     sample = SAMPLE_REPLAYS[0]
@@ -969,11 +1029,11 @@ def test_sample_load_rejects_member_replacement_after_verified_read(
 
 
 def test_sample_load_stays_bound_to_held_directory_during_root_replacement(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / "directory-race"
     held = tmp_path / "directory-race-held"
     attacker = tmp_path / "directory-race-attacker"
@@ -1007,11 +1067,11 @@ def test_sample_load_stays_bound_to_held_directory_during_root_replacement(
 
 
 def test_heavy_verifier_uses_one_manifest_snapshot_for_the_complete_set(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / "manifest-snapshot-race"
     shutil.copytree(first, copied)
     sample = SAMPLE_REPLAYS[0]
@@ -1059,11 +1119,11 @@ def test_heavy_verifier_uses_one_manifest_snapshot_for_the_complete_set(
 
 
 def test_heavy_verifier_rechecks_earlier_members_after_later_sample_load(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / "complete-set-member-race"
     shutil.copytree(first, copied)
     earlier = SAMPLE_REPLAYS[0].replay_path(copied)
@@ -1099,10 +1159,10 @@ def test_heavy_verifier_rechecks_earlier_members_after_later_sample_load(
 
 
 def test_load_boundary_wraps_public_replay_validation_errors(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / "invalid-public-replay"
     shutil.copytree(first, copied)
     sample = SAMPLE_REPLAYS[0]
@@ -1122,10 +1182,10 @@ def test_load_boundary_wraps_public_replay_validation_errors(
 
 
 def test_load_boundary_wraps_public_loader_io_errors(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
 
     def fail_public_load(*_args: object, **_kwargs: object) -> object:
         raise OSError("injected public-loader I/O failure")
@@ -1140,10 +1200,10 @@ def test_load_boundary_wraps_public_loader_io_errors(
 
 
 def test_load_boundary_rejects_false_official_demo_claim(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / "false-official-claim"
     shutil.copytree(first, copied)
     manifest = _manifest_object(copied)
@@ -1170,11 +1230,11 @@ def test_load_boundary_rejects_false_official_demo_claim(
     ),
 )
 def test_manifest_rejects_non_exact_integer_fields(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
     numeric_field: str,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / f"non-exact-{numeric_field}"
     shutil.copytree(first, copied)
     manifest = _manifest_object(copied)
@@ -1201,11 +1261,11 @@ def test_manifest_rejects_non_exact_integer_fields(
 
 @pytest.mark.parametrize("constant", ("NaN", "Infinity", "-Infinity"))
 def test_manifest_rejects_nonfinite_json_constant(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
     constant: str,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / f"nonfinite-manifest-{constant}"
     shutil.copytree(first, copied)
     manifest_path = copied / SAMPLE_REPLAY_MANIFEST_PATH.name
@@ -1233,10 +1293,10 @@ def test_manifest_rejects_duplicate_json_members(
 
 
 def test_manifest_rejects_noncanonical_bytes(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / "noncanonical-manifest"
     shutil.copytree(first, copied)
     manifest_path = copied / SAMPLE_REPLAY_MANIFEST_PATH.name
@@ -1255,12 +1315,12 @@ def test_manifest_rejects_noncanonical_bytes(
     ),
 )
 def test_manifest_rejects_nested_provenance_numeric_aliases(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
     container_name: str,
     field_name: str,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / f"provenance-alias-{container_name}-{field_name}"
     shutil.copytree(first, copied)
     manifest = _manifest_object(copied)
@@ -1269,15 +1329,15 @@ def test_manifest_rejects_nested_provenance_numeric_aliases(
     container[field_name] = 1.0
     _write_manifest(copied, manifest)
 
-    with pytest.raises(SampleReplayVerificationError, match="strict V1 schemas"):
+    with pytest.raises(SampleReplayVerificationError, match="strict versioned schemas"):
         load_verified_sample_replay(SAMPLE_REPLAYS[0].name, directory=copied)
 
 
 def test_heavy_verifier_rejects_stale_manifest_scientific_facts(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     copied = tmp_path / "stale-manifest"
     shutil.copytree(first, copied)
     manifest = _manifest_object(copied)
@@ -1295,13 +1355,258 @@ def test_heavy_verifier_rejects_stale_manifest_scientific_facts(
 
 @pytest.mark.parametrize("boundary", ("light", "heavy"))
 def test_verifiers_reject_symlink_directory_root(
-    generated_sample_directories: tuple[Path, Path],
+    historical_sample_directories: tuple[Path, Path],
     tmp_path: Path,
     boundary: str,
 ) -> None:
-    first, _second = generated_sample_directories
+    first, _second = historical_sample_directories
     linked = tmp_path / "linked-set"
     linked.symlink_to(first, target_is_directory=True)
 
     with pytest.raises(SampleReplayVerificationError, match="no-follow directory"):
         _verify_with_boundary(boundary, linked)
+
+
+@pytest.mark.parametrize("boundary", ("light", "heavy"))
+@pytest.mark.parametrize("member", ("manifest", "replay"))
+@pytest.mark.parametrize("hazard", ("symlink", "oversized", "fifo"))
+def test_current_sample_members_keep_bounded_no_follow_checks(
+    generated_sample_directories: tuple[Path, Path],
+    tmp_path: Path,
+    boundary: str,
+    member: str,
+    hazard: str,
+) -> None:
+    """Run the same file-safety assertions for each current-format member."""
+    if hazard == "symlink":
+        test_verifiers_reject_stationary_symlink_members_before_read(
+            generated_sample_directories, tmp_path, boundary, member
+        )
+    elif hazard == "oversized":
+        limit = (
+            SAMPLE_REPLAY_MAX_MANIFEST_SIZE_BYTES
+            if member == "manifest"
+            else SAMPLE_REPLAY_MAX_MEMBER_SIZE_BYTES
+        )
+        test_verifiers_reject_oversized_members_before_read(
+            generated_sample_directories, tmp_path, boundary, member, limit
+        )
+    else:
+        test_verifiers_reject_fifo_members_without_blocking(
+            generated_sample_directories, tmp_path, boundary, member
+        )
+
+
+@pytest.mark.parametrize(
+    "exercise",
+    (
+        test_sample_load_stays_bound_to_opened_bytes_during_path_replacement,
+        test_sample_load_stays_bound_to_held_directory_during_root_replacement,
+        test_heavy_verifier_uses_one_manifest_snapshot_for_the_complete_set,
+        test_heavy_verifier_rechecks_earlier_members_after_later_sample_load,
+    ),
+    ids=lambda exercise: exercise.__name__,
+)
+def test_current_samples_keep_snapshot_race_checks(
+    generated_sample_directories: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exercise: Callable[[tuple[Path, Path], Path, pytest.MonkeyPatch], None],
+) -> None:
+    exercise(generated_sample_directories, tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize(
+    "exercise",
+    (
+        test_load_boundary_rejects_tampered_member_before_public_load,
+        test_load_boundary_wraps_public_replay_validation_errors,
+        test_load_boundary_rejects_false_official_demo_claim,
+    ),
+    ids=lambda exercise: exercise.__name__,
+)
+def test_current_samples_keep_integrity_and_claim_checks(
+    generated_sample_directories: tuple[Path, Path],
+    tmp_path: Path,
+    exercise: Callable[[tuple[Path, Path], Path], None],
+) -> None:
+    exercise(generated_sample_directories, tmp_path)
+
+
+def test_current_sample_rejects_rehashed_event_fact_disagreement(
+    generated_sample_directories: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    from marl_battlegrounds.evaluation.models import (
+        canonical_digest_sha256,
+        canonical_json_bytes,
+    )
+    from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+
+    first, _second = generated_sample_directories
+    copied = tmp_path / "event-disagreement"
+    shutil.copytree(first, copied)
+    sample = SAMPLE_REPLAYS[0]
+    loaded = load_verified_sample_replay(sample.name, directory=copied)
+    payload = loaded.replay.model_dump(mode="python")
+    event = next(
+        row
+        for row in payload["transitions"][0]["events"]
+        if row["event_type"] == "source_damage_output"
+    )
+    event["raw_damage_output"] += 1.0
+    payload["trajectory_content_digest_sha256"] = canonical_digest_sha256(
+        {
+            name: payload[name]
+            for name in ("header", "completion", "frames", "transitions")
+        }
+    )
+    payload["canonical_digest_sha256"] = canonical_digest_sha256(
+        payload, exclude={"canonical_digest_sha256"}
+    )
+    forged = ReplayArtifactV3.model_validate(payload)
+    raw = canonical_json_bytes(forged)
+    sample.replay_path(copied).write_bytes(raw)
+    manifest = _manifest_object(copied)
+    member = cast(dict[str, object], _first_sample_row(manifest)["replay"])
+    member["byte_length"] = len(raw)
+    member["sha256"] = hashlib.sha256(raw).hexdigest()
+    _write_manifest(copied, manifest)
+    with pytest.raises(SampleReplayVerificationError, match="semantic validation"):
+        load_verified_sample_replay(sample.name, directory=copied)
+
+
+def test_current_manifest_rejects_a_historical_replay_root(
+    generated_sample_directories: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    first, _second = generated_sample_directories
+    copied = tmp_path / "wrong-replay-version"
+    shutil.copytree(first, copied)
+    sample = SAMPLE_REPLAYS[0]
+    raw = sample.replay_path().read_bytes()
+    sample.replay_path(copied).write_bytes(raw)
+    manifest = _manifest_object(copied)
+    member = cast(dict[str, object], _first_sample_row(manifest)["replay"])
+    member["byte_length"] = len(raw)
+    member["sha256"] = hashlib.sha256(raw).hexdigest()
+    _write_manifest(copied, manifest)
+    with pytest.raises(SampleReplayVerificationError, match="replay version"):
+        load_verified_sample_replay(sample.name, directory=copied)
+
+
+def test_current_sample_rejects_rehashed_root_seed_disagreement(
+    generated_sample_directories: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    from marl_battlegrounds.evaluation.models import (
+        canonical_digest_sha256,
+        canonical_json_bytes,
+    )
+    from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+
+    first, _second = generated_sample_directories
+    copied = tmp_path / "seed-disagreement"
+    shutil.copytree(first, copied)
+    sample = SAMPLE_REPLAYS[0]
+    loaded = load_verified_sample_replay(sample.name, directory=copied)
+    assert loaded.replay.header.context.seed_protocol.root_seed == sample.seed
+    payload = loaded.replay.model_dump(mode="python")
+    payload["header"]["context"]["seed_protocol"]["root_seed"] = sample.seed + 1
+    payload["header"]["context_digest_sha256"] = canonical_digest_sha256(
+        payload["header"]["context"]
+    )
+    payload["trajectory_content_digest_sha256"] = canonical_digest_sha256(
+        {
+            name: payload[name]
+            for name in ("header", "completion", "frames", "transitions")
+        }
+    )
+    payload["canonical_digest_sha256"] = canonical_digest_sha256(
+        payload, exclude={"canonical_digest_sha256"}
+    )
+    forged = ReplayArtifactV3.model_validate(payload)
+    raw = canonical_json_bytes(forged)
+    sample.replay_path(copied).write_bytes(raw)
+    manifest = _manifest_object(copied)
+    member = cast(dict[str, object], _first_sample_row(manifest)["replay"])
+    member["byte_length"] = len(raw)
+    member["sha256"] = hashlib.sha256(raw).hexdigest()
+    _write_manifest(copied, manifest)
+    with pytest.raises(
+        SampleReplayVerificationError, match="scientific manifest facts"
+    ):
+        load_verified_sample_replay(sample.name, directory=copied)
+
+
+def test_current_sample_rejects_rehashed_completion_reason(
+    generated_sample_directories: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from marl_battlegrounds.core.types import TASK_MODE_TDM
+    from marl_battlegrounds.evaluation.models import (
+        canonical_digest_sha256,
+        canonical_json_bytes,
+    )
+    from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+
+    first, _second = generated_sample_directories
+    copied = tmp_path / "completion-disagreement"
+    shutil.copytree(first, copied)
+    sample = SAMPLE_REPLAYS[0]
+    original = load_verified_sample_replay(sample.name, directory=copied)
+    scenario = generator_module.get_scenario(sample.source_scenario)
+    config, initial_state = scenario.build_scenario()
+    ending_config = config._replace(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=99,
+        max_steps=len(scenario.frames),
+    )
+    ending_scenario = replace(
+        scenario, build_scenario=lambda: (ending_config, initial_state)
+    )
+
+    def get_ending_scenario(_name: str) -> DebuggerScenario:
+        return ending_scenario
+
+    monkeypatch.setattr(generator_module, "get_scenario", get_ending_scenario)
+    sample.replay_path(copied).unlink()
+    row = generator_module._record_one_sample(  # pyright: ignore[reportPrivateUsage]
+        sample,
+        output_directory=copied,
+        code_revision=CodeRevisionV1.model_validate(
+            original.replay.header.context.code_revision.model_dump(
+                exclude={"schema_version"}
+            )
+        ),
+        runtime_provenance=original.replay.header.runtime_provenance,
+    )
+    manifest = _manifest_object(copied)
+    rows = cast(list[dict[str, object]], manifest["samples"])
+    rows[0] = row
+    _write_manifest(copied, manifest)
+    valid = load_verified_sample_replay(sample.name, directory=copied)
+    reason = valid.replay.transitions[-1].owning_task_end_reason
+    assert reason is not None
+    assert valid.replay.completion.end_or_failure_reason == reason
+    payload = valid.replay.model_dump(mode="python")
+    payload["completion"]["end_or_failure_reason"] = "contradictory test reason"
+    payload["trajectory_content_digest_sha256"] = canonical_digest_sha256(
+        {
+            name: payload[name]
+            for name in ("header", "completion", "frames", "transitions")
+        }
+    )
+    payload["canonical_digest_sha256"] = canonical_digest_sha256(
+        payload, exclude={"canonical_digest_sha256"}
+    )
+    forged = ReplayArtifactV3.model_validate(payload)
+    raw = canonical_json_bytes(forged)
+    sample.replay_path(copied).write_bytes(raw)
+    member = cast(dict[str, object], row["replay"])
+    member["byte_length"] = len(raw)
+    member["sha256"] = hashlib.sha256(raw).hexdigest()
+    _write_manifest(copied, manifest)
+    with pytest.raises(SampleReplayVerificationError, match="semantic validation"):
+        load_verified_sample_replay(sample.name, directory=copied)

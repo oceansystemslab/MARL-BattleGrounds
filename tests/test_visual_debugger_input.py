@@ -888,7 +888,7 @@ def test_terminal_pov_submit_retains_draft_without_reusing_incoming_transition(
     monkeypatch.setattr(control_module, "step", step_spy)
     monkeypatch.setattr(
         control_module,
-        "capture_evaluation_transition_unit_v1",
+        "capture_evaluation_transition_unit_v2",
         capture_spy,
     )
 

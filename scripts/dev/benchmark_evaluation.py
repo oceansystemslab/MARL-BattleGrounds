@@ -187,7 +187,7 @@ def _actions(
     def choose(observation: Observations, mask: ActionMask, keys: Array) -> Action:
         return apply_policies(first, second, (), (), (), (), observation, mask, keys)[0]
 
-    return jax.vmap(choose)(env._observations(state), state.action_mask, actor_keys)  # pyright: ignore[reportPrivateUsage]
+    return jax.vmap(choose)(env.get_observations(state), state.action_mask, actor_keys)
 
 
 def _rollout(

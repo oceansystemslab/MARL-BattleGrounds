@@ -49,19 +49,22 @@ from marl_battlegrounds.evaluation.models import (
     canonical_digest_sha256,
 )
 from marl_battlegrounds.evaluation.pov import (
-    ActorPovAdjacentTransitionSliceV1,
+    ActorPovAdjacentTransitionSlice,
     ActorPovAxisMappingV1,
+    ActorPovFrame,
     ActorPovFrameV1,
-    ActorPovReplayContentV1,
+    ActorPovReplayContent,
     ActorPovTransitionV1,
     ActorPovVisibleBodyObservationChangedCueV1,
     build_actor_pov_adjacent_transition_slice_v1,
     export_actor_pov_replay_v1,
+    export_actor_pov_replay_v2,
 )
 from marl_battlegrounds.evaluation.replay import (
     RuntimeProvenanceV1,
     build_replay_bundle_v1,
 )
+from marl_battlegrounds.evaluation.replay_v3 import build_replay_v3
 from marl_battlegrounds.rendering.authorized_incoming import (
     NoSharedObsIncomingSummaryV1,
     NoSharedObsOwnStatusChangedIncomingCueV1,
@@ -150,7 +153,7 @@ def _live_carrier(
     *,
     transition_index: int,
     global_slot: int = 0,
-) -> ActorPovAdjacentTransitionSliceV1:
+) -> ActorPovAdjacentTransitionSlice:
     return build_actor_pov_adjacent_transition_slice_v1(
         _transition_view(trajectory, transition_index),
         global_slot=global_slot,
@@ -209,13 +212,13 @@ def _replace_tuple_item[T](
 
 
 def _rewrap_content(
-    source: ActorPovReplayContentV1,
+    source: ActorPovReplayContent,
     *,
-    frames: tuple[ActorPovFrameV1, ...] | None = None,
+    frames: tuple[ActorPovFrame, ...] | None = None,
     transitions: tuple[ActorPovTransitionV1, ...] | None = None,
     axis_mapping: ActorPovAxisMappingV1 | None = None,
     completion_updates: dict[str, object] | None = None,
-) -> ActorPovReplayContentV1:
+) -> ActorPovReplayContent:
     payload = source.model_dump(mode="python")
     payload.pop("canonical_digest_sha256")
     if frames is not None:
@@ -229,7 +232,7 @@ def _rewrap_content(
         completion.update(completion_updates)
         payload["completion"] = completion
     payload["canonical_digest_sha256"] = canonical_digest_sha256(payload)
-    return ActorPovReplayContentV1.model_validate(payload)
+    return type(source).model_validate(payload)
 
 
 def _exhaustive_no_shared_index(
@@ -326,7 +329,7 @@ def _exhaustive_no_shared_index(
 
 def _exhaustive_live_carrier(
     trajectory: CapturedEvaluationTrajectory,
-) -> ActorPovAdjacentTransitionSliceV1:
+) -> ActorPovAdjacentTransitionSlice:
     source = _live_carrier(trajectory, transition_index=1)
     selected_row = source.selected_team_local_slot
     start = source.start_frame
@@ -398,22 +401,22 @@ def _exhaustive_live_carrier(
             "successor_frame": successor,
         }
     )
-    return ActorPovAdjacentTransitionSliceV1.model_validate(carrier_payload)
+    return type(source).model_validate(carrier_payload)
 
 
 def _with_live_reward_mutation(
-    source: ActorPovAdjacentTransitionSliceV1,
-) -> ActorPovAdjacentTransitionSliceV1:
+    source: ActorPovAdjacentTransitionSlice,
+) -> ActorPovAdjacentTransitionSlice:
     payload = source.model_dump(mode="python")
     transition = dict(cast(dict[str, object], payload["transition"]))
     transition["canonical_reward"] = cast(float, transition["canonical_reward"]) + 123.0
     payload["transition"] = transition
-    return ActorPovAdjacentTransitionSliceV1.model_validate(payload)
+    return type(source).model_validate(payload)
 
 
 def _with_live_source_only_evidence_mutation(
-    source: ActorPovAdjacentTransitionSliceV1,
-) -> ActorPovAdjacentTransitionSliceV1:
+    source: ActorPovAdjacentTransitionSlice,
+) -> ActorPovAdjacentTransitionSlice:
     payload = source.model_dump(mode="python")
     for endpoint_name in ("start_frame", "successor_frame"):
         endpoint = dict(cast(dict[str, object], payload[endpoint_name]))
@@ -427,17 +430,17 @@ def _with_live_source_only_evidence_mutation(
         previous["ally_move_actions_one_hot"] = tuple(rows)
         endpoint["previous_timestep_actions"] = previous
         payload[endpoint_name] = endpoint
-    return ActorPovAdjacentTransitionSliceV1.model_validate(payload)
+    return type(source).model_validate(payload)
 
 
 def _with_live_masked_relation_payload(
-    source: ActorPovAdjacentTransitionSliceV1,
+    source: ActorPovAdjacentTransitionSlice,
     *,
     endpoint_name: Literal["start_frame", "successor_frame"],
     relation: Literal["ally", "enemy"],
     observation_row: int,
     replacement: tuple[float, ...],
-) -> ActorPovAdjacentTransitionSliceV1:
+) -> ActorPovAdjacentTransitionSlice:
     endpoint = getattr(source, endpoint_name)
     visibility = getattr(endpoint, f"{relation}_visibility_mask")
     if visibility[observation_row]:
@@ -449,7 +452,7 @@ def _with_live_masked_relation_payload(
     rows[observation_row] = replacement
     endpoint_payload[field_name] = tuple(rows)
     payload[endpoint_name] = endpoint_payload
-    return ActorPovAdjacentTransitionSliceV1.model_validate(payload)
+    return type(source).model_validate(payload)
 
 
 def _with_no_shared_reward_mutation(
@@ -1155,7 +1158,7 @@ def test_live_hidden_events_reward_and_source_evidence_are_byte_inert() -> None:
     second_carrier = _live_carrier(second, transition_index=0)
     authority = "live-noninterference-authority"
 
-    def build(source: ActorPovAdjacentTransitionSliceV1) -> bytes:
+    def build(source: ActorPovAdjacentTransitionSlice) -> bytes:
         return _canonical_bytes(
             build_live_no_shared_obs_incoming_summary_v1(
                 source,
@@ -1200,12 +1203,12 @@ def test_real_death_and_respawn_keep_recipient_self_authorized_in_live_and_repla
     )
     frames = [session.current_evaluation_frame]
     transitions: list[EvaluationTransitionV1] = []
-    carriers: list[ActorPovAdjacentTransitionSliceV1] = []
+    carriers: list[ActorPovAdjacentTransitionSlice] = []
     for _ in range(3):
         session = submit_next_script_frame(session)
         view = session.incoming_evaluation_view
         assert view is not None
-        frames.append(view.successor_frame)
+        frames.append(session.current_evaluation_frame)
         transitions.append(view.transition)
         carriers.append(
             build_live_no_shared_obs_visual_adjacent_slice_v1(
@@ -1241,9 +1244,7 @@ def test_real_death_and_respawn_keep_recipient_self_authorized_in_live_and_repla
     )
     death_successor["ally_unit_features"] = tuple(death_ally_rows)
     death_payload["successor_frame"] = death_successor
-    masked_diagonal_poison = ActorPovAdjacentTransitionSliceV1.model_validate(
-        death_payload
-    )
+    masked_diagonal_poison = type(death).model_validate(death_payload)
     assert _canonical_bytes(
         build_live_no_shared_obs_incoming_summary_v1(
             masked_diagonal_poison,
@@ -1270,7 +1271,7 @@ def test_real_death_and_respawn_keep_recipient_self_authorized_in_live_and_repla
     ) == _canonical_bytes(live_summaries[0])
 
     def cue_public_id(
-        carrier: ActorPovAdjacentTransitionSliceV1,
+        carrier: ActorPovAdjacentTransitionSlice,
         cue: ActorPovVisibleBodyObservationChangedCueV1,
     ) -> str:
         public_axis = (
@@ -1336,13 +1337,20 @@ def test_real_death_and_respawn_keep_recipient_self_authorized_in_live_and_repla
         )
     ) == _canonical_bytes(live_summaries[1])
 
-    replay_index = _replay_index(
-        CapturedEvaluationTrajectory(
-            context=session.evaluation_context,
-            frames=tuple(frames),
-            transitions=tuple(transitions),
-        ),
-        global_slot=5,
+    runtime_payload = _runtime_provenance().model_dump(mode="python")
+    runtime_payload["package_version"] = (
+        session.evaluation_context.code_revision.package_version
+    )
+    replay = build_replay_v3(
+        session.evaluation_context,
+        frames,
+        transitions,
+        runtime_provenance=RuntimeProvenanceV1.model_validate(runtime_payload),
+        completion_state="partial",
+        end_or_failure_reason="incoming-summary-fixture",
+    )
+    replay_index = build_actor_pov_projection_index_v1(
+        export_actor_pov_replay_v2(replay, global_slot=5).content,
     )
     replay_summaries = tuple(
         build_replay_no_shared_obs_incoming_summary_v1(

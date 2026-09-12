@@ -47,7 +47,7 @@ def _projection_context(
 def test_no_shared_obs_actor_projection_v2_has_exact_identity() -> None:
     """Freeze the source identity consumed by capture and provenance."""
     assert NO_SHARED_OBS_ACTOR_PROJECTION_ID == "base-observation-no-shared-obs"
-    assert NO_SHARED_OBS_ACTOR_PROJECTION_VERSION == 2
+    assert NO_SHARED_OBS_ACTOR_PROJECTION_VERSION == 3
     assert (
         VersionedIdentityV1(
             identifier="base-observation-no-shared-obs",

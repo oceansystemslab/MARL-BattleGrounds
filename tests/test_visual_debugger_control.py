@@ -63,7 +63,7 @@ from marl_battlegrounds.core.types import (
 from marl_battlegrounds.evaluation import policy_execution
 from marl_battlegrounds.evaluation.models import (
     ActionMaskV1,
-    AssignedPolicySlotV1,
+    AssignedPolicySlotV2,
     ExecutionInformationMode,
 )
 from marl_battlegrounds.evaluation.policy_execution import Policy, PolicyTree
@@ -393,7 +393,7 @@ def test_session_rejects_controller_state_that_does_not_join_provenance() -> Non
         replace(interactive, team_a_controller="reactive_tdm")
 
     assignments = list(interactive.evaluation_context.policy_assignments)
-    assert isinstance(assignments[0], AssignedPolicySlotV1)
+    assert isinstance(assignments[0], AssignedPolicySlotV2)
     assignments[0] = assignments[0].model_copy(update={"policy_kind": "reactive_tdm"})
     stale_context = interactive.evaluation_context.model_copy(
         update={"policy_assignments": tuple(assignments)}
@@ -889,7 +889,7 @@ def test_mixed_submission_keeps_team_a_rows_and_uses_identical_policy_keys(
             key: Array,
         ) -> tuple[ActorAction, PolicyTree]:
             del variables, mask, key
-            slot = actor.global_slot - 5
+            slot = actor.observation.self_ally_index
             return ActorAction(*(value[slot] for value in policy_team_b)), carry
 
         return Policy(name, apply)
@@ -1011,6 +1011,73 @@ def test_random_team_a_combines_with_manual_team_b_from_one_epoch(
     )
 
 
+@pytest.mark.parametrize("scenario_name", ("basic_support", "status_stack"))
+@pytest.mark.parametrize("manual_first_slot", (0, 5))
+@pytest.mark.parametrize("information_mode", ("shared_obs", "no_shared_obs"))
+def test_mixed_manual_policy_keeps_inactive_submitted_rows_neutral(
+    scenario_name: str,
+    manual_first_slot: int,
+    information_mode: ExecutionInformationMode,
+) -> None:
+    scenario = replace(
+        get_scenario(scenario_name),
+        name=f"{scenario_name}_manual_padding",
+        mode="interactive",
+        frames=(),
+    )
+    session = create_session(
+        scenario,
+        seed=7,
+        evaluation_launch_specification=debugger_test_launch_specification(7),
+        team_a_controller="manual" if manual_first_slot == 0 else "random_valid",
+        team_b_controller="manual" if manual_first_slot == 5 else "random_valid",
+        execution_information_mode=information_mode,
+        controlled_global_slot=manual_first_slot,
+        show_ranges=True,
+        verbose_logging=False,
+    )
+    pending = list(session.pending_actions)
+    pending[manual_first_slot] = PendingAction(
+        move_action=MOVE_EAST,
+        selected_global_target_slot=5 if manual_first_slot == 0 else 0,
+        armed_lane=1,
+        arm_origin="explicit",
+    )
+    session = replace(session, pending_actions=tuple(pending))
+    manual_slots = tuple(range(manual_first_slot, manual_first_slot + 5))
+    active_slots = tuple(
+        slot
+        for slot in manual_slots
+        if session.evaluation_context.roster[slot].configured_active
+    )
+    inactive_slots = tuple(slot for slot in manual_slots if slot not in active_slots)
+    assert inactive_slots
+    expected = build_interactive_joint_action(
+        session.evaluation_context,
+        session.pending_actions,
+        actor_global_slots=active_slots,
+    )
+    submitted = submit_interactive(session)
+    view = submitted.incoming_evaluation_view
+    assert view is not None
+    facts = view.transition.facts.action_acceptance_facts
+    recorded = facts.submitted_joint_action
+    for actual, desired in zip(
+        (recorded.move, recorded.select_target, recorded.use_ultimate),
+        expected,
+        strict=True,
+    ):
+        assert tuple(actual[slot] for slot in manual_slots) == tuple(
+            int(desired[slot]) for slot in manual_slots
+        )
+        assert all(actual[slot] == 0 for slot in inactive_slots)
+    assert all(
+        not facts.in_domain_move_action_is_rejected_by_actor[slot]
+        and not facts.in_domain_combat_action_pair_is_rejected_by_actor[slot]
+        for slot in inactive_slots
+    )
+
+
 def test_two_reactive_teams_share_one_same_epoch_source_bank(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1045,33 +1112,33 @@ def test_two_reactive_teams_share_one_same_epoch_source_bank(
             mask: ActionMask,
             key: Array,
         ) -> tuple[ActorAction, PolicyTree]:
-            del variables, mask, key
+            del mask, key
             # A leaked source row makes the submitted action fail the side proof.
             private_features = jnp.where(
                 actor.source_availability[:, None, None],
                 0,
-                actor.source_bank.unit_features_by_sensor_source_and_global_slot,
+                actor.source_bank.unit_features_by_source_and_candidate,
             )
             private_visibility = jnp.where(
                 actor.source_availability[:, None],
                 False,
-                actor.source_bank.unit_visibility_by_sensor_source_and_global_slot,
+                actor.source_bank.unit_visibility_by_source_and_candidate,
             )
             private_objectives = jnp.where(
                 actor.source_availability[:, None, None],
                 0,
-                actor.source_bank.objective_features_by_sensor_source,
+                actor.source_bank.objective_features_by_source,
             )
             authorized = (
                 jnp.all(private_features == 0)
                 & jnp.all(~private_visibility)
                 & jnp.all(private_objectives == 0)
             )
-            value = jnp.where(authorized, actor.global_slot // 5 + 1, 0)
+            value = jnp.where(authorized, jnp.asarray(variables, dtype=jnp.int32), 0)
             zero = jnp.int32(0)
             return ActorAction(value, zero, zero), carry
 
-        return Policy(name, apply)
+        return Policy(name, apply, variables=jnp.int32(len(policy_names)))
 
     def record_shared(*args: object) -> object:
         epoch_calls.append(args)
@@ -1191,7 +1258,7 @@ def test_every_controller_and_information_mode_executes_one_real_coherent_step(
     actual_policy_kinds = tuple(
         row.policy_kind
         for row in first.evaluation_context.policy_assignments
-        if isinstance(row, AssignedPolicySlotV1)
+        if isinstance(row, AssignedPolicySlotV2)
     )
     assert actual_policy_kinds == expected_policy_kinds
 
@@ -1281,6 +1348,7 @@ def test_policy_keys_follow_roles_and_preserve_adversarial_team_b(
             num=MAX_AGENT_SLOTS,
         )
 
+    assert type(seeds.focal_policy_seed) is int
     focal = expected(seeds.focal_policy_seed)
     cooperative_seed = seeds.cooperative_partner_seed
     adversarial_seed = seeds.adversarial_opponent_seed
@@ -1605,7 +1673,7 @@ def test_submission_failures_have_stable_typed_stage_and_preserve_input_epoch(
     elif boundary == "step":
         monkeypatch.setattr(control, "step", fail)
     elif boundary == "capture":
-        monkeypatch.setattr(control, "capture_evaluation_transition_unit_v1", fail)
+        monkeypatch.setattr(control, "capture_evaluation_transition_unit_v2", fail)
     elif boundary == "coherent_view":
         monkeypatch.setattr(control, "EvaluationTransitionViewV1", fail)
     else:

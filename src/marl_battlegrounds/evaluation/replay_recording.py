@@ -14,18 +14,18 @@ import numpy as np
 from marl_battlegrounds.evaluation.replay_capture import ReplayPackets
 
 if TYPE_CHECKING:
-    from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV2
+    from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV3
     from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
-    from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactV2
+    from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
 
 type ContextFactory = Callable[
-    [ReplayPackets], tuple[EvaluationEpisodeContextV2, RuntimeProvenanceV1]
+    [ReplayPackets], tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]
 ]
 
 
 @dataclass
 class _Episode:
-    context: EvaluationEpisodeContextV2
+    context: EvaluationEpisodeContextV3
     runtime: RuntimeProvenanceV1
     tree: Any  # JAX exposes PyTreeDef as a runtime alias, without a public type stub.
     stream: BinaryIO | None
@@ -95,9 +95,9 @@ class ReplayCollector:
     def pending_episode_ids(self) -> frozenset[int]:
         return frozenset(self._episodes)
 
-    def write(self, packets: ReplayPackets) -> Iterator[ReplayArtifactV2]:
+    def write(self, packets: ReplayPackets) -> Iterator[ReplayArtifactV3]:
         """Consume every valid packet, including steps without episode completions."""
-        from marl_battlegrounds.evaluation.replay_v2 import replay_from_packets
+        from marl_battlegrounds.evaluation.replay_v3 import replay_from_packets
 
         if self._closed:
             raise RuntimeError("replay collector is closed")
