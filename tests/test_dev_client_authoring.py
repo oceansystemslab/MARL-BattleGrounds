@@ -143,8 +143,8 @@ def test_asset_ids_are_strict_lowercase_snake_case(asset_id: str) -> None:
 def test_authoring_defaults_use_snake_case_asset_ids() -> None:
     assert new_map_draft().asset_id == "untitled_map"
     assert new_scenario_draft().asset_id == "untitled_scenario"
-    assert new_map_draft("tdm_map_id_10_kawaii_training").asset_id == (
-        "tdm_map_id_10_kawaii_training"
+    assert new_map_draft("tdm_map_id_22_kawaii_training").asset_id == (
+        "tdm_map_id_22_kawaii_training"
     )
 
 

@@ -22,6 +22,7 @@ from numpy.typing import NDArray
 
 from marl_battlegrounds.evaluation import tournament_statistics as stats
 from marl_battlegrounds.evaluation.tournament_schedule import build_tournament_schedule
+from marl_battlegrounds.tasks import CANONICAL_TDM_EVALUATION_MAP_IDS
 
 type FloatArray = NDArray[np.float64]
 type IntArray = NDArray[np.int64]
@@ -38,7 +39,7 @@ def prepare(
     replicates: int,
 ) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray, IntArray, float]:
     schedule = build_tournament_schedule(
-        tuple(f"method-{i:02}" for i in range(12)), (17, 20, 25, 35, 39)
+        tuple(f"method-{i:02}" for i in range(12)), CANONICAL_TDM_EVALUATION_MAP_IDS
     )
     rng = np.random.Generator(np.random.PCG64(112))
     outcomes = {

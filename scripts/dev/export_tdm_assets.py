@@ -21,6 +21,7 @@ from marl_battlegrounds._tdm_assets import (
     TDMAssetSource,
     TDMMapInfo,
     TDMScenarioInfo,
+    map_id_aliases,
 )
 from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v1
 from marl_battlegrounds.evaluation.models import GlobalAnalysisSnapshotV1
@@ -55,23 +56,33 @@ def _source(
 
 def export_tdm_assets(
     *,
-    map_sources: tuple[Path, ...],
+    map_records: tuple[TDMMapInfo, ...],
     scenario_sources: tuple[Path, ...],
     destination: Path,
 ) -> TDMAssetManifest:
-    """Export one complete, explicitly selected approved source set."""
-    if len(map_sources) != 52 or len(scenario_sources) != 8:
+    """Export approved sources in the catalogue's explicit public order."""
+    if len(map_records) != 52 or len(scenario_sources) != 8:
         raise ValueError("export requires exactly 52 maps and eight scenarios")
+    if tuple(row.map_id for row in map_records) != tuple(range(52)):
+        raise ValueError("map records must be ordered by map_id from 0 through 51")
+    map_sources = tuple(Path(row.source.source_path) for row in map_records)
     original_bytes = {
         path: path.read_bytes() for path in (*map_sources, *scenario_sources)
     }
     maps: list[TDMMapInfo] = []
     scenarios: list[TDMScenarioInfo] = []
-    for map_id, path in enumerate(map_sources):
+    for approved, path in zip(map_records, map_sources, strict=True):
+        map_id = approved.map_id
         draft = DevMapDraftV1.model_validate_json(original_bytes[path])
-        if not draft.asset_id.startswith(f"tdm_map_id_{map_id}_"):
-            raise ValueError(f"map source order disagrees with map_id {map_id}")
         compiled = compile_dev_map(draft)
+        source = _source(
+            path,
+            asset_id=draft.asset_id,
+            revision=draft.revision,
+            semantic_digest=compiled.semantic_digest,
+        )
+        if source != approved.source or draft.content.name != approved.name:
+            raise ValueError(f"map source differs from approved map_id {map_id}")
         geometry = MapGeometry.model_validate(
             {
                 "map_width": compiled.content.width,
@@ -86,25 +97,21 @@ def export_tdm_assets(
                 ),
             }
         )
-        split = draft.asset_id.rsplit("_", 1)[1]
         info = TDMMapInfo.model_validate(
             {
                 "map_id": map_id,
                 "name": draft.content.name,
-                "split": split,
-                "curriculum": map_id >= 40,
-                "source": _source(
-                    path,
-                    asset_id=draft.asset_id,
-                    revision=draft.revision,
-                    semantic_digest=compiled.semantic_digest,
-                ),
+                "split": approved.split,
+                "curriculum": approved.curriculum,
+                "source": source,
                 "resource_sha256": _write_json(
                     destination / "maps" / f"{map_id}.json",
                     geometry.model_dump(mode="json"),
                 ),
             }
         )
+        if info.resource_sha256 != approved.resource_sha256:
+            raise ValueError(f"compiled geometry differs from approved map_id {map_id}")
         maps.append(info)
     for scenario_id, path in enumerate(scenario_sources, start=1):
         draft = DevScenarioDraftV1.model_validate_json(original_bytes[path])
@@ -166,6 +173,9 @@ def export_tdm_assets(
         scenarios.append(info)
     manifest = TDMAssetManifest(maps=tuple(maps), scenarios=tuple(scenarios))
     _write_json(destination / "manifest.json", manifest.model_dump(mode="json"))
+    _write_json(
+        destination / "map_id_aliases.json", map_id_aliases().model_dump(mode="json")
+    )
     for path, original in original_bytes.items():
         if path.read_bytes() != original:
             raise RuntimeError(f"source changed while exporting: {path}")
@@ -187,7 +197,7 @@ def main() -> None:
         if hashlib.sha256(source.read_bytes()).hexdigest() != info.source.source_sha256:
             raise ValueError(f"approved source bytes changed: {source}")
     export_tdm_assets(
-        map_sources=tuple(Path(row.source.source_path) for row in manifest.maps),
+        map_records=manifest.maps,
         scenario_sources=tuple(
             Path(row.source.source_path) for row in manifest.scenarios
         ),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -51,23 +52,31 @@ def test_approved_inventory_and_immutable_provenance() -> None:
     maps = list_tdm_maps()
     scenarios = list_tdm_scenarios()
     assert tuple(row.map_id for row in maps) == tuple(range(52))
-    assert sum(row.curriculum for row in maps) == 12
-    assert tuple(row.map_id for row in maps if row.split == "test") == (
-        17,
-        20,
-        25,
-        35,
-        39,
+    assert tuple(row.map_id for row in maps if row.curriculum) == tuple(range(12))
+    assert all(row.split == "training" for row in maps if row.curriculum)
+    assert tuple(
+        row.map_id for row in maps if row.split == "training" and not row.curriculum
+    ) == tuple(range(12, 42))
+    assert tuple(row.map_id for row in maps if row.split == "validation") == tuple(
+        range(42, 47)
     )
+    assert tuple(row.map_id for row in maps if row.split == "test") == tuple(
+        range(47, 52)
+    )
+    assert CANONICAL_TDM_EVALUATION_MAP_IDS == (47, 48, 49, 50, 51)
+    for info in maps:
+        assert info.source.asset_id.startswith(f"tdm_map_id_{info.map_id}_")
+        assert re.match(rf"tdm[-_]map[-_]id[-_]{info.map_id}[-_]", info.name)
+        assert Path(info.source.source_path).parent.name == info.source.asset_id
     assert tuple(row.scenario_id for row in scenarios) == tuple(range(1, 9))
-    assert maps[23].source.revision == 4
+    assert maps[33].source.revision == 4
     assert scenarios[2].source.revision == 25
     assert scenarios[2].approved_source.revision == 24
     assert scenarios[2].source.semantic_digest == (
         scenarios[2].approved_source.semantic_digest
     )
     with pytest.raises(ValidationError, match="frozen"):
-        maps[0].source.revision = 999  # type: ignore[misc]
+        maps[12].source.revision = 999  # type: ignore[misc]
 
 
 def test_every_approved_map_constructs_fixed_shape_tdm_with_reflected_pads() -> None:
@@ -119,7 +128,7 @@ def test_standard_factory_preserves_order_duplicates_and_independent_sizes(
     expected_b: tuple[int, ...],
 ) -> None:
     config = make_standard_team_deathmatch_config(
-        map_id=0,
+        map_id=12,
         team_a_roster=team_a,
         team_b_roster=team_b,
         score_threshold=7,
@@ -177,7 +186,7 @@ def test_factory_rejects_invalid_map_ids(map_id: object) -> None:
         make_canonical_team_deathmatch_evaluation_config(map_id=cast(int, map_id))
 
 
-@pytest.mark.parametrize("map_id", (0, 24, 40))
+@pytest.mark.parametrize("map_id", (12, 42, 0))
 def test_canonical_factory_rejects_training_validation_and_curriculum_maps(
     map_id: int,
 ) -> None:
@@ -191,7 +200,7 @@ def test_canonical_factory_rejects_training_validation_and_curriculum_maps(
 def test_factory_rejects_invalid_or_unordered_rosters(roster: object) -> None:
     with pytest.raises((TypeError, ValueError), match="team_a_roster"):
         make_standard_team_deathmatch_config(
-            map_id=0,
+            map_id=12,
             team_a_roster=cast(tuple[AgentClassName, ...], roster),
             team_b_roster=("mage",),
         )
@@ -205,7 +214,7 @@ def test_factory_uses_core_scalar_validation(
 ) -> None:
     with pytest.raises((TypeError, ValueError)):
         make_standard_team_deathmatch_config(
-            map_id=0,
+            map_id=12,
             team_a_roster=("mage",),
             team_b_roster=("mage",),
             score_threshold=cast(int, threshold),
@@ -257,7 +266,7 @@ def test_package_loader_detects_changed_content(
     monkeypatch.setattr(_tdm_assets, "_resource_bytes", changed_bytes)
     with pytest.raises(ValueError, match="content digest mismatch"):
         make_standard_team_deathmatch_config(
-            map_id=0, team_a_roster=("mage",), team_b_roster=("mage",)
+            map_id=12, team_a_roster=("mage",), team_b_roster=("mage",)
         )
     with pytest.raises(ValueError, match="content digest mismatch"):
         load_tdm_scenario(3)
@@ -265,7 +274,7 @@ def test_package_loader_detects_changed_content(
 
 def test_public_factory_supports_ordinary_and_jitted_transition() -> None:
     config = make_standard_team_deathmatch_config(
-        map_id=0, team_a_roster=("priest", "priest"), team_b_roster=("hunter",)
+        map_id=12, team_a_roster=("priest", "priest"), team_b_roster=("hunter",)
     )
     key = jax.random.key(3)
     state, _, mask, _ = cast(
@@ -299,7 +308,7 @@ import sys
 from marl_battlegrounds.tasks import (
     load_tdm_scenario, make_canonical_team_deathmatch_evaluation_config,
 )
-assert make_canonical_team_deathmatch_evaluation_config(map_id=17).max_steps == 300
+assert make_canonical_team_deathmatch_evaluation_config(map_id=47).max_steps == 300
 assert load_tdm_scenario(3).info.horizon == 10
 assert not any(name == 'scripts' or name.startswith('scripts.') for name in sys.modules)
 """

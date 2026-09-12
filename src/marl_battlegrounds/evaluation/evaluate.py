@@ -15,6 +15,7 @@ import numpy as np
 from jax import Array
 from numpy.typing import NDArray
 
+from marl_battlegrounds._tdm_assets import current_map_id
 from marl_battlegrounds.core import env as core
 from marl_battlegrounds.core.config import (
     validate_env_config,
@@ -455,7 +456,7 @@ def normalize_episode_specs(
         if isinstance(item, EnvConfig):
             resolved.append((None, item))
             continue
-        map_id = item.map_id if isinstance(item, TDMMapInfo) else item
+        map_id = current_map_id(item) if isinstance(item, TDMMapInfo) else item
         if isinstance(map_id, bool) or not isinstance(map_id, Integral):
             raise TypeError(
                 "maps must contain integer map IDs, TDMMapInfo or EnvConfig"

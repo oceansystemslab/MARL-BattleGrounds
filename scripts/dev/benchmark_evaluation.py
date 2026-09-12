@@ -2,7 +2,7 @@
 
 Run with the CUDA environment, for example:
   python -m scripts.dev.benchmark_evaluation --output artifacts/m8-performance
-Add --metrics-only --map-id 20 to simulate each fixed-map ALPHA/BETA batch once,
+Add --metrics-only --map-id 48 to simulate each fixed-map ALPHA/BETA batch once,
 then compare CPU/GPU metric passes over those same facts.
 Each requested size uses a fresh process. No result silently substitutes a smaller
 batch. Full authoritative facts are retained only for this comparison, not by the
@@ -316,7 +316,7 @@ def run_size(
     if map_id is not None and not metrics_only:
         raise ValueError("--map-id requires --metrics-only")
     if metrics_only:
-        map_id = 20 if map_id is None else map_id
+        map_id = 48 if map_id is None else map_id
         rollout_modes = ()
     policies: dict[str, object] = (
         {"team_a": "tdm-alpha", "team_b": "tdm-beta"} if metrics_only else _POLICIES
@@ -663,7 +663,7 @@ def main() -> int:
         type=int,
         choices=range(52),
         metavar="ID",
-        help="fixed map for --metrics-only (default: 20)",
+        help="fixed map for --metrics-only (default: 48)",
     )
     parser.add_argument(
         "--rollout-modes",

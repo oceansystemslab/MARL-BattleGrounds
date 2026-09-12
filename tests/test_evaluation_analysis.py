@@ -67,7 +67,7 @@ def test_search_catalog_uses_recorded_rosters_without_numerical_analysis() -> No
     for team_a, team_b in zip(rosters, reversed(rosters), strict=True):
         context = evaluation_context(
             config=make_standard_team_deathmatch_config(
-                map_id=20, team_a_roster=team_a, team_b_roster=team_b
+                map_id=48, team_a_roster=team_a, team_b_roster=team_b
             )
         )
         completion = EvaluationEpisodeCompletionV1(
@@ -140,7 +140,7 @@ def test_replay_class_filters_keep_helpers_and_recipients_distinct() -> None:
     for team_a, team_b in zip(teams, reversed(teams), strict=True):
         context = evaluation_context(
             config=make_standard_team_deathmatch_config(
-                map_id=20, team_a_roster=team_a, team_b_roster=team_b
+                map_id=48, team_a_roster=team_a, team_b_roster=team_b
             )
         )
         analysis = object.__new__(ReplayAnalysis)
@@ -293,7 +293,7 @@ def test_replay_ultimate_targets_follow_recorded_classes_not_slot_numbers(
     slot_zero_targets: tuple[int, ...],
 ) -> None:
     config = make_standard_team_deathmatch_config(
-        map_id=20,
+        map_id=48,
         team_a_roster=team_a,
         team_b_roster=team_b,
         max_steps=1,

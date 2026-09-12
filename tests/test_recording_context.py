@@ -19,8 +19,18 @@ from marl_battlegrounds.evaluation.runtime_provenance import capture_runtime_pro
 from marl_battlegrounds.tasks import make_standard_team_deathmatch_config
 
 
-@pytest.mark.parametrize("map_id", (0, 20, 24))
-def test_recorded_map_names_splits_geometry_and_safe_filenames(map_id: int) -> None:
+@pytest.mark.parametrize(
+    ("map_id", "original_id", "original_name"),
+    (
+        (0, 40, "tdm_map_id_40_curriculum_map_0_training"),
+        (12, 0, "tdm-map-id-0-foxhole-training"),
+        (48, 20, "tdm_map_id_20_three_body_problem_test"),
+        (42, 24, "tdm_map_id_24_cheshire_cat_validation"),
+    ),
+)
+def test_recorded_map_names_splits_geometry_and_safe_filenames(
+    map_id: int, original_id: int, original_name: str
+) -> None:
     from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v1
     from marl_battlegrounds.evaluation.map_identity import approved_map_id, recorded_map
     from marl_battlegrounds.evaluation.replay_io import generated_replay_filename
@@ -58,7 +68,7 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(map_id: int) -> N
     assert approved_map_id(expected.source.asset_id, "0" * 64) is None
     assert metadata.map_id == map_id
     assert metadata.technical_name == expected.name and metadata.split == expected.split
-    if map_id == 20:
+    if map_id == 48:
         assert metadata.display_name == "Three Body Problem"
     name = generated_replay_filename(context, "a" * 64, episode_id=17)
     assert name.startswith(f"{expected.name}__episode-17__seed-42__stream-23__a-")
@@ -89,18 +99,68 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(map_id: int) -> N
     roundtrip = type(context).model_validate_json(context.model_dump_json())
     assert recorded_map(roundtrip) == metadata
 
+    legacy = context.model_copy(
+        update={
+            "aggregation_keys": tuple(
+                row.model_copy(update={"value": str(original_id)})
+                if row.name == "map_id"
+                else row.model_copy(update={"value": original_name})
+                if row.name == "map_name"
+                else row
+                for row in context.aggregation_keys
+            )
+        }
+    )
+    legacy_bytes = legacy.model_dump_json()
+    legacy_metadata = metadata.model_copy(
+        update={"map_id": original_id, "technical_name": original_name}
+    )
+    assert recorded_map(legacy) == legacy_metadata
+    assert legacy.model_dump_json() == legacy_bytes
+    assert generated_replay_filename(legacy, "a" * 64, episode_id=17) == name.replace(
+        expected.name, original_name, 1
+    )
+
+    # Neither a current nor an old recording may borrow another map's ID,
+    # source name or split. Those fields must all identify the same source.
+    for record in (context, legacy):
+        for field, value in (
+            ("map_id", "13"),
+            ("map_id", "52"),
+            ("map_id", str(original_id if record is context else map_id)),
+            ("map_name", list_tdm_maps()[13].name),
+            ("map_name", original_name if record is context else expected.name),
+            ("map_split", "validation" if expected.split == "training" else "training"),
+        ):
+            invalid = record.model_copy(
+                update={
+                    "aggregation_keys": tuple(
+                        row.model_copy(update={"value": value})
+                        if row.name == field
+                        else row
+                        for row in record.aggregation_keys
+                    )
+                }
+            )
+            with pytest.raises(ValueError, match="conflicts"):
+                recorded_map(invalid)
+
     # An explicitly declared map cannot be attached to another map's geometry.
     wrong = context.model_copy(
         update={
             "resolved_env_config": build_resolved_env_config_v1(
                 make_standard_team_deathmatch_config(
-                    map_id=1, team_a_roster=("mage",), team_b_roster=("priest",)
+                    map_id=13, team_a_roster=("mage",), team_b_roster=("priest",)
                 )
             )
         }
     )
     with pytest.raises(ValueError, match="geometry"):
         recorded_map(wrong)
+    with pytest.raises(ValueError, match="geometry"):
+        recorded_map(
+            legacy.model_copy(update={"resolved_env_config": wrong.resolved_env_config})
+        )
     # Old records with no declaration never acquire a split from resemblance.
     historical = context.model_copy(
         update={
@@ -136,27 +196,42 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(map_id: int) -> N
     authored_bytes = authored.model_dump_json()
     assert recorded_map(authored) == metadata
     assert authored.model_dump_json() == authored_bytes
-    for mismatch in (
-        {"canonical_digest": "0" * 64},
-        {"identifier": "custom-copy-of-the-same-geometry"},
-        {"version": expected.source.revision + 1},
-    ):
-        unverified = authored.model_copy(
-            update={
-                "identity": authored.identity.model_copy(
-                    update={
-                        "layout": authored.identity.layout.model_copy(update=mismatch)
-                    }
-                )
-            }
-        )
-        assert recorded_map(unverified).map_id is None
-        assert recorded_map(unverified).split is None
-    wrong_geometry = authored.model_copy(
-        update={"resolved_env_config": wrong.resolved_env_config}
+    legacy_authored = authored.model_copy(
+        update={
+            "identity": authored.identity.model_copy(
+                update={
+                    "layout": authored.identity.layout.model_copy(
+                        update={"identifier": original_name.replace("-", "_")}
+                    )
+                }
+            )
+        }
     )
-    with pytest.raises(ValueError, match="geometry"):
-        recorded_map(wrong_geometry)
+    legacy_authored_bytes = legacy_authored.model_dump_json()
+    assert recorded_map(legacy_authored) == legacy_metadata
+    assert legacy_authored.model_dump_json() == legacy_authored_bytes
+    for record in (authored, legacy_authored):
+        for mismatch in (
+            {"canonical_digest": "0" * 64},
+            {"identifier": "custom-copy-of-the-same-geometry"},
+            {"version": expected.source.revision + 1},
+        ):
+            unverified = record.model_copy(
+                update={
+                    "identity": record.identity.model_copy(
+                        update={
+                            "layout": record.identity.layout.model_copy(update=mismatch)
+                        }
+                    )
+                }
+            )
+            assert recorded_map(unverified).map_id is None
+            assert recorded_map(unverified).split is None
+        wrong_geometry = record.model_copy(
+            update={"resolved_env_config": wrong.resolved_env_config}
+        )
+        with pytest.raises(ValueError, match="geometry"):
+            recorded_map(wrong_geometry)
     historical_name = historical.model_copy(
         update={
             "aggregation_keys": (
@@ -221,7 +296,7 @@ def test_custom_trainer_unknown_history_and_seeds_stay_absent(mode: str) -> None
     from marl_battlegrounds.evaluation.replay_io import generated_replay_filename
 
     config = make_standard_team_deathmatch_config(
-        map_id=0,
+        map_id=12,
         team_a_roster=("priest",),
         team_b_roster=("mage", "mage"),
         max_steps=2,
@@ -305,7 +380,7 @@ def test_scenario_metadata_preserves_actual_controller_and_execution_facts() -> 
     assert identity != controller_identity(policy("tdm-beta"))
     descriptor = policy_description(renamed, (), (), include_digests=True)
     config = make_standard_team_deathmatch_config(
-        map_id=0, max_steps=2, team_a_roster=("mage",) * 5, team_b_roster=("mage",) * 5
+        map_id=12, max_steps=2, team_a_roster=("mage",) * 5, team_b_roster=("mage",) * 5
     )
     scenario_identity = ContentAddressedIdentityV1(
         identifier="approved-scenario", version=1, canonical_digest="b" * 64
@@ -395,7 +470,7 @@ def test_scenario_metadata_cannot_replace_execution_authority(conflict: str) -> 
     with pytest.raises(ValueError):
         build_recording_context(
             make_standard_team_deathmatch_config(
-                map_id=0,
+                map_id=12,
                 max_steps=2,
                 team_a_roster=("mage",) * 5,
                 team_b_roster=("mage",) * 5,

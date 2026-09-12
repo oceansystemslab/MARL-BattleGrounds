@@ -37,13 +37,15 @@ from marl_battlegrounds.policies.input import ActorInput
 from marl_battlegrounds.policies.random_valid import random_policy
 from marl_battlegrounds.tasks import (
     CANONICAL_TDM_EVALUATION_MAP_IDS,
+    TDMMapInfo,
+    list_tdm_maps,
     make_standard_team_deathmatch_config,
 )
 
 
 def _config(max_steps: int = 2) -> EnvConfig:
     return make_standard_team_deathmatch_config(
-        map_id=0,
+        map_id=12,
         team_a_roster=("priest",),
         team_b_roster=("mage", "mage"),
         max_steps=max_steps,
@@ -59,7 +61,10 @@ def test_public_evaluate_cycles_one_total_budget_and_creates_no_files(
         "random",
         "random",
         num_episodes=3,
-        maps=[0, 1],
+        maps=[
+            TDMMapInfo.model_validate_json(list_tdm_maps()[12].model_dump_json()),
+            13,
+        ],
         num_envs=2,
         max_steps=2,
         chunk_size=4,
@@ -71,9 +76,9 @@ def test_public_evaluate_cycles_one_total_budget_and_creates_no_files(
     assert [
         (row.episode_id, row.map_id, row.episode_length) for row in result.episodes
     ] == [
-        (1, 0, 2),
-        (2, 1, 2),
-        (3, 0, 2),
+        (1, 12, 2),
+        (2, 13, 2),
+        (3, 12, 2),
     ]
     assert all(row.outcome == TASK_MODE_OUTCOME_DRAW for row in result.episodes)
     assert set(PRIORITY_METRIC_NAMES) <= result.priority_metrics.keys()
@@ -91,6 +96,21 @@ def test_public_evaluate_cycles_one_total_budget_and_creates_no_files(
     np.testing.assert_array_equal(result.priority_metrics["agent_0_return"], [0, 0, 0])
     assert result.full_metrics == {}
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("change", ({"map_id": 0}, {"resource_sha256": "0" * 64}))
+def test_saved_map_details_are_rejected_before_evaluation_creates_files(
+    change: dict[str, object], tmp_path: Path
+) -> None:
+    saved = list_tdm_maps()[12].model_copy(update=change)
+    destination = tmp_path / "evaluation"
+    with pytest.raises(
+        ValueError, match=r"choose the map again with list_tdm_maps\(\)"
+    ):
+        evaluate(
+            "random", "random", num_episodes=1, maps=[saved], output_dir=destination
+        )
+    assert not destination.exists()
 
 
 def test_default_maps_are_canonical_and_metrics_can_be_completely_disabled() -> None:

@@ -54,7 +54,7 @@ _CLASS_IDS: dict[AgentClassName, int] = {
     "priest": PRIEST_CLASS_ID,
 }
 _CANONICAL_ROSTER: tuple[AgentClassName, ...] = tuple(_CLASS_IDS)
-CANONICAL_TDM_EVALUATION_MAP_IDS = (17, 20, 25, 35, 39)
+CANONICAL_TDM_EVALUATION_MAP_IDS = (47, 48, 49, 50, 51)
 
 
 @dataclass(frozen=True)
@@ -72,7 +72,7 @@ class TDMScenario:
 
 
 def list_tdm_maps() -> tuple[TDMMapInfo, ...]:
-    """Return all 40 base and 12 curriculum maps in stable numeric order."""
+    """List curriculum, other training, validation, then test maps by ID."""
     return asset_manifest().maps
 
 

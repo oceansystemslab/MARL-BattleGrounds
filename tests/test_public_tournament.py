@@ -16,13 +16,26 @@ from marl_battlegrounds.evaluation.policy_execution import Policy, policy
 from marl_battlegrounds.evaluation.recording_context import capture_recording_provenance
 from marl_battlegrounds.evaluation.run_writer import MATCH_COLUMNS
 from marl_battlegrounds.evaluation.tournament import run_tournament
-from marl_battlegrounds.tasks import CANONICAL_TDM_EVALUATION_MAP_IDS
+from marl_battlegrounds.tasks import CANONICAL_TDM_EVALUATION_MAP_IDS, list_tdm_maps
 
 
 def _entrants(count: int = 2) -> tuple[Policy, ...]:
     return tuple(
         replace(policy("random"), name=f"model-{index}") for index in range(count)
     )
+
+
+@pytest.mark.parametrize("change", ({"map_id": 0}, {"resource_sha256": "0" * 64}))
+def test_saved_map_details_are_rejected_before_tournament_creates_files(
+    change: dict[str, object], tmp_path: Path
+) -> None:
+    saved = list_tdm_maps()[12].model_copy(update=change)
+    destination = tmp_path / "tournament"
+    with pytest.raises(
+        ValueError, match=r"choose the map again with list_tdm_maps\(\)"
+    ):
+        run_tournament(_entrants(), maps=[saved], output_dir=destination)
+    assert not destination.exists()
 
 
 def test_twenty_match_canonical_smoke_has_complete_balanced_evidence_without_files(
@@ -58,7 +71,7 @@ def test_three_entrants_preserve_global_ids_and_sparse_diagnostic_independence()
 ):
     result = run_tournament(
         _entrants(3),
-        maps=[0],
+        maps=[list_tdm_maps()[12]],
         episodes_per_pair=2,
         metrics="none",
         full_metrics_episodes=[2],
@@ -105,7 +118,7 @@ def test_persisted_tournament_resumes_without_reexecution_or_repeated_summary_ro
     entrants = _entrants()
     result = run_tournament(
         entrants,
-        maps=[0],
+        maps=[12],
         episodes_per_pair=4,
         max_steps=1,
         chunk_size=2,
@@ -121,7 +134,7 @@ def test_persisted_tournament_resumes_without_reexecution_or_repeated_summary_ro
     }
     resumed = run_tournament(
         tuple(reversed(entrants)),
-        maps=[0],
+        maps=[12],
         episodes_per_pair=4,
         max_steps=1,
         chunk_size=3,
@@ -138,7 +151,7 @@ def test_persisted_tournament_resumes_without_reexecution_or_repeated_summary_ro
     with pytest.raises(ValueError, match="identity differs"):
         run_tournament(
             (replace(entrants[0], variables=np.asarray(2.0)), entrants[1]),
-            maps=[0],
+            maps=[12],
             episodes_per_pair=4,
             max_steps=1,
             full_metrics_episodes=[1],
@@ -180,7 +193,7 @@ def test_interrupted_pair_pass_resumes_only_missing_episodes(
     with pytest.raises(RuntimeError, match="interrupted tournament"):
         run_tournament(
             _entrants(),
-            maps=[0],
+            maps=[12],
             episodes_per_pair=4,
             max_steps=1,
             chunk_size=2,
@@ -205,7 +218,7 @@ def test_interrupted_pair_pass_resumes_only_missing_episodes(
     monkeypatch.setattr(module, "evaluate_episodes", observe_resumption)
     result = run_tournament(
         _entrants(),
-        maps=[0],
+        maps=[12],
         episodes_per_pair=4,
         max_steps=1,
         chunk_size=2,
@@ -224,7 +237,7 @@ def test_invalid_global_selection_fails_before_creating_run_files(
     with pytest.raises((ValueError, TypeError)):
         run_tournament(
             _entrants(),
-            maps=[0],
+            maps=[12],
             episodes_per_pair=4,
             replay_episodes=selection,
             output_dir=destination,

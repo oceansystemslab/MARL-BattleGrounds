@@ -16,7 +16,7 @@ from marl_battlegrounds import make
 from marl_battlegrounds.tasks import make_standard_team_deathmatch_config
 
 config = make_standard_team_deathmatch_config(
-    map_id=0,
+    map_id=12,
     team_a_roster=("warrior", "hunter", "priest"),
     team_b_roster=("mage", "rogue", "priest"),
 )
@@ -30,10 +30,14 @@ action_mask = env.get_action_mask(state)
 identities. `load_tdm_scenario(1)` returns its approved configuration, initial
 state and Notes; pass those to `initialize_scenario_state(initial_state, config)`.
 Each team can independently contain one through five agents, including repeated
-classes. `make_canonical_team_deathmatch_evaluation_config(map_id=17)` fixes
+classes. `make_canonical_team_deathmatch_evaluation_config(map_id=47)` fixes
 mirrored Mage/Warrior/Hunter/Rogue/Priest teams, first to 20, a 300-transition
 horizon, five-transition respawn waves and canonical shields. Canonical map IDs
-are 17, 20, 25, 35 and 39; training distributions belong to the later curriculum
+are 47–51. Training maps are 0–41, including curriculum maps 0–11; validation
+maps are 42–46. Numbered map names, authored IDs and saved-map folders use the
+same IDs. Map geometry and scenarios stay unchanged. See the
+[map ID change guide](docs/evaluation/workflows.md#map-id-change--2026-09-12)
+when using saved IDs. Training distributions belong to the later curriculum
 milestone.
 
 ## Training, validation and analysis
@@ -50,7 +54,7 @@ Use one callable for frozen-policy validation and evaluation:
 from marl_battlegrounds import evaluate
 
 result = evaluate(
-    "tdm-alpha", "tdm-beta", maps=[17, 20, 25, 35, 39],
+    "tdm-alpha", "tdm-beta", maps=[47, 48, 49, 50, 51],
     num_episodes=100, num_envs=128, seed=42,
     metrics="full", replay_episodes=range(1, 11),
     output_dir="runs/evaluation",

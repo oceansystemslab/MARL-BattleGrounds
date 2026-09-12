@@ -9,7 +9,11 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from marl_battlegrounds._tdm_assets import asset_manifest, map_geometry
+from marl_battlegrounds._tdm_assets import (
+    asset_manifest,
+    map_geometry,
+    map_id_aliases,
+)
 from marl_battlegrounds.evaluation.models import (
     AggregationKeyV1,
     EvaluationEpisodeContext,
@@ -44,22 +48,59 @@ def approved_map_id(asset_id: str | None, semantic_digest: str) -> int | None:
     )
 
 
+def _map_identity(
+    map_id: int, technical_name: str, split: Literal["training", "validation", "test"]
+) -> RecordedMap:
+    prefix = r"^tdm[-_]map[-_]id[-_]\d+[-_]"
+    name = re.sub(prefix, "", technical_name)
+    name = re.sub(rf"[-_]{split}$", "", name)
+    display = re.sub(r"[-_]+", " ", name).title()
+    return RecordedMap(
+        map_id=map_id,
+        technical_name=technical_name,
+        display_name=display,
+        split=split,
+    )
+
+
 @lru_cache(maxsize=52)
 def _registered_map(map_id: int) -> RecordedMap:
     entries = asset_manifest().maps
     if type(map_id) is not int or not 0 <= map_id < len(entries):
         raise ValueError("recorded map_id must identify an approved TDM map")
     info = entries[map_id]
-    prefix = rf"^tdm[-_]map[-_]id[-_]{map_id}[-_]"
-    name = re.sub(prefix, "", info.name)
-    name = re.sub(rf"[-_]{info.split}$", "", name)
-    display = re.sub(r"[-_]+", " ", name).title()
-    return RecordedMap(
-        map_id=map_id,
-        technical_name=info.name,
-        display_name=display,
-        split=info.split,
-    )
+    return _map_identity(map_id, info.name, info.split)
+
+
+@lru_cache(maxsize=104)
+def _registered_map_by_name(name: str) -> tuple[RecordedMap, int]:
+    """Keep the saved name and number; find its unchanged current geometry."""
+    for info in asset_manifest().maps:
+        if info.name == name:
+            return _registered_map(info.map_id), info.map_id
+    for alias in map_id_aliases().maps:
+        if alias.name == name:
+            current = asset_manifest().maps[alias.current_map_id]
+            return _map_identity(
+                alias.map_id, alias.name, current.split
+            ), current.map_id
+    raise ValueError("recorded map name conflicts with the approved catalogue")
+
+
+@lru_cache(maxsize=104)
+def _authored_map(asset_id: str, revision: int, digest: str) -> RecordedMap | None:
+    """Recognize only an exact current or historical authored source."""
+    map_id = approved_map_id(asset_id, digest)
+    if map_id is not None and revision == asset_manifest().maps[map_id].source.revision:
+        return _registered_map(map_id)
+    for alias in map_id_aliases().maps:
+        if (
+            alias.asset_id == asset_id
+            and alias.revision == revision
+            and alias.semantic_digest == digest
+        ):
+            return _registered_map_by_name(alias.name)[0]
+    return None
 
 
 @lru_cache(maxsize=128)
@@ -123,11 +164,8 @@ def _recorded_map(bindings: tuple[tuple[str, str], ...], layout: str) -> Recorde
             map_id = int(metadata["map_id"])
         except ValueError as error:
             raise ValueError("recorded map_id must be an integer") from error
-        result = _registered_map(map_id)
-        if (
-            metadata["map_name"] != result.technical_name
-            or metadata["map_split"] != result.split
-        ):
+        result, _ = _registered_map_by_name(metadata["map_name"])
+        if map_id != result.map_id or metadata["map_split"] != result.split:
             raise ValueError("recorded map name or split conflicts with its map_id")
         return result
     if origin is not None:
@@ -155,13 +193,13 @@ def recorded_map(context: EvaluationEpisodeContext) -> RecordedMap:
     if not bindings:
         # Older authored recordings already name and fingerprint their source
         # layout. Recognize that explicit identity, never geometry alone.
-        map_id = approved_map_id(layout.identifier, layout.canonical_digest)
-        if (
-            map_id is not None
-            and layout.version == asset_manifest().maps[map_id].source.revision
-        ):
-            result = _registered_map(map_id)
+        authored = _authored_map(
+            layout.identifier, layout.version, layout.canonical_digest
+        )
+        if authored is not None:
+            result = authored
     if result.map_id is not None:
         # EvaluationModel is frozen and Pydantic supplies its runtime hash.
-        registered_map_metadata(result.map_id, context.resolved_env_config)  # pyright: ignore[reportArgumentType]
+        _, current_id = _registered_map_by_name(result.technical_name)
+        registered_map_metadata(current_id, context.resolved_env_config)  # pyright: ignore[reportArgumentType]
     return result

@@ -1,13 +1,49 @@
 # Research workflows
 
-Use your own trainer with `make`, one `evaluate` callable for validation and
-evaluation, and `run_tournament` for paired cross-play. The
+Use your own training, validation or evaluation loop with `make`, `reset` and
+`step`. Optional helpers provide `evaluate` for repeated matches and
+`run_tournament` for paired cross-play. The
 [runnable example](../../examples/evaluation.py) exercises these public calls
 with the existing ALPHA and BETA controllers. All examples use complete standard
 TDM episodes; changing the batch size does not change episode identities.
 For evaluation and validation, `--episodes` is the total budget across maps,
 cycled in order. Four episodes cover four of the five maps; use five or a
 multiple of five when demonstrating coverage of the complete five-map split.
+
+## Map ID Change — 2026-09-12
+
+Public map IDs now group maps by their use. Map geometry and game rules are
+unchanged.
+
+| Public IDs | Maps |
+| --- | --- |
+| 0–11 | Curriculum maps, in their existing order |
+| 12–41 | Other training maps, in their previous ID order |
+| 42–46 | Validation maps, in their previous ID order |
+| 47–51 | Test maps, in their previous ID order |
+
+Training still includes all 42 maps with IDs 0–41. Each map's public ID, numbered
+name, authored asset ID and saved-map folder now use the same number. For example,
+old IDs 40, 0 and 20 are now 0, 12 and 48 respectively. Three Body Problem is now
+`tdm_map_id_48_three_body_problem_test`. Its familiar name, geometry and split
+stay the same. All scenario content is unchanged.
+
+The renamed authored files have new byte hashes. Their geometry hashes and
+packaged geometry bytes stay unchanged. The package catalogue records the new
+source names, paths and byte hashes. Use `list_tdm_maps()` to discover current IDs
+and source details. Restart DevClient and reopen saved drafts after this change
+so its selections use the renamed assets.
+
+Existing recordings and result files keep their recorded IDs, names and content.
+Saved configurations containing only numeric map IDs need an explicit old-to-new
+translation using the original catalogue, or map selection through current
+discovery. Do not treat an old number as the new map with that number. Resume or
+reproduce an older run with its original code and catalogue.
+
+Custom tournaments sort maps by public ID. If a map selection spans the groups
+above, its new order can change which seed each map receives. Use the original
+catalogue and schedule when reproducing an older tournament. Historical
+measurements below retain their original labels and source hashes.
 
 ## Evaluate and inspect
 
@@ -511,7 +547,7 @@ For a focused full-metric CPU/GPU comparison, run:
 ```bash
 JAX_PLATFORMS=cuda,cpu XLA_PYTHON_CLIENT_PREALLOCATE=false \
   .venv/bin/python -m scripts.dev.benchmark_evaluation \
-  --metrics-only --map-id 20 --sizes 64 128 256 512 1024 --repeats 5 \
+  --metrics-only --map-id 48 --sizes 64 128 256 512 1024 --repeats 5 \
   --output artifacts/m8-full-metric-performance
 ```
 
@@ -524,7 +560,7 @@ Use a new output directory for each qualification. Keep the historical evidence
 directories below intact. The current schema needs its own measured results;
 the retained older results do not establish its speed or peak memory.
 
-For the broader rollout/capture qualification, omit `--metrics-only --map-id 20`.
+For the broader rollout/capture qualification, omit `--metrics-only --map-id 48`.
 That developer profile cycles five maps with exploratory policies and varied
 rosters, and repeats complete GPU rollouts for none, priority, full, sparse full
 and selected replay capture. It is intentionally more expensive. Optional

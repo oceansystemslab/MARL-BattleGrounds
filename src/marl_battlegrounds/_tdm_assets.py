@@ -67,6 +67,27 @@ class TDMAssetManifest(EvaluationModel):
     scenarios: tuple[TDMScenarioInfo, ...]
 
 
+class TDMMapAlias(EvaluationModel):
+    """One exact map identity saved before the map numbers and names changed."""
+
+    map_id: Annotated[int, Field(ge=0, le=51)]
+    current_map_id: Annotated[int, Field(ge=0, le=51)]
+    name: str
+    asset_id: str
+    revision: Annotated[int, Field(gt=0)]
+    semantic_digest: _Digest
+
+
+class TDMMapAliases(EvaluationModel):
+    """Fixed old identities used only to read historical recordings."""
+
+    schema_id: Literal["marl_battlegrounds.tdm_map_id_aliases"] = (
+        "marl_battlegrounds.tdm_map_id_aliases"
+    )
+    schema_version: Literal[1] = 1
+    maps: tuple[TDMMapAlias, ...]
+
+
 class MapGeometry(EvaluationModel):
     """Authoring-compiled geometry; runtime loading performs no angle conversion."""
 
@@ -97,6 +118,43 @@ def asset_manifest() -> TDMAssetManifest:
     if tuple(row.scenario_id for row in manifest.scenarios) != tuple(range(1, 9)):
         raise ValueError("TDM package must contain ordered scenarios 1 through 8")
     return manifest
+
+
+@cache
+def map_id_aliases() -> TDMMapAliases:
+    """Load the fixed old identities and check their current map targets."""
+    aliases = TDMMapAliases.model_validate_json(_resource_bytes("map_id_aliases.json"))
+    if tuple(row.map_id for row in aliases.maps) != tuple(range(52)) or tuple(
+        sorted(row.current_map_id for row in aliases.maps)
+    ) != tuple(range(52)):
+        raise ValueError("map aliases must cover all 52 old and current IDs once")
+    if (
+        len({row.name for row in aliases.maps}) != 52
+        or len({row.asset_id for row in aliases.maps}) != 52
+    ):
+        raise ValueError("map aliases must have distinct old names and source IDs")
+    current = asset_manifest().maps
+    if any(
+        row.semantic_digest != current[row.current_map_id].source.semantic_digest
+        for row in aliases.maps
+    ):
+        raise ValueError("map aliases must preserve each map's original geometry")
+    return aliases
+
+
+def current_map_id(info: TDMMapInfo) -> int:
+    """Reject saved map details that no longer match the installed catalogue."""
+    entries = asset_manifest().maps
+    if (
+        type(info.map_id) is not int
+        or not 0 <= info.map_id < len(entries)
+        or info != entries[info.map_id]
+    ):
+        raise ValueError(
+            "map details do not match the installed catalogue; "
+            "choose the map again with list_tdm_maps() from marl_battlegrounds.tasks"
+        )
+    return info.map_id
 
 
 def _verified_resource(relative_path: str, digest: str) -> bytes:

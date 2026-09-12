@@ -2521,8 +2521,10 @@ scores retain their existing replay/scoreboard authority. Detailed TDM metrics
 require explicit opt-in, including requests for Replay Viewer detailed analysis.
 Periodic diagnostics and validation-map evaluation must reuse the same evaluator.
 The proposed downstream interface is one interval, a selected validation-map set,
-a match count, and critical/full metrics. The packaged validation-map labels are
-24, 29, 30, 32 and 37; frozen manifests remain split-membership authority. The
+a match count, and critical/full metrics. The 2026-09-12 catalogue reorder
+replaces public validation IDs 24, 29, 30, 32 and 37 with 42–46. Numbered map names,
+authored IDs and folders follow the new IDs. Geometry and split membership stay
+unchanged; frozen manifests remain the authority. The
 user requests measured costs before finalizing cadence/API details, so this is
 a provisional handoff, not an activated scheduler. Log any eventual schedule and
 selected episode identities.

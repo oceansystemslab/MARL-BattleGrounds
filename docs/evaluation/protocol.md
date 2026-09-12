@@ -725,7 +725,7 @@ the approved source and distributed revision identities.
 `make_standard_team_deathmatch_config` for explicit approved maps and independently
 ordered rosters, and `make_canonical_team_deathmatch_evaluation_config` for the
 five canonical evaluation maps
-(17, 20, 25, 35 and 39) with mirrored Mage/Warrior/Hunter/Rogue/Priest slots.
+(47–51) with mirrored Mage/Warrior/Hunter/Rogue/Priest slots.
 These constructors select immutable packaged content without importing the
 mutable DevClient draft store. Canonical evaluation retains paired side
 assignments as well as the approved geometric symmetry.

@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import numpy as np
 
+from marl_battlegrounds._tdm_assets import current_map_id
 from marl_battlegrounds.environment import MetricMode, make
 from marl_battlegrounds.evaluation.evaluate import (
     Columns,
@@ -190,7 +191,7 @@ def run_tournament(
         policy(item) if isinstance(item, str) else item for item in policies
     )
     map_ids = tuple(
-        item.map_id if isinstance(item, TDMMapInfo) else item
+        current_map_id(item) if isinstance(item, TDMMapInfo) else item
         for item in (CANONICAL_TDM_EVALUATION_MAP_IDS if maps is None else maps)
     )
     schedule = build_tournament_schedule(

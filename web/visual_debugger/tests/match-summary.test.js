@@ -125,8 +125,8 @@ test("all six production presentation pairs retain the same source-bound match e
 test("friendly map display and technical identity retain the explicitly recorded split", async () => {
   const raw = structuredClone(fixture.presentations.replay_oracle);
   raw.match_summary.map = {
-    map_id: 20,
-    technical_name: "tdm_map_id_20_three_body_problem_test",
+    map_id: 48,
+    technical_name: "tdm_map_id_48_three_body_problem_test",
     display_name: "Three Body Problem",
     split: "test",
   };
@@ -137,7 +137,7 @@ test("friendly map display and technical identity retain the explicitly recorded
   const facts = new Map(
     authorizedPresentationTechnicalFacts(frame).map((row) => [row.id, row.value]),
   );
-  assert.equal(facts.get("map"), "tdm_map_id_20_three_body_problem_test");
+  assert.equal(facts.get("map"), "tdm_map_id_48_three_body_problem_test");
   assert.equal(facts.get("seeds"), "Root unknown · Episode stream unknown");
   raw.match_summary.map.split = null;
   assert.equal(

@@ -57,7 +57,7 @@ def _row[T](tree: T, index: int) -> T:
 
 def _config(*, max_steps: int = 3, alternate: bool = False) -> EnvConfig:
     return make_standard_team_deathmatch_config(
-        map_id=1 if alternate else 0,
+        map_id=13 if alternate else 12,
         team_a_roster=("priest",) if alternate else ("mage", "priest"),
         team_b_roster=("hunter", "mage", "mage") if alternate else ("mage",),
         score_threshold=7 if alternate else 20,

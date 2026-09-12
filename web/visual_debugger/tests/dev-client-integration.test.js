@@ -145,7 +145,7 @@ test("browser asset IDs use strict lowercase snake_case", async () => {
   for (const valid of [
     "map",
     "map_2",
-    "tdm_map_id_10_kawaii_training",
+    "tdm_map_id_22_kawaii_training",
     "a".repeat(64),
   ]) {
     assert.equal(isValidAuthoringAssetId(valid), true, valid);
