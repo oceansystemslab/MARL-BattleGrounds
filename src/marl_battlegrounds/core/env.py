@@ -63,8 +63,8 @@ from marl_battlegrounds.core.config import (
     validate_scenario_initial_state,
 )
 from marl_battlegrounds.core.geometry import (
-    DEFAULT_AGENT_PROJECTION_PASSES,
     has_clear_line_of_sight,
+    project_charge_endpoints_with_geometry,
     project_movement_with_geometry,
 )
 from marl_battlegrounds.core.types import (
@@ -2488,9 +2488,6 @@ def _return_unchanged_agent_positions(
     obstacles: Array,
     always_participates_in_agent_agent_collision: Array,
     participates_in_agent_agent_collision_at_final_position: Array,
-    agent_agent_overlap_projection_passes: int,
-    collision_projection_passes: int,
-    movement_substeps: int,
 ) -> Array:
     """Return unchanged positions when the conditional Charge phase is inactive."""
     del (
@@ -2501,9 +2498,6 @@ def _return_unchanged_agent_positions(
         map_width,
         map_height,
         obstacles,
-        agent_agent_overlap_projection_passes,
-        collision_projection_passes,
-        movement_substeps,
         always_participates_in_agent_agent_collision,
         participates_in_agent_agent_collision_at_final_position,
     )
@@ -2575,16 +2569,13 @@ def _resolve_post_charge_agent_positions(
         post_charge_current_agent_position_deltas, axis=1
     )
 
-    agent_agent_overlap_projection_passes = 1
-    collision_projection_passes = DEFAULT_AGENT_PROJECTION_PASSES
-    movement_substeps = 1
     there_is_a_charging_warrior = jnp.any(accepted_warrior_charge_by_actor)
 
     return cast(
         Array,
         jax.lax.cond(
             there_is_a_charging_warrior,
-            project_movement_with_geometry,
+            project_charge_endpoints_with_geometry,
             _return_unchanged_agent_positions,
             current_state.agent_positions,
             config.agent_profile.agent_radii,
@@ -2596,9 +2587,6 @@ def _resolve_post_charge_agent_positions(
             config.obstacles,
             always_participates_in_agent_agent_collision,
             always_participates_in_agent_agent_collision,
-            agent_agent_overlap_projection_passes,
-            collision_projection_passes,
-            movement_substeps,
         ),
     )
 
@@ -3275,6 +3263,8 @@ def step(
     reset or the preceding step. It is the sole source of submitted-action
     acceptance; the returned observation and mask describe ``next_state``.
     """
+    del key
+
     accepted_joint_action, action_acceptance_facts = (
         _build_accepted_joint_action_from_submitted_joint_action(
             current_action_mask=current_action_mask, submitted_joint_action=joint_action

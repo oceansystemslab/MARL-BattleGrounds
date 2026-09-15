@@ -2,7 +2,6 @@
 
 from collections.abc import Callable
 from operator import itemgetter
-from pathlib import Path
 from typing import cast
 
 import jax
@@ -12,9 +11,7 @@ import pytest
 from jax import Array
 from scripts.dev.visual_debugger.authoring_compiler import (
     CompiledDevScenarioV1,
-    compile_dev_scenario,
 )
-from scripts.dev.visual_debugger.authoring_models import DevScenarioDraftV1
 from tests.scenario_controller_fixtures import load_scenario_1
 
 from marl_battlegrounds.core.axis_mappings import (
@@ -78,6 +75,7 @@ from marl_battlegrounds.policies.shared_obs import (
     build_shared_obs_sensor_source_bank,
     execute_shared_obs_team_policy,
 )
+from marl_battlegrounds.tasks import TDMScenario, load_tdm_scenario
 
 _POLICY = cast(SharedObsPolicy, jax.jit(reactive_tdm_alpha_policy))
 _REFINE = cast(
@@ -614,7 +612,10 @@ def test_static_obstacle_contact_clipping_and_slide_alternatives(
 
 
 def _team_b(
-    scenario: CompiledDevScenarioV1, obs: Observation, mask: ActionMask, key: int = 0
+    scenario: CompiledDevScenarioV1 | TDMScenario,
+    obs: Observation,
+    mask: ActionMask,
+    key: int = 0,
 ) -> ActorAction:
     profile = scenario.config.agent_profile
     availability = build_default_shared_obs_information_availability(
@@ -659,15 +660,14 @@ def test_scalar_eager_jit_team_parity_and_key_invariance(
 
 
 @pytest.mark.parametrize(
-    ("heal_target", "survivor", "hp"), [(3, 2, 2.575), (4, 3, 20.0)]
+    ("heal_target", "survivor", "hp"), [(3, 2, 25.0), (4, 3, 20.0)]
 )
 def test_reactive_controller_reproduces_both_accepted_witnesses(
-    scenario: CompiledDevScenarioV1, heal_target: int, survivor: int, hp: float
+    heal_target: int, survivor: int, hp: float
 ) -> None:
-    state, obs, mask = (
-        scenario.initial_state,
-        scenario.observation,
-        scenario.action_mask,
+    scenario = load_tdm_scenario(1)
+    state, obs, mask, _ = initialize_scenario_state(
+        scenario.initial_state, scenario.config
     )
     expected_moves = [
         [MOVE_EAST, 0, 0, MOVE_SOUTH, MOVE_NORTH],
@@ -684,7 +684,7 @@ def test_reactive_controller_reproduces_both_accepted_witnesses(
             jnp.array(
                 [0, 0, MOVE_EAST, MOVE_SOUTH, 0]
                 if tick == 0
-                else [0, 0, MOVE_NORTHEAST, 0, 0]
+                else [0, 0, MOVE_NORTHEAST, MOVE_NORTH, 0]
                 if tick == 1
                 else [0] * 5,
                 dtype=jnp.int32,
@@ -717,10 +717,11 @@ def test_reactive_controller_reproduces_both_accepted_witnesses(
             )
         )
         if tick == 2:
-            assert not bool(mask.select_target_use_ultimate_joint_mask[5, 9, 0])
-            assert int(b.select_target[0]) == 8
-            assert int(b.select_target[3]) == (9 if heal_target == 3 else 8)
-            np.testing.assert_array_equal(b.move, [MOVE_EAST, 0, 0, MOVE_NORTHEAST, 0])
+            # The opening heal changes which of Hunter and Rogue is weaker.
+            target = 9 if heal_target == 3 else 8
+            assert int(b.select_target[0]) == target
+            assert int(b.select_target[3]) == target
+            np.testing.assert_array_equal(b.move, [MOVE_EAST, 0, 0, MOVE_SOUTHEAST, 0])
         np.testing.assert_array_equal(b.use_ultimate, [0, 0, 0, 0, 0])
         state, obs, reward, done, mask, _ = _STEP(
             scenario.config, state, mask, joint, jax.random.key(0)
@@ -799,17 +800,10 @@ def test_rules_continue_to_final_wave_with_dead_class_noops(
 
 
 def test_reactive_controller_reproduces_scenario_2_cover_and_healing_witness() -> None:
-    fixture = Path(__file__).parent / "fixtures" / "scenario_2_r12.json"
-    draft = DevScenarioDraftV1.model_validate_json(fixture.read_text(encoding="utf-8"))
-    scenario = compile_dev_scenario(draft)
-    assert draft.revision == 12
-    assert scenario.semantic_digest == (
-        "1b2e2d391053a0de15c7f292dc70f6db679ed9e62e35ec1f11dcc68bb9f1c2cc"
-    )
-    state, obs, mask = (
-        scenario.initial_state,
-        scenario.observation,
-        scenario.action_mask,
+    scenario = load_tdm_scenario(2)
+    assert scenario.info.approved_source.revision == 19
+    state, obs, mask, _ = initialize_scenario_state(
+        scenario.initial_state, scenario.config
     )
     # Warrior/Priest: Charge/self-heal, basic/heal, no-combat/Ultimate, basic/no-combat.
     # Target actions are observer-relative; Team A's 9 is Rogue-B and 6 is Mage-B.
@@ -825,16 +819,18 @@ def test_reactive_controller_reproduces_scenario_2_cover_and_healing_witness() -
         [MOVE_WEST, 0, 0, MOVE_WEST, 0],
         [MOVE_SOUTH, 0, 0, 0, 0],
         [MOVE_SOUTH, 0, 0, 0, 0],
-        [MOVE_NORTH, 0, 0, 0, 0],
+        [MOVE_NORTHEAST, 0, 0, 0, 0],
     ]
     expected_scores = [[18, 19], [19, 19], [19, 19], [20, 19]]
     expected_warrior_hp = [15.9387493, 4.8774986, 185.8162537, 166.7550049]
     for tick in range(4):
         if tick == 2:
+            assert bool(mask.select_target_use_ultimate_joint_mask[4, 2, 1])
+        if tick == 3:
             # Priest is protected by cover, not by being outside Mage's basic range.
             mage, priest = state.agent_positions[5], state.agent_positions[4]
             distance = float(cast(Array, jnp.linalg.norm(mage - priest)))
-            assert distance == pytest.approx(2.982093, abs=1e-5)
+            assert distance == pytest.approx(2.6761029, abs=1e-5)
             assert distance < float(
                 scenario.config.agent_profile.basic_interaction_radii[5]
             )
@@ -842,7 +838,6 @@ def test_reactive_controller_reproduces_scenario_2_cover_and_healing_witness() -
                 has_clear_line_of_sight(mage, priest, scenario.config.obstacles)
             )
             assert not bool(mask.select_target_use_ultimate_joint_mask[5, 10, 0])
-            assert bool(mask.select_target_use_ultimate_joint_mask[4, 2, 1])
         # These are expected outputs only; Team B is generated afresh from this epoch.
         b = _team_b(scenario, obs, mask)
         np.testing.assert_array_equal(b.move, expected_b_moves[tick])

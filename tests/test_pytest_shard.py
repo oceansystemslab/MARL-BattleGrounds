@@ -633,7 +633,7 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
     assert set(CI_SHARD_COST_PROFILE.relocations_by_shard_count) == {12}
     assert CI_SHARD_COST_PROFILE.relocations_by_shard_count[12] == (
         ("residual:tests/test_visual_debugger_service.py", 6, 10),
-        ("file:tests/test_shared_obs_runtime.py", 11, 3),
+        ("file:tests/test_shared_obs_runtime.py", 12, 3),
     )
     assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset()
 

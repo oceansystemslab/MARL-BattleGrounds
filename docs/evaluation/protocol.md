@@ -718,7 +718,7 @@ ten-transition horizon for sustained body blocking, with the canonical
 five-transition respawn-wave period. Scenario/map design approval is complete
 under A36; remaining identity, transport and evidence checks do not reopen it.
 These horizons are properties of this suite, not a global scenario-schema limit.
-The packaged Scenario 3 r25 changes only the accepted r24 Notes; its physical
+The packaged Scenario 3 r26 changes only the accepted r24 Notes; its physical
 state, map and configuration are identical. The package manifest retains both
 the approved source and distributed revision identities.
 

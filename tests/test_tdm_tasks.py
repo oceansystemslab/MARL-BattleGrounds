@@ -70,7 +70,7 @@ def test_approved_inventory_and_immutable_provenance() -> None:
         assert Path(info.source.source_path).parent.name == info.source.asset_id
     assert tuple(row.scenario_id for row in scenarios) == tuple(range(1, 9))
     assert maps[33].source.revision == 4
-    assert scenarios[2].source.revision == 25
+    assert scenarios[2].source.revision == 26
     assert scenarios[2].approved_source.revision == 24
     assert scenarios[2].source.semantic_digest == (
         scenarios[2].approved_source.semantic_digest

@@ -18,11 +18,10 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_Y,
     MOVE_EAST,
     MOVE_NORTH,
-    MOVE_NORTHEAST,
-    MOVE_NORTHWEST,
     MOVE_SOUTH,
+    MOVE_SOUTHEAST,
+    MOVE_SOUTHWEST,
     MOVE_STAY,
-    MOVE_WEST,
     TEAM_B_ID,
     Action,
     ActionMask,
@@ -59,13 +58,13 @@ _EXPECTED_PATH = Path(__file__).parent / "fixtures" / "scenario_3_witness.json"
 # The user lists Hunter first and Warrior second. Simulator slots are 2 and 1.
 _HUNTER_WARRIOR_MOVES = (
     (MOVE_NORTH, MOVE_NORTH),
-    (MOVE_NORTH, MOVE_SOUTH),
-    (MOVE_SOUTH, MOVE_NORTHEAST),
-    (MOVE_SOUTH, MOVE_NORTHWEST),
+    (MOVE_NORTH, MOVE_SOUTHEAST),
+    (MOVE_SOUTH, MOVE_EAST),
     (MOVE_SOUTH, MOVE_SOUTH),
-    (MOVE_SOUTH, MOVE_WEST),
-    (MOVE_STAY, MOVE_EAST),
-    (MOVE_EAST, MOVE_NORTHWEST),
+    (MOVE_NORTH, MOVE_NORTH),
+    (MOVE_NORTH, MOVE_SOUTH),
+    (MOVE_NORTH, MOVE_NORTH),
+    (MOVE_EAST, MOVE_SOUTHWEST),
 )
 
 
@@ -100,9 +99,9 @@ def _run_witness(
     )
     moves = _HUNTER_WARRIOR_MOVES
     if omit_south_south:
-        # Remove turn 5, then finish the shortened line with Stay and Basics.
+        # Remove turn 4, then finish the shortened line with Stay and Basics.
         # This is one declared continuation, not every possible alternative.
-        moves = (*moves[:4], *moves[5:], (MOVE_STAY, MOVE_STAY))
+        moves = (*moves[:3], *moves[4:], (MOVE_STAY, MOVE_STAY))
     trajectory: list[WitnessTransition] = []
     for tick, (hunter_move, warrior_move) in enumerate(moves):
         bank = build_shared_obs_sensor_source_bank(observation)
@@ -159,7 +158,7 @@ def trajectory(scenario: TDMScenario) -> tuple[WitnessTransition, ...]:
 def test_scenario_3_binds_the_approved_setup(scenario: TDMScenario) -> None:
     """A changed map, roster or starting state needs an explicit witness review."""
     assert scenario.info.approved_source.revision == 24
-    assert scenario.info.source.revision == 25
+    assert scenario.info.source.revision == 26
     assert scenario.info.source.semantic_digest == (
         "c5c409e4f64deacc5e54b7c09ee62c59667342138786303b2fc52103a5dc3459"
     )
@@ -219,7 +218,7 @@ def test_all_slots_keep_the_recorded_positions_health_and_actions(
     expected = json.loads(_EXPECTED_PATH.read_text())
     assert expected["scenario_id"] == 3
     assert expected["approved_revision"] == 24
-    assert expected["source_revision"] == 25
+    assert expected["source_revision"] == 26
     slots = jnp.arange(10)
     for transition, row in zip(trajectory, expected["ticks"], strict=True):
         assert_witness_tick(
@@ -254,15 +253,15 @@ def test_all_slots_keep_the_recorded_positions_health_and_actions(
         )
 
 
-def test_south_south_creates_one_safe_hunter_attack(
+def test_final_turn_gives_hunter_a_safe_finishing_attack(
     trajectory: tuple[WitnessTransition, ...],
 ) -> None:
-    """Turn 6 gives Hunter a Basic while Warrior and Rogue cannot hit each other."""
-    sixth = trajectory[5]
-    assert bool(sixth.mask.select_target_use_ultimate_joint_mask[2, 9, 0])
-    assert not bool(sixth.mask.select_target_use_ultimate_joint_mask[1, 9, 0])
-    assert not bool(sixth.mask.select_target_use_ultimate_joint_mask[8, 7, 0])
-    combat = sixth.info.transition_facts.combat_transition_facts
+    """Turn 8 lets Hunter finish while Warrior and Rogue cannot hit each other."""
+    final = trajectory[-1]
+    assert bool(final.mask.select_target_use_ultimate_joint_mask[2, 9, 0])
+    assert not bool(final.mask.select_target_use_ultimate_joint_mask[1, 9, 0])
+    assert not bool(final.mask.select_target_use_ultimate_joint_mask[8, 7, 0])
+    combat = final.info.transition_facts.combat_transition_facts
     np.testing.assert_array_equal(
         combat.basic_effect_is_activated_by_source[jnp.asarray([1, 2, 8])],
         [False, True, False],
@@ -270,14 +269,8 @@ def test_south_south_creates_one_safe_hunter_attack(
     np.testing.assert_array_equal(
         combat.total_effective_damage_by_recipient[jnp.asarray([1, 2, 8])], [0, 0, 6]
     )
-    assert float(sixth.before.current_health[1]) == 30
-    assert float(sixth.after.current_health[1]) == 30
-    # Rogue's final accepted Basic still lands in the transition where it dies.
-    final_combat = trajectory[-1].info.transition_facts.combat_transition_facts
-    assert bool(final_combat.basic_effect_is_activated_by_source[8])
-    assert float(final_combat.total_effective_damage_by_recipient[1]) == pytest.approx(
-        10.2
-    )
+    assert float(final.before.current_health[1]) == pytest.approx(9.6)
+    assert float(final.after.current_health[1]) == pytest.approx(9.6)
 
 
 def test_respawned_agents_keep_the_declared_behavior(
@@ -302,27 +295,27 @@ def test_respawned_agents_keep_the_declared_behavior(
             np.testing.assert_array_equal(head[jnp.asarray([0, 3, 4])], [0, 0, 0])
 
 
-def test_omitting_south_south_then_staying_and_attacking_draws(
+def test_omitting_south_south_loses_hunter_before_the_finish(
     scenario: TDMScenario, trajectory: tuple[WitnessTransition, ...]
 ) -> None:
-    """One fixed continuation without the pause loses Warrior with Rogue on turn 8."""
+    """One fixed continuation without turn 4 loses Hunter on turn 7."""
     without_pause = _run_witness(scenario, omit_south_south=True)
-    assert len(without_pause) == 8
-    for original, changed in zip(trajectory[:4], without_pause[:4], strict=True):
+    assert len(without_pause) == 7
+    for original, changed in zip(trajectory[:3], without_pause[:3], strict=True):
         for left, right in zip(
             jax.tree.leaves(original), jax.tree.leaves(changed), strict=True
         ):
             np.testing.assert_array_equal(left, right)
     final = without_pause[-1]
-    assert int(final.after.step_count) == 298
-    np.testing.assert_array_equal(final.after.team_deathmatch_scores, [20, 20])
+    assert int(final.after.step_count) == 297
+    np.testing.assert_array_equal(final.after.team_deathmatch_scores, [19, 20])
     np.testing.assert_array_equal(
         np.flatnonzero(
             final.info.transition_facts.death_facts.is_newly_dead_by_recipient
         ),
-        [1, 8],
+        [2],
     )
-    np.testing.assert_array_equal(final.reward.rewards, [0] * 10)
+    np.testing.assert_array_equal(final.reward.rewards, [-1] * 5 + [1] * 5)
     assert bool(final.done.terminated)
     assert not bool(final.done.truncated)
-    assert int(final.info.transition_facts.team_deathmatch_facts.outcome) == 3
+    assert int(final.info.transition_facts.team_deathmatch_facts.outcome) == 2

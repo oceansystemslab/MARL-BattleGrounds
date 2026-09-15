@@ -17,6 +17,8 @@ from marl_battlegrounds.core.env import (
 )
 from marl_battlegrounds.core.geometry import GEOMETRY_TOLERANCE
 from marl_battlegrounds.core.types import (
+    AGENT_FEATURE_X,
+    AGENT_FEATURE_Y,
     ENVIRONMENT_DIMENSIONS,
     HUNTER_CLASS_ID,
     MAGE_CLASS_ID,
@@ -751,8 +753,8 @@ def test_assigned_pad_wins_over_live_enemy_occupancy() -> None:
     )
 
 
-def test_duration_zero_overlap_uses_ordinary_stay_collision_next_transition() -> None:
-    """A zero-shield respawn overlaps now and rejoins body blocking next step."""
+def test_duration_zero_coincidence_separates_after_distinct_movement_intent() -> None:
+    """A directionless spawn tie stays neutral until movement supplies a direction."""
     config, state, _, _, _ = _scenario(
         team_sizes=(1, 1),
         periods=(3, 4),
@@ -765,7 +767,14 @@ def test_duration_zero_overlap_uses_ordinary_stay_collision_next_transition() ->
         team_respawn_wave_countdowns=jnp.asarray((0, 3), dtype=jnp.int32),
     )
 
-    overlapped_state, _, _, _, overlapped_mask, _ = _take_step(config, state)
+    (
+        overlapped_state,
+        overlapped_observation,
+        _,
+        _,
+        overlapped_mask,
+        _,
+    ) = _take_step(config, state)
     assert bool(
         jnp.array_equal(
             overlapped_state.agent_positions[_TEAM_A_FIRST_SLOT],
@@ -773,11 +782,81 @@ def test_duration_zero_overlap_uses_ordinary_stay_collision_next_transition() ->
         )
     )
 
-    separated_state, _, _, _, _, _ = _take_step(
+    assert bool(
+        config.agent_profile.agent_radii[_TEAM_A_FIRST_SLOT]
+        == config.agent_profile.agent_radii[_TEAM_B_FIRST_SLOT]
+    )
+    for slot in (_TEAM_A_FIRST_SLOT, _TEAM_B_FIRST_SLOT):
+        assert bool(config.agent_profile.active_mask[slot])
+        assert bool(overlapped_state.alive_mask[slot])
+        assert int(overlapped_state.spawn_shield_durations[slot]) == 0
+        assert bool(overlapped_mask.move_mask[slot, MOVE_EAST])
+        assert bool(overlapped_observation.enemy_visibility_mask[slot, 0])
+        assert bool(
+            jnp.array_equal(
+                overlapped_observation.self_features[
+                    slot, AGENT_FEATURE_X : AGENT_FEATURE_Y + 1
+                ],
+                assigned_pad,
+            )
+        )
+        assert bool(
+            jnp.array_equal(
+                overlapped_observation.enemy_unit_features[
+                    slot, 0, AGENT_FEATURE_X : AGENT_FEATURE_Y + 1
+                ],
+                assigned_pad,
+            )
+        )
+        assert bool(
+            jnp.all(
+                overlapped_observation.spawn_lifecycle.spawn_shield_actual_durations_by_agent_by_team[
+                    slot, :, 0
+                ]
+                == 0
+            )
+        )
+
+    stayed_state, _, _, _, stayed_mask, stayed_info = _take_step(
         config,
         overlapped_state,
         _joint_action(),
         action_mask=overlapped_mask,
+    )
+    # Equal bodies with equal positions and Stay intents have no physical direction.
+    # Separating this exact tie by team or slot would restore the old bias.
+    assert bool(jnp.all(jnp.isfinite(stayed_state.agent_positions)))
+    assert bool(
+        jnp.array_equal(stayed_state.agent_positions, overlapped_state.agent_positions)
+    )
+    for slot in (_TEAM_A_FIRST_SLOT, _TEAM_B_FIRST_SLOT):
+        assert (
+            int(
+                stayed_info.transition_facts.action_acceptance_facts.accepted_joint_action.move[
+                    slot
+                ]
+            )
+            == MOVE_STAY
+        )
+        assert bool(stayed_mask.move_mask[slot, MOVE_EAST])
+
+    separated_state, _, _, _, _, separated_info = _take_step(
+        config,
+        stayed_state,
+        _joint_action((_TEAM_A_FIRST_SLOT, MOVE_EAST, _TARGET_NONE, 0)),
+        action_mask=stayed_mask,
+    )
+    assert (
+        int(
+            separated_info.transition_facts.action_acceptance_facts.accepted_joint_action.move[
+                _TEAM_A_FIRST_SLOT
+            ]
+        )
+        == MOVE_EAST
+    )
+    assert bool(jnp.all(jnp.isfinite(separated_state.agent_positions)))
+    assert float(separated_state.agent_positions[_TEAM_A_FIRST_SLOT, 0]) > float(
+        separated_state.agent_positions[_TEAM_B_FIRST_SLOT, 0]
     )
     distance = cast(
         Array,

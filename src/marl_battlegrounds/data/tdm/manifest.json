@@ -736,18 +736,18 @@
       "scenario_id": 1,
       "approved_source": {
         "asset_id": "scenario_1",
-        "revision": 40,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_1/r40.json",
-        "source_sha256": "923b1114bbf9538821c3c954181b44fa9e1fb6ab84f61447542d571ab1f68361",
+        "revision": 41,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_1/r41.json",
+        "source_sha256": "57b3603125b1c2fa1968cbb007de1a8e3132bd85a164cf45c3154f20c9c71831",
         "semantic_digest": "d3d2f7196fa5eb64622ebf38bb83b13f07af226af808c024852bf75be351bdad"
       },
       "name": "scenario_1_HRP_vs_MRP",
       "description": "Can a team turn a dying healer's last action into a win? Hunter, Rogue and Priest must disable the enemy healer, lure a pursuer into an ambush, and finish two targets in five ticks. This scenario makes healing priorities, cover, coordinated attacks and strategic sacrifice part of the same short team puzzle. Multi-Step Team-Level Planning connects that last heal to the two finishing attacks.",
       "source": {
         "asset_id": "scenario_1",
-        "revision": 40,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_1/r40.json",
-        "source_sha256": "923b1114bbf9538821c3c954181b44fa9e1fb6ab84f61447542d571ab1f68361",
+        "revision": 41,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_1/r41.json",
+        "source_sha256": "57b3603125b1c2fa1968cbb007de1a8e3132bd85a164cf45c3154f20c9c71831",
         "semantic_digest": "d3d2f7196fa5eb64622ebf38bb83b13f07af226af808c024852bf75be351bdad"
       },
       "map_semantic_digest": "acd2cf8640483dac77d93fc4f7189a0a035d587a08f0c8233c9fb685e5b98c94",
@@ -770,7 +770,7 @@
         5
       ],
       "horizon": 5,
-      "resource_sha256": "5ff4d291bea423106f5a05bc73a5bd81b5d2fe843e0596039189625ef9bc136e"
+      "resource_sha256": "ca6e836fb04addd8c93ad69331a6634afa1f0f5607b56e0710478e586c836d44"
     },
     {
       "scenario_id": 2,
@@ -825,9 +825,9 @@
       "description": "A Hunter has just 1 HP, and the enemy Rogue deliberately hunts it. Warrior and Hunter must move as a pair: keep Warrior between the pursuer and its prey while both keep attacking. This ten-tick scenario explores prediction, body screening and kiting against an opponent willing to brush past a defender's shoulder. Five-tick respawn waves can bring reinforcements into the second half of the fight.",
       "source": {
         "asset_id": "scenario_3",
-        "revision": 25,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_3/r25.json",
-        "source_sha256": "08cb4a93f1aa5131a022a1fd6018ffe51fd6f43d015d072ff93cf729758462c3",
+        "revision": 26,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_3/r26.json",
+        "source_sha256": "f5db4f1c5be75c7505ea317fbac1fba57e0b9f1d70e51162fedf8db1f60d0654",
         "semantic_digest": "c5c409e4f64deacc5e54b7c09ee62c59667342138786303b2fc52103a5dc3459"
       },
       "map_semantic_digest": "2e9c468c90b6b147e7b5991d486b9ca03079fc3e78dac3f8693c619742b34a40",
@@ -850,29 +850,29 @@
         5
       ],
       "horizon": 10,
-      "resource_sha256": "e194f3ed0ae34d8c4b5435dcb0fde11317f7a2f954d60660770f9b674081a597"
+      "resource_sha256": "57af05a21460ebc2b654c2ba73696b2671b45fd4c8c7a4dd522e1c6837c423ac"
     },
     {
       "scenario_id": 4,
       "approved_source": {
         "asset_id": "scenario_4",
-        "revision": 12,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_4/r12.json",
-        "source_sha256": "1eb7d6ed9fc668ab826c4bfe57c664b33504abc9df414c86007944a73d7bb3a1",
-        "semantic_digest": "4a299cea9d796a60c77a7de62484d7505a0110a57b7e086fa80e81220d49ca8c"
+        "revision": 14,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_4/r14.json",
+        "source_sha256": "b5ef586573d39288a749acf6c9d5d07d1e19537ee72ec5ff38ae6a150b1f6ee6",
+        "semantic_digest": "49c4ec87d228870ef03be6af58bcdac047ba54131a7dff0a59b10e84ba7fa9f8"
       },
       "name": "scenario_4_WR_vs_MWP",
       "description": "Warrior and Rogue must win a two-kill finish before either teammate falls. A concealed Rogue uses its partner's sightings; Warrior's positioning then displaces a stunned Mage into reach. This scenario tests anticipation, body blocking and kill order: finish the dangerous target first, not simply the easiest one. Multi-Step Team-Level Planning prepares Rogue's finishing job before Warrior is stunned.",
       "source": {
         "asset_id": "scenario_4",
-        "revision": 12,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_4/r12.json",
-        "source_sha256": "1eb7d6ed9fc668ab826c4bfe57c664b33504abc9df414c86007944a73d7bb3a1",
-        "semantic_digest": "4a299cea9d796a60c77a7de62484d7505a0110a57b7e086fa80e81220d49ca8c"
+        "revision": 14,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_4/r14.json",
+        "source_sha256": "b5ef586573d39288a749acf6c9d5d07d1e19537ee72ec5ff38ae6a150b1f6ee6",
+        "semantic_digest": "49c4ec87d228870ef03be6af58bcdac047ba54131a7dff0a59b10e84ba7fa9f8"
       },
-      "map_semantic_digest": "9b1dd6e5934069c7d67964ecd7996bccf83cbc5294c8889cbe87d41213ee5be6",
-      "resolved_configuration_digest": "02b2597162c2aabb861310318e420591f6daf2d85573a9bf0f5c1364446f0266",
-      "resolved_initial_state_digest": "c30ffd69e8923091dd88342385ca2df1ebf7d148207a7c86276ba6c54c4cea62",
+      "map_semantic_digest": "74ce8bb0e2235559743e481d2aa600fa24c4c100af544dba59901f499d962cdb",
+      "resolved_configuration_digest": "5f8d39d6a4abc00158030b31d076c8bf1520d63147a66a207d35d1fde2185188",
+      "resolved_initial_state_digest": "4fbdda9c4cc5ce1526120e3176a79e2080955e54e9cc8a03846b8077b4f93b97",
       "class_ids": [
         1,
         2,
@@ -890,24 +890,24 @@
         5
       ],
       "horizon": 5,
-      "resource_sha256": "96ca4f9aeab5fe5c47454bc48392b9fb66b57f0796b99621fb38280890dd8d46"
+      "resource_sha256": "6f9094c4691eda80b2e521660e108112972ce13affafd004dbe5922e05d72549"
     },
     {
       "scenario_id": 5,
       "approved_source": {
         "asset_id": "scenario_5",
-        "revision": 14,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_5/r14.json",
-        "source_sha256": "4d22ff9e5dffe4f42fa2d91a87a01cd7f8f9a9c7aa1505899b1b30c6e0677b23",
+        "revision": 15,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_5/r15.json",
+        "source_sha256": "443665ddff46513eda7ab3dfdeab1355b02b8ef35f572ab15053070e311f870a",
         "semantic_digest": "813d0013a84d6e67bd678032ebd195ecbf588b96d886a3ccac564e7673d43a6c"
       },
       "name": "scenario_5_MWP_vs_MRP",
       "description": "A healer with only 1 HP keeps its teammates alive instead of healing itself. Warrior must screen a Priest-hunting Rogue while Mage removes enemy support and finishes the fight. This five-tick comeback tests coordinated healing, crowd-control and damage priorities, Burst timing, and positioning that makes a teammate's next action possible. Multi-Step Team-Level Planning connects the moving screen, heals and finishing attacks.",
       "source": {
         "asset_id": "scenario_5",
-        "revision": 14,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_5/r14.json",
-        "source_sha256": "4d22ff9e5dffe4f42fa2d91a87a01cd7f8f9a9c7aa1505899b1b30c6e0677b23",
+        "revision": 15,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_5/r15.json",
+        "source_sha256": "443665ddff46513eda7ab3dfdeab1355b02b8ef35f572ab15053070e311f870a",
         "semantic_digest": "813d0013a84d6e67bd678032ebd195ecbf588b96d886a3ccac564e7673d43a6c"
       },
       "map_semantic_digest": "4539006531a070d3f0f79da07e95a4563c7b385808beb30ecbb2bb13263b415e",
@@ -930,7 +930,7 @@
         5
       ],
       "horizon": 5,
-      "resource_sha256": "49047617fa32ea5c35145803d58567518ab54e8017bf0e8a0e1dabef0a70cb37"
+      "resource_sha256": "1895a07e46aae28a2c5f4182593549036d8e82e183f300127719d82da4b3b3b5"
     },
     {
       "scenario_id": 6,
@@ -1016,18 +1016,18 @@
       "scenario_id": 8,
       "approved_source": {
         "asset_id": "scenario_8",
-        "revision": 17,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_8/r17.json",
-        "source_sha256": "246510c79b03be67a58d4fc5e778c01199e513db375eecba4a579e53066d1661",
+        "revision": 18,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_8/r18.json",
+        "source_sha256": "daec01c18347a612addaf2ac7ac0def05234b668b45948a21388149a0e5a9623",
         "semantic_digest": "3a5c0eb7977d814b7ae33914b46a78d46ab19e50c6095b60895b174f115a9194"
       },
       "name": "scenario_8_WRP_vs_RP",
       "description": "A 1-HP healer keeps its bodyguard alive while Warrior deliberately leaves a trapped enemy healer untouched. The team must survive until its Ultimates become available, then finish before the enemy healer can act. This five-tick scenario connects protection, healing allocation and coordinated cooldown timing.",
       "source": {
         "asset_id": "scenario_8",
-        "revision": 17,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_8/r17.json",
-        "source_sha256": "246510c79b03be67a58d4fc5e778c01199e513db375eecba4a579e53066d1661",
+        "revision": 18,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_8/r18.json",
+        "source_sha256": "daec01c18347a612addaf2ac7ac0def05234b668b45948a21388149a0e5a9623",
         "semantic_digest": "3a5c0eb7977d814b7ae33914b46a78d46ab19e50c6095b60895b174f115a9194"
       },
       "map_semantic_digest": "fbde57bdb7774f00562c9a690b29a37c96e6b3076a3a61b66a977bda8eaf1930",
@@ -1050,7 +1050,7 @@
         5
       ],
       "horizon": 5,
-      "resource_sha256": "9082e832f628380c79ddc3d5c049e16ca6e97be7e223d8705ce0b91fe3ef6cda"
+      "resource_sha256": "bf5e87d6e9af310baaaf6ef2005e3ef187df1999ee4e7e4f791e93c3664c41bc"
     }
   ]
 }

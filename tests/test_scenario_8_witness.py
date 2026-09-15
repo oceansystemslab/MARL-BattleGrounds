@@ -1,6 +1,8 @@
-"""Scenario 8's cooldown-coordination witness and seven matched interventions."""
+"""Current Scenario 8 route and its seven matched timing interventions."""
 
+import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import NamedTuple, cast
 from unittest.mock import Mock, patch
 
@@ -8,25 +10,25 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from scripts.dev.visual_debugger.authoring_compiler import CompiledDevScenarioV1
 from tests.scenario_controller_fixtures import (
     SCENARIO_8_SEMANTIC_DIGEST,
     load_scenario_8,
     load_scenario_8_draft,
 )
 
-from marl_battlegrounds.core.env import step
+from marl_battlegrounds.core.env import initialize_scenario_state, step
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_CURRENT_HEALTH,
     AGENT_FEATURE_X,
     AGENT_FEATURE_Y,
     MOVE_EAST,
     MOVE_SOUTH,
-    MOVE_SOUTHWEST,
+    MOVE_SOUTHEAST,
     MOVE_STAY,
     MOVE_WEST,
     STUN_CHANNEL_HUNTER_TRAP,
     STUN_CHANNEL_ROGUE_POISON,
+    STUN_CHANNEL_WARRIOR_CHARGE,
     TEAM_B_ID,
     Action,
     ActionMask,
@@ -49,6 +51,7 @@ from marl_battlegrounds.policies.shared_obs import (
     build_shared_obs_sensor_source_bank,
     execute_shared_obs_team_policy,
 )
+from marl_battlegrounds.tasks import TDMScenario, load_tdm_scenario
 
 _TEAM = cast(
     Callable[..., ActorAction],
@@ -82,40 +85,15 @@ class ActionChange(NamedTuple):
 
 
 @pytest.fixture(scope="module")
-def scenario() -> CompiledDevScenarioV1:
-    return load_scenario_8()
+def scenario() -> TDMScenario:
+    return load_tdm_scenario(8)
 
 
-def _team_a_action(tick: int, changes: tuple[ActionChange, ...]) -> ActorAction:
-    """Complete the author's witness explicitly, not as a unique winning plan."""
-    # Team A slots: dead Mage, Warrior, dead Hunter, Rogue, Priest. Stay and
-    # no-combat fill unspecified choices; tick 5's Priest heal targets self.
-    moves = (
-        (0, MOVE_STAY, 0, MOVE_WEST, MOVE_SOUTH),
-        (0, MOVE_STAY, 0, MOVE_WEST, MOVE_SOUTH),
-        (0, MOVE_STAY, 0, MOVE_STAY, MOVE_SOUTH),
-        (0, MOVE_STAY, 0, MOVE_WEST, MOVE_STAY),
-        (0, MOVE_STAY, 0, MOVE_STAY, MOVE_STAY),
-    )
-    # Team A relative targets: 4 Rogue-A; 5 Priest-A; 9 Rogue-B; 10 Priest-B.
-    targets = (
-        (0, 0, 0, 0, 4),
-        (0, 0, 0, 9, 4),
-        (0, 0, 0, 0, 4),
-        (0, 10, 0, 9, 4),
-        (0, 0, 0, 9, 5),
-    )
-    ultimates = (
-        (0, 0, 0, 0, 0),
-        (0, 0, 0, 1, 0),
-        (0, 0, 0, 0, 0),
-        (0, 1, 0, 0, 1),
-        (0, 0, 0, 0, 0),
-    )
-    heads = [
-        jnp.asarray(values[tick - 1], dtype=jnp.int32)
-        for values in (moves, targets, ultimates)
-    ]
+def _team_a_action(
+    tick: int, command: ActorAction, changes: tuple[ActionChange, ...]
+) -> ActorAction:
+    """Apply only the declared changes to the author's recorded Team A choices."""
+    heads = list(command)
     for change in changes:
         if change.tick == tick:
             heads = [
@@ -126,19 +104,24 @@ def _team_a_action(tick: int, changes: tuple[ActionChange, ...]) -> ActorAction:
 
 
 def _run_witness(
-    scenario: CompiledDevScenarioV1,
+    scenario: TDMScenario,
     changes: tuple[ActionChange, ...] = (),
 ) -> list[WitnessTransition]:
     """Regenerate BETA from each current epoch; stop at the first terminal flag."""
-    state, observation, mask = (
-        scenario.initial_state,
-        scenario.observation,
-        scenario.action_mask,
+    state, observation, mask, _ = initialize_scenario_state(
+        scenario.initial_state, scenario.config
     )
     availability = build_default_shared_obs_information_availability(
         scenario.config.agent_profile.active_mask,
         scenario.config.agent_profile.team_ids,
     )
+    expected = json.loads(
+        (Path(__file__).parent / "fixtures" / "scenario_8_witness.json").read_text()
+    )
+    assert scenario.info.source.revision == expected["source_revision"]
+    assert scenario.info.source.semantic_digest == expected["semantic_digest"]
+    commands = expected["ticks"]
+    assert len(commands) == 5
     trajectory: list[WitnessTransition] = []
     slots = jnp.arange(10)
     for tick in range(1, 6):
@@ -163,8 +146,14 @@ def _run_witness(
             reactive_tdm_beta_policy,
             TEAM_B_ID,
         )
+        command = ActorAction(
+            *(
+                jnp.asarray(commands[tick - 1][head][:5], dtype=jnp.int32)
+                for head in ActorAction._fields
+            )
+        )
         joint = build_joint_action_from_actor_actions(
-            _team_a_action(tick, changes), team_b
+            _team_a_action(tick, command, changes), team_b
         )
         assert bool(jnp.all(mask.move_mask[slots, joint.move]))
         assert bool(
@@ -205,13 +194,13 @@ def _run_witness(
 
 
 @pytest.fixture(scope="module")
-def trajectory(scenario: CompiledDevScenarioV1) -> list[WitnessTransition]:
+def trajectory(scenario: TDMScenario) -> list[WitnessTransition]:
     return _run_witness(scenario)
 
 
-def test_scenario_8_fixture_binds_approved_revision_14_and_beta_v4(
-    scenario: CompiledDevScenarioV1,
-) -> None:
+def test_scenario_8_fixture_binds_approved_revision_14_and_beta_v4() -> None:
+    # Keep the old immutable fixture separate from the current packaged route.
+    scenario = load_scenario_8()
     draft = load_scenario_8_draft()
     assert draft.asset_id == "scenario_8"
     assert draft.revision == 14
@@ -231,7 +220,7 @@ def test_scenario_8_fixture_binds_approved_revision_14_and_beta_v4(
 
 
 def test_witness_repeats_and_wins_at_truncation_without_a_team_a_death(
-    scenario: CompiledDevScenarioV1, trajectory: list[WitnessTransition]
+    scenario: TDMScenario, trajectory: list[WitnessTransition]
 ) -> None:
     repeated = _run_witness(scenario)
     for first, second in zip(
@@ -240,7 +229,7 @@ def test_witness_repeats_and_wins_at_truncation_without_a_team_a_death(
         np.testing.assert_array_equal(first, second)
     assert len(trajectory) == 5
     scores = ((18, 19), (18, 19), (18, 19), (19, 19), (20, 19))
-    rogue_health = (29, 1, 5, 93, 81)
+    rogue_health = (29, 1, 5, 93, 85)
     killed = ((), (), (), (9,), (8,))
     for index, transition in enumerate(trajectory):
         facts = transition.info.transition_facts
@@ -266,7 +255,7 @@ def test_witness_repeats_and_wins_at_truncation_without_a_team_a_death(
     assert int(final.after.step_count) == 300
     np.testing.assert_allclose(
         final.after.current_health[jnp.asarray([1, 3, 4])],
-        [1, 81, 9],
+        [1, 85, 1],
         rtol=0,
         atol=1e-5,
     )
@@ -278,7 +267,7 @@ def test_witness_repeats_and_wins_at_truncation_without_a_team_a_death(
 def test_team_b_responses_are_generated_by_beta(
     trajectory: list[WitnessTransition],
 ) -> None:
-    rogue_moves = (MOVE_SOUTH, MOVE_SOUTHWEST, MOVE_STAY, MOVE_SOUTHWEST, MOVE_EAST)
+    rogue_moves = (MOVE_SOUTH, MOVE_SOUTH, MOVE_STAY, MOVE_SOUTH, MOVE_SOUTHEAST)
     rogue_targets = (0, 9, 0, 9, 9)
     for index, transition in enumerate(trajectory):
         np.testing.assert_array_equal(
@@ -356,7 +345,7 @@ def _assert_matched_intervention(
 
 
 def test_preserving_trap_prevents_the_enemy_healers_early_self_ultimate(
-    scenario: CompiledDevScenarioV1, trajectory: list[WitnessTransition]
+    scenario: TDMScenario, trajectory: list[WitnessTransition]
 ) -> None:
     changes = (ActionChange(1, 1, MOVE_STAY, 10, 0),)
     actual = _run_witness(scenario, changes)
@@ -378,8 +367,8 @@ def test_preserving_trap_prevents_the_enemy_healers_early_self_ultimate(
     assert bool(final.done.truncated)
 
 
-def test_late_charge_cannot_cancel_the_enemy_healers_precommitted_rescue(
-    scenario: CompiledDevScenarioV1, trajectory: list[WitnessTransition]
+def test_late_charge_cannot_cancel_the_enemy_healers_precommitted_self_heal(
+    scenario: TDMScenario, trajectory: list[WitnessTransition]
 ) -> None:
     changes = (
         ActionChange(4, 1, MOVE_STAY, 0, 0),
@@ -390,15 +379,27 @@ def test_late_charge_cannot_cancel_the_enemy_healers_precommitted_rescue(
     assert len(actual) == 5
     final = actual[-1]
     assert int(final.before.stun_durations[9, STUN_CHANNEL_HUNTER_TRAP]) == 0
-    assert int(final.action.select_target[9]) == 4
-    assert int(final.action.use_ultimate[9]) == 1
+    assert tuple(int(head[1]) for head in final.action) == (MOVE_STAY, 10, 1)
+    assert tuple(int(head[9]) for head in final.action) == (MOVE_SOUTH, 5, 1)
+    # Both effects were chosen before this turn's Charge. The healer now heals
+    # itself; this route does not show a dying healer saving its ally.
     combat = final.info.transition_facts.combat_transition_facts
+    assert bool(combat.ultimate_effect_is_activated_by_source[1])
+    assert int(combat.combat_effect_recipient_global_slot_by_source[1]) == 9
+    assert bool(
+        combat.stun_is_applied_by_source_and_channel[1, STUN_CHANNEL_WARRIOR_CHARGE]
+    )
     assert bool(combat.ultimate_effect_is_activated_by_source[9])
-    assert int(combat.combat_effect_recipient_global_slot_by_source[9]) == 8
-    assert float(combat.total_effective_healing_by_recipient[8]) == 100
-    assert float(final.after.current_health[8]) == 96
-    assert bool(final.info.transition_facts.death_facts.is_newly_dead_by_recipient[9])
-    assert not bool(final.after.alive_mask[9])
+    assert int(combat.combat_effect_recipient_global_slot_by_source[9]) == 9
+    assert float(combat.total_effective_healing_by_recipient[9]) == 200
+    assert float(final.after.current_health[9]) == 100
+    assert float(combat.total_effective_healing_by_recipient[8]) == 0
+    assert bool(final.info.transition_facts.death_facts.is_newly_dead_by_recipient[8])
+    assert not bool(
+        final.info.transition_facts.death_facts.is_newly_dead_by_recipient[9]
+    )
+    assert not bool(final.after.alive_mask[8])
+    assert bool(final.after.alive_mask[9])
     np.testing.assert_array_equal(final.after.team_deathmatch_scores, [19, 19])
     np.testing.assert_array_equal(final.reward.rewards, [0] * 10)
     assert not bool(final.done.terminated)
@@ -418,12 +419,12 @@ def test_late_charge_cannot_cancel_the_enemy_healers_precommitted_rescue(
             ActionChange(2, 4, MOVE_SOUTH, 5, 0), 2, (18, 20), id="self-heal-tick-2"
         ),
         pytest.param(
-            ActionChange(4, 4, MOVE_STAY, 5, 1), 4, (19, 20), id="self-ultimate"
+            ActionChange(4, 4, MOVE_EAST, 5, 1), 4, (19, 20), id="self-ultimate"
         ),
     ),
 )
 def test_matched_damage_or_healing_change_loses_rogue_a(
-    scenario: CompiledDevScenarioV1,
+    scenario: TDMScenario,
     trajectory: list[WitnessTransition],
     change: ActionChange,
     terminal_tick: int,
@@ -444,7 +445,7 @@ def test_matched_damage_or_healing_change_loses_rogue_a(
 
 
 def test_tick_3_heal_is_not_necessary_for_this_matched_win(
-    scenario: CompiledDevScenarioV1, trajectory: list[WitnessTransition]
+    scenario: TDMScenario, trajectory: list[WitnessTransition]
 ) -> None:
     changes = (ActionChange(3, 4, MOVE_SOUTH, 0, 0),)
     actual = _run_witness(scenario, changes)
@@ -462,11 +463,11 @@ def test_tick_3_heal_is_not_necessary_for_this_matched_win(
     assert bool(final.done.terminated) and bool(final.done.truncated)
     np.testing.assert_array_equal(final.after.team_deathmatch_scores, [20, 19])
     np.testing.assert_array_equal(final.reward.rewards[:5], [1] * 5)
-    assert float(final.after.current_health[3]) == pytest.approx(77, rel=0, abs=1e-5)
+    assert float(final.after.current_health[3]) == pytest.approx(81, rel=0, abs=1e-5)
 
 
 def test_each_decision_has_one_current_bank_policy_assembly_and_transition(
-    scenario: CompiledDevScenarioV1,
+    scenario: TDMScenario,
 ) -> None:
     calls = Mock()
     for name, original in (

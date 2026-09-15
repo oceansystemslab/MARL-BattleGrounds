@@ -1,6 +1,6 @@
 """Saved per-turn results for every packaged solution beyond Scenario 3.
 
-Scenario 3 has its own eight-turn and draw tests using the same comparison.
+Scenario 3 has its own eight-turn and missed-move tests using the same comparison.
 Older authoring-revision witness and ablation tests remain separate.
 """
 

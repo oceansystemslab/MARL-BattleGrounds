@@ -1446,7 +1446,6 @@ def test_rotated_wall_validation_matches_public_m4_projection(
             center
         )
     )
-    projected_center = _public_geometry_projection(config, center)
     overlaps = bool(
         disc_overlaps_obstacle(
             center,
@@ -1458,12 +1457,13 @@ def test_rotated_wall_validation_matches_public_m4_projection(
     if is_valid:
         assert not overlaps
         assert validate_env_config(config) is None
+        projected_center = _public_geometry_projection(config, center)
         assert bool(jnp.array_equal(projected_center, center))
     else:
         assert overlaps
         with pytest.raises(ValueError, match="wall"):
             validate_env_config(config)
-        assert not bool(jnp.array_equal(projected_center, center))
+        # Ordinary movement need not repair a spawn that validation rejects.
 
 
 @pytest.mark.parametrize(

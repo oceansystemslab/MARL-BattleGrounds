@@ -111,6 +111,7 @@ def refine_movement(
         no_bodies,
         no_bodies,
         agent_agent_overlap_projection_passes=0,
+        collision_projection_passes=4,
     )[:8]
     displacement = jnp.sqrt(jnp.sum(jnp.square(projected - origin), axis=-1))
     direction_length = jnp.sqrt(jnp.sum(jnp.square(intended_direction)))
@@ -521,6 +522,7 @@ def _body_aware_move(  # pyright: ignore[reportUnusedFunction]
         no_bodies,
         no_bodies,
         agent_agent_overlap_projection_passes=0,
+        collision_projection_passes=4,
     )[:8]
     displacement = jnp.sqrt(jnp.sum(jnp.square(endpoints - origin), axis=-1))
     admissible = (

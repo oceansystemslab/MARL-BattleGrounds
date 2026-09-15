@@ -1534,8 +1534,8 @@ def test_runtime_validator_accepts_public_death_and_corpse_successors() -> None:
     assert validate_env_state(config, corpse_state) is None
 
 
-def test_runtime_validator_accepts_an_actual_boundary_residual_successor() -> None:
-    """Accept fixed-pass overlap only at the runtime/replay snapshot boundary."""
+def test_runtime_validator_accepts_an_actual_boundary_contact_successor() -> None:
+    """Accept a public boundary-contact successor without requiring overlap."""
     config = _valid_config(team_sizes=(1, 1))
     moving_slot = MAX_AGENTS_PER_TEAM
     spawn_pad_positions = (
@@ -1574,7 +1574,6 @@ def test_runtime_validator_accepts_an_actual_boundary_residual_successor() -> No
         + config.agent_profile.agent_radii[moving_slot]
     )
 
-    assert center_distance < radius_sum
+    assert abs(center_distance - radius_sum) <= GEOMETRY_TOLERANCE
     assert validate_env_state(config, next_state) is None
-    with pytest.raises(ValueError, match="curated scenario living bodies overlap"):
-        validate_scenario_initial_state(config, next_state)
+    # The separate residual-snapshot test covers curated-start rejection.

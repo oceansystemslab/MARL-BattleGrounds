@@ -21,7 +21,8 @@ def assert_witness_tick(
     """Check every slot; report the case, turn and first changed field.
 
     Expected values come from a saved file, never another run of current code.
-    Small float rounding is allowed. Actions, life flags and outcomes are exact.
+    Position rounding reuses the 0.00016 bound for CPU/GPU snapshot comparisons.
+    Health and damage keep 0.00001. Actions, life flags and outcomes are exact.
     """
     label = f"{case_name}, turn {expected['tick']}"
     facts = info.transition_facts
@@ -39,8 +40,9 @@ def assert_witness_tick(
     ):
         message = f"{label}: {field} changed"
         assert np.shape(actual) == np.shape(expected[field]), message
+        tolerance = 1e-5 if field in ("health", "damage") else 0.00016
         np.testing.assert_allclose(
-            actual, expected[field], rtol=0, atol=1e-5, err_msg=message
+            actual, expected[field], rtol=0, atol=tolerance, err_msg=message
         )
 
     for field, actual in (

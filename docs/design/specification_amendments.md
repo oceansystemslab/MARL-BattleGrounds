@@ -2624,11 +2624,141 @@ Reject incompatible version combinations and changed-contract resumes.
 Ordinary evaluation continues to assign the first policy to simulator Team A.
 Team B training and diagnostic use remain supported. Raw team and agent metrics
 retain their physical identities. Broader tournament rules remain unresolved.
-Collision/ordering changes are deferred until the 12 trained policies undergo
-controlled slot-block testing. Equal real training steps at both spawn ends
-does not itself prove slot fairness.
+[A38](#a38-neutral-collision-handling) supersedes the earlier decision to defer
+collision ordering work until after training the 12 policies. Equal real
+training steps at both spawn ends do not themselves prove slot fairness.
 
 Acceptance requires exact preserved results for the two saved 2,000-game GPU
 schedules, separate matched-shape action/state/input comparisons, historical and
 current recording tests, and measured computation/storage costs. Source review
 alone cannot establish speed, sample efficiency, learned behavior or fairness.
+
+## A38. Neutral Collision Handling
+
+**Accepted change — 2026-09-14.** This supersedes A37's collision-ordering
+deferral and earlier requirements for sequential global-slot or obstacle-row
+collision resolution. It authorizes the reviewed replacement in
+`core/geometry.py`, its ordinary/Charge calls in `core/env.py`, and the two
+explicit static-only policy query budgets in `policies/reactive_common.py`.
+The replacement is integrated. The evidence below supports this change;
+release qualification remains separate from the accepted collision contract.
+
+Reordering agent rows, with every per-agent input reordered to match, must only
+reorder the result. Reordering obstacle rows must leave the result unchanged.
+These are exact float32 storage contracts within the same backend, array shapes
+and execution settings. Team IDs, global slots and obstacle IDs must not choose
+a contact winner or a separating direction. Changing physical coordinates is
+a different operation: ordinary floating-point differences under reflection,
+including their growth through later contact and policy decisions, remain
+diagnostic. This evidence does not assert exact CPU/GPU numerical identity.
+Neither this contract nor a symmetric map requires every self-play game to draw.
+
+The movement solver keeps separate body and static corrections in repeated
+rounds. Its default is four physical movement substeps, with 28 literal
+collision rounds per substep and one body sweep per round. Correction strength
+is fixed at 1. Each substep keeps one starting position; numerical rounds repair
+proposed endpoints from that start. Bounds, actual pillar circles and actual
+rotated rectangles remain authoritative. A rectangle's disc-clearance region
+includes its rounded corners. Static correction retains useful sliding, and a
+whole-disc travel check guards the committed straight segment. This does not
+claim continuous collision detection between moving bodies.
+
+Each body pair shares its correction equally. Geometry supplies contact and
+tie directions, using separation and movement intent rather than row identity.
+A body that becomes a collision participant at the final substep may already
+overlap another body after its earlier intangible movement. That narrow case
+uses the current radial separation for recovery. Already blocking pairs retain
+their incoming-side rule. Equal-radius bodies with exactly equal positions and
+equal intended movement have no physical separating direction. This narrow
+anonymous coincidence may remain coincident; it must not acquire an arbitrary
+axis or slot-based push. Static validity still applies. A later distinct
+movement intent must receive normal collision handling.
+
+Charge uses the explicit `project_charge_endpoints_with_geometry` helper.
+Its requested relocation may pass intervening bodies or obstacles, as before.
+It first repairs the arrival's static contacts, then resolves body contacts
+using the arrival geometry; earlier separation only breaks a direction tie.
+The default performs 28 arrival-recovery rounds and 28 collision rounds in one
+endpoint step. Ordinary movement then runs from the realized Charge positions
+using the already chosen actions. Intermediate Charge body overlap is a
+diagnostic; public body acceptance applies after Charge and ordinary movement.
+
+The accepted general body-overlap ceiling is exactly **0.135 map units** for
+participating bodies in the valid-start qualification scope. This is the amount
+by which the sum of two radii exceeds their center distance. Zero overlap remains
+the preferred result. There is no added tolerance on this ceiling. Named simple
+controls keep their stricter limits,
+and the anonymous case above is the explicit exception. Finite values, bounds,
+obstacle clearance and static travel checks remain separate hard requirements.
+The common ceiling replaces historical per-stratum body limits; those older
+measurements remain diagnostics. Respawn still places each body on its assigned
+pad at the end of the transition. A zero-shield respawn can create the exact
+anonymous overlap described above.
+
+The ordinary helper keeps its existing signature; explicit round counts are
+literal, and zero body sweeps disables body correction. The two static-only
+policy queries explicitly retain four collision rounds. State, observation,
+mask, action, reward, transition-fact and recording schemas are unchanged.
+Action choice, Charge, ordinary movement, death, shield and respawn timing are
+unchanged. No solver memory, public precision setting or coordinate grid is
+added. Existing line-of-sight and obstacle-query behavior is preserved.
+
+The default briefly increased to 64 rounds on 2026-09-15, then returned to 28
+after the GPU cost and scenario comparisons. A commented 64-round option remains
+beside the default for excessive body overlap found during training. R28 was
+about 2.2–2.3 times as fast as R64 in the isolated RTX 5090 movement and Charge
+checks at batches 1, 64 and 1024. This does not measure full training speed.
+The following evidence describes the original 28-round integration and
+acceptance decisions; changing the default back does not rerun those checks.
+
+Completed RTX 5090 evidence for that integration includes 208 aligned team/slot
+pairs across 54 recorded fields in the 416-condition full-game census, plus its exact repeated
+run with reordered world lanes. The final integrated source reproduces all 92
+saved arrays from those two executions exactly, including captured collision
+inputs and outputs. The integrated movement helper also matches the frozen
+candidate exactly on endpoints and all four committed substeps for the full
+13,312-input bank on CPU and GPU. Focused comparisons cover Charge and the
+static-only policy queries. A final type-only change preserves the calculation
+and passes the full GPU game comparison. No full CPU game comparison between
+the candidate and integrated versions is claimed.
+
+Three further public contacts found in the CPU census were replayed with the
+same saved inputs on GPU. Their GPU overlap depths are 0.134743, 0.095014 and
+0.107966 map units. The user inspected these contacts and accepted the 0.135
+ceiling. All three pass that ceiling; their earlier failures under 0.076 remain
+recorded. This acceptance change does not change the 28-round solver or its cost.
+
+The separate controlled-reflection study completes 2,496 games with no assigned
+physical failures and exact retained team/slot comparisons in both orientations.
+Reflected game outcomes often differ: 194 of 416 matched outcomes agree when
+controllers choose actions throughout each game. These are spatial-reflection
+diagnostics, not evidence that all mirrored fights agree. The checks support
+the stated comparisons; they do not establish a universal speedup or
+sample-efficiency claim.
+
+**Scenario repair — 2026-09-15.** The user supplied revised winning commands
+for Scenarios 1, 3, 5 and 8 and three small physical edits for Scenario 4.
+Its Mage-B starts at y=5.8, obstacle_0 moves to x=7.2, and obstacle_2 moves
+to y=3.4. Scenarios 2, 6 and 7 retain their commands and physical setup.
+All eight keep their goals, rules and intended mechanics. Their nine winning
+lines, including both Scenario 1 healing choices, now win 20–19 on GPU over
+41 real transitions. Expected per-turn records were updated only after those
+user-supplied routes were verified with live opponent decisions. Scenario 3's
+revised missed-move control loses Hunter on turn 7; its older draw result
+belongs to the earlier route.
+
+The packaged scenarios and Notes now use revisions 41/19/26/14/15/16/29/18.
+Scenario 3 retains approved r24 physics. Twenty-four focused GPU checks pass
+for the packaged solutions, their identities and public initialization.
+Standalone solution tests use the revised commands and the current packaged
+setups where those setups changed. Historical fixture checks remain separate.
+Scenario 2 demonstrates its within-range wall protection on turn 4, after its
+turn-3 Ultimate heal. Delaying Charge in the revised Scenario 8 lets Priest-B
+complete its chosen self-heal and produces a 19–19 draw. This retains the
+action-timing lesson; the older dying-healer rescue belongs to the older route.
+CPU/GPU position and displacement snapshots allow 0.00016 map units of
+rounding difference; health and damage retain 0.00001, and actions, life flags,
+scores and outcomes remain exact. Storage permutations remain exact on the
+same backend. These focused
+results do not claim a complete regression-gate or release-qualification pass;
+those gates must be run on the final candidate.

@@ -116,7 +116,7 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
             ),
             (
                 "file:tests/test_shared_obs_runtime.py",
-                11,
+                12,
                 3,
             ),
         )

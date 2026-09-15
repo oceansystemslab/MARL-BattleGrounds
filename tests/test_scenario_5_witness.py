@@ -1,31 +1,25 @@
-"""The approved five-transition coordinated-healing witness, not a policy tape."""
+"""The current five-turn healing solution and the separate historical fixture."""
 
+import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from scripts.dev.visual_debugger.authoring_compiler import CompiledDevScenarioV1
 from tests.scenario_controller_fixtures import (
     SCENARIO_5_SEMANTIC_DIGEST,
     load_scenario_5,
     load_scenario_5_draft,
 )
 
-from marl_battlegrounds.core.env import step
+from marl_battlegrounds.core.env import initialize_scenario_state, step
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_CURRENT_HEALTH,
     AGENT_FEATURE_X,
     AGENT_FEATURE_Y,
-    MOVE_NORTH,
-    MOVE_NORTHEAST,
-    MOVE_NORTHWEST,
-    MOVE_SOUTH,
-    MOVE_SOUTHEAST,
-    MOVE_STAY,
-    MOVE_WEST,
     STUN_CHANNEL_ROGUE_POISON,
     TEAM_B_ID,
     Action,
@@ -46,6 +40,7 @@ from marl_battlegrounds.policies.shared_obs import (
     build_shared_obs_sensor_source_bank,
     execute_shared_obs_team_policy,
 )
+from marl_battlegrounds.tasks import TDMScenario, load_tdm_scenario
 
 _TEAM = cast(
     Callable[..., ActorAction],
@@ -67,43 +62,25 @@ class WitnessTransition(NamedTuple):
 
 
 @pytest.fixture(scope="module")
-def scenario() -> CompiledDevScenarioV1:
-    return load_scenario_5()
+def scenario() -> TDMScenario:
+    return load_tdm_scenario(5)
 
 
-def _run_witness(scenario: CompiledDevScenarioV1) -> list[WitnessTransition]:
-    state, observation, mask = (
-        scenario.initial_state,
-        scenario.observation,
-        scenario.action_mask,
+def _run_witness(scenario: TDMScenario) -> list[WitnessTransition]:
+    state, observation, mask, _ = initialize_scenario_state(
+        scenario.initial_state, scenario.config
     )
     availability = build_default_shared_obs_information_availability(
         scenario.config.agent_profile.active_mask,
         scenario.config.agent_profile.team_ids,
     )
-    # Team A slots: Mage, Warrior, dead Hunter, dead Rogue, Priest.
-    moves = (
-        (MOVE_NORTHEAST, MOVE_NORTH, 0, 0, MOVE_SOUTH),
-        (MOVE_NORTHWEST, MOVE_STAY, 0, 0, MOVE_SOUTHEAST),
-        (MOVE_WEST, MOVE_WEST, 0, 0, MOVE_SOUTH),
-        (MOVE_WEST, MOVE_STAY, 0, 0, MOVE_WEST),
-        (MOVE_WEST, MOVE_SOUTHEAST, 0, 0, MOVE_NORTHWEST),
+    expected = json.loads(
+        (Path(__file__).parent / "fixtures" / "scenario_5_witness.json").read_text()
     )
-    # Relative targets: 1 Mage-A, 2 Warrior-A, 6 Mage-B, 9 Rogue-B, 10 Priest-B.
-    targets = (
-        (0, 9, 0, 0, 2),
-        (10, 9, 0, 0, 1),
-        (10, 9, 0, 0, 1),
-        (6, 0, 0, 0, 2),
-        (6, 9, 0, 0, 2),
-    )
-    ultimates = (
-        (1, 1, 0, 0, 0),
-        (0, 0, 0, 0, 0),
-        (0, 0, 0, 0, 1),
-        (0, 0, 0, 0, 0),
-        (0, 0, 0, 0, 0),
-    )
+    assert scenario.info.source.revision == expected["source_revision"]
+    assert scenario.info.source.semantic_digest == expected["semantic_digest"]
+    commands = expected["ticks"]
+    assert len(commands) == 5
     trajectory: list[WitnessTransition] = []
     slots = jnp.arange(10)
     for tick in range(5):
@@ -129,9 +106,10 @@ def _run_witness(scenario: CompiledDevScenarioV1) -> list[WitnessTransition]:
             TEAM_B_ID,
         )
         team_a = ActorAction(
-            jnp.asarray(moves[tick], dtype=jnp.int32),
-            jnp.asarray(targets[tick], dtype=jnp.int32),
-            jnp.asarray(ultimates[tick], dtype=jnp.int32),
+            *(
+                jnp.asarray(commands[tick][head][:5], dtype=jnp.int32)
+                for head in ActorAction._fields
+            )
         )
         joint = build_joint_action_from_actor_actions(team_a, team_b)
         assert bool(jnp.all(mask.move_mask[slots, joint.move]))
@@ -157,9 +135,9 @@ def _run_witness(scenario: CompiledDevScenarioV1) -> list[WitnessTransition]:
     return trajectory
 
 
-def test_scenario_5_fixture_preserves_the_approved_physical_revision(
-    scenario: CompiledDevScenarioV1,
-) -> None:
+def test_scenario_5_fixture_preserves_the_approved_physical_revision() -> None:
+    # Keep the original r9 fixture separate from the current packaged solution.
+    scenario = load_scenario_5()
     draft = load_scenario_5_draft()
     assert draft.asset_id == "scenario_5"
     assert draft.revision == 9
@@ -172,7 +150,7 @@ def test_scenario_5_fixture_preserves_the_approved_physical_revision(
 
 
 def test_coordinated_healing_witness_wins_on_the_final_transition(
-    scenario: CompiledDevScenarioV1,
+    scenario: TDMScenario,
 ) -> None:
     trajectory = _run_witness(scenario)
     repeated = _run_witness(scenario)

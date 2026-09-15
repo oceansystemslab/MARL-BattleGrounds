@@ -1,14 +1,14 @@
-"""Shared JAX-compatible geometry helpers for simulator movement and LOS."""
+"""Shared JAX geometry for movement, Charge endpoints and line of sight."""
 
 from typing import cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
 
 from marl_battlegrounds.core.types import (
     MAX_AGENT_SLOTS,
-    MAX_OBSTACLE_SLOTS,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
     OBSTACLE_FEATURE_RADIUS,
@@ -23,127 +23,30 @@ from marl_battlegrounds.core.types import (
 
 GEOMETRY_EPSILON = 1e-6
 GEOMETRY_TOLERANCE = 1e-5
-# Milestone 4 defaults are implementation-local, not public schema. With the
-# Step 1 placeholder movement speed of 1.0 and default agent radius of 0.5, four
-# movement substeps advance 0.25 world units at a time, which is small enough for
-# the early deterministic maps without doubling projection cost. Four projection
-# passes meaningfully reduce ordinary body-blocking residuals while keeping JAX
-# control flow fixed and cheap. Revisit these after Step 3 movement integration
-# profiling, especially if class mechanics introduce faster movement.
+_STATIC_TRAVEL_MARGIN = 2e-6
 DEFAULT_MOVEMENT_SUBSTEPS = 4
-DEFAULT_AGENT_PROJECTION_PASSES = 4
+# This is a literal count. Static policy probes explicitly use four rounds.
+DEFAULT_AGENT_PROJECTION_PASSES = 28
+# DEFAULT_AGENT_PROJECTION_PASSES = 64
+# Enable 64 if training reveals excessive body overlap.
+# Cost: 28 was about 2.2-2.3x as fast in isolated RTX 5090 movement/Charge
+# checks (batches 1, 64 and 1024); this is not a full-training speedup.
 
 __all__ = (
     "disc_overlaps_obstacle",
     "has_clear_line_of_sight",
+    "project_charge_endpoints_with_geometry",
     "project_movement_with_geometry",
 )
 
-# Private geometry helpers ---
-
-
-def _project_overlapping_pillar(
-    distance_vector: Array,
-    pillar_center: Array,
-    distance_between_centers: Array,
-    sum_of_radii: Array | float,
-    center: Array,
-) -> Array:
-    """Resolve an agent-pillar overlap using a measured or fallback direction."""
-    has_measured_direction = distance_between_centers > GEOMETRY_EPSILON
-
-    return cast(
-        Array,
-        jax.lax.cond(
-            has_measured_direction,
-            _project_pillar_with_measured_direction,
-            _project_pillar_with_fallback_direction,
-            distance_vector,
-            pillar_center,
-            distance_between_centers,
-            sum_of_radii,
-            center,
-        ),
-    )
-
-
-def _project_pillar_with_measured_direction(
-    distance_vector: Array,
-    pillar_center: Array,
-    distance_between_centers: Array,
-    sum_of_radii: Array | float,
-    center: Array,
-) -> Array:
-    """Move an overlapping agent center to pillar tangency along the radial line."""
-    del center
-
-    unit_direction = distance_vector / distance_between_centers
-
-    return pillar_center + sum_of_radii * unit_direction
-
-
-def _project_pillar_with_fallback_direction(
-    distance_vector: Array,
-    pillar_center: Array,
-    distance_between_centers: Array,
-    sum_of_radii: Array | float,
-    center: Array,
-) -> Array:
-    """Move a coincident agent center out of a pillar along a fixed world axis."""
-    del distance_vector, distance_between_centers, center
-
-    fallback_direction = jnp.array([1.0, 0.0], dtype=jnp.float32)
-
-    return pillar_center + sum_of_radii * fallback_direction
-
-
-def _keep_pillar_projection_center(
-    distance_vector: Array,
-    pillar_center: Array,
-    distance_between_centers: Array,
-    sum_of_radii: Array | float,
-    center: Array,
-) -> Array:
-    """Keep an agent center unchanged when it does not overlap the pillar."""
-    del distance_vector, pillar_center, distance_between_centers, sum_of_radii
-
-    return center
-
-
-def _project_disc_out_of_active_pillar(
-    center: Array,
-    radius: Array | float,
-    obstacle: Array,
-) -> Array:
-    """Resolve collision between one agent disc and one active circular pillar."""
-    pillar_center = jnp.stack(
-        (
-            obstacle[OBSTACLE_FEATURE_X],
-            obstacle[OBSTACLE_FEATURE_Y],
-        )
-    )
-    pillar_radius = obstacle[OBSTACLE_FEATURE_RADIUS]
-
-    distance_vector = center - pillar_center
-    distance_between_centers = jnp.hypot(distance_vector[0], distance_vector[1])
-    sum_of_radii = radius + pillar_radius
-    projection_needed = cast(
-        bool, _disc_overlaps_active_pillar(center, radius, obstacle)
-    )
-
-    return cast(
-        Array,
-        jax.lax.cond(
-            projection_needed,
-            _project_overlapping_pillar,
-            _keep_pillar_projection_center,
-            distance_vector,
-            pillar_center,
-            distance_between_centers,
-            sum_of_radii,
-            center,
-        ),
-    )
+# These fixed tables give each body its nine pair contributions.
+_FIRST, _SECOND = np.triu_indices(MAX_AGENT_SLOTS, 1)
+_PAIR_INDEX = np.zeros((MAX_AGENT_SLOTS, MAX_AGENT_SLOTS - 1), dtype=np.int32)
+_PAIR_SIGN = np.zeros((MAX_AGENT_SLOTS, MAX_AGENT_SLOTS - 1), dtype=np.float32)
+for _actor in range(MAX_AGENT_SLOTS):
+    _ids = np.flatnonzero((_actor == _FIRST) | (_actor == _SECOND))
+    _PAIR_INDEX[_actor] = _ids
+    _PAIR_SIGN[_actor] = np.where(_FIRST[_ids] == _actor, 1.0, -1.0)
 
 
 def _create_2d_rotation_matrix(theta: Array | float) -> Array:
@@ -261,272 +164,6 @@ def disc_overlaps_obstacle(
     )
 
 
-def _project_inside_disc_out_of_active_wall(
-    agent_center_wall_local: Array,
-    nearest_point_to_agent_center: Array,
-    wall_x_bounds: Array,
-    wall_y_bounds: Array,
-    radius: Array | float,
-) -> Array:
-    """Push an agent center that is inside wall geometry through the nearest face."""
-    del nearest_point_to_agent_center
-
-    # Inside-wall projection is ambiguous at corners and at the rectangle center;
-    # choose the nearest local face so the result is deterministic.
-    distance_to_left_face = jnp.abs(agent_center_wall_local[0] - wall_x_bounds[0])
-    distance_to_right_face = jnp.abs(agent_center_wall_local[0] - wall_x_bounds[1])
-    distance_to_bottom_face = jnp.abs(agent_center_wall_local[1] - wall_y_bounds[0])
-    distance_to_top_face = jnp.abs(agent_center_wall_local[1] - wall_y_bounds[1])
-
-    distances_to_faces = jnp.array(
-        [
-            distance_to_left_face,
-            distance_to_right_face,
-            distance_to_bottom_face,
-            distance_to_top_face,
-        ],
-        dtype=jnp.float32,
-    )
-    nearest_face_index = jnp.argmin(distances_to_faces)
-
-    branches = (
-        _project_inside_disc_to_left_face_of_wall,
-        _project_inside_disc_to_right_face_of_wall,
-        _project_inside_disc_to_bottom_face_of_wall,
-        _project_inside_disc_to_top_face_of_wall,
-    )
-
-    return cast(
-        Array,
-        jax.lax.switch(
-            nearest_face_index,
-            branches,
-            agent_center_wall_local,
-            wall_x_bounds,
-            wall_y_bounds,
-            radius,
-        ),
-    )
-
-
-def _project_inside_disc_to_left_face_of_wall(
-    agent_center_wall_local: Array,
-    wall_x_bounds: Array,
-    wall_y_bounds: Array,
-    radius: Array | float,
-) -> Array:
-    """Place an inside-wall agent just outside the wall's local left face."""
-    del wall_y_bounds
-
-    return jnp.array(
-        (
-            wall_x_bounds[0] - radius,
-            agent_center_wall_local[1],
-        ),
-        dtype=jnp.float32,
-    )
-
-
-def _project_inside_disc_to_right_face_of_wall(
-    agent_center_wall_local: Array,
-    wall_x_bounds: Array,
-    wall_y_bounds: Array,
-    radius: Array | float,
-) -> Array:
-    """Place an inside-wall agent just outside the wall's local right face."""
-    del wall_y_bounds
-
-    return jnp.array(
-        (
-            wall_x_bounds[1] + radius,
-            agent_center_wall_local[1],
-        ),
-        dtype=jnp.float32,
-    )
-
-
-def _project_inside_disc_to_bottom_face_of_wall(
-    agent_center_wall_local: Array,
-    wall_x_bounds: Array,
-    wall_y_bounds: Array,
-    radius: Array | float,
-) -> Array:
-    """Place an inside-wall agent just outside the wall's local bottom face."""
-    del wall_x_bounds
-
-    return jnp.array(
-        (
-            agent_center_wall_local[0],
-            wall_y_bounds[0] - radius,
-        ),
-        dtype=jnp.float32,
-    )
-
-
-def _project_inside_disc_to_top_face_of_wall(
-    agent_center_wall_local: Array,
-    wall_x_bounds: Array,
-    wall_y_bounds: Array,
-    radius: Array | float,
-) -> Array:
-    """Place an inside-wall agent just outside the wall's local top face."""
-    del wall_x_bounds
-
-    return jnp.array(
-        (
-            agent_center_wall_local[0],
-            wall_y_bounds[1] + radius,
-        ),
-        dtype=jnp.float32,
-    )
-
-
-def _project_outside_disc_out_of_active_wall(
-    agent_center_wall_local: Array,
-    nearest_point_to_agent_center: Array,
-    wall_x_bounds: Array,
-    wall_y_bounds: Array,
-    radius: Array | float,
-) -> Array:
-    """Resolve outside-wall overlap in wall-local coordinates."""
-    del wall_x_bounds, wall_y_bounds
-
-    wall_to_agent_center_vector = (
-        agent_center_wall_local - nearest_point_to_agent_center
-    )
-    distance_to_wall = jnp.hypot(
-        wall_to_agent_center_vector[0], wall_to_agent_center_vector[1]
-    )
-    projection_needed = radius > distance_to_wall
-
-    return cast(
-        Array,
-        jax.lax.cond(
-            projection_needed,
-            _project_overlapping_outside_disc_out_of_active_wall,
-            _keep_wall_projection_center,
-            agent_center_wall_local,
-            wall_to_agent_center_vector,
-            distance_to_wall,
-            radius,
-        ),
-    )
-
-
-def _project_overlapping_outside_disc_out_of_active_wall(
-    agent_center_wall_local: Array,
-    wall_to_agent_center_vector: Array,
-    distance_to_wall: Array,
-    radius: Array | float,
-) -> Array:
-    """Move an overlapping outside-wall agent along the wall contact normal."""
-    direction_vector = wall_to_agent_center_vector / distance_to_wall
-    violation_magnitude = radius - distance_to_wall
-
-    return agent_center_wall_local + violation_magnitude * direction_vector
-
-
-def _keep_wall_projection_center(
-    agent_center_wall_local: Array,
-    wall_to_agent_center_vector: Array,
-    distance_to_wall: Array,
-    radius: Array | float,
-) -> Array:
-    """Keep a wall-local agent center unchanged when there is no wall overlap."""
-    del wall_to_agent_center_vector, distance_to_wall, radius
-
-    return agent_center_wall_local
-
-
-def _project_disc_out_of_active_wall(
-    center: Array,
-    radius: Array | float,
-    obstacle: Array,
-) -> Array:
-    """Resolve collision between one agent disc and one active rotated wall."""
-    wall_center = jnp.stack(
-        (
-            obstacle[OBSTACLE_FEATURE_X],
-            obstacle[OBSTACLE_FEATURE_Y],
-        )
-    )
-    wall_width = obstacle[OBSTACLE_FEATURE_WIDTH]
-    wall_height = obstacle[OBSTACLE_FEATURE_HEIGHT]
-    wall_theta = obstacle[OBSTACLE_FEATURE_THETA]
-
-    # Work in the wall's local frame so rotated walls reduce to axis-aligned
-    # rectangle projection.
-    world_to_wall = _create_2d_rotation_matrix(-wall_theta)
-    agent_center_wall_local = world_to_wall @ (center - wall_center)
-
-    wall_x_bounds = jnp.array(
-        [-wall_width / 2.0, wall_width / 2.0],
-        dtype=jnp.float32,
-    )
-    wall_y_bounds = jnp.array(
-        [-wall_height / 2.0, wall_height / 2.0],
-        dtype=jnp.float32,
-    )
-
-    nearest_x_to_agent_center = jnp.clip(
-        agent_center_wall_local[0],
-        min=wall_x_bounds[0],
-        max=wall_x_bounds[1],
-    )
-    nearest_y_to_agent_center = jnp.clip(
-        agent_center_wall_local[1],
-        min=wall_y_bounds[0],
-        max=wall_y_bounds[1],
-    )
-    nearest_point_to_agent_center = jnp.stack(
-        (
-            nearest_x_to_agent_center,
-            nearest_y_to_agent_center,
-        )
-    )
-
-    # If clamping did not move the point, the center is inside or on the wall.
-    center_is_inside_or_on_wall = jnp.array_equal(
-        nearest_point_to_agent_center, agent_center_wall_local
-    )
-
-    center_is_outside_wall = jnp.logical_not(center_is_inside_or_on_wall)
-
-    new_center_wall_local = cast(
-        Array,
-        jax.lax.cond(
-            center_is_outside_wall,
-            _project_outside_disc_out_of_active_wall,
-            _project_inside_disc_out_of_active_wall,
-            agent_center_wall_local,
-            nearest_point_to_agent_center,
-            wall_x_bounds,
-            wall_y_bounds,
-            radius,
-        ),
-    )
-
-    wall_to_world = world_to_wall.T
-    projected_world_center = (wall_to_world @ new_center_wall_local) + wall_center
-
-    # Preserve the original world coordinates exactly when no collision exists.
-    # Rotating a separated center into the wall frame and back can otherwise
-    # introduce float32 drift during MOVE_STAY.
-    projection_needed = _disc_overlaps_active_wall(center, radius, obstacle)
-    return jnp.where(projection_needed, projected_world_center, center)
-
-
-def _keep_obstacle_projection_center(
-    center: Array,
-    radius: Array | float,
-    obstacle: Array,
-) -> Array:
-    """Keep an agent center unchanged for inactive or non-matching obstacles."""
-    del radius, obstacle
-
-    return center
-
-
 def _obstacle_blocks_line_of_sight(
     agent_center_a: Array,
     agent_center_b: Array,
@@ -622,278 +259,6 @@ def _inactive_or_none_obstacle(
     del agent_center_a, agent_center_b, obstacle
 
     return jnp.array(False)
-
-
-def _return_original_positions(
-    agent_positions: Array,
-    distance_between_agents: Array | float,
-    agent_a_index: int,
-    agent_b_index: int,
-    agent_radii: Array,
-) -> Array:
-    """Keep positions unchanged when an agent pair does not need projection."""
-    del distance_between_agents, agent_a_index, agent_b_index, agent_radii
-    return agent_positions
-
-
-def _resolve_agent_agent_overlap(
-    agent_positions: Array,
-    distance_between_agents: Array | float,
-    agent_a_index: int,
-    agent_b_index: int,
-    agent_radii: Array,
-) -> Array:
-    """Symmetrically separate one overlapping active-alive agent pair."""
-    agent_center_a = agent_positions[agent_a_index]
-    agent_center_b = agent_positions[agent_b_index]
-
-    displacement_a_from_b = agent_center_a - agent_center_b
-    centers_are_coincident = distance_between_agents <= GEOMETRY_EPSILON
-
-    # Coincident centers have no geometric normal; use a fixed axis to keep the
-    # projection finite and deterministic.
-    safe_distance = jnp.where(
-        centers_are_coincident,
-        1.0,
-        distance_between_agents,
-    )
-
-    fallback_direction_a = jnp.array(
-        (1.0, 0.0),
-        dtype=agent_positions.dtype,
-    )
-
-    direction_vector_a = jnp.where(
-        centers_are_coincident,
-        fallback_direction_a,
-        displacement_a_from_b / safe_distance,
-    )
-    direction_vector_b = -direction_vector_a
-
-    sum_of_radii = agent_radii[agent_a_index] + agent_radii[agent_b_index]
-
-    degree_of_violation = jnp.where(
-        centers_are_coincident, sum_of_radii, sum_of_radii - distance_between_agents
-    )
-
-    updated_agent_a_center = agent_center_a + direction_vector_a * (
-        degree_of_violation / 2.0
-    )
-    updated_agent_b_center = agent_center_b + direction_vector_b * (
-        degree_of_violation / 2.0
-    )
-
-    agent_positions = agent_positions.at[agent_a_index].set(updated_agent_a_center)
-    agent_positions = agent_positions.at[agent_b_index].set(updated_agent_b_center)
-
-    return agent_positions
-
-
-# Private projection kernels ---
-
-
-def _project_disc_to_bounds(
-    center: Array,
-    radius: Array | float,
-    map_width: Array | float,
-    map_height: Array | float,
-) -> Array:
-    """Keep an agent disc fully inside the rectangular map."""
-    center_x = jnp.clip(center[0], min=radius, max=map_width - radius)
-    center_y = jnp.clip(center[1], min=radius, max=map_height - radius)
-
-    return jnp.stack((center_x, center_y))
-
-
-def _project_disc_out_of_pillar(
-    center: Array,
-    radius: Array | float,
-    obstacle: Array,
-) -> Array:
-    """Resolve one agent against one circular pillar obstacle row."""
-    is_active_pillar = jnp.logical_and(
-        obstacle[OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_PILLAR,
-        obstacle[OBSTACLE_FEATURE_ACTIVE] == 1.0,
-    )
-
-    return cast(
-        Array,
-        jax.lax.cond(
-            is_active_pillar,
-            _project_disc_out_of_active_pillar,
-            _keep_obstacle_projection_center,
-            center,
-            radius,
-            obstacle,
-        ),
-    )
-
-
-def _project_disc_out_of_wall(
-    center: Array,
-    radius: Array | float,
-    obstacle: Array,
-) -> Array:
-    """Resolve one agent against one rotated wall obstacle row."""
-    is_active_wall = jnp.logical_and(
-        obstacle[OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_WALL,
-        obstacle[OBSTACLE_FEATURE_ACTIVE] == 1.0,
-    )
-
-    return cast(
-        Array,
-        jax.lax.cond(
-            is_active_wall,
-            _project_disc_out_of_active_wall,
-            _keep_obstacle_projection_center,
-            center,
-            radius,
-            obstacle,
-        ),
-    )
-
-
-def _project_disc_out_of_obstacle(
-    center: Array,
-    radius: Array | float,
-    obstacle: Array,
-) -> Array:
-    """Resolve one agent against one padded obstacle row."""
-    # Obstacle type values are part of the fixed obstacle-row schema:
-    # 0 = none, 1 = pillar, 2 = wall.
-    idx = obstacle[OBSTACLE_FEATURE_TYPE].astype(jnp.int32)
-
-    branches = [
-        _keep_obstacle_projection_center,
-        _project_disc_out_of_pillar,
-        _project_disc_out_of_wall,
-    ]
-    return cast(Array, jax.lax.switch(idx, branches, center, radius, obstacle))
-
-
-def _project_disc_out_of_obstacles(
-    center: Array,
-    radius: Array | float,
-    obstacles: Array,  # (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES)
-) -> Array:
-    """Resolve one agent against every static obstacle slot."""
-
-    def _project_disc_out_of_obstacle_wrapper(
-        i: int,
-        current_center: Array,
-    ) -> Array:
-        """Project the carried center against obstacle slot i."""
-        return _project_disc_out_of_obstacle(current_center, radius, obstacles[i])
-
-    # Projection is sequential: each obstacle sees the center produced by the
-    # preceding obstacle slot.
-    return cast(
-        Array,
-        jax.lax.fori_loop(
-            0, MAX_OBSTACLE_SLOTS, _project_disc_out_of_obstacle_wrapper, center
-        ),
-    )
-
-
-def _resolve_agent_agent_overlaps(
-    agent_positions: Array,
-    agent_radii: Array,
-    active_mask: Array,
-    alive_mask: Array,
-    agent_agent_collision_participation_mask: Array,
-    projection_passes: int = DEFAULT_AGENT_PROJECTION_PASSES,
-) -> Array:
-    """Reduce active-alive body overlap with fixed pairwise passes."""
-    participants = jnp.logical_and(
-        jnp.logical_and(active_mask, alive_mask),
-        agent_agent_collision_participation_mask,
-    )
-
-    def _projection_pass(
-        pass_index: int,
-        current_agent_positions: Array,
-    ) -> Array:
-        """Run one fixed sweep over all agent pairs."""
-        del pass_index
-
-        def _resolve_pairs_for_agent(
-            agent_a_index: int,
-            current_positions: Array,
-        ) -> Array:
-            """Resolve pairs anchored at one agent slot."""
-
-            def _resolve_pair(
-                agent_b_index: int,
-                pair_positions: Array,
-            ) -> Array:
-                """Resolve one ordered agent pair when both slots participate."""
-                # The triangular sweep visits each pair once without constructing
-                # a dynamic pair list, which keeps JAX shapes static.
-                pair_participants = jnp.logical_and(
-                    participants[agent_a_index],
-                    participants[agent_b_index],
-                )
-
-                distance_between_agents = cast(
-                    Array,
-                    jnp.linalg.norm(
-                        pair_positions[agent_a_index] - pair_positions[agent_b_index]
-                    ),
-                )
-
-                sum_of_radii = agent_radii[agent_a_index] + agent_radii[agent_b_index]
-                pair_overlaps = sum_of_radii > distance_between_agents
-                should_resolve_pair = jnp.logical_and(
-                    pair_participants,
-                    pair_overlaps,
-                )
-
-                return cast(
-                    Array,
-                    jax.lax.cond(
-                        should_resolve_pair,
-                        _resolve_agent_agent_overlap,
-                        _return_original_positions,
-                        pair_positions,
-                        distance_between_agents,
-                        agent_a_index,
-                        agent_b_index,
-                        agent_radii,
-                    ),
-                )
-
-            return cast(
-                Array,
-                jax.lax.fori_loop(
-                    lower=agent_a_index + 1,
-                    upper=MAX_AGENT_SLOTS,
-                    body_fun=_resolve_pair,
-                    init_val=current_positions,
-                ),
-            )
-
-        return cast(
-            Array,
-            jax.lax.fori_loop(
-                lower=0,
-                upper=MAX_AGENT_SLOTS,
-                body_fun=_resolve_pairs_for_agent,
-                init_val=current_agent_positions,
-            ),
-        )
-
-    return cast(
-        Array,
-        jax.lax.fori_loop(
-            lower=0,
-            upper=projection_passes,
-            body_fun=_projection_pass,
-            init_val=agent_positions,
-        ),
-    )
-
-
-# Private LOS kernels ---
 
 
 def _segment_intersects_circle(
@@ -996,174 +361,6 @@ def _segment_intersects_rotated_rect(
     )
 
 
-# Public geometry API ---
-
-
-def project_movement_with_geometry(
-    agent_positions: Array,
-    agent_radii: Array,
-    intended_movement_deltas: Array,
-    active_mask: Array,
-    alive_mask: Array,
-    map_width: Array | float,
-    map_height: Array | float,
-    obstacles: Array,
-    always_participates_in_agent_agent_collision: Array,
-    participates_in_agent_agent_collision_at_final_position: Array,
-    agent_agent_overlap_projection_passes: int = 1,
-    collision_projection_passes: int = DEFAULT_AGENT_PROJECTION_PASSES,
-    movement_substeps: int = DEFAULT_MOVEMENT_SUBSTEPS,
-) -> Array:
-    """Project intended per-slot movement through shared geometry constraints.
-
-    This helper is the public array-level geometry primitive that ``env.step``
-    calls with already-computed movement deltas; action and lifecycle semantics
-    belong outside this module. Final committed positions prioritize static
-    world validity. Agent-agent body blocking uses a deterministic fixed-pass
-    projection, which fully separates ordinary feasible cases and may leave
-    bounded residual overlap in pinned or crowded cases.
-
-    Args:
-        agent_positions: Current slot-aligned centers with shape
-            ``(MAX_AGENT_SLOTS, 2)``.
-        agent_radii: Slot-aligned body radii with shape ``(MAX_AGENT_SLOTS,)``.
-        intended_movement_deltas: Slot-aligned movement deltas with shape
-            ``(MAX_AGENT_SLOTS, 2)``.
-        active_mask: Boolean mask for real, non-padding agent slots.
-        alive_mask: Boolean mask for currently alive agent slots.
-        map_width: Width of the rectangular battleground.
-        map_height: Height of the rectangular battleground.
-        obstacles: Fixed obstacle table with shape
-            ``(MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES)``.
-        always_participates_in_agent_agent_collision: Slot mask governing
-            agent-agent collision during movement traversal.
-        participates_in_agent_agent_collision_at_final_position: Slot mask
-            governing agent-agent collision after the final movement increment.
-            A pair exchanges collision displacement only when both rows
-            participate.
-        agent_agent_overlap_projection_passes: Fixed pairwise overlap sweeps
-            inside each collision projection pass.
-        collision_projection_passes: Fixed passes that compose boundary,
-            obstacle, and agent-agent projection during each movement substep.
-        movement_substeps: Fixed number of movement increments used to apply
-            the provided deltas.
-
-    Returns:
-        Slot-aligned projected positions. Inactive and dead slots preserve their
-        original positions.
-
-    """
-    original_agent_positions = agent_positions
-
-    participant_mask = jnp.logical_and(active_mask, alive_mask)[:, None]
-
-    substep_deltas = intended_movement_deltas / movement_substeps
-    masked_substep_deltas = jnp.where(
-        participant_mask,
-        substep_deltas,
-        jnp.zeros_like(substep_deltas),
-    )
-
-    project_disc_to_bounds_vmap = jax.vmap(
-        _project_disc_to_bounds,
-        in_axes=(0, 0, None, None),
-        out_axes=0,
-    )
-
-    project_disc_out_of_obstacles_vmap = jax.vmap(
-        _project_disc_out_of_obstacles,
-        in_axes=(0, 0, None),
-        out_axes=0,
-    )
-
-    def _project_to_bounds(candidate_positions: Array) -> Array:
-        """Project all slots into map bounds."""
-        return project_disc_to_bounds_vmap(
-            candidate_positions,
-            agent_radii,
-            map_width,
-            map_height,
-        )
-
-    def _project_out_of_obstacles(candidate_positions: Array) -> Array:
-        """Project all slots out of static obstacles."""
-        return project_disc_out_of_obstacles_vmap(
-            candidate_positions,
-            agent_radii,
-            obstacles,
-        )
-
-    def _project_collision_pass(
-        pass_index: int,
-        current_positions_and_agent_agent_participation_mask: tuple[Array, Array],
-    ) -> tuple[Array, Array]:
-        """Run one fixed collision-composition pass."""
-        del pass_index
-
-        current_positions = _project_to_bounds(
-            current_positions_and_agent_agent_participation_mask[0]
-        )
-        current_positions = _project_out_of_obstacles(current_positions)
-
-        return (
-            _resolve_agent_agent_overlaps(
-                current_positions,
-                agent_radii,
-                active_mask,
-                alive_mask,
-                current_positions_and_agent_agent_participation_mask[1],
-                agent_agent_overlap_projection_passes,
-            ),
-            current_positions_and_agent_agent_participation_mask[1],
-        )
-
-    def _project_movement_substep(
-        substep_index: int,
-        current_positions: Array,
-    ) -> Array:
-        """Apply and project one fixed movement substep."""
-
-        current_positions = current_positions + masked_substep_deltas
-
-        agent_agent_collision_participation_mask = jnp.where(
-            substep_index == movement_substeps - 1,
-            # The final-position mask includes every traversal participant.
-            participates_in_agent_agent_collision_at_final_position,
-            always_participates_in_agent_agent_collision,
-        )
-
-        current_positions, _ = cast(
-            tuple[Array, Array],
-            jax.lax.fori_loop(
-                0,
-                collision_projection_passes,
-                _project_collision_pass,
-                (current_positions, agent_agent_collision_participation_mask),
-            ),
-        )
-
-        # Agent-agent projection can push a slot back into static geometry. The
-        # final cleanup makes map bounds and obstacles the hard committed state.
-        current_positions = _project_out_of_obstacles(current_positions)
-        current_positions = _project_to_bounds(current_positions)
-
-        return jnp.where(
-            participant_mask,
-            current_positions,
-            original_agent_positions,
-        )
-
-    return cast(
-        Array,
-        jax.lax.fori_loop(
-            0,
-            movement_substeps,
-            _project_movement_substep,
-            original_agent_positions,
-        ),
-    )
-
-
 def has_clear_line_of_sight(
     agent_center_a: Array,
     agent_center_b: Array,
@@ -1200,3 +397,693 @@ def has_clear_line_of_sight(
     )
 
     return jnp.logical_not(jnp.any(blocked_by_obstacle))
+
+
+def _wall_frame(positions: Array, obstacles: Array) -> tuple[Array, Array, Array]:
+    """Express every body centre in every obstacle's local coordinates."""
+    delta = (
+        positions[:, None, :]
+        - obstacles[None, :, OBSTACLE_FEATURE_X : OBSTACLE_FEATURE_Y + 1]
+    )
+    cosine = jnp.cos(obstacles[:, OBSTACLE_FEATURE_THETA])
+    sine = jnp.sin(obstacles[:, OBSTACLE_FEATURE_THETA])
+    local = jnp.stack(
+        (
+            delta[..., 0] * cosine + delta[..., 1] * sine,
+            delta[..., 1] * cosine - delta[..., 0] * sine,
+        ),
+        axis=-1,
+    )
+    return (local, cosine, sine)
+
+
+def _static_positions_are_valid(
+    positions: Array,
+    radii: Array,
+    width: Array | float,
+    height: Array | float,
+    obstacles: Array,
+    origin: float = 0.0,
+) -> Array:
+    """Check actual shape distances independently of a chosen contact normal."""
+    local, _, _ = _wall_frame(positions, obstacles)
+    half = (
+        obstacles[None, :, OBSTACLE_FEATURE_WIDTH : OBSTACLE_FEATURE_HEIGHT + 1] * 0.5
+    )
+    outside = local - jnp.clip(local, -half, half)
+    wall_distance = jnp.hypot(outside[..., 0], outside[..., 1])
+    wall_valid = wall_distance >= radii[:, None] - GEOMETRY_EPSILON
+    centre_delta = (
+        positions[:, None, :]
+        - obstacles[None, :, OBSTACLE_FEATURE_X : OBSTACLE_FEATURE_Y + 1]
+    )
+    pillar_distance = jnp.hypot(centre_delta[..., 0], centre_delta[..., 1])
+    pillar_valid = (
+        pillar_distance
+        >= radii[:, None]
+        + obstacles[None, :, OBSTACLE_FEATURE_RADIUS]
+        - GEOMETRY_EPSILON
+    )
+    shape_valid = jnp.where(
+        obstacles[None, :, OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_WALL,
+        wall_valid,
+        pillar_valid,
+    )
+    known = (obstacles[None, :, OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_WALL) | (
+        obstacles[None, :, OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_PILLAR
+    )
+    shape_valid |= (obstacles[None, :, OBSTACLE_FEATURE_ACTIVE] != 1) | ~known
+    bounds_valid = jnp.all(
+        positions >= origin + radii[:, None] - GEOMETRY_EPSILON, axis=-1
+    ) & jnp.all(
+        positions
+        <= origin + jnp.asarray([width, height]) - radii[:, None] + GEOMETRY_EPSILON,
+        axis=-1,
+    )
+    return bounds_valid & jnp.all(shape_valid, axis=1)
+
+
+def _box_entry(start: Array, delta: Array, half: Array) -> Array:
+    """Find the first segment entry into the expanded rectangle."""
+    moving = delta != 0
+    divisor = jnp.where(moving, delta, 1)
+    first = (-half - start) / divisor
+    second = (half - start) / divisor
+    near = jnp.where(moving, jnp.minimum(first, second), -jnp.inf)
+    far = jnp.where(moving, jnp.maximum(first, second), jnp.inf)
+    entry = jnp.maximum(near[..., 0], near[..., 1])
+    leave = jnp.minimum(far[..., 0], far[..., 1])
+    parallel_clear = jnp.any(~moving & (jnp.abs(start) >= half), axis=-1)
+    crossed = ~parallel_clear & (leave > jnp.maximum(entry, 0)) & (entry < 1)
+    near_face = half - GEOMETRY_EPSILON
+    first_inside = start + jnp.clip(entry, 0, 1)[..., None] * delta
+    last_inside = start + jnp.clip(leave, 0, 1)[..., None] * delta
+    leaving_near_face = jnp.any(
+        (first_inside >= near_face) & (last_inside >= near_face)
+        | (-first_inside >= near_face) & (-last_inside >= near_face),
+        axis=-1,
+    )
+    crossed &= ~leaving_near_face
+    return jnp.where(crossed, jnp.maximum(entry, 0), 1)
+
+
+def _circle_entry(start: Array, delta: Array, radius: Array) -> Array:
+    """Find the first segment entry deeper than the allowed circle tolerance."""
+    a = delta[..., 0] ** 2 + delta[..., 1] ** 2
+    b = start[..., 0] * delta[..., 0] + start[..., 1] * delta[..., 1]
+    divisor = jnp.where(a > 0, a, 1)
+    cross = start[..., 0] * delta[..., 1] - start[..., 1] * delta[..., 0]
+    chord_squared = (radius**2 * a - cross * cross) / divisor
+    root = jnp.sqrt(jnp.maximum(chord_squared, 0) / divisor)
+    middle = -b / divisor
+    entry = middle - root
+    leave = middle + root
+    crossed = (a > 0) & (chord_squared > 0) & (b < 0)
+    crossed &= (leave > jnp.maximum(entry, 0)) & (entry < 1)
+    end = start + delta
+    nearest_squared = jnp.where(
+        middle <= 0,
+        start[..., 0] ** 2 + start[..., 1] ** 2,
+        jnp.where(
+            middle >= 1, end[..., 0] ** 2 + end[..., 1] ** 2, cross * cross / divisor
+        ),
+    )
+    inner_radius = jnp.maximum(radius - GEOMETRY_EPSILON, 0)
+    crossed &= nearest_squared < inner_radius**2
+    return jnp.where(crossed, jnp.maximum(entry, 0), 1)
+
+
+def _obstacle_entry_fractions(
+    start: Array, intended: Array, radii: Array, obstacles: Array
+) -> Array:
+    """Use the same full-disc shape components as the current travel guard."""
+    local, cosine, sine = _wall_frame(start, obstacles)
+    world_delta = intended - start
+    delta = jnp.stack(
+        (
+            world_delta[:, None, 0] * cosine + world_delta[:, None, 1] * sine,
+            world_delta[:, None, 1] * cosine - world_delta[:, None, 0] * sine,
+        ),
+        axis=-1,
+    )
+    half = (
+        obstacles[None, :, OBSTACLE_FEATURE_WIDTH : OBSTACLE_FEATURE_HEIGHT + 1] * 0.5
+    )
+    horizontal = half + radii[:, None, None] * jnp.asarray([1.0, 0.0])
+    vertical = half + radii[:, None, None] * jnp.asarray([0.0, 1.0])
+    box_fraction = jnp.minimum(
+        _box_entry(local, delta, horizontal), _box_entry(local, delta, vertical)
+    )
+    signs = jnp.asarray([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
+    corners = half[..., None, :] * signs
+    corner_fraction = _circle_entry(
+        local[..., None, :] - corners, delta[..., None, :], radii[:, None, None]
+    )
+    wall_fraction = jnp.minimum(box_fraction, jnp.min(corner_fraction, axis=-1))
+    relative = (
+        start[:, None, :]
+        - obstacles[None, :, OBSTACLE_FEATURE_X : OBSTACLE_FEATURE_Y + 1]
+    )
+    pillar_fraction = _circle_entry(
+        relative,
+        world_delta[:, None, :],
+        radii[:, None] + obstacles[None, :, OBSTACLE_FEATURE_RADIUS],
+    )
+    wall_offset = local - jnp.clip(local, -half, half)
+    wall_distance = jnp.hypot(wall_offset[..., 0], wall_offset[..., 1])
+    wall_dot = wall_offset[..., 0] * delta[..., 0] + wall_offset[..., 1] * delta[..., 1]
+    wall_escape = (
+        (wall_distance > 0) & (wall_distance < radii[:, None]) & (wall_dot >= 0)
+    )
+    pillar_distance = jnp.hypot(relative[..., 0], relative[..., 1])
+    pillar_dot = (
+        relative[..., 0] * world_delta[:, None, 0]
+        + relative[..., 1] * world_delta[:, None, 1]
+    )
+    pillar_escape = (
+        (pillar_distance > obstacles[None, :, OBSTACLE_FEATURE_RADIUS])
+        & (
+            pillar_distance
+            < obstacles[None, :, OBSTACLE_FEATURE_RADIUS] + radii[:, None]
+        )
+        & (pillar_dot >= 0)
+    )
+    wall = obstacles[None, :, OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_WALL
+    active = (obstacles[None, :, OBSTACLE_FEATURE_ACTIVE] == 1) & (
+        wall | (obstacles[None, :, OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_PILLAR)
+    )
+    escape = active & jnp.where(wall, wall_escape, pillar_escape)
+    return jnp.where(escape, 1, jnp.where(wall, wall_fraction, pillar_fraction))
+
+
+def _swept_fraction(
+    start: Array,
+    proposed: Array,
+    radii: Array,
+    width: Array | float,
+    height: Array | float,
+    obstacles: Array,
+    origin: float = 0.0,
+) -> Array:
+    """Find the earliest whole-disc obstacle or map-bound contact."""
+    world_delta = proposed - start
+    fraction = _obstacle_entry_fractions(start, proposed, radii, obstacles)
+    active = (obstacles[None, :, OBSTACLE_FEATURE_ACTIVE] == 1) & (
+        (obstacles[None, :, OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_WALL)
+        | (obstacles[None, :, OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_PILLAR)
+    )
+    fraction = jnp.min(jnp.where(active, fraction, 1), axis=1)
+    size = origin + jnp.asarray([width, height])
+    divisor = jnp.where(world_delta != 0, world_delta, 1)
+    bound_fraction = jnp.where(
+        world_delta > 0,
+        (size - radii[:, None] - start) / divisor,
+        (origin + radii[:, None] - start) / divisor,
+    )
+    bound_fraction = jnp.where(world_delta != 0, bound_fraction, 1)
+    return jnp.clip(jnp.minimum(fraction, jnp.min(bound_fraction, axis=-1)), 0, 1)
+
+
+def _balanced_sum(values: Array, axis: int) -> Array:
+    """Reuse a fixed tree instead of a backend-selected reduction tree."""
+    values = jnp.moveaxis(values, axis, -1)
+    size = values.shape[-1]
+    padded = 1 << (size - 1).bit_length()
+    values = jnp.pad(values, [(0, 0)] * (values.ndim - 1) + [(0, padded - size)])
+    while padded > 1:
+        values = values[..., ::2] + values[..., 1::2]
+        padded //= 2
+    return values[..., 0]
+
+
+def _sum_contact_corrections(values: Array, axis: int) -> Array:
+    """Add the same scalar contributions in the same order after row changes."""
+    ordered = jnp.sort(values, axis=axis, stable=False)
+    positive = jnp.maximum(ordered, 0)
+    negative = jnp.maximum(-jnp.flip(ordered, axis=axis), 0)
+    result = _balanced_sum(positive, axis) - _balanced_sum(negative, axis)
+    return jnp.where(result == 0, jnp.zeros_like(result), result)
+
+
+def _unit(vector: Array) -> tuple[Array, Array]:
+    """Return a unit direction and its length; zero remains zero."""
+    length = jnp.hypot(vector[..., 0], vector[..., 1])
+    return (vector / jnp.where(length > 0, length, 1)[..., None], length)
+
+
+def _body_corrections(
+    positions: Array,
+    radii: Array,
+    participant: Array,
+    start: Array,
+    intended: Array,
+    tie_direction: Array | None = None,
+    recovering_pairs: Array | None = None,
+) -> Array:
+    """Share each pair's incoming-side correction equally between its bodies."""
+    first, second = (jnp.asarray(_FIRST), jnp.asarray(_SECOND))
+    difference = positions[first] - positions[second]
+    previous = start[first] - start[second]
+    radius = radii[first] + radii[second]
+    _, previous_distance = _unit(previous)
+    change = difference - previous
+    _, change_distance = _unit(change)
+    clearance = jnp.maximum(previous_distance - radius, 0)
+    fraction = jnp.minimum(
+        clearance / jnp.where(change_distance > 0, change_distance, 1), 1
+    )
+    direction = previous + fraction[:, None] * change
+    direction = jnp.where((fraction == 1)[:, None], difference, direction)
+    direction = jnp.where(
+        jnp.any(direction != 0, axis=-1)[:, None], direction, previous
+    )
+    intent = intended[first] - intended[second]
+    direction = jnp.where(jnp.any(direction != 0, axis=-1)[:, None], direction, intent)
+    direction = jnp.where(
+        jnp.any(direction != 0, axis=-1)[:, None], direction, difference
+    )
+    if tie_direction is not None:
+        direction = jnp.where(
+            jnp.any(direction != 0, axis=-1)[:, None], direction, tie_direction
+        )
+    if recovering_pairs is not None:
+        # A newly blocking overlap has no valid incoming contact side to retain.
+        recover = (
+            recovering_pairs
+            & (previous_distance < radius)
+            & jnp.any(difference != 0, axis=-1)
+        )
+        direction = jnp.where(recover[:, None], difference, direction)
+    normal, length = _unit(direction)
+    separation = normal[:, 0] * difference[:, 0] + normal[:, 1] * difference[:, 1]
+    depth = jnp.maximum(radius - separation, 0)
+    active = participant[first] & participant[second] & (length > 0)
+    response = jnp.where(active[:, None], normal * (depth * 0.5)[:, None], 0)
+    contributions = (
+        response[jnp.asarray(_PAIR_INDEX)] * jnp.asarray(_PAIR_SIGN)[..., None]
+    )
+    return _sum_contact_corrections(contributions, axis=1)
+
+
+def _obstacle_corrections(
+    positions: Array, radii: Array, obstacles: Array, start: Array
+) -> Array:
+    """Reuse local rectangle projection and radial pillar projection together."""
+    local, cosine, sine = _wall_frame(positions, obstacles)
+    previous, _, _ = _wall_frame(start, obstacles)
+    half = (
+        obstacles[None, :, OBSTACLE_FEATURE_WIDTH : OBSTACLE_FEATURE_HEIGHT + 1] * 0.5
+    )
+    outside, distance = _unit(local - jnp.clip(local, -half, half))
+    faces = jnp.asarray(
+        [[-1.0, 0.0], [1.0, 0.0], [0.0, -1.0], [0.0, 1.0]], positions.dtype
+    )
+    face_distance = jnp.stack(
+        (
+            half[..., 0] + local[..., 0],
+            half[..., 0] - local[..., 0],
+            half[..., 1] + local[..., 1],
+            half[..., 1] - local[..., 1],
+        ),
+        axis=-1,
+    )
+    nearest = face_distance == jnp.min(face_distance, axis=-1, keepdims=True)
+    approach = previous - local
+    preference = (
+        approach[..., 0, None] * faces[:, 0] + approach[..., 1, None] * faces[:, 1]
+    )
+    preference = jnp.where(nearest, preference, -jnp.inf)
+    chosen = nearest & (preference == jnp.max(preference, axis=-1, keepdims=True))
+    # These values are only -1, 0 or 1. Every partial sum is exact.
+    inside, _ = _unit(jnp.sum(chosen[..., None] * faces, axis=-2))
+    inside_depth = (
+        half[..., 0] * jnp.abs(inside[..., 0])
+        + half[..., 1] * jnp.abs(inside[..., 1])
+        - local[..., 0] * inside[..., 0]
+        - local[..., 1] * inside[..., 1]
+        + radii[:, None]
+    )
+    local_push = jnp.where(
+        (distance > 0)[..., None],
+        outside * jnp.maximum(radii[:, None] - distance, 0)[..., None],
+        inside * jnp.maximum(inside_depth, 0)[..., None],
+    )
+    wall_push = jnp.stack(
+        (
+            local_push[..., 0] * cosine - local_push[..., 1] * sine,
+            local_push[..., 0] * sine + local_push[..., 1] * cosine,
+        ),
+        axis=-1,
+    )
+    delta = (
+        positions[:, None, :]
+        - obstacles[None, :, OBSTACLE_FEATURE_X : OBSTACLE_FEATURE_Y + 1]
+    )
+    pillar_normal, pillar_distance = _unit(delta)
+    prior_normal, _ = _unit(
+        start[:, None, :]
+        - obstacles[None, :, OBSTACLE_FEATURE_X : OBSTACLE_FEATURE_Y + 1]
+    )
+    pillar_normal = jnp.where(
+        (pillar_distance > 0)[..., None], pillar_normal, prior_normal
+    )
+    pillar_push = (
+        pillar_normal
+        * jnp.maximum(
+            radii[:, None]
+            + obstacles[None, :, OBSTACLE_FEATURE_RADIUS]
+            - pillar_distance,
+            0,
+        )[..., None]
+    )
+    pillar = obstacles[None, :, OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_PILLAR
+    active = (obstacles[None, :, OBSTACLE_FEATURE_ACTIVE] == 1) & (
+        pillar | (obstacles[None, :, OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_WALL)
+    )
+    correction = jnp.where(pillar[..., None], pillar_push, wall_push)
+    return _sum_contact_corrections(jnp.where(active[..., None], correction, 0), axis=1)
+
+
+def _commit_static_safe_positions(
+    start: Array,
+    proposed: Array,
+    radii: Array,
+    enabled: Array,
+    width: Array | float,
+    height: Array | float,
+    obstacles: Array,
+    origin: float = 0.0,
+) -> Array:
+    """Reuse the existing actual-shape segment shortening and endpoint check."""
+    proposed = jnp.clip(
+        proposed,
+        origin + radii[:, None],
+        origin + jnp.asarray([width, height]) - radii[:, None],
+    )
+    fraction = _swept_fraction(start, proposed, radii, width, height, obstacles, origin)
+    delta = proposed - start
+    _, length = _unit(delta)
+    safe_fraction = jnp.maximum(
+        fraction - _STATIC_TRAVEL_MARGIN / jnp.maximum(length, _STATIC_TRAVEL_MARGIN), 0
+    )
+    accepted = start + safe_fraction[:, None] * delta
+    accepted = jnp.where((fraction >= 1)[:, None], proposed, accepted)
+    valid = _static_positions_are_valid(
+        accepted, radii, width, height, obstacles, origin
+    )
+    return jnp.where((enabled & valid)[:, None], accepted, start)
+
+
+def _slide_corrections(
+    start: Array, proposed: Array, radii: Array, obstacles: Array
+) -> Array:
+    """Turn an unsafe proposal along the actual shape at its first contact."""
+    fraction = _obstacle_entry_fractions(start, proposed, radii, obstacles)
+    delta = proposed - start
+    local, cosine, sine = _wall_frame(start, obstacles)
+    local_delta = jnp.stack(
+        (
+            delta[:, None, 0] * cosine + delta[:, None, 1] * sine,
+            delta[:, None, 1] * cosine - delta[:, None, 0] * sine,
+        ),
+        axis=-1,
+    )
+    contact = local + fraction[..., None] * local_delta
+    half = (
+        obstacles[None, :, OBSTACLE_FEATURE_WIDTH : OBSTACLE_FEATURE_HEIGHT + 1] * 0.5
+    )
+    local_normal, wall_distance = _unit(contact - jnp.clip(contact, -half, half))
+    wall_normal = jnp.stack(
+        (
+            local_normal[..., 0] * cosine - local_normal[..., 1] * sine,
+            local_normal[..., 0] * sine + local_normal[..., 1] * cosine,
+        ),
+        axis=-1,
+    )
+    pillar_normal, pillar_distance = _unit(
+        start[:, None, :]
+        - obstacles[None, :, OBSTACLE_FEATURE_X : OBSTACLE_FEATURE_Y + 1]
+        + fraction[..., None] * delta[:, None, :]
+    )
+    pillar = obstacles[None, :, OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_PILLAR
+    depth = jnp.where(
+        pillar,
+        radii[:, None] + obstacles[None, :, OBSTACLE_FEATURE_RADIUS] - pillar_distance,
+        radii[:, None] - wall_distance,
+    )
+    normal = jnp.where(pillar[..., None], pillar_normal, wall_normal)
+    remainder = (1 - fraction)[..., None] * delta[:, None, :]
+    inward = depth - (
+        remainder[..., 0] * normal[..., 0] + remainder[..., 1] * normal[..., 1]
+    )
+    blocked = (
+        (obstacles[None, :, OBSTACLE_FEATURE_ACTIVE] == 1)
+        & (pillar | (obstacles[None, :, OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_WALL))
+        & (fraction < 1)
+    )
+    return _sum_contact_corrections(
+        jnp.where(blocked[..., None], normal * jnp.maximum(inward, 0)[..., None], 0),
+        axis=1,
+    )
+
+
+def _project_geometry(
+    agent_positions: Array,
+    agent_radii: Array,
+    intended_movement_deltas: Array,
+    active_mask: Array,
+    alive_mask: Array,
+    map_width: Array | float,
+    map_height: Array | float,
+    obstacles: Array,
+    always_participates_in_agent_agent_collision: Array,
+    participates_in_agent_agent_collision_at_final_position: Array,
+    agent_agent_overlap_projection_passes: int,
+    collision_projection_passes: int,
+    movement_substeps: int,
+    endpoint_mode: bool,
+) -> Array:
+    """Run the shared ordinary or Charge geometry path with literal round counts."""
+    if (
+        movement_substeps < 1
+        or min(agent_agent_overlap_projection_passes, collision_projection_passes) < 0
+    ):
+        raise ValueError("Substeps must be positive and pass counts nonnegative.")
+    enabled = active_mask & alive_mask
+    size = jnp.asarray([map_width, map_height], agent_positions.dtype)
+    first, second = (jnp.asarray(_FIRST), jnp.asarray(_SECOND))
+    origin = 0.0
+    deltas = jnp.where(
+        enabled[:, None], intended_movement_deltas / movement_substeps, 0
+    )
+    budget = collision_projection_passes
+
+    def static_project(position: Array, start: Array) -> Array:
+        """Correct map bounds and actual obstacle shapes from one snapshot."""
+        bounded = jnp.clip(
+            position, origin + agent_radii[:, None], size - agent_radii[:, None]
+        )
+        corrected = bounded + _obstacle_corrections(
+            bounded, agent_radii, obstacles, start
+        )
+        return jnp.where(enabled[:, None], corrected, start)
+
+    def substep(index: Array, current: Array) -> Array:
+        """Commit one movement increment from its fixed starting positions."""
+        intended = current + deltas
+        start = current
+        tie_direction = None
+        if endpoint_mode:
+            # Charge uses its arrival scene. Earlier positions only break ties.
+            previous = current[first] - current[second]
+            tie_direction = jnp.where(
+                jnp.any(previous != 0, axis=-1)[:, None],
+                previous,
+                deltas[first] - deltas[second],
+            )
+
+            def recover_static(_: int, position: Array) -> Array:
+                return static_project(position, current)
+
+            recovered = cast(
+                Array, jax.lax.fori_loop(0, budget, recover_static, intended)
+            )
+            valid = _static_positions_are_valid(
+                recovered, agent_radii, map_width, map_height, obstacles, origin
+            )
+            intended = jnp.where((enabled & valid)[:, None], recovered, current)
+            start = intended
+
+        def correct_static(position: Array) -> Array:
+            """Correct the proposed endpoint before checking its whole static path."""
+            corrected = static_project(position, start)
+            return corrected + _slide_corrections(
+                start, corrected, agent_radii, obstacles
+            )
+
+        participant = enabled & jnp.where(
+            index == movement_substeps - 1,
+            participates_in_agent_agent_collision_at_final_position,
+            always_participates_in_agent_agent_collision,
+        )
+        recovering_pairs = None
+        if not endpoint_mode:
+            joining = participant & ~always_participates_in_agent_agent_collision
+            recovering_pairs = joining[first] | joining[second]
+        initial_static = static_project(intended, start)
+        initial_slide = initial_static + _slide_corrections(
+            start, initial_static, agent_radii, obstacles
+        )
+        initial = _commit_static_safe_positions(
+            start,
+            initial_slide,
+            agent_radii,
+            enabled,
+            map_width,
+            map_height,
+            obstacles,
+            origin,
+        )
+
+        def round_step(position: Array, _: None) -> tuple[Array, None]:
+            """Apply shared body correction, then safe static correction."""
+            body = position
+            if agent_agent_overlap_projection_passes > 0:
+
+                def separate_bodies(_: int, current_position: Array) -> Array:
+                    return current_position + _body_corrections(
+                        current_position,
+                        agent_radii,
+                        participant,
+                        start,
+                        intended,
+                        tie_direction,
+                        recovering_pairs,
+                    )
+
+                body = cast(
+                    Array,
+                    jax.lax.fori_loop(
+                        0,
+                        agent_agent_overlap_projection_passes,
+                        separate_bodies,
+                        position,
+                    ),
+                )
+            corrected = correct_static(body)
+            accepted = _commit_static_safe_positions(
+                start,
+                corrected,
+                agent_radii,
+                enabled,
+                map_width,
+                map_height,
+                obstacles,
+                origin,
+            )
+            return (accepted, None)
+
+        result, _ = jax.lax.scan(round_step, initial, None, length=budget)
+        result = jnp.where(enabled[:, None], result, agent_positions)
+        return result
+
+    def advance(current: Array, index: Array) -> tuple[Array, None]:
+        """Advance one physical movement substep."""
+        return (substep(index, current), None)
+
+    result, _ = jax.lax.scan(advance, agent_positions, jnp.arange(movement_substeps))
+    return result
+
+
+def project_movement_with_geometry(
+    agent_positions: Array,
+    agent_radii: Array,
+    intended_movement_deltas: Array,
+    active_mask: Array,
+    alive_mask: Array,
+    map_width: Array | float,
+    map_height: Array | float,
+    obstacles: Array,
+    always_participates_in_agent_agent_collision: Array,
+    participates_in_agent_agent_collision_at_final_position: Array,
+    agent_agent_overlap_projection_passes: int = 1,
+    collision_projection_passes: int = DEFAULT_AGENT_PROJECTION_PASSES,
+    movement_substeps: int = DEFAULT_MOVEMENT_SUBSTEPS,
+) -> Array:
+    """Move bodies through bounds, obstacles and other participating bodies.
+
+    Positions and intended deltas have shape (MAX_AGENT_SLOTS, 2). Radii and
+    masks have shape (MAX_AGENT_SLOTS,). Obstacles keep their fixed table shape.
+    Inactive and dead rows keep their original positions. Active/alive masks
+    are combined with the caller's traversal and final-contact masks.
+
+    Each ordinary movement substep keeps one starting point. Numerical rounds
+    correct proposed endpoints; only the checked straight segment is committed.
+    The static path must stay safe. Crowded bodies may keep a small residual.
+
+    The three loop controls are static Python integers. Collision rounds are
+    literal counts; zero body sweeps skips body correction. The default is four
+    physical substeps and 28 collision rounds per substep. Action meanings and
+    shield timing belong to the caller, not this helper.
+    """
+    return _project_geometry(
+        agent_positions,
+        agent_radii,
+        intended_movement_deltas,
+        active_mask,
+        alive_mask,
+        map_width,
+        map_height,
+        obstacles,
+        always_participates_in_agent_agent_collision,
+        participates_in_agent_agent_collision_at_final_position,
+        agent_agent_overlap_projection_passes,
+        collision_projection_passes,
+        movement_substeps,
+        False,
+    )
+
+
+def project_charge_endpoints_with_geometry(
+    agent_positions: Array,
+    agent_radii: Array,
+    intended_movement_deltas: Array,
+    active_mask: Array,
+    alive_mask: Array,
+    map_width: Array | float,
+    map_height: Array | float,
+    obstacles: Array,
+    always_participates_in_agent_agent_collision: Array,
+    participates_in_agent_agent_collision_at_final_position: Array,
+    agent_agent_overlap_projection_passes: int = 1,
+    collision_projection_passes: int = DEFAULT_AGENT_PROJECTION_PASSES,
+) -> Array:
+    """Place simultaneous Charge arrivals, then resolve their endpoint contacts.
+
+    The ten array operands have the same shapes and mask meanings as ordinary
+    movement. The requested relocation may pass intervening bodies or obstacles.
+    Recover a statically valid arrival first, then use that arrival for body
+    contact direction and for the checked static correction path. Older physical
+    separation only breaks a direction tie. Ordinary movement runs afterward.
+
+    The static integer controls default to one body sweep and 28 literal
+    collision rounds. Arrival recovery also uses 28 rounds by default. This
+    helper always performs one endpoint step. Ordinary movement then starts
+    from its returned positions with the already chosen voluntary movement.
+    """
+    return _project_geometry(
+        agent_positions,
+        agent_radii,
+        intended_movement_deltas,
+        active_mask,
+        alive_mask,
+        map_width,
+        map_height,
+        obstacles,
+        always_participates_in_agent_agent_collision,
+        participates_in_agent_agent_collision_at_final_position,
+        agent_agent_overlap_projection_passes,
+        collision_projection_passes,
+        1,
+        True,
+    )
