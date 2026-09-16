@@ -1,4 +1,4 @@
-"""Canonical evaluation-record diagnostics for live debugger transitions."""
+"""Check live debugger diagnostics built from evaluation records."""
 
 import pytest
 from scripts.dev.visual_debugger.control import (

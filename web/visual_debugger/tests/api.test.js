@@ -1,3 +1,7 @@
+/**
+ * @file Check HTTP/frame decoding, schema rejection, authorized joins and browser
+ * command/error handling.
+ */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -32,11 +36,9 @@ const presentationKinds = [
   "replay_shared_obs_agent_pov",
 ];
 
-/**
- * @template T
+/** @template T
  * @param {T} value
- * @returns {T}
- */
+ * @returns {T} */
 function clone(value) {
   return structuredClone(value);
 }
@@ -58,11 +60,9 @@ function withEndpointReadTripwire(source) {
   return { presentation, readCount: () => reads };
 }
 
-/**
- * @param {unknown} payload
+/** @param {unknown} payload
  * @param {{ok?: boolean, status?: number, contentType?: string}} options
- * @returns {Response}
- */
+ * @returns {Response} */
 function jsonResponse(
   payload,
   { ok = true, status = 200, contentType = "application/json" } = {},
@@ -539,10 +539,8 @@ test("replay timeline and command use separate exact routes and send once", asyn
     configurable: true,
     value: {
       clearTimeout: globalThis.clearTimeout,
-      /**
-       * @param {string} path
-       * @param {RequestInit} options
-       */
+      /** @param {string} path
+       * @param {RequestInit} options */
       fetch: async (path, options) => {
         calls.push({ path: String(path), options });
         return {

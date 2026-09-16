@@ -1,3 +1,7 @@
+/**
+ * @file Check the filter registry/defaults, immutable updates and each filter's
+ * allowed display effect.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 

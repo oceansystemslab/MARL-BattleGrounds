@@ -1,3 +1,7 @@
+/**
+ * @file Check complete paused replay summaries at both supported viewport sizes
+ * without relying on animation.
+ */
 import { expect, test } from "@playwright/test";
 
 import { VISUAL_FILTER_IDS } from "../src/visual-filters.js";
@@ -126,10 +130,8 @@ async function settleStaticSummary(page) {
   ).toEqual([]);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} path
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} path */
 async function authenticatedText(page, path) {
   return page.evaluate(async (requestPath) => {
     const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
@@ -170,15 +172,9 @@ async function openVisualFilters(page) {
   await expect(page.locator("#visual-filter-options")).toBeVisible();
 }
 
-/**
- * Derive the exact enabled spatial identity from the same pure planner used by
- * the product. Geometry uses a roomy synthetic surface because this helper
- * audits identity/filter ownership; the real DOM below owns viewport geometry.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {Record<string, any>} rawPresentation
- * @param {string[]} disabledFilters
- */
+ * @param {string[]} disabledFilters */
 async function expectedPlanSignature(page, rawPresentation, disabledFilters = []) {
   return page.evaluate(
     async ({ disabled, raw }) => {
@@ -279,10 +275,8 @@ async function staticDomSignature(page) {
       if (!(map instanceof SVGRectElement)) {
         throw new Error("Battlefield map bounds are unavailable.");
       }
-      /**
-       * @param {Element} element
-       * @param {string} name
-       */
+      /** @param {Element} element
+       * @param {string} name */
       const numberAttribute = (element, name) => {
         const raw = element.getAttribute(name);
         if (raw === null) {
@@ -708,18 +702,14 @@ async function spatialContractEvidence(page) {
 /** @param {Awaited<ReturnType<typeof spatialContractEvidence>>} evidence */
 function expectSpatialContracts(evidence) {
   const tolerance = 0.5;
-  /**
-   * @param {{left: number, top: number, right: number, bottom: number} | null} bounds
-   * @returns {bounds is {left: number, top: number, right: number, bottom: number}}
-   */
+  /** @param {{left: number, top: number, right: number, bottom: number} | null} bounds
+   * @returns {bounds is {left: number, top: number, right: number, bottom: number}} */
   const finiteBounds = (bounds) =>
     bounds !== null &&
     [bounds.left, bounds.top, bounds.right, bounds.bottom].every(Number.isFinite);
-  /**
-   * @param {{left: number, top: number, right: number, bottom: number} | null} actual
+  /** @param {{left: number, top: number, right: number, bottom: number} | null} actual
    * @param {{left: number, top: number, right: number, bottom: number} | null} reserved
-   * @param {string} label
-   */
+   * @param {string} label */
   const assertContained = (actual, reserved, label) => {
     if (!finiteBounds(actual) || !finiteBounds(reserved)) {
       throw new Error(`${label} has non-finite paint or reservation bounds.`);
@@ -847,20 +837,16 @@ function expectSpatialContracts(evidence) {
 
 /** @param {Awaited<ReturnType<typeof staticDomSignature>>} signature */
 function expectBoundedNonOverlap(signature) {
-  /**
-   * @param {{left: number | null, top: number | null, right: number | null, bottom: number | null} | null} rectangle
-   * @returns {rectangle is {left: number, top: number, right: number, bottom: number}}
-   */
+  /** @param {{left: number | null, top: number | null, right: number | null, bottom: number | null} | null} rectangle
+   * @returns {rectangle is {left: number, top: number, right: number, bottom: number}} */
   const finiteRectangle = (rectangle) =>
     rectangle !== null &&
     [rectangle.left, rectangle.top, rectangle.right, rectangle.bottom].every(
       Number.isFinite,
     );
-  /**
-   * @param {{left: number, top: number, right: number, bottom: number}} left
+  /** @param {{left: number, top: number, right: number, bottom: number}} left
    * @param {{left: number, top: number, right: number, bottom: number}} right
-   * @param {number} [tolerance]
-   */
+   * @param {number} [tolerance] */
   const overlaps = (left, right, tolerance = 0.001) =>
     Math.min(left.right, right.right) - Math.max(left.left, right.left) > tolerance &&
     Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top) > tolerance;
@@ -928,12 +914,10 @@ function expectBoundedNonOverlap(signature) {
   }
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {{method: string, path: string}[]} apiRequests
  * @param {string} filterId
- * @param {boolean} enabled
- */
+ * @param {boolean} enabled */
 async function setFilter(page, apiRequests, filterId, enabled) {
   const mark = apiRequests.length;
   const input = page.locator(`${FILTER_INPUT}[data-visual-filter-id="${filterId}"]`);

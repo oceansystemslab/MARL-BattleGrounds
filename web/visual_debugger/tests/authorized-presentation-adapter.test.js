@@ -1,3 +1,7 @@
+/**
+ * @file Check that only normalized authorized frames become browser views and that
+ * identity/preferences keep their exact scope.
+ */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -206,10 +210,6 @@ function oracleTrajectoryForClass(raw, classId) {
   return trajectory;
 }
 
-/**
- * Give every represented class distinct start/post-Charge/successor points
- * without changing the digest-owned current endpoint.
- */
 function movingOracleRaw() {
   const raw = structuredClone(fixture.presentations.replay_oracle);
   const startsByClass = new Map([
@@ -266,11 +266,9 @@ function projectedTrajectoryPoint(raw, classId, phase) {
   return { x: x * 10, y: y * 10 };
 }
 
-/**
- * @param {Record<string, any>} raw
+/** @param {Record<string, any>} raw
  * @param {string} kind
- * @param {{channel?: number, recipientClass?: number, sourceClass?: number}} [options]
- */
+ * @param {{channel?: number, recipientClass?: number, sourceClass?: number}} [options] */
 function oracleStatusEvent(raw, kind, options = {}) {
   const channel = options.channel ?? 4;
   const event = {

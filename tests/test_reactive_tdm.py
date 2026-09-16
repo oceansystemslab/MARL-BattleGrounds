@@ -1,4 +1,4 @@
-"""Reactive TDM rules and accepted Scenario 1 and Scenario 2 witnesses."""
+"""Check Reactive TDM decisions and the reviewed Scenario 1 and 2 solutions."""
 
 from collections.abc import Callable
 from operator import itemgetter

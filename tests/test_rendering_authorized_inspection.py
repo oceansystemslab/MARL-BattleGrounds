@@ -1,4 +1,4 @@
-"""Focused CP2.4 outgoing replay-inspection and live-draft proofs."""
+"""Check replay inspection and live action drafts against their allowed data."""
 
 from __future__ import annotations
 
@@ -329,7 +329,6 @@ def _trajectory_with_public_effects(
     active_status_channels: tuple[int, ...],
     active_aura_ids: tuple[str, ...],
 ) -> CapturedEvaluationTrajectory:
-    """Install one coherent public multi-effect row at frame zero."""
     frame = trajectory.frames[0]
     context = trajectory.context
     catalog = context.static_mechanics_catalog
@@ -701,7 +700,6 @@ def test_shared_scene_preserves_public_lifecycle_while_fog_hides_assignees(
     inspection_cases: _InspectionCases,
     recipient_slot: int,
 ) -> None:
-    """Shared fog must not redact public o_t lifecycle or invent hidden bodies."""
     current, recipient = _shared_current(
         inspection_cases.shared,
         recipient_slot=recipient_slot,

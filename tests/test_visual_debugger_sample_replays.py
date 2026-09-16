@@ -1,4 +1,4 @@
-"""Deterministic checked-in Visual Debugger sample replay proofs."""
+"""Check the deterministic bundled sample replays."""
 
 from __future__ import annotations
 
@@ -180,7 +180,6 @@ def _generate_samples_in_cpu_child(
     *,
     historical_provenance_directory: Path | None = None,
 ) -> None:
-    """Run real generation without selecting a backend in the pytest process."""
     if historical_provenance_directory is None:
         command = (
             sys.executable,
@@ -216,7 +215,6 @@ def _generate_samples_in_cpu_child(
 def generated_sample_directories(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> tuple[Path, Path]:
-    """Generate two independent real sample sets for byte-stability proofs."""
     root = tmp_path_factory.mktemp("visual-debugger-samples")
     first = root / "first"
     second = root / "second"
@@ -234,7 +232,6 @@ def generated_sample_directories(
 
 @pytest.fixture(scope="module")
 def historical_sample_directories() -> tuple[Path, Path]:
-    """Keep the archived V1 sidecar and integrity contract under its existing tests."""
     return SAMPLE_REPLAY_DIRECTORY, SAMPLE_REPLAY_DIRECTORY
 
 
@@ -400,7 +397,6 @@ def test_fresh_samples_use_exact_researcher_geometry_and_event_union(
 def test_checked_samples_match_fresh_cpu_generation_scientific_truth(
     tmp_path: Path,
 ) -> None:
-    """Preserve physical facts; change only the declared input and replay versions."""
     expected = _file_bytes_by_name(SAMPLE_REPLAY_DIRECTORY)
     assert len(expected) == 7
     historical_manifest = verify_sample_replays(SAMPLE_REPLAY_DIRECTORY)
@@ -1377,7 +1373,6 @@ def test_current_sample_members_keep_bounded_no_follow_checks(
     member: str,
     hazard: str,
 ) -> None:
-    """Run the same file-safety assertions for each current-format member."""
     if hazard == "symlink":
         test_verifiers_reject_stationary_symlink_members_before_read(
             generated_sample_directories, tmp_path, boundary, member

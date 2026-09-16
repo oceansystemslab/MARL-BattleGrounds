@@ -1,10 +1,12 @@
-"""Authoritative host compilation and validation for DevClient drafts.
+"""Compile private editor drafts into validated simulator inputs.
 
-The browser edits JSON-shaped product drafts.  This module is the only bridge
-from those drafts to existing MARL-BGs runtime objects: it normalizes content,
-constructs an ``EnvConfig``, calls ordinary reset, overlays the explicitly
-authorable ``EnvState`` leaves, forces neutral previous-action history, and
-then invokes the unchanged core validators and authored-state initializer.
+The authoring service calls ``compile_dev_map`` or ``compile_dev_scenario`` before
+loading a draft. This is the single bridge from editor models to runtime arrays.
+It rounds values to float32, preserves fixed object order, uses existing Core
+configuration/state validators, and builds coherent initial observations and masks.
+Scenario compilation initializes JAX arrays and performs reset work; it does not
+advance a gameplay transition or write files. Validation helpers return field-linked
+problems so the editor can point to the value that needs attention.
 """
 
 from __future__ import annotations
@@ -90,6 +92,9 @@ class DevAuthoringValidationError(ValueError):
     """An authoring operation failed with stable linked validation problems."""
 
     def __init__(self, problems: tuple[DevAuthoringProblemV1, ...]) -> None:
+        """Require at least one error and retain all field-linked validation
+        problems.
+        """
         if not problems or not any(problem.severity == "error" for problem in problems):
             raise ValueError("DevAuthoringValidationError requires at least one error")
         self.problems = problems
@@ -105,6 +110,9 @@ class _NumericNormalizationError(ValueError):
         *,
         object_id: str | None = None,
     ) -> None:
+        """Keep the field and object identity of a value that cannot become finite
+        float32.
+        """
         self.field_path = field_path
         self.object_id = object_id
         super().__init__("Value is not representable as finite float32.")
@@ -112,6 +120,24 @@ class _NumericNormalizationError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class CompiledDevMapV1:
+    """Normalized map content and its fixed-shape runtime geometry.
+
+    Attributes
+    ----------
+    content : DevMapContentV1
+        Independent normalized map content in its authored object order.
+    obstacles : Array
+        Float32 array [MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES], padded with inactive
+        rows.
+    team_spawn_pad_positions : Array
+        Float32 positions [2, 5, 2], Team A then Team B, each in local slot order.
+    semantic_digest : str
+        SHA-256 identity of physical map content, excluding display names and object
+        IDs.
+    problems : tuple of DevAuthoringProblemV1
+        Validation warnings and any errors permitted by the caller's compilation mode.
+    """
+
     content: DevMapContentV1
     obstacles: Array
     team_spawn_pad_positions: Array
@@ -121,6 +147,15 @@ class CompiledDevMapV1:
 
 @dataclass(frozen=True, slots=True)
 class CompiledDevScenarioV1:
+    """Validated authored endpoint with matching config, state, observation and mask.
+
+    The content is copied and normalized. ``config`` and ``initial_state`` contain the
+    runtime inputs; ``observation``, ``action_mask`` and ``info`` come from Core's
+    initial-state authority. Map/scenario semantic digests identify physical content.
+    Resolved configuration/state digests identify the exact runtime payloads.
+    ``problems`` retains warnings; compilation does not return a failed partial state.
+    """
+
     content: DevScenarioContentV1
     config: EnvConfig
     initial_state: EnvState
@@ -142,6 +177,7 @@ def _problem(
     *,
     object_id: str | None = None,
 ) -> DevAuthoringProblemV1:
+    """Build one editor-linked error or warning with a stable code and field path."""
     return DevAuthoringProblemV1(
         severity=severity,
         stable_code=code,
@@ -157,6 +193,9 @@ def _normalization_problem(
     *,
     fallback_field_path: str,
 ) -> DevAuthoringProblemV1:
+    """Keep a numeric error's exact field/object link, or use the supplied fallback
+    field.
+    """
     if isinstance(error, _NumericNormalizationError):
         return _problem(
             "error",
@@ -169,6 +208,7 @@ def _normalization_problem(
 
 
 def _float32(value: float) -> float:
+    """Round a number to runtime float32 and reject values that become nonfinite."""
     try:
         with np.errstate(over="ignore", under="ignore", invalid="ignore"):
             normalized = np.float32(value)
@@ -185,6 +225,7 @@ def _normalized_float32(
     *,
     object_id: str | None = None,
 ) -> float:
+    """Round to finite float32 while retaining the authoring field that needs repair."""
     try:
         return _float32(value)
     except ValueError as error:
@@ -195,12 +236,14 @@ def _normalized_float32(
 
 
 def _normalized_radians(rotation_degrees: float) -> float:
+    """Convert degrees to a wrapped angle in radians and round it to float32."""
     radians = math.radians(rotation_degrees)
     normalized = (radians + math.pi) % (2.0 * math.pi) - math.pi
     return _float32(normalized)
 
 
 def _normalized_degrees_from_radians(radians: float) -> float:
+    """Convert a runtime angle back to display degrees with float32 rounding."""
     return _float32(math.degrees(radians))
 
 
@@ -210,6 +253,9 @@ def _normalized_rotation_degrees(
     *,
     object_id: str,
 ) -> float:
+    """Reject unrepresentable input before wrapping its rotation into normalized
+    degrees.
+    """
     try:
         # Reject an unrepresentable authored value before periodic normalization.
         _float32(value)
@@ -222,6 +268,7 @@ def _normalized_rotation_degrees(
 
 
 def _field_path(prefix: str, field_path: str) -> str:
+    """Prefix a nested editor field without adding an extra separator at the root."""
     return field_path if not prefix else f"{prefix}.{field_path}"
 
 
@@ -230,7 +277,30 @@ def normalize_map_content(
     *,
     field_prefix: str = "",
 ) -> DevMapContentV1:
-    """Return deterministic float32 map content without changing object order."""
+    """Return map values rounded to runtime float32 without reordering objects.
+
+    Parameters
+    ----------
+    content : DevMapContentV1
+        Strict editor map content to normalize.
+    field_prefix : str, optional
+        Prefix for reported field paths; empty by default for a top-level map.
+
+    Returns
+    -------
+    DevMapContentV1
+        Deep copy with finite float32 geometry and normalized wall rotations.
+
+    Raises
+    ------
+    ValueError
+        If an authored number cannot be represented as finite float32.
+
+    Notes
+    -----
+    Numeric normalization is separate from geometry validation. The source stays
+    unchanged.
+    """
     normalized_obstacles: list[DevObstacleV1] = []
     for obstacle_index, obstacle in enumerate(content.obstacles):
         obstacle_prefix = _field_path(
@@ -334,7 +404,27 @@ def normalize_map_content(
 def normalize_scenario_content(
     content: DevScenarioContentV1,
 ) -> DevScenarioContentV1:
-    """Normalize every persisted floating scenario input to runtime float32."""
+    """Normalize the authored map, motion settings and agent state numbers.
+
+    Parameters
+    ----------
+    content : DevScenarioContentV1
+        Strict scenario editor content.
+
+    Returns
+    -------
+    DevScenarioContentV1
+        Deep copy whose runtime floating values have float32 precision.
+
+    Raises
+    ------
+    ValueError
+        If numeric conversion fails; linked errors identify the original editor field.
+
+    Notes
+    -----
+    No runtime validity is implied until the compiled scenario passes Core validation.
+    """
     normalized_states = tuple(
         state.model_copy(
             update={
@@ -381,6 +471,11 @@ def normalize_scenario_content(
 
 
 def _compile_obstacles(content: DevMapContentV1) -> Array:
+    """Pack normalized obstacles into fixed float32 rows with neutral unused slots.
+
+    Caller validation owns the maximum count. With invalid preview content, only
+    the supported obstacle capacity is packed; returned problems retain the error.
+    """
     rows = np.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=np.float32)
     for obstacle_index, obstacle in enumerate(content.obstacles):
         if obstacle_index >= MAX_OBSTACLE_SLOTS:
@@ -401,6 +496,7 @@ def _compile_obstacles(content: DevMapContentV1) -> Array:
 
 
 def _compile_spawn_pads(content: DevMapContentV1) -> Array:
+    """Pack the fixed ten authored pads into float32 [2, 5, 2] team/local-slot order."""
     rows = np.asarray(
         tuple((pad.position.x, pad.position.y) for pad in content.spawn_pads),
         dtype=np.float32,
@@ -409,6 +505,9 @@ def _compile_spawn_pads(content: DevMapContentV1) -> Array:
 
 
 def _obstacle_semantic_row(obstacle: DevObstacleV1) -> Mapping[str, object]:
+    """Describe physical obstacle geometry without browser object IDs or display
+    prose.
+    """
     if isinstance(obstacle, DevWallV1):
         return {
             "kind": "wall",
@@ -427,7 +526,24 @@ def _obstacle_semantic_row(obstacle: DevObstacleV1) -> Mapping[str, object]:
 
 
 def map_semantic_payload(content: DevMapContentV1) -> dict[str, object]:
-    """Project map semantics while excluding names and browser object IDs."""
+    """Describe physical map content for stable comparison and hashing.
+
+    Parameters
+    ----------
+    content : DevMapContentV1
+        Map content to normalize before comparison.
+
+    Returns
+    -------
+    dict of str to object
+        Schema-tagged dimensions, ordered obstacle geometry and fixed spawn pads.
+        Names, descriptive prose and browser object IDs are excluded.
+
+    Raises
+    ------
+    ValueError
+        If a geometry number cannot become finite float32.
+    """
     normalized = normalize_map_content(content)
     return {
         "schema": "dev-map-semantics@1",
@@ -449,10 +565,28 @@ def map_semantic_payload(content: DevMapContentV1) -> dict[str, object]:
 
 
 def map_semantic_digest(content: DevMapContentV1) -> str:
+    """Hash normalized physical map content.
+
+    Parameters
+    ----------
+    content : DevMapContentV1
+        Map content whose physical identity is required.
+
+    Returns
+    -------
+    str
+        Lowercase SHA-256 digest of the map semantic payload.
+
+    Raises
+    ------
+    ValueError
+        If numeric normalization fails.
+    """
     return canonical_digest_sha256(map_semantic_payload(content))
 
 
 def _obstacle_extents(obstacle: DevObstacleV1) -> tuple[float, float, float, float]:
+    """Return axis-aligned world bounds for a pillar or rotated wall."""
     if isinstance(obstacle, DevPillarV1):
         return (
             obstacle.center_x - obstacle.radius,
@@ -480,7 +614,24 @@ def _obstacle_extents(obstacle: DevObstacleV1) -> tuple[float, float, float, flo
 def validate_map_content(
     content: DevMapContentV1,
 ) -> tuple[DevAuthoringProblemV1, ...]:
-    """Validate reusable-map rules and return stable linked problems."""
+    """Collect map geometry problems with stable editor field links.
+
+    Parameters
+    ----------
+    content : DevMapContentV1
+        Strict map model; numeric values are normalized before geometry checks.
+
+    Returns
+    -------
+    tuple of DevAuthoringProblemV1
+        Errors and warnings, or an empty tuple when checks find no problems. Numeric
+        normalization errors are returned as problems. Overlapping obstacle bounds
+        produce warnings because intentional overlaps are allowed.
+
+    Notes
+    -----
+    Checks run on the host and may use Core geometry helpers. The input is not changed.
+    """
     problems: list[DevAuthoringProblemV1] = []
     try:
         normalized = normalize_map_content(content)
@@ -661,6 +812,32 @@ def compile_dev_map(
     *,
     require_valid: bool = True,
 ) -> CompiledDevMapV1:
+    """Normalize a map and pack its fixed-shape runtime geometry.
+
+    Parameters
+    ----------
+    source : DevMapDraftV1 or DevMapContentV1
+        Complete map draft or its content model.
+    require_valid : bool, optional
+        True rejects validation errors. False returns problems with best-effort packed
+        geometry for inspection; such a result is not approved for simulation.
+
+    Returns
+    -------
+    CompiledDevMapV1
+        Normalized content, padded obstacle array, both spawn banks, digest and
+        problems.
+
+    Raises
+    ------
+    DevAuthoringValidationError
+        If normalization fails, or validation has errors while ``require_valid`` is
+        True.
+
+    Notes
+    -----
+    Creates JAX geometry arrays but does not write files or mutate the source draft.
+    """
     content = source.content if isinstance(source, DevMapDraftV1) else source
     try:
         normalized = normalize_map_content(content)
@@ -687,6 +864,7 @@ def compile_dev_map(
 
 
 def _active(global_slot: int, content: DevScenarioContentV1) -> bool:
+    """Check whether a fixed global slot belongs to its authored team-size prefix."""
     return global_slot % 5 < (
         content.team_a_size if global_slot < 5 else content.team_b_size
     )
@@ -695,6 +873,10 @@ def _active(global_slot: int, content: DevScenarioContentV1) -> bool:
 def _scenario_custom_problems(
     content: DevScenarioContentV1,
 ) -> tuple[DevAuthoringProblemV1, ...]:
+    """Collect editor-specific map, numeric, roster and starting-state problems.
+
+    This host pass keeps field links; Core remains the final runtime validator.
+    """
     problems = [
         problem.model_copy(
             update={
@@ -716,6 +898,7 @@ def _scenario_custom_problems(
         field_path: str,
         object_id: str | None = None,
     ) -> bool:
+        """Append a field-linked error when an authored integer exceeds signed int32."""
         if _INT32_MIN <= value <= _INT32_MAX:
             return True
         problems.append(
@@ -738,6 +921,9 @@ def _scenario_custom_problems(
         field_path: str,
         object_id: str | None = None,
     ) -> bool:
+        """Append the supplied field-linked error when a value is below its allowed
+        minimum.
+        """
         if value >= minimum:
             return True
         problems.append(
@@ -992,7 +1178,12 @@ def _scenario_custom_problems(
 
 
 def _requested_class_ids(content: DevScenarioContentV1) -> Array:
+    """Build int32 class IDs for all ten slots, with neutral IDs in inactive rows."""
+
     def class_id(global_slot: int, slot: DevRosterSlotV1) -> int:
+        """Resolve one active class name, or return the neutral class for an inactive
+        slot.
+        """
         if not _active(global_slot, content):
             return NEUTRAL_CLASS_ID
         if slot.class_name == "not_applicable":
@@ -1011,6 +1202,9 @@ def _requested_class_ids(content: DevScenarioContentV1) -> Array:
 def _build_config(
     content: DevScenarioContentV1, compiled_map: CompiledDevMapV1
 ) -> EnvConfig:
+    """Build product configuration from the normalized draft using the shared profile
+    authority.
+    """
     profile = resolve_agent_profile(
         _requested_class_ids(content),
         jnp.asarray((content.team_a_size, content.team_b_size), dtype=jnp.int32),
@@ -1043,6 +1237,9 @@ def _overlay_authored_state(
     reset_state: EnvState,
     content: DevScenarioContentV1,
 ) -> EnvState:
+    """Copy explicitly editable starting fields over reset state and retain neutral
+    history.
+    """
     states = content.agent_states
     positions = jnp.asarray(
         tuple((state.position.x, state.position.y) for state in states),
@@ -1133,6 +1330,9 @@ def _overlay_authored_state(
 
 
 def _array_payload(value: Array) -> dict[str, object]:
+    """Copy one array to host and record its dtype, shape and values for stable
+    hashing.
+    """
     host = np.asarray(value)
     return {
         "dtype": str(host.dtype),
@@ -1142,6 +1342,7 @@ def _array_payload(value: Array) -> dict[str, object]:
 
 
 def _state_digest(state: EnvState) -> str:
+    """Hash every resolved starting-state leaf with its field name, dtype and shape."""
     return canonical_digest_sha256(
         {
             "schema": "dev-resolved-initial-state@1",
@@ -1154,7 +1355,24 @@ def _state_digest(state: EnvState) -> str:
 
 
 def scenario_semantic_payload(content: DevScenarioContentV1) -> dict[str, object]:
-    """Project physical semantics, excluding display prose and provenance IDs."""
+    """Describe normalized physical scenario settings and initial state.
+
+    Parameters
+    ----------
+    content : DevScenarioContentV1
+        Complete embedded map, task, roster and authored starting state.
+
+    Returns
+    -------
+    dict of str to object
+        Schema-tagged physical values in fixed slot order. Display prose and provenance
+        IDs are excluded; runtime-relevant task and state fields remain included.
+
+    Raises
+    ------
+    ValueError
+        If a runtime floating value cannot be normalized.
+    """
     content = normalize_scenario_content(content)
     return {
         "schema": "dev-scenario-semantics@1",
@@ -1184,6 +1402,23 @@ def scenario_semantic_payload(content: DevScenarioContentV1) -> dict[str, object
 
 
 def scenario_semantic_digest(content: DevScenarioContentV1) -> str:
+    """Hash a scenario's normalized physical content.
+
+    Parameters
+    ----------
+    content : DevScenarioContentV1
+        Scenario whose physical identity is needed.
+
+    Returns
+    -------
+    str
+        Lowercase SHA-256 digest of the semantic scenario payload.
+
+    Raises
+    ------
+    ValueError
+        If normalization fails.
+    """
     return canonical_digest_sha256(scenario_semantic_payload(content))
 
 
@@ -1200,6 +1435,7 @@ _STUN_AUTHORING_FIELDS = (
 
 
 def _first_invalid_index(mask: np.ndarray) -> tuple[int, int | None] | None:
+    """Return the first marked row and optional channel, or None if no row is marked."""
     indices = np.argwhere(mask)
     if indices.size == 0:
         return None
@@ -1212,6 +1448,11 @@ def _core_agent_target(
     config: EnvConfig,
     state: EnvState,
 ) -> tuple[int, str] | None:
+    """Locate the editor field described by a known Core validation failure.
+
+    This maps an already-rejected value to its UI row; it does not replace Core
+    validation or decide whether a configuration/state should be accepted.
+    """
     indexed_position = re.search(r"agent_positions\[(\d+)\]", message)
     if indexed_position is not None:
         return int(indexed_position.group(1)), "position"
@@ -1356,6 +1597,9 @@ def _core_problem(
     config: EnvConfig | None = None,
     state: EnvState | None = None,
 ) -> DevAuthoringProblemV1:
+    """Translate a Core error into one editor-linked problem, retaining its original
+    message.
+    """
     message = str(error)
     field_path = "scenario"
     object_id: str | None = None
@@ -1394,7 +1638,32 @@ def _core_problem(
 def compile_dev_scenario(
     source: DevScenarioDraftV1 | DevScenarioContentV1,
 ) -> CompiledDevScenarioV1:
-    """Compile, revalidate, and expose one immutable authored scenario snapshot."""
+    """Build one coherent initial endpoint from a validated authored scenario.
+
+    Parameters
+    ----------
+    source : DevScenarioDraftV1 or DevScenarioContentV1
+        Strict editor scenario, including embedded map and all ten fixed agent rows.
+
+    Returns
+    -------
+    CompiledDevScenarioV1
+        Normalized independent content, validated config/state, matching observation
+        and action mask, runtime/semantic digests, and any nonblocking warnings.
+
+    Raises
+    ------
+    DevAuthoringValidationError
+        If numeric conversion, editor checks, product config validation, or authored
+        state initialization fails. Problems retain the relevant editor field links.
+
+    Notes
+    -----
+    Uses Core reset with a fixed seed to establish neutral fields, overlays only
+    explicitly editable starting values, and calls Core's authored-state initializer.
+    It creates device arrays and computes host digests; no gameplay step or file write
+    occurs. Previous-action history remains neutral for the new initial endpoint.
+    """
     raw_content = (
         source.content if not isinstance(source, DevScenarioContentV1) else source
     )
@@ -1463,7 +1732,24 @@ def compile_dev_scenario(
 def validate_dev_scenario(
     source: DevScenarioDraftV1 | DevScenarioContentV1,
 ) -> tuple[DevAuthoringProblemV1, ...]:
-    """Return execution problems without leaking partially compiled state."""
+    """Return scenario compilation problems without exposing an invalid partial
+    state.
+
+    Parameters
+    ----------
+    source : DevScenarioDraftV1 or DevScenarioContentV1
+        Scenario to check through the same path used for loading.
+
+    Returns
+    -------
+    tuple of DevAuthoringProblemV1
+        Compilation errors and warnings, or only warnings for a valid scenario.
+
+    Notes
+    -----
+    Runs the compiler, including array construction and initial-state validation.
+    It catches domain validation errors; unexpected implementation failures propagate.
+    """
     try:
         return compile_dev_scenario(source).problems
     except DevAuthoringValidationError as error:
@@ -1476,7 +1762,33 @@ def apply_alive_edit(
     global_slot: int,
     alive: bool,
 ) -> DevScenarioContentV1:
-    """Apply the explicit Alive/Dead authoring transaction for one active row."""
+    """Apply one explicit editor Alive/Dead change to an active agent row.
+
+    Parameters
+    ----------
+    content : DevScenarioContentV1
+        Source scenario; other rows are preserved.
+    global_slot : int
+        Active agent slot from zero through nine.
+    alive : bool
+        Desired life state. A living-to-dead edit clears health and transient status
+        fields while preserving position, identity and Ultimate cooldown.
+
+    Returns
+    -------
+    DevScenarioContentV1
+        New content with the selected row changed. Setting Alive does not invent health;
+        the compiler still checks whether the edited state is valid.
+
+    Raises
+    ------
+    ValueError
+        If the slot is outside the fixed axis or is inactive.
+
+    Notes
+    -----
+    This edits a draft only; it does not apply simulator death or respawn rules.
+    """
     if not 0 <= global_slot < MAX_AGENT_SLOTS:
         raise ValueError(f"global_slot must be in [0, {MAX_AGENT_SLOTS})")
     if not _active(global_slot, content):
@@ -1498,7 +1810,23 @@ def apply_alive_edit(
 
 
 def canonicalize_inactive_rows(content: DevScenarioContentV1) -> DevScenarioContentV1:
-    """Canonicalize only rows made inactive by an explicit team-size edit."""
+    """Clear rows made inactive by an explicit editor team-size change.
+
+    Parameters
+    ----------
+    content : DevScenarioContentV1
+        Source content carrying the desired team sizes and all ten fixed rows.
+
+    Returns
+    -------
+    DevScenarioContentV1
+        Content with active rows preserved and inactive rows set to the neutral class,
+        zero position/health/status values, and dead state while retaining object IDs.
+
+    Notes
+    -----
+    This changes a draft representation. The compiler still owns runtime validation.
+    """
     roster: list[DevRosterSlotV1] = []
     states: list[DevAgentStateV1] = []
     for global_slot, (roster_slot, agent_state) in enumerate(

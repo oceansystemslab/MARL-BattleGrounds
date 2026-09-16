@@ -1,4 +1,12 @@
-"""Strict core-free wire contracts for the read-only replay viewer."""
+"""Define strict replay-viewer commands, timelines and response models.
+
+The replay server parses these commands and returns validated immutable frames.
+Every captured transition has a start and successor, so a prefix with T transitions
+has T+1 frames. Validators join cursor, timeline, completion and audience identity.
+Researcher processing facts stay separate from actor-authorized battlefield data.
+These models do not load files, advance simulation, move the cursor or write data;
+the replay service owns those operations.
+"""
 
 from __future__ import annotations
 
@@ -138,24 +146,30 @@ class _PrivateSharedReplayProtocolModel(_ReplayProtocolModel):
     model_config = ConfigDict(revalidate_instances="always")
 
     def __init_subclass__(cls) -> None:
+        """Reject subclassing that could bypass exact private SharedObs root checks."""
         super().__init_subclass__()
         if _PrivateSharedReplayProtocolModel not in cls.__bases__:
             raise TypeError("private Shared replay roots cannot be subclassed.")
 
 
 def _private_exact_int(value: object) -> int:
+    """Reject Boolean and converted values where the private transport requires a
+    Python int.
+    """
     if type(value) is not int:
         raise ValueError("private Shared integer fields require exact Python ints.")
     return value
 
 
 def _private_exact_str(value: object) -> str:
+    """Require an exact Python string for private SharedObs identity fields."""
     if type(value) is not str:
         raise ValueError("private Shared identity fields require exact Python strings.")
     return value
 
 
 def _private_exact_optional_str(value: object) -> str | None:
+    """Accept None or an exact Python string for optional private identity fields."""
     if value is not None and type(value) is not str:
         raise ValueError(
             "private Shared optional identity fields require exact Python strings."
@@ -164,6 +178,7 @@ def _private_exact_optional_str(value: object) -> str | None:
 
 
 def _private_exact_bool(value: object) -> bool:
+    """Require an exact Python bool for private SharedObs flags."""
     if type(value) is not bool:
         raise ValueError("private Shared boolean fields require exact Python bools.")
     return value
@@ -190,6 +205,9 @@ class ReplayArtifactSummaryV1(_ReplayProtocolModel):
 
     @model_validator(mode="after")
     def _validate_summary(self) -> Self:
+        """Require a supported replay identity, T+1 frames for T transitions, and
+        bounded progress.
+        """
         if type(self.replay_reference) not in (
             ReplayArtifactReferenceV1,
             ReplayArtifactReferenceV2,
@@ -232,6 +250,9 @@ class SharedObsAgentPovReplayArtifactSummaryV1(_PrivateSharedReplayProtocolModel
 
     @model_validator(mode="after")
     def _validate_summary(self) -> Self:
+        """Bind captured counts to a recipient-local replay identity without global
+        disclosure.
+        """
         if self.captured_frame_count != self.captured_transition_count + 1:
             raise ValueError(
                 "SharedObs Agent replay summary requires exact T+1/T counts."
@@ -247,6 +268,7 @@ class SharedObsAgentPovReplayArtifactSummaryV1(_PrivateSharedReplayProtocolModel
 
 
 def _validate_researcher_artifact_summary(summary: ReplayArtifactSummaryV1) -> None:
+    """Keep researcher metric availability distinct from actor-view nondisclosure."""
     if summary.metric_report_availability == ACTOR_POV_METRIC_REPORT_AVAILABILITY_V1:
         raise ValueError(
             "researcher/source-material summary cannot use actor-POV non-disclosure."
@@ -254,6 +276,7 @@ def _validate_researcher_artifact_summary(summary: ReplayArtifactSummaryV1) -> N
 
 
 def _validate_actor_pov_artifact_summary(summary: ReplayArtifactSummaryV1) -> None:
+    """Require actor-view summaries to withhold metric-report availability."""
     if summary.metric_report_availability != ACTOR_POV_METRIC_REPORT_AVAILABILITY_V1:
         raise ValueError(
             "actor POV summary must not disclose metric-report availability."
@@ -278,6 +301,9 @@ class ReplayCompletionBadgeV1(_ReplayProtocolModel):
 
     @model_validator(mode="after")
     def _validate_completion(self) -> Self:
+        """Match captured progress, endpoint identity and complete/failed-prefix
+        evidence.
+        """
         if self.validated_transition_count > self.expected_transition_count:
             raise ValueError(
                 "validated transitions cannot exceed the expected horizon."
@@ -328,6 +354,9 @@ class ActorPovReplayCompletionBadgeV1(_ReplayProtocolModel):
 
     @model_validator(mode="after")
     def _validate_completion(self) -> Self:
+        """Match actor-safe prefix counts and done flags to its public completion
+        evidence.
+        """
         if self.captured_transition_count > self.expected_transition_count:
             raise ValueError("captured transitions cannot exceed the expected horizon.")
         if self.captured_transition_count == 0 and (self.terminated or self.truncated):
@@ -362,6 +391,9 @@ class ReplayProcessingBadgeV1(_ReplayProtocolModel):
 
     @model_validator(mode="after")
     def _validate_processing(self) -> Self:
+        """Require stage/code details only for failed processing and valid
+        attempted-step scope.
+        """
         if self.status in ("succeeded", "not_requested"):
             if any(
                 value is not None
@@ -410,6 +442,9 @@ class ReplayCursorV1(_ReplayProtocolModel):
 
     @model_validator(mode="after")
     def _validate_cursor(self) -> Self:
+        """Keep the selected frame in range and animation progress no newer than
+        cursor progress.
+        """
         if self.frame_index > self.final_frame_index:
             raise ValueError("replay cursor exceeds the captured prefix.")
         if self.choreography_generation > self.cursor_generation:
@@ -420,6 +455,9 @@ class ReplayCursorV1(_ReplayProtocolModel):
 def _expected_endpoint_kind(
     completion: ReplayCompletionBadgeV1 | ActorPovReplayCompletionBadgeV1,
 ) -> ReplayTimelineEndpointKindV1:
+    """Choose the timeline endpoint label from declared complete or incomplete
+    evidence.
+    """
     if completion.completion_state != "complete":
         return "captured_prefix"
     bases = completion.completion_bases
@@ -450,6 +488,7 @@ def _validate_shared_agent_completion_disclosure(
 
 
 def _validate_private_shared_cursor_root(cursor: ReplayCursorV1) -> None:
+    """Reject altered private cursor shape, field types or model identity."""
     if type(cursor) is not ReplayCursorV1:
         raise ValueError("private Shared cursor must use its exact V1 root.")
     field_names = set(ReplayCursorV1.model_fields)
@@ -465,6 +504,9 @@ def _validate_private_shared_cursor_root(cursor: ReplayCursorV1) -> None:
 def _validate_private_shared_completion_root(
     completion: ActorPovReplayCompletionBadgeV1,
 ) -> None:
+    """Require the exact private completion model and canonical field/container
+    types.
+    """
     if type(completion) is not ActorPovReplayCompletionBadgeV1:
         raise ValueError("private Shared completion must use its exact Agent root.")
     field_names = set(ActorPovReplayCompletionBadgeV1.model_fields)
@@ -492,6 +534,7 @@ def _validate_completion_summary_join(
     summary: ReplayArtifactSummaryV1,
     completion: ReplayCompletionBadgeV1 | ActorPovReplayCompletionBadgeV1,
 ) -> None:
+    """Join completion identity, horizon and captured progress to the replay summary."""
     if completion.episode_id != summary.replay_reference.episode_id:
         raise ValueError("timeline completion must join replay identity.")
     if completion.expected_transition_count != summary.expected_transition_count:
@@ -512,12 +555,13 @@ def _validate_adjacent_simulator_step(
     previous_step: int | None,
     current_step: int,
 ) -> None:
+    """Require successive recorded simulator steps to differ by exactly one."""
     if previous_step is not None and current_step != previous_step + 1:
         raise ValueError("timeline simulator epochs must remain adjacent.")
 
 
 class ResearcherReplayTimelineRowV1(_ReplayProtocolModel):
-    """One compact researcher timeline row with canonical CP2 identity."""
+    """Describe one researcher timeline frame with its recorded global identity."""
 
     frame_index: _NonNegativeInt
     frame_id: _ScientificId
@@ -528,7 +572,7 @@ class ResearcherReplayTimelineRowV1(_ReplayProtocolModel):
 
 
 class ActorPovReplayTimelineRowV1(_ReplayProtocolModel):
-    """One recipient-local timeline row without privileged CP2 event identity."""
+    """Describe one recipient-local timeline frame without global event identity."""
 
     frame_index: _NonNegativeInt
     pov_frame_id: _ScientificId
@@ -574,6 +618,8 @@ class SharedObsAgentPovReplayTimelineRowV1(_PrivateSharedReplayProtocolModel):
 
 
 class _ReplayTimelineBaseV1(_ReplayProtocolModel):
+    """Shared replay timeline identity and final captured-frame boundary."""
+
     schema_version: Literal[1] = REPLAY_VIEWER_PROTOCOL_SCHEMA_VERSION
     timeline_id: _ScientificId
     artifact_summary: ReplayArtifactSummaryV1
@@ -581,6 +627,9 @@ class _ReplayTimelineBaseV1(_ReplayProtocolModel):
 
     @model_validator(mode="after")
     def _validate_base(self) -> Self:
+        """Require the exact artifact summary and a final index matching its captured
+        prefix.
+        """
         if type(self.artifact_summary) is not ReplayArtifactSummaryV1:
             raise ValueError("artifact_summary must be the exact replay root.")
         if self.final_frame_index != self.artifact_summary.recorded_transition_count:
@@ -589,12 +638,22 @@ class _ReplayTimelineBaseV1(_ReplayProtocolModel):
 
 
 class ResearcherReplayTimelineV1(_ReplayTimelineBaseV1):
+    """Complete researcher timeline with canonical frame, transition and endpoint
+    identities.
+
+    Rows cover the reset frame and every captured successor in order. The final
+    marker reflects recorded completion evidence, not current viewer processing.
+    """
+
     timeline_kind: Literal["researcher"] = "researcher"
     completion: ReplayCompletionBadgeV1
     rows: tuple[ResearcherReplayTimelineRowV1, ...]
 
     @model_validator(mode="after")
     def _validate_timeline(self) -> Self:
+        """Require ordered canonical T+1 rows, adjacent steps and the correct final
+        endpoint marker.
+        """
         summary = self.artifact_summary
         _validate_researcher_artifact_summary(summary)
         completion = self.completion
@@ -635,6 +694,11 @@ class ResearcherReplayTimelineV1(_ReplayTimelineBaseV1):
 
 
 class ActorPovReplayTimelineV1(_ReplayTimelineBaseV1):
+    """Actor-local timeline with authorized frame IDs and incoming cue counts.
+
+    Rows retain one selected actor and never use privileged global event identities.
+    """
+
     timeline_kind: Literal["actor_pov"] = "actor_pov"
     pov_global_slot: _GlobalSlot
     public_agent_id: _PublicAgentId
@@ -643,6 +707,9 @@ class ActorPovReplayTimelineV1(_ReplayTimelineBaseV1):
 
     @model_validator(mode="after")
     def _validate_timeline(self) -> Self:
+        """Join actor-local row identities, adjacent steps, prefix counts and final
+        completion.
+        """
         summary = self.artifact_summary
         _validate_actor_pov_artifact_summary(summary)
         completion = self.completion
@@ -689,6 +756,11 @@ class ActorPovReplayTimelineV1(_ReplayTimelineBaseV1):
 
 
 class SharedObsSourceMaterialReplayTimelineV1(_ReplayTimelineBaseV1):
+    """Explicitly source-only timeline for one SharedObs base sensor.
+
+    This is recorded source material, not a claim to be a composed policy input.
+    """
+
     timeline_kind: Literal["shared_obs_source_material"] = "shared_obs_source_material"
     selected_global_slot: _GlobalSlot
     public_agent_id: _PublicAgentId
@@ -700,6 +772,9 @@ class SharedObsSourceMaterialReplayTimelineV1(_ReplayTimelineBaseV1):
 
     @model_validator(mode="after")
     def _validate_timeline(self) -> Self:
+        """Keep source-material rows, identities and endpoint markers consistent with
+        the replay.
+        """
         summary = self.artifact_summary
         _validate_researcher_artifact_summary(summary)
         completion = self.completion
@@ -765,6 +840,9 @@ class SharedObsAgentPovReplayTimelineV1(_PrivateSharedReplayProtocolModel):
 
     @model_validator(mode="after")
     def _validate_timeline(self) -> Self:
+        """Require exact recipient-local roots, ordered frame IDs and matching
+        captured progress.
+        """
         summary = self.artifact_summary
         completion = self.completion
         if type(summary) is not SharedObsAgentPovReplayArtifactSummaryV1:
@@ -840,6 +918,8 @@ type ReplayTimelineV1 = Annotated[
 
 
 class _ReplayViewerFrameBaseV1(_ReplayProtocolModel):
+    """Viewer session/revision and cursor metadata shared by supported replay views."""
+
     schema_version: Literal[1] = REPLAY_VIEWER_PROTOCOL_SCHEMA_VERSION
     viewer_session_id: _OpaqueId
     revision: _NonNegativeInt
@@ -851,6 +931,9 @@ class _ReplayViewerFrameBaseV1(_ReplayProtocolModel):
 
     @model_validator(mode="after")
     def _validate_base(self) -> Self:
+        """Require exact replay/cursor roots and a cursor bound matching the captured
+        prefix.
+        """
         if type(self.artifact_summary) is not ReplayArtifactSummaryV1:
             raise ValueError("artifact_summary must be the exact replay root.")
         if type(self.cursor) is not ReplayCursorV1:
@@ -868,6 +951,9 @@ def _validate_researcher_progress(
     completion: ReplayCompletionBadgeV1,
     processing: ReplayProcessingBadgeV1,
 ) -> None:
+    """Keep processing progress within validated replay progress and complete it on
+    success.
+    """
     reference = summary.replay_reference
     if completion.episode_id != reference.episode_id:
         raise ValueError("completion must join replay identity.")
@@ -895,6 +981,9 @@ class ReplayArtifactFactsV1(_ReplayProtocolModel):
 
     @model_validator(mode="after")
     def _validate_facts(self) -> Self:
+        """Require the exact artifact, rollout completion and processing roots before
+        joining them.
+        """
         if type(self.artifact_summary) is not ReplayArtifactSummaryV1:
             raise ValueError("artifact_summary must be the exact replay artifact root.")
         if type(self.completion) is not ReplayCompletionBadgeV1:
@@ -916,6 +1005,9 @@ def _validate_agent_artifact_facts_join(
     completion: ActorPovReplayCompletionBadgeV1,
     facts: ReplayArtifactFactsV1,
 ) -> None:
+    """Join actor-safe replay counts to the separate researcher artifact-facts
+    record.
+    """
     if type(facts) is not ReplayArtifactFactsV1:
         raise ValueError("artifact_facts must be the exact canonical replay root.")
     canonical = facts.artifact_summary
@@ -955,7 +1047,7 @@ def _validate_agent_artifact_facts_join(
 
 
 class ResearcherReplayViewerFrameV1(_ReplayViewerFrameBaseV1):
-    """Read-only researcher frame carrying the accepted CP7.1 projection."""
+    """Carry a read-only researcher frame with the checked global display projection."""
 
     frame_kind: Literal["researcher_replay_viewer"] = "researcher_replay_viewer"
     view_mode: Literal["researcher"] = "researcher"
@@ -971,6 +1063,9 @@ class ResearcherReplayViewerFrameV1(_ReplayViewerFrameBaseV1):
 
     @model_validator(mode="after")
     def _validate_frame(self) -> Self:
+        """Bind researcher projection, frame and incoming transition to the selected
+        replay cursor.
+        """
         _validate_researcher_artifact_summary(self.artifact_summary)
         _validate_researcher_progress(
             self.artifact_summary,
@@ -1025,6 +1120,9 @@ class ActorPovReplayViewerFrameV1(_ReplayViewerFrameBaseV1):
 
     @model_validator(mode="after")
     def _validate_frame(self) -> Self:
+        """Bind actor-safe projection, completion and incoming identity to the
+        selected replay frame.
+        """
         summary = self.artifact_summary
         _validate_actor_pov_artifact_summary(summary)
         reference = summary.replay_reference
@@ -1101,6 +1199,9 @@ class SharedObsSourceMaterialReplayViewerFrameV1(_ReplayViewerFrameBaseV1):
 
     @model_validator(mode="after")
     def _validate_frame(self) -> Self:
+        """Require exact source-material projection and identity joins without
+        claiming composed input.
+        """
         _validate_researcher_artifact_summary(self.artifact_summary)
         _validate_researcher_progress(
             self.artifact_summary,
@@ -1196,6 +1297,9 @@ class SharedObsAgentPovReplayViewerFrameV1(_PrivateSharedReplayProtocolModel):
 
     @model_validator(mode="after")
     def _validate_frame(self) -> Self:
+        """Require recipient-local SharedObs identity, exact roots and coherent
+        captured progress.
+        """
         summary = self.artifact_summary
         cursor = self.cursor
         completion = self.completion
@@ -1265,37 +1369,57 @@ type ReplayViewerFrameV1 = Annotated[
 
 
 class ReplayAbsoluteSeekCommandV1(_ReplayProtocolModel):
+    """Request a zero-based recorded frame index; the service checks the replay
+    bounds.
+    """
+
     command_type: Literal["absolute_seek"] = "absolute_seek"
     frame_index: _NonNegativeInt
 
 
 class ReplayFirstFrameCommandV1(_ReplayProtocolModel):
+    """Move the viewer to the captured reset frame."""
+
     command_type: Literal["first_frame"] = "first_frame"
 
 
 class ReplayPreviousFrameCommandV1(_ReplayProtocolModel):
+    """Move the viewer one recorded frame backward when possible."""
+
     command_type: Literal["previous_frame"] = "previous_frame"
 
 
 class ReplayNextFrameCommandV1(_ReplayProtocolModel):
+    """Move the viewer one recorded frame forward when possible."""
+
     command_type: Literal["next_frame"] = "next_frame"
 
 
 class ReplayLastFrameCommandV1(_ReplayProtocolModel):
+    """Move the viewer to the last captured frame, which may be an incomplete prefix."""
+
     command_type: Literal["last_frame"] = "last_frame"
 
 
 class ReplaySelectAgentCommandV1(_ReplayProtocolModel):
+    """Select a researcher-view global agent slot, or clear selection with None."""
+
     command_type: Literal["select_agent"] = "select_agent"
     selected_global_slot: _GlobalSlot | None
 
 
 class ReplaySetViewCommandV1(_ReplayProtocolModel):
+    """Request a supported researcher or actor replay view."""
+
     command_type: Literal["set_view"] = "set_view"
     view_mode: ReplayViewModeV1
 
 
 class ReplaySetPovActorCommandV1(_ReplayProtocolModel):
+    """Select the actor view using exactly one global slot or authorized presentation
+    key.
+    """
+
     command_type: Literal["set_pov_actor"] = "set_pov_actor"
     global_slot: _GlobalSlot | None = Field(
         default=None,
@@ -1308,18 +1432,24 @@ class ReplaySetPovActorCommandV1(_ReplayProtocolModel):
 
     @model_validator(mode="after")
     def _validate_actor_reference(self) -> Self:
+        """Require exactly one actor reference so slot and presentation-key inputs
+        cannot conflict.
+        """
         if (self.global_slot is None) == (self.presentation_key is None):
             raise ValueError("set_pov_actor requires exactly one actor reference.")
         return self
 
 
 class ReplaySetPresetCommandV1(_ReplayProtocolModel):
+    """Request the supported presentation preset with legacy-name compatibility."""
+
     command_type: Literal["set_preset"] = "set_preset"
     preset: ReplayPresetV1
 
     @field_validator("preset", mode="before")
     @classmethod
     def _canonicalize_legacy_technical_preset(cls, value: object) -> object:
+        """Map historical preset spellings to the current Analysis presentation."""
         return (
             "analysis"
             if value in ("presentation", "analysis", "technical", "debug")
@@ -1328,16 +1458,22 @@ class ReplaySetPresetCommandV1(_ReplayProtocolModel):
 
 
 class ReplaySetRangesCommandV1(_ReplayProtocolModel):
+    """Request whether the replay view displays configured range overlays."""
+
     command_type: Literal["set_ranges"] = "set_ranges"
     show_ranges: bool
 
 
 class ReplaySetVerbosityCommandV1(_ReplayProtocolModel):
+    """Carry the legacy verbosity option for service-level compatibility handling."""
+
     command_type: Literal["set_verbosity"] = "set_verbosity"
     verbose: bool
 
 
 class ReplayExitCommandV1(_ReplayProtocolModel):
+    """Request a clean shutdown of the local replay viewer."""
+
     command_type: Literal["exit"] = "exit"
 
 
@@ -1359,6 +1495,13 @@ type ReplayCommandV1 = Annotated[
 
 
 class ReplayCommandRequestV1(_ReplayProtocolModel):
+    """One versioned replay command with client ID, retry identity and expected
+    revision.
+
+    The service uses these fields to handle repeat requests and stale commands;
+    parsing the model alone does not apply the operation.
+    """
+
     schema_version: Literal[1] = REPLAY_VIEWER_PROTOCOL_SCHEMA_VERSION
     client_id: _OpaqueId
     command_id: _OpaqueId
@@ -1367,6 +1510,12 @@ class ReplayCommandRequestV1(_ReplayProtocolModel):
 
 
 class ReplayCommandResponseV1(_ReplayProtocolModel):
+    """A replay command result and latest frame with optional one-step animation intent.
+
+    Animation belongs to this response only. It does not become durable playback
+    state, and frame zero has no incoming transition to animate.
+    """
+
     schema_version: Literal[1] = REPLAY_VIEWER_PROTOCOL_SCHEMA_VERSION
     result: ReplayCommandResultV1
     frame: ReplayViewerFrameV1
@@ -1375,6 +1524,9 @@ class ReplayCommandResponseV1(_ReplayProtocolModel):
 
     @model_validator(mode="after")
     def _validate_animation_intent(self) -> Self:
+        """Permit animation only for an applied command with a real advanced incoming
+        transition.
+        """
         if self.animate_incoming:
             if self.result != "applied":
                 raise ValueError("only an applied command may request choreography.")
@@ -1386,6 +1538,8 @@ class ReplayCommandResponseV1(_ReplayProtocolModel):
 
 
 class ReplayApiErrorV1(_ReplayProtocolModel):
+    """A stable replay API error with a message and optional latest validated frame."""
+
     schema_version: Literal[1] = REPLAY_VIEWER_PROTOCOL_SCHEMA_VERSION
     error_code: ReplayApiErrorCodeV1
     message: _Message

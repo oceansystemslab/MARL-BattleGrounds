@@ -1,4 +1,12 @@
-"""Locked authoritative session ownership for the live browser debugger."""
+"""Own the live browser session and serialize its commands.
+
+``DebuggerService`` keeps one committed session and response frame under a
+reentrant lock. Candidate frames and authorized presentations are checked
+before installation. A bounded command cache prevents repeated execution
+while an ID remains cached. Optional recording captures accepted transitions,
+saves through the recorder, and hands verified output to the replay service.
+The HTTP server owns transport and authentication.
+"""
 
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -93,6 +101,7 @@ class RecordingCloseResult:
     message: str
 
     def __post_init__(self) -> None:
+        """Require an exact boolean saved flag and a nonempty host message."""
         if type(self.saved) is not bool:
             raise TypeError("recording close saved flag must be a Python bool.")
         if type(self.message) is not str or not self.message:
@@ -101,12 +110,16 @@ class RecordingCloseResult:
 
 @dataclass(frozen=True, slots=True)
 class _CommandRecord:
+    """Remember one request fingerprint and whether it requested shutdown."""
+
     fingerprint: str
     shutdown_requested: bool
 
 
 @dataclass(frozen=True, slots=True)
 class _RecordingResponseCandidate:
+    """Hold a validated frame, response, and cache update before state is committed."""
+
     revision: int
     frame: LiveDebuggerFrame
     response: CommandResponseV2
@@ -116,6 +129,8 @@ class _RecordingResponseCandidate:
 
 @dataclass(frozen=True, slots=True)
 class _EndpointResponseCandidates:
+    """Hold checked success and save-failure responses for a sealed episode."""
+
     saved: _RecordingResponseCandidate
     failures: dict[
         RecordingPersistenceErrorCodeV1,
@@ -125,6 +140,8 @@ class _EndpointResponseCandidates:
 
 @dataclass(frozen=True, slots=True)
 class _FailureCloseoutCandidates:
+    """Hold checked responses for saving the last accepted prefix after a failure."""
+
     saved: _RecordingResponseCandidate
     failures: dict[
         RecordingPersistenceErrorCodeV1,
@@ -145,6 +162,37 @@ class DebuggerService:
         session_id: str | None = None,
         recorder: DebuggerReplayRecorder | None = None,
     ) -> None:
+        """Build the live service around an existing immutable session.
+
+        Parameters
+        ----------
+        session : DebuggerSession
+            Current live episode and matching captured frame.
+        view_mode : ViewMode
+            Researcher or actor view passed to the frame builder.
+        preset : Preset or {'technical', 'debug'}
+            Accepted compatibility preset. All accepted values start in analysis mode.
+        include_stress : bool
+            Whether registered stress scenarios may be selected.
+        session_id : str or None, optional
+            Session identity for protocol frames. Missing or empty values create a
+            random identity. Defaults to None.
+        recorder : DebuggerReplayRecorder or None, optional
+            Exact recorder owning this open episode prefix. None requires the debug
+            capture profile; recording requires metric-complete capture.
+
+        Raises
+        ------
+        TypeError
+            The recorder has an unsupported exact type.
+        ValueError
+            Scenario access, preset, capture profile, or recorder identity is invalid.
+
+        Notes
+        -----
+        Construction builds the initial host frame and lock. It does not advance the
+        simulator or publish a replay file.
+        """
         if session.scenario_name in STRESS_SCENARIOS and not include_stress:
             msg = (
                 f"stress scenario {session.scenario_name!r} requires "
@@ -177,6 +225,9 @@ class DebuggerService:
         session: DebuggerSession,
         recorder: DebuggerReplayRecorder | None,
     ) -> DebuggerReplayRecorder | None:
+        """Require the recorder to own this exact open capture, or require debug
+        mode.
+        """
         if recorder is None:
             if session.evaluation_context.capture_profile != "debug":
                 raise ValueError(
@@ -207,7 +258,33 @@ class DebuggerService:
             return self._session
 
     def load_scenario(self, scenario: DebuggerScenario) -> DebuggerSession:
-        """Atomically replace the live diagnostic episode with one scenario."""
+        """Replace an unrecorded live episode after validating its full response.
+
+        Parameters
+        ----------
+        scenario : DebuggerScenario
+            Exact compiled scenario to load into a reset episode.
+
+        Returns
+        -------
+        DebuggerSession
+            Newly installed session. The revision increases and cached command IDs
+            are cleared only after frame and presentation validation succeeds.
+
+        Raises
+        ------
+        TypeError
+            The scenario has the wrong exact type.
+        RuntimeError
+            The service is stopping, faulted, or owns a replay recording.
+        ValueError
+            Scenario setup or its candidate response fails validation.
+
+        Notes
+        -----
+        The operation holds the service lock and performs reset work. It does not
+        write an authored scenario file.
+        """
         if type(scenario) is not DebuggerScenario:
             raise TypeError("scenario must be the exact DebuggerScenario type.")
         with self._lock:
@@ -279,7 +356,21 @@ class DebuggerService:
             return None if self._recorder is None else self._recorder.status
 
     def close_recording_for_keyboard_interrupt(self) -> RecordingCloseResult:
-        """Best-effort durable closeout for the hosting process's Ctrl-C path."""
+        """Try to save active capture before the hosting process exits.
+
+        Returns
+        -------
+        RecordingCloseResult
+            Whether capture is safe to leave and a host-facing status message.
+            No active capture and an already saved replay both count as success.
+
+        Notes
+        -----
+        The service lock covers response preparation and saving. A failed initial
+        save is retried; a failed retry tries a deterministic recovery sibling.
+        The revision and displayed recording status reflect the final result.
+        Unexpected invariant or response-validation failures still propagate.
+        """
         with self._lock:
             recorder = self._recorder
             if recorder is None or recorder.lifecycle == "discarded":
@@ -381,6 +472,7 @@ class DebuggerService:
             )
 
     def _validated_transition_count(self) -> int:
+        """Read the committed recorder count, or the unrecorded current frame index."""
         if self._recorder is not None:
             return self._recorder.validated_transition_count
         return self._session.current_evaluation_frame.frame_index
@@ -398,12 +490,37 @@ class DebuggerService:
             return self._faulted
 
     def current_frame(self) -> LiveDebuggerFrame:
-        """Return the current coherent frame without mutating the session."""
+        """Read the current immutable transport frame under the service lock.
+
+        Returns
+        -------
+        LiveDebuggerFrame
+            The already built frame for the committed revision; no simulator work
+            or new recording I/O is performed.
+        """
         with self._lock:
             return self._frame
 
     def current_presentation(self) -> PresentationResourceResultV1:
-        """Build one authorized presentation from the committed live snapshot."""
+        """Build the authorized display resource for the committed live snapshot.
+
+        Returns
+        -------
+        PresentationResourceResultV1
+            Checked presentation for the current researcher or actor view.
+
+        Raises
+        ------
+        RuntimeError
+            The retained transport frame differs from the service-owned snapshot.
+        ValueError
+            An authority, epoch, or display contract fails validation.
+
+        Notes
+        -----
+        This holds the service lock while deriving host display data. It does not
+        advance the simulator or expand an actor's information rights.
+        """
         with self._lock:
             raw_frame = self._frame
             expected_frame = self._build_frame()
@@ -525,6 +642,7 @@ class DebuggerService:
         fingerprint: str,
         notice: str,
     ) -> ServiceCommandResult:
+        """Remember an unavailable recording command and return the unchanged frame."""
         record = _CommandRecord(
             fingerprint=fingerprint,
             shutdown_requested=False,
@@ -540,6 +658,9 @@ class DebuggerService:
         )
 
     def _build_replay_handoff(self) -> ReplayViewerService:
+        """Create a replay service from verified saved capture and current view
+        choices.
+        """
         recorder = self._recorder
         if recorder is None or recorder.verified_loaded_bundle is None:
             raise RuntimeError("replay handoff requires a verified recording.")
@@ -579,6 +700,9 @@ class DebuggerService:
         changed: bool,
         shutdown_requested: bool = False,
     ) -> _RecordingResponseCandidate:
+        """Validate a proposed recording response and copied command cache before
+        mutation.
+        """
         candidate_revision = self._revision + int(changed)
         candidate_frame = self._build_frame(
             revision=candidate_revision,
@@ -614,6 +738,9 @@ class DebuggerService:
         *,
         replay_handoff: ReplayViewerService | None = None,
     ) -> ServiceCommandResult:
+        """Install a prepared response and optional shutdown flag; return any replay
+        handoff.
+        """
         self._revision = candidate.revision
         self._frame = candidate.frame
         self._command_records = candidate.command_records
@@ -634,6 +761,7 @@ class DebuggerService:
         completion_reason: str | None = None,
         persistence_error_code: RecordingPersistenceErrorCodeV1 | None = None,
     ) -> RecordingStatusV1:
+        """Build proposed lifecycle facts using the current accepted capture count."""
         recorder = self._recorder
         if recorder is None:
             raise AssertionError("recording status preview requires a recorder.")
@@ -652,6 +780,12 @@ class DebuggerService:
         fingerprint: str,
         command: object,
     ) -> ServiceCommandResult | None:
+        """Handle save, review, retry, and exit commands for an attached recorder.
+
+        Return None when ordinary command dispatch should continue. Build response
+        candidates before recorder mutations and retain a saved fallback if review
+        construction fails.
+        """
         recorder = self._recorder
         if recorder is None:
             return None
@@ -856,6 +990,9 @@ class DebuggerService:
         _RecordingResponseCandidate,
         dict[RecordingPersistenceErrorCodeV1, _RecordingResponseCandidate],
     ]:
+        """Validate success, review-fallback, and each expected save-error response
+        first.
+        """
         success = self._prepare_recording_response(
             command_key=command_key,
             fingerprint=fingerprint,
@@ -916,6 +1053,7 @@ class DebuggerService:
             _RecordingResponseCandidate,
         ],
     ) -> _RecordingResponseCandidate:
+        """Select the prebuilt response matching the recorder's public save error."""
         recorder = self._recorder
         if recorder is None or recorder.persistence_error_code is None:
             raise AssertionError(
@@ -935,6 +1073,9 @@ class DebuggerService:
         ],
         begin_review: bool,
     ) -> ServiceCommandResult:
+        """Install the matching save result, keeping saved status if review cannot
+        open.
+        """
         if outcome == "persistence_failed":
             return self._commit_recording_response(
                 self._failure_response_for_current_status(failures)
@@ -956,6 +1097,9 @@ class DebuggerService:
         *,
         candidates: _EndpointResponseCandidates,
     ) -> ServiceCommandResult:
+        """Save a committed sealed capture and install its prevalidated endpoint
+        response.
+        """
         recorder = self._recorder
         if recorder is None or recorder.lifecycle != "sealed":
             raise AssertionError("endpoint finalization requires a sealed recorder.")
@@ -973,6 +1117,9 @@ class DebuggerService:
         self,
         candidate: _RecordingResponseCandidate,
     ) -> ServiceCommandResult:
+        """Install endpoint save status only at the already committed transition
+        revision.
+        """
         if candidate.revision != self._revision:
             raise AssertionError("endpoint response revision drifted after commit.")
         self._frame = candidate.frame
@@ -993,6 +1140,9 @@ class DebuggerService:
         preset: Preset,
         transition_close_status: RecordingStatusV1,
     ) -> _EndpointResponseCandidates:
+        """Validate endpoint success and save-failure frames before accepting the
+        transition.
+        """
         if transition_close_status.lifecycle != "sealed":
             raise ValueError("endpoint response candidates require sealed status.")
         completion_state = transition_close_status.completion_state
@@ -1006,6 +1156,9 @@ class DebuggerService:
             status: RecordingStatusV1,
             notice: str,
         ) -> _RecordingResponseCandidate:
+            """Build one endpoint response from proposed recording status and public
+            notice.
+            """
             frame = self._build_frame(
                 session=session,
                 revision=revision,
@@ -1095,6 +1248,9 @@ class DebuggerService:
         session: DebuggerSession | None = None,
         captured_transition_count: int | None = None,
     ) -> _FailureCloseoutCandidates:
+        """Validate save outcomes for the accepted capture prefix before failure
+        closeout.
+        """
         recorder = self._recorder
         if recorder is None:
             raise AssertionError("failure closeout requires a recorder.")
@@ -1117,6 +1273,9 @@ class DebuggerService:
             notice: str,
             persistence_error_code: RecordingPersistenceErrorCodeV1 | None = None,
         ) -> _RecordingResponseCandidate:
+            """Build a failed-step closeout response for one proposed publication
+            result.
+            """
             status = recorder.preview_status_v1(
                 captured_transition_count=count,
                 lifecycle=lifecycle,
@@ -1195,6 +1354,9 @@ class DebuggerService:
         ],
         candidates: _FailureCloseoutCandidates,
     ) -> ServiceCommandResult:
+        """Save the accepted prefix, install its result, and fence unexpected
+        closeout failures.
+        """
         recorder = self._recorder
         if recorder is None:
             raise AssertionError("failure closeout requires a recorder.")
@@ -1211,7 +1373,30 @@ class DebuggerService:
         return self._commit_recording_response(candidates.saved)
 
     def apply_command(self, request: CommandRequestV1) -> ServiceCommandResult:
-        """Apply at most one command under duplicate and revision guards."""
+        """Apply one revision-matched command under the service lock.
+
+        Parameters
+        ----------
+        request : CommandRequestV1
+            Validated request containing client ID, command ID, base revision, and
+            one supported live or recording command.
+
+        Returns
+        -------
+        ServiceCommandResult
+            Response or typed rejection with the current frame. A saved replay may
+            include a prepared replay-service handoff. Shutdown is only requested
+            in the result; the HTTP host owns stopping its request loop.
+
+        Notes
+        -----
+        The latest 256 request IDs are retained. An exact repeat while cached returns
+        the current frame without repeating the command; changed content under that
+        ID is rejected. Stale revisions, shutdown, and fault state reject new work.
+        Step and reset commands may execute JAX work; recording commands may write
+        files. Candidate response validation precedes installation. Unexpected
+        internal failures can fence further commands and propagate.
+        """
         command_key = (request.client_id, request.command_id)
         fingerprint = request.model_dump_json()
         with self._lock:
@@ -1801,6 +1986,9 @@ class DebuggerService:
         preset: Preset | None = None,
         recording_status: RecordingStatusV1 | None = None,
     ) -> LiveDebuggerFrame:
+        """Build a candidate frame, using committed values wherever overrides are
+        None.
+        """
         resolved_recording_status = recording_status
         if resolved_recording_status is None and self._recorder is not None:
             resolved_recording_status = self._recorder.status
@@ -1819,6 +2007,7 @@ class DebuggerService:
         key: tuple[str, str],
         record: _CommandRecord,
     ) -> None:
+        """Insert a request record into the current bounded recent-command cache."""
         self._remember_command_in(self._command_records, key, record)
 
     @staticmethod

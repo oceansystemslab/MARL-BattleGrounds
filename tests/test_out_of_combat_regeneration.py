@@ -1,4 +1,4 @@
-"""Public out-of-combat regeneration proofs for Milestone 6 Checkpoint 2."""
+"""Check health regeneration and the rules for leaving combat."""
 
 # pyright: reportPrivateUsage=false
 
@@ -66,12 +66,10 @@ _StepResult = tuple[
 
 
 def _empty_obstacles() -> Array:
-    """Return an inactive fixed-size obstacle table."""
     return jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32)
 
 
 def _spawn_pad_positions() -> Array:
-    """Return clear immutable pads for every fixed team-local slot."""
     team_a = jnp.asarray(
         ((3.0, 2.0), (3.0, 4.0), (3.0, 6.0), (3.0, 8.0), (3.0, 10.0)),
         dtype=jnp.float32,
@@ -87,7 +85,6 @@ def _requested_roster(
     team_sizes: tuple[int, int],
     *class_rows: tuple[int, int],
 ) -> Array:
-    """Return a padded Hunter roster with selected active class overrides."""
     roster = jnp.full((MAX_AGENT_SLOTS,), NEUTRAL_CLASS_ID, dtype=jnp.int32)
     roster = roster.at[: team_sizes[0]].set(HUNTER_CLASS_ID)
     roster = roster.at[MAX_AGENTS_PER_TEAM : MAX_AGENTS_PER_TEAM + team_sizes[1]].set(
@@ -105,7 +102,6 @@ def _scenario(
     shield_duration: int = 3,
     ordinary_movement_distance_scale: float = 0.25,
 ) -> tuple[EnvConfig, EnvState, Observation, ActionMask, Info]:
-    """Build a deterministic fully visible public-step scenario."""
     profile = resolve_agent_profile(
         _requested_roster(team_sizes, *class_rows),
         jnp.asarray(team_sizes, dtype=jnp.int32),
@@ -138,7 +134,6 @@ def _scenario(
 
 
 def _target_action_for_global_slot(actor_slot: int, recipient_slot: int) -> int:
-    """Return the actor-relative target category for one global recipient."""
     actor_team = actor_slot // MAX_AGENTS_PER_TEAM
     recipient_team = recipient_slot // MAX_AGENTS_PER_TEAM
     recipient_local_slot = recipient_slot % MAX_AGENTS_PER_TEAM
@@ -147,11 +142,6 @@ def _target_action_for_global_slot(actor_slot: int, recipient_slot: int) -> int:
 
 
 def _joint_action(*rows: tuple[int, int, int | None, int]) -> Action:
-    """Return a canonical joint action with selected actor overrides.
-
-    Each row is ``(actor_slot, move, recipient_global_slot, use_ultimate)``.
-    ``None`` denotes target-none.
-    """
     move = jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32)
     target = jnp.full((MAX_AGENT_SLOTS,), _TARGET_NONE, dtype=jnp.int32)
     ultimate = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
@@ -168,7 +158,6 @@ def _joint_action(*rows: tuple[int, int, int | None, int]) -> Action:
 def _observation_and_mask(
     config: EnvConfig, state: EnvState
 ) -> tuple[Observation, ActionMask]:
-    """Return the public observation and authoritative mask for an authored state."""
     return _build_observation_and_action_mask(state, config)
 
 
@@ -180,7 +169,6 @@ def _take_step(
     action_mask: ActionMask | None = None,
     key: Array | None = None,
 ) -> _StepResult:
-    """Advance one deterministic public transition."""
     choosing_mask = (
         _observation_and_mask(config, state)[1] if action_mask is None else action_mask
     )
@@ -194,7 +182,6 @@ def _take_step(
 
 
 def _slot_mask(*slots: int) -> Array:
-    """Return a fixed-slot boolean mask selecting exactly ``slots``."""
     mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
     for slot in slots:
         mask = mask.at[slot].set(True)
@@ -202,7 +189,6 @@ def _slot_mask(*slots: int) -> Array:
 
 
 def _with_dead_slot(state: EnvState, slot: int) -> EnvState:
-    """Return one canonical authored corpse while retaining static profile truth."""
     return state._replace(
         alive_mask=state.alive_mask.at[slot].set(False),
         current_health=state.current_health.at[slot].set(0.0),
@@ -227,7 +213,6 @@ def _with_dead_slot(state: EnvState, slot: int) -> EnvState:
 
 
 def _assert_tree_equal(left: object, right: object) -> None:
-    """Assert exact equality for two identically structured JAX PyTrees."""
     assert jax.tree_util.tree_structure(left) == jax.tree_util.tree_structure(right)
     for left_leaf, right_leaf in zip(
         jax.tree_util.tree_leaves(left),
@@ -238,17 +223,14 @@ def _assert_tree_equal(left: object, right: object) -> None:
 
 
 def _stack_trees(*trees: object) -> object:
-    """Stack identically structured PyTrees along a leading batch axis."""
     return jax.tree_util.tree_map(lambda *leaves: jnp.stack(leaves), *trees)
 
 
 def _assert_close(actual: Array, expected: float) -> None:
-    """Assert one scalar JAX value against a readable floating expectation."""
     assert float(actual) == pytest.approx(expected)
 
 
 def test_catalogs_profile_reset_and_canonical_facts_publish_exact_contract() -> None:
-    """Resolve exact class capabilities once and expose canonical reset truth."""
     expected_delays = jnp.asarray((0, 5, 5, 5, 3, 5), dtype=jnp.int32)
     expected_rates = jnp.asarray((0.0, 0.04, 0.04, 0.04, 0.04, 0.04), dtype=jnp.float32)
 
@@ -335,7 +317,6 @@ def test_catalogs_profile_reset_and_canonical_facts_publish_exact_contract() -> 
 
 
 def test_hunter_trap_resets_class_delays_while_mage_burst_does_not() -> None:
-    """Route Hunter damage universally while preserving zero-damage Mage Burst."""
     config, state, *_ = _scenario(
         (_TEAM_A_FIRST_SLOT, ROGUE_CLASS_ID),
         (_TEAM_A_SECOND_SLOT, MAGE_CLASS_ID),
@@ -391,7 +372,6 @@ def test_hunter_trap_resets_class_delays_while_mage_burst_does_not() -> None:
 def test_countdown_five_to_zero_blocks_regeneration_until_the_next_selected_step() -> (
     None
 ):
-    """Prove the complete public `5 -> ... -> 1 -> 0 -> regenerate` trajectory."""
     config, state, observation, *_ = _scenario()
     state = state._replace(
         current_health=state.current_health.at[_TEAM_A_FIRST_SLOT].set(50.0),
@@ -443,7 +423,6 @@ def test_countdown_five_to_zero_blocks_regeneration_until_the_next_selected_step
 
 
 def test_delay_zero_damage_still_blocks_regeneration_on_the_interaction_step() -> None:
-    """A delay-zero ablation records the reset and regenerates only next step."""
     config, state, *_ = _scenario()
     delay_probe = config.agent_profile.out_of_combat_delay_steps.at[
         _TEAM_A_FIRST_SLOT
@@ -486,7 +465,6 @@ def test_delay_zero_damage_still_blocks_regeneration_on_the_interaction_step() -
 
 
 def test_delay_one_expires_before_the_first_regeneration_transition() -> None:
-    """A delay-one tuning probe preserves the public `1 -> 0 -> regenerate` rule."""
     config, state, *_ = _scenario()
     delay_probe = config.agent_profile.out_of_combat_delay_steps.at[
         _TEAM_A_FIRST_SLOT
@@ -533,7 +511,6 @@ def test_delay_one_expires_before_the_first_regeneration_transition() -> None:
 
 
 def test_ooc_heal_uses_snapshot_then_qualifies_next_transition() -> None:
-    """Prove the canonical two-transition heal/damage causal trajectory."""
     config, state, *_ = _scenario(
         (_TEAM_A_FIRST_SLOT, PRIEST_CLASS_ID),
         (_TEAM_A_SECOND_SLOT, HUNTER_CLASS_ID),
@@ -608,7 +585,6 @@ def test_ooc_heal_uses_snapshot_then_qualifies_next_transition() -> None:
 
 
 def test_ooc_heal_target_dealing_damage_does_not_reset_healer() -> None:
-    """Snapshot qualification ignores the recipient's simultaneous attack."""
     config, state, *_ = _scenario(
         (_TEAM_A_FIRST_SLOT, PRIEST_CLASS_ID),
         (_TEAM_A_SECOND_SLOT, HUNTER_CLASS_ID),
@@ -656,7 +632,6 @@ def test_ooc_heal_target_dealing_damage_does_not_reset_healer() -> None:
 
 
 def test_lethal_damage_to_ooc_heal_target_does_not_retroactively_reset_healer() -> None:
-    """Lethal same-step damage cannot change healing qualification."""
     config, state, *_ = _scenario(
         (_TEAM_A_FIRST_SLOT, PRIEST_CLASS_ID),
         (_TEAM_A_SECOND_SLOT, HUNTER_CLASS_ID),
@@ -702,7 +677,6 @@ def test_lethal_damage_to_ooc_heal_target_does_not_retroactively_reset_healer() 
 
 
 def test_overheal_and_multiple_healers_reset_all_snapshot_qualified_endpoints() -> None:
-    """Positive raw overheal resets every healer and the already-IC recipient."""
     config, state, *_ = _scenario(
         (_TEAM_A_FIRST_SLOT, PRIEST_CLASS_ID),
         (_TEAM_A_SECOND_SLOT, PRIEST_CLASS_ID),
@@ -768,7 +742,6 @@ def test_snapshot_healing_chain_is_invariant_to_slot_permutation(
     healer_b: int,
     recipient_c: int,
 ) -> None:
-    """A newly reset middle healer cannot retroactively qualify an incoming heal."""
     config, state, *_ = _scenario(
         (healer_a, PRIEST_CLASS_ID),
         (healer_b, PRIEST_CLASS_ID),
@@ -804,7 +777,6 @@ def test_snapshot_healing_chain_is_invariant_to_slot_permutation(
 
 
 def test_damaged_healer_resets_while_ooc_recipient_regenerates() -> None:
-    """Independent damage resets the healer without changing OOC heal qualification."""
     config, state, *_ = _scenario(
         (_TEAM_A_FIRST_SLOT, PRIEST_CLASS_ID),
         (_TEAM_A_SECOND_SLOT, HUNTER_CLASS_ID),
@@ -846,7 +818,6 @@ def test_damaged_healer_resets_while_ooc_recipient_regenerates() -> None:
 def test_regeneration_uses_class_maximum_clamp_profile_rate_and_start_anti_heal() -> (
     None
 ):
-    """Cover zero/interior/one rates, class-relative amounts, clamp, and anti-heal."""
     config, state, *_ = _scenario(
         (_TEAM_A_FIRST_SLOT, MAGE_CLASS_ID),
         (_TEAM_A_SECOND_SLOT, WARRIOR_CLASS_ID),
@@ -939,7 +910,6 @@ def test_regeneration_uses_class_maximum_clamp_profile_rate_and_start_anti_heal(
 
 
 def test_movement_aura_coverage_and_spawn_shield_do_not_gate_regeneration() -> None:
-    """Moving, aura-covered, and shielded OOC agents all use the universal rule."""
     config, state, *_ = _scenario(
         (_TEAM_A_FIRST_SLOT, MAGE_CLASS_ID),
         (_TEAM_A_SECOND_SLOT, HUNTER_CLASS_ID),
@@ -1008,7 +978,6 @@ def test_movement_aura_coverage_and_spawn_shield_do_not_gate_regeneration() -> N
 def test_death_wait_respawn_and_inactive_rows_canonicalize_countdown_and_facts() -> (
     None
 ):
-    """Death and waiting stay at zero; due-wave respawn starts OOC at full health."""
     config, state, *_ = _scenario(
         (_TEAM_A_FIRST_SLOT, ROGUE_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -1105,7 +1074,6 @@ def test_death_wait_respawn_and_inactive_rows_canonicalize_countdown_and_facts()
 
 
 def test_observation_exposes_capabilities_and_zeros_hidden_rows() -> None:
-    """Preserve public capabilities and ordinary visibility redaction."""
     config, state, *_ = _scenario(
         (_TEAM_A_FIRST_SLOT, ROGUE_CLASS_ID),
         (_TEAM_A_SECOND_SLOT, PRIEST_CLASS_ID),
@@ -1191,7 +1159,6 @@ def test_observation_exposes_capabilities_and_zeros_hidden_rows() -> None:
 
 
 def test_step_regeneration_outputs_match_eager_jit_and_shared_config_vmap() -> None:
-    """Prove complete-output eager/JIT equality and mixed-countdown vmap timing."""
     config, state_zero, *_ = _scenario()
     state_zero = state_zero._replace(
         current_health=state_zero.current_health.at[_TEAM_A_FIRST_SLOT].set(50.0)
@@ -1269,7 +1236,6 @@ def test_step_regeneration_outputs_match_eager_jit_and_shared_config_vmap() -> N
 
 
 def test_scan_preserves_reset_expiry_and_first_regeneration() -> None:
-    """Scan one attack and six quiet actions through the public state/mask carry."""
     config, state, _, action_mask, _ = _scenario()
     state = state._replace(
         current_health=state.current_health.at[_TEAM_B_FIRST_SLOT].set(50.0)

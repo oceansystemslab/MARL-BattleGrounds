@@ -1,8 +1,7 @@
-"""Previous accepted joint-action state and observation contract tests.
+"""Check how the last accepted action appears in state and observations.
 
-These tests cover the Milestone 5 Step 8 public trajectory: pre-state action
-acceptance, one-step state history, post-state actor visibility, and
-observer-relative policy-facing action categories.
+The tests follow action acceptance, one-step history and what each observer is
+allowed to see at the next decision.
 """
 
 # pyright: reportPrivateUsage=false
@@ -60,7 +59,6 @@ def _requested_roster(
     team_a_first_class: int = MAGE_CLASS_ID,
     team_b_first_class: int = MAGE_CLASS_ID,
 ) -> Array:
-    """Return deterministic class IDs for both fixed team blocks."""
     return jnp.asarray(
         (
             team_a_first_class,
@@ -79,7 +77,6 @@ def _requested_roster(
 
 
 def _positions() -> Array:
-    """Return nonoverlapping deterministic positions for every fixed slot."""
     return jnp.asarray(
         (
             (2.0, 2.0),
@@ -107,7 +104,6 @@ def _config(
     team_a_first_class: int = MAGE_CLASS_ID,
     team_b_first_class: int = MAGE_CLASS_ID,
 ) -> EnvConfig:
-    """Return a deterministic config with explicit policy-relevant ranges."""
     profile = resolve_agent_profile(
         _requested_roster(team_a_first_class, team_b_first_class),
         jnp.asarray(team_sizes, dtype=jnp.int32),
@@ -143,7 +139,6 @@ def _config(
 
 
 def _neutral_action() -> Action:
-    """Return the canonical neutral submission for every fixed slot."""
     return Action(
         move=jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32),
         select_target=jnp.full((MAX_AGENT_SLOTS,), _TARGET_NONE, dtype=jnp.int32),
@@ -157,7 +152,6 @@ def _action(
     target_rows: tuple[tuple[int, int], ...] = (),
     ultimate_rows: tuple[tuple[int, int], ...] = (),
 ) -> Action:
-    """Return a neutral joint action with selected per-head overrides."""
     action = _neutral_action()
     move = action.move
     select_target = action.select_target
@@ -176,7 +170,6 @@ def _action(
 
 
 def _fully_permissive_action_mask() -> ActionMask:
-    """Return an all-true fixed-shape mask for acceptance-boundary tests."""
     return ActionMask(
         move_mask=jnp.ones((MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS), dtype=jnp.bool_),
         select_target_mask=jnp.ones(
@@ -193,7 +186,6 @@ def _fully_permissive_action_mask() -> ActionMask:
 
 
 def _canonical_only_action_mask() -> ActionMask:
-    """Return a mask that permits only the canonical neutral tuple."""
     move_mask = (
         jnp.zeros((MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS), dtype=jnp.bool_)
         .at[:, MOVE_STAY]
@@ -221,7 +213,6 @@ def _step(
     action_mask: ActionMask,
     action: Action,
 ) -> tuple[EnvState, Observation, ActionMask]:
-    """Advance one transition and return its next public snapshot."""
     next_state, observation, _, _, next_action_mask, _ = step(
         config,
         state,
@@ -235,12 +226,10 @@ def _step(
 def _previous_action_leaves(
     observation: Observation,
 ) -> tuple[Array, ...]:
-    """Return the six policy-facing previous-action tensors."""
     return tuple(observation.previous_timestep_actions)
 
 
 def _assert_tree_equal(left: object, right: object) -> None:
-    """Assert exact equality for two JAX PyTrees."""
     assert jax.tree_util.tree_structure(left) == jax.tree_util.tree_structure(right)
     for left_leaf, right_leaf in zip(
         jax.tree_util.tree_leaves(left),
@@ -251,7 +240,6 @@ def _assert_tree_equal(left: object, right: object) -> None:
 
 
 def _global_target_slot(actor_slot: int, target_action: int) -> int | None:
-    """Decode one actor-relative target category to stable global identity."""
     if target_action == _TARGET_NONE:
         return None
     actor_team_start = 0 if actor_slot < MAX_AGENTS_PER_TEAM else MAX_AGENTS_PER_TEAM
@@ -265,7 +253,6 @@ def _observer_relative_target_action(
     observer_slot: int,
     global_target_slot: int | None,
 ) -> int:
-    """Encode stable target identity in one observer's relation convention."""
     if global_target_slot is None:
         return _TARGET_NONE
     observer_team_start = (
@@ -285,7 +272,6 @@ def _observed_actor_target_row(
     observer_slot: int,
     actor_slot: int,
 ) -> Array:
-    """Return one observed actor's target-category row."""
     observer_is_team_a = observer_slot < MAX_AGENTS_PER_TEAM
     actor_is_team_a = actor_slot < MAX_AGENTS_PER_TEAM
     actor_relation_row = actor_slot % MAX_AGENTS_PER_TEAM
@@ -300,7 +286,6 @@ def _observed_actor_target_row(
 
 
 def test_reset_exposes_exact_zero_history_schema() -> None:
-    """Reset must distinguish absent history from a real neutral action."""
     state, observation, _, _ = reset(_config(), jax.random.key(0))
 
     assert state.previous_timestep_move_actions.shape == (MAX_AGENT_SLOTS,)
@@ -334,7 +319,6 @@ def test_reset_exposes_exact_zero_history_schema() -> None:
 
 
 def test_first_neutral_transition_exposes_valid_neutral_one_hots() -> None:
-    """A real neutral action must not be represented as absent history."""
     config = _config()
     state, _, action_mask, _ = reset(config, jax.random.key(0))
 
@@ -377,7 +361,6 @@ def test_malformed_head_neutralizes_only_that_actors_complete_tuple(
     head: str,
     malformed_value: int,
 ) -> None:
-    """Every malformed head must trigger per-actor whole-tuple containment."""
     config = _config()
     state, _, _, _ = reset(config, jax.random.key(0))
     submitted = _action(
@@ -420,7 +403,6 @@ def test_malformed_head_neutralizes_only_that_actors_complete_tuple(
 
 
 def test_multiple_malformed_heads_remain_isolated_to_one_actor() -> None:
-    """Multiple malformed heads must still produce one local neutral tuple."""
     config = _config()
     state, _, _, _ = reset(config, jax.random.key(0))
     submitted = _action(
@@ -455,7 +437,6 @@ def test_multiple_malformed_heads_remain_isolated_to_one_actor() -> None:
 
 
 def test_in_domain_mask_fallback_preserves_movement_combat_independence() -> None:
-    """Mask illegality must preserve the other in-domain acceptance group."""
     config = _config()
     state, _, _, _ = reset(config, jax.random.key(0))
     action = _action(
@@ -515,7 +496,6 @@ def test_in_domain_mask_fallback_preserves_movement_combat_independence() -> Non
 
 
 def test_second_transition_completely_overwrites_first_history() -> None:
-    """One-step history must never retain an older non-neutral action."""
     config = _config()
     state, _, action_mask, _ = reset(config, jax.random.key(0))
     non_neutral_action = _action(
@@ -544,7 +524,6 @@ def test_second_transition_completely_overwrites_first_history() -> None:
 
 
 def test_target_categories_are_reinterpreted_for_each_observers_team() -> None:
-    """Every observer-relative category must preserve one stable target identity."""
     config = _config()
     state, _, _, _ = reset(config, jax.random.key(0))
     state = state._replace(
@@ -610,7 +589,6 @@ def test_every_target_category_preserves_identity_for_both_observer_teams(
     actor_slot: int,
     target_action: int,
 ) -> None:
-    """Exhaustively prove target-category conversion without mirrored formulas."""
     config = _config()
     state, _, _, _ = reset(config, jax.random.key(0))
     state = state._replace(
@@ -643,7 +621,6 @@ def test_every_target_category_preserves_identity_for_both_observer_teams(
 
 
 def test_hidden_actor_rows_are_zero_but_hidden_target_identity_remains_public() -> None:
-    """Actor visibility gates rows while target visibility does not rewrite identity."""
     positions = _positions()
     positions = positions.at[_TEAM_A_ACTOR_0].set(
         jnp.asarray((2.0, 2.0), dtype=jnp.float32)
@@ -711,7 +688,6 @@ def test_hidden_actor_rows_are_zero_but_hidden_target_identity_remains_public() 
 
 
 def test_spawn_shield_hides_actor_history_without_rewriting_target_history() -> None:
-    """Conceal actor rows while preserving a visible actor's target provenance."""
     config = _config()
     state, _, _, _ = reset(config, jax.random.key(0))
     state = state._replace(
@@ -749,7 +725,6 @@ def test_spawn_shield_hides_actor_history_without_rewriting_target_history() -> 
 
 
 def test_spawn_shield_concealment_is_invariant_to_hidden_position_and_move() -> None:
-    """Hidden spatial and actor-history rows reveal neither position nor movement."""
     config = _config(team_b_first_class=PRIEST_CLASS_ID)
     state, _, _, _ = reset(config, jax.random.key(0))
     shielded_slot = _TEAM_B_ACTOR_0
@@ -815,7 +790,6 @@ def test_spawn_shield_concealment_is_invariant_to_hidden_position_and_move() -> 
 
 
 def test_spawn_shield_rejected_combat_pair_preserves_legal_movement() -> None:
-    """Official shield masks reject combat without discarding legal movement."""
     config = _config(team_sizes=(1, 1))
     state, _, _, _ = reset(config, jax.random.key(0))
     shielded_state = state._replace(
@@ -874,7 +848,6 @@ def test_successor_visibility_controls_previous_action_exposure(
     move_action: int,
     expected_visible: bool,
 ) -> None:
-    """The successor snapshot, not the pre-state, gates action-history rows."""
     positions = _positions()
     positions = positions.at[_TEAM_A_ACTOR_0].set(
         jnp.asarray((2.0, 2.0), dtype=jnp.float32)
@@ -912,7 +885,6 @@ def test_successor_visibility_controls_previous_action_exposure(
 
 
 def test_collision_limited_movement_records_accepted_category() -> None:
-    """History records accepted intent rather than realized displacement."""
     config = _config(team_sizes=(1, 1))
     state, _, action_mask, _ = reset(config, jax.random.key(0))
     boundary_position = jnp.asarray((19.5, 2.0), dtype=jnp.float32)
@@ -935,7 +907,6 @@ def test_collision_limited_movement_records_accepted_category() -> None:
 
 
 def test_charge_and_precommitted_movement_are_both_recorded() -> None:
-    """Accepted Charge must not erase its independently accepted movement head."""
     positions = _positions()
     positions = positions.at[_TEAM_A_ACTOR_0].set(
         jnp.asarray((2.0, 2.0), dtype=jnp.float32)
@@ -971,7 +942,6 @@ def test_charge_and_precommitted_movement_are_both_recorded() -> None:
 
 
 def test_jitted_step_matches_complete_eager_previous_action_outputs() -> None:
-    """Compiled and eager transitions must agree on every new state/output leaf."""
     config = _config()
     state, _, action_mask, _ = reset(config, jax.random.key(0))
     action = _action(
@@ -989,7 +959,6 @@ def test_jitted_step_matches_complete_eager_previous_action_outputs() -> None:
 
 
 def test_compiled_scan_establishes_and_overwrites_fixed_history() -> None:
-    """Scanned carry must retain fixed history leaves and replacement timing."""
     config = _config()
     initial_state, _, initial_mask, _ = reset(config, jax.random.key(0))
     first_action = _action(

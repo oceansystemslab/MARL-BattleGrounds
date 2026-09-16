@@ -1,4 +1,4 @@
-"""Live recipient-slice proofs over the accepted CP2/CP3 coherent view."""
+"""Check that current actor-POV records use matched observations and transitions."""
 
 from __future__ import annotations
 
@@ -201,7 +201,6 @@ def test_current_slice_fails_closed_for_shared_obs_and_inactive_actor() -> None:
 def test_live_pov_v1_factories_reject_actor_projection_v2(
     trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """POV V1 must not claim exact materialization of the newer actor input."""
     projection_v2_context = trajectory.context.model_copy(
         update={"actor_projection": NO_SHARED_OBS_ACTOR_PROJECTION_V2}
     )

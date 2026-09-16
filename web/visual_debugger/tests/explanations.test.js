@@ -1,3 +1,7 @@
+/**
+ * @file Check immutable explanation records, exact vocabulary and public agent
+ * identity in browser help.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -427,10 +431,8 @@ const STATUS_CASES = Object.freeze([
   },
 ]);
 
-/**
- * @param {(typeof STATUS_CASES)[number]} statusCase
- * @param {Record<string, unknown>} [overrides]
- */
+/** @param {(typeof STATUS_CASES)[number]} statusCase
+ * @param {Record<string, unknown>} [overrides] */
 function durableStatus(statusCase, overrides = {}) {
   return {
     status_channel: STATUS_CASES.indexOf(statusCase),

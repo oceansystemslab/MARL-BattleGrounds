@@ -1,4 +1,4 @@
-"""Contract tests for strict versioned evaluation context models."""
+"""Check strict validation of versioned evaluation records."""
 
 import inspect
 import json
@@ -640,7 +640,6 @@ def test_package_exports_legacy_and_current_replay_public_functions() -> None:
 
 
 def test_transition_fact_models_mirror_every_core_subtree_and_leaf_name() -> None:
-    """Keep the host schema losslessly aligned with the 47-leaf core payload."""
     root_fields = tuple(TransitionFactsV1.model_fields)
     assert root_fields[2:] == CoreTransitionFacts._fields
 

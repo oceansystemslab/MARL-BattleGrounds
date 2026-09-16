@@ -1,4 +1,4 @@
-"""Focused validation tests for the browser debugger protocol."""
+"""Check validation of browser-to-debugger messages."""
 
 import json
 

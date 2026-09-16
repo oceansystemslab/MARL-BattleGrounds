@@ -1,3 +1,11 @@
+/**
+ * @file Export the painted Replay Viewer battlefield as a self-contained PNG.
+ * Capture a settled authorized frame, embed its canonical provenance and
+ * retain the declared audience. Helpers validate metadata, PNG containers
+ * and SVG resources; they do not prove image pixels came from a simulator.
+ * Browser capture loads bundled fonts and uses SVG/Canvas, without saving
+ * a file or binding UI events. The caller owns the eventual download.
+ */
 import { authorizedPresentationSceneView } from "./authorized-presentation-adapter.js";
 import {
   isJoinedTransportAndAuthorizedPresentationV1,
@@ -86,13 +94,22 @@ export const REPLAY_BATTLEFIELD_BACKGROUND_V1 = Object.freeze({
 /** @type {Promise<Readonly<{regular: Uint8Array, bold: Uint8Array}>> | null} */
 let bundledFontBytesPromise = null;
 
-/** @param {string} message @returns {never} */
+/**
+ * Throw TypeError with message. Used for invalid export inputs and
+ * container data; this helper never returns.
+ *
+ * @param {string} message @returns {never}
+ */
 function invalid(message) {
   throw new TypeError(message);
 }
 
 /**
- * Snapshot one plain JSON-style record without invoking accessors.
+ * Copy one plain object's own enumerable data fields into a new record
+ * with no prototype. Accept Object.prototype or null; reject arrays, other
+ * prototypes, symbol keys, accessors and nonenumerable fields with TypeError
+ * labelled by label. Child values remain references. Proxy reflection can
+ * still run traps; this is not a sandbox for arbitrary executable objects.
  *
  * @param {unknown} value
  * @param {string} label
@@ -122,6 +139,11 @@ function snapshotRecord(value, label) {
 }
 
 /**
+ * Require value's enumerable string keys to equal expected, independent
+ * of order. Throw TypeError naming label for missing/extra keys; return
+ * nothing otherwise. Call snapshotRecord first to reject accessors, symbols
+ * and unexpected prototypes. Neither object nor expected is modified.
+ *
  * @param {Record<string, any>} value
  * @param {readonly string[]} expected
  * @param {string} label
@@ -137,7 +159,12 @@ function exactKeys(value, expected, label) {
   }
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Return value if it is a string with length greater than zero. Whitespace
+ * is allowed and not trimmed. Otherwise throw TypeError naming label.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function nonEmptyString(value, label) {
   if (typeof value !== "string" || value.length === 0) {
     invalid(`${label} must be a non-empty string.`);
@@ -145,7 +172,13 @@ function nonEmptyString(value, label) {
   return value;
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Return a numeric safe integer value at least zero. Reject strings,
+ * booleans, fractions, infinities and out-of-range values with TypeError
+ * naming label. Negative zero is accepted; no rounding is performed.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function nonNegativeSafeInteger(value, label) {
   if (!Number.isSafeInteger(value) || Number(value) < 0) {
     invalid(`${label} must be a non-negative safe integer.`);
@@ -153,7 +186,13 @@ function nonNegativeSafeInteger(value, label) {
   return Number(value);
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Return a numeric safe integer greater than zero, or throw TypeError
+ * naming label. Apply the same strict numeric checks as
+ * nonNegativeSafeInteger; do not coerce strings or round fractions.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function positiveSafeInteger(value, label) {
   const normalized = nonNegativeSafeInteger(value, label);
   if (normalized === 0) {
@@ -162,7 +201,13 @@ function positiveSafeInteger(value, label) {
   return normalized;
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Return value when it is exactly 64 lowercase hexadecimal characters;
+ * otherwise throw TypeError naming label. This validates digest spelling,
+ * not the content or authenticity of the object the digest claims to identify.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function sha256(value, label) {
   if (typeof value !== "string" || !HEX_SHA256.test(value)) {
     invalid(`${label} must be a lowercase SHA-256 digest.`);
@@ -170,7 +215,14 @@ function sha256(value, label) {
   return value;
 }
 
-/** @param {Record<string, any>} value @returns {Readonly<Record<string, boolean>>} */
+/**
+ * Copy exactly the VISUAL_FILTER_IDS boolean fields into a frozen record.
+ * Throw TypeError for missing/extra fields or nonboolean values. value should
+ * already be a plain-data snapshot; this helper does not inspect descriptors.
+ * No default filters are filled in.
+ *
+ * @param {Record<string, any>} value @returns {Readonly<Record<string, boolean>>}
+ */
 function normalizeVisualFilters(value) {
   exactKeys(value, VISUAL_FILTER_IDS, "Replay export visual filters");
   /** @type {Record<string, boolean>} */
@@ -184,7 +236,17 @@ function normalizeVisualFilters(value) {
   return Object.freeze(normalized);
 }
 
-/** @param {unknown} value @returns {Readonly<Record<string, any>>} */
+/**
+ * Validate a version-1 Replay Viewer provenance object and return a deeply
+ * frozen plain copy. Require exact root/nested fields, audience-specific
+ * source fields, consistent replay kind/observation mode, nonnegative frame
+ * counts and an incoming transition exactly when frame_index is nonzero.
+ * Require replay_static, scale factor 2, positive CSS sizes, matching doubled
+ * pixel sizes and complete boolean filters. Reject invalid data with TypeError.
+ * Hashes are checked for format; no replay file is opened or verified here.
+ *
+ * @param {unknown} value @returns {Readonly<Record<string, any>>}
+ */
 function normalizeProvenance(value) {
   const root = snapshotRecord(value, "Replay PNG provenance");
   exactKeys(
@@ -353,6 +415,10 @@ function normalizeProvenance(value) {
 }
 
 /**
+ * Recursively freeze enumerable child values and value itself, returning
+ * the same reference. Primitive values pass through. Call only with owned
+ * acyclic plain JSON data; this does not copy data or detect cycles.
+ *
  * @param {unknown} value
  * @returns {any}
  */
@@ -365,7 +431,11 @@ function deepFreeze(value) {
 }
 
 /**
- * Canonically encode one already-schema-validated JSON value.
+ * Encode already validated JSON data with sorted object keys and no
+ * extra whitespace. Preserve array order and finite number/string/boolean/
+ * null values. Require dense plain arrays and plain data objects; unsupported
+ * values or shapes throw TypeError. The caller provides acyclic data. This
+ * returns text only and does not hash or mutate the input.
  *
  * @param {unknown} value
  * @returns {string}
@@ -403,7 +473,11 @@ function canonicalJson(value) {
 }
 
 /**
- * Validate and return one recursively canonical compact JSON encoding.
+ * Validate provenance value and return its frozen normalized record,
+ * canonical compact JSON text and new UTF-8 bytes. Object keys are sorted
+ * recursively; no external identity check occurs. Invalid fields throw
+ * TypeError. The outer result and provenance are frozen; the returned
+ * Uint8Array is a caller-owned mutable buffer.
  *
  * @param {unknown} value
  * @returns {Readonly<{provenance: Readonly<Record<string, any>>, json: string, utf8: Uint8Array}>}
@@ -419,7 +493,15 @@ export function canonicalReplayPngProvenanceV1(value) {
 }
 
 /**
- * Project only the authority-safe fields from one branded strict replay leaf.
+ * Project export metadata from a branded strict Replay Viewer presentation.
+ * value must contain exactly presentation, renderPolicy, cssWidth, cssHeight,
+ * showRanges, visualFilters and localInspectedPresentationKey. Use
+ * replay_static, positive integer CSS sizes and complete boolean filters.
+ * The inspection key may be undefined, null or a nonempty string. Resolve
+ * the painted selection through the authorized scene, then record 2x pixel
+ * sizes. Oracle includes artifact references; Agent POV omits those fields.
+ * Return deeply frozen validated provenance; invalid or unresolved inputs
+ * throw TypeError. Raw transport objects cannot substitute for the brand.
  *
  * @param {unknown} value
  * @returns {Readonly<Record<string, any>>}
@@ -544,7 +626,15 @@ export function projectReplayPngProvenanceV1(value) {
   });
 }
 
-/** @param {unknown} value @param {number} maximumLength @param {string} fallback */
+/**
+ * Return an ASCII-safe filename component from string value. Replace runs
+ * outside letters/digits/dot/underscore/hyphen, trim edge punctuation, limit
+ * to maximumLength and remove the metric-report suffix. Use fallback if
+ * nothing remains. Nonstring values throw TypeError. Caller supplies the
+ * positive length and safe fallback; neither is independently validated.
+ *
+ * @param {unknown} value @param {number} maximumLength @param {string} fallback
+ */
 function safeFilenameComponent(value, maximumLength, fallback) {
   if (typeof value !== "string") {
     invalid("Replay PNG filename components must be strings.");
@@ -555,17 +645,37 @@ function safeFilenameComponent(value, maximumLength, fallback) {
   return safe || fallback;
 }
 
-/** @param {unknown} value */
+/**
+ * Make a filename component from episode string value, limited to 64
+ * characters. Use replay if sanitizing leaves it empty. Nonstring input
+ * throws TypeError. The output is a display filename, not an episode identity.
+ *
+ * @param {unknown} value
+ */
 export function sanitizeReplayEpisodeForPngFilenameV1(value) {
   return safeFilenameComponent(value, 64, "replay");
 }
 
-/** @param {unknown} value */
+/**
+ * Make a filename component from recipient string value, limited to 64
+ * characters. Use agent if sanitizing leaves it empty. Nonstring input
+ * throws TypeError. Preserve the original identity separately in provenance.
+ *
+ * @param {unknown} value
+ */
 export function sanitizeReplayRecipientForPngFilenameV1(value) {
   return safeFilenameComponent(value, 64, "agent");
 }
 
 /**
+ * Build an ASCII PNG filename from exactly episodeId, audience,
+ * artifactDigestSha256, recipientPublicAgentId, frameIndex and
+ * simulatorStepCount. Counts must be nonnegative safe integers and receive
+ * at least six digits. Oracle requires a digest and null recipient; Agent
+ * POV requires a recipient and null artifact digest. Sanitize identity
+ * components and reject names over 240 bytes. Return the name only; invalid
+ * fields throw TypeError and no file is written.
+ *
  * @param {unknown} value
  * @returns {string}
  */
@@ -619,7 +729,14 @@ export function buildReplayBattlefieldPngFilenameV1(value) {
   return filename;
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Return a new Uint8Array containing value's bytes. Accept ArrayBuffer
+ * or a Uint8Array with exactly Uint8Array.prototype, rejecting other views
+ * and subclasses with TypeError naming label. The copy isolates later input
+ * mutation; allocation or detached-buffer errors can propagate.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function snapshotBytes(value, label) {
   if (value instanceof ArrayBuffer) {
     return new Uint8Array(value.slice(0));
@@ -645,7 +762,13 @@ const CRC32_TABLE = (() => {
   return table;
 })();
 
-/** @param {Uint8Array} bytes */
+/**
+ * Return the unsigned PNG CRC-32 checksum of bytes. Read the buffer without
+ * changing it, using the module's precomputed polynomial table. This checks
+ * accidental corruption; it is not a cryptographic integrity proof.
+ *
+ * @param {Uint8Array} bytes
+ */
 function crc32(bytes) {
   let value = 0xffffffff;
   for (const byte of bytes) {
@@ -654,7 +777,13 @@ function crc32(bytes) {
   return (value ^ 0xffffffff) >>> 0;
 }
 
-/** @param {Uint8Array} bytes @param {number} offset */
+/**
+ * Read an unsigned big-endian 32-bit integer at byte offset in bytes.
+ * Respect the typed view's own start/length. Invalid offsets propagate
+ * DataView RangeError; this function does not modify the buffer.
+ *
+ * @param {Uint8Array} bytes @param {number} offset
+ */
 function readUint32(bytes, offset) {
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(
     offset,
@@ -662,14 +791,26 @@ function readUint32(bytes, offset) {
   );
 }
 
-/** @param {number} value */
+/**
+ * Return four new bytes encoding value as a big-endian unsigned integer.
+ * DataView applies JavaScript's numeric conversion; callers must validate
+ * the intended nonnegative 32-bit range before this helper.
+ *
+ * @param {number} value
+ */
 function uint32Bytes(value) {
   const bytes = new Uint8Array(4);
   new DataView(bytes.buffer).setUint32(0, value, false);
   return bytes;
 }
 
-/** @param {readonly Uint8Array[]} chunks */
+/**
+ * Copy chunks in order into one new Uint8Array and return it. Preserve
+ * every input buffer. Allocation fails normally if the total length exceeds
+ * the platform's available memory or typed-array limits.
+ *
+ * @param {readonly Uint8Array[]} chunks
+ */
 function concatenateBytes(chunks) {
   const length = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
   const result = new Uint8Array(length);
@@ -681,7 +822,13 @@ function concatenateBytes(chunks) {
   return result;
 }
 
-/** @param {Uint8Array} bytes */
+/**
+ * Convert a small byte sequence to characters with the same code points.
+ * No ASCII-range validation occurs. Callers use short PNG types/keywords;
+ * large buffers may exceed JavaScript's spread-argument limit.
+ *
+ * @param {Uint8Array} bytes
+ */
 function ascii(bytes) {
   return String.fromCharCode(...bytes);
 }
@@ -696,7 +843,16 @@ function ascii(bytes) {
  * }>} ParsedPngChunk
  */
 
-/** @param {unknown} value */
+/**
+ * Copy PNG bytes and check signature, chunk bounds/types/CRCs, required
+ * IHDR/IDAT/IEND structure, no trailing bytes and supported IHDR fields.
+ * Accept the byte inputs supported by snapshotBytes; invalid containers throw
+ * TypeError. Return width, height, copied bytes and frozen chunk records with
+ * copied data/raw buffers. It does not decompress IDAT, decode pixels or
+ * implement every PNG semantic constraint. Returned typed buffers are mutable.
+ *
+ * @param {unknown} value
+ */
 function parsePng(value) {
   const bytes = snapshotBytes(value, "Replay PNG bytes");
   if (
@@ -785,7 +941,14 @@ function parsePng(value) {
   return Object.freeze({ bytes, chunks: Object.freeze(chunks), width, height });
 }
 
-/** @param {string} type @param {Uint8Array} data */
+/**
+ * Encode type and data into new PNG chunk bytes with length and CRC.
+ * Require a four-letter type or throw TypeError. The caller owns data-size
+ * and semantic chunk validity; this does not check reserved-bit rules or
+ * copy scientific metadata beyond the requested bytes.
+ *
+ * @param {string} type @param {Uint8Array} data
+ */
 function pngChunk(type, data) {
   const typeBytes = new TextEncoder().encode(type);
   if (typeBytes.byteLength !== 4 || !PNG_CHUNK_TYPE.test(type)) {
@@ -799,7 +962,13 @@ function pngChunk(type, data) {
   ]);
 }
 
-/** @param {Uint8Array} data */
+/**
+ * Return the ASCII text before data's first null byte when its length is
+ * 1–79 and all characters are printable ASCII. Return null otherwise. This
+ * checks the keyword prefix only, not a text chunk's remaining structure.
+ *
+ * @param {Uint8Array} data
+ */
 function pngKeyword(data) {
   const end = data.indexOf(0);
   if (end < 1 || end > 79) return null;
@@ -808,7 +977,13 @@ function pngKeyword(data) {
   return ascii(keywordBytes);
 }
 
-/** @param {string} canonicalProvenanceJson */
+/**
+ * Return a new uncompressed iTXt chunk with the fixed provenance keyword,
+ * empty language/translation fields and canonicalProvenanceJson as UTF-8.
+ * The caller must validate and canonicalize the JSON first.
+ *
+ * @param {string} canonicalProvenanceJson
+ */
 function provenanceItxtChunk(canonicalProvenanceJson) {
   const keyword = new TextEncoder().encode(PNG_PROVENANCE_KEYWORD);
   const text = new TextEncoder().encode(canonicalProvenanceJson);
@@ -816,7 +991,12 @@ function provenanceItxtChunk(canonicalProvenanceJson) {
 }
 
 /**
- * Validate a PNG carrying exactly one canonical replay-provenance iTXt entry.
+ * Inspect a PNG with exactly one provenance entry directly after IHDR.
+ * Require an uncompressed, untranslated UTF-8 iTXt entry with canonical
+ * version-1 provenance, matching PNG dimensions and no duplicate keyword
+ * in text chunks. Return frozen metadata, chunk types and provenance. Invalid
+ * bytes/metadata throw TypeError. This verifies container consistency, not
+ * the truth of the picture or the referenced simulator artifacts.
  *
  * @param {unknown} value
  */
@@ -881,8 +1061,14 @@ export function inspectReplayBattlefieldPngV1(value) {
 }
 
 /**
- * Build one immutable PNG artifact from trusted Canvas bytes and a branded
- * presentation. The caller cannot supply provenance directly.
+ * Build a PNG artifact from trusted Canvas bytes and a branded replay view.
+ * value contains exactly canvasPngBytes plus the seven projection options
+ * documented by projectReplayPngProvenanceV1. Project provenance internally;
+ * callers cannot pass replacement provenance. Return a frozen artifact with
+ * Blob, filename, byteLength, schemaVersion, provenance and canonical JSON.
+ * Invalid metadata, PNG dimensions or existing provenance throw TypeError.
+ * The caller is responsible for the bytes actually depicting that view;
+ * this helper cannot verify pixel meaning and does not start a download.
  *
  * @param {unknown} value
  */
@@ -915,6 +1101,12 @@ export function buildReplayBattlefieldPngArtifactV1(value) {
 }
 
 /**
+ * Insert validated provenance immediately after Canvas PNG's IHDR and
+ * verify the resulting container. Reject mismatched dimensions or existing
+ * provenance with TypeError. Preserve all original chunks otherwise. Return
+ * a frozen artifact record with an image/png Blob, safe filename, byte count
+ * and metadata. No pixel decoding or filesystem write occurs.
+ *
  * @param {unknown} canvasPngBytes
  * @param {Readonly<Record<string, any>>} provenance
  */
@@ -969,7 +1161,11 @@ function buildArtifactFromProvenance(canvasPngBytes, provenance) {
 }
 
 /**
- * Prove one complete RGBA buffer is non-empty and fully opaque.
+ * Copy a nonempty packed RGBA byte buffer and require every alpha byte
+ * to equal 255. Accept ArrayBuffer, exact Uint8Array or exact
+ * Uint8ClampedArray. Return pixel count; wrong type, non-multiple-of-four
+ * length or transparency throws TypeError. Dimensions/color meaning are
+ * not checked, and the input remains unchanged.
  *
  * @param {unknown} value
  */
@@ -990,7 +1186,13 @@ export function assertOpaqueReplayExportPixelsV1(value) {
   return pixels.byteLength / 4;
 }
 
-/** @param {Uint8Array} bytes */
+/**
+ * Encode bytes as standard padded Base64 and return the string. Read
+ * without mutation; output length is four characters per three-byte group.
+ * Used for bundled font data URLs, not encryption or content validation.
+ *
+ * @param {Uint8Array} bytes
+ */
 function base64(bytes) {
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   let encoded = "";
@@ -1007,7 +1209,14 @@ function base64(bytes) {
   return encoded;
 }
 
-/** @param {string} route */
+/**
+ * Fetch route with force-cache and same-origin credentials and return
+ * new nonempty bytes. Reject non-success HTTP status or empty content with
+ * Error; network failures propagate. The caller supplies a bundled font
+ * route. This does not validate WOFF2 contents or a cryptographic digest.
+ *
+ * @param {string} route
+ */
 async function fetchFontBytes(route) {
   const response = await fetch(route, {
     cache: "force-cache",
@@ -1023,6 +1232,12 @@ async function fetchFontBytes(route) {
   return bytes;
 }
 
+/**
+ * Load regular and bold bundled fonts together and cache their promise.
+ * Return a frozen record of byte arrays, shared by later exports. On failure
+ * clear the cache so a future call can retry, then propagate the error.
+ * Callers must treat the returned buffers as read-only.
+ */
 async function loadBundledFontBytes() {
   if (bundledFontBytesPromise === null) {
     bundledFontBytesPromise = Promise.all([
@@ -1038,7 +1253,15 @@ async function loadBundledFontBytes() {
   return bundledFontBytesPromise;
 }
 
-/** @param {Element} element */
+/**
+ * Remove UI/style/class/event/accessibility attributes from detached
+ * element and remove IDs other than battlefield. Reject linked-resource
+ * attributes and nonlocal URL forms with TypeError. Mutate this element
+ * only; children are handled by the caller. This is one export check, not
+ * a general sanitizer for arbitrary SVG.
+ *
+ * @param {Element} element
+ */
 function stripTransientAndExternalAttributes(element) {
   for (const attribute of [...element.attributes]) {
     const name = attribute.name.toLowerCase();
@@ -1067,7 +1290,14 @@ function stripTransientAndExternalAttributes(element) {
   }
 }
 
-/** @param {string} value */
+/**
+ * Extract url(...) values from CSS text, trimming whitespace and matching
+ * outer quotes. Throw TypeError for mismatched outer quotes. Return strings
+ * in occurrence order. This is a limited URL scanner, not a complete CSS
+ * parser or a resource fetcher.
+ *
+ * @param {string} value
+ */
 function cssResourceUrls(value) {
   return [...value.matchAll(/url\(([^)]+)\)/giu)].map((match) => {
     const raw = String(match[1]).trim();
@@ -1082,17 +1312,35 @@ function cssResourceUrls(value) {
   });
 }
 
-/** @param {string} value */
+/**
+ * Return whether value is a #fragment using letters, digits, underscore,
+ * dot, colon or hyphen. It does not check whether that SVG target exists.
+ *
+ * @param {string} value
+ */
 function isLocalFragmentUrl(value) {
   return /^#[A-Za-z0-9_.:-]+$/u.test(value);
 }
 
-/** @param {string} value */
+/**
+ * Return whether value has the accepted WOFF2 Base64 data-URL spelling.
+ * This checks syntax only, not font bytes or whether the font came from the
+ * bundled routes. The caller controls which resources are inserted.
+ *
+ * @param {string} value
+ */
 function isBundledFontDataUrl(value) {
   return /^data:font\/woff2;base64,[A-Za-z0-9+/]+=*$/u.test(value);
 }
 
-/** @param {CSSStyleDeclaration} computed */
+/**
+ * Copy supported nonempty computed style properties into CSS declarations.
+ * Permit only local-fragment URLs; reject other resources with TypeError.
+ * Return semicolon-separated text in declared property order. Read computed
+ * without mutation; unsupported properties are intentionally not exported.
+ *
+ * @param {CSSStyleDeclaration} computed
+ */
 function resolvedStyleDeclarations(computed) {
   const declarations = [];
   for (const property of EXPORT_STYLE_PROPERTIES) {
@@ -1107,8 +1355,10 @@ function resolvedStyleDeclarations(computed) {
 }
 
 /**
- * Keep resolved presentation styles in the detached SVG rather than assigning
- * inline style attributes, which the host page's CSP correctly rejects.
+ * Prepend a style element containing rules to clone's first defs element.
+ * Throw TypeError when defs is absent. Mutate the detached clone only; rules
+ * must already be resolved and checked. This avoids inline style attributes
+ * that the host page's content-security policy rejects.
  *
  * @param {SVGSVGElement} clone
  * @param {readonly string[]} rules
@@ -1123,7 +1373,17 @@ function installResolvedStyleSheet(clone, rules) {
   defs.prepend(style);
 }
 
-/** @param {Element} shell @param {Window} view */
+/**
+ * Read shell's computed background and return grid spacing in CSS pixels.
+ * Require the locked dark background and two linear-gradient occurrences
+ * containing the expected color, opacity and 1px text. Check the first
+ * background-size pair is square and 2rem within 0.01px. This is a limited
+ * style check, not full gradient equivalence. Invalid styles throw TypeError.
+ * view must belong to shell's document; this checks export appearance without
+ * changing the live page.
+ *
+ * @param {Element} shell @param {Window} view
+ */
 function resolveGridSpacing(shell, view) {
   const shellStyle = view.getComputedStyle(shell);
   const base = shellStyle.backgroundColor.replaceAll(" ", "").toLowerCase();
@@ -1161,6 +1421,11 @@ function resolveGridSpacing(shell, view) {
 }
 
 /**
+ * Prepend defs and opaque/grid rectangles to detached clone. width and
+ * height are CSS pixels; spacing is the validated square-grid spacing.
+ * Use fixed colors and 1px lines. Return nothing and do not modify the live
+ * battlefield. Call once per clone to avoid duplicate resource IDs.
+ *
  * @param {SVGSVGElement} clone
  * @param {number} width
  * @param {number} height
@@ -1215,8 +1480,13 @@ function installBattlefieldBackdrop(clone, width, height, spacing) {
 }
 
 /**
- * @param {Readonly<{regular: Uint8Array, bold: Uint8Array}>} fonts
+ * Prepend regular/bold Atkinson font-face rules with embedded WOFF2 bytes
+ * to clone's first defs. Throw TypeError if defs is missing. Mutate only the
+ * detached SVG; fonts must be the trusted bundled buffers. No request or font
+ * content validation happens inside this helper.
+ *
  * @param {SVGSVGElement} clone
+ * @param {Readonly<{regular: Uint8Array, bold: Uint8Array}>} fonts
  */
 function installBundledFonts(clone, fonts) {
   const defs = clone.querySelector("defs");
@@ -1228,7 +1498,15 @@ function installBundledFonts(clone, fonts) {
   defs.prepend(style);
 }
 
-/** @param {SVGSVGElement} clone */
+/**
+ * Check clone and descendants for permitted local-fragment resources and
+ * exactly two WOFF2 data URLs in style text. Reject linked attributes, CSS
+ * imports or other URLs with TypeError. Return nothing and do not modify DOM.
+ * This validates the export builder's resource policy, not arbitrary SVG
+ * behavior or the authenticity of font bytes.
+ *
+ * @param {SVGSVGElement} clone
+ */
 function assertSelfContainedSvgResources(clone) {
   let bundledFontUrlCount = 0;
   for (const element of [clone, ...clone.querySelectorAll("*")]) {
@@ -1264,8 +1542,13 @@ function assertSelfContainedSvgResources(clone) {
 }
 
 /**
- * Clone and freeze all source-DOM-derived bytes synchronously. No later async
- * stage is allowed to consult the source battlefield again.
+ * Synchronously clone battlefield and copy its supported computed styles.
+ * Require a window and #battlefield-shell parent, matching clone structure
+ * and the locked backdrop. width/height are validated CSS pixels. Strip
+ * transient attributes, set dimensions/viewBox and insert backdrop/styles.
+ * Return a detached mutable SVG; invalid structure/resources throw TypeError.
+ * The live DOM is read only. After this call, asynchronous painting uses the
+ * clone's appearance rather than rereading live styles.
  *
  * @param {SVGSVGElement} battlefield
  * @param {number} width
@@ -1308,7 +1591,14 @@ function detachBattlefieldSnapshot(battlefield, width, height) {
   return clone;
 }
 
-/** @param {string} serialized */
+/**
+ * Load serialized self-contained SVG through an encoded data URL and
+ * resolve to an Image after its load event. Reject decoder failure with
+ * Error. No object URL cleanup is needed. The caller must have checked SVG
+ * resources before passing the string.
+ *
+ * @param {string} serialized
+ */
 async function decodeSvgImage(serialized) {
   const image = new Image();
   const loaded = new Promise((resolve, reject) => {
@@ -1324,7 +1614,13 @@ async function decodeSvgImage(serialized) {
   return image;
 }
 
-/** @param {HTMLCanvasElement} canvas */
+/**
+ * Ask canvas to encode an image/png Blob and return a promise for it.
+ * Reject missing or wrong-type output with Error; Canvas security/encoding
+ * failures may also reject. This does not save the Blob or alter the canvas.
+ *
+ * @param {HTMLCanvasElement} canvas
+ */
 function canvasPngBlob(canvas) {
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
@@ -1338,9 +1634,21 @@ function canvasPngBlob(canvas) {
 }
 
 /**
- * Capture one coherent installed replay battlefield without binding UI events.
- * The SVG decoder uses a CSP-compatible data URL; the source DOM is never
- * mutated and all asynchronous work owns the detached clone snapshot.
+ * Capture one settled installed Replay Viewer frame as a PNG artifact.
+ * value has exactly battlefield, installedAuthority, isCurrent,
+ * localInspectedPresentationKey, renderPolicy, showRanges, transportState
+ * and visualFilters. Require a branded joined authority, SETTLED transport,
+ * replay_static render policy and a painted #battlefield SVG in a non-busy
+ * #battlefield-shell. isCurrent() must return true after document fonts are
+ * ready. Inspection/filter options follow projectReplayPngProvenanceV1.
+ *
+ * Snapshot the live SVG/styles synchronously, then load bundled fonts, decode
+ * the detached SVG and paint an opaque Canvas at twice each CSS dimension.
+ * Return the same Blob/filename/provenance artifact as the builder. Invalid
+ * inputs throw TypeError; changed authority, loading, decoding and Canvas
+ * failures reject the promise. The live frame can advance after its snapshot;
+ * this export still describes that captured frame. No live DOM mutation,
+ * event binding, automatic download or filesystem write occurs.
  *
  * @param {unknown} value
  */

@@ -1,4 +1,12 @@
-"""Import-light registry for checked-in Visual Debugger sample replays."""
+"""List and verify the repository's demonstration replays.
+
+Registry lookup imports no simulator code. Load helpers bind files to one
+checked manifest snapshot, verify sizes and hashes, and use the public replay
+loader on private temporary copies. The source directory is never modified.
+Historical manifests require replay/metric pairs; current manifests describe
+completed version-3 replay files. These samples are presentation demos, not
+benchmark results or attestations of the current source tree.
+"""
 
 from __future__ import annotations
 
@@ -60,6 +68,9 @@ class SampleReplayDefinition:
     seed: int = 0
 
     def __post_init__(self) -> None:
+        """Require registered-style names, matching filenames, labels, and a
+        nonnegative seed.
+        """
         if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", self.name) is None:
             raise ValueError("sample replay names must be lower-kebab-case tokens")
         if not self.display_name or not self.description:
@@ -76,14 +87,36 @@ class SampleReplayDefinition:
             raise ValueError("sample replay seed must be a nonnegative exact integer")
 
     def replay_path(self, directory: Path = SAMPLE_REPLAY_DIRECTORY) -> Path:
-        """Resolve the registered replay member beneath one explicit directory."""
+        """Build the registered replay path without opening it.
+
+        Parameters
+        ----------
+        directory : pathlib.Path, optional
+            Parent directory. Defaults to examples/replays/v1.
+
+        Returns
+        -------
+        pathlib.Path
+            Directory joined to this entry's registered filename.
+        """
         return directory / self.replay_file_name
 
     def metric_report_path(
         self,
         directory: Path = SAMPLE_REPLAY_DIRECTORY,
     ) -> Path:
-        """Resolve the registered metric member beneath one explicit directory."""
+        """Build the registered historical metric companion path without opening it.
+
+        Parameters
+        ----------
+        directory : pathlib.Path, optional
+            Parent directory. Defaults to examples/replays/v1.
+
+        Returns
+        -------
+        pathlib.Path
+            Directory joined to this entry's registered filename.
+        """
         return directory / self.metric_report_file_name
 
     def summary(self) -> str:
@@ -137,12 +170,34 @@ if len(_SAMPLE_REPLAY_BY_NAME) != len(SAMPLE_REPLAYS):
 
 
 def iter_sample_replays() -> Iterator[SampleReplayDefinition]:
-    """Yield the immutable checked-in registry in launcher display order."""
+    """Iterate registered demonstration replays in stable launcher order.
+
+    Returns
+    -------
+    Iterator of SampleReplayDefinition
+        Iterator over the immutable registry, with no file reads or simulator imports.
+    """
     return iter(SAMPLE_REPLAYS)
 
 
 def get_sample_replay(name: str) -> SampleReplayDefinition:
-    """Resolve one exact sample name without importing simulator authority."""
+    """Find a demonstration replay by its exact launch name.
+
+    Parameters
+    ----------
+    name : str
+        Lower-kebab-case registry name.
+
+    Returns
+    -------
+    SampleReplayDefinition
+        Immutable registry entry; the replay file is not opened.
+
+    Raises
+    ------
+    ValueError
+        The name is not registered.
+    """
     try:
         return _SAMPLE_REPLAY_BY_NAME[name]
     except KeyError as error:
@@ -153,6 +208,7 @@ def get_sample_replay(name: str) -> SampleReplayDefinition:
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Build one JSON object while rejecting repeated member names."""
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
@@ -164,6 +220,7 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
 
 
 def _require_mapping(value: object, *, label: str) -> Mapping[str, object]:
+    """Require a JSON object and include the supplied label in verification failures."""
     if not isinstance(value, Mapping):
         raise SampleReplayVerificationError(f"{label} must be a JSON object")
     return cast(Mapping[str, object], value)
@@ -175,6 +232,7 @@ def _require_exact_keys(
     *,
     label: str,
 ) -> None:
+    """Reject missing or extra fields against the declared manifest schema."""
     if set(value) != expected:
         raise SampleReplayVerificationError(
             f"{label} members differ from the declared manifest contract"
@@ -182,6 +240,7 @@ def _require_exact_keys(
 
 
 def _require_exact_nonnegative_int(value: object, *, label: str) -> int:
+    """Require a nonnegative Python int, excluding booleans."""
     if type(value) is not int or value < 0:
         raise SampleReplayVerificationError(
             f"{label} must be a nonnegative exact integer"
@@ -190,6 +249,7 @@ def _require_exact_nonnegative_int(value: object, *, label: str) -> int:
 
 
 def _reject_nonfinite_json_constant(value: str) -> object:
+    """Reject NaN and infinity tokens while reading a manifest."""
     raise SampleReplayVerificationError(
         f"sample manifest forbids nonfinite JSON constant {value}"
     )
@@ -198,7 +258,26 @@ def _reject_nonfinite_json_constant(value: str) -> object:
 def canonical_sample_replay_manifest_json_bytes_v1(
     manifest: Mapping[str, object],
 ) -> bytes:
-    """Return the exact readable, sorted bytes for either manifest version."""
+    """Encode either supported manifest version as readable canonical JSON.
+
+    Parameters
+    ----------
+    manifest : Mapping of str to object
+        JSON-serializable manifest content. This function does not validate its
+        manifest schema.
+
+    Returns
+    -------
+    bytes
+        UTF-8 JSON with sorted keys, two-space indentation, and one final newline.
+
+    Raises
+    ------
+    TypeError
+        A value cannot be encoded as JSON.
+    ValueError
+        A value is nonfinite or contains a circular reference.
+    """
     return (
         json.dumps(
             manifest,
@@ -212,6 +291,7 @@ def canonical_sample_replay_manifest_json_bytes_v1(
 
 
 def _canonical_json_value_bytes(value: object) -> bytes:
+    """Encode finite JSON with sorted keys and no spacing for value comparisons."""
     return json.dumps(
         value,
         allow_nan=False,
@@ -222,6 +302,7 @@ def _canonical_json_value_bytes(value: object) -> bytes:
 
 
 def _required_no_follow_flag() -> int:
+    """Require platform support for opening files without following final symlinks."""
     no_follow = getattr(os, "O_NOFOLLOW", None)
     if type(no_follow) is not int or no_follow == 0:
         raise SampleReplayVerificationError(
@@ -236,6 +317,12 @@ def _read_open_bounded_regular_file(
     max_size_bytes: int,
     label: str,
 ) -> tuple[bytes, _FileIdentity]:
+    """Read and close one descriptor after checking regular-file type and size.
+
+    Limit bytes even if the file grows. Compare descriptor metadata before and
+    after reading, and return bytes plus the checked file identity. Every exit
+    closes the descriptor; read or close errors become verification failures.
+    """
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
@@ -290,6 +377,9 @@ def _read_bounded_regular_entry(
     max_size_bytes: int,
     label: str,
 ) -> tuple[bytes, _FileIdentity]:
+    """Open a final entry without following symlinks, then perform a bounded checked
+    read.
+    """
     no_follow = _required_no_follow_flag()
     flags = os.O_RDONLY | no_follow
     flags |= getattr(os, "O_CLOEXEC", 0)
@@ -316,11 +406,35 @@ def read_bounded_regular_file_v1(
     max_size_bytes: int,
     label: str,
 ) -> bytes:
-    """Read a bounded regular file through one no-follow descriptor.
+    """Read a size-limited regular file through one no-follow descriptor.
 
-    The descriptor is opened nonblocking where supported, so a crafted FIFO
-    cannot stall the verifier.  Every inspection and byte read applies to the
-    same descriptor; replacing the directory entry cannot redirect the read.
+    Parameters
+    ----------
+    path : pathlib.Path
+        File to open. Its final entry must not be a symlink.
+    max_size_bytes : int
+        Positive exact integer limiting both the declared and actual byte count.
+    label : str
+        Human-readable name used in verification errors.
+
+    Returns
+    -------
+    bytes
+        Checked file content.
+
+    Raises
+    ------
+    TypeError
+        Path or byte limit has an unsupported type or value.
+    SampleReplayVerificationError
+        No-follow opens are unavailable, the file is invalid or too large, its
+        metadata changes while read, or file I/O fails.
+
+    Notes
+    -----
+    The descriptor opens nonblocking where supported so a FIFO cannot stall the
+    reader. Inspections and reads use the same descriptor. This protects the
+    final file entry; it does not promise that every parent path is symlink-free.
     """
     if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
         path,
@@ -339,6 +453,7 @@ def read_bounded_regular_file_v1(
 
 
 def _open_sample_replay_directory(path: Path) -> int:
+    """Open and validate a no-follow directory descriptor; the caller must close it."""
     no_follow = _required_no_follow_flag()
     directory_flag = getattr(os, "O_DIRECTORY", None)
     if type(directory_flag) is not int or directory_flag == 0:
@@ -367,6 +482,9 @@ def _open_sample_replay_directory(path: Path) -> int:
 
 
 def _close_sample_replay_directory(descriptor: int) -> None:
+    """Close the held directory descriptor and report close failure as verification
+    failure.
+    """
     try:
         os.close(descriptor)
     except OSError as error:
@@ -376,6 +494,9 @@ def _close_sample_replay_directory(descriptor: int) -> None:
 
 
 def _file_identity(metadata: os.stat_result) -> _FileIdentity:
+    """Extract device, inode, mode, link count, and change timestamps for later
+    checks.
+    """
     return (
         metadata.st_dev,
         metadata.st_ino,
@@ -387,6 +508,7 @@ def _file_identity(metadata: os.stat_result) -> _FileIdentity:
 
 
 def _directory_identity(descriptor: int) -> _FileIdentity:
+    """Read the held directory descriptor's identity or raise a verification failure."""
     try:
         metadata = os.fstat(descriptor)
     except OSError as error:
@@ -400,6 +522,7 @@ def _require_unchanged_directory(
     descriptor: int,
     expected_identity: _FileIdentity,
 ) -> None:
+    """Reject a directory whose held-descriptor identity changed during verification."""
     if _directory_identity(descriptor) != expected_identity:
         raise SampleReplayVerificationError(
             "sample replay directory changed during verification"
@@ -413,6 +536,7 @@ def _require_unchanged_regular_entry(
     *,
     label: str,
 ) -> None:
+    """Reopen an entry without following symlinks and compare its checked identity."""
     no_follow = _required_no_follow_flag()
     flags = os.O_RDONLY | no_follow
     flags |= getattr(os, "O_CLOEXEC", 0)
@@ -449,6 +573,9 @@ def _validated_member_metadata(
     max_size_bytes: int,
     label: str,
 ) -> Mapping[str, object]:
+    """Require a registered filename, bounded byte length, and lowercase SHA-256
+    digest.
+    """
     row = _require_mapping(member, label=label)
     _require_exact_keys(row, {"file", "byte_length", "sha256"}, label=label)
     if row["file"] != expected_file_name:
@@ -475,6 +602,9 @@ def _verified_member_bytes(
     max_size_bytes: int,
     label: str,
 ) -> tuple[bytes, _FileIdentity]:
+    """Read one registered member and require its bytes to match manifest size and
+    hash.
+    """
     row = _validated_member_metadata(
         member,
         expected_file_name=expected_file_name,
@@ -500,6 +630,9 @@ def _validate_manifest_sample_row(
     *,
     schema_version: int,
 ) -> Mapping[str, object]:
+    """Check registry identity, capture counts, sorted event coverage, and member
+    metadata.
+    """
     row = _require_mapping(raw_row, label=f"sample {sample.name}")
     _require_exact_keys(
         row,
@@ -578,6 +711,9 @@ def _read_sample_replay_manifest_from_directory_descriptor(
     tuple[Mapping[str, object], ...],
     _FileIdentity,
 ]:
+    """Read and validate a versioned manifest using the already held directory
+    descriptor.
+    """
     manifest_payload, manifest_identity = _read_bounded_regular_entry(
         SAMPLE_REPLAY_MANIFEST_PATH.name,
         directory_descriptor=directory_descriptor,
@@ -710,7 +846,30 @@ def _read_sample_replay_manifest_from_directory_descriptor(
 def read_sample_replay_manifest(
     directory: Path = SAMPLE_REPLAY_DIRECTORY,
 ) -> tuple[Mapping[str, object], tuple[Mapping[str, object], ...]]:
-    """Read one versioned manifest snapshot from a held directory descriptor."""
+    """Read and validate one manifest snapshot.
+
+    Parameters
+    ----------
+    directory : pathlib.Path, optional
+        Sample directory. Defaults to examples/replays/v1.
+
+    Returns
+    -------
+    tuple
+        Parsed manifest and registered sample rows in registry order.
+
+    Raises
+    ------
+    TypeError
+        The directory is not a pathlib.Path.
+    SampleReplayVerificationError
+        The snapshot, schema, or required integrity checks fail.
+
+    Notes
+    -----
+    The manifest is limited to 1 MiB. Source member payloads are not loaded.
+    The directory and manifest identities are checked again before returning.
+    """
     if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
         directory,
         Path,
@@ -735,6 +894,11 @@ def read_sample_replay_manifest(
 
 
 def _write_private_member(path: Path, payload: bytes) -> None:
+    """Create one private validation file exclusively with mode 0600.
+
+    Write all supplied bytes and fsync before closing. Existing files and final
+    symlinks are rejected; I/O failures propagate to the loader boundary.
+    """
     no_follow = getattr(os, "O_NOFOLLOW", None)
     if type(no_follow) is not int or no_follow == 0:
         raise SampleReplayVerificationError(
@@ -767,6 +931,13 @@ def _load_verified_sample_replay_from_snapshot(
 ) -> tuple[
     LoadedReplayBundleV1 | LoadedReplay, tuple[tuple[str, _FileIdentity, str], ...]
 ]:
+    """Verify one sample's bytes and semantics against the supplied manifest row.
+
+    Read through the held source directory, then load temporary private copies
+    through the public loader. Check capture facts, provenance, exact canonical
+    bytes, and unchanged original member identities. Return the in-memory replay
+    and identities for the caller's final snapshot check.
+    """
     name = sample.name
     replay_payload, replay_identity = _verified_member_bytes(
         row["replay"],
@@ -943,7 +1114,36 @@ def load_verified_sample_replay(
     *,
     directory: Path = SAMPLE_REPLAY_DIRECTORY,
 ) -> LoadedReplayBundleV1 | LoadedReplay:
-    """Return one complete in-memory bundle bound to one manifest snapshot."""
+    """Load one registered sample after checking its manifest and source files.
+
+    Parameters
+    ----------
+    name : str
+        Exact registered sample name.
+    directory : pathlib.Path, optional
+        Sample directory. Defaults to examples/replays/v1.
+
+    Returns
+    -------
+    LoadedReplayBundleV1 or LoadedReplay
+        Fully loaded historical bundle or current replay, depending on the
+        manifest version. Its temporary validation files no longer exist.
+
+    Raises
+    ------
+    TypeError
+        The directory is not a pathlib.Path.
+    ValueError
+        The sample name is not registered.
+    SampleReplayVerificationError
+        Source files, hashes, schema, capture facts, or provenance fail validation.
+
+    Notes
+    -----
+    Source reads use a held directory descriptor and bounded members of at most
+    64 MiB. Private temporary copies allow public-loader validation without
+    reopening mutable source paths. The source files are not changed.
+    """
     if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
         directory,
         Path,
@@ -985,7 +1185,31 @@ def load_verified_sample_replay(
 def load_verified_sample_replay_set(
     directory: Path = SAMPLE_REPLAY_DIRECTORY,
 ) -> VerifiedSampleReplaySet:
-    """Load the complete registered set against one immutable directory view."""
+    """Verify and load every registered sample against one directory snapshot.
+
+    Parameters
+    ----------
+    directory : pathlib.Path, optional
+        Sample directory. Defaults to examples/replays/v1.
+
+    Returns
+    -------
+    VerifiedSampleReplaySet
+        Manifest, ordered rows, in-memory replay roots, and observed filenames.
+
+    Raises
+    ------
+    TypeError
+        The directory is not a pathlib.Path.
+    SampleReplayVerificationError
+        The snapshot, schema, or required integrity checks fail.
+
+    Notes
+    -----
+    Each member is limited to 64 MiB. Private temporary copies are created and
+    removed for public-loader validation. Source files are not changed.
+    The directory and manifest identities are checked again before returning.
+    """
     if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
         directory,
         Path,
@@ -1045,7 +1269,30 @@ def load_verified_sample_replay_set(
 def read_sample_replay_manifest_v1(
     directory: Path = SAMPLE_REPLAY_DIRECTORY,
 ) -> tuple[Mapping[str, object], tuple[Mapping[str, object], ...]]:
-    """Read the historical manifest without reinterpreting current formats."""
+    """Read a historical version-1 manifest with its original pair contract.
+
+    Parameters
+    ----------
+    directory : pathlib.Path, optional
+        Sample directory. Defaults to examples/replays/v1.
+
+    Returns
+    -------
+    tuple
+        Historical manifest and registered rows in registry order.
+
+    Raises
+    ------
+    TypeError
+        The directory is not a pathlib.Path.
+    SampleReplayVerificationError
+        The snapshot, schema, or required integrity checks fail.
+
+    Notes
+    -----
+    Current manifest versions are rejected. Replay payloads are not loaded.
+    The directory and manifest identities are checked again before returning.
+    """
     manifest, rows = read_sample_replay_manifest(directory)
     if manifest["schema_version"] != 1:
         raise SampleReplayVerificationError(
@@ -1057,7 +1304,31 @@ def read_sample_replay_manifest_v1(
 def load_verified_sample_replay_set_v1(
     directory: Path = SAMPLE_REPLAY_DIRECTORY,
 ) -> VerifiedSampleReplaySet:
-    """Verify the historical pairs with their original sidecar requirement."""
+    """Load historical samples with their required metric companion files.
+
+    Parameters
+    ----------
+    directory : pathlib.Path, optional
+        Sample directory. Defaults to examples/replays/v1.
+
+    Returns
+    -------
+    VerifiedSampleReplaySet
+        Checked version-1 manifest and complete in-memory replay/metric pairs.
+
+    Raises
+    ------
+    TypeError
+        The directory is not a pathlib.Path.
+    SampleReplayVerificationError
+        The snapshot, schema, or required integrity checks fail.
+
+    Notes
+    -----
+    Current manifest versions are rejected. Loading uses private temporary
+    copies and changes no source files.
+    The directory and manifest identities are checked again before returning.
+    """
     loaded = load_verified_sample_replay_set(directory)
     if loaded.manifest["schema_version"] != 1:
         raise SampleReplayVerificationError(

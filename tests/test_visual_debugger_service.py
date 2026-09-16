@@ -1,4 +1,4 @@
-"""Focused revision, idempotency, and concurrency proofs for DebuggerService."""
+"""Check service revisions, repeated requests and concurrent access."""
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -1440,7 +1440,6 @@ def test_every_scripted_scenario_preflights_each_successor_in_both_views(
     scenario_name: str,
     view_mode: ViewMode,
 ) -> None:
-    """Every authored successor must remain presentable before it can commit."""
     service = _service(scenario_name, include_stress=True)
     scenario = get_scenario(scenario_name)
     if view_mode == "pov":

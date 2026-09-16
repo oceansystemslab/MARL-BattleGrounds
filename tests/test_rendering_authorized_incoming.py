@@ -1,4 +1,4 @@
-"""Focused CP2.3 recipient-safe incoming-summary proofs."""
+"""Check incoming summaries against the recipient's allowed information."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Exact SharedObs input delivery across actor lifecycles and JAX batching."""
+"""Check SharedObs input delivery across death, reset and JAX batching."""
 
 from typing import cast
 
@@ -59,7 +59,6 @@ def _echo_delivered_input(
     source_bank: SharedObsSensorSourceBankV2,
     source_availability: Array,
 ) -> ActorInput:
-    """Probe delivery only: return all input leaves instead of selecting an action."""
     del action_mask, key
     return ActorInput(observation, source_bank, source_availability)
 
@@ -263,7 +262,6 @@ def test_compact_observations_reconstruct_authorized_inputs_without_stored_banks
 def test_same_physical_actors_receive_equal_inputs_after_team_block_exchange(
     sizes: tuple[int, int],
 ) -> None:
-    """Routing labels change; every actor's physical input and masks stay equal."""
     config = evaluation_env_config(team_sizes=sizes)._replace(
         spawn_shield_duration_steps=0
     )
@@ -292,7 +290,6 @@ def test_same_physical_actors_receive_equal_inputs_after_team_block_exchange(
 
 
 def test_relation_flags_and_self_lookup_survive_hidden_rows_death_and_respawn() -> None:
-    """Repeated classes retain self lookup; unseen and unused rows remain distinct."""
     config = make_standard_team_deathmatch_config(
         map_id=12,
         team_a_roster=("mage", "mage", "priest"),

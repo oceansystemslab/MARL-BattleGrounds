@@ -1,9 +1,9 @@
-"""Standard-library-only metadata for registered debugger scenarios.
+"""List debugger scenario metadata without importing the simulator or JAX.
 
-Live scenario constructors intentionally remain in :mod:`scenarios`.  Keeping
-their launch metadata here lets discovery and shell completion run on machines
-without initializing an array backend, while the live registry consumes this
-same catalog as its single metadata authority.
+Launchers and shell completion use this catalog to discover names and summaries.
+The live scenario registry in ``scenarios`` uses these same metadata rows. Helpers
+return ordered immutable tuples and do not create sessions, read artifacts, or
+write files.
 """
 
 from dataclasses import dataclass
@@ -15,7 +15,23 @@ type ScenarioAudience = Literal["researcher", "stress"]
 
 @dataclass(frozen=True, slots=True)
 class ScenarioCatalogEntry:
-    """Backend-free launch metadata for one registered scenario."""
+    """Describe one registered debugger scenario without constructing it.
+
+    Attributes
+    ----------
+    name : str
+        Stable launcher key.
+    title : str
+        Human-readable scenario title.
+    description : str
+        Short description of the demonstration.
+    mode : {"interactive", "scripted"}
+        Whether actors are controlled live or follow saved scripted commands.
+    default_controlled_slot : int
+        Initial zero-based global actor slot.
+    audience : {"researcher", "stress"}
+        Whether discovery includes the scenario by default or only after stress opt-in.
+    """
 
     name: str
     title: str
@@ -25,7 +41,13 @@ class ScenarioCatalogEntry:
     audience: ScenarioAudience
 
     def summary(self) -> str:
-        """Return the stable one-line launcher representation."""
+        """Format one stable line for scenario listings.
+
+        Returns
+        -------
+        str
+            Padded launcher name and mode followed by the short description.
+        """
         return f"{self.name:<22} {self.mode:<11} {self.description}"
 
 
@@ -187,12 +209,34 @@ def iter_scenario_catalog(
     *,
     include_stress: bool = False,
 ) -> tuple[ScenarioCatalogEntry, ...]:
-    """Return stable launch metadata without importing live simulator modules."""
+    """Return registered scenario metadata in the declared display order.
+
+    Parameters
+    ----------
+    include_stress : bool, optional
+        False returns researcher scenarios only. True appends stress scenarios.
+
+    Returns
+    -------
+    tuple of ScenarioCatalogEntry
+        Immutable metadata rows without constructing simulator state.
+    """
     return SCENARIO_CATALOG if include_stress else RESEARCHER_SCENARIO_CATALOG
 
 
 def iter_scenario_summaries(*, include_stress: bool = False) -> tuple[str, ...]:
-    """Return stable one-line scenario summaries without backend imports."""
+    """Return the selected scenario list as readable launcher lines.
+
+    Parameters
+    ----------
+    include_stress : bool, optional
+        False omits stress scenarios; True includes them after researcher scenarios.
+
+    Returns
+    -------
+    tuple of str
+        One formatted line per catalog entry in the same declared order.
+    """
     return tuple(
         entry.summary()
         for entry in iter_scenario_catalog(include_stress=include_stress)

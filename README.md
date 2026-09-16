@@ -1,59 +1,81 @@
 # MARL-BattleGrounds
 
-MARL-BattleGrounds is a JAX-native environment suite and benchmark for
-heterogeneous adversarial multi-agent reinforcement learning.
+MARL-BattleGrounds lets researchers train and compare teams of agents in
+competitive games. Agents have different classes and abilities, so a team
+must combine movement, attacks, healing and support. The simulator uses JAX
+for compiled, batched GPU execution.
 
-The project is currently under development.
+The project is under development. Team Deathmatch and the current researcher
+tools are available; later learner, official tournament and manuscript work
+are described below as plans, not completed results.
 
-## Team Deathmatch benchmark
+## Take a First Step
 
-The installed package includes the 52 approved maps and eight fixed scenarios.
-Construct a configuration and use the public JAX environment:
+The package includes 52 Team Deathmatch maps and eight fixed scenarios. Prepare
+128 games, sample legal actions and advance them together:
 
 ```python
 import jax
-from marl_battlegrounds import make
-from marl_battlegrounds.tasks import make_standard_team_deathmatch_config
+import marl_battlegrounds as marl_bgs
 
-config = make_standard_team_deathmatch_config(
-    map_id=12,
-    team_a_roster=("warrior", "hunter", "priest"),
-    team_b_roster=("mage", "rogue", "priest"),
-)
-env = make("tdm", metrics="priority")
-observation, state = env.reset(jax.random.key(0), config, episode_id=1)
-action_mask = env.get_action_mask(state)
-# observation, state, reward, done, info = env.step(key, state, actions)
+reset_key, action_key, step_key, next_reset_key = jax.random.split(jax.random.key(42), 4)
+env = marl_bgs.make("tdm", map_id=0, num_envs=128)
+observation, state = env.reset(reset_key)
+actions = env.sample_actions(action_key, state)
+observation, state, reward, done, info = env.step(step_key, state, actions)
+observation, state = env.reset_done(next_reset_key, state)
 ```
 
-`list_tdm_maps()` and `list_tdm_scenarios()` expose names and immutable source
-identities. `load_tdm_scenario(1)` returns its approved configuration, initial
-state and Notes; pass those to `initialize_scenario_state(initial_state, config)`.
-Each team can independently contain one through five agents, including repeated
-classes. `make_canonical_team_deathmatch_evaluation_config(map_id=47)` fixes
-mirrored Mage/Warrior/Hunter/Rogue/Priest teams, first to 20, a 300-transition
+Keep the returned state for the next call. `reset_done` replaces only completed
+games; continuing games keep their exact state. The environment supplies episode
+IDs and legal action sampling. It does not reset inside `step`.
+
+Map-based setup balances spawn locations by default: half the lanes keep the
+map's ordered spawn banks and half exchange both banks. Team identities, rosters
+and world directions stay fixed. Automatic balance needs an even positive batch.
+For a scalar or odd batch, set `balance_spawn_locations=False`. An explicit
+`env_config` remains exact and overrides automatic preparation. Equal episode
+counts alone do not establish equal training steps from both spawn locations.
+
+See [examples/environment.py](examples/environment.py) for a runnable loop and
+[Ubuntu setup](docs/dev/setup_ubuntu.md) for the locked GPU environment.
+
+## Choose Maps and Rosters
+
+`marl_bgs.list_tdm_maps()` and `marl_bgs.list_tdm_scenarios()` list names and source
+identities. `marl_bgs.load_tdm_scenario(1)` returns a configuration, exact initial
+state and notes. Pass that object to `env.reset(key, scenario=scenario)`.
+Each team may contain one through five agents, including repeated classes.
+Supplied roster order fills the first team-local slots; it does not reserve a
+fixed slot for each class. `marl_bgs.canonical_tournament_rosters()` returns the
+shared default roster order.
+
+The factory
+`marl_battlegrounds.tasks.make_canonical_team_deathmatch_evaluation_config(map_id=47)`
+fixes mirrored Mage/Warrior/Hunter/Rogue/Priest teams, first to 20, a 300-transition
 horizon, five-transition respawn waves and canonical shields. Canonical map IDs
 are 47–51. Training maps are 0–41, including curriculum maps 0–11; validation
 maps are 42–46. Numbered map names, authored IDs and saved-map folders use the
-same IDs. Map geometry and scenarios stay unchanged. See the
+same IDs. See the
 [map ID change guide](docs/evaluation/workflows.md#map-id-change--2026-09-12)
 when using saved IDs. Training distributions belong to the later curriculum
 milestone.
 
-## Training, validation and analysis
+## Train, Evaluate and Read Results
 
-Own your trainer; use `jit`, `vmap` and `lax.scan` around the same `reset`/`step`
-contract. `make("tdm", num_envs=128)` supplies native batching. Configuration,
-authoritative masks and episode counters travel in wrapper state. Partial reset
-uses `reset(..., state=state, reset_mask=done.done)` with the next episode IDs.
-The environment does not reset completed episodes automatically.
+Researchers own their models, sampling and learning update. Use JAX `jit`,
+`vmap` and `lax.scan` around the same `reset`/`step` contract. Configuration,
+current legal-action masks and episode counters travel in environment state.
+Use `reset_done` for ordinary terminal resets, or explicit `reset` arguments
+for custom episode starts. A mask describes current legal actions; a structural
+action space alone cannot express every coupled action constraint.
 
 Use one callable for frozen-policy validation and evaluation:
 
 ```python
-from marl_battlegrounds import evaluate
+import marl_battlegrounds as marl_bgs
 
-result = evaluate(
+result = marl_bgs.evaluate(
     "tdm-alpha", "tdm-beta", maps=[47, 48, 49, 50, 51],
     num_episodes=100, num_envs=128, seed=42,
     metrics="full", replay_episodes=range(1, 11),
@@ -73,7 +95,8 @@ for shapes and the recording-version change.
 
 Metrics use `"none"`, `"priority"` (default), or `"full"`. Select extra full episodes
 with `full_metrics_episodes=range(1000, 50_001, 1000)` and replays independently
-with `replay_episodes=range(49_951, 50_001)`. No replay is needed for metrics.
+with `replay_episodes=range(49_951, 50_001)` when those IDs exist in the run.
+No replay is needed for metrics.
 Without an output directory, results are column arrays suitable for
 `pandas.DataFrame(result.full_metrics)`, and no files are created. Each output
 request creates a unique child run; `resume_from` explicitly resumes a run.
@@ -87,42 +110,27 @@ shared-writer validation, replay and tournament commands.
 
 ## DevClient
 
-Use the DevClient as the developer workspace for live combat debugging and
-minimal reusable map and Team Deathmatch scenario authoring:
+Launch the live development tool:
 
 ```bash
 ./scripts/dev/run_dev_client.sh
 ```
 
-Its three areas are Combat Debugger, Maps, and Scenarios. The Combat Debugger
-provides staged simultaneous actions, exact legality, Oracle and authorized
-agent-POV views, saved-scenario loading, browser-local visual filters, and
-optional replay recording. Maps and Scenarios save revisioned local drafts with
-visible paths, validate them through the existing simulator authorities, and
-delete unwanted saved assets after confirmation. Saved scenarios load
-directly; saved maps can be opened as clearly labelled deterministic
-default-5v5-TDM previews without modifying the map. Either team can remain
-manual, use **Reactive TDM ALPHA**, or use **Random** for same-start testing.
-ALPHA is the existing deterministic five-class SharedObs controller. Team B also
-offers **Reactive TDM BETA**, which keeps ALPHA for all non-Rogues while its
-Rogues pursue observed living enemies in **Priest → Mage → Hunter** order
-and attempt glancing shoulder routes past intervening bodies. Without any of
-those prey classes, Rogue movement falls back to ALPHA. BETA requires SharedObs.
-Their attacks still independently prioritize low-health legal targets. Random
-samples the exact current action support and works under either SharedObs or
-NoSharedObs. These are diagnostic/scenario-pressure tools, not official
-baselines or Big 12 entrants. The old Scripted TDM scorer and separate Reactive
-MRP controller and the superseded standalone Scenario 3 controller have been
-removed, without changing historical replay support.
-Every applicable selector shows all latest saved revisions in numeric-aware
-asset-ID order, with native scrolling for longer lists. New Map and Scenario
-asset IDs use lowercase snake case, such as `tdm_map_10`, while their visible
-names remain free-form. Save is explicit and persists numbered local revisions
-under ignored `artifacts/dev_client/` storage across DevClient restarts; the
-DevClient does not autosave.
-Existing replay artifacts remain outside the DevClient.
+Its **Combat Debugger** stages simultaneous actions, shows current legality and
+switches between Oracle and authorized Agent POV views. **Maps** and **Scenarios**
+author reusable local assets. Save is explicit: numbered revisions persist under
+ignored `artifacts/dev_client/` storage. Validation uses existing simulator
+rules. Deletion requires confirmation. A saved map opens as a labelled standard
+5v5 preview; loading it does not change the saved map.
 
-Record one manual episode to a single replay file:
+Each team may be Manual, Random or Reactive TDM ALPHA. Team B also offers BETA,
+whose Rogues prioritize observed living Priests, then Mages, then Hunters and
+try body-avoidance routes. Other classes use ALPHA behavior. Reactive controllers
+require SharedObs; Random supports both observation modes and samples exact
+current masks. These are diagnostic/pressure controllers, not official learned
+baselines. Their limitations and versioned rules remain explicit.
+
+Record one episode to a new replay file:
 
 ```bash
 mkdir -p recordings
@@ -130,14 +138,14 @@ mkdir -p recordings
   --record-replay recordings/episode.marlbg-replay.json
 ```
 
-See the [DevClient and Combat Debugger guide](docs/dev/combat_debugger.md) for
-launch options, authoring, saved-scenario loading, input, authority,
-recording/recovery, static reset snapshots, visual filters, and troubleshooting.
+The [DevClient guide](docs/dev/combat_debugger.md) covers arguments, asset IDs,
+controls, exact starts, recording/recovery and troubleshooting. It explains
+which fields belong to researcher inspection and which may reach an actor.
+Existing replay files belong in the separate Viewer.
 
 ## Replay Viewer
 
-Use the separate read-only Replay Viewer for immutable artifacts, checked
-samples, and materialized scripted demonstrations:
+Open an immutable replay, discover checked samples or inspect a scripted demo:
 
 ```bash
 ./scripts/dev/run_replay_viewer.sh --replay episode.marlbg-replay.json
@@ -147,57 +155,51 @@ samples, and materialized scripted demonstrations:
 ./scripts/dev/run_replay_viewer.sh --scenario stacked_team_auras
 ```
 
-The viewer validates or materializes one complete replay bundle before opening
-the browser. It offers settled exact-frame summaries, serialized playback,
-eight playback rates, configurable visual effects,
-provenance-bearing PNG export, current scores and participants, and offline
-evaluation metrics across visual POVs. Open **TDM Evaluation Metrics** below
-the class details to select **Up to Current Tick** or **Entire Episode**.
-**Download Metrics CSV** exports scalar values at that boundary. New replay
-recordings have no metric-JSON sidecar dependency; historical recordings remain
-readable. Full metrics are computed only when requested, using the same numerical
-authority as evaluation. Nine default effects include Death Announcer; Ranges
-remain off. **Default Configuration** restores this selection. Death announcements
-remain visible for 1.5 seconds at normal playback speed.
-It cannot stage or submit simulator actions.
+The Viewer validates saved evidence before serving it. A scripted-demo request
+first materializes its replay in a separate preparation step. The read-only
+Viewer then navigates exact frames, plays recorded transitions and provides
+participant/score summaries, configurable effects and provenance-bearing PNG
+exports. It cannot submit simulator actions.
 
-See the [Replay Viewer guide](docs/dev/replay_viewer.md) for artifact selection,
-sample provenance, scenario isolation, transport and keyboard behavior,
-audience boundaries, export, static rendering, and troubleshooting. If you
-used the historical combined command surface, start with the concise
-[browser-tools migration page](docs/dev/visual_debugger.md).
+Open **TDM Evaluation Metrics** for **Up to Current Tick** or **Entire Episode**.
+**Download Metrics CSV** exports the selected boundary through the same scalar
+metric authority as evaluation. Current replay files need no metric sidecar;
+historical files keep their readers. Metrics are computed on request. A visual
+POV changes the battlefield view, not the researcher-level metric ownership.
 
-The DevClient and Replay Viewer use tracked native HTML, CSS, SVG, and
-JavaScript served by base Python dependencies. Researchers need neither Node.js
-nor npm. The browser installs only Python-authorized presentation data; the rendering-only
-SharedObs visual-union boundary is recorded in
-[specification amendment A17](docs/design/specification_amendments.md#a17-sharedobs-recorded-visual-union-presentation).
+See the [Viewer guide](docs/dev/replay_viewer.md) for transport, keyboard controls,
+audience limits, exports and recovery. The
+[migration guide](docs/dev/visual_debugger.md) explains the former combined tool.
+Both clients use local HTML, CSS, SVG and JavaScript served by Python. Researchers
+need neither Node.js nor npm. SharedObs visual union is a rendering contract,
+separate from the structured actor input, as described in
+[A17](docs/design/specification_amendments.md#a17-sharedobs-recorded-visual-union-presentation).
 
-## Actor information regimes
+## Actor Information Regimes
 
-Paper 1 uses one canonical actor-information contract: `shared_obs` with actor
-projection `base-observation-plus-authorized-sensor-source-bank@1`. Every frame
-of official evidence must record exactly the configured-active, same-team,
-off-diagonal source-availability matrix derived from the frozen roster.
-SharedObs composes already-authored teammate sensor rows without changing the
-simulator; evaluation records store those base observations and the exact
-availability authority rather than a second materialized tensor.
+Paper 1 uses canonical SharedObs: each actor receives its own permitted view
+plus authorized teammate sensor rows. Official recordings require the complete
+configured-active, same-team, off-diagonal availability matrix at every frame.
+A configured dead teammate remains an authorized source, with no live sensor
+material. The input adapter does not reveal simulator team IDs or global slots.
 
-The generic policy/evaluation layer and replay readers continue to support
-homogeneous `no_shared_obs` execution through the same lifecycle for
-diagnostics, custom research, and historical compatibility. NoSharedObs is not
-an official baseline or Paper 1 comparison axis. Saved maps and scenarios are
-regime-independent; official execution binds canonical SharedObs only after an
-asset is loaded and validated. See
-[specification amendment A25](docs/design/specification_amendments.md#a25-sharedobs-only-canonical-benchmark-execution)
-for the full eligibility and compatibility boundary.
+Current recording binds SharedObs actor projection 2; historical projection 1
+files retain their original meaning. Always use the recorded version rather
+than treating equal tensor widths as compatibility. Base observations and exact
+availability are recorded without storing a second materialized source bank.
 
-The benchmark standardizes authorized actor inputs, categorical identities,
-domains, sentinel meanings, shapes, masks, slot/source identities, provenance,
-and reference-encoder conventions. It does not mandate one-hot encodings,
-embeddings, attention, or any other researcher neural architecture.
+Generic execution and historical readers also support homogeneous NoSharedObs
+for custom research and diagnostics. It is not the official Paper 1 comparison
+axis. Assets are regime-independent; official eligibility is checked after
+loading. [A25](docs/design/specification_amendments.md#a25-sharedobs-only-canonical-benchmark-execution)
+records the original canonical decision and historical version context.
 
-## Planned scenario evaluations and Big 12
+Researchers choose their networks, encoders and learning algorithms. The API
+fixes permitted information, shapes, categorical meanings, masks and provenance;
+it does not require one-hot features, embeddings, attention or a particular
+model framework.
+
+## Planned Scenario Evaluations and Big 12
 
 The approved TDM suite contains eight scenarios. Seven use five-transition
 horizons; Scenario 3 uses ten transitions to examine sustained body blocking,
@@ -261,26 +263,33 @@ retain three independently trained runs and their checkpoint
 histories, but only the fixed checkpoint selected by the frozen validation-only
 rule enters the tournament. Qwen-Five remains tentative until a measured
 throughput and resource gate is passed. Twelve systems yield 66 unordered
-pairings and, at 100 episodes per pairing, 6,600 tournament episodes. The raw
+pairings. For illustration, 100 episodes per pairing would mean 6,600 games;
+the final official numerical budget is not settled. The raw
 win/draw/loss matrix remains authoritative. The compact ladder presentation is
 Policy, Elo with uncertainty, Expected Score with uncertainty, Win %, Draw % and
 Loss %, accompanied by full matchup and per-map results. Full tactical metrics
-are optional when running a local tournament. A planned secondary team K/D
-column pools total kills divided by total deaths across the tournament, showing
-unavailable when deaths are zero; it is not a rating input.
+are optional when running a local tournament. The planned headline report identifies tournament entries, rather than calling
+them teams. Its K/D ratio divides total kills by total deaths and stays blank
+when deaths are zero. This is descriptive evidence, not a rating input.
 
-Weekly Big 12 reviews will publish immutable dated snapshots. A qualified new
-method may enter by relegating the lowest method; a week without a qualified
-challenger changes nothing. The Paper 1 snapshot remains frozen, and
-pool-centred Elo values from different weekly pools are not directly
-longitudinally comparable. Current and former entrants remain reproducibly
-available in a cumulative Baseline Library through immutable manifests—never a
-mutable `latest_big_12` alias. Reactive TDM, specialist scenario controllers,
+The accepted next design uses immutable monthly snapshots with exactly twelve
+controller versions. A challenger comparison contains those twelve plus one
+challenger; the growing Baseline Library does not enlarge that population.
+Custom tournaments may use other populations. Local runs produce results and
+do not admit or publish a controller. Numerical budgets and several admission
+rules still need approval; the canonical snapshot/reuse runner is later M8 work.
+The current generic tournament tools do not establish that release qualification.
+
+The Paper 1 snapshot stays frozen. Pool-centred Elo values from different
+populations are not directly comparable over time. Current and former entrants
+retain immutable identities and supporting records in the Baseline Library.
+The earlier weekly update wording is superseded by this monthly direction.
+Reactive TDM, specialist scenario controllers,
 Random, and internal training-population members are not Big 12 entrants.
 See
 [specification amendment A27](docs/design/specification_amendments.md#a27-rolling-big-12-and-baseline-library-governance).
 
-## Static snapshots
+## Static Snapshots
 
 The optional `viz` dependency is activated automatically by either shell
 launcher when `--static` is present:
@@ -294,10 +303,11 @@ launcher when `--static` is present:
   --replay episode.marlbg-replay.json --static --frame-index 0
 ```
 
-Static rendering starts no browser server. Install the optional dependency
-explicitly for direct Python use with `uv sync --extra viz`.
+Static rendering starts no browser server. For direct Python calls, prepare the
+optional painter with `uv sync --locked --extra viz`. Browser launch does not
+require Matplotlib.
 
-## Design and evaluation
+## Design and Evaluation
 
 - [Specification amendments](docs/design/specification_amendments.md) are the
   controlling public authority for accepted departures from the historical
@@ -313,6 +323,20 @@ explicitly for direct Python use with `uv sync --extra viz`.
   companion artifacts, and canonical bounded local persistence.
 - [Dependency policy](docs/dev/dependency_policy.md) separates researcher
   runtime requirements from optional and contributor-only tooling.
+
+## Contribute
+
+Use the locked dependencies and the [quality gates](docs/dev/quality_gates.md).
+GPU/JAX speed, memory, compilation reuse and data movement are the performance
+targets. CPU checks establish correctness and compatibility; their timings help
+balance CI jobs and are not simulator performance claims.
+
+Documentation is part of every change. The shared
+[Documentation Standard](docs/dev/documentation_standard.md)
+requires clear file descriptions and complete, source-checked function contracts.
+Python uses NumPy-style docstrings; browser code uses JSDoc. Test files keep one
+file-level description and necessary type directives, with no function or class
+docstrings. Examples must show working public calls and label future designs.
 
 ## Author
 

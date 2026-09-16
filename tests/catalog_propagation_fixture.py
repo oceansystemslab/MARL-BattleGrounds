@@ -1,4 +1,8 @@
-"""One Python-authored catalog mutation consumed by host and browser tests."""
+"""Build a changed mechanics catalog for host and browser tests.
+
+Both sides use this same fixture so the checks can detect hard-coded display
+values that ignore the catalog.
+"""
 
 from __future__ import annotations
 
@@ -29,8 +33,6 @@ from marl_battlegrounds.rendering.evaluation_adapter import (
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CatalogPropagationExpectationV1:
-    """Dynamic values deliberately changed at the Python catalog authority."""
-
     basic_raw_damage: float
     burst_duration_steps: int
     burst_multiplier: float
@@ -40,8 +42,6 @@ class CatalogPropagationExpectationV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CatalogPropagationDeltaV1:
-    """Test-owned variation applied to whatever catalog production supplies."""
-
     basic_raw_damage: float = 4.25
     burst_duration_steps: int = 2
     burst_multiplier: float = 0.23
@@ -50,7 +50,6 @@ class CatalogPropagationDeltaV1:
 
 
 def _display_grid_sum(value: float, delta: float) -> float:
-    """Add a variation and quantize it to the browser's two-decimal grid."""
     if not isfinite(value) or not isfinite(delta):
         raise ValueError("catalog propagation values must remain finite")
     return float(
@@ -64,7 +63,6 @@ def _display_grid_sum(value: float, delta: float) -> float:
 def catalog_propagation_values(
     context: EvaluationEpisodeContext,
 ) -> CatalogPropagationExpectationV1:
-    """Read the five mechanics varied by the cross-boundary proof."""
     catalog = context.static_mechanics_catalog
     mage = catalog.class_mechanics[1]
     burst = catalog.status_channels[7]
@@ -89,7 +87,6 @@ def catalog_propagation_values(
 def _derived_expectation(
     context: EvaluationEpisodeContext,
 ) -> CatalogPropagationExpectationV1:
-    """Derive a distinct reasonable variation from the validated source catalog."""
     source = catalog_propagation_values(context)
     delta = CatalogPropagationDeltaV1()
     expected = CatalogPropagationExpectationV1(
@@ -133,7 +130,6 @@ def replace_catalog_propagation_values[ContextT: EvaluationEpisodeContext](
     original_context: ContextT,
     expected: CatalogPropagationExpectationV1,
 ) -> ContextT:
-    """Return a fully revalidated context with one reasonable Mage tune."""
     catalog_payload = original_context.static_mechanics_catalog.model_dump(mode="json")
 
     class_rows = cast(list[dict[str, object]], catalog_payload["class_mechanics"])
@@ -179,7 +175,6 @@ def replace_catalog_propagation_values[ContextT: EvaluationEpisodeContext](
 def derive_catalog_propagation_context[ContextT: EvaluationEpisodeContext](
     original_context: ContextT,
 ) -> tuple[ContextT, CatalogPropagationExpectationV1]:
-    """Apply one source-relative variation and return its exact expectations."""
     expected = _derived_expectation(original_context)
     context = replace_catalog_propagation_values(original_context, expected)
     if catalog_propagation_values(context) != expected:
@@ -191,7 +186,6 @@ def build_catalog_propagation_fixture() -> tuple[
     ResearcherLiveDebuggerFrameV2,
     CatalogPropagationExpectationV1,
 ]:
-    """Build the exact mutated Python envelope served to the browser proof."""
     session = create_session(
         get_scenario("arena_5v5"),
         seed=0,
@@ -228,7 +222,6 @@ def build_catalog_propagation_fixture() -> tuple[
 
 
 def catalog_propagation_wire_payload() -> dict[str, object]:
-    """Return the test-only JSON envelope shared across the process boundary."""
     frame, expected = build_catalog_propagation_fixture()
     return {
         "live_frame": frame.model_dump(mode="json"),

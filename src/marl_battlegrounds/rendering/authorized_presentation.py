@@ -1,11 +1,15 @@
-"""Authority-neutral presentation facts derived from validated evaluation rows.
-
-This module deliberately owns no HTTP, replay-artifact, persistence, simulator,
-JAX, or NumPy dependency.  Its Oracle builder consumes one already-authorized
-durable scene, the same episode context, the optional incoming visual inventory,
-and (only when inspection is active) the recorded outgoing transition.  A
-successor frame is not an input, so outgoing anchors can only come from the
-displayed state.
+"""Build typed presentation facts from validated recorded evaluation data.
+Use ``build_oracle_authorized_scene_v1`` for the displayed Oracle scene,
+``build_replay_oracle_presentation_parts_v1`` for replay scene/history/action
+parts, and ``build_agent_pov_visual_incoming_summary_v1`` for events allowed
+by adjacent Agent POV scenes. Frozen dataclasses define the wire fields and
+reject inconsistent identities, phases, counts, and values at construction.
+These helpers do not run the simulator or perform HTTP, file, JAX, or NumPy
+work. Callers own authorization and the outer session/epoch envelope. Oracle
+outgoing action anchors come from the displayed scene, never a future frame.
+Spatial values use world units, health uses hit points, and durations use
+transition ticks unless a field states otherwise. Class docstrings also feed
+Pydantic schema descriptions; the compact browser schema strips that prose.
 """
 
 from __future__ import annotations
@@ -278,16 +282,72 @@ _CANONICAL_AURA_DOCUMENTATION_SHAPE_V1: tuple[tuple[object, ...], ...] = (
 
 
 def _require_python_int(value: int, *, name: str, minimum: int = 0) -> None:
+    """Require an exact Python int at or above a bound.
+    Reject bools and numeric scalar substitutes. minimum defaults to 0.
+    Parameters
+    ----------
+    value : int
+        Value to check; this helper does not coerce it.
+    name : str
+        Field label used in validation errors.
+    minimum : int
+        Inclusive lower bound; default follows the function signature.
+    Returns
+    -------
+    None
+        The value satisfies the integer contract.
+    Raises
+    ------
+    ValueError
+        The value has the wrong type or is below minimum.
+    """
     if type(value) is not int or value < minimum:
         raise ValueError(f"{name} must be a Python int >= {minimum}.")
 
 
 def _require_text(value: str, *, name: str) -> None:
+    """Require a nonempty non-whitespace Python string.
+    Keep the original string; whitespace is checked, not stripped.
+    Parameters
+    ----------
+    value : str
+        Value to check; this helper does not coerce it.
+    name : str
+        Field label used in validation errors.
+    Returns
+    -------
+    None
+        The text contract is satisfied.
+    Raises
+    ------
+    ValueError
+        The value is not an exact str or contains only whitespace.
+    """
     if type(value) is not str or not value.strip():
         raise ValueError(f"{name} must be a non-empty Python string.")
 
 
 def _require_finite(value: float, *, name: str, minimum: float | None = None) -> None:
+    """Require an exact finite Python float and optional lower bound.
+    minimum defaults to None, which adds no lower bound. Integers are not
+    coerced.
+    Parameters
+    ----------
+    value : float
+        Value to check; this helper does not coerce it.
+    name : str
+        Field label used in validation errors.
+    minimum : float | None
+        Inclusive lower bound; default follows the function signature.
+    Returns
+    -------
+    None
+        The numeric contract is satisfied.
+    Raises
+    ------
+    ValueError
+        The type, finiteness, or requested bound is invalid.
+    """
     if type(value) is not float or not isfinite(value):
         raise ValueError(f"{name} must be a finite Python float.")
     if minimum is not None and value < minimum:
@@ -295,6 +355,24 @@ def _require_finite(value: float, *, name: str, minimum: float | None = None) ->
 
 
 def _require_point(value: Point2D, *, name: str) -> None:
+    """Require an (x, y) tuple of finite Python floats.
+    The tuple has exactly two coordinates; no array/list conversion is
+    performed.
+    Parameters
+    ----------
+    value : Point2D
+        Value to check; this helper does not coerce it.
+    name : str
+        Field label used in validation errors.
+    Returns
+    -------
+    None
+        The point contract is satisfied.
+    Raises
+    ------
+    ValueError
+        The tuple shape or either coordinate is invalid.
+    """
     if type(value) is not tuple or len(value) != 2:
         raise ValueError(f"{name} must be a two-coordinate Python tuple.")
     for coordinate in value:
@@ -302,6 +380,23 @@ def _require_point(value: Point2D, *, name: str) -> None:
 
 
 def _points_close(left: Point2D, right: Point2D) -> bool:
+    """Compare two points using the recorded-geometry tolerance.
+    Use relative tolerance 1e-6 and absolute tolerance 1e-5 on both coordinates.
+    Parameters
+    ----------
+    left : Point2D
+        First value to compare.
+    right : Point2D
+        Second value to compare.
+    Returns
+    -------
+    bool
+        Whether every paired coordinate is close.
+    Raises
+    ------
+    ValueError
+        Input lengths differ; callers normally supply two-coordinate points.
+    """
     return all(
         isclose(left_value, right_value, rel_tol=1e-6, abs_tol=1e-5)
         for left_value, right_value in zip(left, right, strict=True)
@@ -312,13 +407,19 @@ def _equals_catalog_or_exact_f32_encoding(
     recorded_value: float,
     catalog_value: float,
 ) -> bool:
-    """Join one recorded float32 fact to its public catalog authority exactly.
-
-    POV feature rows preserve the binary32 value recorded on the observation
-    wire, while a validated public catalog may retain a wider Python float.
-    This is not a tolerance: the values join only when they are already equal
-    or the recorded value is the exact IEEE-754 binary32 encoding of the
-    catalog value.
+    """Join a recorded number to its catalog value without a tolerance.
+    Accept exact equality or the exact IEEE-754 float32 encoding of the catalog
+    float. A catalog value outside float32 range returns False.
+    Parameters
+    ----------
+    recorded_value : float
+        Value preserved by the recorded observation wire.
+    catalog_value : float
+        Corresponding public catalog value.
+    Returns
+    -------
+    bool
+        Whether the two representations describe the same permitted value.
     """
     if recorded_value == catalog_value:
         return True
@@ -333,6 +434,20 @@ def _optional_catalog_float_joins(
     recorded_value: float | None,
     catalog_value: float | None,
 ) -> bool:
+    """Compare optional recorded/catalog values with the exact float32 join rule.
+    If either value is None, both must be None. Otherwise use the exact
+    recorded/catalog comparison.
+    Parameters
+    ----------
+    recorded_value : float | None
+        Value preserved by the recorded observation wire.
+    catalog_value : float | None
+        Corresponding public catalog value.
+    Returns
+    -------
+    bool
+        Whether optional values agree.
+    """
     if recorded_value is None or catalog_value is None:
         return recorded_value is catalog_value
     return _equals_catalog_or_exact_f32_encoding(recorded_value, catalog_value)
@@ -344,6 +459,25 @@ def _require_exact_tuple(
     name: str,
     item_type: type[object],
 ) -> None:
+    """Require a Python tuple whose rows have one exact class.
+    Subclasses and lists are rejected; an empty tuple is permitted.
+    Parameters
+    ----------
+    value : object
+        Value to check; this helper does not coerce it.
+    name : str
+        Field label used in validation errors.
+    item_type : type[object]
+        Exact permitted row class; subclasses do not qualify.
+    Returns
+    -------
+    None
+        The container/type contract is satisfied.
+    Raises
+    ------
+    ValueError
+        The container or any row has the wrong exact type.
+    """
     if type(value) is not tuple:
         raise ValueError(f"{name} must be a Python tuple.")
     items = cast(tuple[object, ...], value)
@@ -356,26 +490,83 @@ def oracle_presentation_key_v1(
     authority_session_id: str,
     public_agent_id: str,
 ) -> str:
-    """Return a stable, authority-namespaced key with no embedded slot meaning."""
+    """Create a stable opaque key for an Oracle agent in one authority namespace.
+    Hash the namespace and public ID with a fixed Oracle prefix. This helper
+    does not validate its strings or encode an internal slot.
+    Parameters
+    ----------
+    authority_session_id : str
+        Authority/session namespace to hash; callers validate it before this
+        helper.
+    public_agent_id : str
+        Public identity used in this authority namespace.
+    Returns
+    -------
+    str
+        oracle_ followed by the SHA-256 hex digest.
+    """
     payload = f"oracle\x00{authority_session_id}\x00{public_agent_id}".encode()
     return f"oracle_{sha256(payload).hexdigest()}"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedObstacleV1:
-    """One strict authority-neutral static obstacle."""
+    """Store one static obstacle with a consistent shape.
+    Pillars require positive radius and no wall dimensions. Walls require
+    positive width and height and no radius. Coordinates and rotation are
+    finite.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    obstacle_id : str
+        Nonempty identifier, unique within the map.
+    kind : Literal['pillar', 'wall']
+        Obstacle shape: pillar uses radius; wall uses width and height.
+    center : Point2D
+        Center coordinates (x, y), in world units.
+    radius : float | None
+        Positive pillar radius in world units, or None for a wall.
+    width : float | None
+        Positive wall width in world units, or None for a pillar.
+    height : float | None
+        Positive wall height in world units, or None for a pillar.
+    theta : float
+        Obstacle rotation in radians; must be a finite Python float.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     obstacle_id: str
+    """Nonempty identifier, unique within the map."""
     kind: Literal["pillar", "wall"]
+    """Obstacle shape: pillar uses radius; wall uses width and height."""
     center: Point2D
+    """Center coordinates (x, y), in world units."""
     radius: float | None
+    """Positive pillar radius in world units, or None for a wall."""
     width: float | None
+    """Positive wall width in world units, or None for a pillar."""
     height: float | None
+    """Positive wall height in world units, or None for a pillar."""
     theta: float
+    """Obstacle rotation in radians; must be a finite Python float."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Pillars require positive radius and no wall dimensions. Walls require
+        positive width and height and no radius. Coordinates and rotation are
+        finite.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         _require_text(self.obstacle_id, name="obstacle_id")
         _require_point(self.center, name="center")
         _require_finite(self.theta, name="theta")
@@ -398,15 +589,44 @@ class AuthorizedObstacleV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedMapV1:
-    """Strict finite map bounds and ordered static obstacles."""
+    """Store positive map bounds and ordered static obstacles.
+    Widths and heights are positive finite floats. Obstacle rows have exact
+    types and unique IDs.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    width : float
+        Positive finite map width in world units.
+    height : float
+        Positive finite map height in world units.
+    obstacles : tuple[AuthorizedObstacleV1, ...]
+        Ordered obstacle rows with unique IDs.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     width: float
+    """Positive finite map width in world units."""
     height: float
+    """Positive finite map height in world units."""
     obstacles: tuple[AuthorizedObstacleV1, ...]
+    """Ordered obstacle rows with unique IDs."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Widths and heights are positive finite floats. Obstacle rows have exact
+        types and unique IDs.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         _require_finite(self.width, name="width", minimum=0.0)
         _require_finite(self.height, name="height", minimum=0.0)
         if self.width <= 0.0 or self.height <= 0.0:
@@ -423,14 +643,40 @@ class AuthorizedMapV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedAuraModifierV1:
-    """One exact non-neutral recipient-local aggregate aura multiplier."""
+    """Store one non-neutral aggregate aura effect on a recipient.
+    Only the two canonical aura IDs are accepted; the multiplier is finite,
+    nonnegative, and different from 1.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    aura_id : AuthorizedAuraIdV1
+        Canonical Mage damage or Warrior mitigation aura identifier.
+    multiplier : float
+        Finite nonnegative aggregate multiplier; neutral 1.0 is omitted.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     aura_id: AuthorizedAuraIdV1
+    """Canonical Mage damage or Warrior mitigation aura identifier."""
     multiplier: float
+    """Finite nonnegative aggregate multiplier; neutral 1.0 is omitted."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Only the two canonical aura IDs are accepted; the multiplier is finite,
+        nonnegative, and different from 1.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.aura_id not in (
             "mage_damage_amplification",
             "warrior_damage_mitigation",
@@ -443,12 +689,46 @@ class AuthorizedAuraModifierV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedClassStatusMechanicV1:
-    """One strict public-catalog status mechanic."""
+    """Describe one public class status mechanic.
+    The channel and ID retain the nine-status catalog identity. Duration is
+    positive; magnitude presence agrees with its kind.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    status_channel : int
+        Zero-based channel on the fixed nine-status axis.
+    status_id : str
+        Canonical status identifier matching status_channel.
+    family : str
+        Allowed values: 'slow', 'stun', 'anti_heal', 'damage_amplification',
+        'movement_floor'.
+        Effect family named by the status catalog.
+    source_action_component : Literal['basic', 'ultimate']
+        Basic or Ultimate action component that creates the effect.
+    duration_steps : int
+        Configured positive duration in transition ticks.
+    magnitude_kind : str
+        Allowed values: 'movement_multiplier', 'none', 'healing_multiplier',
+        'damage_multiplier', 'movement_floor'.
+        Meaning of magnitude; none requires magnitude to be None.
+    magnitude : float | None
+        Finite configured effect value, or None for magnitude kind none.
+    breaks_on_positive_damage : bool
+        Whether positive damage removes this status; an exact bool.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     status_channel: int
+    """Zero-based channel on the fixed nine-status axis."""
     status_id: str
+    """Canonical status identifier matching status_channel."""
     family: Literal[
         "slow",
         "stun",
@@ -456,8 +736,12 @@ class AuthorizedClassStatusMechanicV1:
         "damage_amplification",
         "movement_floor",
     ]
+    """Allowed values: 'slow', 'stun', 'anti_heal', 'damage_amplification',
+    'movement_floor'. Effect family named by the status catalog."""
     source_action_component: Literal["basic", "ultimate"]
+    """Basic or Ultimate action component that creates the effect."""
     duration_steps: int
+    """Configured positive duration in transition ticks."""
     magnitude_kind: Literal[
         "movement_multiplier",
         "none",
@@ -465,10 +749,23 @@ class AuthorizedClassStatusMechanicV1:
         "damage_multiplier",
         "movement_floor",
     ]
+    """Allowed values: 'movement_multiplier', 'none', 'healing_multiplier',
+    'damage_multiplier', 'movement_floor'. Meaning of magnitude; none requires
+    magnitude to be None."""
     magnitude: float | None
+    """Finite configured effect value, or None for magnitude kind none."""
     breaks_on_positive_damage: bool
+    """Whether positive damage removes this status; an exact bool."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        The channel and ID retain the nine-status catalog identity. Duration is
+        positive; magnitude presence agrees with its kind.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         _require_python_int(self.status_channel, name="status_channel")
         if self.status_channel >= 9:
             raise ValueError("status channel is outside the V1 catalog axis.")
@@ -507,18 +804,56 @@ class AuthorizedClassStatusMechanicV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedClassAuraMechanicV1:
-    """One strict public-catalog aura mechanic."""
+    """Describe one public class aura mechanic.
+    The aura ID is known, numeric values are finite and nonnegative, and
+    stacking uses multiply_then_clamp with a ceiling or floor.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    aura_id : AuthorizedAuraIdV1
+        Canonical Mage damage or Warrior mitigation aura identifier.
+    radius : float
+        Nonnegative configured aura radius in world units.
+    per_emitter_multiplier : float
+        Finite nonnegative multiplier contributed by one emitter.
+    stacking_rule : Literal['multiply_then_clamp']
+        multiply_then_clamp: combine emitter factors, then apply the bound.
+    clamp_kind : Literal['ceiling', 'floor']
+        Whether clamp_value is the upper ceiling or lower floor.
+    clamp_value : float
+        Finite nonnegative bound for the combined multiplier.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     aura_id: AuthorizedAuraIdV1
+    """Canonical Mage damage or Warrior mitigation aura identifier."""
     radius: float
+    """Nonnegative configured aura radius in world units."""
     per_emitter_multiplier: float
+    """Finite nonnegative multiplier contributed by one emitter."""
     stacking_rule: Literal["multiply_then_clamp"]
+    """multiply_then_clamp: combine emitter factors, then apply the bound."""
     clamp_kind: Literal["ceiling", "floor"]
+    """Whether clamp_value is the upper ceiling or lower floor."""
     clamp_value: float
+    """Finite nonnegative bound for the combined multiplier."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        The aura ID is known, numeric values are finite and nonnegative, and
+        stacking uses multiply_then_clamp with a ceiling or floor.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.aura_id not in _AURA_SOURCE_CLASS_BY_ID_V1:
             raise ValueError("unknown class aura identity.")
         for name in ("radius", "per_emitter_multiplier", "clamp_value"):
@@ -531,31 +866,108 @@ class AuthorizedClassAuraMechanicV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedClassMechanicsV1:
-    """Strict serialized class vocabulary and exact catalog mechanics."""
+    """Store public class identity and configured mechanics.
+    Require a canonical class, positive health/body radius, valid target modes,
+    bounded regeneration, and unique ordered status channels and aura IDs.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    class_id : int
+        Canonical real-class ID from 1 through 5.
+    class_name : str
+        Canonical class name paired with class_id.
+    maximum_health : float
+        Positive maximum health in hit points.
+    body_radius : float
+        Positive body radius in world units.
+    base_movement_speed : float
+        Nonnegative movement distance per tick before current effects.
+    observation_radius : float
+        Nonnegative observation radius in world units.
+    basic_target_mode : Literal['unavailable', 'ally', 'enemy']
+        Whether Basic targets allies, enemies, or is unavailable.
+    basic_interaction_radius : float
+        Nonnegative Basic range in world units.
+    basic_raw_damage : float
+        Nonnegative configured Basic damage before modifiers, in hit points.
+    basic_raw_healing : float
+        Nonnegative configured Basic healing before modifiers, in hit points.
+    ultimate_target_mode : Literal['unavailable', 'target_none', 'ally', 'enemy']
+        Ultimate target relation, target_none, or unavailable.
+    ultimate_interaction_radius : float
+        Nonnegative Ultimate range in world units.
+    ultimate_cooldown_steps : int
+        Nonnegative configured Ultimate cooldown in ticks.
+    ultimate_raw_damage : float
+        Nonnegative configured Ultimate damage before modifiers, in hit points.
+    ultimate_raw_healing : float
+        Nonnegative configured Ultimate healing before modifiers, in hit points.
+    out_of_combat_delay_steps : int
+        Nonnegative configured delay before leaving combat, in ticks.
+    out_of_combat_health_regeneration_fraction_per_step : float
+        Fraction of maximum health restored per eligible tick, between 0 and 1.
+    status_mechanics : tuple[AuthorizedClassStatusMechanicV1, ...]
+        Unique status mechanics in channel order for this class.
+    aura_mechanics : tuple[AuthorizedClassAuraMechanicV1, ...]
+        Unique aura mechanics belonging to this class.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     class_id: int
+    """Canonical real-class ID from 1 through 5."""
     class_name: str
+    """Canonical class name paired with class_id."""
     maximum_health: float
+    """Positive maximum health in hit points."""
     body_radius: float
+    """Positive body radius in world units."""
     base_movement_speed: float
+    """Nonnegative movement distance per tick before current effects."""
     observation_radius: float
+    """Nonnegative observation radius in world units."""
     basic_target_mode: Literal["unavailable", "ally", "enemy"]
+    """Whether Basic targets allies, enemies, or is unavailable."""
     basic_interaction_radius: float
+    """Nonnegative Basic range in world units."""
     basic_raw_damage: float
+    """Nonnegative configured Basic damage before modifiers, in hit points."""
     basic_raw_healing: float
+    """Nonnegative configured Basic healing before modifiers, in hit points."""
     ultimate_target_mode: Literal["unavailable", "target_none", "ally", "enemy"]
+    """Ultimate target relation, target_none, or unavailable."""
     ultimate_interaction_radius: float
+    """Nonnegative Ultimate range in world units."""
     ultimate_cooldown_steps: int
+    """Nonnegative configured Ultimate cooldown in ticks."""
     ultimate_raw_damage: float
+    """Nonnegative configured Ultimate damage before modifiers, in hit points."""
     ultimate_raw_healing: float
+    """Nonnegative configured Ultimate healing before modifiers, in hit points."""
     out_of_combat_delay_steps: int
+    """Nonnegative configured delay before leaving combat, in ticks."""
     out_of_combat_health_regeneration_fraction_per_step: float
+    """Fraction of maximum health restored per eligible tick, between 0 and 1."""
     status_mechanics: tuple[AuthorizedClassStatusMechanicV1, ...]
+    """Unique status mechanics in channel order for this class."""
     aura_mechanics: tuple[AuthorizedClassAuraMechanicV1, ...]
+    """Unique aura mechanics belonging to this class."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require a canonical class, positive health/body radius, valid target modes,
+        bounded regeneration, and unique ordered status channels and aura IDs.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         _require_python_int(self.class_id, name="class_id", minimum=1)
         if self.class_id > 5:
             raise ValueError("class_id must identify a real V1 class.")
@@ -619,14 +1031,42 @@ class AuthorizedClassMechanicsV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedClassDocumentationProfileAvailableV1:
-    """Certification that canonical class guide copy is exact for this catalog."""
+    """Certify that the authored canonical class guide applies.
+    Require the available discriminator and the exact versioned profile ID. This
+    record carries a prior certification result; it does not inspect a catalog
+    itself.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    availability_kind : Literal['available']
+        Exact discriminator identifying the available or unavailable variant.
+    profile_id : Literal['marl_battlegrounds.class_documentation.canonical_v1']
+        Versioned identifier for the canonical authored class guide.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     availability_kind: Literal["available"]
+    """Exact discriminator identifying the available or unavailable variant."""
     profile_id: Literal["marl_battlegrounds.class_documentation.canonical_v1"]
+    """Versioned identifier for the canonical authored class guide."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the available discriminator and the exact versioned profile ID. This
+        record carries a prior certification result; it does not inspect a catalog
+        itself.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.availability_kind != "available":
             raise ValueError("unknown available class-documentation discriminator.")
         if self.profile_id != AUTHORIZED_CLASS_DOCUMENTATION_PROFILE_ID_V1:
@@ -635,13 +1075,36 @@ class AuthorizedClassDocumentationProfileAvailableV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedClassDocumentationProfileUnavailableV1:
-    """Fail-closed denial of canonical class guide copy for this catalog."""
+    """State that the canonical authored class guide is unavailable.
+    Require the unavailable discriminator. Numeric class facts can still be
+    shown without this categorical prose.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    availability_kind : Literal['unavailable']
+        Exact discriminator identifying the available or unavailable variant.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     availability_kind: Literal["unavailable"]
+    """Exact discriminator identifying the available or unavailable variant."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the unavailable discriminator. Numeric class facts can still be
+        shown without this categorical prose.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.availability_kind != "unavailable":
             raise ValueError("unknown unavailable class-documentation discriminator.")
 
@@ -655,12 +1118,39 @@ type AuthorizedClassDocumentationProfileV1 = Annotated[
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedClassMechanicsV2(AuthorizedClassMechanicsV1):
-    """Exact class mechanics plus one catalog-certified documentation profile."""
+    """Add a catalog-checked guide profile to class mechanics.
+    Validate inherited V1 mechanics, mechanics_version 2, and one exact
+    available/unavailable profile variant. All inherited constructor fields
+    remain required.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on AuthorizedClassMechanicsV1.
+    Attributes
+    ----------
+    mechanics_version : Literal[2]
+        Version discriminator; this row requires 2.
+    documentation_profile : AuthorizedClassDocumentationProfileV1
+        Certification or explicit denial of canonical class-guide prose.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     mechanics_version: Literal[2]
+    """Version discriminator; this row requires 2."""
     documentation_profile: AuthorizedClassDocumentationProfileV1
+    """Certification or explicit denial of canonical class-guide prose."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Validate inherited V1 mechanics, mechanics_version 2, and one exact
+        available/unavailable profile variant. All inherited constructor fields
+        remain required.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         AuthorizedClassMechanicsV1.__post_init__(self)
         if self.mechanics_version != 2:
             raise ValueError("unknown authorized class mechanics version.")
@@ -677,11 +1167,19 @@ type AuthorizedClassMechanics = AuthorizedClassMechanicsV1 | AuthorizedClassMech
 def _catalog_has_complete_class_documentation_profile_v1(
     catalog: StaticMechanicsCatalogV1,
 ) -> bool:
-    """Certify canonical V1 semantic identities plus prose-dependent tuning facts.
-
-    Literal class, status, and aura shapes bind the versioned simulator semantics
-    that are not repeated as numeric catalog leaves. Numeric predicates below
-    exist only where the authored guide makes the corresponding qualitative claim.
+    """Check whether canonical authored class explanations match a validated catalog.
+    Check class/status/aura meanings, units, and only the numeric relationships
+    used by the prose. A tuned catalog may qualify if those claims remain true;
+    this is not whole-catalog hash equality.
+    Parameters
+    ----------
+    catalog : StaticMechanicsCatalogV1
+        Exact static mechanics catalog to check.
+    Returns
+    -------
+    bool
+        Whether the complete categorical and qualitative guide profile is
+        justified.
     """
     class_shape = tuple(
         (
@@ -845,7 +1343,24 @@ def _catalog_has_complete_class_documentation_profile_v1(
 def authorized_class_documentation_profile_v1(
     catalog: StaticMechanicsCatalogV1,
 ) -> AuthorizedClassDocumentationProfileV1:
-    """Certify the authored categorical and qualitative documentation profile."""
+    """Certify or deny the canonical class-guide profile for a catalog.
+    Revalidate a Python dump before checking all prose-dependent identities and
+    tuning relationships. Do not infer that a changed numeric catalog always
+    invalidates the guide.
+    Parameters
+    ----------
+    catalog : StaticMechanicsCatalogV1
+        Exact static mechanics catalog to check.
+    Returns
+    -------
+    AuthorizedClassDocumentationProfileV1
+        Frozen available profile or explicit unavailable variant.
+    Raises
+    ------
+    TypeError, ValueError
+        The root is not the exact catalog type, or strict catalog validation
+        fails.
+    """
     if type(catalog) is not StaticMechanicsCatalogV1:
         raise TypeError("catalog must be the exact StaticMechanicsCatalogV1 root.")
     validated = StaticMechanicsCatalogV1.model_validate(
@@ -863,16 +1378,48 @@ def authorized_class_documentation_profile_v1(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedRespawnWaveV1:
-    """One strict current team lifecycle countdown."""
+    """Store the current respawn countdown for one team.
+    Team index and ID agree; the period is positive and the countdown is
+    nonnegative and smaller than the period.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    team_index : int
+        Zero-based team index: 0 for Team A, 1 for Team B.
+    team_id : int
+        Team ID: 1 for Team A, 2 for Team B.
+    period_steps : int
+        Positive respawn-wave period in transition ticks.
+    countdown_steps : int
+        Ticks until the wave, from 0 up to but excluding period_steps.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     team_index: int
+    """Zero-based team index: 0 for Team A, 1 for Team B."""
     team_id: int
+    """Team ID: 1 for Team A, 2 for Team B."""
     period_steps: int
+    """Positive respawn-wave period in transition ticks."""
     countdown_steps: int
+    """Ticks until the wave, from 0 up to but excluding period_steps."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Team index and ID agree; the period is positive and the countdown is
+        nonnegative and smaller than the period.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         _require_python_int(self.team_index, name="team_index")
         _require_python_int(self.team_id, name="team_id", minimum=1)
         if self.team_index not in (0, 1) or self.team_id != self.team_index + 1:
@@ -885,15 +1432,44 @@ class AuthorizedRespawnWaveV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedSpawnShieldMechanicsAvailableV1:
-    """Exact configured spawn-shield mechanics available to presentation."""
+    """Store recorded Spawn Shield duration and movement speed.
+    The duration is a nonnegative Python int and speed is a positive finite
+    float.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    availability_kind : Literal['available']
+        Exact discriminator identifying the available or unavailable variant.
+    configured_duration_steps : int
+        Configured effect duration in transition ticks.
+    movement_speed : float
+        Positive Spawn Shield movement distance per tick.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     availability_kind: Literal["available"]
+    """Exact discriminator identifying the available or unavailable variant."""
     configured_duration_steps: int
+    """Configured effect duration in transition ticks."""
     movement_speed: float
+    """Positive Spawn Shield movement distance per tick."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        The duration is a nonnegative Python int and speed is a positive finite
+        float.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.availability_kind != "available":
             raise ValueError("unknown available spawn-shield discriminator.")
         _require_python_int(
@@ -907,22 +1483,79 @@ class AuthorizedSpawnShieldMechanicsAvailableV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedSpawnShieldMechanicsAvailableV2:
-    """Exact public Spawn Shield semantics for canonical documentation copy."""
+    """Store configured Spawn Shield facts and their canonical meanings.
+    Require the V2 discriminator, valid duration/speed, and all seven exact
+    semantic literals. These facts support the authored Spawn Shield
+    explanation.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    availability_kind : Literal['available_v2']
+        Exact discriminator identifying the available or unavailable variant.
+    configured_duration_steps : int
+        Configured effect duration in transition ticks.
+    movement_speed : float
+        Positive Spawn Shield movement distance per tick.
+    protection_effect : Literal['invulnerable']
+        invulnerable: protected agents take no damage.
+    visibility_effect : Literal['concealed_from_opponents']
+        concealed_from_opponents: opponents cannot observe the shielded agent.
+    targetability_effect : Literal['untargetable']
+        untargetable: combat targeting cannot select the shielded agent.
+    action_scope : Literal['movement_only']
+        movement_only: only movement is available while protected.
+    aura_effect : Literal['excluded_as_emitter_and_beneficiary']
+        excluded_as_emitter_and_beneficiary: shielded agents neither give nor
+        receive aura effects.
+    agent_collision_effect : Literal['phased_until_expiring_endpoint_rejoin']
+        phased_until_expiring_endpoint_rejoin: body collision rejoins at shield
+        expiry.
+    ordinary_application_mechanism : Literal['end_of_transition_respawn_lifecycle']
+        end_of_transition_respawn_lifecycle: ordinary application occurs at
+        respawn.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     availability_kind: Literal["available_v2"]
+    """Exact discriminator identifying the available or unavailable variant."""
     configured_duration_steps: int
+    """Configured effect duration in transition ticks."""
     movement_speed: float
+    """Positive Spawn Shield movement distance per tick."""
     protection_effect: Literal["invulnerable"]
+    """invulnerable: protected agents take no damage."""
     visibility_effect: Literal["concealed_from_opponents"]
+    """concealed_from_opponents: opponents cannot observe the shielded agent."""
     targetability_effect: Literal["untargetable"]
+    """untargetable: combat targeting cannot select the shielded agent."""
     action_scope: Literal["movement_only"]
+    """movement_only: only movement is available while protected."""
     aura_effect: Literal["excluded_as_emitter_and_beneficiary"]
+    """excluded_as_emitter_and_beneficiary: shielded agents neither give nor
+    receive aura effects."""
     agent_collision_effect: Literal["phased_until_expiring_endpoint_rejoin"]
+    """phased_until_expiring_endpoint_rejoin: body collision rejoins at shield
+    expiry."""
     ordinary_application_mechanism: Literal["end_of_transition_respawn_lifecycle"]
+    """end_of_transition_respawn_lifecycle: ordinary application occurs at respawn."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the V2 discriminator, valid duration/speed, and all seven exact
+        semantic literals. These facts support the authored Spawn Shield
+        explanation.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.availability_kind != "available_v2":
             raise ValueError("unknown V2 spawn-shield discriminator.")
         _require_python_int(
@@ -956,13 +1589,34 @@ class AuthorizedSpawnShieldMechanicsAvailableV2:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedSpawnShieldMechanicsUnavailableV1:
-    """Explicit absence of recorded spawn-shield configuration facts."""
+    """State that recorded Spawn Shield configuration is unavailable.
+    Require the unavailable discriminator; no duration or speed is invented.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    availability_kind : Literal['unavailable']
+        Exact discriminator identifying the available or unavailable variant.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     availability_kind: Literal["unavailable"]
+    """Exact discriminator identifying the available or unavailable variant."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the unavailable discriminator; no duration or speed is invented.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.availability_kind != "unavailable":
             raise ValueError("unknown unavailable spawn-shield discriminator.")
 
@@ -983,26 +1637,96 @@ type AuthorizedSpawnShieldMechanics = Annotated[
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedStatusSourceV1:
-    """One authorized direct source identity without a raw slot or event ID."""
+    """Identify one authorized direct source of a durable status.
+    Both nonempty identifiers describe the same source; the enclosing scene
+    checks that join. No raw slot or event ID is stored.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    source_presentation_key : str
+        Nonempty opaque key for an authorized source agent.
+    source_public_agent_id : str
+        Nonempty public ID for the same source agent.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     source_presentation_key: str
+    """Nonempty opaque key for an authorized source agent."""
     source_public_agent_id: str
+    """Nonempty public ID for the same source agent."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Both nonempty identifiers describe the same source; the enclosing scene
+        checks that join. No raw slot or event ID is stored.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         _require_text(self.source_presentation_key, name="source_presentation_key")
         _require_text(self.source_public_agent_id, name="source_public_agent_id")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedStatusV1:
-    """One durable status row and only its authorized source identities."""
+    """Store a durable status and the sources allowed in this view.
+    Validate catalog channel/ID, positive bounded duration, source class domain,
+    magnitude presence, and unique direct source keys. Scene validation checks
+    catalog and source-agent joins.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    status_channel : int
+        Zero-based channel on the fixed nine-status axis.
+    status_id : str
+        Canonical status identifier matching status_channel.
+    family : str
+        Allowed values: 'slow', 'stun', 'anti_heal', 'damage_amplification',
+        'movement_floor'.
+        Effect family named by the status catalog.
+    configured_duration_steps : int
+        Positive configured status duration in ticks.
+    remaining_duration : int
+        Positive remaining duration, no greater than configured duration, in
+        ticks.
+    source_class_id : int
+        Canonical source-class ID from 1 through 5.
+    source_class_name : str
+        Public source-class name; scene validation joins it to the class ID.
+    source_action_component : Literal['basic', 'ultimate']
+        Basic or Ultimate action component that creates the effect.
+    magnitude_kind : str
+        Allowed values: 'movement_multiplier', 'none', 'healing_multiplier',
+        'damage_multiplier', 'movement_floor'.
+        Meaning of magnitude; none requires magnitude to be None.
+    magnitude : float | None
+        Finite configured effect value, or None for magnitude kind none.
+    breaks_on_positive_damage : bool
+        Whether positive damage removes this status; an exact bool.
+    direct_sources : tuple[AuthorizedStatusSourceV1, ...]
+        Unique authorized source identities; no internal slot or event IDs.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     status_channel: int
+    """Zero-based channel on the fixed nine-status axis."""
     status_id: str
+    """Canonical status identifier matching status_channel."""
     family: Literal[
         "slow",
         "stun",
@@ -1010,11 +1734,18 @@ class AuthorizedStatusV1:
         "damage_amplification",
         "movement_floor",
     ]
+    """Allowed values: 'slow', 'stun', 'anti_heal', 'damage_amplification',
+    'movement_floor'. Effect family named by the status catalog."""
     configured_duration_steps: int
+    """Positive configured status duration in ticks."""
     remaining_duration: int
+    """Positive remaining duration, no greater than configured duration, in ticks."""
     source_class_id: int
+    """Canonical source-class ID from 1 through 5."""
     source_class_name: str
+    """Public source-class name; scene validation joins it to the class ID."""
     source_action_component: Literal["basic", "ultimate"]
+    """Basic or Ultimate action component that creates the effect."""
     magnitude_kind: Literal[
         "movement_multiplier",
         "none",
@@ -1022,11 +1753,26 @@ class AuthorizedStatusV1:
         "damage_multiplier",
         "movement_floor",
     ]
+    """Allowed values: 'movement_multiplier', 'none', 'healing_multiplier',
+    'damage_multiplier', 'movement_floor'. Meaning of magnitude; none requires
+    magnitude to be None."""
     magnitude: float | None
+    """Finite configured effect value, or None for magnitude kind none."""
     breaks_on_positive_damage: bool
+    """Whether positive damage removes this status; an exact bool."""
     direct_sources: tuple[AuthorizedStatusSourceV1, ...]
+    """Unique authorized source identities; no internal slot or event IDs."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Validate catalog channel/ID, positive bounded duration, source class domain,
+        magnitude presence, and unique direct source keys. Scene validation checks
+        catalog and source-agent joins.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         _require_python_int(self.status_channel, name="status_channel")
         if self.status_channel >= 9:
             raise ValueError("status channel is outside the V1 catalog axis.")
@@ -1090,35 +1836,126 @@ class AuthorizedStatusV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedAgentV1:
-    """One authority-neutral durable agent row keyed for presentation only."""
+    """Store one authorized agent body and its durable public facts.
+    Require canonical identity, finite geometry/health/speeds, bounded
+    countdowns and regeneration, and unique status/aura rows. This model does
+    not decide whether the caller may see the agent.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    presentation_key : str
+        Nonempty opaque key scoped to the presentation authority.
+    public_agent_id : str
+        Nonempty public identity of the same agent.
+    relation : AuthorizedRelationV1
+        oracle, self, ally, or opponent, as allowed by the enclosing view.
+    team_id : int
+        Team ID: 1 for Team A, 2 for Team B.
+    class_id : int
+        Canonical real-class ID from 1 through 5.
+    class_name : str
+        Canonical class name paired with class_id.
+    position : Point2D
+        Agent or pad center (x, y), in world units.
+    radius : float
+        Positive agent body radius in world units.
+    life_state : AgentLifeStateV1
+        alive or corpse; inactive roster slots have no body row.
+    current_health : float
+        Nonnegative health in hit points, at most maximum_health.
+    maximum_health : float
+        Positive maximum health in hit points.
+    base_movement_speed : float
+        Nonnegative movement distance per tick before current effects.
+    effective_movement_speed : float
+        Nonnegative movement distance per tick after current movement effects.
+    observation_radius : float
+        Nonnegative observation radius in world units.
+    basic_interaction_radius : float
+        Nonnegative Basic range in world units.
+    ultimate_interaction_radius : float
+        Nonnegative Ultimate range in world units.
+    ultimate_cooldown_remaining : int
+        Nonnegative remaining Ultimate cooldown in ticks.
+    spawn_shield_remaining : int
+        Nonnegative remaining Spawn Shield duration in ticks.
+    steps_until_out_of_combat : int
+        Nonnegative combat countdown, at most its configured delay, in ticks.
+    out_of_combat_delay_steps : int
+        Nonnegative configured delay before leaving combat, in ticks.
+    out_of_combat_health_regeneration_fraction_per_step : float
+        Fraction of maximum health restored per eligible tick, between 0 and 1.
+    statuses : tuple[AuthorizedStatusV1, ...]
+        Durable status rows with unique status channels.
+    aura_modifiers : tuple[AuthorizedAuraModifierV1, ...]
+        Unique recipient aura multipliers; omit neutral factors.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     presentation_key: str
+    """Nonempty opaque key scoped to the presentation authority."""
     public_agent_id: str
+    """Nonempty public identity of the same agent."""
     relation: AuthorizedRelationV1
+    """oracle, self, ally, or opponent, as allowed by the enclosing view."""
     team_id: int
+    """Team ID: 1 for Team A, 2 for Team B."""
     class_id: int
+    """Canonical real-class ID from 1 through 5."""
     class_name: str
+    """Canonical class name paired with class_id."""
     position: Point2D
+    """Agent or pad center (x, y), in world units."""
     radius: float
+    """Positive agent body radius in world units."""
     life_state: AgentLifeStateV1
+    """alive or corpse; inactive roster slots have no body row."""
     current_health: float
+    """Nonnegative health in hit points, at most maximum_health."""
     maximum_health: float
+    """Positive maximum health in hit points."""
     base_movement_speed: float
+    """Nonnegative movement distance per tick before current effects."""
     effective_movement_speed: float
+    """Nonnegative movement distance per tick after current movement effects."""
     observation_radius: float
+    """Nonnegative observation radius in world units."""
     basic_interaction_radius: float
+    """Nonnegative Basic range in world units."""
     ultimate_interaction_radius: float
+    """Nonnegative Ultimate range in world units."""
     ultimate_cooldown_remaining: int
+    """Nonnegative remaining Ultimate cooldown in ticks."""
     spawn_shield_remaining: int
+    """Nonnegative remaining Spawn Shield duration in ticks."""
     steps_until_out_of_combat: int
+    """Nonnegative combat countdown, at most its configured delay, in ticks."""
     out_of_combat_delay_steps: int
+    """Nonnegative configured delay before leaving combat, in ticks."""
     out_of_combat_health_regeneration_fraction_per_step: float
+    """Fraction of maximum health restored per eligible tick, between 0 and 1."""
     statuses: tuple[AuthorizedStatusV1, ...]
+    """Durable status rows with unique status channels."""
     aura_modifiers: tuple[AuthorizedAuraModifierV1, ...]
+    """Unique recipient aura multipliers; omit neutral factors."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require canonical identity, finite geometry/health/speeds, bounded
+        countdowns and regeneration, and unique status/aura rows. This model does
+        not decide whether the caller may see the agent.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         _require_text(self.presentation_key, name="presentation_key")
         _require_text(self.public_agent_id, name="public_agent_id")
         if self.relation not in ("oracle", "self", "ally", "opponent"):
@@ -1184,25 +2021,86 @@ class AuthorizedAgentV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedAuraFieldV1:
-    """One authorized emitter field keyed without exposing a raw actor slot."""
+    """Store an authorized aura emitter and its field mechanics.
+    Require a known aura, finite positive radius, nonnegative multipliers, and
+    exact lifecycle/stacking values. The enclosing scene checks source identity
+    and catalog equality.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    aura_id : AuthorizedAuraIdV1
+        Canonical Mage damage or Warrior mitigation aura identifier.
+    source_presentation_key : str
+        Nonempty opaque key for an authorized source agent.
+    source_public_agent_id : str
+        Nonempty public ID for the same source agent.
+    source_class_id : int
+        Canonical source-class ID from 1 through 5.
+    source_class_name : str
+        Public source-class name; scene validation joins it to the class ID.
+    source_alive : bool
+        Whether the authorized emitter is alive; an exact bool.
+    center : Point2D
+        Center coordinates (x, y), in world units.
+    radius : float
+        Positive emitter aura radius in world units.
+    beneficiary_relation : Literal['same_team']
+        same_team: this aura affects agents on the emitter team.
+    per_emitter_multiplier : float
+        Finite nonnegative multiplier contributed by one emitter.
+    stacking_rule : Literal['multiply_then_clamp']
+        multiply_then_clamp: combine emitter factors, then apply the bound.
+    clamp_kind : Literal['ceiling', 'floor']
+        Whether clamp_value is the upper ceiling or lower floor.
+    clamp_value : float
+        Finite nonnegative bound for the combined multiplier.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     aura_id: AuthorizedAuraIdV1
+    """Canonical Mage damage or Warrior mitigation aura identifier."""
     source_presentation_key: str
+    """Nonempty opaque key for an authorized source agent."""
     source_public_agent_id: str
+    """Nonempty public ID for the same source agent."""
     source_class_id: int
+    """Canonical source-class ID from 1 through 5."""
     source_class_name: str
+    """Public source-class name; scene validation joins it to the class ID."""
     source_alive: bool
+    """Whether the authorized emitter is alive; an exact bool."""
     center: Point2D
+    """Center coordinates (x, y), in world units."""
     radius: float
+    """Positive emitter aura radius in world units."""
     beneficiary_relation: Literal["same_team"]
+    """same_team: this aura affects agents on the emitter team."""
     per_emitter_multiplier: float
+    """Finite nonnegative multiplier contributed by one emitter."""
     stacking_rule: Literal["multiply_then_clamp"]
+    """multiply_then_clamp: combine emitter factors, then apply the bound."""
     clamp_kind: Literal["ceiling", "floor"]
+    """Whether clamp_value is the upper ceiling or lower floor."""
     clamp_value: float
+    """Finite nonnegative bound for the combined multiplier."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require a known aura, finite positive radius, nonnegative multipliers, and
+        exact lifecycle/stacking values. The enclosing scene checks source identity
+        and catalog equality.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.aura_id not in (
             "mage_damage_amplification",
             "warrior_damage_mitigation",
@@ -1229,20 +2127,64 @@ class AuthorizedAuraFieldV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedSpawnPadV1:
-    """One authorized lifecycle pad with an optional visible-body assignment."""
+    """Store a lifecycle pad with an optional authorized body assignment.
+    Assignee key and public ID appear together. Team/slot IDs are bounded;
+    inactive pads cannot be alive, assigned, or shielded.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    team_id : int
+        Team ID: 1 for Team A, 2 for Team B.
+    team_local_slot : int
+        Zero-based roster slot within the team, from 0 through 4.
+    assigned_presentation_key : str | None
+        Authorized body key, or None when no visible body is assigned.
+    assigned_public_agent_id : str | None
+        Matching public ID, present exactly when the assigned key is present.
+    position : Point2D
+        Agent or pad center (x, y), in world units.
+    configured_active : bool
+        Whether this roster slot participates in the episode.
+    currently_alive : bool
+        Whether its occupant is alive; inactive slots cannot be alive.
+    spawn_shield_remaining : int
+        Nonnegative remaining Spawn Shield duration in ticks.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     team_id: int
+    """Team ID: 1 for Team A, 2 for Team B."""
     team_local_slot: int
+    """Zero-based roster slot within the team, from 0 through 4."""
     assigned_presentation_key: str | None
+    """Authorized body key, or None when no visible body is assigned."""
     assigned_public_agent_id: str | None
+    """Matching public ID, present exactly when the assigned key is present."""
     position: Point2D
+    """Agent or pad center (x, y), in world units."""
     configured_active: bool
+    """Whether this roster slot participates in the episode."""
     currently_alive: bool
+    """Whether its occupant is alive; inactive slots cannot be alive."""
     spawn_shield_remaining: int
+    """Nonnegative remaining Spawn Shield duration in ticks."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Assignee key and public ID appear together. Team/slot IDs are bounded;
+        inactive pads cannot be alive, assigned, or shielded.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         _require_python_int(self.team_id, name="team_id", minimum=1)
         if self.team_id not in (1, 2):
             raise ValueError("team_id must be one or two.")
@@ -1284,20 +2226,71 @@ class AuthorizedSpawnPadV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedBattlefieldSceneV1:
-    """Neutral durable battlefield facts with authority and epochs outside it."""
+    """Join authorized bodies, mechanics, and lifecycle facts into one scene.
+    Check exact row types, unique identities, represented class/status/aura
+    axes, source/assignee joins, shield bounds, and ordered team waves. Oracle
+    static values match catalog values exactly or their exact float32 encoding;
+    non-Oracle per-slot static overrides remain allowed.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    schema_version : Literal[1]
+        Wire version discriminator; this model requires 1.
+    map : AuthorizedMapV1
+        Finite map bounds and ordered static obstacles.
+    agents : tuple[AuthorizedAgentV1, ...]
+        Ordered authorized durable agents with unique keys and public IDs.
+    aura_fields : tuple[AuthorizedAuraFieldV1, ...]
+        Emitter fields joined to their authorized source agents and catalog
+        mechanics.
+    class_mechanics : tuple[AuthorizedClassMechanics, ...]
+        Mechanics for exactly the represented classes, in ascending class-ID
+        order.
+    spawn_shield_mechanics : AuthorizedSpawnShieldMechanics
+        Available configured shield facts or an explicit unavailable variant.
+    spawn_pads : tuple[AuthorizedSpawnPadV1, ...]
+        Unique lifecycle pads ordered by team ID and team-local slot.
+    respawn_waves : tuple[AuthorizedRespawnWaveV1, ...]
+        Team A then Team B lifecycle countdowns.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     schema_version: Literal[1]
+    """Wire version discriminator; this model requires 1."""
     map: AuthorizedMapV1
+    """Finite map bounds and ordered static obstacles."""
     agents: tuple[AuthorizedAgentV1, ...]
+    """Ordered authorized durable agents with unique keys and public IDs."""
     aura_fields: tuple[AuthorizedAuraFieldV1, ...]
+    """Emitter fields joined to their authorized source agents and catalog
+    mechanics."""
     class_mechanics: tuple[AuthorizedClassMechanics, ...]
+    """Mechanics for exactly the represented classes, in ascending class-ID order."""
     spawn_shield_mechanics: AuthorizedSpawnShieldMechanics
+    """Available configured shield facts or an explicit unavailable variant."""
     spawn_pads: tuple[AuthorizedSpawnPadV1, ...]
+    """Unique lifecycle pads ordered by team ID and team-local slot."""
     respawn_waves: tuple[AuthorizedRespawnWaveV1, ...]
+    """Team A then Team B lifecycle countdowns."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Check exact row types, unique identities, represented class/status/aura
+        axes, source/assignee joins, shield bounds, and ordered team waves. Oracle
+        static values match catalog values exactly or their exact float32 encoding;
+        non-Oracle per-slot static overrides remain allowed.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.schema_version != AUTHORIZED_PRESENTATION_SCHEMA_VERSION:
             raise ValueError("unknown authorized battlefield schema version.")
         if type(self.map) is not AuthorizedMapV1:
@@ -1552,15 +2545,42 @@ class AuthorizedBattlefieldSceneV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingAuthorizedAgentIdentityV1:
-    """One configured-active Oracle identity, detached from internal slot axes."""
+    """Identify an active incoming-event agent without exposing its internal slot.
+    Require the authorized_agent discriminator and nonempty key/public ID.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    identity_kind : Literal['authorized_agent']
+        Exact discriminator for a scene agent or inactive feed-only identity.
+    presentation_key : str
+        Nonempty opaque key scoped to the presentation authority.
+    public_agent_id : str
+        Nonempty public identity of the same agent.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     identity_kind: Literal["authorized_agent"]
+    """Exact discriminator for a scene agent or inactive feed-only identity."""
     presentation_key: str
+    """Nonempty opaque key scoped to the presentation authority."""
     public_agent_id: str
+    """Nonempty public identity of the same agent."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the authorized_agent discriminator and nonempty key/public ID.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.identity_kind != "authorized_agent":
             raise ValueError("unknown authorized incoming agent identity.")
         _require_text(self.presentation_key, name="presentation_key")
@@ -1569,14 +2589,40 @@ class ReplayIncomingAuthorizedAgentIdentityV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingFeedOnlyAgentIdentityV1:
-    """One configured-inactive rejection identity with no invented scene body."""
+    """Identify an inactive rejected actor only in the event feed.
+    Require inactive_feed_only and a public ID. There is no presentation key or
+    invented scene body.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    identity_kind : Literal['inactive_feed_only']
+        Exact discriminator for a scene agent or inactive feed-only identity.
+    public_agent_id : str
+        Nonempty public identity of the same agent.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     identity_kind: Literal["inactive_feed_only"]
+    """Exact discriminator for a scene agent or inactive feed-only identity."""
     public_agent_id: str
+    """Nonempty public identity of the same agent."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require inactive_feed_only and a public ID. There is no presentation key or
+        invented scene body.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.identity_kind != "inactive_feed_only":
             raise ValueError("unknown feed-only incoming agent identity.")
         _require_text(self.public_agent_id, name="public_agent_id")
@@ -1590,16 +2636,49 @@ type ReplayIncomingAgentIdentityV1 = Annotated[
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingAgentAnchorV1:
-    """One authority-neutral actor anchor at an exact scientific phase."""
+    """Store an authorized agent position at one scientific phase.
+    The phase is transition_start, post_charge, or successor; identity strings
+    and both float coordinates are valid.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    phase : ReplayIncomingAnchorPhaseV1
+        Scientific endpoint named by the row; it is not an animation timing
+        choice.
+    presentation_key : str
+        Nonempty opaque key scoped to the presentation authority.
+    public_agent_id : str
+        Nonempty public identity of the same agent.
+    position : Point2D
+        Agent or pad center (x, y), in world units.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     phase: ReplayIncomingAnchorPhaseV1
+    """Scientific endpoint named by the row; it is not an animation timing choice."""
     presentation_key: str
+    """Nonempty opaque key scoped to the presentation authority."""
     public_agent_id: str
+    """Nonempty public identity of the same agent."""
     position: Point2D
+    """Agent or pad center (x, y), in world units."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        The phase is transition_start, post_charge, or successor; identity strings
+        and both float coordinates are valid.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.phase not in ("transition_start", "post_charge", "successor"):
             raise ValueError("unknown replay incoming anchor phase.")
         _require_text(self.presentation_key, name="presentation_key")
@@ -1609,15 +2688,43 @@ class ReplayIncomingAgentAnchorV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingTeamAnchorV1:
-    """One axis-free team cue at an exact scientific phase."""
+    """Store a non-spatial team cue at the successor phase.
+    Require successor and a matching zero-based index and one-based team ID.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    phase : Literal['successor']
+        Scientific endpoint named by the row; it is not an animation timing
+        choice.
+    team_index : int
+        Zero-based team index: 0 for Team A, 1 for Team B.
+    team_id : int
+        Team ID: 1 for Team A, 2 for Team B.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     phase: Literal["successor"]
+    """Scientific endpoint named by the row; it is not an animation timing choice."""
     team_index: int
+    """Zero-based team index: 0 for Team A, 1 for Team B."""
     team_id: int
+    """Team ID: 1 for Team A, 2 for Team B."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require successor and a matching zero-based index and one-based team ID.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.phase != "successor":
             raise ValueError("replay incoming team anchors must use successor phase.")
         _require_python_int(self.team_index, name="team_index")
@@ -1630,17 +2737,52 @@ class ReplayIncomingTeamAnchorV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingAgentPhaseTrajectoryV1:
-    """One ordered, slot-free start/post-Charge/successor trajectory."""
+    """Store one agent at start, after Charge, and at the successor.
+    All three exact anchors retain the same public and presentation identities
+    and their named phases.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    agent_presentation_key : str
+        Opaque identity shared by this agent trajectory and its anchors.
+    agent_public_agent_id : str
+        Public identity shared by this agent trajectory and its anchors.
+    transition_start : ReplayIncomingAgentAnchorV1
+        Authorized position before the incoming transition.
+    post_charge : ReplayIncomingAgentAnchorV1
+        Authorized position after Charge and before ordinary movement.
+    successor : ReplayIncomingAgentAnchorV1
+        Authorized position after the incoming transition.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     agent_presentation_key: str
+    """Opaque identity shared by this agent trajectory and its anchors."""
     agent_public_agent_id: str
+    """Public identity shared by this agent trajectory and its anchors."""
     transition_start: ReplayIncomingAgentAnchorV1
+    """Authorized position before the incoming transition."""
     post_charge: ReplayIncomingAgentAnchorV1
+    """Authorized position after Charge and before ordinary movement."""
     successor: ReplayIncomingAgentAnchorV1
+    """Authorized position after the incoming transition."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        All three exact anchors retain the same public and presentation identities
+        and their named phases.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         _require_text(
             self.agent_presentation_key,
             name="agent_presentation_key",
@@ -1664,13 +2806,30 @@ class ReplayIncomingAgentPhaseTrajectoryV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _ReplayIncomingEventBaseV1:
-    """Shared strict identity fields for one neutral atomic event."""
+    """Share identity and ordering fields across incoming atomic events.
+    Concrete subclasses call _validate_base with their exact kind and scientific
+    phase rank. This base is not a complete event variant.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    event_id : str
+        Nonempty event identity within the enclosing transition inventory.
+    ordinal : int
+        Zero-based event position; the enclosing inventory requires dense order.
+    phase_rank : int
+        Canonical scientific phase rank used to order events.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     event_id: str
+    """Nonempty event identity within the enclosing transition inventory."""
     ordinal: int
+    """Zero-based event position; the enclosing inventory requires dense order."""
     phase_rank: int
+    """Canonical scientific phase rank used to order events."""
 
     def _validate_base(
         self,
@@ -1679,6 +2838,26 @@ class _ReplayIncomingEventBaseV1:
         expected_kind: ReplayIncomingEventKindV1,
         expected_phase_rank: int,
     ) -> None:
+        """Validate shared event identity and canonical ordering fields.
+        Require nonempty event ID, nonnegative Python ordinal/rank, and the concrete
+        expected kind/rank.
+        Parameters
+        ----------
+        event_kind : ReplayIncomingEventKindV1
+            Actual concrete event discriminator.
+        expected_kind : ReplayIncomingEventKindV1
+            Required discriminator for the concrete event type.
+        expected_phase_rank : int
+            Canonical scientific ordering rank required by the event type.
+        Returns
+        -------
+        None
+            Shared event fields satisfy the concrete variant contract.
+        Raises
+        ------
+        ValueError
+            Identity, integer domains, kind, or rank are invalid.
+        """
         _require_text(self.event_id, name="event_id")
         _require_python_int(self.ordinal, name="ordinal")
         _require_python_int(self.phase_rank, name="phase_rank")
@@ -1694,6 +2873,26 @@ def _require_incoming_anchor(
     name: str,
     phase: ReplayIncomingAnchorPhaseV1,
 ) -> None:
+    """Require an exact incoming agent anchor at the named phase.
+    This helper checks its row type and phase; the enclosing summary joins
+    identity and position to a trajectory.
+    Parameters
+    ----------
+    value : ReplayIncomingAgentAnchorV1
+        Value to check; this helper does not coerce it.
+    name : str
+        Field label used in validation errors.
+    phase : ReplayIncomingAnchorPhaseV1
+        Required scientific anchor phase.
+    Returns
+    -------
+    None
+        The phase/type check passed.
+    Raises
+    ------
+    ValueError
+        The anchor type or phase differs.
+    """
     if type(value) is not ReplayIncomingAgentAnchorV1 or value.phase != phase:
         raise ValueError(f"{name} must be an exact {phase} incoming anchor.")
 
@@ -1704,6 +2903,26 @@ def _require_optional_incoming_anchor(
     name: str,
     phase: ReplayIncomingAnchorPhaseV1,
 ) -> None:
+    """Validate an incoming anchor only when one is present.
+    None is a deliberate absence; a present anchor follows the exact phase/type
+    rule.
+    Parameters
+    ----------
+    value : ReplayIncomingAgentAnchorV1 | None
+        Value to check; this helper does not coerce it.
+    name : str
+        Field label used in validation errors.
+    phase : ReplayIncomingAnchorPhaseV1
+        Required scientific anchor phase.
+    Returns
+    -------
+    None
+        The optional anchor is absent or valid.
+    Raises
+    ------
+    ValueError
+        A present anchor has the wrong type or phase.
+    """
     if value is not None:
         _require_incoming_anchor(value, name=name, phase=phase)
 
@@ -1714,6 +2933,26 @@ def _require_incoming_anchor_tuple(
     name: str,
     phase: ReplayIncomingAnchorPhaseV1,
 ) -> None:
+    """Require unique authorized anchors at one scientific phase.
+    Validate exact tuple/row types, the required phase, and unique presentation
+    keys.
+    Parameters
+    ----------
+    value : tuple[ReplayIncomingAgentAnchorV1, ...]
+        Value to check; this helper does not coerce it.
+    name : str
+        Field label used in validation errors.
+    phase : ReplayIncomingAnchorPhaseV1
+        Required scientific anchor phase.
+    Returns
+    -------
+    None
+        Every tuple member satisfies the anchor contract.
+    Raises
+    ------
+    ValueError
+        A type, phase, or uniqueness check fails.
+    """
     _require_exact_tuple(value, name=name, item_type=ReplayIncomingAgentAnchorV1)
     for anchor in value:
         _require_incoming_anchor(anchor, name=f"{name} item", phase=phase)
@@ -1724,14 +2963,60 @@ def _require_incoming_anchor_tuple(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingActionRejectedEventV1(_ReplayIncomingEventBaseV1):
+    """Record an action component rejected at transition start.
+    Require the canonical event kind and phase rank 10. Active actors require
+    matching authorized identity and start anchor. Inactive actors remain feed-
+    only with no anchor; preserve the submitted tuple.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['action_rejected']
+        Exact event discriminator for this concrete row type.
+    actor_identity : ReplayIncomingAgentIdentityV1
+        Scene identity for an active actor, or a feed-only identity for an
+        inactive actor.
+    actor_configured_active : bool
+        Whether the rejected actor belongs to the active roster.
+    rejection_component : Literal['domain', 'movement', 'combat_pair']
+        Rejected domain, movement component, or target/Ultimate pair.
+    submitted_action : SubmittedActionTupleV1
+        Recorded submitted integer tuple, including rejected out-of-domain
+        values.
+    actor_anchor : ReplayIncomingAgentAnchorV1 | None
+        Rejected actor position at transition start; None for inactive feed-only
+        rows.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["action_rejected"]
+    """Exact event discriminator for this concrete row type."""
     actor_identity: ReplayIncomingAgentIdentityV1
+    """Scene identity for an active actor, or a feed-only identity for an inactive
+    actor."""
     actor_configured_active: bool
+    """Whether the rejected actor belongs to the active roster."""
     rejection_component: Literal["domain", "movement", "combat_pair"]
+    """Rejected domain, movement component, or target/Ultimate pair."""
     submitted_action: SubmittedActionTupleV1
+    """Recorded submitted integer tuple, including rejected out-of-domain values."""
     actor_anchor: ReplayIncomingAgentAnchorV1 | None
+    """Rejected actor position at transition start; None for inactive feed-only
+    rows."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 10. Active actors require
+        matching authorized identity and start anchor. Inactive actors remain feed-
+        only with no anchor; preserve the submitted tuple.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="action_rejected",
@@ -1767,12 +3052,47 @@ class ReplayIncomingActionRejectedEventV1(_ReplayIncomingEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingAbilityActivatedEventV1(_ReplayIncomingEventBaseV1):
+    """Record a Basic or Ultimate activation at transition start.
+    Require the canonical event kind and phase rank 20. Require a start source
+    anchor and an optional start recipient anchor; the ability component is
+    basic or ultimate.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['ability_activated']
+        Exact event discriminator for this concrete row type.
+    ability_component : Literal['basic', 'ultimate']
+        basic or ultimate, identifying the activated ability.
+    source_anchor : ReplayIncomingAgentAnchorV1
+        Authorized source identity and position at the event required phase.
+    recipient_anchor : ReplayIncomingAgentAnchorV1 | None
+        Authorized recipient identity and position at the event required phase.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["ability_activated"]
+    """Exact event discriminator for this concrete row type."""
     ability_component: Literal["basic", "ultimate"]
+    """basic or ultimate, identifying the activated ability."""
     source_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized source identity and position at the event required phase."""
     recipient_anchor: ReplayIncomingAgentAnchorV1 | None
+    """Authorized recipient identity and position at the event required phase."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 20. Require a start source
+        anchor and an optional start recipient anchor; the ability component is
+        basic or ultimate.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="ability_activated",
@@ -1794,16 +3114,65 @@ class ReplayIncomingAbilityActivatedEventV1(_ReplayIncomingEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingSourceDamageOutputEventV1(_ReplayIncomingEventBaseV1):
+    """Record source damage and the covering aura evidence.
+    Require the canonical event kind and phase rank 30. Source and optional
+    recipient use start anchors. Damage values and recipient multiplier are
+    finite and nonnegative; emitter tuples contain unique start anchors.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['source_damage_output']
+        Exact event discriminator for this concrete row type.
+    source_anchor : ReplayIncomingAgentAnchorV1
+        Authorized source identity and position at the event required phase.
+    recipient_anchor : ReplayIncomingAgentAnchorV1 | None
+        Authorized recipient identity and position at the event required phase.
+    raw_damage_output : float
+        Nonnegative source damage before modifiers, in hit points.
+    source_modified_damage_output : float
+        Nonnegative damage after source modifiers, before recipient modifiers.
+    recipient_damage_modifier : float
+        Nonnegative recipient damage multiplier.
+    mage_damage_aura_covering_emitters : tuple[ReplayIncomingAgentAnchorV1, ...]
+        Unique covering Mage emitters at transition start, in trajectory order.
+    warrior_mitigation_aura_covering_emitters : tuple[ReplayIncomingAgentAnchorV1,
+    ...]
+        Unique covering Warrior emitters at transition start, in trajectory
+        order.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["source_damage_output"]
+    """Exact event discriminator for this concrete row type."""
     source_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized source identity and position at the event required phase."""
     recipient_anchor: ReplayIncomingAgentAnchorV1 | None
+    """Authorized recipient identity and position at the event required phase."""
     raw_damage_output: float
+    """Nonnegative source damage before modifiers, in hit points."""
     source_modified_damage_output: float
+    """Nonnegative damage after source modifiers, before recipient modifiers."""
     recipient_damage_modifier: float
+    """Nonnegative recipient damage multiplier."""
     mage_damage_aura_covering_emitters: tuple[ReplayIncomingAgentAnchorV1, ...]
+    """Unique covering Mage emitters at transition start, in trajectory order."""
     warrior_mitigation_aura_covering_emitters: tuple[ReplayIncomingAgentAnchorV1, ...]
+    """"""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 30. Source and optional
+        recipient use start anchors. Damage values and recipient multiplier are
+        finite and nonnegative; emitter tuples contain unique start anchors.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="source_damage_output",
@@ -1839,14 +3208,55 @@ class ReplayIncomingSourceDamageOutputEventV1(_ReplayIncomingEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingSourceHealingOutputEventV1(_ReplayIncomingEventBaseV1):
+    """Record source healing before recipient health resolution.
+    Require the canonical event kind and phase rank 30. Source and optional
+    recipient use start anchors; healing values and recipient multiplier are
+    finite and nonnegative.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['source_healing_output']
+        Exact event discriminator for this concrete row type.
+    source_anchor : ReplayIncomingAgentAnchorV1
+        Authorized source identity and position at the event required phase.
+    recipient_anchor : ReplayIncomingAgentAnchorV1 | None
+        Authorized recipient identity and position at the event required phase.
+    raw_healing_output : float
+        Nonnegative source healing before modifiers, in hit points.
+    source_modified_healing_output : float
+        Nonnegative healing after source modifiers, before recipient modifiers.
+    recipient_healing_modifier : float
+        Nonnegative recipient healing multiplier.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["source_healing_output"]
+    """Exact event discriminator for this concrete row type."""
     source_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized source identity and position at the event required phase."""
     recipient_anchor: ReplayIncomingAgentAnchorV1 | None
+    """Authorized recipient identity and position at the event required phase."""
     raw_healing_output: float
+    """Nonnegative source healing before modifiers, in hit points."""
     source_modified_healing_output: float
+    """Nonnegative healing after source modifiers, before recipient modifiers."""
     recipient_healing_modifier: float
+    """Nonnegative recipient healing multiplier."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 30. Source and optional
+        recipient use start anchors; healing values and recipient multiplier are
+        finite and nonnegative.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="source_healing_output",
@@ -1872,15 +3282,60 @@ class ReplayIncomingSourceHealingOutputEventV1(_ReplayIncomingEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingRecipientHealthResolutionEventV1(_ReplayIncomingEventBaseV1):
+    """Record combined combat health resolution for one recipient.
+    Require the canonical event kind and phase rank 40. Use a start recipient
+    anchor, nonnegative health/damage/healing values, and finite signed net
+    change. This row stores recorded totals rather than recomputing combat.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['recipient_health_resolution']
+        Exact event discriminator for this concrete row type.
+    recipient_anchor : ReplayIncomingAgentAnchorV1
+        Authorized recipient identity and position at the event required phase.
+    transition_start_health : float
+        Recipient health before combat resolution, in hit points.
+    total_effective_damage : float
+        Nonnegative combined effective damage in hit points.
+    total_effective_healing : float
+        Nonnegative combined effective healing in hit points.
+    health_after_combat_resolution : float
+        Nonnegative health after combined combat resolution, in hit points.
+    realized_net_health_change : float
+        Signed health change in hit points: positive for gain, negative for
+        loss.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["recipient_health_resolution"]
+    """Exact event discriminator for this concrete row type."""
     recipient_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized recipient identity and position at the event required phase."""
     transition_start_health: float
+    """Recipient health before combat resolution, in hit points."""
     total_effective_damage: float
+    """Nonnegative combined effective damage in hit points."""
     total_effective_healing: float
+    """Nonnegative combined effective healing in hit points."""
     health_after_combat_resolution: float
+    """Nonnegative health after combined combat resolution, in hit points."""
     realized_net_health_change: float
+    """Signed health change in hit points: positive for gain, negative for loss."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 40. Use a start recipient
+        anchor, nonnegative health/damage/healing values, and finite signed net
+        change. This row stores recorded totals rather than recomputing combat.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="recipient_health_resolution",
@@ -1906,10 +3361,37 @@ class ReplayIncomingRecipientHealthResolutionEventV1(_ReplayIncomingEventBaseV1)
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingCombatCountdownResetEventV1(_ReplayIncomingEventBaseV1):
+    """Record a reset of an agent combat countdown.
+    Require the canonical event kind and phase rank 50. Use the agent
+    transition-start anchor.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['combat_countdown_reset']
+        Exact event discriminator for this concrete row type.
+    agent_anchor : ReplayIncomingAgentAnchorV1
+        Authorized agent identity and position at the event required phase.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["combat_countdown_reset"]
+    """Exact event discriminator for this concrete row type."""
     agent_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized agent identity and position at the event required phase."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 50. Use the agent
+        transition-start anchor.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="combat_countdown_reset",
@@ -1924,10 +3406,37 @@ class ReplayIncomingCombatCountdownResetEventV1(_ReplayIncomingEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingAgentLeftCombatEventV1(_ReplayIncomingEventBaseV1):
+    """Record an agent leaving combat at the successor.
+    Require the canonical event kind and phase rank 50. Use the successor agent
+    anchor.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['agent_left_combat']
+        Exact event discriminator for this concrete row type.
+    agent_anchor : ReplayIncomingAgentAnchorV1
+        Authorized agent identity and position at the event required phase.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["agent_left_combat"]
+    """Exact event discriminator for this concrete row type."""
     agent_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized agent identity and position at the event required phase."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 50. Use the successor agent
+        anchor.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="agent_left_combat",
@@ -1942,11 +3451,41 @@ class ReplayIncomingAgentLeftCombatEventV1(_ReplayIncomingEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingHealthRegeneratedEventV1(_ReplayIncomingEventBaseV1):
+    """Record health actually restored by regeneration.
+    Require the canonical event kind and phase rank 50. Use a transition-start
+    anchor and a nonnegative finite restored-health value.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['health_regenerated']
+        Exact event discriminator for this concrete row type.
+    agent_anchor : ReplayIncomingAgentAnchorV1
+        Authorized agent identity and position at the event required phase.
+    actual_health_regenerated : float
+        Nonnegative health actually restored by regeneration, in hit points.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["health_regenerated"]
+    """Exact event discriminator for this concrete row type."""
     agent_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized agent identity and position at the event required phase."""
     actual_health_regenerated: float
+    """Nonnegative health actually restored by regeneration, in hit points."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 50. Use a transition-start
+        anchor and a nonnegative finite restored-health value.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="health_regenerated",
@@ -1966,10 +3505,37 @@ class ReplayIncomingHealthRegeneratedEventV1(_ReplayIncomingEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingCooldownStartedEventV1(_ReplayIncomingEventBaseV1):
+    """Record an Ultimate cooldown starting.
+    Require the canonical event kind and phase rank 60. Use the transition-start
+    agent anchor.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['cooldown_started']
+        Exact event discriminator for this concrete row type.
+    agent_anchor : ReplayIncomingAgentAnchorV1
+        Authorized agent identity and position at the event required phase.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["cooldown_started"]
+    """Exact event discriminator for this concrete row type."""
     agent_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized agent identity and position at the event required phase."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 60. Use the transition-start
+        agent anchor.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="cooldown_started",
@@ -1984,10 +3550,37 @@ class ReplayIncomingCooldownStartedEventV1(_ReplayIncomingEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingCooldownReadyEventV1(_ReplayIncomingEventBaseV1):
+    """Record an Ultimate cooldown becoming ready.
+    Require the canonical event kind and phase rank 60. Use the transition-start
+    agent anchor.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['cooldown_ready']
+        Exact event discriminator for this concrete row type.
+    agent_anchor : ReplayIncomingAgentAnchorV1
+        Authorized agent identity and position at the event required phase.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["cooldown_ready"]
+    """Exact event discriminator for this concrete row type."""
     agent_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized agent identity and position at the event required phase."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 60. Use the transition-start
+        agent anchor.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="cooldown_ready",
@@ -2002,12 +3595,47 @@ class ReplayIncomingCooldownReadyEventV1(_ReplayIncomingEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingChargePhaseDisplacementEventV1(_ReplayIncomingEventBaseV1):
+    """Record actual movement during the Charge phase.
+    Require the canonical event kind and phase rank 70. Join transition_start to
+    post_charge for one identity. End position equals start plus displacement
+    within relative 1e-6 and absolute 1e-5 tolerance.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['charge_phase_displacement']
+        Exact event discriminator for this concrete row type.
+    realized_displacement : Point2D
+        Actual (dx, dy) displacement in world units.
+    start_anchor : ReplayIncomingAgentAnchorV1
+        Authorized identity and position at this movement phase start.
+    end_anchor : ReplayIncomingAgentAnchorV1
+        Same agent at this movement phase end, after realized displacement.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["charge_phase_displacement"]
+    """Exact event discriminator for this concrete row type."""
     realized_displacement: Point2D
+    """Actual (dx, dy) displacement in world units."""
     start_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized identity and position at this movement phase start."""
     end_anchor: ReplayIncomingAgentAnchorV1
+    """Same agent at this movement phase end, after realized displacement."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 70. Join transition_start to
+        post_charge for one identity. End position equals start plus displacement
+        within relative 1e-6 and absolute 1e-5 tolerance.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="charge_phase_displacement",
@@ -2041,12 +3669,47 @@ class ReplayIncomingChargePhaseDisplacementEventV1(_ReplayIncomingEventBaseV1):
 class ReplayIncomingOrdinaryMovementPhaseDisplacementEventV1(
     _ReplayIncomingEventBaseV1
 ):
+    """Record actual movement after Charge.
+    Require the canonical event kind and phase rank 80. Join post_charge to
+    successor for one identity. End position equals start plus displacement
+    within relative 1e-6 and absolute 1e-5 tolerance.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['ordinary_movement_phase_displacement']
+        Exact event discriminator for this concrete row type.
+    realized_displacement : Point2D
+        Actual (dx, dy) displacement in world units.
+    start_anchor : ReplayIncomingAgentAnchorV1
+        Authorized identity and position at this movement phase start.
+    end_anchor : ReplayIncomingAgentAnchorV1
+        Same agent at this movement phase end, after realized displacement.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["ordinary_movement_phase_displacement"]
+    """Exact event discriminator for this concrete row type."""
     realized_displacement: Point2D
+    """Actual (dx, dy) displacement in world units."""
     start_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized identity and position at this movement phase start."""
     end_anchor: ReplayIncomingAgentAnchorV1
+    """Same agent at this movement phase end, after realized displacement."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 80. Join post_charge to
+        successor for one identity. End position equals start plus displacement
+        within relative 1e-6 and absolute 1e-5 tolerance.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="ordinary_movement_phase_displacement",
@@ -2078,10 +3741,37 @@ class ReplayIncomingOrdinaryMovementPhaseDisplacementEventV1(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingAgentDiedEventV1(_ReplayIncomingEventBaseV1):
+    """Record a death at the successor position.
+    Require the canonical event kind and phase rank 90. Use the successor
+    recipient anchor.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['agent_died']
+        Exact event discriminator for this concrete row type.
+    recipient_anchor : ReplayIncomingAgentAnchorV1
+        Authorized recipient identity and position at the event required phase.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["agent_died"]
+    """Exact event discriminator for this concrete row type."""
     recipient_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized recipient identity and position at the event required phase."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 90. Use the successor
+        recipient anchor.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="agent_died",
@@ -2096,12 +3786,45 @@ class ReplayIncomingAgentDiedEventV1(_ReplayIncomingEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingLethalDamageContributionEventV1(_ReplayIncomingEventBaseV1):
+    """Record a source contribution to a recipient death.
+    Require the canonical event kind and phase rank 90. Use successor source and
+    recipient anchors and nonnegative finite attributed damage.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['lethal_damage_contribution']
+        Exact event discriminator for this concrete row type.
+    source_anchor : ReplayIncomingAgentAnchorV1
+        Authorized source identity and position at the event required phase.
+    recipient_anchor : ReplayIncomingAgentAnchorV1
+        Authorized recipient identity and position at the event required phase.
+    attributed_death_damage : float
+        Nonnegative damage contribution attributed to this death, in hit points.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["lethal_damage_contribution"]
+    """Exact event discriminator for this concrete row type."""
     source_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized source identity and position at the event required phase."""
     recipient_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized recipient identity and position at the event required phase."""
     attributed_death_damage: float
+    """Nonnegative damage contribution attributed to this death, in hit points."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 90. Use successor source and
+        recipient anchors and nonnegative finite attributed damage.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="lethal_damage_contribution",
@@ -2126,9 +3849,27 @@ class ReplayIncomingLethalDamageContributionEventV1(_ReplayIncomingEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _ReplayIncomingStatusEventBaseV1(_ReplayIncomingEventBaseV1):
+    """Share recipient and status identity across status lifecycle events.
+    Subclasses validate successor anchors, the canonical status channel/ID pair,
+    and phase rank 100 through _validate_status.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    recipient_anchor : ReplayIncomingAgentAnchorV1
+        Authorized recipient identity and position at the event required phase.
+    status_channel : int
+        Zero-based channel on the fixed nine-status axis.
+    status_id : str
+        Canonical status identifier matching status_channel.
+    """
+
     recipient_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized recipient identity and position at the event required phase."""
     status_channel: int
+    """Zero-based channel on the fixed nine-status axis."""
     status_id: str
+    """Canonical status identifier matching status_channel."""
 
     def _validate_status(
         self,
@@ -2136,6 +3877,24 @@ class _ReplayIncomingStatusEventBaseV1(_ReplayIncomingEventBaseV1):
         event_kind: ReplayIncomingEventKindV1,
         expected_kind: ReplayIncomingEventKindV1,
     ) -> None:
+        """Validate a status lifecycle event at the successor phase.
+        Check base event fields at rank 100, the exact successor anchor, and the
+        nine-channel status ID mapping.
+        Parameters
+        ----------
+        event_kind : ReplayIncomingEventKindV1
+            Actual concrete event discriminator.
+        expected_kind : ReplayIncomingEventKindV1
+            Required discriminator for the concrete event type.
+        Returns
+        -------
+        None
+            Shared status-event fields are valid.
+        Raises
+        ------
+        ValueError
+            The event, anchor, or catalog identity is inconsistent.
+        """
         self._validate_base(
             event_kind=event_kind,
             expected_kind=expected_kind,
@@ -2157,9 +3916,33 @@ class _ReplayIncomingStatusEventBaseV1(_ReplayIncomingEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingStatusAgedToZeroEventV1(_ReplayIncomingStatusEventBaseV1):
+    """Record a status expiring through normal ageing.
+    Require the canonical event kind and phase rank 100. Validate the successor
+    recipient and canonical status channel/ID.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingStatusEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['status_aged_to_zero']
+        Exact event discriminator for this concrete row type.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["status_aged_to_zero"]
+    """Exact event discriminator for this concrete row type."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 100. Validate the successor
+        recipient and canonical status channel/ID.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_status(
             event_kind=self.event_kind,
             expected_kind="status_aged_to_zero",
@@ -2168,9 +3951,33 @@ class ReplayIncomingStatusAgedToZeroEventV1(_ReplayIncomingStatusEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingStatusBrokenByDamageEventV1(_ReplayIncomingStatusEventBaseV1):
+    """Record a status removed by positive damage.
+    Require the canonical event kind and phase rank 100. Validate the successor
+    recipient and canonical status channel/ID.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingStatusEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['status_broken_by_damage']
+        Exact event discriminator for this concrete row type.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["status_broken_by_damage"]
+    """Exact event discriminator for this concrete row type."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 100. Validate the successor
+        recipient and canonical status channel/ID.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_status(
             event_kind=self.event_kind,
             expected_kind="status_broken_by_damage",
@@ -2179,10 +3986,37 @@ class ReplayIncomingStatusBrokenByDamageEventV1(_ReplayIncomingStatusEventBaseV1
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingStatusAppliedEventV1(_ReplayIncomingStatusEventBaseV1):
+    """Record a new status application and its source.
+    Require the canonical event kind and phase rank 100. Validate successor
+    source/recipient anchors and canonical status channel/ID.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingStatusEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['status_applied']
+        Exact event discriminator for this concrete row type.
+    source_anchor : ReplayIncomingAgentAnchorV1
+        Authorized source identity and position at the event required phase.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["status_applied"]
+    """Exact event discriminator for this concrete row type."""
     source_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized source identity and position at the event required phase."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 100. Validate successor
+        source/recipient anchors and canonical status channel/ID.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_status(
             event_kind=self.event_kind,
             expected_kind="status_applied",
@@ -2196,9 +4030,33 @@ class ReplayIncomingStatusAppliedEventV1(_ReplayIncomingStatusEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingStatusRefreshedOrExtendedEventV1(_ReplayIncomingStatusEventBaseV1):
+    """Record a status duration being refreshed or extended.
+    Require the canonical event kind and phase rank 100. Validate the successor
+    recipient and canonical status channel/ID.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingStatusEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['status_refreshed_or_extended']
+        Exact event discriminator for this concrete row type.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["status_refreshed_or_extended"]
+    """Exact event discriminator for this concrete row type."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 100. Validate the successor
+        recipient and canonical status channel/ID.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_status(
             event_kind=self.event_kind,
             expected_kind="status_refreshed_or_extended",
@@ -2207,9 +4065,33 @@ class ReplayIncomingStatusRefreshedOrExtendedEventV1(_ReplayIncomingStatusEventB
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingStatusClearedByNewDeathEventV1(_ReplayIncomingStatusEventBaseV1):
+    """Record a status removed because its recipient just died.
+    Require the canonical event kind and phase rank 100. Validate the successor
+    recipient and canonical status channel/ID.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingStatusEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['status_cleared_by_new_death']
+        Exact event discriminator for this concrete row type.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["status_cleared_by_new_death"]
+    """Exact event discriminator for this concrete row type."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 100. Validate the successor
+        recipient and canonical status channel/ID.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_status(
             event_kind=self.event_kind,
             expected_kind="status_cleared_by_new_death",
@@ -2218,10 +4100,37 @@ class ReplayIncomingStatusClearedByNewDeathEventV1(_ReplayIncomingStatusEventBas
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingSpawnShieldExpiredEventV1(_ReplayIncomingEventBaseV1):
+    """Record Spawn Shield expiry at the successor.
+    Require the canonical event kind and phase rank 110. Use the successor agent
+    anchor.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['spawn_shield_expired']
+        Exact event discriminator for this concrete row type.
+    agent_anchor : ReplayIncomingAgentAnchorV1
+        Authorized agent identity and position at the event required phase.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["spawn_shield_expired"]
+    """Exact event discriminator for this concrete row type."""
     agent_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized agent identity and position at the event required phase."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 110. Use the successor agent
+        anchor.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="spawn_shield_expired",
@@ -2236,10 +4145,38 @@ class ReplayIncomingSpawnShieldExpiredEventV1(_ReplayIncomingEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingRespawnWaveOccurredEventV1(_ReplayIncomingEventBaseV1):
+    """Record a team respawn wave without a spatial anchor.
+    Require the canonical event kind and phase rank 120. Require an exact
+    successor team anchor.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['respawn_wave_occurred']
+        Exact event discriminator for this concrete row type.
+    team_anchor : ReplayIncomingTeamAnchorV1
+        Matching team identity at the successor phase, without a spatial
+        position.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["respawn_wave_occurred"]
+    """Exact event discriminator for this concrete row type."""
     team_anchor: ReplayIncomingTeamAnchorV1
+    """Matching team identity at the successor phase, without a spatial position."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 120. Require an exact
+        successor team anchor.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="respawn_wave_occurred",
@@ -2251,12 +4188,45 @@ class ReplayIncomingRespawnWaveOccurredEventV1(_ReplayIncomingEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingAgentRespawnedEventV1(_ReplayIncomingEventBaseV1):
+    """Record an agent respawn at its actual successor position.
+    Require the canonical event kind and phase rank 120. Require a valid team ID
+    and a realized position exactly equal to the successor anchor.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['agent_respawned']
+        Exact event discriminator for this concrete row type.
+    agent_anchor : ReplayIncomingAgentAnchorV1
+        Authorized agent identity and position at the event required phase.
+    team_id : int
+        Team ID: 1 for Team A, 2 for Team B.
+    realized_successor_position : Point2D
+        Respawn position (x, y), exactly equal to the successor anchor.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
+
     event_kind: Literal["agent_respawned"]
+    """Exact event discriminator for this concrete row type."""
     agent_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized agent identity and position at the event required phase."""
     team_id: int
+    """Team ID: 1 for Team A, 2 for Team B."""
     realized_successor_position: Point2D
+    """Respawn position (x, y), exactly equal to the successor anchor."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 120. Require a valid team ID
+        and a realized position exactly equal to the successor anchor.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="agent_respawned",
@@ -2280,17 +4250,60 @@ class ReplayIncomingAgentRespawnedEventV1(_ReplayIncomingEventBaseV1):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingTeamDeathmatchScoreChangedEventV1(_ReplayIncomingEventBaseV1):
-    """One global, non-spatial Team Deathmatch score transition."""
+    """Record a global Team Deathmatch score increase.
+    Require the canonical event kind and phase rank 130. Require matching team
+    identity/anchor, positive increment, and successor score equal to previous
+    score plus increment.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['team_deathmatch_score_changed']
+        Exact event discriminator for this concrete row type.
+    team_index : int
+        Zero-based team index: 0 for Team A, 1 for Team B.
+    team_id : int
+        Team ID: 1 for Team A, 2 for Team B.
+    score_increment : int
+        Positive Team Deathmatch score increase.
+    previous_score : int
+        Nonnegative score before this transition.
+    successor_score : int
+        Previous score plus score_increment.
+    team_anchor : ReplayIncomingTeamAnchorV1
+        Matching team identity at the successor phase, without a spatial
+        position.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     event_kind: Literal["team_deathmatch_score_changed"]
+    """Exact event discriminator for this concrete row type."""
     team_index: int
+    """Zero-based team index: 0 for Team A, 1 for Team B."""
     team_id: int
+    """Team ID: 1 for Team A, 2 for Team B."""
     score_increment: int
+    """Positive Team Deathmatch score increase."""
     previous_score: int
+    """Nonnegative score before this transition."""
     successor_score: int
+    """Previous score plus score_increment."""
     team_anchor: ReplayIncomingTeamAnchorV1
+    """Matching team identity at the successor phase, without a spatial position."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 130. Require matching team
+        identity/anchor, positive increment, and successor score equal to previous
+        score plus increment.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="team_deathmatch_score_changed",
@@ -2318,17 +4331,47 @@ class ReplayIncomingTeamDeathmatchScoreChangedEventV1(_ReplayIncomingEventBaseV1
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingTeamDeathmatchCompletedEventV1(_ReplayIncomingEventBaseV1):
-    """One global, non-spatial Team Deathmatch completion transition."""
+    """Record the global Team Deathmatch result and completion reason.
+    Require the canonical event kind and phase rank 140. Require a known
+    win/draw outcome and score-threshold/horizon completion basis.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['team_deathmatch_completed']
+        Exact event discriminator for this concrete row type.
+    outcome : Literal['team_a_win', 'team_b_win', 'draw']
+        team_a_win, team_b_win, or draw.
+    completion_basis : str
+        Allowed values: 'score_threshold', 'horizon', 'score_threshold_at_horizon'.
+        Score threshold, horizon, or both on the same transition.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     event_kind: Literal["team_deathmatch_completed"]
+    """Exact event discriminator for this concrete row type."""
     outcome: Literal["team_a_win", "team_b_win", "draw"]
+    """team_a_win, team_b_win, or draw."""
     completion_basis: Literal[
         "score_threshold",
         "horizon",
         "score_threshold_at_horizon",
     ]
+    """Allowed values: 'score_threshold', 'horizon', 'score_threshold_at_horizon'.
+    Score threshold, horizon, or both on the same transition."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the canonical event kind and phase rank 140. Require a known
+        win/draw outcome and score-threshold/horizon completion basis.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="team_deathmatch_completed",
@@ -2404,6 +4447,23 @@ _REPLAY_INCOMING_EVENT_TYPES_V1: tuple[type[object], ...] = (
 def _incoming_event_agent_anchors(
     event: ReplayIncomingEventV1,
 ) -> tuple[ReplayIncomingAgentAnchorV1, ...]:
+    """Collect all agent anchors carried by one concrete incoming event.
+    Include optional recipients and covering aura emitters in payload order.
+    Non-spatial team events and inactive rejections return an empty tuple; no
+    deduplication occurs.
+    Parameters
+    ----------
+    event : ReplayIncomingEventV1
+        Typed event whose anchors or authorized payload are needed.
+    Returns
+    -------
+    tuple[ReplayIncomingAgentAnchorV1, ...]
+        Anchors whose trajectory joins the summary must check.
+    Raises
+    ------
+    TypeError
+        The event is not a supported exact concrete variant.
+    """
     if type(event) is ReplayIncomingActionRejectedEventV1:
         return () if event.actor_anchor is None else (event.actor_anchor,)
     if type(event) in (
@@ -2493,24 +4553,82 @@ def _incoming_event_agent_anchors(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayIncomingSummaryV1:
-    """Exact incoming identity, neutral trajectories, and atomic payloads."""
+    """Store one complete Oracle incoming event inventory.
+    Join canonical episode/frame/transition IDs, adjacent ticks, dense event
+    order, unique trajectories, and every anchor. Covering aura emitters retain
+    trajectory order.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    summary_kind : Literal['replay_incoming_inventory']
+        Exact discriminator for the incoming inventory variant.
+    incoming_transition_index : int
+        Zero-based index of the transition ending at the displayed frame.
+    incoming_transition_id : str
+        Canonical episode-scoped ID for the incoming transition.
+    incoming_start_frame_id : str
+        Canonical frame ID immediately before the incoming transition.
+    incoming_successor_frame_id : str
+        Canonical frame ID immediately after the incoming transition.
+    incoming_start_simulator_step_count : int
+        Nonnegative simulator tick before the transition.
+    incoming_successor_simulator_step_count : int
+        Simulator tick after the transition; exactly one above the start tick.
+    agent_phase_trajectories : tuple[ReplayIncomingAgentPhaseTrajectoryV1, ...]
+        Unique ordered authorized trajectories used by every event anchor.
+    ordered_event_ids : tuple[str, ...]
+        Event IDs in payload order, with dense zero-based ordinals.
+    ordered_event_kinds : tuple[ReplayIncomingEventKindV1, ...]
+        Event discriminators in the same order as IDs and payloads.
+    events : tuple[ReplayIncomingEventV1, ...]
+        Concrete typed event rows in nondecreasing scientific phase order.
+    event_count : int
+        Nonnegative count equal to the ID, kind, and payload tuple lengths.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     summary_kind: Literal["replay_incoming_inventory"]
+    """Exact discriminator for the incoming inventory variant."""
     incoming_transition_index: int
+    """Zero-based index of the transition ending at the displayed frame."""
     incoming_transition_id: str
+    """Canonical episode-scoped ID for the incoming transition."""
     incoming_start_frame_id: str
+    """Canonical frame ID immediately before the incoming transition."""
     incoming_successor_frame_id: str
+    """Canonical frame ID immediately after the incoming transition."""
     incoming_start_simulator_step_count: int
+    """Nonnegative simulator tick before the transition."""
     incoming_successor_simulator_step_count: int
+    """Simulator tick after the transition; exactly one above the start tick."""
     agent_phase_trajectories: tuple[ReplayIncomingAgentPhaseTrajectoryV1, ...]
+    """Unique ordered authorized trajectories used by every event anchor."""
     ordered_event_ids: tuple[str, ...]
+    """Event IDs in payload order, with dense zero-based ordinals."""
     ordered_event_kinds: tuple[ReplayIncomingEventKindV1, ...]
+    """Event discriminators in the same order as IDs and payloads."""
     events: tuple[ReplayIncomingEventV1, ...]
+    """Concrete typed event rows in nondecreasing scientific phase order."""
     event_count: int
+    """Nonnegative count equal to the ID, kind, and payload tuple lengths."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Join canonical episode/frame/transition IDs, adjacent ticks, dense event
+        order, unique trajectories, and every anchor. Covering aura emitters retain
+        trajectory order.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.summary_kind != "replay_incoming_inventory":
             raise ValueError("unknown replay incoming summary kind.")
         _require_python_int(
@@ -2673,17 +4791,56 @@ _AGENT_POV_VISUAL_INCOMING_EVENT_KINDS_V1 = frozenset(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AgentPovVisualIncomingAgentPhaseTrajectoryV1:
-    """One fog-authorized adjacent-scene trajectory with no Charge phase."""
+    """Store only authorized start and successor positions for an Agent POV agent.
+    At least one endpoint exists; each present endpoint retains the same
+    identity and its correct phase. No post-Charge position is carried.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    agent_presentation_key : str
+        Opaque identity shared by this agent trajectory and its anchors.
+    agent_public_agent_id : str
+        Public identity shared by this agent trajectory and its anchors.
+    agent_class_id : int
+        Canonical trajectory class ID from 1 through 5.
+    transition_start : ReplayIncomingAgentAnchorV1 | None
+        Authorized start anchor, or None when the agent was absent from that
+        allowed endpoint.
+    successor : ReplayIncomingAgentAnchorV1 | None
+        Authorized successor anchor, or None when the agent is absent from that
+        allowed endpoint.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     agent_presentation_key: str
+    """Opaque identity shared by this agent trajectory and its anchors."""
     agent_public_agent_id: str
+    """Public identity shared by this agent trajectory and its anchors."""
     agent_class_id: int
+    """Canonical trajectory class ID from 1 through 5."""
     transition_start: ReplayIncomingAgentAnchorV1 | None
+    """Authorized start anchor, or None when the agent was absent from that allowed
+    endpoint."""
     successor: ReplayIncomingAgentAnchorV1 | None
+    """Authorized successor anchor, or None when the agent is absent from that
+    allowed endpoint."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        At least one endpoint exists; each present endpoint retains the same
+        identity and its correct phase. No post-Charge position is carried.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         _require_text(self.agent_presentation_key, name="agent_presentation_key")
         _require_text(self.agent_public_agent_id, name="agent_public_agent_id")
         _require_python_int(self.agent_class_id, name="agent_class_id", minimum=1)
@@ -2717,15 +4874,52 @@ class AgentPovVisualIncomingAgentPhaseTrajectoryV1:
 class AgentPovVisualIncomingRecipientHealthResolutionEventV1(
     _ReplayIncomingEventBaseV1
 ):
-    """One visible recipient's health result without hidden gross causes."""
+    """Show a visible recipient health result without hidden gross causes.
+    Use phase rank 40 and a transition-start recipient anchor. Health values are
+    nonnegative; signed net change equals their difference within the declared
+    float tolerance.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['recipient_health_resolution']
+        Exact event discriminator for this concrete row type.
+    recipient_anchor : ReplayIncomingAgentAnchorV1
+        Authorized recipient identity and position at the event required phase.
+    transition_start_health : float
+        Recipient health before combat resolution, in hit points.
+    health_after_combat_resolution : float
+        Nonnegative health after combined combat resolution, in hit points.
+    realized_net_health_change : float
+        Signed health change in hit points: positive for gain, negative for
+        loss.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     event_kind: Literal["recipient_health_resolution"]
+    """Exact event discriminator for this concrete row type."""
     recipient_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized recipient identity and position at the event required phase."""
     transition_start_health: float
+    """Recipient health before combat resolution, in hit points."""
     health_after_combat_resolution: float
+    """Nonnegative health after combined combat resolution, in hit points."""
     realized_net_health_change: float
+    """Signed health change in hit points: positive for gain, negative for loss."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Use phase rank 40 and a transition-start recipient anchor. Health values are
+        nonnegative; signed net change equals their difference within the declared
+        float tolerance.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="recipient_health_resolution",
@@ -2758,12 +4952,37 @@ class AgentPovVisualIncomingRecipientHealthResolutionEventV1(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AgentPovVisualIncomingAgentRespawnedEventV1(_ReplayIncomingEventBaseV1):
-    """One visible respawn paint cue with no unjoined team metadata."""
+    """Show an authorized respawn cue without unjoined team metadata.
+    Require event kind agent_respawned, phase rank 120, and a successor agent
+    anchor.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Inherited fields are documented on _ReplayIncomingEventBaseV1.
+    Attributes
+    ----------
+    event_kind : Literal['agent_respawned']
+        Exact event discriminator for this concrete row type.
+    agent_anchor : ReplayIncomingAgentAnchorV1
+        Authorized agent identity and position at the event required phase.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     event_kind: Literal["agent_respawned"]
+    """Exact event discriminator for this concrete row type."""
     agent_anchor: ReplayIncomingAgentAnchorV1
+    """Authorized agent identity and position at the event required phase."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require event kind agent_respawned, phase rank 120, and a successor agent
+        anchor.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         self._validate_base(
             event_kind=self.event_kind,
             expected_kind="agent_respawned",
@@ -2816,28 +5035,103 @@ _AGENT_POV_VISUAL_INCOMING_EVENT_TYPES_V1: tuple[type[object], ...] = (
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AgentPovVisualIncomingSummaryV1:
-    """Fog-filtered visual facts bound only to recipient-local epochs."""
+    """Store fog-filtered events in a recipient-local namespace.
+    Require adjacent ticks, dense local IDs/order, unique endpoint trajectories,
+    and the exact recipient at both endpoints. Event anchors must join
+    authorized endpoints; after-state facts need an authorized successor and
+    rejections belong only to the recipient.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    schema_version : Literal[1]
+        Wire version discriminator; this model requires 1.
+    summary_kind : Literal['agent_pov_fog_filtered_visual_events']
+        Exact discriminator for the incoming inventory variant.
+    source_episode_id : str
+        Nonempty episode ID supplying the recorded event facts.
+    recipient_public_agent_id : str
+        Public ID of the Agent POV recipient authorized at both endpoints.
+    recipient_presentation_key : str
+        Stable recipient key shared by both adjacent authorized scenes.
+    incoming_transition_index : int
+        Zero-based index of the transition ending at the displayed frame.
+    incoming_recipient_transition_id : str
+        Transition ID in the actor-pov or shared-obs-visual-union recipient
+        namespace.
+    incoming_start_recipient_frame_id : str
+        Recipient-local frame ID immediately before this transition.
+    incoming_successor_recipient_frame_id : str
+        Recipient-local frame ID immediately after this transition.
+    incoming_start_simulator_step_count : int
+        Nonnegative simulator tick before the transition.
+    incoming_successor_simulator_step_count : int
+        Simulator tick after the transition; exactly one above the start tick.
+    agent_phase_trajectories : tuple[AgentPovVisualIncomingAgentPhaseTrajectoryV1,
+    ...]
+        Unique ordered authorized trajectories used by every event anchor.
+    ordered_event_ids : tuple[str, ...]
+        Event IDs in payload order, with dense zero-based ordinals.
+    ordered_event_kinds : tuple[AgentPovVisualIncomingEventKindV1, ...]
+        Event discriminators in the same order as IDs and payloads.
+    events : tuple[AgentPovVisualIncomingEventV1, ...]
+        Concrete typed event rows in nondecreasing scientific phase order.
+    event_count : int
+        Nonnegative count equal to the ID, kind, and payload tuple lengths.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     schema_version: Literal[1]
+    """Wire version discriminator; this model requires 1."""
     summary_kind: Literal["agent_pov_fog_filtered_visual_events"]
+    """Exact discriminator for the incoming inventory variant."""
     source_episode_id: str
+    """Nonempty episode ID supplying the recorded event facts."""
     recipient_public_agent_id: str
+    """Public ID of the Agent POV recipient authorized at both endpoints."""
     recipient_presentation_key: str
+    """Stable recipient key shared by both adjacent authorized scenes."""
     incoming_transition_index: int
+    """Zero-based index of the transition ending at the displayed frame."""
     incoming_recipient_transition_id: str
+    """Transition ID in the actor-pov or shared-obs-visual-union recipient
+    namespace."""
     incoming_start_recipient_frame_id: str
+    """Recipient-local frame ID immediately before this transition."""
     incoming_successor_recipient_frame_id: str
+    """Recipient-local frame ID immediately after this transition."""
     incoming_start_simulator_step_count: int
+    """Nonnegative simulator tick before the transition."""
     incoming_successor_simulator_step_count: int
+    """Simulator tick after the transition; exactly one above the start tick."""
     agent_phase_trajectories: tuple[AgentPovVisualIncomingAgentPhaseTrajectoryV1, ...]
+    """"""
     ordered_event_ids: tuple[str, ...]
+    """Event IDs in payload order, with dense zero-based ordinals."""
     ordered_event_kinds: tuple[AgentPovVisualIncomingEventKindV1, ...]
+    """Event discriminators in the same order as IDs and payloads."""
     events: tuple[AgentPovVisualIncomingEventV1, ...]
+    """Concrete typed event rows in nondecreasing scientific phase order."""
     event_count: int
+    """Nonnegative count equal to the ID, kind, and payload tuple lengths."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require adjacent ticks, dense local IDs/order, unique endpoint trajectories,
+        and the exact recipient at both endpoints. Event anchors must join
+        authorized endpoints; after-state facts need an authorized successor and
+        rejections belong only to the recipient.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.schema_version != AUTHORIZED_PRESENTATION_SCHEMA_VERSION:
             raise ValueError("unknown Agent POV visual incoming schema version.")
         if self.summary_kind != "agent_pov_fog_filtered_visual_events":
@@ -3039,15 +5333,48 @@ class AgentPovVisualIncomingSummaryV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SubmittedActionTupleV1:
-    """One recorded submitted tuple, including possible out-of-domain integers."""
+    """Preserve a submitted action tuple, including invalid categories.
+    Each component is an exact Python int in the signed 32-bit range. Domain
+    rejection can therefore be reported without changing what was submitted.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    move_action : int
+        Recorded movement category; the enclosing tuple defines its integer
+        domain.
+    target_action : int
+        Recorded actor-relative target category; zero means no target when
+        accepted.
+    use_ultimate_action : int
+        Recorded Basic/Ultimate category; the enclosing tuple defines its
+        integer domain.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     move_action: int
+    """Recorded movement category; the enclosing tuple defines its integer domain."""
     target_action: int
+    """Recorded actor-relative target category; zero means no target when accepted."""
     use_ultimate_action: int
+    """Recorded Basic/Ultimate category; the enclosing tuple defines its integer
+    domain."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Each component is an exact Python int in the signed 32-bit range. Domain
+        rejection can therefore be reported without changing what was submitted.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         for name in ("move_action", "target_action", "use_ultimate_action"):
             value = cast(int, getattr(self, name))
             if type(value) is not int or not -(2**31) <= value <= 2**31 - 1:
@@ -3056,15 +5383,48 @@ class SubmittedActionTupleV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AcceptedActionTupleV1:
-    """One canonical category-bounded accepted tuple."""
+    """Store the recorded accepted action categories.
+    Each exact Python int lies within its canonical movement, target, or
+    Ultimate category count. The tuple does not recompute action acceptance.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    move_action : int
+        Recorded movement category; the enclosing tuple defines its integer
+        domain.
+    target_action : int
+        Recorded actor-relative target category; zero means no target when
+        accepted.
+    use_ultimate_action : int
+        Recorded Basic/Ultimate category; the enclosing tuple defines its
+        integer domain.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     move_action: int
+    """Recorded movement category; the enclosing tuple defines its integer domain."""
     target_action: int
+    """Recorded actor-relative target category; zero means no target when accepted."""
     use_ultimate_action: int
+    """Recorded Basic/Ultimate category; the enclosing tuple defines its integer
+    domain."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Each exact Python int lies within its canonical movement, target, or
+        Ultimate category count. The tuple does not recompute action acceptance.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         domains = (
             ("move_action", self.move_action, NUM_MOVE_ACTIONS_V1),
             ("target_action", self.target_action, NUM_TARGET_ACTIONS_V1),
@@ -3081,33 +5441,86 @@ class AcceptedActionTupleV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayAcceptedNoTargetV1:
-    """Canonical target-none accepted action disclosure."""
+    """Represent an accepted action with no selected target.
+    Require the none discriminator. The enclosing inspection joins this variant
+    to accepted target category zero.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    target_kind : Literal['none']
+        Exact discriminator for no target or an authorized target.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     target_kind: Literal["none"]
+    """Exact discriminator for no target or an authorized target."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require the none discriminator. The enclosing inspection joins this variant
+        to accepted target category zero.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.target_kind != "none":
             raise ValueError("unknown target-none discriminator.")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayAcceptedAuthorizedTargetV1:
-    """One accepted target joined to the displayed current scene.
-
-    The pure builder owns the actor-relative target-axis join because the HTTP
-    envelope intentionally does not duplicate the replay context catalog.
+    """Join an accepted target to the displayed current scene.
+    Require nonempty identity and a finite point. The builder owns actor-
+    relative target-axis resolution because the HTTP envelope does not repeat
+    the context catalog.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    target_kind : Literal['authorized_agent']
+        Exact discriminator for no target or an authorized target.
+    target_presentation_key : str
+        Opaque key for the accepted target in the displayed current scene.
+    target_public_agent_id : str
+        Public ID of that same accepted target.
+    target_anchor : Point2D
+        Accepted target center (x, y) in the displayed scene, in world units.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
     """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     target_kind: Literal["authorized_agent"]
+    """Exact discriminator for no target or an authorized target."""
     target_presentation_key: str
+    """Opaque key for the accepted target in the displayed current scene."""
     target_public_agent_id: str
+    """Public ID of that same accepted target."""
     target_anchor: Point2D
+    """Accepted target center (x, y) in the displayed scene, in world units."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Require nonempty identity and a finite point. The builder owns actor-
+        relative target-axis resolution because the HTTP envelope does not repeat
+        the context catalog.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.target_kind != "authorized_agent":
             raise ValueError("unknown authorized-target discriminator.")
         _require_text(self.target_presentation_key, name="target_presentation_key")
@@ -3123,24 +5536,87 @@ type ReplayAcceptedTargetV1 = Annotated[
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayOutgoingInspectionV1:
-    """Recorded outgoing intent at s_n, structurally separate from history."""
+    """Store recorded outgoing intent at the displayed frame.
+    Keep submitted and accepted actions separate. Accepted lane follows the
+    Ultimate head, and accepted target variant follows zero versus nonzero
+    target category. The builder checks the frame/actor/target joins.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    inspection_kind : Literal['replay_recorded_outgoing_action']
+        replay_recorded_outgoing_action discriminator.
+    outgoing_transition_index : int
+        Zero-based transition index starting at the displayed frame.
+    outgoing_transition_id : str
+        Canonical ID of the recorded outgoing transition.
+    outgoing_start_frame_id : str
+        Displayed frame ID at which the recorded action was submitted.
+    outgoing_successor_frame_id : str
+        Recorded ID of the next frame; its scene is not used for current
+        anchors.
+    actor_presentation_key : str
+        Opaque key for the selected actor in the displayed scene.
+    actor_public_agent_id : str
+        Public ID of the selected actor.
+    actor_anchor : Point2D
+        Selected actor center (x, y) in the displayed current scene, in world
+        units.
+    submitted_action : SubmittedActionTupleV1
+        Recorded submitted integer tuple, including rejected out-of-domain
+        values.
+    accepted_action : AcceptedActionTupleV1
+        Recorded action after simulator acceptance, bounded to canonical
+        categories.
+    accepted_lane : AcceptedLaneV1
+        basic or ultimate, matching the accepted Ultimate action head.
+    accepted_target : ReplayAcceptedTargetV1
+        No-target variant for category zero, otherwise the joined authorized
+        target.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     inspection_kind: Literal["replay_recorded_outgoing_action"]
+    """replay_recorded_outgoing_action discriminator."""
     outgoing_transition_index: int
+    """Zero-based transition index starting at the displayed frame."""
     outgoing_transition_id: str
+    """Canonical ID of the recorded outgoing transition."""
     outgoing_start_frame_id: str
+    """Displayed frame ID at which the recorded action was submitted."""
     outgoing_successor_frame_id: str
+    """Recorded ID of the next frame; its scene is not used for current anchors."""
     actor_presentation_key: str
+    """Opaque key for the selected actor in the displayed scene."""
     actor_public_agent_id: str
+    """Public ID of the selected actor."""
     actor_anchor: Point2D
+    """Selected actor center (x, y) in the displayed current scene, in world units."""
     submitted_action: SubmittedActionTupleV1
+    """Recorded submitted integer tuple, including rejected out-of-domain values."""
     accepted_action: AcceptedActionTupleV1
+    """Recorded action after simulator acceptance, bounded to canonical categories."""
     accepted_lane: AcceptedLaneV1
+    """basic or ultimate, matching the accepted Ultimate action head."""
     accepted_target: ReplayAcceptedTargetV1
+    """No-target variant for category zero, otherwise the joined authorized target."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Keep submitted and accepted actions separate. Accepted lane follows the
+        Ultimate head, and accepted target variant follows zero versus nonzero
+        target category. The builder checks the frame/actor/target joins.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if self.inspection_kind != "replay_recorded_outgoing_action":
             raise ValueError("unknown replay outgoing inspection kind.")
         _require_python_int(
@@ -3174,15 +5650,47 @@ class ReplayOutgoingInspectionV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayOraclePresentationPartsV1:
-    """Authority-neutral siblings packaged by the replay HTTP protocol layer."""
+    """Package current Oracle scene, incoming history, and optional outgoing action.
+    Incoming successor identities and positions equal the current scene in
+    order. Feed-only rejected actors cannot invent a scene body. The outer
+    protocol adds session and cursor authority.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    current_scene : AuthorizedBattlefieldSceneV1
+        Authorized durable scene at the displayed replay frame.
+    incoming_summary : ReplayIncomingSummaryV1 | None
+        History ending at this scene, or None only at frame zero.
+    outgoing_inspection : ReplayOutgoingInspectionV1 | None
+        Selected recorded action starting here, or None without eligible
+        inspection.
+    Raises
+    ------
+    ValueError
+        A field or cross-field invariant described above is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
 
     current_scene: AuthorizedBattlefieldSceneV1
+    """Authorized durable scene at the displayed replay frame."""
     incoming_summary: ReplayIncomingSummaryV1 | None
+    """History ending at this scene, or None only at frame zero."""
     outgoing_inspection: ReplayOutgoingInspectionV1 | None
+    """Selected recorded action starting here, or None without eligible inspection."""
 
     def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Incoming successor identities and positions equal the current scene in
+        order. Feed-only rejected actors cannot invent a scene body. The outer
+        protocol adds session and cursor authority.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
         if type(self.current_scene) is not AuthorizedBattlefieldSceneV1:
             raise ValueError("current_scene must be its exact neutral root.")
         if (
@@ -3229,6 +5737,21 @@ class ReplayOraclePresentationPartsV1:
 
 
 def _authorized_obstacle(obstacle: ObstacleSceneV1) -> AuthorizedObstacleV1:
+    """Copy a validated obstacle into the strict presentation row.
+    Keep shape, dimensions, position, and rotation unchanged.
+    Parameters
+    ----------
+    obstacle : ObstacleSceneV1
+        Validated source obstacle row.
+    Returns
+    -------
+    AuthorizedObstacleV1
+        New frozen obstacle row.
+    Raises
+    ------
+    ValueError
+        Copied values violate the destination row contract.
+    """
     return AuthorizedObstacleV1(
         obstacle_id=obstacle.obstacle_id,
         kind=obstacle.kind,
@@ -3241,6 +5764,22 @@ def _authorized_obstacle(obstacle: ObstacleSceneV1) -> AuthorizedObstacleV1:
 
 
 def _authorized_map(scene_map: MapSceneV1) -> AuthorizedMapV1:
+    """Copy map bounds and ordered obstacles into presentation rows.
+    Preserve source order and validate destination dimensions and unique
+    obstacle IDs.
+    Parameters
+    ----------
+    scene_map : MapSceneV1
+        Validated source map bounds and obstacle rows.
+    Returns
+    -------
+    AuthorizedMapV1
+        New frozen map row.
+    Raises
+    ------
+    ValueError
+        A copied map or obstacle invariant is invalid.
+    """
     return AuthorizedMapV1(
         width=scene_map.width,
         height=scene_map.height,
@@ -3251,6 +5790,21 @@ def _authorized_map(scene_map: MapSceneV1) -> AuthorizedMapV1:
 def _authorized_aura_modifier(
     modifier: AuraRecipientModifierSceneV2,
 ) -> AuthorizedAuraModifierV1:
+    """Copy one non-neutral recipient aura multiplier into presentation.
+    Callers omit neutral values; the destination validator rejects 1.0.
+    Parameters
+    ----------
+    modifier : AuraRecipientModifierSceneV2
+        Source recipient aura multiplier row.
+    Returns
+    -------
+    AuthorizedAuraModifierV1
+        New frozen aggregate modifier.
+    Raises
+    ------
+    ValueError
+        The aura ID or multiplier is invalid or neutral.
+    """
     return AuthorizedAuraModifierV1(
         aura_id=modifier.aura_id,
         multiplier=modifier.multiplier,
@@ -3260,6 +5814,21 @@ def _authorized_aura_modifier(
 def _authorized_class_status_mechanic(
     mechanic: ClassStatusMechanicSceneV2,
 ) -> AuthorizedClassStatusMechanicV1:
+    """Copy one class status mechanic into its strict presentation form.
+    Preserve catalog channel/ID, duration, magnitude, and damage-break meaning.
+    Parameters
+    ----------
+    mechanic : ClassStatusMechanicSceneV2
+        Validated source class status or aura mechanic.
+    Returns
+    -------
+    AuthorizedClassStatusMechanicV1
+        New frozen status mechanic.
+    Raises
+    ------
+    ValueError
+        Copied catalog fields violate the destination contract.
+    """
     return AuthorizedClassStatusMechanicV1(
         status_channel=mechanic.status_channel,
         status_id=mechanic.status_id,
@@ -3275,6 +5844,21 @@ def _authorized_class_status_mechanic(
 def _authorized_class_aura_mechanic(
     mechanic: ClassAuraMechanicSceneV2,
 ) -> AuthorizedClassAuraMechanicV1:
+    """Copy one class aura mechanic into its strict presentation form.
+    Preserve the configured radius, factor, stacking rule, and clamp.
+    Parameters
+    ----------
+    mechanic : ClassAuraMechanicSceneV2
+        Validated source class status or aura mechanic.
+    Returns
+    -------
+    AuthorizedClassAuraMechanicV1
+        New frozen aura mechanic.
+    Raises
+    ------
+    ValueError
+        Copied aura fields violate the destination contract.
+    """
     return AuthorizedClassAuraMechanicV1(
         aura_id=cast(AuthorizedAuraIdV1, mechanic.aura_id),
         radius=mechanic.radius,
@@ -3290,6 +5874,24 @@ def _authorized_class_mechanics(
     *,
     documentation_profile: AuthorizedClassDocumentationProfileV1,
 ) -> AuthorizedClassMechanicsV2:
+    """Copy class mechanics and attach the checked guide profile.
+    Build the V2 row and preserve status/aura order. This helper does not
+    independently certify the supplied documentation profile.
+    Parameters
+    ----------
+    mechanics : ClassMechanicsSceneV2
+        Source class mechanics for the same agent class.
+    documentation_profile : AuthorizedClassDocumentationProfileV1
+        Catalog-checked availability result for authored class-guide prose.
+    Returns
+    -------
+    AuthorizedClassMechanicsV2
+        New frozen mechanics row with the supplied profile.
+    Raises
+    ------
+    ValueError
+        Copied fields or profile variant violate the row contract.
+    """
     return AuthorizedClassMechanicsV2(
         class_id=mechanics.class_id,
         class_name=mechanics.class_name,
@@ -3324,6 +5926,21 @@ def _authorized_class_mechanics(
 def _authorized_respawn_wave(
     wave: RespawnWaveSceneV2,
 ) -> AuthorizedRespawnWaveV1:
+    """Copy one team wave countdown into its strict presentation form.
+    Preserve team identity, period, and remaining ticks.
+    Parameters
+    ----------
+    wave : RespawnWaveSceneV2
+        Validated source team respawn countdown.
+    Returns
+    -------
+    AuthorizedRespawnWaveV1
+        New frozen wave row.
+    Raises
+    ------
+    ValueError
+        The team or countdown values are inconsistent.
+    """
     return AuthorizedRespawnWaveV1(
         team_index=wave.team_index,
         team_id=wave.team_id,
@@ -3339,6 +5956,31 @@ def _status_row(
     key_by_internal_slot: dict[int, str],
     public_id_by_internal_slot: dict[int, str],
 ) -> AuthorizedStatusV1:
+    """Project a status and replace direct-source slots with authorized identities.
+    Require each evidence source to join the supplied key/public-ID maps, and
+    keep its first occurrence only. Do not carry event IDs or raw source slots
+    into the result.
+    Parameters
+    ----------
+    status : StatusSceneV2
+        Source durable status, including recorded direct-source evidence.
+    configured_duration_steps : int
+        Positive configured duration from the matching status catalog, in ticks.
+    key_by_internal_slot : dict[int, str]
+        Lookup from configured-active internal slots to unique authorized opaque
+        keys.
+    public_id_by_internal_slot : dict[int, str]
+        Lookup from those same internal slots to public agent IDs.
+    Returns
+    -------
+    AuthorizedStatusV1
+        New durable status with deduplicated authorized source rows.
+    Raises
+    ------
+    ValueError
+        A source identity is absent/mismatched or a destination field is
+        invalid.
+    """
     direct_sources: list[AuthorizedStatusSourceV1] = []
     seen_keys: set[str] = set()
     for evidence in status.direct_source_evidence:
@@ -3381,6 +6023,32 @@ def _agent_row(
     key_by_internal_slot: dict[int, str],
     public_id_by_internal_slot: dict[int, str],
 ) -> AuthorizedAgentV1:
+    """Project one Oracle agent with its matching class/status mechanics.
+    Require exact class ID, maximum health, and body radius agreement. Resolve
+    source identities, preserve durable state, and omit neutral aura modifiers.
+    Parameters
+    ----------
+    agent : AgentSceneV2
+        Source durable agent row from the Oracle scene.
+    mechanics : ClassMechanicsSceneV2
+        Source class mechanics for the same agent class.
+    status_mechanics_by_channel : dict[int, ClassStatusMechanicSceneV2]
+        Status catalog indexed by the fixed channel axis.
+    key_by_internal_slot : dict[int, str]
+        Lookup from configured-active internal slots to unique authorized opaque
+        keys.
+    public_id_by_internal_slot : dict[int, str]
+        Lookup from those same internal slots to public agent IDs.
+    Returns
+    -------
+    AuthorizedAgentV1
+        New Oracle agent row with no internal slot field.
+    Raises
+    ------
+    ValueError, KeyError
+        Static facts disagree, a destination invariant fails, or required lookup
+        entries are absent.
+    """
     if (
         agent.class_id != mechanics.class_id
         or agent.max_health != mechanics.maximum_health
@@ -3436,6 +6104,30 @@ def _authorized_scene(
     *,
     authority_session_id: str,
 ) -> tuple[AuthorizedBattlefieldSceneV1, dict[int, str]]:
+    """Build an Oracle presentation scene and its internal-to-public key lookup.
+    Require configured-active roster order and complete source class/status/aura
+    axes. Project only represented classes, join aura emitters and pads, and
+    attach configured Spawn Shield facts and checked guide availability.
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Validated episode context with roster, resolved configuration, and
+        public catalog.
+    scene : BattlefieldSceneV2
+        Displayed durable Oracle scene for the same episode.
+    authority_session_id : str
+        Nonempty authority/session namespace for opaque presentation keys.
+    Returns
+    -------
+    tuple[AuthorizedBattlefieldSceneV1, dict[int, str]]
+        Frozen scene plus the temporary slot-to-key map used for adjacent
+        branches.
+    Raises
+    ------
+    ValueError
+        Roster, source axes, row identity, or a destination invariant is
+        inconsistent.
+    """
     active_roster = tuple(row for row in context.roster if row.configured_active)
     internal_slots = tuple(row.global_slot for row in active_roster)
     if tuple(agent.global_slot for agent in scene.agents) != internal_slots:
@@ -3582,7 +6274,30 @@ def build_oracle_authorized_scene_v1(
     *,
     authority_session_id: str,
 ) -> AuthorizedBattlefieldSceneV1:
-    """Project one exact epoch-bearing Oracle scene without adjacent branches."""
+    """Validate and project one current Oracle scene without adjacent replay branches.
+    Round-trip context and scene through strict wire validation, reject changed
+    runtime types or hidden model fields, and join episode/static authority.
+    Perform host-side validation only; inputs are unchanged and no I/O or
+    simulator step runs.
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Validated episode context with roster, resolved configuration, and
+        public catalog.
+    scene : BattlefieldSceneV2
+        Displayed durable Oracle scene for the same episode.
+    authority_session_id : str
+        Nonempty authority/session namespace for opaque presentation keys.
+    Returns
+    -------
+    AuthorizedBattlefieldSceneV1
+        Frozen durable scene whose keys belong to authority_session_id.
+    Raises
+    ------
+    TypeError, ValueError
+        Input roots, runtime wire types, episode identity, or static/durable
+        joins are invalid.
+    """
     evaluation_context_type(context)
     if type(scene) is not BattlefieldSceneV2:
         raise TypeError("scene must be the exact BattlefieldSceneV2 root.")
@@ -3601,6 +6316,20 @@ def build_oracle_authorized_scene_v1(
     validated_scene = scene_adapter.validate_json(scene_json)
 
     def exact_tree_matches(candidate: object, canonical: object) -> bool:
+        """Check that strict wire validation retained exact runtime types and values.
+        Recurse through models, dataclasses, tuples, and ordered dictionaries.
+        Reject extra/private model state and scalar type coercion.
+        Parameters
+        ----------
+        candidate : object
+            Original runtime tree whose exact types and values must be retained.
+        canonical : object
+            Tree reconstructed by strict wire validation.
+        Returns
+        -------
+        bool
+            Whether candidate exactly matches the canonical runtime tree.
+        """
         if isinstance(canonical, BaseModel):
             if type(candidate) is not type(canonical):
                 return False
@@ -3674,6 +6403,25 @@ def _replay_incoming_anchor(
     *,
     key_by_internal_slot: dict[int, str],
 ) -> ReplayIncomingAgentAnchorV1:
+    """Replace one recorded anchor slot with its authorized presentation key.
+    Preserve phase, public ID, and position. The enclosing trajectory/summary
+    checks the complete identity join.
+    Parameters
+    ----------
+    anchor : VisualAgentAnchorV2
+        Recorded agent anchor at one scientific phase.
+    key_by_internal_slot : dict[int, str]
+        Lookup from configured-active internal slots to unique authorized opaque
+        keys.
+    Returns
+    -------
+    ReplayIncomingAgentAnchorV1
+        New slot-free anchor.
+    Raises
+    ------
+    ValueError
+        The internal slot lacks an authorized key or the row fields are invalid.
+    """
     key = key_by_internal_slot.get(anchor.global_slot)
     if key is None:
         raise ValueError("incoming anchor must join an authorized Oracle agent.")
@@ -3690,6 +6438,24 @@ def _replay_incoming_trajectory(
     *,
     key_by_internal_slot: dict[int, str],
 ) -> ReplayIncomingAgentPhaseTrajectoryV1:
+    """Project all three recorded trajectory anchors to authorized keys.
+    Preserve start, post-Charge, and successor positions and their order.
+    Parameters
+    ----------
+    trajectory : VisualAgentPhaseTrajectoryV2
+        Recorded start/post-Charge/successor trajectory for one agent.
+    key_by_internal_slot : dict[int, str]
+        Lookup from configured-active internal slots to unique authorized opaque
+        keys.
+    Returns
+    -------
+    ReplayIncomingAgentPhaseTrajectoryV1
+        New slot-free trajectory.
+    Raises
+    ------
+    ValueError
+        The agent has no key or its anchor identities/phases disagree.
+    """
     key = key_by_internal_slot.get(trajectory.global_slot)
     if key is None:
         raise ValueError("incoming trajectory must join an authorized Oracle agent.")
@@ -3718,6 +6484,29 @@ def _replay_incoming_trajectory_anchor(
     trajectory_by_internal_slot: dict[int, VisualAgentPhaseTrajectoryV2],
     key_by_internal_slot: dict[int, str],
 ) -> ReplayIncomingAgentAnchorV1:
+    """Resolve one internal slot and scientific phase to an authorized anchor.
+    Use the recorded trajectory; never invent a coordinate from the displayed
+    scene.
+    Parameters
+    ----------
+    internal_slot : int
+        Internal roster slot used only to resolve the authorized anchor.
+    phase : VisualAnchorPhaseV2
+        Required scientific anchor phase.
+    trajectory_by_internal_slot : dict[int, VisualAgentPhaseTrajectoryV2]
+        Recorded canonical trajectories indexed by internal roster slot.
+    key_by_internal_slot : dict[int, str]
+        Lookup from configured-active internal slots to unique authorized opaque
+        keys.
+    Returns
+    -------
+    ReplayIncomingAgentAnchorV1
+        Projected anchor for the requested phase.
+    Raises
+    ------
+    ValueError
+        The trajectory or authorized key is missing.
+    """
     trajectory = trajectory_by_internal_slot.get(internal_slot)
     if trajectory is None:
         raise ValueError("incoming event identity has no authorized trajectory.")
@@ -3733,6 +6522,29 @@ def _replay_incoming_event(
     trajectory_by_internal_slot: dict[int, VisualAgentPhaseTrajectoryV2],
     key_by_internal_slot: dict[int, str],
 ) -> ReplayIncomingEventV1:
+    """Project one canonical visual event without changing its recorded meaning.
+    Replace slot references with authorized anchors and preserve event identity,
+    order, numeric facts, and atomic event kind. Inactive rejected actors stay
+    feed-only; source and recipient phases come from recorded evidence.
+    Parameters
+    ----------
+    event : VisualEventV2
+        Typed event whose anchors or authorized payload are needed.
+    trajectory_by_internal_slot : dict[int, VisualAgentPhaseTrajectoryV2]
+        Recorded canonical trajectories indexed by internal roster slot.
+    key_by_internal_slot : dict[int, str]
+        Lookup from configured-active internal slots to unique authorized opaque
+        keys.
+    Returns
+    -------
+    ReplayIncomingEventV1
+        Exact matching incoming-event variant.
+    Raises
+    ------
+    TypeError, ValueError
+        The event kind is unsupported, an identity lookup fails, or projected
+        fields are invalid.
+    """
     if type(event) is ActionRejectedEventV2:
         actor_identity: ReplayIncomingAgentIdentityV1
         if event.actor_configured_active:
@@ -4123,6 +6935,25 @@ def _visual_event_agent_anchors(
     *,
     trajectory_by_internal_slot: dict[int, VisualAgentPhaseTrajectoryV2],
 ) -> tuple[VisualAgentAnchorV2, ...]:
+    """Collect the source visual anchors needed to authorize an event.
+    Read explicit anchor fields and add transition-start anchors for recorded
+    damage-aura emitters. Preserve order and duplicates.
+    Parameters
+    ----------
+    event : VisualEventV2
+        Typed event whose anchors or authorized payload are needed.
+    trajectory_by_internal_slot : dict[int, VisualAgentPhaseTrajectoryV2]
+        Recorded canonical trajectories indexed by internal roster slot.
+    Returns
+    -------
+    tuple[VisualAgentAnchorV2, ...]
+        All referenced agent anchors to check against visible endpoint scenes.
+    Raises
+    ------
+    ValueError
+        An explicit anchor has the wrong type or an aura emitter has no
+        trajectory.
+    """
     anchors: list[VisualAgentAnchorV2] = []
     for field_name in (
         "actor_anchor",
@@ -4161,6 +6992,36 @@ def _agent_pov_visual_scene_agents_by_slot(
     trajectory_by_internal_slot: dict[int, VisualAgentPhaseTrajectoryV2],
     configured_active_by_global_slot: tuple[bool, ...],
 ) -> dict[int, AuthorizedAgentV1]:
+    """Join an Agent POV endpoint scene to canonical recorded trajectories.
+    Recheck scene invariants, forbid Oracle relations, require the exact self
+    recipient, and join configured-active public IDs and positions at the
+    requested endpoint.
+    Parameters
+    ----------
+    scene : AuthorizedBattlefieldSceneV1
+        Displayed durable Oracle scene for the same episode.
+    scene_name : str
+        Input label included in validation errors.
+    phase : Literal['transition_start', 'successor']
+        Required scientific anchor phase.
+    recipient_public_agent_id : str
+        Public ID of the single self recipient at both authorized endpoints.
+    slot_by_public_agent_id : dict[str, int]
+        Canonical roster lookup from public IDs to internal slots.
+    trajectory_by_internal_slot : dict[int, VisualAgentPhaseTrajectoryV2]
+        Recorded canonical trajectories indexed by internal roster slot.
+    configured_active_by_global_slot : tuple[bool, ...]
+        Fixed roster-axis bool tuple identifying configured-active slots.
+    Returns
+    -------
+    dict[int, AuthorizedAgentV1]
+        Authorized scene bodies indexed temporarily by internal slot.
+    Raises
+    ------
+    ValueError
+        A scene, recipient, identity, activity, position, or uniqueness check
+        fails.
+    """
     if type(scene) is not AuthorizedBattlefieldSceneV1:
         raise ValueError(f"{scene_name} must be an exact authorized scene.")
     AuthorizedBattlefieldSceneV1.__post_init__(scene)
@@ -4206,6 +7067,34 @@ def _agent_pov_visual_event_is_authorized(
     successor_agents_by_slot: dict[int, AuthorizedAgentV1],
     trajectory_by_internal_slot: dict[int, VisualAgentPhaseTrajectoryV2],
 ) -> bool:
+    """Check whether an event can be shown from the two allowed Agent POV endpoints.
+    Omit hidden gross causes, global team events, movement-phase details, and
+    other actors rejection facts. Require every anchor at its authorized
+    endpoint and a successor for after-state facts; check visible start health
+    for health resolution.
+    Parameters
+    ----------
+    event : VisualEventV2
+        Typed event whose anchors or authorized payload are needed.
+    recipient_global_slot : int
+        Internal slot of the authorized POV recipient.
+    transition_start_agents_by_slot : dict[int, AuthorizedAgentV1]
+        Agent-input-authorized bodies at the start endpoint, indexed by slot.
+    successor_agents_by_slot : dict[int, AuthorizedAgentV1]
+        Agent-input-authorized bodies at the successor endpoint, indexed by
+        slot.
+    trajectory_by_internal_slot : dict[int, VisualAgentPhaseTrajectoryV2]
+        Recorded canonical trajectories indexed by internal roster slot.
+    Returns
+    -------
+    bool
+        Whether the event is permitted for projection.
+    Raises
+    ------
+    ValueError
+        A retained health fact disagrees with visible start health or an anchor
+        lookup is invalid.
+    """
     if type(event) in (
         ChargePhaseDisplacementEventV2,
         OrdinaryMovementPhaseDisplacementEventV2,
@@ -4275,7 +7164,39 @@ def _agent_pov_corpse_choreography_agents_by_slot(
     trajectory_by_internal_slot: dict[int, VisualAgentPhaseTrajectoryV2],
     configured_active_by_global_slot: tuple[bool, ...],
 ) -> dict[int, AuthorizedAgentV1]:
-    """Validate a base-scene superset whose additions are corpses only."""
+    """Validate an endpoint scene extended only with permitted corpse rows.
+    Preserve every base actor-input row exactly. Additional rows must be non-
+    self corpses with zero health within absolute tolerance 1e-8 and must join
+    canonical endpoint trajectories.
+    Parameters
+    ----------
+    scene : AuthorizedBattlefieldSceneV1
+        Displayed durable Oracle scene for the same episode.
+    base_agents_by_slot : dict[int, AuthorizedAgentV1]
+        Base actor-input scene rows that a corpse extension must preserve
+        exactly.
+    scene_name : str
+        Input label included in validation errors.
+    phase : Literal['transition_start', 'successor']
+        Required scientific anchor phase.
+    recipient_public_agent_id : str
+        Public ID of the single self recipient at both authorized endpoints.
+    slot_by_public_agent_id : dict[str, int]
+        Canonical roster lookup from public IDs to internal slots.
+    trajectory_by_internal_slot : dict[int, VisualAgentPhaseTrajectoryV2]
+        Recorded canonical trajectories indexed by internal roster slot.
+    configured_active_by_global_slot : tuple[bool, ...]
+        Fixed roster-axis bool tuple identifying configured-active slots.
+    Returns
+    -------
+    dict[int, AuthorizedAgentV1]
+        Base and corpse rows indexed by internal slot.
+    Raises
+    ------
+    ValueError
+        A base row changed or an added row/identity is not a valid corpse
+        extension.
+    """
     agents_by_slot = _agent_pov_visual_scene_agents_by_slot(
         scene,
         scene_name=scene_name,
@@ -4319,7 +7240,47 @@ def build_agent_pov_visual_incoming_summary_v1(
     incoming_start_recipient_frame_id: str,
     incoming_successor_recipient_frame_id: str,
 ) -> AgentPovVisualIncomingSummaryV1:
-    """Filter facts through actor-input scenes plus corpse lifecycle evidence."""
+    """Project only incoming visual facts allowed by adjacent Agent POV scenes.
+    Validate recorded events and both recipient endpoints. Optional corpse
+    scenes must be supplied together and can extend death/respawn cues only.
+    Omit hidden gross damage/healing causes and post-Charge anchors, preserve
+    allowed endpoints, and assign dense recipient-local event IDs. Inputs are
+    not mutated; no simulator or I/O work runs.
+    Parameters
+    ----------
+    incoming_events : VisualEventBatchV2
+        Canonical recorded visual batch for one incoming transition.
+    transition_start_scene : AuthorizedBattlefieldSceneV1
+        Authorized actor-input scene before the transition, including its self
+        recipient.
+    successor_scene : AuthorizedBattlefieldSceneV1
+        Authorized actor-input scene after the same transition and for the same
+        recipient.
+    transition_start_corpse_choreography_scene : AuthorizedBattlefieldSceneV1 | None
+        Optional start scene that may add only zero-health non-self corpses;
+        defaults to None.
+    successor_corpse_choreography_scene : AuthorizedBattlefieldSceneV1 | None
+        Matching optional successor corpse scene; defaults to None and must be
+        supplied with the start scene.
+    recipient_public_agent_id : str
+        Public ID of the single self recipient at both authorized endpoints.
+    incoming_recipient_transition_id : str
+        Canonical recipient-local transition ID, using actor-pov or shared-obs-
+        visual-union.
+    incoming_start_recipient_frame_id : str
+        Recipient-local start frame ID at the incoming transition index.
+    incoming_successor_recipient_frame_id : str
+        Recipient-local successor frame ID at incoming index plus one.
+    Returns
+    -------
+    AgentPovVisualIncomingSummaryV1
+        Frozen recipient-local trajectories and allowed event payloads.
+    Raises
+    ------
+    ValueError
+        Input types, episode/recipient identities, endpoint evidence, corpse
+        pairing, or summary invariants are inconsistent.
+    """
     if type(incoming_events) is not VisualEventBatchV2:
         raise ValueError("incoming_events must be an exact VisualEventBatchV2.")
     VisualEventBatchV2.__post_init__(incoming_events)
@@ -4635,7 +7596,26 @@ def _project_replay_incoming_summary_v1(
     *,
     key_by_internal_slot: dict[int, str],
 ) -> ReplayIncomingSummaryV1:
-    """Project one validated Oracle batch without retaining internal axes."""
+    """Project a complete validated Oracle event batch without raw slot fields.
+    Require the key dictionary to cover exactly the configured-active axis with
+    unique nonempty strings. Preserve canonical trajectory/event ordering and
+    recorded transition IDs.
+    Parameters
+    ----------
+    incoming_events : VisualEventBatchV2
+        Canonical recorded visual batch for one incoming transition.
+    key_by_internal_slot : dict[int, str]
+        Lookup from configured-active internal slots to unique authorized opaque
+        keys.
+    Returns
+    -------
+    ReplayIncomingSummaryV1
+        Frozen full incoming inventory.
+    Raises
+    ------
+    ValueError
+        The batch, exact key-map coverage, or a projected join is invalid.
+    """
     VisualEventBatchV2.__post_init__(incoming_events)
     expected_slots = tuple(
         slot
@@ -4703,6 +7683,34 @@ def _incoming_summary(
     expected_public_agent_id_by_global_slot: tuple[str, ...],
     expected_configured_active_by_global_slot: tuple[bool, ...],
 ) -> ReplayIncomingSummaryV1 | None:
+    """Join incoming history to the displayed Oracle scene.
+    Frame zero requires no incoming batch and returns None. Later frames require
+    the exact previous transition, roster axes, successor epoch/tick, and event
+    ID inventory.
+    Parameters
+    ----------
+    scene : BattlefieldSceneV2
+        Displayed durable Oracle scene for the same episode.
+    incoming_events : VisualEventBatchV2 | None
+        Recorded incoming visual batch; None at frame zero, required for every
+        later frame.
+    key_by_internal_slot : dict[int, str]
+        Lookup from configured-active internal slots to unique authorized opaque
+        keys.
+    expected_public_agent_id_by_global_slot : tuple[str, ...]
+        Complete context roster public IDs, including inactive slots.
+    expected_configured_active_by_global_slot : tuple[bool, ...]
+        Complete context roster activity flags on the same slot axis.
+    Returns
+    -------
+    ReplayIncomingSummaryV1 or None
+        Projected history, or None at frame zero.
+    Raises
+    ------
+    ValueError
+        History is missing, unexpectedly present, or does not join this
+        scene/context.
+    """
     if scene.frame_index == 0:
         if incoming_events is not None:
             raise ValueError("frame zero cannot carry incoming presentation events.")
@@ -4743,6 +7751,41 @@ def _outgoing_inspection(
     outgoing_transition: EvaluationTransitionV1 | None,
     final_frame_index: int,
 ) -> ReplayOutgoingInspectionV1 | None:
+    """Project the selected recorded action starting at the displayed scene.
+    Require an outgoing row only when a configured-active actor is selected
+    before the final retained frame. Resolve accepted target categories through
+    the actor-relative catalog axis and take actor/target positions only from
+    the current scene.
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Validated episode context with roster, resolved configuration, and
+        public catalog.
+    scene : BattlefieldSceneV2
+        Displayed durable Oracle scene for the same episode.
+    key_by_internal_slot : dict[int, str]
+        Lookup from configured-active internal slots to unique authorized opaque
+        keys.
+    selected_internal_slot : int | None
+        Selected configured-active actor slot, or None to omit outgoing
+        inspection.
+    outgoing_transition : EvaluationTransitionV1 | None
+        Exact recorded row starting at the displayed scene, or None when no
+        outgoing inspection is allowed.
+    final_frame_index : int
+        Nonnegative final retained replay frame index, including a partial
+        prefix.
+    Returns
+    -------
+    ReplayOutgoingInspectionV1 or None
+        Submitted/accepted action disclosure, or None when inspection is
+        unavailable.
+    Raises
+    ------
+    ValueError
+        Outgoing-row presence, transition epoch, actor identity, or accepted
+        target does not join.
+    """
     should_have_outgoing = (
         selected_internal_slot is not None and scene.frame_index < final_frame_index
     )
@@ -4836,12 +7879,42 @@ def build_replay_oracle_presentation_parts_v1(
     selected_internal_slot: int | None,
     outgoing_transition: EvaluationTransitionV1 | None,
 ) -> ReplayOraclePresentationPartsV1:
-    """Build neutral Oracle scene/history/inspection siblings from recorded facts.
-
-    The incoming branch losslessly remaps canonical visual events and phase
-    trajectories to authorized identities without choosing presentation
-    anchors or composing atomic status motifs.  No successor frame is accepted
-    by this API; the incoming batch's successor anchors must join ``scene``.
+    """Build current Oracle scene, incoming history, and selected outgoing action.
+    Consume already validated recorded roots from one episode. Remap canonical
+    incoming events without changing atomic meanings; their successor positions
+    must join scene. No successor scene is accepted, so outgoing anchors cannot
+    use future positions. This pure host projection does not perform I/O or
+    simulator work.
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Validated episode context with roster, resolved configuration, and
+        public catalog.
+    scene : BattlefieldSceneV2
+        Displayed durable Oracle scene for the same episode.
+    incoming_events : VisualEventBatchV2 | None
+        Recorded incoming visual batch; None at frame zero, required for every
+        later frame.
+    authority_session_id : str
+        Nonempty authority/session namespace for opaque presentation keys.
+    final_frame_index : int
+        Nonnegative final retained replay frame index, including a partial
+        prefix.
+    selected_internal_slot : int | None
+        Selected configured-active actor slot, or None to omit outgoing
+        inspection.
+    outgoing_transition : EvaluationTransitionV1 | None
+        Exact recorded row starting at the displayed scene, or None when no
+        outgoing inspection is allowed.
+    Returns
+    -------
+    ReplayOraclePresentationPartsV1
+        Frozen sibling branches ready for the outer replay authority envelope.
+    Raises
+    ------
+    TypeError, ValueError
+        A root type, index, episode, roster, history, action, or scene join is
+        invalid.
     """
     evaluation_context_type(context)
     if type(scene) is not BattlefieldSceneV2:

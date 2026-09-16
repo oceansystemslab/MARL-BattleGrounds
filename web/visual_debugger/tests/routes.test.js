@@ -1,3 +1,7 @@
+/**
+ * @file Check directed event paths, body/marker clearance, dense route separation and
+ * viewport containment.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -9,26 +13,20 @@ import {
   routeMarkerPose,
 } from "../src/routes.js";
 
-/**
- * @param {{x: number, y: number}} left
- * @param {{x: number, y: number}} right
- */
+/** @param {{x: number, y: number}} left
+ * @param {{x: number, y: number}} right */
 function dot(left, right) {
   return left.x * right.x + left.y * right.y;
 }
 
-/**
- * @param {{x: number, y: number}} left
- * @param {{x: number, y: number}} right
- */
+/** @param {{x: number, y: number}} left
+ * @param {{x: number, y: number}} right */
 function subtract(left, right) {
   return { x: left.x - right.x, y: left.y - right.y };
 }
 
-/**
- * @param {ReturnType<typeof createRouteGeometry>} route
- * @param {{left: number, top: number, right: number, bottom: number}} bounds
- */
+/** @param {ReturnType<typeof createRouteGeometry>} route
+ * @param {{left: number, top: number, right: number, bottom: number}} bounds */
 function assertRouteContained(route, bounds) {
   if (route.kind !== "curve") {
     assert.fail("distinct centers must produce a directed curve.");
@@ -42,14 +40,8 @@ function assertRouteContained(route, bounds) {
   }
 }
 
-/**
- * The live arrow is the polygon declared by choreography-painter.js. Checking
- * its transformed vertices proves containment of the visible marker, not only
- * its center point.
- *
- * @param {ReturnType<typeof routeMarkerPose>} marker
- * @param {{left: number, top: number, right: number, bottom: number}} bounds
- */
+/** @param {ReturnType<typeof routeMarkerPose>} marker
+ * @param {{left: number, top: number, right: number, bottom: number}} bounds */
 function assertVisibleMarkerContained(marker, bounds) {
   const radians = (marker.degrees * Math.PI) / 180;
   const cosine = Math.cos(radians);

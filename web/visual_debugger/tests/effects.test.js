@@ -1,3 +1,7 @@
+/**
+ * @file Check battlefield effect facts, credited death identities and visibility
+ * without granting new information rights.
+ */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -30,8 +34,7 @@ const ALL_VISUAL_FILTERS = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
 const buildChoreographyPlan = (presentation, surface, filters = ALL_VISUAL_FILTERS) =>
   buildPlan(presentation, surface, filters);
 
-/**
- * @typedef {{
+/** @typedef {{
  *   worldToScreen: (point: readonly [number, number] | {x: number, y: number}) =>
  *     {x: number, y: number},
  *   worldLengthToScreen: (length: number) => number,
@@ -51,8 +54,7 @@ const buildChoreographyPlan = (presentation, surface, filters = ALL_VISUAL_FILTE
  *     width: number,
  *     height: number,
  *   }>,
- * }} ProjectionSurface
- */
+ * }} ProjectionSurface */
 
 /** @type {ProjectionSurface} */
 const surface = {
@@ -817,11 +819,9 @@ test("all registered transient families validate without constructing disabled g
   /** @param {number} classId @param {string} phase */
   const anchor = (classId, phase) =>
     structuredClone(trajectoryForClass(classId)[phase]);
-  /**
-   * @param {string} eventKind
+  /** @param {string} eventKind
    * @param {number} channel
-   * @param {number} [recipientClass]
-   */
+   * @param {number} [recipientClass] */
   const statusEvent = (eventKind, channel, recipientClass = 2) => ({
     event_kind: eventKind,
     recipient_anchor: anchor(recipientClass, "successor"),
@@ -1677,13 +1677,11 @@ test("NET cues follow scrolling battle text while regeneration retains useful gr
   netEvent.health_after_combat_resolution = 190;
   netEvent.realized_net_health_change = -10;
   const netFrame = await normalizeAuthorizedPresentationFrameV1(rawNet);
-  /**
-   * @type {ReadonlyArray<readonly [
+  /** @type {ReadonlyArray<readonly [
    *   string[],
    *   {effect: boolean, battleText: boolean, recipientText: boolean},
    *   boolean,
-   * ]>}
-   */
+   * ]>} */
   const netCases = [
     [[], { effect: true, battleText: true, recipientText: true }, false],
     [
@@ -1729,13 +1727,11 @@ test("NET cues follow scrolling battle text while regeneration retains useful gr
   rawRegeneration.latest_events.ordered_event_kinds = [regenerationEvent.event_kind];
   const regenerationFrame =
     await normalizeAuthorizedPresentationFrameV1(rawRegeneration);
-  /**
-   * @type {ReadonlyArray<readonly [
+  /** @type {ReadonlyArray<readonly [
    *   string[],
    *   {effect: boolean, battleText: boolean},
    *   boolean,
-   * ]>}
-   */
+   * ]>} */
   const regenerationCases = [
     [[], { effect: true, battleText: true }, false],
     [["scrolling_battle_text"], { effect: true, battleText: false }, false],

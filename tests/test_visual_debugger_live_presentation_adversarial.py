@@ -1,4 +1,4 @@
-"""Adversarial privacy, authority-join, and import-boundary proofs."""
+"""Check privacy, matching record identities and imports using hostile inputs."""
 
 from __future__ import annotations
 

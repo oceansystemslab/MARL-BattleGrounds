@@ -1,4 +1,11 @@
-"""Replay packaging seams for the authorized presentation resource."""
+"""Package recorded replay endpoints for the authorized browser presentation API.
+
+The replay service calls these builders for Oracle, NoSharedObs, or SharedObs
+views. They join recorded current frames with incoming and upcoming transition
+facts, then return immutable presentation models. Actor views preserve their
+information limits. This module does not load files, run simulator steps, or
+change the saved replay.
+"""
 
 from __future__ import annotations
 
@@ -91,6 +98,9 @@ def _oracle_transition_action_rows_v1(
     *,
     authority_session_id: str,
 ) -> tuple[LatestTransitionActionRowV1, ...]:
+    """Map recorded submitted and accepted actions onto active public roster
+    identities.
+    """
     acceptance = transition.facts.action_acceptance_facts
     submitted = acceptance.submitted_joint_action
     accepted = acceptance.accepted_joint_action
@@ -136,6 +146,7 @@ def _oracle_latest_transition_v1(
     *,
     authority_session_id: str,
 ) -> OracleLatestTransitionV1 | None:
+    """Package the recorded incoming Oracle transition, or None at the reset frame."""
     if incoming_transition is None:
         return None
     if type(incoming_transition) is not EvaluationTransitionV1:
@@ -167,6 +178,9 @@ def _oracle_upcoming_transition_v1(
     *,
     authority_session_id: str,
 ) -> OracleUpcomingTransitionV1 | None:
+    """Package recorded next-transition Oracle actions without applying them to
+    state.
+    """
     if outgoing_transition is None:
         return None
     if type(outgoing_transition) is not EvaluationTransitionV1:
@@ -202,7 +216,45 @@ def build_replay_researcher_space_v1(
     incoming_transition: EvaluationTransitionV1 | None,
     outgoing_transition: EvaluationTransitionV1 | None,
 ) -> ReplayResearcherSpaceV1:
-    """Package global roster/navigation facts without global scene geometry."""
+    """Build global replay panels without copying battlefield geometry.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact supported episode context declaring roster, rules, and information mode.
+    source_scene : BattlefieldSceneV2
+        Exact source scene for the selected episode frame and simulator step.
+    authority_session_id : str
+        Nonempty session identity used to scope presentation keys.
+    final_frame_index : int
+        Last captured frame index, equal to the number of recorded transitions.
+    selected_global_slot : int
+        Configured-active simulator slot selected for researcher inspection.
+    incoming_transition : EvaluationTransitionV1 | None
+        Recorded transition entering this frame, or None at frame zero.
+    outgoing_transition : EvaluationTransitionV1 | None
+        Recorded transition leaving this frame, or None at the final captured frame.
+
+    Returns
+    -------
+    ReplayResearcherSpaceV1
+        Checked immutable presentation for the supplied source frame.
+
+    Raises
+    ------
+    TypeError
+        A required source or nested model has an unsupported exact type.
+    ValueError
+        Source identity, epoch, action meaning, or display authorization is
+        inconsistent.
+
+    Notes
+    -----
+    Preserve incoming and outgoing action meaning through the fixed roster. The
+    result is researcher display data, not a policy observation.
+    This performs host projection and model validation, with no simulator step
+    or file write.
+    """
     endpoint = build_oracle_authorized_current_endpoint_v1(
         context=context,
         source_scene=source_scene,
@@ -264,6 +316,9 @@ def _no_shared_obs_latest_transition_v1(
     successor_frame_index: int,
     action_axis: AgentPovActionAxisV1,
 ) -> NoSharedObsLatestTransitionV1 | None:
+    """Package the selected actor's recorded incoming action using its authorized
+    axis.
+    """
     if type(source) is not ActorPovProjectionIndexV1:
         raise TypeError("source must use the exact POV projection index root.")
     source = ActorPovProjectionIndexV1(content=source.content)
@@ -314,6 +369,7 @@ def _no_shared_obs_upcoming_transition_v1(
     *,
     action_axis: AgentPovActionAxisV1,
 ) -> NoSharedObsUpcomingTransitionV1 | None:
+    """Package only the selected actor's authorized upcoming replay action."""
     if inspection is None:
         return None
     reference = inspection.transition_reference
@@ -348,6 +404,7 @@ def _shared_obs_upcoming_transition_v1(
     *,
     action_axis: AgentPovActionAxisV1,
 ) -> SharedObsUpcomingTransitionV1 | None:
+    """Package the recipient's upcoming action from the SharedObs replay evidence."""
     if inspection is None:
         return None
     reference = inspection.transition_reference
@@ -390,7 +447,55 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
     researcher_space: ReplayResearcherSpaceV1,
     exact_actor_input_export_available: bool = True,
 ) -> ReplayNoSharedObsAuthorizedPresentationFrameV1:
-    """Package one committed recipient-local NoSharedObs replay frame."""
+    """Build a NoSharedObs replay presentation for one fixed recipient.
+
+    Parameters
+    ----------
+    source : ActorPovProjectionIndexV1
+        Exact immutable actor projection index containing the recipient's replay frames.
+    raw_frame : ActorPovReplayViewerFrameV1
+        Exact mode-specific service response for the committed source revision.
+    global_context : EvaluationEpisodeContext
+        Trusted global episode context used only by the authorized host projection.
+    current_global_frame : EvaluationFrame
+        Trusted global frame at the selected cursor, used to validate local display
+        facts.
+    previous_global_frame : EvaluationFrame | None
+        Trusted immediately preceding frame, or None at frame zero.
+    public_catalog : StaticMechanicsCatalogV1
+        Exact recorded public class-mechanics catalog for these source frames.
+    source_authority_epoch : int
+        Nonnegative authority revision; it must match the committed raw frame revision.
+    incoming_visual_events : VisualEventBatchV2 | None
+        Visual events for the immediately preceding transition, or None at frame zero.
+    researcher_space : ReplayResearcherSpaceV1
+        Separately authorized global panels for this same frame, without a global
+        battlefield scene.
+    exact_actor_input_export_available : bool
+        Whether the source supports exact actor-input export. Defaults to True;
+        historical visual-only projections must pass False.
+
+    Returns
+    -------
+    ReplayNoSharedObsAuthorizedPresentationFrameV1
+        Checked immutable presentation for the supplied source frame.
+
+    Raises
+    ------
+    TypeError
+        A required source or nested model has an unsupported exact type.
+    ValueError
+        Source identity, epoch, action meaning, or display authorization is
+        inconsistent.
+
+    Notes
+    -----
+    Recheck the committed local projection against its source index. Trusted
+    global frames authorize paint-only corpse and visual-event data; they do
+    not become actor policy inputs.
+    This performs host projection and model validation, with no simulator step
+    or file write.
+    """
     from scripts.dev.visual_debugger.local_oracle_corpse_overlay import (
         build_local_oracle_corpse_overlay_v1,
         compose_local_oracle_corpse_scene_v1,
@@ -648,7 +753,68 @@ def build_replay_shared_obs_authorized_presentation_v1(
     outgoing_transition: EvaluationTransitionV1 | None,
     researcher_space: ReplayResearcherSpaceV1,
 ) -> ReplaySharedObsAuthorizedPresentationFrameV1:
-    """Package one fixed-recipient SharedObs visual-union replay frame."""
+    """Build a SharedObs replay visual union for one fixed recipient.
+
+    Parameters
+    ----------
+    raw_frame : SharedObsAgentPovReplayViewerFrameV1
+        Exact mode-specific service response for the committed source revision.
+    global_context : EvaluationEpisodeContext
+        Trusted global episode context used only by the authorized host projection.
+    current_global_frame : EvaluationFrame
+        Trusted global frame at the selected cursor, used to validate local display
+        facts.
+    previous_global_frame : EvaluationFrame | None
+        Trusted immediately preceding frame, or None at frame zero.
+    public_catalog : StaticMechanicsCatalogV1
+        Exact recorded public class-mechanics catalog for these source frames.
+    source_authority_epoch : int
+        Nonnegative authority revision; it must match the committed raw frame revision.
+    authorized_recipient_global_slot : int
+        Configured-active recipient slot supplied by the trusted service, from 0 through
+        9.
+    current_recipient_source_material : SharedObsSourceMaterialProjection
+        Recipient's trusted source projection at the current frame.
+    current_active_nonrecipient_source_material :
+    tuple[SharedObsSourceMaterialProjection, ...]
+        Current source projections for every other configured-active slot. The
+        shared-scene authority chooses allowed contributors.
+    previous_recipient_source_material : SharedObsSourceMaterialProjection | None
+        Recipient's immediately preceding source projection, or None at frame zero.
+    previous_active_nonrecipient_source_material :
+    tuple[SharedObsSourceMaterialProjection, ...]
+        Other active slots' preceding projections; empty at frame zero.
+    incoming_visual_events : VisualEventBatchV2 | None
+        Visual events for the immediately preceding transition, or None at frame zero.
+    incoming_transition : EvaluationTransitionV1 | None
+        Recorded transition entering this frame, or None at frame zero.
+    outgoing_transition : EvaluationTransitionV1 | None
+        Recorded transition leaving this frame, or None at the final captured frame.
+    researcher_space : ReplayResearcherSpaceV1
+        Separately authorized global panels for this same frame, without a global
+        battlefield scene.
+
+    Returns
+    -------
+    ReplaySharedObsAuthorizedPresentationFrameV1
+        Checked immutable presentation for the supplied source frame.
+
+    Raises
+    ------
+    TypeError
+        A required source or nested model has an unsupported exact type.
+    ValueError
+        Source identity, epoch, action meaning, or display authorization is
+        inconsistent.
+
+    Notes
+    -----
+    Current and previous source sets stay at their own frame epochs. Allowed
+    sensor evidence determines the visual union. This display does not provide
+    an exact actor-input export.
+    This performs host projection and model validation, with no simulator step
+    or file write.
+    """
     from scripts.dev.visual_debugger.local_oracle_corpse_overlay import (
         build_local_oracle_corpse_overlay_v1,
         compose_local_oracle_corpse_scene_v1,
@@ -965,7 +1131,45 @@ def build_replay_oracle_authorized_presentation_v1(
     incoming_transition: EvaluationTransitionV1 | None,
     outgoing_transition: EvaluationTransitionV1 | None,
 ) -> ReplayOracleAuthorizedPresentationFrameV1:
-    """Package one committed Oracle ``s_n`` with incoming and outgoing siblings."""
+    """Build the global current replay display with incoming and outgoing inspection.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact supported episode context declaring roster, rules, and information mode.
+    current_frame : EvaluationFrame
+        Exact current captured frame, matching the context and raw response identity.
+    raw_frame : ResearcherReplayViewerFrameV1
+        Exact mode-specific service response for the committed source revision.
+    source_authority_epoch : int
+        Nonnegative authority revision; it must match the committed raw frame revision.
+    selected_internal_slot : int | None
+        Configured-active simulator slot to inspect, or None when no actor is selected.
+    incoming_transition : EvaluationTransitionV1 | None
+        Recorded transition entering this frame, or None at frame zero.
+    outgoing_transition : EvaluationTransitionV1 | None
+        Recorded transition leaving this frame, or None at the final captured frame.
+
+    Returns
+    -------
+    ReplayOracleAuthorizedPresentationFrameV1
+        Checked immutable presentation for the supplied source frame.
+
+    Raises
+    ------
+    TypeError
+        A required source or nested model has an unsupported exact type.
+    ValueError
+        Source identity, epoch, action meaning, or display authorization is
+        inconsistent.
+
+    Notes
+    -----
+    Incoming actions reach the current frame. Outgoing actions belong to the
+    recorded next transition; the final captured frame has none.
+    This performs host projection and model validation, with no simulator step
+    or file write.
+    """
     if type(raw_frame) is not ResearcherReplayViewerFrameV1:
         raise TypeError(
             "raw_frame must be the exact ResearcherReplayViewerFrameV1 root."

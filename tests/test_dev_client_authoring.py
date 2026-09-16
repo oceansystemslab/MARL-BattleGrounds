@@ -1,4 +1,4 @@
-"""Focused contracts for the private DevClient authoring host."""
+"""Check DevClient map and scenario authoring with isolated local files."""
 
 from __future__ import annotations
 

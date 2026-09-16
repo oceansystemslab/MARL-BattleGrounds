@@ -1,4 +1,4 @@
-"""Scientific estimator, pairing, weighting and unavailable-uncertainty proofs."""
+"""Check tournament estimates, pairing, weights and unavailable uncertainty."""
 
 # Private reduced-replicate plumbing keeps semantic tests bounded; the public
 # 5,000-replicate entry point receives its own genuine execution proof below.
@@ -27,7 +27,6 @@ type FloatArray = NDArray[np.float64]
 def _outcomes(
     schedule: Schedule, block_patterns: tuple[tuple[int, int], ...]
 ) -> dict[int, int]:
-    """Patterns describe canonical first-policy W/D/L as 1/3/2 on both sides."""
     result: dict[int, int] = {}
     for match in schedule:
         first_side = match.team_a < match.team_b

@@ -1,3 +1,7 @@
+/**
+ * @file Provide browser-test helpers for observing transition animation and its
+ * settled state. These support assertions without becoming simulator authorities.
+ */
 import { expect } from "@playwright/test";
 
 export const CHOREOGRAPHY_ROOT =
@@ -7,12 +11,7 @@ export const CHOREOGRAPHY_CONNECTOR_ROOT =
 export const CHOREOGRAPHY_ROUTE_ROOT =
   '#battlefield [data-layer="transient-route"] > .combat-choreography-routes';
 
-/**
- * Pause CP5-owned Web Animations at creation time so browser assertions can
- * seek one deterministic shared presentation clock without production hooks.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 export async function installWaapiAutopause(page) {
   await page.addInitScript(() => {
     const nativeAnimate = Element.prototype.animate;
@@ -30,13 +29,8 @@ export async function installWaapiAutopause(page) {
   });
 }
 
-/**
- * Synchronize the visible controller state and seek every owned animation to
- * the same logical time.
- *
- * @param {import("@playwright/test").Page} page
- * @param {number} logicalMs
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {number} logicalMs */
 export async function pauseAtLogicalTime(page, logicalMs) {
   const root = page.locator(CHOREOGRAPHY_ROOT);
   const connectorRoot = page.locator(CHOREOGRAPHY_CONNECTOR_ROOT);
@@ -75,15 +69,8 @@ export async function pauseAtLogicalTime(page, logicalMs) {
   }, logicalMs);
 }
 
-/**
- * Resolve one readable event-owned animation window. Some event rows are
- * intentionally durable-only and therefore own no transient animation. Walk
- * the rendered rows in DOM order and select the first row with the requested
- * animation part instead of assuming the first row is animated.
- *
- * @param {import("@playwright/test").Page} page
- * @param {{eventType?: string, part: "auto" | "group" | "route", progress: number}} request
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {{eventType?: string, part: "auto" | "group" | "route", progress: number}} request */
 async function resolveReadableEventWindow(page, request) {
   const root = page.locator(CHOREOGRAPHY_ROOT);
   await root.waitFor({ state: "attached" });
@@ -137,16 +124,9 @@ async function resolveReadableEventWindow(page, request) {
   }, request);
 }
 
-/**
- * Seek inside the installed animation for one exact event family. Dynamic
- * choreography omits absent families, so browser proofs derive their sample
- * point from the authored WAAPI window instead of duplicating one static
- * transition schedule.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} eventType
- * @param {{part?: "auto" | "group" | "route", progress?: number}} [options]
- */
+ * @param {{part?: "auto" | "group" | "route", progress?: number}} [options] */
 export async function pauseInsideEventWindow(
   page,
   eventType,
@@ -170,12 +150,8 @@ export async function pauseInsideEventWindow(
   return resolved.logicalMs;
 }
 
-/**
- * Seek the first rendered event that owns a readable animation window.
- *
- * @param {import("@playwright/test").Page} page
- * @param {{part?: "auto" | "group" | "route", progress?: number}} [options]
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {{part?: "auto" | "group" | "route", progress?: number}} [options] */
 export async function pauseInsideFirstEventWindow(
   page,
   { part = "auto", progress = 0.5 } = {},
@@ -191,12 +167,8 @@ export async function pauseInsideFirstEventWindow(
   return resolved.logicalMs;
 }
 
-/**
- * Finish one controller-owned sentinel clock without wall-clock waiting.
- *
- * @param {import("@playwright/test").Page} page
- * @param {"gate" | "cleanup"} suffix
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {"gate" | "cleanup"} suffix */
 export async function finishControllerClock(page, suffix) {
   await page.locator(CHOREOGRAPHY_ROOT).evaluate((root, clockSuffix) => {
     const clock = root
@@ -209,9 +181,7 @@ export async function finishControllerClock(page, suffix) {
   }, suffix);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 export async function choreographySnapshot(page) {
   return page.locator(CHOREOGRAPHY_ROOT).evaluate((root) => ({
     animationIds: (root.closest("svg") ?? root)
@@ -249,12 +219,7 @@ export async function choreographySnapshot(page) {
   }));
 }
 
-/**
- * Prove the retained subtree and its Web Animations remain within the public
- * per-batch limits. This complements, rather than duplicates, planner units.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 export async function assertBoundedChoreography(page) {
   const roots = page.locator(CHOREOGRAPHY_ROOT);
   const connectorRoots = page.locator(CHOREOGRAPHY_CONNECTOR_ROOT);
@@ -304,12 +269,7 @@ export async function assertBoundedChoreography(page) {
   );
 }
 
-/**
- * Every transient slot reference must belong to the currently authorized
- * roster. Absence remains valid for redacted endpoints.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 export async function assertTransientSlotsAuthorized(page) {
   const rawRosterSlots = await page
     .locator("#roster .roster-row")

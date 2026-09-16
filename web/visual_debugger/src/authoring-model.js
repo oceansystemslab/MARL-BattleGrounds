@@ -1,16 +1,37 @@
-/** @param {unknown} value */
+/**
+ * @file Edit browser-local map/scenario drafts before host validation and saving.
+ * Most edits clone the draft and return a replacement; no helper writes files
+ * or changes the simulator. Coordinates use map world units. Authored roster
+ * team_local_slot values are 1–5, distinct from the public API's zero-based
+ * team-local indices. The host owns physical/configuration validity.
+ */
+/**
+ * Return whether value is a non-null object that is not an array. This
+ * checks shape only, without prototype, field or schema validation.
+ *
+ * @param {unknown} value
+ */
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** @template T @param {T} value @returns {T} */
+/**
+ * Return structuredClone(value), preserving its supported data types and
+ * removing shared nested references. The browser throws DataCloneError for
+ * unsupported values such as functions. No transfer list or input mutation
+ * is used. Callers supply plain draft data, not live DOM objects.
+ *
+ * @template T @param {T} value @returns {T}
+ */
 export function cloneAuthoringValue(value) {
   return structuredClone(value);
 }
 
 /**
- * History records only editable content. Persisted draft identity belongs to
- * the host and must survive undo/redo after a save advances the revision.
+ * Validate draft's recognized kind and return a deep copy of draft.content.
+ * Exclude persisted draft identity/revision so undo cannot roll a later save
+ * back to an older host identity. Invalid draft shape throws TypeError;
+ * structured-clone errors propagate. No file or original object is changed.
  *
  * @param {any} draft
  */
@@ -19,7 +40,14 @@ export function authoringContentSnapshot(draft) {
   return cloneAuthoringValue(draft.content);
 }
 
-/** @param {any} draft @param {unknown} content */
+/**
+ * Return a cloned draft with a separate clone of content installed. Preserve
+ * the draft's host identity/revision. Check its recognized kind and the
+ * replacement map's basic arrays; invalid shape throws TypeError. This does
+ * not fully validate geometry or save anything. Neither input is changed.
+ *
+ * @param {any} draft @param {unknown} content
+ */
 export function restoreAuthoringContent(draft, content) {
   authoringKind(draft);
   const next = cloneAuthoringValue(draft);
@@ -28,7 +56,13 @@ export function restoreAuthoringContent(draft, content) {
   return next;
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Return value as a finite number, using Number conversion for nonnumbers.
+ * Throw TypeError with label if the converted number is nonfinite; native
+ * conversion errors propagate. This does not constrain sign, range or units.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function finiteNumber(value, label) {
   const number = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(number)) {
@@ -37,7 +71,13 @@ function finiteNumber(value, label) {
   return number;
 }
 
-/** @param {any} draft */
+/**
+ * Return map or scenario for a recognized draft schema with object content.
+ * Other values throw TypeError. The check recognizes dev-map-draft@1 and
+ * dev-scenario-draft@1; it does not validate their full content or revision.
+ *
+ * @param {any} draft
+ */
 export function authoringKind(draft) {
   if (!isRecord(draft) || !isRecord(draft.content)) {
     throw new TypeError("Authoring draft must contain content.");
@@ -51,7 +91,14 @@ export function authoringKind(draft) {
   throw new TypeError("Authoring draft schema is unsupported.");
 }
 
-/** @param {any} draft @returns {any} */
+/**
+ * Return draft's map content object, retaining its original reference.
+ * For scenarios, use content.embedded_map; for maps, use content itself.
+ * Require recognized draft kind plus obstacle and spawn_pad arrays, otherwise
+ * throw TypeError. Nested geometry is not checked and no copy is made.
+ *
+ * @param {any} draft @returns {any}
+ */
 export function mapContent(draft) {
   const kind = authoringKind(draft);
   const content = /** @type {Record<string, any>} */ (draft.content);
@@ -66,7 +113,15 @@ export function mapContent(draft) {
   return map;
 }
 
-/** @param {number} value @param {number} step @param {boolean} bypass */
+/**
+ * Return value on the nearest step-sized grid in world units. Both inputs
+ * pass finiteNumber; step must stay positive even when bypass is true.
+ * bypass defaults to false; true returns the unsnapped coordinate. Invalid
+ * inputs throw TypeError/RangeError. Rounding uses JavaScript Math.round;
+ * no map-bound or collision checks are performed.
+ *
+ * @param {number} value @param {number} step @param {boolean} bypass
+ */
 export function snapAuthoringCoordinate(value, step, bypass = false) {
   const coordinate = finiteNumber(value, "coordinate");
   const snapStep = finiteNumber(step, "snap step");
@@ -76,7 +131,18 @@ export function snapAuthoringCoordinate(value, step, bypass = false) {
   return bypass ? coordinate : Math.round(coordinate / snapStep) * snapStep;
 }
 
-/** @param {any} draft @returns {readonly any[]} */
+/**
+ * List selectable draft objects in roster, obstacle, then spawn-pad order.
+ *
+ * draft must have valid basic map arrays; a scenario also needs roster and
+ * agent_states arrays aligned by index. Include only roster rows within
+ * their team's declared size. Return a frozen array of frozen view records
+ * with object IDs, kind/label and world x/y. Nested roster/state/shape records
+ * still reference draft content. Invalid basic shape throws TypeError;
+ * complete row and physical validation belong to the host.
+ *
+ * @param {any} draft @returns {readonly any[]}
+ */
 export function authoringObjects(draft) {
   const map = mapContent(draft);
   const objects = [];
@@ -136,7 +202,14 @@ export function authoringObjects(draft) {
   return Object.freeze(objects);
 }
 
-/** @param {any} draft @param {string | null} objectId @returns {any} */
+/**
+ * Return the first visible object in draft with object_id equal to objectId,
+ * or null when not found. A null objectId returns null without inspecting the
+ * draft. The projection uses authoringObjects and retains its nested source
+ * references; draft validation errors propagate.
+ *
+ * @param {any} draft @param {string | null} objectId @returns {any}
+ */
 export function selectedAuthoringObject(draft, objectId) {
   if (objectId === null) {
     return null;
@@ -146,7 +219,15 @@ export function selectedAuthoringObject(draft, objectId) {
   );
 }
 
-/** @param {any} draft @param {string} objectId @param {number} x @param {number} y @returns {any} */
+/**
+ * Return a deep-cloned draft with objectId moved to finite world x/y.
+ * Search obstacles, spawn pads, then scenario agent state. Unknown IDs throw
+ * RangeError; invalid map/coordinates throw TypeError. Do not snap, clamp or
+ * check collisions. The input draft is unchanged; host validation later
+ * decides whether the authored position is physically valid.
+ *
+ * @param {any} draft @param {string} objectId @param {number} x @param {number} y @returns {any}
+ */
 export function moveAuthoringObject(draft, objectId, x, y) {
   const next = cloneAuthoringValue(draft);
   const map = mapContent(next);
@@ -180,8 +261,10 @@ export function moveAuthoringObject(draft, objectId, x, y) {
 }
 
 /**
- * Apply the one authoring snap rule before moving an existing object. Pointer
- * drags and native roster-row drops deliberately share this path.
+ * Snap x and y using step, then move objectId in a cloned draft.
+ * bypass defaults to false and skips rounding only; step still must be
+ * positive. Pointer drags and row drops share this path. Return the new draft
+ * and propagate snap/object validation errors without editing the original.
  *
  * @param {any} draft
  * @param {string} objectId
@@ -206,7 +289,15 @@ export function moveAuthoringObjectWithSnap(
   );
 }
 
-/** @param {any} draft @param {readonly (string | number)[]} path @param {unknown} value @returns {any} */
+/**
+ * Return a cloned draft with one path assigned value. path is a nonempty
+ * array of string/number keys. Each parent must resolve to an object/array;
+ * a null parent is replaced by an empty object. Invalid paths throw TypeError.
+ * The supplied value is assigned by reference, not cloned. This low-level
+ * helper does not validate the draft schema, field meaning or physical rules.
+ *
+ * @param {any} draft @param {readonly (string | number)[]} path @param {unknown} value @returns {any}
+ */
 export function setAuthoringField(draft, path, value) {
   if (!Array.isArray(path) || path.length === 0) {
     throw new TypeError("Authoring field path must be nonempty.");
@@ -231,7 +322,19 @@ export function setAuthoringField(draft, path, value) {
   return next;
 }
 
-/** @param {any} draft @param {"A" | "B"} team @param {number} size @param {Record<string, any>} catalog */
+/**
+ * Return a cloned scenario draft with team A or B resized to 1–5 agents.
+ *
+ * size must be an integer; catalog must contain host class_mechanics. Rows
+ * beyond the size become inactive, dead and zeroed. Newly activated rows use
+ * the class for their 1-based authored slot, the matching spawn pad and the
+ * catalog maximum health. Existing active rows keep their authored values.
+ * Invalid kind/catalog throws TypeError, invalid team/size RangeError, and
+ * missing required mechanics/pads Error. This prepares a draft, not a fully
+ * validated or saved scenario, and leaves the other input objects unchanged.
+ *
+ * @param {any} draft @param {"A" | "B"} team @param {number} size @param {Record<string, any>} catalog
+ */
 export function setScenarioTeamSize(draft, team, size, catalog) {
   if (authoringKind(draft) !== "scenario") {
     throw new TypeError("Only scenarios contain team rosters.");
@@ -289,7 +392,17 @@ export function setScenarioTeamSize(draft, team, size, catalog) {
   return next;
 }
 
-/** @param {any} draft @param {string} objectId @param {boolean} alive @returns {any} */
+/**
+ * Return a cloned scenario draft with objectId's alive flag set from alive.
+ *
+ * A false value also clears health, spawn shield, out-of-combat countdown
+ * and fields whose names end in _duration. A true value does not restore
+ * health or clear other timers; the author and host validation must make the
+ * full start consistent. Non-scenarios throw TypeError; unknown agents throw
+ * RangeError. No simulator death or respawn transition is executed.
+ *
+ * @param {any} draft @param {string} objectId @param {boolean} alive @returns {any}
+ */
 export function setAgentAlive(draft, objectId, alive) {
   if (authoringKind(draft) !== "scenario") {
     throw new TypeError("Only scenarios contain agent lifecycle state.");
@@ -318,8 +431,13 @@ export function setAgentAlive(draft, objectId, alive) {
 const OBJECT_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9])?$/u;
 
 /**
- * Rename one obstacle's structural identity without changing map semantics.
- * Spawn-pad and roster identities deliberately remain immutable.
+ * Rename one obstacle in a cloned draft while retaining its geometry/order.
+ *
+ * requestedId is trimmed and must be 1–64 ASCII letters/digits/dot/underscore/
+ * hyphen, beginning and ending with a letter/digit. Reject invalid names or
+ * collisions with RangeError; nontext and non-obstacle oldId throw TypeError.
+ * Return a frozen {draft, object_id} pair; an unchanged name reuses draft,
+ * otherwise return its clone. Spawn-pad and roster identities are not renamed.
  *
  * @param {any} draft
  * @param {string} oldId
@@ -363,7 +481,13 @@ export function renameAuthoringObstacleId(draft, oldId, requestedId) {
   return Object.freeze({ draft: next, object_id: objectId });
 }
 
-/** @param {any} draft */
+/**
+ * Return the first unused obstacle_N name starting at N=0. Check draft's
+ * obstacle and spawn-pad IDs plus scenario roster IDs. This does not reserve
+ * the name or mutate the draft; malformed draft errors come from mapContent.
+ *
+ * @param {any} draft
+ */
 function nextObstacleObjectId(draft) {
   const map = mapContent(draft);
   const occupied = new Set([
@@ -380,7 +504,18 @@ function nextObstacleObjectId(draft) {
   return `obstacle_${ordinal}`;
 }
 
-/** @param {any} draft @param {"wall" | "pillar"} kind @param {number} maximumObstacles */
+/**
+ * Append a default shape at the map center in a cloned draft.
+ *
+ * kind must be wall or pillar as supplied by the caller. A wall is 2-by-1
+ * world units at zero rotation; the other branch uses radius 0.75. This helper
+ * does not validate kind separately. maximumObstacles must be a positive
+ * integer and exceed the current count, or throw RangeError. Return a frozen
+ * {draft, object_id} pair using the first free obstacle_N ID. No geometry
+ * validity check or save is performed.
+ *
+ * @param {any} draft @param {"wall" | "pillar"} kind @param {number} maximumObstacles
+ */
 export function addAuthoringObstacle(draft, kind, maximumObstacles) {
   const next = cloneAuthoringValue(draft);
   const map = mapContent(next);
@@ -405,7 +540,17 @@ export function addAuthoringObstacle(draft, kind, maximumObstacles) {
   return Object.freeze({ draft: next, object_id: objectId });
 }
 
-/** @param {any} draft @param {string} objectId @param {number} maximumObstacles @param {number} offset */
+/**
+ * Copy one obstacle to a fresh ID in a cloned draft and offset both axes.
+ *
+ * objectId must identify an obstacle. maximumObstacles is a positive integer
+ * and must leave room. offset must convert to a positive finite number in
+ * world units. Invalid limits/offset throw RangeError or TypeError; an unknown
+ * obstacle throws TypeError. Return a frozen {draft, object_id} pair. The copy
+ * is appended, not inserted beside its source; no collision/bounds check occurs.
+ *
+ * @param {any} draft @param {string} objectId @param {number} maximumObstacles @param {number} offset
+ */
 export function duplicateAuthoringObstacle(draft, objectId, maximumObstacles, offset) {
   const next = cloneAuthoringValue(draft);
   const map = mapContent(next);
@@ -435,7 +580,13 @@ export function duplicateAuthoringObstacle(draft, objectId, maximumObstacles, of
   return Object.freeze({ draft: next, object_id: duplicateId });
 }
 
-/** @param {any} draft @param {string} objectId @returns {any} */
+/**
+ * Remove objectId from a cloned draft's ordered obstacle array and return
+ * the new draft. If it is not an obstacle, throw TypeError. Spawn pads and
+ * agents are not deletable through this helper; the input stays unchanged.
+ *
+ * @param {any} draft @param {string} objectId @returns {any}
+ */
 export function deleteAuthoringObstacle(draft, objectId) {
   const next = cloneAuthoringValue(draft);
   const map = mapContent(next);
@@ -449,7 +600,14 @@ export function deleteAuthoringObstacle(draft, objectId) {
   return next;
 }
 
-/** @param {any} draft @param {string} objectId @param {-1 | 1} direction @returns {any} */
+/**
+ * Move objectId one position in a cloned obstacle array. direction must be
+ * -1 or 1; the caller owns that precondition. Return the clone unchanged when
+ * the ID is absent or destination is out of range. Preserve every other
+ * obstacle's relative order. This does not change geometry or save the draft.
+ *
+ * @param {any} draft @param {string} objectId @param {-1 | 1} direction @returns {any}
+ */
 export function reorderAuthoringObstacle(draft, objectId, direction) {
   const next = cloneAuthoringValue(draft);
   const obstacles = mapContent(next).obstacles;
@@ -465,7 +623,15 @@ export function reorderAuthoringObstacle(draft, objectId, direction) {
   return next;
 }
 
-/** @param {unknown} problems */
+/**
+ * Return a frozen list of shallow-frozen valid problem records. problems
+ * may be any input; a non-array returns an empty list. Keep rows with severity
+ * error/warning and string stable_code, message and field_path. Other rows
+ * are dropped. Extra fields are copied; nested values stay shared. This
+ * filters display records, not physical validity or host error truth.
+ *
+ * @param {unknown} problems
+ */
 export function normalizeAuthoringProblems(problems) {
   if (!Array.isArray(problems)) {
     return Object.freeze([]);

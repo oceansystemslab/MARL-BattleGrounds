@@ -1,3 +1,10 @@
+/**
+ * @file Configure serial Chromium browser tests for the two native clients.
+ * Each shard has one worker and no whole-test timeout. Individual actions,
+ * assertions and navigation keep bounded waits. CI rejects focused tests;
+ * failed runs retain traces and screenshots. Run through check_frontend.sh
+ * for the complete inventory or Playwright for a selected local check.
+ */
 import { defineConfig } from "@playwright/test";
 
 export default defineConfig({

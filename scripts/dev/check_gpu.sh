@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
+
+# Qualify a clean committed checkout on JAX's concrete CUDA backend.
+# Usage: scripts/dev/check_gpu.sh [--allow-dirty | --help]. The default rejects
+# staged, unstaged and nonignored untracked changes. --allow-dirty runs diagnostics
+# only; it cannot qualify publication. Requires a working NVIDIA driver,
+# nvidia-smi and the prepared CUDA uv environment. The script disables JAX memory
+# preallocation, verifies synchronized GPU matrix work, then runs focused tests.
+# It rechecks the committed source identity and cleanliness before qualification.
+# This is a correctness check, not a throughput benchmark. It never commits.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
 
+# Print qualification/diagnostic options and their meaning to stderr. No arguments.
 usage() {
   cat >&2 <<'EOF'
 usage: scripts/dev/check_gpu.sh [--allow-dirty | --help]
@@ -14,6 +24,8 @@ commit for publication or release.
 EOF
 }
 
+# Return success only when tracked, staged and nonignored untracked changes are
+# absent. No arguments. Ignore private ignored files; do not change Git state.
 repository_is_clean() {
   local untracked=""
 
@@ -23,6 +35,8 @@ repository_is_clean() {
   [[ -z "${untracked}" ]]
 }
 
+# Print the current committed HEAD:tree identity. No arguments. Fail if either
+# Git revision is unavailable. This reads the committed tree, not dirty worktree bytes.
 candidate_fingerprint() {
   local head_revision=""
   local tree_revision=""
@@ -108,6 +122,8 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 cd -- "${REPO_ROOT}"
 nvidia-smi
 uv run --no-sync python - <<'PY'
+"""Verify CUDA is the only active backend and complete one checked GPU workload."""
+
 from __future__ import annotations
 
 import jax
@@ -146,6 +162,11 @@ if "cuda" not in str(cuda_backend.platform_version).lower():
 
 @jax.jit
 def accelerator_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
+    """Multiply compatible float32 matrices on their device and return the result.
+
+    The caller supplies two (2048, 2048) arrays, then synchronizes and checks
+    the returned array. This function performs no host copy or validation.
+    """
     return left @ right
 
 

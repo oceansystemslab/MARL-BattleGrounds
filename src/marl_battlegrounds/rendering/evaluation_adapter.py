@@ -1,10 +1,18 @@
-"""Pure canonical-evaluation to researcher-presentation projection.
+"""Project canonical evaluation records into researcher scenes and source views.
 
-The adapter consumes only strict host records.  It does not import simulator
-state, JAX/NumPy arrays, mechanic helpers, policy code, replay persistence, or a
-renderer.  Durable state comes from the selected frame and context; an optional
-coherent transition view contributes only direct incoming-event identity and
-source evidence.
+build_researcher_analyzer_projection_v2 joins a selected frame, its incoming
+events and frame-bound status evidence. The evidence initializer, reducer
+and replay index preserve only directly recorded status sources. The
+SharedObs builders expose labelled base-sensor and availability material;
+they do not claim to export the exact composed actor input.
+
+This adapter consumes strict host records. It does not import simulator
+state, JAX/NumPy arrays, live mechanic helpers, policy code, replay storage
+or a renderer. Durable truth comes from recorded context/frame values;
+coherent incoming views contribute event identity and direct evidence.
+Projection is host work with no file I/O or input mutation. Researcher
+output remains privileged, and narrower authority builders have separate
+input contracts for authorized inspection.
 """
 
 from dataclasses import dataclass
@@ -228,14 +236,52 @@ _SHARED_OBS_SOURCE_MATERIAL_DISCLOSURE = (
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EvaluationScenePresentationStateV1:
-    """Presentation-only selection for one researcher scene projection."""
+    """Choose the inspected actor, target and combat lane.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    controlled_global_slot : int | None, default None
+        Python global slot in 0..9, or None for no inspected actor.
+    selected_global_slot : int | None, default None
+        Python target slot in 0..9, or None. A target requires a controlled actor.
+    armed_lane : PresentationLaneV1 | None, default None
+        Python int 0 for Basic or 1 for Ultimate, or None. A lane requires a
+        selected target.
+    show_ranges : bool, default True
+        Exact Python bool controlling range-circle records; True by default.
+
+    Raises
+    ------
+    ValueError
+        Optional slot/lane types or ranges are invalid, selection dependencies
+        fail, or show_ranges is not a Python bool.
+
+    Notes
+    -----
+    This record holds UI choices only. Scene building checks that selected slots
+    are configured active; no action is submitted.
+    """
 
     controlled_global_slot: int | None = None
+    """Python global slot in 0..9, or None for no inspected actor."""
     selected_global_slot: int | None = None
+    """Python target slot in 0..9, or None. A target requires a controlled actor."""
     armed_lane: PresentationLaneV1 | None = None
+    """Python int 0 for Basic or 1 for Ultimate, or None. A lane requires a
+    selected target.
+    """
     show_ranges: bool = True
+    """Exact Python bool controlling range-circle records; True by default."""
 
     def __post_init__(self) -> None:
+        """Check EvaluationScenePresentationStateV1 during host construction.
+
+        Raise ValueError if optional slot/lane types or ranges are invalid,
+        selection dependencies fail, or show_ranges is not a Python bool.
+        Return None without changing valid values.
+        """
         for name in ("controlled_global_slot", "selected_global_slot"):
             value = cast(int | None, getattr(self, name))
             if value is not None and (
@@ -261,19 +307,72 @@ class EvaluationScenePresentationStateV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsSensorSourceAvailabilityV1:
-    """One recorded source-availability cell for a selected recipient."""
+    """Describe one recorded source-availability cell for a recipient.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    sensor_source_global_slot : int
+        Python source slot in 0..9, including unused slots.
+    sensor_source_public_agent_id : str
+        Nonblank recorded source ID.
+    sensor_source_team_local_slot : int
+        Python source roster position in 0..4.
+    sensor_source_configured_team_id : int
+        Python team ID 1/2 for configured sources, or 0 for unused slots.
+    sensor_source_configured_active : bool
+        Python bool, True exactly when configured team ID is 1 or 2.
+    relation_to_recipient : Literal['self', 'ally', 'opponent', 'inactive']
+        self, ally, opponent or inactive.
+    base_sensor_relation_axis : Literal['ally', 'enemy']
+        ally or enemy axis in the recipient's base observation.
+    base_sensor_observation_row : int
+        Python row index in 0..4 on that relation axis.
+    recorded_available : bool
+        Exact Python bool copied from the recorded availability matrix. True is
+        allowed only for configured allies, excluding self.
+
+    Raises
+    ------
+    ValueError
+        Types, ranges, active/team agreement or relation labels fail, or an
+        available source is not a configured ally.
+
+    Notes
+    -----
+    Availability is a recorded permission fact. It is not a visibility flag, a
+    composed actor input or proof of current life status.
+    """
 
     sensor_source_global_slot: int
+    """Python source slot in 0..9, including unused slots."""
     sensor_source_public_agent_id: str
+    """Nonblank recorded source ID."""
     sensor_source_team_local_slot: int
+    """Python source roster position in 0..4."""
     sensor_source_configured_team_id: int
+    """Python team ID 1/2 for configured sources, or 0 for unused slots."""
     sensor_source_configured_active: bool
+    """Python bool, True exactly when configured team ID is 1 or 2."""
     relation_to_recipient: Literal["self", "ally", "opponent", "inactive"]
+    """self, ally, opponent or inactive."""
     base_sensor_relation_axis: Literal["ally", "enemy"]
+    """ally or enemy axis in the recipient's base observation."""
     base_sensor_observation_row: int
+    """Python row index in 0..4 on that relation axis."""
     recorded_available: bool
+    """Exact Python bool copied from the recorded availability matrix. True is
+    allowed only for configured allies, excluding self.
+    """
 
     def __post_init__(self) -> None:
+        """Check SharedObsSensorSourceAvailabilityV1 during host construction.
+
+        Raise ValueError if types, ranges, active/team agreement or relation
+        labels fail, or an available source is not a configured ally.
+        Return None without changing valid values.
+        """
         if type(self.sensor_source_global_slot) is not int or not (
             0 <= self.sensor_source_global_slot < MAX_AGENT_SLOTS_V1
         ):
@@ -328,6 +427,13 @@ def _require_tuple_shape(
     name: str,
     leaf_type: type[float] | type[bool],
 ) -> None:
+    """Validate a fixed nested tuple shape and exact scalar leaf type.
+
+    value must follow shape, a tuple of axis lengths. leaf_type is float or
+    bool; floats must be finite. name labels ValueError for a wrong shape or
+    leaf. Return None without converting or copying input. This host check
+    accepts no NumPy/JAX arrays.
+    """
     if not shape:
         if type(value) is not leaf_type:
             raise ValueError(f"{name} must contain exact {leaf_type.__name__} values.")
@@ -347,29 +453,120 @@ def _require_tuple_shape(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _SharedObsBaseSensorFrame:
-    """One selected recipient's source-only base-sensor frame."""
+    """Keep one recipient's base sensor data for SharedObs inspection.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    schema_version : int
+        Python int 1 for the historical subtype or 2 for the current subtype.
+    observation_materialization : Literal['source_material_only']
+        The literal source_material_only; this is not composed SharedObs input.
+    episode_id : str
+        Nonblank recorded episode ID.
+    public_agent_id : str
+        Nonblank selected recipient public ID.
+    frame_index : int
+        Nonnegative Python recorded frame index.
+    source_material_frame_id : str
+        Canonical episode:shared-obs-source-material:public-agent:frame:index ID.
+    source_frame_id : str
+        Canonical episode:frame:index ID of the source evaluation frame.
+    simulator_step_count : int
+        Nonnegative Python simulator count, distinct from frame index for
+        authored starts.
+    self_features : tuple[float, ...]
+        Finite Python float tuple (58,) for the selected actor.
+    ally_unit_features : tuple[tuple[float, ...], ...]
+        Finite Python float tuples (5, 58), in stable own-team observation-row order.
+    enemy_unit_features : tuple[tuple[float, ...], ...]
+        Finite Python float tuples (5, 58), in stable opposing-team row order.
+    map_obstacle_features : tuple[tuple[float, ...], ...]
+        Finite Python float tuples (32, 8) copied from the recipient's base observation.
+    objective_features : tuple[tuple[float, ...], ...]
+        Finite Python float tuples (8, 12) copied from the base observation.
+    context_features : tuple[float, ...]
+        Finite Python float tuple (19,) of base-observation context.
+    ally_visibility_mask : tuple[bool, ...]
+        Exact Python bool tuple (5,) gating own-team base sensor rows.
+    enemy_visibility_mask : tuple[bool, ...]
+        Exact Python bool tuple (5,) gating opposing-team base sensor rows.
+    previous_timestep_actions : ActorPovPreviousTimestepActionsV1
+        Exact ActorPovPreviousTimestepActionsV1 containing this recipient's
+        recorded accepted-action history.
+    spawn_lifecycle : ActorPovSpawnLifecycleV1
+        Exact ActorPovSpawnLifecycleV1 with own-team then opposing-team axes.
+    action_mask : ActorPovActionMaskV1
+        Exact ActorPovActionMaskV1 for this frame's next decision.
+
+    Raises
+    ------
+    ValueError
+        Version/materialization, canonical IDs, counters, fixed tuple shapes or
+        scalar types fail, or nested actor records change under structural
+        revalidation.
+
+    Notes
+    -----
+    Feature column meanings depend on schema version. V1 column three stores
+    physical team IDs; V2 stores is_enemy. This record retains no arrays and
+    does not combine teammate observations.
+    """
 
     schema_version: int
+    """Python int 1 for the historical subtype or 2 for the current subtype."""
     observation_materialization: Literal["source_material_only"]
+    """The literal source_material_only; this is not composed SharedObs input."""
     episode_id: str
+    """Nonblank recorded episode ID."""
     public_agent_id: str
+    """Nonblank selected recipient public ID."""
     frame_index: int
+    """Nonnegative Python recorded frame index."""
     source_material_frame_id: str
+    """Canonical episode:shared-obs-source-material:public-agent:frame:index ID."""
     source_frame_id: str
+    """Canonical episode:frame:index ID of the source evaluation frame."""
     simulator_step_count: int
+    """Nonnegative Python simulator count, distinct from frame index for authored
+    starts.
+    """
     self_features: tuple[float, ...]
+    """Finite Python float tuple (58,) for the selected actor."""
     ally_unit_features: tuple[tuple[float, ...], ...]
+    """Finite Python float tuples (5, 58), in stable own-team observation-row order."""
     enemy_unit_features: tuple[tuple[float, ...], ...]
+    """Finite Python float tuples (5, 58), in stable opposing-team row order."""
     map_obstacle_features: tuple[tuple[float, ...], ...]
+    """Finite Python float tuples (32, 8) copied from the recipient's base
+    observation.
+    """
     objective_features: tuple[tuple[float, ...], ...]
+    """Finite Python float tuples (8, 12) copied from the base observation."""
     context_features: tuple[float, ...]
+    """Finite Python float tuple (19,) of base-observation context."""
     ally_visibility_mask: tuple[bool, ...]
+    """Exact Python bool tuple (5,) gating own-team base sensor rows."""
     enemy_visibility_mask: tuple[bool, ...]
+    """Exact Python bool tuple (5,) gating opposing-team base sensor rows."""
     previous_timestep_actions: ActorPovPreviousTimestepActionsV1
+    """Exact ActorPovPreviousTimestepActionsV1 containing this recipient's recorded
+    accepted-action history.
+    """
     spawn_lifecycle: ActorPovSpawnLifecycleV1
+    """Exact ActorPovSpawnLifecycleV1 with own-team then opposing-team axes."""
     action_mask: ActorPovActionMaskV1
+    """Exact ActorPovActionMaskV1 for this frame's next decision."""
 
     def __post_init__(self) -> None:
+        """Check _SharedObsBaseSensorFrame during host construction.
+
+        Raise ValueError if version/materialization, canonical IDs, counters,
+        fixed tuple shapes or scalar types fail, or nested actor records change
+        under structural revalidation.
+        Return None without changing valid values.
+        """
         if type(self.schema_version) is not int or (
             self.schema_version
             != (2 if type(self) is SharedObsBaseSensorFrameV2 else 1)
@@ -457,16 +654,58 @@ class _SharedObsBaseSensorFrame:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsBaseSensorFrameV1(_SharedObsBaseSensorFrame):
-    """Historical source material with physical team IDs in column three."""
+    """Keep historical base-sensor data with physical team IDs.
+
+    Inherited fields follow _SharedObsBaseSensorFrame.
+    This is a frozen, slotted, keyword-only host record.
+
+    Raises
+    ------
+    ValueError
+        Inherited frame validation fails or schema_version is not 1.
+
+    Notes
+    -----
+    All fields and shapes follow _SharedObsBaseSensorFrame. Feature column three
+    retains the historical physical-team meaning.
+    """
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsBaseSensorFrameV2(_SharedObsBaseSensorFrame):
-    """Current source material with actor-relative relation flags."""
+    """Keep current base-sensor data with actor-relative relation flags.
+
+    Inherited fields follow _SharedObsBaseSensorFrame.
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    self_ally_index : int
+        Python index in 0..4 locating self in the own-team row axis.
+
+    Raises
+    ------
+    ValueError
+        Inherited frame validation fails, schema_version is not 2,
+        self_ally_index is invalid, or self is_enemy is not zero.
+
+    Notes
+    -----
+    Feature column three is is_enemy, with zero for self/own team and one for
+    opponents. Self retains its roster position rather than being moved to the
+    first row.
+    """
 
     self_ally_index: int
+    """Python index in 0..4 locating self in the own-team row axis."""
 
     def __post_init__(self) -> None:
+        """Check SharedObsBaseSensorFrameV2 during host construction.
+
+        Raise ValueError if inherited frame validation fails, schema_version is
+        not 2, self_ally_index is invalid, or self is_enemy is not zero.
+        Return None without changing valid values.
+        """
         super(SharedObsBaseSensorFrameV2, self).__post_init__()
         if type(self.self_ally_index) is not int or not 0 <= self.self_ally_index < 5:
             raise ValueError("self_ally_index must be an integer from zero to four.")
@@ -479,22 +718,89 @@ type SharedObsBaseSensorFrame = SharedObsBaseSensorFrameV1 | SharedObsBaseSensor
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsBaseSensorSceneV1:
-    """Selected actor's base-sensor scene, explicitly not composed SharedObs."""
+    """Describe only the selected actor's base-sensor view.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    schema_version : int
+        Exact Python int 1; this scene root serves both supported source-frame versions.
+    audience_badge : str
+        Exact source-material disclosure label defined by this module.
+    observation_materialization : Literal['source_material_only']
+        The literal source_material_only.
+    episode_id : str
+        Nonblank episode ID.
+    frame_index : int
+        Nonnegative Python frame index.
+    source_frame_id : str
+        Canonical episode:frame:index ID.
+    simulator_step_count : int
+        Nonnegative Python simulator count.
+    map : MapSceneV1
+        Exact MapSceneV1 derived from base-sensor map/context features.
+    self_actor : ActorPovSelfSceneV1
+        Exact ActorPovSelfSceneV1 for the selected recipient.
+    visible_bodies : tuple[ActorPovVisibleBodySceneV1, ...]
+        Exact tuple of recipient-safe bodies, sorted by unique (relation,
+        observation row) keys.
+    spawn_pads : tuple[ActorPovSpawnPadSceneV1, ...]
+        Exact tuple of ten recipient-safe pad rows ordered by own/opponent team
+        and local slot.
+    respawn_waves : tuple[ActorPovRespawnWaveSceneV1, ...]
+        Tuple of own/opponent wave rows in actor-relative team order (0, 1).
+
+    Raises
+    ------
+    ValueError
+        Version/disclosure, frame identity, scalar fields, record roots or
+        required body/pad/wave ordering is invalid.
+
+    Notes
+    -----
+    This is not the visual union of all permitted SharedObs sources and does not
+    export the exact composed policy input.
+    """
 
     schema_version: int
+    """Exact Python int 1; this scene root serves both supported source-frame
+    versions.
+    """
     audience_badge: str
+    """Exact source-material disclosure label defined by this module."""
     observation_materialization: Literal["source_material_only"]
+    """The literal source_material_only."""
     episode_id: str
+    """Nonblank episode ID."""
     frame_index: int
+    """Nonnegative Python frame index."""
     source_frame_id: str
+    """Canonical episode:frame:index ID."""
     simulator_step_count: int
+    """Nonnegative Python simulator count."""
     map: MapSceneV1
+    """Exact MapSceneV1 derived from base-sensor map/context features."""
     self_actor: ActorPovSelfSceneV1
+    """Exact ActorPovSelfSceneV1 for the selected recipient."""
     visible_bodies: tuple[ActorPovVisibleBodySceneV1, ...]
+    """Exact tuple of recipient-safe bodies, sorted by unique (relation,
+    observation row) keys.
+    """
     spawn_pads: tuple[ActorPovSpawnPadSceneV1, ...]
+    """Exact tuple of ten recipient-safe pad rows ordered by own/opponent team and
+    local slot.
+    """
     respawn_waves: tuple[ActorPovRespawnWaveSceneV1, ...]
+    """Tuple of own/opponent wave rows in actor-relative team order (0, 1)."""
 
     def __post_init__(self) -> None:
+        """Check SharedObsBaseSensorSceneV1 during host construction.
+
+        Raise ValueError if version/disclosure, frame identity, scalar fields,
+        record roots or required body/pad/wave ordering is invalid.
+        Return None without changing valid values.
+        """
         if type(self.schema_version) is not int or (
             self.schema_version != SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION
         ):
@@ -543,21 +849,88 @@ class SharedObsBaseSensorSceneV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _SharedObsSourceMaterialProjection:
-    """Non-exportable base-sensor and availability evidence for SharedObs."""
+    """Join base-sensor data with recorded SharedObs availability evidence.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    schema_version : int
+        Python int 1 for the historical subtype or 2 for the current subtype.
+    disclosure_label : str
+        Exact source-material disclosure label defined by this module.
+    observation_materialization : Literal['source_material_only']
+        The literal source_material_only.
+    exact_actor_input_export_available : Literal[False]
+        The literal False; this record cannot export composed SharedObs input.
+    axis_mapping : ActorPovAxisMapping
+        Exact version-matched actor mapping from observation/action rows to public IDs.
+    ally_observation_row_global_slot_by_id : tuple[int, ...]
+        Python int tuple (5,) mapping own-team rows to global slots.
+    enemy_observation_row_global_slot_by_id : tuple[int, ...]
+        Python int tuple (5,) mapping opposing-team rows to global slots;
+        together both axes partition 0..9.
+    base_sensor_frame : SharedObsBaseSensorFrame
+        Exact version-matched selected-recipient source frame.
+    base_sensor_scene : SharedObsBaseSensorSceneV1
+        Exact SharedObsBaseSensorSceneV1 reconstructed solely from base_sensor_frame.
+    incoming_transition_id : str | None
+        None for frame zero; otherwise the canonical transition entering the
+        source frame.
+    sensor_source_availability : tuple[SharedObsSensorSourceAvailabilityV1, ...]
+        Exact tuple of ten availability rows ordered by source global slot.
+
+    Raises
+    ------
+    ValueError
+        Disclosure/version, actor mapping, full axes, frame/scene identity,
+        incoming transition or source topology/IDs disagree, or rebuilding the
+        base scene changes it.
+
+    Notes
+    -----
+    Construction revalidates nested actor mappings and rebuilds the base scene.
+    This is host work. Source availability and base material remain distinct
+    from a composed actor input.
+    """
 
     schema_version: int
+    """Python int 1 for the historical subtype or 2 for the current subtype."""
     disclosure_label: str
+    """Exact source-material disclosure label defined by this module."""
     observation_materialization: Literal["source_material_only"]
+    """The literal source_material_only."""
     exact_actor_input_export_available: Literal[False]
+    """The literal False; this record cannot export composed SharedObs input."""
     axis_mapping: ActorPovAxisMapping
+    """Exact version-matched actor mapping from observation/action rows to public
+    IDs.
+    """
     ally_observation_row_global_slot_by_id: tuple[int, ...]
+    """Python int tuple (5,) mapping own-team rows to global slots."""
     enemy_observation_row_global_slot_by_id: tuple[int, ...]
+    """Python int tuple (5,) mapping opposing-team rows to global slots; together
+    both axes partition 0..9.
+    """
     base_sensor_frame: SharedObsBaseSensorFrame
+    """Exact version-matched selected-recipient source frame."""
     base_sensor_scene: SharedObsBaseSensorSceneV1
+    """Exact SharedObsBaseSensorSceneV1 reconstructed solely from base_sensor_frame."""
     incoming_transition_id: str | None
+    """None for frame zero; otherwise the canonical transition entering the source
+    frame.
+    """
     sensor_source_availability: tuple[SharedObsSensorSourceAvailabilityV1, ...]
+    """Exact tuple of ten availability rows ordered by source global slot."""
 
     def __post_init__(self) -> None:
+        """Check _SharedObsSourceMaterialProjection during host construction.
+
+        Raise ValueError if disclosure/version, actor mapping, full axes,
+        frame/scene identity, incoming transition or source topology/IDs
+        disagree, or rebuilding the base scene changes it.
+        Return None without changing valid values.
+        """
         if type(self.schema_version) is not int or (
             self.schema_version
             != (2 if type(self) is SharedObsSourceMaterialProjectionV2 else 1)
@@ -720,18 +1093,64 @@ class _SharedObsSourceMaterialProjection:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsSourceMaterialProjectionV1(_SharedObsSourceMaterialProjection):
-    """Historical source material with physical team IDs in column three."""
+    """Keep historical physical-team SharedObs source material.
+
+    Inherited fields follow _SharedObsSourceMaterialProjection.
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    axis_mapping : ActorPovAxisMappingV1
+        Exact ActorPovAxisMappingV1 for this schema.
+    base_sensor_frame : SharedObsBaseSensorFrameV1
+        Exact SharedObsBaseSensorFrameV1 for the selected recipient.
+
+    Raises
+    ------
+    ValueError
+        Inherited projection checks fail or schema_version is not 1.
+
+    Notes
+    -----
+    All other fields follow _SharedObsSourceMaterialProjection. This record does
+    not claim to contain the composed actor input.
+    """
 
     axis_mapping: ActorPovAxisMappingV1
+    """Exact ActorPovAxisMappingV1 for this schema."""
     base_sensor_frame: SharedObsBaseSensorFrameV1
+    """Exact SharedObsBaseSensorFrameV1 for the selected recipient."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsSourceMaterialProjectionV2(_SharedObsSourceMaterialProjection):
-    """Current source material with actor-relative relation flags."""
+    """Keep current actor-relative SharedObs source material.
+
+    Inherited fields follow _SharedObsSourceMaterialProjection.
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    axis_mapping : ActorPovAxisMappingV2
+        Exact ActorPovAxisMappingV2 for this schema.
+    base_sensor_frame : SharedObsBaseSensorFrameV2
+        Exact SharedObsBaseSensorFrameV2 for the selected recipient.
+
+    Raises
+    ------
+    ValueError
+        Inherited projection checks fail or schema_version is not 2.
+
+    Notes
+    -----
+    All other fields follow _SharedObsSourceMaterialProjection. This record does
+    not claim to contain the composed actor input.
+    """
 
     axis_mapping: ActorPovAxisMappingV2
+    """Exact ActorPovAxisMappingV2 for this schema."""
     base_sensor_frame: SharedObsBaseSensorFrameV2
+    """Exact SharedObsBaseSensorFrameV2 for the selected recipient."""
 
 
 type SharedObsSourceMaterialProjection = (
@@ -744,6 +1163,15 @@ def _validate_projection_inputs(
     frame: EvaluationFrame,
     transition_view: EvaluationTransitionViewV1 | None,
 ) -> EvaluationTransitionViewV1 | None:
+    """Revalidate the selected frame and its incoming transition view.
+
+    context and frame must be exact supported evaluation roots for the same
+    episode. transition_view=None is allowed only at frame zero and triggers
+    initial-frame validation. Otherwise rebuild the exact coherent view and
+    require its context/successor to equal the supplied context/frame. Return
+    None or the rebuilt view. Raise TypeError for wrong roots and ValueError
+    for broken structural, temporal or episode joins.
+    """
     evaluation_context_type(context)
     if type(frame) is not EvaluationFrameV1 and type(frame) is not EvaluationFrameV2:
         raise TypeError("frame must be the exact EvaluationFrameV1 root.")
@@ -777,6 +1205,11 @@ def _validate_projection_inputs(
 
 
 def _decode_wire_bool(value: float, *, name: str) -> bool:
+    """Decode an exact Python wire float 0.0/1.0 into a bool.
+
+    name labels ValueError for any other type/value. No truthiness coercion
+    is allowed, and the scalar input is unchanged.
+    """
     if type(value) is not float or value not in (0.0, 1.0):
         raise ValueError(f"{name} must be the exact wire float 0.0 or 1.0.")
     return value == 1.0
@@ -789,6 +1222,12 @@ def _decode_wire_int(
     minimum: int = 0,
     maximum: int | None = None,
 ) -> int:
+    """Decode an integral finite Python wire float within inclusive bounds.
+
+    value must be a finite float with no fractional part. minimum defaults to
+    zero; maximum=None leaves the upper end unbounded. Return a Python int.
+    Raise ValueError labelled by name for invalid type, fraction or bounds.
+    """
     if type(value) is not float or not isfinite(value) or not value.is_integer():
         raise ValueError(f"{name} must be an integer-valued finite wire float.")
     decoded = int(value)
@@ -802,9 +1241,21 @@ def _base_sensor_axis_mapping(
     *,
     selected_global_slot: int,
 ) -> ActorPovAxisMapping:
+    """Copy recorded public action/observation mappings for one recipient.
+
+    context owns the catalog and roster; selected_global_slot is a validated
+    slot in 0..9. Return V2 axes for context schema 3, otherwise historical V1.
+    The mapping includes self and unused slots, and leaves world movement
+    directions unchanged. No policy input is materialized.
+    """
     catalog = context.static_mechanics_catalog
 
     def public_id(global_slot: int) -> str:
+        """Read global_slot's public ID from the enclosing recorded context.
+
+        The caller supplies a valid slot in 0..9. Return the stored string without
+        changing identity or querying simulator state.
+        """
         return context.roster[global_slot].public_agent_id
 
     ally_slots = catalog.global_slot_by_actor_and_ally_observation_row[
@@ -849,6 +1300,13 @@ def _base_sensor_frame(
     selected_global_slot: int,
     public_agent_id: str,
 ) -> SharedObsBaseSensorFrame:
+    """Copy one recipient's base observation and exact mask into host records.
+
+    frame supplies the selected epoch; selected_global_slot in 0..9 chooses
+    the actor, and public_agent_id supplies its already-joined identity. Return
+    a version-matched SharedObsBaseSensorFrame, including history/lifecycle
+    records and V2 self index. Do not combine other sources or grant access.
+    """
     observation = frame.base_observation
     previous = observation.previous_timestep_actions
     lifecycle = observation.spawn_lifecycle
@@ -963,6 +1421,13 @@ def _base_sensor_frame(
 
 
 def _base_sensor_map_scene(frame: SharedObsBaseSensorFrame) -> MapSceneV1:
+    """Decode visible static map records from a selected base-sensor frame.
+
+    frame supplies (32, 8) obstacle features and context map dimensions.
+    Skip inactive rows, preserve world geometry, and return MapSceneV1. Raise
+    ValueError for invalid wire flags/types or an unsupported active obstacle.
+    No privileged map record is consulted.
+    """
     obstacles: list[ObstacleSceneV1] = []
     for obstacle_slot, row in enumerate(frame.map_obstacle_features):
         if not _decode_wire_bool(
@@ -1016,6 +1481,15 @@ def _base_sensor_visible_bodies(
     schema_version: int,
     configured_team_id: int,
 ) -> tuple[ActorPovVisibleBodySceneV1, ...]:
+    """Build only the body rows admitted by a base-sensor visibility mask.
+
+    relation is ally/enemy; rows are float tuples (5, 58), visibility is bool
+    (5,), and public_agent_ids maps those five rows. schema_version selects
+    physical-team versus relation-flag decoding; configured_team_id is the
+    recipient's physical team 1/2. Return rows in observation order. Invisible
+    rows are skipped; a visible inactive row or invalid feature raises
+    ValueError. This uses only supplied base material.
+    """
     bodies: list[ActorPovVisibleBodySceneV1] = []
     for observation_row, (row, visible) in enumerate(
         zip(rows, visibility, strict=True)
@@ -1080,6 +1554,15 @@ def _shared_obs_base_sensor_scene(
     class_id: int,
     axis_mapping: ActorPovAxisMapping,
 ) -> SharedObsBaseSensorSceneV1:
+    """Build a labelled base-sensor scene without composing SharedObs.
+
+    base_sensor_frame supplies self, visible rows, geometry and lifecycle.
+    selected_global_slot, selected_team_local_slot, configured_team_id and
+    class_id are the context identity to join; axis_mapping supplies public
+    row IDs and own/opponent labels. Return the source-only scene. Raise
+    ValueError when self is inactive or team/class identity disagrees. Other
+    record validators reject malformed values. No hidden body is recovered.
+    """
     self_row = base_sensor_frame.self_features
     if not _decode_wire_bool(
         self_row[AGENT_FEATURE_ACTIVE_V1],
@@ -1202,6 +1685,12 @@ def _shared_obs_base_sensor_scene(
 
 
 def _map_scene(context: EvaluationEpisodeContext) -> MapSceneV1:
+    """Copy active recorded obstacles and map bounds from context.
+
+    Return MapSceneV1 with stable obstacle-slot IDs. Ignore inactive padding;
+    raise ValueError for an unsupported active obstacle type. Dimensions use
+    world units and wall angles use radians. No live catalog is consulted.
+    """
     config = context.resolved_env_config
     obstacles: list[ObstacleSceneV1] = []
     for row in config.obstacle_slots:
@@ -1243,6 +1732,12 @@ def _map_scene(context: EvaluationEpisodeContext) -> MapSceneV1:
 def _class_mechanics(
     context: EvaluationEpisodeContext,
 ) -> tuple[ClassMechanicsSceneV2, ...]:
+    """Copy all real class cards from context's recorded mechanics catalog.
+
+    Skip neutral class zero. Join each class to its recorded status and aura
+    mechanics, returning ordered ClassMechanicsSceneV2 rows. Values are copied
+    without invoking current simulator mechanic helpers.
+    """
     real_class_ids = range(1, len(context.static_mechanics_catalog.class_mechanics))
     rows: list[ClassMechanicsSceneV2] = []
     for class_id in real_class_ids:
@@ -1305,6 +1800,13 @@ def _incoming_status_sources(
     context: EvaluationEpisodeContext,
     transition_view: EvaluationTransitionViewV1 | None,
 ) -> dict[tuple[int, int], tuple[StatusSourceEvidenceSceneV2, ...]]:
+    """Collect conservative direct-source evidence from one incoming view.
+
+    context joins applying slots to public IDs. transition_view=None returns
+    an empty lookup. Otherwise key evidence by (recipient slot, channel), sort
+    sources by slot, and clear evidence for any key marked refreshed/extended.
+    This is incoming-only evidence; it does not reconstruct older sources.
+    """
     if transition_view is None:
         return {}
     sources: dict[tuple[int, int], list[StatusSourceEvidenceSceneV2]] = {}
@@ -1335,6 +1837,12 @@ def _incoming_status_sources(
 
 
 def _status_durations(frame: EvaluationFrame, global_slot: int) -> tuple[int, ...]:
+    """Read the nine status durations for global_slot from frame.
+
+    Return Python ints in scientific order: three slows, three stuns, Rogue
+    anti-heal, Mage amplification and Priest movement floor. The caller owns
+    frame/slot validation; this helper does not age any counter.
+    """
     snapshot = frame.snapshot
     return (
         *snapshot.slow_durations[global_slot],
@@ -1350,6 +1858,13 @@ def _status_source_state_from_frame(
     frame: EvaluationFrame,
     evidence_by_key: dict[tuple[int, int], tuple[StatusSourceEvidenceSceneV2, ...]],
 ) -> StatusSourceEvidenceStateV2:
+    """Build evidence rows for exactly the active statuses in frame.
+
+    context supplies roster/catalog identity. evidence_by_key maps recipient
+    slot/channel pairs to direct evidence. Keep positive-duration channels for
+    configured agents, using an empty tuple when source evidence is missing.
+    Return a new frame-bound StatusSourceEvidenceStateV2; inputs are unchanged.
+    """
     catalog = context.static_mechanics_catalog
     rows: list[StatusSourceChannelEvidenceV2] = []
     for roster in context.roster:
@@ -1386,7 +1901,33 @@ def initialize_status_source_evidence_v2(
     context: EvaluationEpisodeContext,
     initial_frame: EvaluationFrame,
 ) -> StatusSourceEvidenceStateV2:
-    """Initialize frame-zero status evidence without inventing source agents."""
+    """Start frame-zero status evidence without guessing source agents.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact supported episode context.
+    initial_frame : EvaluationFrameV1 or EvaluationFrameV2
+        Matching frame zero. Authored initial statuses are allowed.
+
+    Returns
+    -------
+    StatusSourceEvidenceStateV2
+        New frame-zero state with rows for active statuses and empty source tuples.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    This host operation validates the initial frame and copies data. It does not
+    mutate records, draw randomness or call the simulator. Carry the result into
+    advance_status_source_evidence_v2 for the next recorded transition.
+    """
     _validate_projection_inputs(context, initial_frame, None)
     return _status_source_state_from_frame(context, initial_frame, {})
 
@@ -1395,7 +1936,35 @@ def advance_status_source_evidence_v2(
     previous_state: StatusSourceEvidenceStateV2,
     coherent_view: EvaluationTransitionViewV1,
 ) -> StatusSourceEvidenceStateV2:
-    """Return the next immutable evidence state from one validated CP2 view."""
+    """Advance direct status-source evidence across one recorded transition.
+
+    Parameters
+    ----------
+    previous_state : StatusSourceEvidenceStateV2
+        Exact evidence state bound to coherent_view's starting frame.
+    coherent_view : EvaluationTransitionViewV1
+        Exact context/start/transition/successor view, revalidated on entry.
+
+    Returns
+    -------
+    StatusSourceEvidenceStateV2
+        New successor state containing exactly the statuses still active there.
+        Carry this replacement into the next call; previous_state is unchanged.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    Process events in their recorded order. Direct applications add evidence;
+    refresh/extension clears uncertain sources. Aging, damage break and death
+    clear old evidence. Only positive successor durations remain. Empty evidence
+    means unknown source, not an inactive status. This is pure host record work.
+    """
     if type(previous_state) is not StatusSourceEvidenceStateV2:
         raise TypeError("previous_state must be the exact StatusSourceEvidenceStateV2.")
     if type(coherent_view) is not EvaluationTransitionViewV1:
@@ -1455,7 +2024,36 @@ def build_status_source_evidence_index_v2(
     frames: tuple[EvaluationFrame, ...],
     transitions: tuple[EvaluationTransitionV1, ...],
 ) -> StatusSourceEvidenceIndexV2:
-    """Build one O(T) replay index through the live replacement-state reducer."""
+    """Build reusable source-evidence states for a complete recorded trajectory.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact supported context for the trajectory.
+    frames : tuple of EvaluationFrameV1 or EvaluationFrameV2
+        Nonempty exact Python tuple of T+1 coherent frames starting at frame zero.
+    transitions : tuple of EvaluationTransitionV1
+        Exact Python tuple of T transitions joining consecutive frame pairs.
+
+    Returns
+    -------
+    StatusSourceEvidenceIndexV2
+        Immutable states for frames 0..T. state_for_frame retrieves a stored state.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    Use the same initializer and replacement-state reducer as live inspection.
+    This host pass walks the full trajectory once and retains every evidence
+    state. It does not load or write a replay file, infer missing events or run
+    the simulator. Cost grows with recorded events and retained evidence.
+    """
     if type(frames) is not tuple or type(transitions) is not tuple:
         raise TypeError("frames and transitions must be Python tuples.")
     if not frames or len(frames) != len(transitions) + 1:
@@ -1486,6 +2084,14 @@ def _status_scenes(
     global_slot: int,
     source_evidence: dict[tuple[int, int], tuple[StatusSourceEvidenceSceneV2, ...]],
 ) -> tuple[StatusSceneV2, ...]:
+    """Build display-ordered active statuses for one recorded agent.
+
+    context supplies catalog meanings; frame and global_slot supply durations.
+    source_evidence maps (recipient slot, channel) to direct application rows.
+    Return only positive-duration statuses in canonical presentation order;
+    missing evidence becomes empty. Raise ValueError when recorded duration
+    and catalog axes disagree. This does not infer source identity.
+    """
     durations = _status_durations(frame, global_slot)
     catalog = context.static_mechanics_catalog
     if len(durations) != len(catalog.status_channels):
@@ -1525,6 +2131,12 @@ def _status_scenes(
 def _incoming_respawn_event_ids(
     transition_view: EvaluationTransitionViewV1 | None,
 ) -> dict[int, str]:
+    """Map respawned global slots to their direct incoming event IDs.
+
+    transition_view=None returns an empty dictionary. Otherwise inspect exact
+    canonical respawn events only; later entries replace earlier ones for the
+    same slot. No respawn is inferred from position or health changes.
+    """
     if transition_view is None:
         return {}
     return {
@@ -1540,6 +2152,14 @@ def _agent_scenes(
     transition_view: EvaluationTransitionViewV1 | None,
     status_source_evidence_state: StatusSourceEvidenceStateV2 | None = None,
 ) -> tuple[AgentSceneV2, ...]:
+    """Copy configured agents from a selected frame into researcher rows.
+
+    context owns roster/profile data; frame supplies durable values and public
+    self-derived speed/modifiers. transition_view supplies direct respawn IDs.
+    status_source_evidence_state defaults to incoming-only status evidence;
+    when supplied it must match this frame or raises ValueError. Return new
+    AgentSceneV2 rows in roster order, including corpses and both aura values.
+    """
     if status_source_evidence_state is None:
         source_evidence = _incoming_status_sources(context, transition_view)
     else:
@@ -1627,6 +2247,13 @@ def _aura_fields(
     context: EvaluationEpisodeContext,
     frame: EvaluationFrame,
 ) -> tuple[AuraFieldSceneV2, ...]:
+    """Copy every configured emitter's declared aura capability into scene rows.
+
+    context supplies aura catalog values and frame supplies emitter position
+    and alive flag. Return rows sorted by (source slot, aura ID), including
+    capability rows for dead emitters. Do not infer recipient coverage or
+    recompute shield eligibility.
+    """
     catalog = context.static_mechanics_catalog
     fields: list[AuraFieldSceneV2] = []
     for roster in context.roster:
@@ -1664,6 +2291,11 @@ def _aura_fields(
 def _spawn_pads(
     context: EvaluationEpisodeContext,
 ) -> tuple[SpawnPadSceneV2, ...]:
+    """Join recorded context spawn pads to configured roster agents.
+
+    Return SpawnPadSceneV2 rows sorted by physical team ID and local slot.
+    Skip unused slots and retain each class-to-pad assignment unchanged.
+    """
     positions = context.resolved_env_config.team_spawn_pad_positions
     rows = [
         SpawnPadSceneV2(
@@ -1683,6 +2315,11 @@ def _respawn_waves(
     context: EvaluationEpisodeContext,
     frame: EvaluationFrame,
 ) -> tuple[RespawnWaveSceneV2, ...]:
+    """Copy Team A then Team B wave clocks from context and frame.
+
+    context supplies each period and frame supplies each current countdown.
+    Return two RespawnWaveSceneV2 rows without advancing or deriving clocks.
+    """
     config = context.resolved_env_config
     return tuple(
         RespawnWaveSceneV2(
@@ -1699,10 +2336,34 @@ def validate_oracle_scene_static_authority_v1(
     context: EvaluationEpisodeContext,
     scene: BattlefieldSceneV2,
 ) -> None:
-    """Check static coherence of already canonical, deeply validated exact roots.
+    """Check that a researcher scene agrees with its recorded static authority.
 
-    This predicate does not construct or deep-validate either input. Authority
-    constructors must perform that validation before calling it.
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Already deeply validated exact context root.
+    scene : BattlefieldSceneV2
+        Already deeply validated exact researcher scene for the same episode.
+
+    Returns
+    -------
+    None
+        The scene's map, class cards, pads, roster profiles, declared aura
+        capabilities, clock limits and status values agree with context.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    This host predicate does not construct or deeply revalidate either input;
+    authority constructors must do that first. It checks context-owned values
+    and bounds, including shield speed while shielded. It does not validate
+    all dynamic state against a selected frame or recompute simulator rules.
     """
     evaluation_context_type(context)
     if type(scene) is not BattlefieldSceneV2:
@@ -1825,6 +2486,15 @@ def _selection_projection(
     SelectionSceneV1 | None,
     SelectedLegalitySceneV1 | None,
 ]:
+    """Build optional ranges and next-decision pair-mask labels.
+
+    context supplies active roster, catalog ranges and target mappings; frame
+    supplies current position/mask. presentation supplies controlled/selected
+    slots and lane. Return (ranges, selection, legality), using empty/None when
+    no actor or target is selected. Raise ValueError for inactive selections
+    or a target absent from the recorded mapping. Never compute legality from
+    a radius or infer it from an incoming action.
+    """
     controlled = presentation.controlled_global_slot
     selected = presentation.selected_global_slot
     active_slots = {
@@ -1894,7 +2564,13 @@ def _observer_visibility_projection(
     frame: EvaluationFrame,
     presentation: EvaluationScenePresentationStateV1,
 ) -> tuple[ObserverVisibilitySceneV1, ...]:
-    """Project one researcher's exact recorded base-sensor visibility row."""
+    """Copy one selected observer's recorded visibility over the scene roster.
+
+    context maps own/opponent rows to global slots, frame supplies base masks,
+    and presentation chooses the observer. Return ordered configured-agent
+    facts, or an empty tuple when no observer is selected. This researcher
+    projection does not grant these facts to another actor.
+    """
     observer = presentation.controlled_global_slot
     if observer is None:
         return ()
@@ -1932,7 +2608,45 @@ def build_evaluation_battlefield_scene_v2(
     presentation: EvaluationScenePresentationStateV1 | None = None,
     status_source_evidence_state: StatusSourceEvidenceStateV2 | None = None,
 ) -> BattlefieldSceneV2:
-    """Project one canonical selected frame into the V2 researcher scene."""
+    """Project a selected canonical frame into a privileged researcher scene.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact supported recorded context, including roster, catalog and episode ID.
+    frame : EvaluationFrameV1 or EvaluationFrameV2
+        Exact selected recorded frame joined to context.
+    transition_view : EvaluationTransitionViewV1 or None, optional
+        Coherent incoming transition whose successor equals frame. Required after
+        frame zero; None validates the initial frame. The view is revalidated.
+    audience : str, default 'researcher'
+        Must be researcher. This route cannot create an actor-POV projection.
+    presentation : EvaluationScenePresentationStateV1 or None, optional
+        Selection and range choices; None means no selected actor and defaults.
+    status_source_evidence_state : StatusSourceEvidenceStateV2 or None, optional
+        Optional evidence state bound to frame. None uses only direct incoming
+        application evidence; it cannot recover sources from older transitions.
+
+    Returns
+    -------
+    BattlefieldSceneV2
+        New researcher scene. Durable state comes from context/frame; incoming
+        events supply identity and direct evidence. Selected legality describes
+        the next decision using this frame's exact mask.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    Host-only record projection; no JAX arrays, policy calls, file I/O or renderer
+    objects are used. Input records remain unchanged. Use the analyzer envelope
+    when a scene, its exact event batch and persistent evidence must travel together.
+    """
     if audience != "researcher":
         raise ValueError(
             "researcher projection cannot be reused as an actor-POV projection."
@@ -1989,7 +2703,15 @@ def _build_shared_obs_source_material_projection_v1(
     selected_global_slot: int,
     incoming_transition_id: str | None,
 ) -> SharedObsSourceMaterialProjection:
-    """Construct one projection after the caller validates its authority root."""
+    """Build SharedObs source material after the caller validates its roots.
+
+    context/frame supply recorded identity, base data and availability.
+    selected_global_slot must be configured active in 0..9. The caller supplies
+    the canonical incoming_transition_id or None at frame zero. Return a
+    version-matched projection with ten source-availability rows. Raise
+    ValueError for a non-SharedObs episode, bad actor or missing availability.
+    No exact composed actor input is created.
+    """
     if context.execution_information_mode != "shared_obs":
         raise ValueError(
             "SharedObs source-material projection requires a shared_obs episode."
@@ -2094,7 +2816,41 @@ def build_shared_obs_source_material_projection_v1(
     *,
     selected_global_slot: int,
     transition_view: EvaluationTransitionViewV1 | None = None,
-) -> SharedObsSourceMaterialProjectionV1: ...
+) -> SharedObsSourceMaterialProjectionV1:
+    """Project labelled base-sensor and availability evidence for SharedObs.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact recorded context with execution_information_mode='shared_obs'.
+    frame : EvaluationFrameV1 or EvaluationFrameV2
+        Matching exact frame with recorded source-availability values.
+    selected_global_slot : int
+        Exact Python configured-active recipient slot in 0..9.
+    transition_view : EvaluationTransitionViewV1 or None, optional
+        Required coherent incoming view after frame zero. None is allowed only
+        at frame zero; the complete context/frame/transition join is revalidated.
+
+    Returns
+    -------
+    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
+        Version follows frame. Includes the recipient's base sensor frame/scene
+        and ten availability cells. Exact composed actor-input export is False.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    This is a full-record researcher aid, explicitly labelled source material.
+    It does not export or claim the composed actor input. Exact SharedObs input
+    materialization is unavailable through this route. No policy is executed.
+    """
+    ...
 
 
 @overload
@@ -2104,7 +2860,41 @@ def build_shared_obs_source_material_projection_v1(
     *,
     selected_global_slot: int,
     transition_view: EvaluationTransitionViewV1 | None = None,
-) -> SharedObsSourceMaterialProjectionV2: ...
+) -> SharedObsSourceMaterialProjectionV2:
+    """Project labelled base-sensor and availability evidence for SharedObs.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact recorded context with execution_information_mode='shared_obs'.
+    frame : EvaluationFrameV1 or EvaluationFrameV2
+        Matching exact frame with recorded source-availability values.
+    selected_global_slot : int
+        Exact Python configured-active recipient slot in 0..9.
+    transition_view : EvaluationTransitionViewV1 or None, optional
+        Required coherent incoming view after frame zero. None is allowed only
+        at frame zero; the complete context/frame/transition join is revalidated.
+
+    Returns
+    -------
+    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
+        Version follows frame. Includes the recipient's base sensor frame/scene
+        and ten availability cells. Exact composed actor-input export is False.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    This is a full-record researcher aid, explicitly labelled source material.
+    It does not export or claim the composed actor input. Exact SharedObs input
+    materialization is unavailable through this route. No policy is executed.
+    """
+    ...
 
 
 @overload
@@ -2114,7 +2904,41 @@ def build_shared_obs_source_material_projection_v1(
     *,
     selected_global_slot: int,
     transition_view: EvaluationTransitionViewV1 | None = None,
-) -> SharedObsSourceMaterialProjection: ...
+) -> SharedObsSourceMaterialProjection:
+    """Project labelled base-sensor and availability evidence for SharedObs.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact recorded context with execution_information_mode='shared_obs'.
+    frame : EvaluationFrameV1 or EvaluationFrameV2
+        Matching exact frame with recorded source-availability values.
+    selected_global_slot : int
+        Exact Python configured-active recipient slot in 0..9.
+    transition_view : EvaluationTransitionViewV1 or None, optional
+        Required coherent incoming view after frame zero. None is allowed only
+        at frame zero; the complete context/frame/transition join is revalidated.
+
+    Returns
+    -------
+    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
+        Version follows frame. Includes the recipient's base sensor frame/scene
+        and ten availability cells. Exact composed actor-input export is False.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    This is a full-record researcher aid, explicitly labelled source material.
+    It does not export or claim the composed actor input. Exact SharedObs input
+    materialization is unavailable through this route. No policy is executed.
+    """
+    ...
 
 
 def build_shared_obs_source_material_projection_v1(
@@ -2126,8 +2950,36 @@ def build_shared_obs_source_material_projection_v1(
 ) -> SharedObsSourceMaterialProjection:
     """Project labelled base-sensor and availability evidence for SharedObs.
 
-    This full-record researcher aid deliberately does not export or claim the
-    composed actor input.  Exact SharedObs materialization remains unavailable.
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact recorded context with execution_information_mode='shared_obs'.
+    frame : EvaluationFrameV1 or EvaluationFrameV2
+        Matching exact frame with recorded source-availability values.
+    selected_global_slot : int
+        Exact Python configured-active recipient slot in 0..9.
+    transition_view : EvaluationTransitionViewV1 or None, optional
+        Required coherent incoming view after frame zero. None is allowed only
+        at frame zero; the complete context/frame/transition join is revalidated.
+
+    Returns
+    -------
+    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
+        Version follows frame. Includes the recipient's base sensor frame/scene
+        and ten availability cells. Exact composed actor-input export is False.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    This is a full-record researcher aid, explicitly labelled source material.
+    It does not export or claim the composed actor input. Exact SharedObs input
+    materialization is unavailable through this route. No policy is executed.
     """
     canonical_view = _validate_projection_inputs(context, frame, transition_view)
     return _build_shared_obs_source_material_projection_v1(
@@ -2146,7 +2998,39 @@ def build_shared_obs_authority_source_material_projection_v1(
     frame: EvaluationFrameV1,
     *,
     selected_global_slot: int,
-) -> SharedObsSourceMaterialProjectionV1: ...
+) -> SharedObsSourceMaterialProjectionV1:
+    """Build SharedObs visual source authority without incoming history.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact recorded context with execution_information_mode='shared_obs'.
+    frame : EvaluationFrameV1 or EvaluationFrameV2
+        Matching exact frame with recorded source-availability values.
+    selected_global_slot : int
+        Exact Python configured-active recipient slot in 0..9.
+
+    Returns
+    -------
+    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
+        Version-matched base-sensor and availability evidence. Incoming transition
+        identity is formed from frame_index; no incoming event data is supplied.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    Revalidate the context/frame join, then use the same source-material builder
+    as the full-record diagnostic route. This narrower authority is for visual
+    union construction and does not claim composed actor-input export. It does
+    not require a transition view, read history files or execute a policy.
+    """
+    ...
 
 
 @overload
@@ -2155,7 +3039,39 @@ def build_shared_obs_authority_source_material_projection_v1(
     frame: EvaluationFrameV2,
     *,
     selected_global_slot: int,
-) -> SharedObsSourceMaterialProjectionV2: ...
+) -> SharedObsSourceMaterialProjectionV2:
+    """Build SharedObs visual source authority without incoming history.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact recorded context with execution_information_mode='shared_obs'.
+    frame : EvaluationFrameV1 or EvaluationFrameV2
+        Matching exact frame with recorded source-availability values.
+    selected_global_slot : int
+        Exact Python configured-active recipient slot in 0..9.
+
+    Returns
+    -------
+    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
+        Version-matched base-sensor and availability evidence. Incoming transition
+        identity is formed from frame_index; no incoming event data is supplied.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    Revalidate the context/frame join, then use the same source-material builder
+    as the full-record diagnostic route. This narrower authority is for visual
+    union construction and does not claim composed actor-input export. It does
+    not require a transition view, read history files or execute a policy.
+    """
+    ...
 
 
 @overload
@@ -2164,7 +3080,39 @@ def build_shared_obs_authority_source_material_projection_v1(
     frame: EvaluationFrame,
     *,
     selected_global_slot: int,
-) -> SharedObsSourceMaterialProjection: ...
+) -> SharedObsSourceMaterialProjection:
+    """Build SharedObs visual source authority without incoming history.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact recorded context with execution_information_mode='shared_obs'.
+    frame : EvaluationFrameV1 or EvaluationFrameV2
+        Matching exact frame with recorded source-availability values.
+    selected_global_slot : int
+        Exact Python configured-active recipient slot in 0..9.
+
+    Returns
+    -------
+    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
+        Version-matched base-sensor and availability evidence. Incoming transition
+        identity is formed from frame_index; no incoming event data is supplied.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    Revalidate the context/frame join, then use the same source-material builder
+    as the full-record diagnostic route. This narrower authority is for visual
+    union construction and does not claim composed actor-input export. It does
+    not require a transition view, read history files or execute a policy.
+    """
+    ...
 
 
 def build_shared_obs_authority_source_material_projection_v1(
@@ -2173,7 +3121,37 @@ def build_shared_obs_authority_source_material_projection_v1(
     *,
     selected_global_slot: int,
 ) -> SharedObsSourceMaterialProjection:
-    """Build Shared visual-union authority without transition/history input."""
+    """Build SharedObs visual source authority without incoming history.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact recorded context with execution_information_mode='shared_obs'.
+    frame : EvaluationFrameV1 or EvaluationFrameV2
+        Matching exact frame with recorded source-availability values.
+    selected_global_slot : int
+        Exact Python configured-active recipient slot in 0..9.
+
+    Returns
+    -------
+    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
+        Version-matched base-sensor and availability evidence. Incoming transition
+        identity is formed from frame_index; no incoming event data is supplied.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    Revalidate the context/frame join, then use the same source-material builder
+    as the full-record diagnostic route. This narrower authority is for visual
+    union construction and does not claim composed actor-input export. It does
+    not require a transition view, read history files or execute a policy.
+    """
     validate_context_joined_evaluation_frame_v1(context, frame)
     incoming_transition_id = (
         None
@@ -2191,6 +3169,13 @@ def build_shared_obs_authority_source_material_projection_v1(
 def _visual_phase_trajectories_v2(
     view: EvaluationTransitionViewV1,
 ) -> tuple[VisualAgentPhaseTrajectoryV2, ...]:
+    """Build each configured agent's anchors from one coherent recorded view.
+
+    view supplies start/successor positions and recorded Charge displacement.
+    Return trajectories in global roster order: start, start plus Charge
+    displacement, then recorded successor. Unused slots are omitted. These
+    are phase facts, not a newly simulated continuous movement path.
+    """
     context = view.context
     start_positions = view.start_frame.snapshot.agent_positions
     successor_positions = view.successor_frame.snapshot.agent_positions
@@ -2234,9 +3219,19 @@ def _visual_phase_trajectories_v2(
 
 
 class _VisualEventIdentityV2(TypedDict):
+    """Type the three identity fields copied unchanged into every visual event.
+
+    This TypedDict describes a plain dictionary; it performs no runtime
+    validation. event_id, transition_id and ordinal retain canonical evaluation
+    identity and order.
+    """
+
     event_id: str
+    """Canonical event string copied from the evaluation event."""
     transition_id: str
+    """Canonical containing-transition string copied unchanged."""
     ordinal: int
+    """Nonnegative event ordinal copied unchanged within its transition."""
 
 
 def _project_visual_event_v2(
@@ -2246,10 +3241,26 @@ def _project_visual_event_v2(
     public_agent_id_by_global_slot: tuple[str, ...],
     configured_active_by_global_slot: tuple[bool, ...],
 ) -> VisualEventV2:
+    """Copy one canonical event into its matching visual record.
+
+    event supplies unchanged identity and scalar facts. trajectory_by_slot
+    supplies anchors; the ten-entry public-ID and active-flag tuples supply
+    roster identity, including feed-only unused actor rejections. Return one
+    VisualEventV2 without joining another event. Raise TypeError for an
+    unsupported event type and ValueError if a required active anchor is
+    missing or a resulting record fails validation.
+    """
+
     def anchor(
         global_slot: int,
         phase: Literal["transition_start", "post_charge", "successor"],
     ) -> VisualAgentAnchorV2:
+        """Look up global_slot's recorded position at phase in the enclosing view.
+
+        phase is transition_start, post_charge or successor. Return the stored
+        VisualAgentAnchorV2. Raise ValueError when no configured trajectory exists;
+        never recover an unused actor's position from privileged state.
+        """
         trajectory = trajectory_by_slot.get(global_slot)
         if trajectory is None:
             raise ValueError(
@@ -2500,7 +3511,32 @@ def _project_visual_event_v2(
 def build_visual_event_batch_v2(
     coherent_view: EvaluationTransitionViewV1,
 ) -> VisualEventBatchV2:
-    """Project every canonical event independently without cross-event joins."""
+    """Project every canonical event with its recorded identity and phase anchors.
+
+    Parameters
+    ----------
+    coherent_view : EvaluationTransitionViewV1
+        Exact coherent context/start/transition/successor view, revalidated here.
+
+    Returns
+    -------
+    VisualEventBatchV2
+        Every canonical event once, in unchanged order, plus phase trajectories
+        for configured agents. Unused actor rejections remain non-spatial cues.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    Each event is copied independently without deriving facts by joining other
+    events. Start and successor positions come from recorded frames; post-Charge
+    anchors use recorded Charge displacement. No simulator or renderer is called.
+    """
     if type(coherent_view) is not EvaluationTransitionViewV1:
         raise TypeError("coherent_view must be EvaluationTransitionViewV1.")
     view = EvaluationTransitionViewV1(
@@ -2545,7 +3581,43 @@ def build_researcher_analyzer_projection_v2(
     presentation: EvaluationScenePresentationStateV1 | None = None,
     status_source_evidence_state: StatusSourceEvidenceStateV2 | None = None,
 ) -> ResearcherAnalyzerProjectionV2:
-    """Build the stable researcher scene/event envelope for one frame."""
+    """Build the joined researcher scene, incoming events and status evidence.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact supported recorded context, including roster, catalog and episode ID.
+    frame : EvaluationFrameV1 or EvaluationFrameV2
+        Exact selected recorded frame joined to context.
+    transition_view : EvaluationTransitionViewV1 or None, optional
+        Coherent incoming transition whose successor equals frame. Required after
+        frame zero; None validates the initial frame. The view is revalidated.
+    presentation : EvaluationScenePresentationStateV1 or None, optional
+        Optional actor/target/lane and range choices; None uses defaults.
+    status_source_evidence_state : StatusSourceEvidenceStateV2 or None, optional
+        Frame-bound evidence state. Required after frame zero. At frame zero,
+        None initializes unknown-source rows for authored active statuses.
+
+    Returns
+    -------
+    ResearcherAnalyzerProjectionV2
+        New immutable envelope with exact scene/event/evidence joins. Frame zero
+        has incoming_events=None; later frames contain their incoming batch.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    Advance status evidence separately across recorded transitions, or use the
+    replay evidence index, then pass the state for this selected frame. This
+    host projection does not advance the simulator, mutate inputs or authorize
+    an actor to read researcher information.
+    """
     canonical_view = _validate_projection_inputs(context, frame, transition_view)
     if frame.frame_index == 0:
         evidence_state = (

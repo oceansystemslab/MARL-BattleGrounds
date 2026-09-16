@@ -1,3 +1,8 @@
+/**
+ * @file Create browser SVG icons from a fixed local shape registry. Icons use
+ * currentColor and a 24-by-24 view box. No image download, HTML parsing or
+ * simulator lookup is involved; callers choose accessible names and placement.
+ */
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
 /**
@@ -19,6 +24,11 @@ const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
  */
 
 /**
+ * Return a frozen SVG primitive with tag and attributes. tag is an allowed
+ * shape name; attributes holds its SVG values. Freeze the supplied attributes
+ * object itself, without copying or validating it. This module owns those
+ * objects, so callers must not expect to edit one after registration.
+ *
  * @param {IconPrimitiveTag} tag
  * @param {Record<string, string | number>} attributes
  * @returns {Readonly<IconPrimitive>}
@@ -31,6 +41,10 @@ function primitive(tag, attributes) {
 }
 
 /**
+ * Return a frozen icon definition for glyphKey and its primitives. Freeze
+ * the supplied primitives array itself; existing primitive objects are reused.
+ * The module owns and validates the registry through its authored constants.
+ *
  * @param {string} glyphKey
  * @param {IconPrimitive[]} primitives
  * @returns {Readonly<IconDefinition>}
@@ -228,7 +242,9 @@ const ICONS = Object.freeze({
 export const KNOWN_GLYPH_KEYS = Object.freeze(Object.keys(ICONS));
 
 /**
- * Return an allowlisted inline-vector definition or the safe unknown icon.
+ * Look up glyphKey after trimming string input. Return the shared frozen
+ * definition, or the shared unknown icon for nonstring/empty/unlisted input.
+ * No DOM is created and the registry is not changed.
  *
  * @param {unknown} glyphKey
  * @returns {Readonly<IconDefinition>}
@@ -242,10 +258,13 @@ export function iconDefinition(glyphKey) {
 }
 
 /**
- * Create a nested SVG icon using only local primitives and `currentColor`.
+ * Create a detached SVG element for a registered glyph or the unknown icon.
  *
- * A supplied accessible name creates one labelled image. Without a label the
- * icon is decorative and hidden from accessibility APIs.
+ * ownerDocument creates every SVG node. glyphKey uses iconDefinition's lookup.
+ * options defaults to {}; className is copied when truthy. A nonempty trimmed
+ * accessibleName makes a labelled image; otherwise mark it decorative with
+ * aria-hidden. Return the new SVGSVGElement with its child shapes. The caller
+ * attaches it. No network access or existing DOM mutation occurs.
  *
  * @param {Document} ownerDocument
  * @param {unknown} glyphKey

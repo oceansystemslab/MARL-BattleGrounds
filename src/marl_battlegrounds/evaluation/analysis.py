@@ -1,7 +1,10 @@
-"""Read-only replay prefixes using the training/evaluation scalar metric authority.
+"""Compute replay metric prefixes for the Viewer and CSV exports.
 
-Decode captured Core arrays once, scan fixed-size blocks, and retain only scalar
-prefixes. Seeking and CSV export never rerun the simulator or metric collection.
+analyze_replay reads captured Core facts once and uses the same numerical
+metric functions as live evaluation. Fixed-size JAX blocks limit temporary
+decoding; ReplayAnalysis keeps only scalar values for each captured frame.
+Seeking and exporting then select stored values without replaying game physics.
+Full metrics require a matching recorded mechanics catalog.
 """
 
 from __future__ import annotations
@@ -95,12 +98,20 @@ REPLAY_IDENTITY_COLUMNS = (
 
 
 class _Carry(NamedTuple):
+    """Carry the last captured state and compact metric totals between analysis
+    blocks.
+    """
+
     state: EnvState
     priority: PriorityTotals
     diagnostics: FullTotals
 
 
 class _Transition(NamedTuple):
+    """One decoded successor, acting mask, Core facts and reward, with an admission
+    flag.
+    """
+
     successor: EnvState
     action_mask: ActionMask
     info: Info
@@ -109,6 +120,9 @@ class _Transition(NamedTuple):
 
 
 def _source_digest() -> str:
+    """Hash installed evaluation/Core source bytes so analyzed values identify their
+    producer.
+    """
     digest = hashlib.sha256()
     for package in ("marl_battlegrounds.evaluation", "marl_battlegrounds.core"):
         for path in sorted(files(package).iterdir(), key=lambda path: path.name):
@@ -122,6 +136,9 @@ def _source_digest() -> str:
 def _values(
     config: EnvConfig, initial_step: Array, carry: _Carry, outcome: Array, *, full: bool
 ) -> MetricValues:
+    """Read current priority values, adding full values only for the static full
+    mode.
+    """
     priority = priority_values(
         config, carry.state, initial_step, carry.priority, outcome
     )
@@ -132,6 +149,7 @@ def _values(
 def _initialize(
     config: EnvConfig, state: EnvState, *, full: bool
 ) -> tuple[_Carry, MetricValues]:
+    """Create one prefix's metric totals and values at the captured initial frame."""
     carry = _Carry(
         state, initialize_priority(), initialize_full(config, state) if full else {}
     )
@@ -149,8 +167,22 @@ def _scan_block(
     *,
     full: bool,
 ) -> tuple[_Carry, MetricValues]:
+    """Reduce one fixed-size captured block without advancing simulator physics.
+
+    full is static; config/state/facts are numerical inputs. Valid rows update the
+    shared metric authorities and return prefix values. Padding leaves carry
+    unchanged and returns unavailable zeros that the host removes.
+    """
+
     def step(previous: _Carry, row: _Transition) -> tuple[_Carry, MetricValues]:
+        """Choose a real recorded transition or inert padding while keeping fixed
+        shapes.
+        """
+
         def observed(_: None) -> tuple[_Carry, MetricValues]:
+            """Update totals from captured facts and read the successor's metric
+            prefix.
+            """
             current = _Carry(
                 row.successor,
                 update_priority(previous.priority, row.reward, row.info),
@@ -173,6 +205,9 @@ def _scan_block(
             )
 
         def padding(_: None) -> tuple[_Carry, MetricValues]:
+            """Preserve carry and emit unavailable zero values for a padded block
+            row.
+            """
             size = len(METRIC_COLUMNS) if full else len(PRIORITY_METRIC_COLUMNS)
             return previous, MetricValues(
                 jnp.zeros(size, jnp.float32), jnp.zeros(size, bool)
@@ -188,7 +223,33 @@ def _scan_block(
 
 @dataclass(frozen=True, slots=True)
 class ReplayAnalysis:
-    """Immutable scalar prefixes; GUI and CSV select the identical stored boundary."""
+    """Read stored metric prefixes without recomputing a recorded game.
+
+    Attributes
+    ----------
+    source_replay_digest : str
+        Digest of the analyzed replay artifact.
+    analysis_source_digest : str
+        Digest of installed evaluation/Core source bytes.
+    original_metric_status : str
+        Status of any original sidecar: not_recorded,
+        missing, available or empty. Current values are computed separately.
+    context : EvaluationEpisodeContext
+        Immutable recorded episode/config/information context.
+    completion : EvaluationEpisodeCompletionV1
+        Recorded completion description for the final captured frame.
+    columns : tuple[MetricColumn, ...]
+        Ordered metric catalog entries represented by the stored arrays.
+    frame_count : object
+        Number of captured frames, including the initial frame.
+
+    Notes
+    -----
+    Construct through analyze_replay. Internal float32 values and boolean
+    validity arrays have shape (frames, columns) and are read-only. This frozen
+    descriptor also caches nested Python display metadata; treat returned
+    catalog/topic descriptions as read-only. No method owns a file handle.
+    """
 
     source_replay_digest: str
     analysis_source_digest: str
@@ -204,7 +265,7 @@ class ReplayAnalysis:
     _topics: tuple[dict[str, object], ...] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Prepare immutable descriptions once, independently of cursor or POV."""
+        """Cache roster-aware descriptions once, without choosing cursor time or POV."""
         rows: list[dict[str, object]] = []
         reasons: list[str | None] = []
         recorded_classes = tuple(agent.class_id for agent in self.context.roster)
@@ -291,7 +352,12 @@ class ReplayAnalysis:
         )
 
     def _not_applicable_reason(self, column: MetricColumn) -> str | None:
-        """Explain roster or ability limits, never a value or zero denominator."""
+        """Explain a structural roster/targeting limit for one display column.
+
+        Use configured active classes and recorded mechanics, never a current value,
+        cooldown or zero denominator. Return None when the column can apply. This
+        display filter does not change the numerical CSV availability mask.
+        """
         roster = self.context.roster
         if column.scope == "episode":
             return None
@@ -367,11 +433,12 @@ class ReplayAnalysis:
     def _effect_not_applicable_reason(
         self, column: MetricColumn, sources: tuple[int, ...]
     ) -> str | None:
-        """Hide impossible helpers, without treating their patients as helpers.
+        """Explain impossible effect producers using recorded class abilities.
 
-        Use the recorded roster and abilities, never this tick's values, range,
-        health or cooldowns. A capable source keeps its rows even before acting.
-        CSV values and missing-value rules do not use these display checks.
+        sources contains configured global slots for the metric subject. Recipients
+        are not mistaken for their helpers. Preserve rows for capable agents before
+        they act, and preserve authored Trap intervals without inventing a caster.
+        This display-only explanation never changes numerical values or CSV masks.
         """
         health_effect = (
             "damage"
@@ -422,6 +489,9 @@ class ReplayAnalysis:
         )
 
         def has_class(team_id: int, class_id: int) -> bool:
+            """Check active recorded roster membership for a configured team and
+            class.
+            """
             return any(
                 agent.configured_active
                 and agent.configured_team_id == team_id
@@ -430,12 +500,16 @@ class ReplayAnalysis:
             )
 
         def can_produce(slot: int, effect: str = "damage", ability: str = "") -> bool:
+            """Check recorded raw Basic/Ultimate effect capability for one source
+            slot.
+            """
             profile = mechanics[roster[slot].class_id]
             return (
                 ability != "ultimate" and getattr(profile, f"basic_raw_{effect}") > 0
             ) or (ability != "basic" and getattr(profile, f"ultimate_raw_{effect}") > 0)
 
         def team_can_damage(team_id: int) -> bool:
+            """Check whether any active recorded teammate can produce damage."""
             return any(
                 agent.configured_active
                 and agent.configured_team_id == team_id
@@ -628,7 +702,20 @@ class ReplayAnalysis:
         return None
 
     def catalog(self) -> dict[str, object]:
-        """Describe every numerical CSV column without choosing a replay tick."""
+        """Return metric descriptions and display navigation without choosing a frame.
+
+        Returns
+        -------
+        dict[str, object]
+            Dict with schema/source identities, topics, classes, global agent rows and
+            every selected column's meaning, applicability and search terms.
+
+        Notes
+        -----
+        Host-only; reads cached metadata and performs no numerical analysis.
+        Treat nested descriptions as read-only because some are shared with this
+        analysis object. This catalog contains no current-frame metric values.
+        """
         class_names = self.context.static_mechanics_catalog.class_name_by_id
         return {
             "metric_schema_id": METRIC_SCHEMA_ID,
@@ -665,9 +752,11 @@ class ReplayAnalysis:
 
     @property
     def frame_count(self) -> int:
+        """Return initial-frame count plus the number of captured real transitions."""
         return len(self._values)
 
     def _frame(self, frame_index: int, scope: MetricScope) -> int:
+        """Validate cursor/scope and choose the requested or final cached frame."""
         if scope not in ("cursor", "final"):
             raise ValueError("metric scope must be cursor or final")
         if type(frame_index) is not int or not 0 <= frame_index < self.frame_count:
@@ -675,6 +764,9 @@ class ReplayAnalysis:
         return self.frame_count - 1 if scope == "final" else frame_index
 
     def _metadata(self, selected: int, scope: MetricScope) -> dict[str, object]:
+        """Build selected-prefix identity fields from recorded context and frame
+        time.
+        """
         context = self.context
         metadata: dict[str, object] = {
             "episode_id": context.identity.episode_id,
@@ -706,12 +798,16 @@ class ReplayAnalysis:
         return metadata
 
     def _subject(self, column: MetricColumn) -> str:
+        """Describe a metric's recorded global agent/team subjects in display order."""
         if column.scope == "episode":
             return "Episode"
         if column.scope == "team":
             return "Team A" if column.subjects[0] == 1 else "Team B"
 
         def agent(slot: int) -> str:
+            """Name a global slot by recorded class and fixed Team A/Team B
+            ownership.
+            """
             roster = self.context.roster[slot]
             class_name = self.context.static_mechanics_catalog.class_name_by_id[
                 roster.class_id
@@ -731,7 +827,35 @@ class ReplayAnalysis:
     def summary(
         self, frame_index: int, *, scope: MetricScope = "cursor"
     ) -> dict[str, object]:
-        """Return catalog descriptions and scalar values, never GUI-side formulas."""
+        """Read described metric values at a captured frame or the final boundary.
+
+        Parameters
+        ----------
+        frame_index : int
+            Integer captured-frame index in 0..frame_count-1, including
+            the initial frame at zero. It must be valid even for final scope.
+        scope : MetricScope
+            "cursor" by default, or "final" to select the last captured frame.
+
+        Returns
+        -------
+        dict[str, object]
+            Host dict with prefix identity, topics and one statistics row per column.
+            Unavailable values are None with valid=False. completion is included only
+            at the final captured frame; earlier prefixes are labeled partial.
+
+        Raises
+        ------
+        ValueError
+            scope is neither cursor nor final.
+        IndexError
+            frame_index is not an exact in-range Python int.
+
+        Notes
+        -----
+        No simulator or metric kernel runs here. Values come from the cached
+        prefix arrays. Treat nested shared description fields as read-only.
+        """
         selected = self._frame(frame_index, scope)
         rows: list[dict[str, object]] = []
         for index, template in enumerate(self._row_templates):
@@ -755,7 +879,34 @@ class ReplayAnalysis:
         }
 
     def csv(self, frame_index: int, *, scope: MetricScope = "cursor") -> str:
-        """One wide episode row; unavailable scalar values are empty CSV cells."""
+        """Return one wide CSV row using the same cached boundary as summary.
+
+        Parameters
+        ----------
+        frame_index : int
+            Exact Python int in 0..frame_count-1; required even for final.
+        scope : MetricScope
+            "cursor" by default, or "final" for the last captured frame.
+
+        Returns
+        -------
+        str
+            CSV text containing a header and one data row. Identity columns precede
+            the ordered selected metrics. Unavailable values become empty cells;
+            valid zero remains numeric zero.
+
+        Raises
+        ------
+        ValueError
+            scope is unknown.
+        IndexError
+            frame_index is not an exact in-range Python int.
+
+        Notes
+        -----
+        Host-only and no file I/O. The caller owns saving the returned string.
+        Export uses the recorded prefix; it does not rerun metrics or game physics.
+        """
         selected = self._frame(frame_index, scope)
         row = self._metadata(selected, scope)
         row.update(
@@ -780,11 +931,42 @@ class ReplayAnalysis:
 
 
 def analyze_replay(bundle: LoadedReplayBundle, *, full: bool = False) -> ReplayAnalysis:
-    """Read recorded arrays once; priority metrics default, full diagnostics opt in.
+    """Compute scalar metric values for every captured replay frame.
 
-    This is an analysis of captured facts under the installed scalar metric
-    schema, independent of any historical V1 sidecar. Full diagnostics reuse Core
-    counterfactual helpers, so their recorded mechanics catalog must match.
+    Parameters
+    ----------
+    bundle : LoadedReplayBundle
+        LoadedReplayBundle with validated captured state, transition facts
+        and context. Any historical metric sidecar remains separate evidence.
+    full : bool
+        False by default for priority metrics only. True adds the current
+        full metric catalog and requires matching recorded mechanics.
+
+    Returns
+    -------
+    ReplayAnalysis
+        ReplayAnalysis with read-only float32 values and boolean validity for
+        initial frame plus every captured transition. Column order is current
+        PRIORITY_METRIC_COLUMNS or METRIC_COLUMNS, independent of old sidecars.
+
+    Raises
+    ------
+    ValueError
+        The recorded task mode is outside neutral/TDM (0/1), or full
+        analysis sees a different mechanics catalog.
+    RuntimeError
+        Evaluation/Core source bytes change during analysis.
+    TypeError
+        Captured data cannot be reconstructed with its declared types.
+
+    Notes
+    -----
+    Host orchestration decodes at most 64 transitions per block and calls JAX
+    metric reducers. It may compile and transfer arrays, but never reruns the
+    simulator. Full metrics reuse Core's existing counterfactual helpers.
+    The final short block uses inert padding that creates no extra prefix.
+    No files are written. Later summary/csv calls reuse the stored scalars;
+    source-byte digests intentionally change when source documentation changes.
     """
     replay = bundle.replay
     context = replay.header.context

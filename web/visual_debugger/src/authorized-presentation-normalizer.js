@@ -1,3 +1,14 @@
+/**
+ * @file Validate and join the browser's six authorized presentation variants.
+ * normalizeAuthorizedPresentationFrameV1 checks the generated schema, semantic joins,
+ * privacy limits, endpoint hashes, and opaque identity keys before recursively freezing
+ * and privately marking the result. Oracle and Agent POV, live and replay, retain their
+ * separate information rights. The same-origin Python producer is the authority root;
+ * hashes detect inconsistent content but do not authenticate an arbitrary producer.
+ * Transport joins reject stale mixed responses before installation. Adapter modules
+ * must test this module's private marker, not accept look-alike objects. Work is in
+ * memory, with asynchronous Web Crypto SHA-256 checks and no network or file I/O.
+ */
 import { AUTHORIZED_PRESENTATION_SCHEMA_V1 } from "./authorized-presentation-schema.js";
 import { normalizeLiveDebuggerFrameV2 } from "./frame-normalizer.js";
 import {
@@ -349,34 +360,61 @@ const ORACLE_EVENT_NONNEGATIVE_FIELDS = Object.freeze([
 const NORMALIZED_PRESENTATION_ROOTS = new WeakSet();
 const JOINED_PRESENTATION_ROOTS = new WeakSet();
 
+/**
+ * Identify a coherent transport/presentation pair fetched from different refreshes.
+ * Callers may recognize this error with isPresentationJoinRace and refetch through their
+ * normal transport workflow. It is distinct from TypeError for malformed content.
+ * The constructor keeps the supplied message and sets name to PresentationJoinMismatchError.
+ */
 export class PresentationJoinMismatchError extends Error {
-  /** @param {string} message */
+  /**
+   * Create a join-mismatch error with the caller's message. This does not retry a
+   * request or change browser state.
+   *
+   * @param {string} message
+   */
   constructor(message) {
     super(message);
     this.name = "PresentationJoinMismatchError";
   }
 }
 
-/** @param {string} message @returns {never} */
+/**
+ * Throw TypeError with message for malformed or unauthorized presentation content.
+ * This helper never returns.
+ *
+ * @param {string} message @returns {never}
+ */
 function invalid(message) {
   throw new TypeError(message);
 }
 
-/** @param {string} message @returns {never} */
+/**
+ * Throw PresentationJoinMismatchError with message for mismatched refresh identities.
+ * This helper never returns and does not perform recovery.
+ *
+ * @param {string} message @returns {never}
+ */
 function joinMismatch(message) {
   throw new PresentationJoinMismatchError(message);
 }
 
-/** @param {unknown} error */
+/**
+ * Return whether error is a PresentationJoinMismatchError from this module.
+ * Other errors, including malformed-payload TypeError, return false.
+ *
+ * @param {unknown} error
+ */
 export function isPresentationJoinRace(error) {
   return error instanceof PresentationJoinMismatchError;
 }
 
 /**
- * Fail closed if Python ever emits a JSON Schema keyword the browser visitor
- * does not implement. Property and definition names are deliberately handled
- * as names, so a future wire field called `title` cannot be stripped or
- * mistaken for schema metadata.
+ * Check value for JSON Schema keywords implemented by this visitor.
+ * context defaults to schema; names treats property/definition keys as field names,
+ * and mapping leaves discriminator mappings untouched. Recursively inspect child
+ * schemas and reject unsupported keywords/discriminator structure with TypeError.
+ * Return undefined on success. This guards the generated schema, not a wire payload.
  *
  * @param {unknown} value
  * @param {"schema" | "names" | "mapping"} context
@@ -423,9 +461,11 @@ if (!Object.isFrozen(AUTHORIZED_PRESENTATION_SCHEMA_V1)) {
 assertSupportedSchema(AUTHORIZED_PRESENTATION_SCHEMA_V1);
 
 /**
- * Snapshot a JSON object without invoking accessors. JSON-decoded values have
- * only enumerable own data properties; accepting anything broader would make
- * validation order observable to a hostile caller.
+ * Copy value's own enumerable data properties into a new null-prototype record.
+ * Require a plain Object or null prototype, no symbols, and no accessors/non-enumerable
+ * fields. Throw TypeError naming label otherwise. Child values remain references until
+ * recursive schema validation copies them. This avoids invoking property getters; it
+ * is intended for decoded JSON, not arbitrary Proxy behavior.
  *
  * @param {unknown} value
  * @param {string} label
@@ -455,6 +495,11 @@ function snapshotRecord(value, label) {
 }
 
 /**
+ * Copy dense plain-array value without invoking element getters.
+ * Require exactly numeric element keys followed by length, Array.prototype, no extra
+ * fields, and enumerable data elements. Return a fresh array of existing child values
+ * or throw TypeError naming label. Recursive validation copies children separately.
+ *
  * @param {unknown} value
  * @param {string} label
  * @returns {any[]}
@@ -484,7 +529,13 @@ function snapshotArray(value, label) {
   });
 }
 
-/** @param {Record<string, any>} schema @returns {Record<string, any>} */
+/**
+ * Return schema unchanged unless it has a local #/$defs reference.
+ * Resolve that reference against the generated presentation schema and return its
+ * definition. Throw TypeError for external or unknown references. No network is used.
+ *
+ * @param {Record<string, any>} schema @returns {Record<string, any>}
+ */
 function resolveSchema(schema) {
   if (typeof schema.$ref !== "string") {
     return schema;
@@ -502,6 +553,13 @@ function resolveSchema(schema) {
 }
 
 /**
+ * Validate value against inputSchema and return its normalized in-memory tree.
+ * label identifies errors. Handle exact literals/enums, discriminator variants, oneOf/
+ * anyOf alternatives, finite numbers, safe integers, strings, arrays, and record fields.
+ * Containers are copied through strict JSON snapshots; allowed scalar values remain
+ * unchanged. Throw TypeError when the schema contract fails. This is structural
+ * validation only; semantic/privacy/hash checks and final freezing happen afterward.
+ *
  * @param {unknown} value
  * @param {Record<string, any>} inputSchema
  * @param {string} label
@@ -641,6 +699,10 @@ function validateSchema(value, inputSchema, label) {
 }
 
 /**
+ * Check already numeric value against schema's inclusive and exclusive bounds.
+ * Return undefined on success or throw TypeError naming label. Type/finite checks are
+ * owned by validateSchema before this helper runs.
+ *
  * @param {number} value
  * @param {Record<string, any>} schema
  * @param {string} label
@@ -661,9 +723,11 @@ function validateNumericBounds(value, schema, label) {
 }
 
 /**
- * Select the exact already-validated schema branch for canonical encoding.
- * This is separate from validation so number-vs-integer wire types remain
- * available after JSON.parse has erased a token such as `20.0`.
+ * Select the unique schema branch for already validated value under inputSchema.
+ * label names errors. Resolve local references/discriminators, or recheck alternatives
+ * and require exactly one match. Return that concrete schema or throw TypeError.
+ * The selected number/integer type preserves Python JSON spelling after JSON.parse
+ * has erased the distinction between tokens such as 20 and 20.0.
  *
  * @param {unknown} value
  * @param {Record<string, any>} inputSchema
@@ -700,10 +764,10 @@ function selectCanonicalSchema(value, inputSchema, label) {
 }
 
 /**
- * Match CPython's finite-float representation used by json.dumps. ECMAScript
- * and CPython share shortest-roundtrip significant digits but select fixed vs
- * exponent notation at different thresholds, so the notation is rebuilt from
- * the shortest digits and the schema-owned float type.
+ * Encode finite numeric value using the Python float notation expected by the wire hash.
+ * Return a string preserving negative zero, a decimal point for whole floats, and Python's
+ * fixed/exponent thresholds and exponent padding. Throw TypeError for a non-finite value.
+ * This is canonical serialization for validated float fields, not display formatting.
  *
  * @param {number} value
  */
@@ -754,6 +818,13 @@ function canonicalPythonFloat(value) {
 }
 
 /**
+ * Encode already validated value according to inputSchema into compact canonical JSON.
+ * label identifies branch/type errors. Object keys are sorted; schema number fields use
+ * Python float spelling while integer fields keep integer spelling. omitObjectKeys is
+ * an optional set applied only to the current object, typically to omit its own digest.
+ * Return a string or throw TypeError for an ambiguous/unsupported canonical type.
+ * No file is written and no input is changed.
+ *
  * @param {unknown} value
  * @param {Record<string, any>} inputSchema
  * @param {string} label
@@ -804,6 +875,12 @@ function canonicalPythonJson(value, inputSchema, label, omitObjectKeys) {
 }
 
 /**
+ * Verify frame.current_endpoint's SHA-256 against its declared canonical digest.
+ * frame must already pass schema checks. Serialize with its exact generated schema,
+ * omitting only the endpoint digest field, then await Web Crypto. Resolve undefined
+ * on agreement; reject with TypeError for missing Web Crypto or a digest mismatch.
+ * This checks content consistency, not the authenticity of the sender.
+ *
  * @param {Record<string, any>} frame
  */
 async function verifyAuthorizedEndpointDigest(frame) {
@@ -832,11 +909,13 @@ async function verifyAuthorizedEndpointDigest(frame) {
 }
 
 /**
- * This required V1 field is an atomic lockstep contract between the internal
- * developer-tool producer and consumer; older Agent-V1 bytes are not accepted.
- * The authenticated same-origin Python producer remains the authority root.
- * Here the digest and redundant `oracle_public_facts` copy detect malformed,
- * stale, or spliced content; they do not manufacture independent authenticity.
+ * Verify the required local corpse-overlay digest on an Agent POV frame.
+ * For Oracle frames, resolve undefined without hashing. Otherwise encode the already
+ * validated overlay with its exact schema and omit only its digest field; await Web
+ * Crypto SHA-256 and reject with TypeError on mismatch or unavailable crypto.
+ * The same-origin Python producer remains the authority root. The digest and redundant
+ * public facts detect stale/spliced content; they do not grant independent authenticity.
+ * Older Agent payloads missing this required field are not accepted.
  *
  * @param {Record<string, any>} frame
  */
@@ -866,7 +945,13 @@ async function verifyLocalOracleCorpseOverlayDigest(frame) {
   }
 }
 
-/** @param {unknown} value @returns {any} */
+/**
+ * Recursively freeze value's object/array children and return value itself.
+ * The caller supplies an acyclic, already copied JSON-like tree. This mutates freeze
+ * state of that tree, not the original wire object retained by the caller.
+ *
+ * @param {unknown} value @returns {any}
+ */
 function deepFreeze(value) {
   if (value && typeof value === "object") {
     for (const child of Object.values(value)) deepFreeze(child);
@@ -875,19 +960,36 @@ function deepFreeze(value) {
   return value;
 }
 
-/** @param {unknown[]} values @param {string} label */
+/**
+ * Require values to contain no duplicate entries under Set equality.
+ * Return undefined on success; otherwise throw TypeError naming label.
+ *
+ * @param {unknown[]} values @param {string} label
+ */
 function requireUnique(values, label) {
   if (new Set(values).size !== values.length) invalid(`${label} must be unique.`);
 }
 
-/** @param {any[]} values @param {(value: any, index: number) => unknown} selector @param {string} label */
+/**
+ * Require selector(value, index) to equal each zero-based array index by Object.is.
+ * Return undefined for canonical values order, otherwise throw TypeError naming label.
+ * The selector reads the already validated category/index field.
+ *
+ * @param {any[]} values @param {(value: any, index: number) => unknown} selector @param {string} label
+ */
 function requireExactOrder(values, selector, label) {
   if (values.some((value, index) => !Object.is(selector(value, index), index))) {
     invalid(`${label} must retain canonical order.`);
   }
 }
 
-/** @param {unknown} left @param {unknown} right @returns {boolean} */
+/**
+ * Return recursive equality of left and right JSON-like trees.
+ * Use Object.is for scalars, ordered equality for arrays, and sorted enumerable keys
+ * for records. Inputs must be acyclic; nothing is changed.
+ *
+ * @param {unknown} left @param {unknown} right @returns {boolean}
+ */
 function structurallyEqual(left, right) {
   if (Object.is(left, right)) return true;
   if (Array.isArray(left) || Array.isArray(right)) {
@@ -916,7 +1018,9 @@ function structurallyEqual(left, right) {
 }
 
 /**
- * Mirror Python math.isclose for cross-runtime semantic identities.
+ * Return whether finite numbers left and right differ by at most absolute 1e-5 or
+ * relative 1e-6, whichever is larger. Non-finite input returns false. This matches the
+ * chosen Python semantic-comparison tolerances, not math.isclose's default settings.
  *
  * @param {number} left
  * @param {number} right
@@ -930,7 +1034,14 @@ function pythonIsClose(left, right) {
   );
 }
 
-/** @param {Record<string, any>} axis */
+/**
+ * Check already schema-valid axis for exact 9/11/2 movement/target/Ultimate categories.
+ * Require canonical category indices, target-none then five allies then five opponents,
+ * unique target public IDs, and unique labels within each head. Return undefined or
+ * throw TypeError. No legality mask is computed here.
+ *
+ * @param {Record<string, any>} axis
+ */
 function validateActionAxis(axis) {
   const movementActions = /** @type {any[]} */ (axis.movement_actions);
   const targetActions = /** @type {any[]} */ (axis.target_actions);
@@ -974,7 +1085,14 @@ function validateActionAxis(axis) {
   }
 }
 
-/** @param {Record<string, any>} mask @param {string} label */
+/**
+ * Check already schema-valid mask using either supported field-name spelling.
+ * Require shapes 9, 11, 2, and (11, 2), with target/Ultimate marginals equal to any-true
+ * reductions of the joint mask. Return undefined or throw TypeError naming label.
+ * The schema owns boolean entry types; this helper checks shape and agreement.
+ *
+ * @param {Record<string, any>} mask @param {string} label
+ */
 function validateDecisionMask(mask, label) {
   const movement = /** @type {any[]} */ (mask.move ?? mask.movement_action_mask);
   const target = /** @type {any[]} */ (mask.select_target ?? mask.target_action_mask);
@@ -1004,6 +1122,12 @@ function validateDecisionMask(mask, label) {
 }
 
 /**
+ * Check root's opaque-key/public-ID pairs and return their unique pair list.
+ * options defaults to {}; authorityKind defaults to root.authority.authority_kind,
+ * and excludedRootFields can skip separately owned branches only at the root level.
+ * Require oracle_/pov_ SHA-256-shaped keys and a one-to-one key/public-ID relationship.
+ * Throw TypeError for mismatches. Cryptographic derivation is checked separately.
+ *
  * @param {Record<string, any>} root
  * @param {{authorityKind?: "oracle" | "agent_pov", excludedRootFields?: ReadonlySet<string>}} [options]
  */
@@ -1012,7 +1136,13 @@ function validatePresentationKeyGraph(root, options = {}) {
   const expectedPrefix = authorityKind === "oracle" ? "oracle_" : "pov_";
   const publicByKey = new Map();
   const keyByPublic = new Map();
-  /** @param {unknown} value */
+  /**
+   * Walk value and collect matching key/public-ID pairs in the enclosing maps.
+   * rootLevel defaults to false; only the initial root visit honors excludedRootFields.
+   * Throw TypeError for bad prefix/shape, nullable-pair mismatch, or a nonunique mapping.
+   *
+   * @param {unknown} value
+   */
   function visit(value, rootLevel = false) {
     if (Array.isArray(value)) {
       for (const child of value) visit(child);
@@ -1056,6 +1186,12 @@ function validatePresentationKeyGraph(root, options = {}) {
 }
 
 /**
+ * Await SHA-256 derivation checks for all pairs under session and authorityKind.
+ * Oracle keys use the public ID; Agent POV keys also include recipient. pairs contains
+ * validated {key, publicId} rows. Resolve undefined when every opaque key matches its
+ * exact authority identity. Reject with TypeError for missing Web Crypto or mismatch.
+ * These deterministic names are not secret credentials and do not authenticate the producer.
+ *
  * @param {string} session
  * @param {"oracle" | "agent_pov"} authorityKind
  * @param {string | null} recipient
@@ -1084,6 +1220,10 @@ async function verifyPresentationKeyPairs(session, authorityKind, recipient, pai
 }
 
 /**
+ * Verify pairs using frame's source session and authority/recipient identity.
+ * frame and pairs have already passed structural/key-graph checks. Return the promise
+ * from verifyPresentationKeyPairs; rejection means unavailable crypto or a wrong key.
+ *
  * @param {Record<string, any>} frame
  * @param {{key: string, publicId: string}[]} pairs
  */
@@ -1097,7 +1237,15 @@ async function verifyPresentationKeyDerivation(frame, pairs) {
   );
 }
 
-/** @param {Record<string, any>} root */
+/**
+ * Check already schema-valid Agent root for prohibited keys and Oracle identity values.
+ * Traverse the entire tree while allowing only the explicitly named recorded-ID fields
+ * inside researcher_space and the source-frame field in the local corpse overlay.
+ * Return undefined or throw TypeError. This enforces declared disclosure boundaries;
+ * it does not prove the producer's underlying sensor authorization independently.
+ *
+ * @param {Record<string, any>} root
+ */
 function validateAgentPrivacy(root) {
   const episodeId = root.source.episode_id;
   const recipientId = root.authority.recipient_public_agent_id;
@@ -1108,6 +1256,10 @@ function validateAgentPrivacy(root) {
     "u",
   );
   /**
+   * Walk value with field context, initially null. researcherSpace and localCorpseOverlay
+   * default false and track the two separately allowed branches. Reject prohibited keys
+   * or exact Oracle identity strings outside their admitted fields; return undefined.
+   *
    * @param {unknown} value
    * @param {string | null} field
    * @param {boolean} researcherSpace
@@ -1154,10 +1306,12 @@ function validateAgentPrivacy(root) {
 }
 
 /**
- * A joined transport gives the browser exact private values that must never be
- * reflected through an Agent presentation. This is intentionally equality-
- * based: arbitrary public IDs and display prose may contain words such as
- * "source-material", "metric", or "processing".
+ * Reject exact private transport strings reflected into an Agent presentation.
+ * transport and presentation are already structurally checked. Collect values from the
+ * fixed forbidden transport fields, then compare presentation strings with explicit
+ * exceptions for permitted endpoint/overlay digests and researcher recorded IDs.
+ * Return undefined for Oracle or a clean Agent pair; throw TypeError for a reflection.
+ * Ordinary prose containing words such as metric or processing is not rejected.
  *
  * @param {Record<string, any>} transport
  * @param {Record<string, any>} presentation
@@ -1165,7 +1319,12 @@ function validateAgentPrivacy(root) {
 function validatePairedAgentPrivacy(transport, presentation) {
   if (presentation.authority.authority_kind !== "agent_pov") return;
   const forbiddenValues = new Set();
-  /** @param {unknown} value */
+  /**
+   * Collect nonempty string values from the enclosing fixed forbidden-field set while
+   * walking transport value. Arrays recurse; scalar values outside those fields are ignored.
+   *
+   * @param {unknown} value
+   */
   function collect(value) {
     if (Array.isArray(value)) {
       for (const child of value) collect(child);
@@ -1185,6 +1344,11 @@ function validatePairedAgentPrivacy(transport, presentation) {
   }
   collect(transport);
   /**
+   * Walk presentation value and reject a string equal to a collected private transport
+   * value unless its exact field is allowed. field defaults null; researcherSpace and
+   * localCorpseOverlay default false and track the approved exceptions. Throw TypeError
+   * on a forbidden reflection; otherwise return undefined.
+   *
    * @param {unknown} value
    * @param {string | null} [field]
    * @param {boolean} [researcherSpace]
@@ -1234,7 +1398,13 @@ function validatePairedAgentPrivacy(transport, presentation) {
   rejectReflections(presentation);
 }
 
-/** @param {Record<string, any>} action @param {string} label */
+/**
+ * Check action's three submitted heads as signed int32-range integers.
+ * Return undefined or throw TypeError naming label and field. Out-of-domain action
+ * categories remain valid evidence here; accepted actions use the stricter helper.
+ *
+ * @param {Record<string, any>} action @param {string} label
+ */
 function validateSubmittedActionTuple(action, label) {
   for (const name of ["move_action", "target_action", "use_ultimate_action"]) {
     if (
@@ -1247,7 +1417,13 @@ function validateSubmittedActionTuple(action, label) {
   }
 }
 
-/** @param {Record<string, any>} action @param {string} label */
+/**
+ * Check action's movement/target/Ultimate heads against category counts 9/11/2.
+ * Return undefined or throw TypeError naming label and field. This checks category
+ * bounds, not whether the action was legal under a particular decision mask.
+ *
+ * @param {Record<string, any>} action @param {string} label
+ */
 function validateAcceptedActionTuple(action, label) {
   const domains = { move_action: 9, target_action: 11, use_ultimate_action: 2 };
   for (const [name, count] of Object.entries(domains)) {
@@ -1258,6 +1434,12 @@ function validateAcceptedActionTuple(action, label) {
 }
 
 /**
+ * Check pending against the full ordered active roster at simulatorStep.
+ * draft names the selected editable actor and its armed action. Require one bounded
+ * pending action per roster row and exact identity order; the selected row must equal
+ * the effective draft, with an unarmed combat lane represented as target-none/no-Ultimate.
+ * Return undefined or throw TypeError naming label. Does not submit or simulate actions.
+ *
  * @param {Record<string, any> | null} pending
  * @param {any[]} roster
  * @param {number} simulatorStep
@@ -1301,6 +1483,12 @@ function validateLivePendingJointAction(pending, roster, simulatorStep, draft, l
 }
 
 /**
+ * Check latest as one adjacent incoming transition under prefix and episodeId.
+ * Require canonical start/successor/transition IDs, adjacent simulator ticks, nonempty
+ * unique actor rows, signed submitted heads, bounded accepted heads, and eleven-entry
+ * target axes with null at zero and unique public IDs thereafter. Return undefined or
+ * throw TypeError. The surrounding state check joins it to the current endpoint.
+ *
  * @param {Record<string, any>} latest
  * @param {string} prefix
  * @param {string} episodeId
@@ -1346,6 +1534,11 @@ function validateLatestTransition(latest, prefix, episodeId) {
 }
 
 /**
+ * Check upcoming as one adjacent recorded outgoing transition under prefix and episodeId.
+ * Require canonical endpoint/transition IDs, adjacent ticks, unique nonempty actor rows,
+ * valid submitted/accepted head domains, and eleven-entry target identity axes. Return
+ * undefined or throw TypeError. This validates stored future playback, not a prediction.
+ *
  * @param {Record<string, any>} upcoming
  * @param {string} prefix
  * @param {string} episodeId
@@ -1391,19 +1584,34 @@ function validateUpcomingTransition(upcoming, prefix, episodeId) {
 }
 
 /**
+ * Return event's present spatial anchors paired with their required transition phases.
+ * Use the event_kind to distinguish transition_start, post_charge, and successor; include
+ * any aura emitter arrays where that event carries them. Missing/null anchors are omitted.
+ * The caller supplies a schema-valid event and validates each returned anchor later.
+ *
  * @param {Record<string, any>} event
  * @returns {{anchor: Record<string, any>, phase: string}[]}
  */
 function oracleEventAnchors(event) {
   /** @type {{anchor: Record<string, any>, phase: string}[]} */
   const anchors = [];
-  /** @param {string} field @param {string} phase */
+  /**
+   * Append event[field] with the supplied phase when that anchor is neither null nor
+   * undefined. The enclosing event is already schema-valid; return undefined.
+   *
+   * @param {string} field @param {string} phase
+   */
   const add = (field, phase) => {
     if (event[field] !== null && event[field] !== undefined) {
       anchors.push({ anchor: event[field], phase });
     }
   };
-  /** @param {string} field @param {string} phase */
+  /**
+   * Append every anchor from event[field] with phase, treating an absent/null list as
+   * empty. The caller's schema check owns array shape; return undefined.
+   *
+   * @param {string} field @param {string} phase
+   */
   const addMany = (field, phase) => {
     for (const anchor of event[field] ?? []) anchors.push({ anchor, phase });
   };
@@ -1467,7 +1675,14 @@ function oracleEventAnchors(event) {
   return anchors;
 }
 
-/** @param {Record<string, any>[]} statuses @param {string} label */
+/**
+ * Check statuses as a unique canonical status-axis snapshot.
+ * Require matching channel/ID, presentation order, positive remaining/configured ticks
+ * with remaining no greater than configured, and null magnitude only for kind none.
+ * Return undefined or throw TypeError naming label. Schema checks own primitive types.
+ *
+ * @param {Record<string, any>[]} statuses @param {string} label
+ */
 function validateIncomingStatuses(statuses, label) {
   const statusChannels = new Set();
   let previousPresentationRank = -1;
@@ -1491,7 +1706,13 @@ function validateIncomingStatuses(statuses, label) {
   }
 }
 
-/** @param {Record<string, any>[]} modifiers @param {string} label */
+/**
+ * Require modifiers to have nonnegative, non-neutral multipliers and strictly
+ * increasing aura IDs. Return undefined or throw TypeError naming label. A multiplier
+ * of one is omitted from this compact incoming inventory rather than stored.
+ *
+ * @param {Record<string, any>[]} modifiers @param {string} label
+ */
 function validateIncomingAuraModifiers(modifiers, label) {
   /** @type {string | null} */
   let previousId = null;
@@ -1507,7 +1728,14 @@ function validateIncomingAuraModifiers(modifiers, label) {
   }
 }
 
-/** @param {Record<string, any>} observation @param {string} label */
+/**
+ * Check already schema-valid observation's public class/body/health/speed/range values,
+ * countdown bounds, regeneration fraction, statuses, and non-neutral aura inventory.
+ * Return undefined or throw TypeError naming label. Coordinates and profile values are
+ * checked locally; source/recipient identity joins belong to the containing summary.
+ *
+ * @param {Record<string, any>} observation @param {string} label
+ */
 function validateIncomingObservationLocal(observation, label) {
   if (
     CLASS_NAME_BY_ID[observation.class_id] !== observation.class_name ||
@@ -1539,6 +1767,11 @@ function validateIncomingObservationLocal(observation, label) {
 }
 
 /**
+ * Require the declared static observation fields to agree between start and successor.
+ * For status channels present at both endpoints, also require their static mechanic
+ * fields to agree. Return undefined or throw TypeError naming label. Dynamic fields
+ * and appearance/disappearance are handled by the containing change variant.
+ *
  * @param {Record<string, any>} start
  * @param {Record<string, any>} successor
  * @param {string} label
@@ -1570,7 +1803,14 @@ function validateRetainedIncomingStaticProfile(start, successor, label) {
   }
 }
 
-/** @param {Record<string, any>[]} sources @param {string} label */
+/**
+ * Check sources as a nonempty, unique, ordered sensor-source list.
+ * Recipient base comes before teammate sources; entries then sort by public ID. Public
+ * IDs and presentation keys cannot repeat. Return undefined or throw TypeError naming
+ * label. Recipient identity and source-kind joins are checked by the containing summary.
+ *
+ * @param {Record<string, any>[]} sources @param {string} label
+ */
 function validateSharedObservationSources(sources, label) {
   if (sources.length === 0) invalid(`${label} must retain an observation source.`);
   const publicIds = new Set();
@@ -1594,7 +1834,16 @@ function validateSharedObservationSources(sources, label) {
   }
 }
 
-/** @param {Record<string, any>} latest */
+/**
+ * Check latest's recipient-local incoming cue inventory after schema validation.
+ * Require one initial action outcome, canonical IDs/ordinals and family order, singleton
+ * own-change cues, and unique body changes with correct endpoint presence/identity.
+ * Retained observations must actually change without changing their static profiles.
+ * Recipient body stays self; an episode-ended cue must be final and have a done flag.
+ * Return undefined or throw TypeError. Does not read privileged events.
+ *
+ * @param {Record<string, any>} latest
+ */
 function validateNoSharedIncomingSummary(latest) {
   /** @type {Readonly<Record<string, number>>} */
   const familyRanks = Object.freeze({
@@ -1788,7 +2037,16 @@ function validateNoSharedIncomingSummary(latest) {
   }
 }
 
-/** @param {Record<string, any>} latest */
+/**
+ * Check latest's shared-observation delta inventory after schema validation.
+ * Require canonical IDs/ordinals, one-to-one public/key identity, consistent recipient
+ * and source roles, valid observation/source snapshots, and exact changed-field lists.
+ * Per-agent deltas must be contiguous and follow the permitted appearance, disappearance,
+ * value-change, and provenance-change combinations. Return undefined or throw TypeError.
+ * A change in sensor sources stays distinct from a change in observed body values.
+ *
+ * @param {Record<string, any>} latest
+ */
 function validateSharedIncomingSummary(latest) {
   const publicToKey = new Map();
   const keyToPublic = new Map();
@@ -1953,7 +2211,20 @@ function validateSharedIncomingSummary(latest) {
   }
 }
 
-/** @param {Record<string, any>} latest */
+/**
+ * Check one recorded incoming event summary against its own ordering and anchors.
+ *
+ * `latest` is a schema-checked Oracle, NoSharedObs, or SharedObs summary. The
+ * successor tick must be the start tick plus one. Oracle events must have canonical
+ * IDs, phase order, valid status channels, coherent score/completion fields, and
+ * anchors that exactly match their declared trajectories. Agent summaries are
+ * checked by the matching observation-summary validator.
+ *
+ * Returns undefined. Throws TypeError on a broken join, count, order, or field.
+ * This checks the recorded explanation; it does not run the simulator again.
+ *
+ * @param {Record<string, any>} latest
+ */
 function validateLatestEvents(latest) {
   if (
     latest.incoming_successor_simulator_step_count !==
@@ -2089,7 +2360,20 @@ function validateLatestEvents(latest) {
   }
 }
 
-/** @param {Record<string, any>} visual */
+/**
+ * Check the drawing-only events visible to one actor across an incoming step.
+ *
+ * `visual` is a schema-checked fog-filtered summary. Its event counts, IDs, phase
+ * order, recipient identity, and start/successor trajectories must agree. Every
+ * spatial event anchor must match an allowed trajectory anchor. After-step facts
+ * need a visible successor. The payload must not contain hidden intermediate
+ * movement/respawn events or forbidden aggregate damage/healing fields.
+ *
+ * Returns undefined or throws TypeError. This validates the producer's visible
+ * inventory and consistency; it does not recompute visibility or combat.
+ *
+ * @param {Record<string, any>} visual
+ */
 function validateAgentVisualEvents(visual) {
   if (
     visual.summary_kind !== "agent_pov_fog_filtered_visual_events" ||
@@ -2263,7 +2547,19 @@ function validateAgentVisualEvents(visual) {
   });
 }
 
-/** @param {Record<string, any>} agent */
+/**
+ * Select the actor-body fields used to compare an incoming observation.
+ *
+ * `agent` is a validated scene body. Returns a new mutable record containing its
+ * identity, position, health, speed, status, and aura observation fields. Status
+ * records are copied and their mechanic-action field is renamed for the incoming
+ * schema. Position and aura arrays remain borrowed references.
+ *
+ * The caller compares this value; this helper does not authorize, freeze, or
+ * validate it and does not change `agent`.
+ *
+ * @param {Record<string, any>} agent
+ */
 function projectAgentIncomingObservation(agent) {
   return {
     presentation_key: agent.presentation_key,
@@ -2303,14 +2599,33 @@ function projectAgentIncomingObservation(agent) {
   };
 }
 
-/** @param {number} recorded @param {number} catalog */
+/**
+ * Compare a recorded number with the catalog number or its float32 rounding.
+ *
+ * `recorded` and `catalog` are already checked numeric fields. Returns true for
+ * exact equality or equality after rounding `catalog` with Math.fround. This
+ * allows Python/JAX float32 storage without accepting an arbitrary tolerance.
+ * It does not check finiteness or convert strings.
+ *
+ * @param {number} recorded @param {number} catalog
+ */
 function joinsCatalogFloat(recorded, catalog) {
   return recorded === catalog || recorded === Math.fround(catalog);
 }
 
 /**
- * Validate the geometry-independent public class catalog used by battlefield
- * scenes and global researcher panels alike.
+ * Check the class mechanics needed by a scene and index their declarations.
+ *
+ * `classMechanics` contains schema-checked profiles in the exact order given by
+ * `representedClassIds`. `scope` names this part of the payload in errors. The
+ * profiles must use one supported mechanics version, agree on version-2
+ * documentation, contain valid bounds, and declare the exact status/aura inventory
+ * for those classes. A missing mechanics version means version 1.
+ *
+ * Returns a mutable record with `mechanicsById` and `statusMechanicsByChannel`
+ * Maps whose values borrow input records. Throws TypeError on invalid profiles.
+ * This checks the supplied mechanics contract; it does not import simulator rules
+ * or independently prove every numeric value against the current simulator.
  *
  * @param {any[]} classMechanics
  * @param {number[]} representedClassIds
@@ -2421,8 +2736,17 @@ function validateAuthorizedClassMechanics(classMechanics, representedClassIds, s
 }
 
 /**
- * Validate durable status and aggregate-aura rows shared by battlefield actors
- * and geometry-free researcher roster actors.
+ * Check one scene body's status and aura references against available facts.
+ *
+ * `agent` is a schema-checked body, `agentsByKey` maps visible keys to bodies, and
+ * `statusMechanicsByChannel` maps declared channels to class mechanics. `scope`
+ * is included in TypeError messages. Status IDs, duration bounds, source class,
+ * and any available mechanics declaration must agree; direct sources must refer
+ * to matching bodies. Aura IDs must be known, unique, and have valid nonneutral
+ * multipliers.
+ *
+ * Returns undefined. It reads the records without changing them and does not
+ * infer an omitted source or recompute an effect.
  *
  * @param {Record<string, any>} agent
  * @param {Map<string, Record<string, any>>} agentsByKey
@@ -2498,8 +2822,15 @@ function validateAuthorizedAgentEffects(
 }
 
 /**
- * Validate every geometry-free researcher row with the same catalog and effect
- * machinery used by the authorized battlefield scene.
+ * Check the public body facts of a researcher-wide roster.
+ *
+ * `roster` contains schema-checked active-agent records. `classMechanics` supplies
+ * exactly the represented classes; `scope` labels TypeError messages. This checks
+ * class names, health/speed bounds, counters, cooldown limits, float32-compatible
+ * static values, and status/aura references against the supplied declarations.
+ *
+ * Returns undefined. It does not validate world positions, compute effects, or
+ * turn these researcher-wide facts into an actor's policy input.
  *
  * @param {any[]} roster
  * @param {any[]} classMechanics
@@ -2547,9 +2878,17 @@ function validateResearcherRosterFacts(roster, classMechanics, scope) {
 }
 
 /**
- * Port the closed semantic joins of Python's AuthorizedBattlefieldSceneV1.
- * JSON Schema owns local wire shapes; this visitor owns catalog identity,
- * cross-row cardinality/order, and source/mechanic/lifecycle coherence.
+ * Check the internal joins of a schema-checked scene.
+ *
+ * `scene` supplies positive map dimensions, represented class profiles, bodies,
+ * auras, spawn pads, shield settings, and two ordered team wave clocks. This
+ * checks body identities and bounds, class/effect joins, aura source anchors,
+ * spawn assignments, and timer limits. Oracle-only static facts must also agree
+ * with their declared profiles.
+ *
+ * Returns undefined or throws TypeError. The trusted producer decides which
+ * bodies may appear; this helper does not recompute geometry, visibility, or the
+ * simulation that produced the scene.
  *
  * @param {Record<string, any>} scene
  */
@@ -2731,6 +3070,16 @@ function validateAuthorizedScene(scene) {
 }
 
 /**
+ * Check that observed bodies use the recipient's declared actor-relative axis.
+ *
+ * `observation` is a schema-checked incoming body observation. `endpoint` is the
+ * matching authorized actor endpoint, including its recipient and action-target
+ * axis. Each body ID must be on that axis with the correct self/ally/opponent
+ * relation and team. Returns undefined or throws TypeError.
+ *
+ * This checks identity and order semantics without making unseen axis entries
+ * visible or changing the observation.
+ *
  * @param {Record<string, any>} observation
  * @param {Record<string, any>} endpoint
  */
@@ -2763,6 +3112,19 @@ function validateAgentIncomingObservationAxis(observation, endpoint) {
 }
 
 /**
+ * Join the incoming explanation to the current endpoint and action records.
+ *
+ * `frame`, `source`, and `endpoint` are already schema-checked members of one
+ * presentation. `oracle` and `shared` select its authority branch. Frame zero has
+ * no incoming step, so this helper returns immediately; the caller checks its
+ * required absence. Later frames must use the preceding transition's canonical
+ * IDs and adjacent ticks.
+ *
+ * Oracle action rows, trajectories, target axes, and rejection events must agree.
+ * Actor summaries must join their own action row, observations, visible successor
+ * bodies, and SharedObs provenance. Returns undefined or throws TypeError. It
+ * checks cross-field consistency without replaying the transition.
+ *
  * @param {Record<string, any>} frame
  * @param {Record<string, any>} source
  * @param {Record<string, any>} endpoint
@@ -3009,8 +3371,17 @@ function validateIncomingStateMatrix(frame, source, endpoint, oracle, shared) {
 }
 
 /**
- * Validate the additive presentation-only visual channel without weakening
- * the existing Agent cue/delta and action-transition joins above.
+ * Join actor-only drawing events to the frame without widening policy input.
+ *
+ * `frame`, `source`, and `endpoint` are schema-checked. `oracle` and `shared`
+ * select the audience; `renderedScene` may also include checked corpse overlays.
+ * Oracle frames must omit visual events. Actor frame zero requires null; later
+ * actor frames need a matching incoming summary, identities, and action rejection
+ * facts. A corpse overlay may supply a successor anchor only for its own death
+ * choreography, not for other after-step facts.
+ *
+ * Returns undefined or throws TypeError. The base endpoint remains the source of
+ * observations, legal masks, and targets; drawing additions do not change it.
  *
  * @param {Record<string, any>} frame
  * @param {Record<string, any>} source
@@ -3197,6 +3568,17 @@ function validateAgentVisualStateMatrix(
 }
 
 /**
+ * Check the replay's outgoing action records against the current frame.
+ *
+ * `frame`, `source`, and `endpoint` are schema-checked. `oracle` and `shared`
+ * choose global or actor-local transition IDs and rows. The final frame must have
+ * no upcoming transition; other frames must have the canonical next transition.
+ * Oracle rows cover the active roster in order. Actor rows contain only the
+ * recipient, with its exact target axis and any matching inspection action.
+ *
+ * Returns undefined or throws TypeError. It does not execute the recorded action
+ * or check the successor frame here.
+ *
  * @param {Record<string, any>} frame
  * @param {Record<string, any>} source
  * @param {Record<string, any>} endpoint
@@ -3305,9 +3687,17 @@ function validateUpcomingStateMatrix(frame, source, endpoint, oracle, shared) {
 }
 
 /**
- * Validate the deliberately narrow global researcher branch carried by Replay
- * Agent leaves. It contains roster and recorded-action facts, never battlefield
- * geometry or choreography.
+ * Validate the researcher-wide facts attached to an actor replay frame.
+ *
+ * `frame` is schema-checked and contains a replay researcher-space record. This
+ * joins its episode, cursor, ticks, selected recipient, ten-slot identity
+ * directory, active roster, class mechanics, and incoming/outgoing action rows.
+ * Any overlapping actor-local body facts must match, allowing the defined float
+ * tolerance where stored precision differs.
+ *
+ * Returns the mutable list of presentation-key/public-ID pairs collected under
+ * Oracle rules, for later digest-derived key checks. Throws TypeError on invalid
+ * joins. These facts support researcher inspection; they are not actor input.
  *
  * @param {Record<string, any>} frame
  * @returns {{key: string, publicId: string}[]}
@@ -3425,6 +3815,14 @@ function validateReplayResearcherSpace(frame) {
   }
 
   /**
+   * Check one researcher-wide replay transition in the enclosing frame.
+   *
+   * `transition` is the nullable incoming or outgoing record; `incoming` selects
+   * which side of the current frame is checked. Presence, adjacent ticks, canonical
+   * IDs, complete roster order, and each actor-relative target axis must match the
+   * enclosing validated researcher facts. Returns undefined or throws TypeError.
+   * It neither changes the record nor executes the action.
+   *
    * @param {Record<string, any> | null} transition
    * @param {boolean} incoming
    */
@@ -3501,7 +3899,16 @@ function validateReplayResearcherSpace(frame) {
   });
 }
 
-/** @param {number} left @param {number} right */
+/**
+ * Compare two finite body facts using the live/replay precision allowance.
+ *
+ * `left` and `right` must be numbers. Returns true when both are finite and their
+ * absolute difference is at most the larger of 1e-8 and 1e-6 times the larger
+ * magnitude. Returns false for wrong types or nonfinite values. No coercion or
+ * mutation occurs.
+ *
+ * @param {number} left @param {number} right
+ */
 function liveResearcherFloatMatches(left, right) {
   return (
     Number.isFinite(left) &&
@@ -3511,7 +3918,19 @@ function liveResearcherFloatMatches(left, right) {
   );
 }
 
-/** @param {Record<string, any>} globalStatus @param {Record<string, any>} localStatus */
+/**
+ * Compare the shared public fields of two status records.
+ *
+ * `globalStatus` and `localStatus` are schema-checked researcher and actor records.
+ * Channel identity, names, source class, duration, and other static fields must
+ * match exactly; a numeric magnitude uses the declared float tolerance, and null
+ * must match null. Returns a boolean.
+ *
+ * Direct-source lists are deliberately outside this comparison: the actor record
+ * may not disclose sources that the researcher record contains.
+ *
+ * @param {Record<string, any>} globalStatus @param {Record<string, any>} localStatus
+ */
 function liveResearcherStatusMatches(globalStatus, localStatus) {
   for (const field of [
     "status_channel",
@@ -3535,7 +3954,15 @@ function liveResearcherStatusMatches(globalStatus, localStatus) {
   return liveResearcherFloatMatches(globalStatus.magnitude, localStatus.magnitude);
 }
 
-/** @param {Record<string, any>} globalAura @param {Record<string, any>} localAura */
+/**
+ * Compare the public fields of two already checked aura modifiers.
+ *
+ * `globalAura` and `localAura` must have the same aura ID and multipliers that
+ * match within the live/replay float tolerance. Returns a boolean without changing
+ * either record or recomputing which emitters caused the modifier.
+ *
+ * @param {Record<string, any>} globalAura @param {Record<string, any>} localAura
+ */
 function liveResearcherAuraMatches(globalAura, localAura) {
   return (
     globalAura.aura_id === localAura.aura_id &&
@@ -3544,6 +3971,16 @@ function liveResearcherAuraMatches(globalAura, localAura) {
 }
 
 /**
+ * Compare one drawable corpse with its supplied public-facts record.
+ *
+ * `corpse` and `facts` are schema-checked records. Identity, life state, counters,
+ * and static labels must match exactly. Position, body values, and effect
+ * magnitudes use the declared float allowance. Status direct-source lists must be
+ * empty on both records. Returns a boolean without changing either record.
+ *
+ * This compares two supplied records; it does not independently prove visibility
+ * or the corpse's position from global simulator state.
+ *
  * @param {Record<string, any>} corpse
  * @param {Record<string, any>} facts
  */
@@ -3607,9 +4044,19 @@ function localOracleCorpseMatchesPublicFacts(corpse, facts) {
 }
 
 /**
- * Validate and compose the presentation-only corpse projection. The returned
- * scene is used for paint and inspection only; the original endpoint remains
- * the sole decision, mask, and targeting authority.
+ * Add checked drawing-only corpses to an actor scene.
+ *
+ * `frame` supplies the schema-checked corpse overlay and researcher facts;
+ * `baseScene` contains the actor's authorized bodies; `shared` selects which
+ * living sensor IDs may explain an overlay. The overlay must join the same epoch
+ * and recipient, use ordered unique target IDs, name only allowed living sensors,
+ * and agree with the declared corpse/public/roster facts.
+ *
+ * Returns a new mutable scene record with a new combined agent array and the
+ * needed class profiles. Body/profile records are borrowed. Throws TypeError on
+ * invalid joins. It does not recompute radius or line of sight: the trusted
+ * producer owns that projection. The original endpoint still owns observations,
+ * masks, and targets; these corpses add only drawing and inspection information.
  *
  * @param {Record<string, any>} frame
  * @param {Record<string, any>} baseScene
@@ -3802,8 +4249,18 @@ function composeLocalOracleCorpseOverlay(frame, baseScene, shared) {
 }
 
 /**
- * Validate the global, geometry-free controls carried beside a live Agent
- * battlefield. This branch may drive panels and commands, never the SVG.
+ * Validate researcher-wide facts attached to a live actor presentation.
+ *
+ * `frame` is schema-checked. This joins the session, generation, revision, epoch,
+ * selected recipient, ten-slot directory, active roster, incoming actions, and
+ * technical-frame identity. Editable joint turns must also agree on pending joint
+ * actions and the selected actor's draft, axis, and masks. Scripted playback has
+ * no pending joint-action draft. Shared public body facts must agree between the
+ * researcher and actor views.
+ *
+ * Returns a mutable list of Oracle presentation-key/public-ID pairs for later key
+ * checks. Throws TypeError on invalid joins. Researcher data remains inspection
+ * information; it does not replace the actor's authorized endpoint.
  *
  * @param {Record<string, any>} frame
  * @returns {{key: string, publicId: string}[]}
@@ -4147,6 +4604,19 @@ function validateLiveResearcherSpace(frame) {
 }
 
 /**
+ * Join action inspection to its exact decision epoch and authorized axis.
+ *
+ * `frame`, `source`, and `endpoint` are schema-checked. `actionAxis` may be null
+ * only where that frame permits it; `scene` is the base actor-input scene, without
+ * extra drawing-only corpses. `live`, `oracle`, and `shared` select the contract.
+ * Live editable drafts and replay outgoing actions must join the owner, tick,
+ * target IDs, labels, and legal mask. Final replay frames have no action
+ * inspection; scripted live playback returns after checking its scope.
+ *
+ * Returns undefined or throws TypeError. Actor masks must equal the endpoint's
+ * mask. Replay accepted actions must be legal; submitted int32 values can record
+ * invalid intent. This validates records without selecting or applying actions.
+ *
  * @param {Record<string, any>} frame
  * @param {Record<string, any>} source
  * @param {Record<string, any>} endpoint
@@ -4391,7 +4861,23 @@ function validateInspectionStateMatrix(
   }
 }
 
-/** @param {Record<string, any>} frame */
+/**
+ * Check the cross-field meaning of one schema-checked presentation frame.
+ *
+ * `frame` is the cloned wire record. This joins product/authority/source kinds,
+ * epochs, identity directories, actor-relative axes, scene facts, masks,
+ * provenance, researcher inspection data, and incoming/outgoing action and event
+ * records. It checks the base actor scene separately from drawing-only corpse
+ * additions. The producer remains responsible for simulation and visibility.
+ *
+ * Returns a mutable derived record containing `actionAxis`, `decisionMask`,
+ * `frameId`, `live`, `oracle`, both presentation-key pair lists, and the composed
+ * `scene`. Values may borrow records from `frame`. Throws TypeError for a broken
+ * contract. It does not yet verify hashes, freeze data, or brand the result;
+ * normalizeAuthorizedPresentationFrameV1 owns those final steps.
+ *
+ * @param {Record<string, any>} frame
+ */
 function validateSemanticFrame(frame) {
   const source = frame.source;
   const authority = frame.authority;
@@ -4618,7 +5104,16 @@ function validateSemanticFrame(frame) {
     if (shared) {
       const sources = /** @type {any[]} */ (parts.authorized_sensor_sources);
       const provenanceRows = /** @type {any[]} */ (parts.agent_observation_provenance);
-      /** @param {any} left @param {any} right */
+      /**
+       * Compare two checked SharedObs source records in canonical order.
+       *
+       * `left` and `right` are source records from the enclosing actor endpoint. Returns
+       * true when `left` sorts earlier: the recipient's source comes first, followed by
+       * other sources in public-agent-ID string order. It does not sort or mutate the
+       * input list.
+       *
+       * @param {any} left @param {any} right
+       */
       const sourceSortsBefore = (left, right) => {
         const leftRank = left.source_kind === "recipient_base" ? 0 : 1;
         const rightRank = right.source_kind === "recipient_base" ? 0 : 1;
@@ -4839,9 +5334,21 @@ function validateSemanticFrame(frame) {
 }
 
 /**
- * Strictly normalize one of the six Python-owned authorized presentation
- * leaves. The result contains the exact wire branches plus authority-neutral
- * aliases used by browser consumers.
+ * Validate, copy, and freeze one authorized presentation wire frame.
+ *
+ * `value` is an untrusted version-1 record for one of the six supported live/replay
+ * and Oracle/actor leaves. The record must use plain data properties, the exact
+ * schema fields, coherent identities/epochs/scenes/actions/events, and matching
+ * endpoint, overlay, and presentation-key hashes. Match-summary facts are checked
+ * when present. Hashes establish consistency with supplied identities and data;
+ * the trusted Python producer remains the authority for permitted information.
+ *
+ * Resolves to a new deeply frozen record containing the validated wire fields and
+ * renderer aliases such as `scene`, `frame_id`, `action_axis`, and `decision_mask`.
+ * The root is remembered by identity for later guards. The input is unchanged;
+ * cloning the result loses that remembered identity. This performs local Web
+ * Crypto work, not network or filesystem I/O. Rejects with TypeError on malformed
+ * or inconsistent data; missing/failing Web Crypto also prevents completion.
  *
  * @param {unknown} value
  * @returns {Promise<Readonly<Record<string, any>>>}
@@ -4984,9 +5491,11 @@ export async function normalizeAuthorizedPresentationFrameV1(value) {
 }
 
 /**
- * Return true only for an exact root produced by this module after complete
- * structural and semantic validation. A lookalike frozen object cannot enter
- * presentation-owned rendering through this guard.
+ * Test whether this exact object completed presentation normalization here.
+ *
+ * `value` may be anything. Returns true only for a root object recorded by this
+ * module after successful normalization. A look-alike or cloned record returns
+ * false. This checks object identity; it does not rerun schema or hash checks.
  *
  * @param {unknown} value
  * @returns {value is Readonly<Record<string, any>>}
@@ -5000,7 +5509,13 @@ export function isNormalizedAuthorizedPresentationFrameV1(value) {
 }
 
 /**
- * Validate the exact audience-unavailable response served with HTTP 422.
+ * Validate the one supported unavailable-audience API error payload.
+ *
+ * `value` must be a plain version-1 record with exactly the schema version,
+ * `audience_unavailable` error code, and the canonical unavailable-audience
+ * message. Returns a new deeply frozen copy. Throws TypeError for unknown fields,
+ * wrong values, or malformed properties. It performs no request and does not
+ * change UI state.
  *
  * @param {unknown} value
  * @returns {Readonly<Record<string, any>>}
@@ -5022,6 +5537,14 @@ export function normalizePresentationApiErrorV1(value) {
 }
 
 /**
+ * Snapshot a plain record and require exactly the named own fields.
+ *
+ * `value` is the candidate, `expected` lists every permitted field name, and
+ * `label` identifies the record in TypeError messages. Returns a new mutable
+ * null-prototype record with borrowed field values. Accessors and malformed
+ * records are rejected before field reads; unknown or missing keys also fail.
+ * This is a shallow snapshot, not recursive field validation.
+ *
  * @param {unknown} value
  * @param {readonly string[]} expected
  * @param {string} label
@@ -5039,7 +5562,15 @@ function exactRecord(value, expected, label) {
   return record;
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Require a safe nonnegative integer identity/count field.
+ *
+ * `value` is returned unchanged when it is a number accepted by
+ * Number.isSafeInteger and is at least zero. Otherwise throws TypeError naming
+ * `label`. Strings are not converted and no default is supplied.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function exactNonnegativeInteger(value, label) {
   if (!Number.isSafeInteger(value) || Number(value) < 0) {
     invalid(`${label} must be a non-negative safe integer.`);
@@ -5047,7 +5578,15 @@ function exactNonnegativeInteger(value, label) {
   return Number(value);
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Require a nonempty string without trimming or converting it.
+ *
+ * Returns `value` unchanged if it is a string with positive length; whitespace
+ * alone is accepted. Otherwise throws TypeError naming `label`. This checks
+ * presence, not scientific-ID syntax.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function exactNonemptyString(value, label) {
   if (typeof value !== "string" || value.length === 0) {
     invalid(`${label} must be a non-empty string.`);
@@ -5055,7 +5594,15 @@ function exactNonemptyString(value, label) {
   return value;
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Require the bounded ASCII syntax used by scientific artifact IDs.
+ *
+ * `value` must be a string of 1 through 512 letters, digits, underscores, periods,
+ * colons, or hyphens. Returns it unchanged or throws TypeError naming `label`.
+ * No trimming, normalization, or uniqueness check occurs.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function exactScientificId(value, label) {
   const text = exactNonemptyString(value, label);
   if (text.length > 512 || !/^[A-Za-z0-9_.:-]+$/u.test(text)) {
@@ -5064,7 +5611,15 @@ function exactScientificId(value, label) {
   return text;
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Require the bounded ASCII syntax used by public agent IDs.
+ *
+ * `value` must be a string of 1 through 128 letters, digits, underscores, periods,
+ * colons, or hyphens. Returns it unchanged or throws TypeError naming `label`.
+ * This does not prove that an agent exists in a particular roster.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function exactPublicAgentId(value, label) {
   const text = exactNonemptyString(value, label);
   if (text.length > 128 || !/^[A-Za-z0-9_.:-]+$/u.test(text)) {
@@ -5074,9 +5629,19 @@ function exactPublicAgentId(value, label) {
 }
 
 /**
- * Strictly normalize the recipient-local Shared replay transport plus its
- * researcher-wide artifact facts. It deliberately creates no scene, event,
- * legality, projection, or HUD aliases.
+ * Validate and freeze a private SharedObs replay transport frame.
+ *
+ * `value` is the plain version-1 SharedObs actor replay wire record, with exact
+ * fields and an analysis/nonverbose/POV audience. `animateIncoming` defaults to
+ * false and must be a boolean; it records caller intent. This checks the session,
+ * revision, canonical replay/frame/transition IDs, cursor bounds, captured counts,
+ * completion facts, and their researcher-wide artifact-facts joins.
+ *
+ * Returns a new deeply frozen transport with replay/session/cursor aliases and
+ * `animate_incoming`. It adds no scene, HUD, or policy-input authority and does
+ * not acquire the joined-pair identity mark. Throws TypeError on malformed data.
+ * The outer join checks whether requested incoming animation fits this cursor.
+ * No I/O occurs and the input is unchanged.
  *
  * @param {unknown} value
  * @param {boolean} animateIncoming
@@ -5323,8 +5888,18 @@ export function normalizeSharedObsAgentPovReplayTransportV1(
 }
 
 /**
- * Normalize the existing Python-owned private Shared timeline without adding
- * scene, projection, source-material, HUD, or command aliases.
+ * Validate and freeze a private SharedObs replay's complete cursor timeline.
+ *
+ * `value` is a plain version-1 timeline record with exact fields. The summary,
+ * completion, and timeline ID must agree. There must be one row per captured
+ * frame, in index order, with canonical recipient-frame and incoming-transition
+ * IDs and adjacent simulator ticks. Only the final row carries the endpoint kind;
+ * its kind follows the checked completion evidence or captured-prefix status.
+ *
+ * Returns a new deeply frozen record with copied rows and replay/audience/episode/
+ * recipient aliases. Throws TypeError on malformed fields or inconsistent joins.
+ * The first tick need not be zero. This does not load frames, verify their content,
+ * or join a current frame; joinReplayTransportAndTimelineV1 owns that step.
  *
  * @param {unknown} value
  */
@@ -5522,7 +6097,16 @@ export function normalizeSharedObsAgentPovReplayTimelineTransportV1(value) {
   });
 }
 
-/** @param {Record<string, any>} value @param {readonly string[]} expected @param {string} label */
+/**
+ * Require a previously snapshotted record to have exactly the expected keys.
+ *
+ * `value` is the safe shallow snapshot; `expected` lists the permitted own names;
+ * `label` is included in TypeError messages. Returns undefined if the sorted name
+ * sets agree and throws otherwise. Input order is irrelevant and neither input
+ * is changed. This does not inspect values or create the snapshot.
+ *
+ * @param {Record<string, any>} value @param {readonly string[]} expected @param {string} label
+ */
 function requireExactSnapshotKeys(value, expected, label) {
   const actual = Object.keys(value).sort();
   const canonical = [...expected].sort();
@@ -5535,15 +6119,30 @@ function requireExactSnapshotKeys(value, expected, label) {
 }
 
 /**
- * Classify only two individually scalar-well-formed unequal identity values as
- * a GET race. Wrong types/nonfinite values are protocol poison and never retry.
+ * Compare two well-formed scalar identities and classify a response race.
+ *
+ * `left` and `right` must both be nonempty strings, finite numbers, or null, and
+ * must have the same JavaScript type. Invalid scalars throw TypeError naming
+ * `label`. Otherwise unequal values throw PresentationJoinMismatchError, which
+ * the caller may handle as a bounded GET retry. Equal values return undefined.
+ *
+ * Object.is defines equality, including the distinction between positive and
+ * negative zero. This does not issue a request or retry it.
  *
  * @param {unknown} left
  * @param {unknown} right
  * @param {string} label
  */
 function requireJoinEqual(left, right, label) {
-  /** @param {unknown} value */
+  /**
+   * Recognize the scalar forms allowed by the enclosing identity comparison.
+   *
+   * `value` may be any value. Returns true for a nonempty string, finite number, or
+   * null. It does not check nonnegative integer bounds or scientific-ID syntax;
+   * the appropriate field validators own those restrictions.
+   *
+   * @param {unknown} value
+   */
   const valid = (value) =>
     (typeof value === "string" && value.length > 0) ||
     (typeof value === "number" && Number.isFinite(value)) ||
@@ -5555,9 +6154,19 @@ function requireJoinEqual(left, right, label) {
 }
 
 /**
- * Compare only raw/source/authority identity fields before presentation nested
- * payload validation. This ordering is a security property: a mismatched pair
- * cannot trigger an endpoint, event, Technical Frame, or inspection getter.
+ * Compare response identities before validating their nested presentation data.
+ *
+ * `rawValue` and `presentationValue` are untrusted wire candidates. This takes
+ * safe shallow snapshots, requires the appropriate exact root fields, checks
+ * source/authority literals and scalar syntax, then joins session, epoch, frame,
+ * audience, and relevant replay artifact identities. Returns the raw frame-kind
+ * string when the pair agrees.
+ *
+ * Malformed data throws TypeError. A mismatch between otherwise valid compared
+ * identities throws PresentationJoinMismatchError for the caller's bounded GET
+ * retry. The identity phase does not read nested endpoint, event, technical-frame,
+ * or inspection payloads; those are validated only after the pair agrees. It
+ * does not prove either full payload is valid or perform any request.
  *
  * @param {unknown} rawValue
  * @param {unknown} presentationValue
@@ -5931,8 +6540,20 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
 }
 
 /**
- * Join one exact raw transport frame to one separately authorized presentation.
- * The two validated roots remain separate and neither input is mutated.
+ * Join matching raw transport and authorized presentation response records.
+ *
+ * `rawValue` and `presentationValue` are untrusted wire records from the same
+ * session, audience, and frame epoch. `animateIncoming` defaults to false and
+ * must be a boolean. For replay it requests incoming choreography and must fit
+ * the replay cursor; live normalization does not use the animation flag.
+ *
+ * Checks identity first, normalizes each record using its own contract, verifies
+ * presentation hashes, then checks cross-record actor privacy. Resolves to a new
+ * deeply frozen `{transport, presentation}` pair remembered by object identity.
+ * Both roots remain separate and neither input is changed. A valid identity race
+ * rejects with PresentationJoinMismatchError; malformed/inconsistent payloads
+ * reject with TypeError. Web Crypto failures also propagate. No fetch, retry,
+ * rendering, or persistent write occurs here.
  *
  * @param {unknown} rawValue
  * @param {unknown} presentationValue
@@ -5976,7 +6597,15 @@ export async function joinTransportAndAuthorizedPresentationV1(
   return joined;
 }
 
-/** @param {unknown} value @returns {value is Readonly<Record<string, any>>} */
+/**
+ * Test whether this exact object was installed as an authorized pair here.
+ *
+ * `value` may be anything. Returns true for a root recorded by either frame-pair
+ * or replay-timeline joining in this module. A clone or look-alike returns false.
+ * This is an identity check, not fresh payload validation or a source signature.
+ *
+ * @param {unknown} value @returns {value is Readonly<Record<string, any>>}
+ */
 export function isJoinedTransportAndAuthorizedPresentationV1(value) {
   return (
     typeof value === "object" && value !== null && JOINED_PRESENTATION_ROOTS.has(value)
@@ -5984,9 +6613,18 @@ export function isJoinedTransportAndAuthorizedPresentationV1(value) {
 }
 
 /**
- * Normalize and join the independently fetched replay timeline to one already
- * authorized pair. Structurally valid epoch/audience mismatch is a bounded-GET
- * race; malformed timeline bytes remain an ordinary TypeError.
+ * Attach a matching replay timeline to an already normalized frame pair.
+ *
+ * `joinedValue` must be the exact remembered result of this module's pair join;
+ * `timelineValue` is an untrusted replay timeline wire record. The timeline is
+ * normalized for the transport audience, then its artifact, completion, cursor,
+ * and current-row facts are joined to the transport.
+ *
+ * Returns a new deeply frozen remembered root with borrowed `transport` and
+ * `presentation` roots plus the normalized `timeline`. Inputs are unchanged.
+ * Malformed timelines or an unrecognized pair throw TypeError; a mismatch after
+ * timeline normalization throws PresentationJoinMismatchError for a possible
+ * bounded GET retry. This does not fetch, retry, or move the replay cursor.
  *
  * @param {unknown} joinedValue
  * @param {unknown} timelineValue
@@ -6036,9 +6674,19 @@ export function joinReplayTransportAndTimelineV1(joinedValue, timelineValue) {
 }
 
 /**
- * Validate previous→next replay command continuity across legacy and private
- * Shared transports. Inputs must be unforgeable authorized pairs; presentation
- * authority switching remains a separate main-state clearing concern.
+ * Check that two remembered replay pairs can belong to one command sequence.
+ *
+ * `previousValue` and `nextValue` must be exact pair roots installed by this
+ * module. `result` is the caller's already checked command-result string, such as
+ * `applied`, `duplicate`, or `stale_resync`. Legacy-only pairs use the legacy
+ * continuity check. If either pair uses private SharedObs transport, this checks
+ * session/artifact/count/completion stability and the result-dependent revision
+ * and resync-generation bounds across audience changes.
+ *
+ * Returns `nextValue` itself on success; throws TypeError for unknown pairs or
+ * broken continuity. It does not clear old audience state, check every command's
+ * cursor delta, validate `result` against an enum, or issue commands. The caller
+ * owns command-result validation and presentation-authority state clearing.
  *
  * @param {unknown} previousValue
  * @param {unknown} nextValue

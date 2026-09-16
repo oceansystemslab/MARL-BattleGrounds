@@ -1,4 +1,4 @@
-"""Launch-scoped debugger source-revision discovery proofs."""
+"""Check the source revision recorded when the debugger starts."""
 
 from __future__ import annotations
 

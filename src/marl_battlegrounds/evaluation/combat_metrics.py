@@ -1,4 +1,11 @@
-"""Shared per-transition combat quantities over authoritative simulator facts."""
+"""Derive combat measurements from one authoritative Core transition.
+
+combat_quantities supplies directed amounts and useful kill/rescue contribution
+for full metrics. combat_credit shares the observed credit rule with capture.
+Hypothetical healing calls existing Core helpers; this module does not change
+combat physics. All numerical functions use one scalar environment and support
+outer JAX batching. Admission of real transitions belongs to the caller.
+"""
 
 # Core is protected. Its existing private helpers preserve one simulator
 # authority for hypothetical healing without changing Core's public API.
@@ -34,11 +41,34 @@ from marl_battlegrounds.core.types import (
 
 
 class CombatQuantities(NamedTuple):
-    """Source/recipient matrices, plus unique recipient rescue opportunities.
+    """Directed combat amounts and recipient-level rescue facts for one transition.
 
-    Amount matrices are float32 ``[10, 10]``. Contribution matrices are boolean
-    ``[10, 10]`` and recipient opportunity/save vectors are boolean ``[10]``.
-    Priest contribution counts indicate useful participation, not solo causation.
+    Attributes
+    ----------
+    routing : Array
+        float32 (10, 10) source/recipient routing from Core.
+    damage : Array
+        float32 (10, 10) delivered damage after source/recipient modifiers,
+        including amounts beyond remaining health.
+    healing : Array
+        float32 (10, 10) delivered Priest healing, including excess.
+    excess_healing : Array
+        float32 (10, 10) excess allocated among healing sources.
+    kill_contributions : Array
+        bool (10, 10) direct damage or useful one-hop Priest
+        support on a newly dead recipient's transition.
+    rescue_opportunities : Array
+        bool (10,) recipients legal healing could have saved.
+    rescues : Array
+        bool (10,) recipients actually saved by this transition's healing.
+    rescue_contributions : Array
+        bool (10, 10) Priests giving useful healing in rescues.
+
+    Notes
+    -----
+    Matrix axes use global source then recipient slots. Team A occupies 0..4
+    and Team B 5..9. Contribution marks useful participation, not sole causation.
+    No natural regeneration receives Priest healing/support credit.
     """
 
     routing: Array
@@ -52,7 +82,24 @@ class CombatQuantities(NamedTuple):
 
 
 class CombatCredit(NamedTuple):
-    """Recipient excess and nonrecursive credit from observed combat effects."""
+    """Observed excess healing and nonrecursive contribution masks.
+
+    Attributes
+    ----------
+    excess_healing_by_recipient : Array
+        float32 (10,) healing beyond post-combat capacity.
+    useful_healing : Array
+        bool (10, 10) Priest source/recipient pairs with some useful
+        healing on this transition.
+    kill_contributions : Array
+        bool (10, 10) direct contributors plus Priests healing
+        those direct contributors usefully. Healing support is not recursive.
+
+    Notes
+    -----
+    All slots are global. This immutable numerical tree contains no hypothetical
+    rescue computation and no attribution to unseen earlier status casters.
+    """
 
     excess_healing_by_recipient: Array
     useful_healing: Array
@@ -69,11 +116,40 @@ def combat_credit(
     health_after: Array,
     contributed_to_death: Array,
 ) -> CombatCredit:
-    """Share observed direct/Priest credit without hypothetical rescue work.
+    """Compute observed damage/Priest kill credit without hypothetical rescues.
 
-    Healing and routing are source/recipient ``[10, 10]`` matrices; other
-    arguments are ``[10]`` vectors from the same transition. Health is measured
-    before and immediately after simultaneous combat, before regeneration.
+    Parameters
+    ----------
+    class_ids : Array
+        int32 (10,) configured classes in global slot order.
+    health_before : Array
+        float32 (10,) health at the decision start.
+    healing : Array
+        float32 (10, 10) delivered source/recipient healing amounts.
+    routing : Array
+        (10, 10) source/recipient routing mask or zero/one amounts.
+    total_healing : Array
+        float32 (10,) Core recipient healing totals.
+    total_damage : Array
+        float32 (10,) Core recipient damage totals.
+    health_after : Array
+        float32 (10,) health immediately after simultaneous combat,
+        before natural regeneration.
+    contributed_to_death : Array
+        bool (10,) Core source flags for newly caused deaths.
+
+    Returns
+    -------
+    CombatCredit
+        CombatCredit with recipient excess and source/recipient useful-healing and
+        kill-contribution masks. Entirely excess healing earns no support.
+
+    Notes
+    -----
+    Inputs must describe one transition in the same decision epoch. This pure
+    JAX calculation does not validate, mutate or transfer them to the host.
+    Priest support reaches direct attackers once; healing a support-only Priest
+    does not recursively earn credit.
     """
     uncapped_health = health_before + (total_healing - total_damage)
     excess = jnp.clip(uncapped_health - health_after, min=0, max=total_healing)
@@ -92,12 +168,13 @@ def combat_credit(
 def _available_priest_healing(
     config: EnvConfig, state: EnvState, action_mask: ActionMask
 ) -> Array:
-    """Resolve each recipient's best legal combined healing through Core.
+    """Return each recipient's best legally available combined Priest healing.
 
-    Catalog amounts rank Basic/Ultimate choices; the same recipient modifier
-    applies to both. Core still computes the selected combined amount and its
-    float32 reduction order. Each recipient is an independent counterfactual,
-    not a claim that one Priest could heal several allies simultaneously.
+    config, state and action_mask describe the same scalar decision start. Rank
+    legal Basic/Ultimate choices by catalog amounts, then let existing Core helpers
+    compute their combined result and float32 reduction order. Return float32 (10,).
+    Each recipient is a separate hypothetical case; one Priest is not claimed to
+    heal all of them at once. The numerical path supports jit and outer vmap.
     """
     slots = jnp.arange(MAX_AGENT_SLOTS)
     priest = config.agent_profile.class_ids == PRIEST_CLASS_ID
@@ -111,6 +188,7 @@ def _available_priest_healing(
     neutral_multipliers = jnp.ones(MAX_AGENT_SLOTS, dtype=jnp.float32)
 
     def healing_for(recipient: Array) -> Array:
+        """Ask Core for the best legal Priest-healing combination on one recipient."""
         targets = jnp.argmax(
             recipient == GLOBAL_RECIPIENT_SLOT_INDEX_BY_ACTOR_AND_TARGET_ACTION,
             axis=-1,
@@ -145,12 +223,34 @@ def _available_priest_healing(
 def combat_quantities(
     config: EnvConfig, state: EnvState, action_mask: ActionMask, info: Info
 ) -> CombatQuantities:
-    """Compute delivered effects and truthful direct/support credit once.
+    """Compute directed combat effects and useful support from one Core transition.
 
-    ``state`` and ``action_mask`` are the decision-start pair that produced
-    ``info``. All routing, modifiers, deaths and actual combat health come from
-    Core facts. Metric excess allocation is proportional to delivered healing;
-    natural regeneration never earns healing, kill-support or rescue credit.
+    Parameters
+    ----------
+    config : EnvConfig
+        Exact scalar EnvConfig for the transition.
+    state : EnvState
+        Core EnvState at decision start, before combat and regeneration.
+    action_mask : ActionMask
+        Matching decision-start masks, including joint target/Ultimate
+        legality used by the healing-opportunity calculation.
+    info : Info
+        Core Info containing that transition's routing, modifiers, health
+        resolution, death and action-acceptance facts.
+
+    Returns
+    -------
+    CombatQuantities
+        CombatQuantities. Amounts use float32 global (source, recipient) matrices;
+        contribution masks are bool (10, 10), and rescue vectors are bool (10,).
+        Excess healing is shared in proportion to delivered healing.
+
+    Notes
+    -----
+    Pure numerical JAX route with no host I/O or input mutation. Core remains
+    the authority for actual and hypothetical health resolution. The caller
+    decides whether a transition is real before accumulating results.
+    Regeneration contributes no Priest healing, kill-support or rescue credit.
     """
     facts = info.transition_facts
     combat = facts.combat_transition_facts

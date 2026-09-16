@@ -1,4 +1,4 @@
-"""Focused HTTP security, routing, and lifecycle tests for the debugger."""
+"""Check debugger HTTP routing, security boundaries and server lifetime."""
 
 import json
 import socket
@@ -148,7 +148,6 @@ def _command_body(
 
 
 def _complete_runtime_asset_root(tmp_path: Path) -> Path:
-    """Copy the validated runtime allowlist into one isolated test root."""
     asset_root = tmp_path / "web"
     for route, asset in build_static_manifest(_ASSET_ROOT).items():
         if route == "/":

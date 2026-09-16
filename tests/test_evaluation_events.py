@@ -1,4 +1,4 @@
-"""Focused contract tests for deterministic evaluation-event decoding."""
+"""Check deterministic decoding of evaluation events."""
 
 from __future__ import annotations
 
@@ -80,7 +80,6 @@ _NEUTRAL_EVENT_TYPES = {
 
 
 def _replace_item[T](values: tuple[T, ...], index: int, value: T) -> tuple[T, ...]:
-    """Return one tuple with a single test value replaced."""
     return (*values[:index], value, *values[index + 1 :])
 
 
@@ -90,7 +89,6 @@ def _replace_matrix_item[T](
     column: int,
     value: T,
 ) -> tuple[tuple[T, ...], ...]:
-    """Return one fixed matrix with a single test value replaced."""
     return _replace_item(
         values,
         row,
@@ -107,7 +105,6 @@ def _snapshot(
     agent_positions: tuple[tuple[float, float], ...] | None = None,
     team_deathmatch_scores: tuple[int, int] = (0, 0),
 ) -> GlobalAnalysisSnapshotV1:
-    """Build the validated dynamic subset consumed by the event decoder."""
     if agent_positions is None:
         agent_positions = tuple((float(slot), 0.0) for slot in range(10))
     return GlobalAnalysisSnapshotV1(
@@ -136,7 +133,6 @@ def _frame(
     simulator_step_count: int,
     snapshot: GlobalAnalysisSnapshotV1,
 ) -> EvaluationFrameV1:
-    """Build a decoder frame while omitting irrelevant validated tensor payloads."""
     return EvaluationFrameV1.model_construct(
         episode_id="episode-001",
         frame_index=frame_index,
@@ -155,7 +151,6 @@ def _joint_action(
     select_target: tuple[int, ...] = _ZERO_INT_10,
     use_ultimate: tuple[int, ...] = _ZERO_INT_10,
 ) -> JointActionV1:
-    """Build one fixed-width host joint action."""
     return JointActionV1(
         move=move,
         select_target=select_target,
@@ -164,7 +159,6 @@ def _joint_action(
 
 
 def _neutral_facts(*, transition_start_step_count: int = 7) -> TransitionFactsV1:
-    """Build real-transition facts whose event view is empty."""
     neutral_action = _joint_action()
     return TransitionFactsV1(
         has_transition=True,
@@ -244,7 +238,6 @@ def _decode(
     start_snapshot: GlobalAnalysisSnapshotV1 | None = None,
     successor_snapshot: GlobalAnalysisSnapshotV1 | None = None,
 ) -> tuple[EvaluationEventV1, ...]:
-    """Decode one standard adjacent test transition."""
     if context is None:
         context = evaluation_context()
     if start_snapshot is None:
@@ -260,12 +253,10 @@ def _decode(
 
 
 def _event_types(events: Iterable[EvaluationEventV1]) -> tuple[str, ...]:
-    """Return event discriminators in decoded order."""
     return tuple(event.event_type for event in events)
 
 
 def _representative_multi_event_transition() -> EvaluationTransitionV1:
-    """Build a transition whose discriminated event tuple has multiple variants."""
     facts = _neutral_facts()
     facts = facts.model_copy(
         update={

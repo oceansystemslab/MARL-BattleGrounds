@@ -1,4 +1,12 @@
-"""Small deterministic targeting and general/specialist movement primitives."""
+"""Share deterministic target and movement choices between reactive controllers.
+
+These helpers read permitted observations and exact action masks. Target helpers
+choose rows; movement helpers compare possible moves using Core's existing static
+geometry functions. They neither change collision rules nor predict other actors'
+actions. The BETA movement path treats observed bodies as stationary obstacles
+when choosing a move. All choices remain the controller's preferences, not a
+guarantee of the next physical outcome.
+"""
 
 import jax.numpy as jnp
 from jax import Array, vmap
@@ -41,12 +49,49 @@ BYPASS_MINIMUM_CONTACT_ANGLE_DEGREES = 45
 
 
 def centers(features: Array) -> Array:
-    """Read observed world-space centers from one or more unit rows."""
+    """Read world-space (x, y) centers from unit-feature rows.
+
+    Parameters
+    ----------
+    features : Array
+        One feature row of shape (58,) or several rows of shape (..., 58).
+
+    Returns
+    -------
+    Array
+        The selected position columns, shape (..., 2), with the input dtype and
+        all leading axes preserved. Positions use the map's world units.
+
+    Notes
+    -----
+    The caller must use visibility and activity masks before treating a row as
+    a known position. This helper does not distinguish a hidden zero row from
+    a visible unit at the origin.
+    """
     return features[..., jnp.asarray([AGENT_FEATURE_X, AGENT_FEATURE_Y])]
 
 
 def living_candidates(features: Array, visible: Array) -> Array:
-    """Reject hidden, inactive, dead, and zero-health candidate rows."""
+    """Select visible, active, living candidates with positive health.
+
+    Parameters
+    ----------
+    features : Array
+        Candidate features of shape (N, 58), in the caller's row order.
+    visible : Array
+        Boolean visibility for the same N candidates, shape (N,).
+
+    Returns
+    -------
+    Array
+        Boolean (N,) mask. A row is True only when visibility, activity, life
+        state and positive current health all agree.
+
+    Notes
+    -----
+    The helper reads supplied features without changing them or querying Core.
+    The caller owns the observation's information permissions.
+    """
     return (
         visible
         & (features[:, AGENT_FEATURE_ACTIVE] > 0)
@@ -58,10 +103,30 @@ def living_candidates(features: Array, visible: Array) -> Array:
 def lowest_health_row(
     features: Array, eligible: Array, *, break_ties_by_max_health: bool = False
 ) -> Array:
-    """Choose by absolute HP, optional maximum HP, then ascending row/slot.
+    """Choose the eligible row with the lowest current health.
 
-    The fixed ally and enemy axes are each ordered by global slot. Callers
-    retain their eligibility mask to distinguish an empty set from row zero.
+    Parameters
+    ----------
+    features : Array
+        Candidate features of shape (N, 58). Health is measured in health points,
+        not as a fraction of maximum health.
+    eligible : Array
+        Boolean (N,) mask of candidates the caller permits.
+    break_ties_by_max_health : bool, default=False
+        If True, equal current health is resolved by the lower maximum health.
+        Otherwise skip that comparison. Keep this Python choice static in JAX.
+
+    Returns
+    -------
+    Array
+        Scalar int32 row index. Remaining exact ties use the lowest row index.
+        If no row is eligible, the result is 0; it does not mean row 0 is valid.
+
+    Notes
+    -----
+    Check whether eligible contains any True values before using the result.
+    Ally and enemy observation rows retain their own fixed order. Inputs are
+    unchanged and no random tie-break is made.
     """
     health = features[:, AGENT_FEATURE_CURRENT_HEALTH]
     tied = eligible & (health == jnp.min(jnp.where(eligible, health, jnp.inf)))
@@ -72,7 +137,28 @@ def lowest_health_row(
 
 
 def nearest_row(features: Array, eligible: Array, origin: Array) -> Array:
-    """Choose nearest center; exact ties use ascending row/global slot."""
+    """Choose the eligible candidate whose center is nearest to the origin.
+
+    Parameters
+    ----------
+    features : Array
+        Candidate features of shape (N, 58).
+    eligible : Array
+        Boolean (N,) mask of permitted candidates.
+    origin : Array
+        World-space (x, y) point, shape (2,), in the same units as the features.
+
+    Returns
+    -------
+    Array
+        Scalar int32 row index. Exact distance ties choose the lowest row.
+        An empty eligible set returns 0; the caller must check eligibility.
+
+    Notes
+    -----
+    Distances compare centers and do not subtract body radii or test reachability.
+    Inputs are unchanged.
+    """
     distance_squared = jnp.sum(jnp.square(centers(features) - origin), axis=-1)
     return jnp.argmin(jnp.where(eligible, distance_squared, jnp.inf)).astype(jnp.int32)
 
@@ -84,12 +170,39 @@ def refine_movement(
     *,
     approach: Array | bool = False,
 ) -> Array:
-    """Pick the closest legal direction with useful static-world displacement.
+    """Choose a legal direction that makes useful progress through static geometry.
 
-    Eight independent hypothetical moves occupy the first eight geometry slots.
-    No body pair participates; the final two slots are inert padding. This uses
-    precisely the simulator's bounded obstacle/boundary projection, not a new
-    collision implementation or a prediction of other agents' actions.
+    Parameters
+    ----------
+    observation : Observation
+        One actor's current observation. Position, body radius, movement speed,
+        map bounds and visible map geometry supply the movement calculation.
+    action_mask : ActionMask
+        The actor's exact mask for the same decision.
+    intended_direction : Array
+        World-space displacement toward the intended goal, shape (2,).
+        Direction ranking normalizes it, but wall steering uses its endpoint
+        at the current position plus this displacement. Scaling it can change
+        approach steering. Zero intent keeps Stay.
+    approach : Array or bool, default=False
+        Whether movement approaches a goal. True allows the bounded wall-end
+        steering rule; retreat movement does not enter that rule.
+
+    Returns
+    -------
+    Array
+        Scalar int32 movement category. Prefer the best direction alignment
+        among admitted moves; exact ties use the lower movement category.
+        Return Stay when no useful legal move remains.
+
+    Notes
+    -----
+    Core's static obstacle and map-bound projection evaluates eight possible moves
+    without body-pair contacts. A move needs at least MINIMUM_MOVEMENT_FRACTION of
+    the actor's movement speed as displacement, with additional progress checks
+    during wall steering. This is a one-decision preference, not a route planner
+    or a prediction of simultaneous body movement. The helper is JAX-compatible
+    and changes no state.
     """
     origin = centers(observation.self_features)
     speed = observation.self_features[AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED]
@@ -159,12 +272,48 @@ def _wall_steering(
     bodies: Array | None = None,
     body_mask: Array | None = None,
 ) -> tuple[Array, Array, Array, Array]:
-    """Steer through a bounded wall-side/end strip without remembering a route.
+    """Choose a temporary direction around a nearby vertical wall end.
 
-    Goal-side identity stays fixed across the wall center. The strip uses wall
-    thickness and body diameter, so a Slow cannot erase a partly cleared turn.
-    SOUTH is preferred; a wall attached to the lower boundary uses NORTH.
-    An active zero direction means neither end fits, not permission to replan.
+    Parameters
+    ----------
+    observation : Observation
+        One actor's current permitted position, body size, movement state and map.
+    goal : Array
+        World-space destination, shape (2,).
+    approach_enabled : Array or bool
+        Scalar Boolean enabling this approach-only steering rule.
+    candidate_origins : Array or None, default=None
+        Optional possible next centers, shape (N, 2). Callers replace inadmissible
+        candidates with the current center before passing them here.
+    bodies : Array or None, default=None
+        Optional observed unit rows of shape (N, 58). Supplying bodies selects
+        BETA's wall grouping and boundary-passage handling.
+    body_mask : Array or None, default=None
+        Boolean (N,) blocker mask, paired with bodies. Pass both for body-aware
+        steering. The caller excludes self, prey and unseen bodies.
+
+    Returns
+    -------
+    direction : Array
+        Float32 (2,) preferred direction. Without active steering, this is
+        goal minus the actor's current center.
+    active : Array
+        Scalar Boolean saying a nearby wall steering rule applies.
+    end_direction : Array
+        Scalar direction toward the selected wall end: -1 south, 1 north,
+        or 0 for no selected end. Active steering with 0 means neither end fits.
+    end_height : Array
+        Selected wall-end y coordinate in world units. Use it only when the
+        steering and end-selection flags make it relevant.
+
+    Notes
+    -----
+    This rule handles axis-aligned walls taller than they are wide, including
+    quarter-turn obstacle encodings. It prefers a fitting south end, with a north
+    alternative. The body-aware branch considers directly overlapping expanded
+    wall groups, not an unbounded route search. It carries no route memory and
+    changes neither physical geometry nor observations. Possible moves still
+    need the caller's legality and progress checks.
     """
     own = observation.self_features
     origin = centers(own)
@@ -204,6 +353,11 @@ def _wall_steering(
         )
 
         def exit_clear(center: Array) -> Array:
+            """Check whether an actor-sized disc at this exit overlaps any map obstacle.
+
+            The enclosing call supplies the body radius and observed obstacle array.
+            This checks static exit clearance, not other actors or an entire route.
+            """
             return ~jnp.any(
                 vmap(disc_overlaps_obstacle, in_axes=(None, None, 0))(
                     center, radius, obstacles
@@ -331,6 +485,11 @@ def _wall_steering(
         required_radius = radius + bodies[:, AGENT_FEATURE_RADIUS]
 
         def occupied(height: Array) -> Array:
+            """Check whether a permitted body blocks this wall-end passage.
+
+            The enclosing body-aware branch supplies the group width, body radii and
+            Boolean blocker mask. The scalar height uses map world units.
+            """
             distance_squared = (body_centers[:, 0] - closest_x) ** 2 + (
                 body_centers[:, 1] - height
             ) ** 2
@@ -440,11 +599,34 @@ def _body_bypass_moves(
     bodies: Array,
     body_mask: Array,
 ) -> Array:
-    """Admit clear segments and shoulder contact at least 45 degrees from head-on.
+    """Mark candidate segments that avoid head-on contact with observed bodies.
 
-    Incidence uses the first contact normal, not the initial direction to a
-    distant body. Tiny solver overlap counts as contact; deeper overlap retains
-    strict outward escape. This changes steering only, never physical radii.
+    Parameters
+    ----------
+    origin : Array
+        Starting center, shape (2,), in world units.
+    endpoints : Array
+        Candidate next centers, shape (M, 2).
+    radius : Array
+        Scalar radius of the moving actor.
+    bodies : Array
+        Observed body-feature rows, shape (N, 58).
+    body_mask : Array
+        Boolean (N,) blocker mask. False rows cannot reject a candidate.
+
+    Returns
+    -------
+    Array
+        Boolean (M,) mask. Every selected blocker must admit the segment:
+        clear travel or glancing first contact is allowed. A deeper initial
+        overlap requires travel that does not deepen it and ends farther away.
+
+    Notes
+    -----
+    Glancing contact is at least 45 degrees from head-on, using the first contact
+    normal. Tiny initial overlaps within Core's geometry tolerance count as
+    contact. Bodies are assumed stationary for this preference. The function
+    does not perform the simulation's collision resolution or alter body radii.
     """
     travel = endpoints - origin
     start = origin - centers(bodies)
@@ -501,7 +683,36 @@ def _body_aware_move(  # pyright: ignore[reportUnusedFunction]
     bodies: Array,
     body_mask: Array,
 ) -> Array:
-    """Use current body-clear wall passages, preserving physical candidate checks."""
+    """Choose BETA's movement toward prey while checking observed body contacts.
+
+    Parameters
+    ----------
+    observation : Observation
+        The moving actor's current permitted observation.
+    action_mask : ActionMask
+        Its exact current action mask.
+    prey_center : Array
+        Observed prey center, shape (2,), in world units.
+    bodies : Array
+        Candidate blocker features of shape (N, 58).
+    body_mask : Array
+        Boolean (N,) mask of visible living blockers, excluding self and prey.
+
+    Returns
+    -------
+    Array
+        Scalar int32 movement category. Among admitted moves, prefer progress
+        along active wall steering or a closer endpoint to the prey. Remaining
+        ties use endpoint distance and then the lower movement category.
+        Return Stay if no admitted move remains.
+
+    Notes
+    -----
+    Static endpoints come from Core's geometry helper, without body-pair solving.
+    Contact checks treat other observed bodies as stationary. Wall steering can
+    permit a temporary move away from prey. No history, hidden positions, other
+    actors' selected actions or extra random draws are used.
+    """
     origin = centers(observation.self_features)
     speed = observation.self_features[AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED]
     radius = observation.self_features[AGENT_FEATURE_RADIUS]

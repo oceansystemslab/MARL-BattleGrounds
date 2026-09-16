@@ -1,8 +1,14 @@
-"""Historical metric schemas and the active validated-record observer boundary.
+"""Define historical metric records and the validated host observer lifecycle.
 
-Strict V1 component/report records remain readable. The transactional observer
-serves debugger integrity and archived basic report generation; current numerical
-metrics use the public JAX evaluation workflow.
+V1 reports store raw counts, sums, ratios, durations, opportunities, and samples
+with explicit episode eligibility. The observer keeps valid captured trajectory
+progress separate from reducer progress, so a metric failure cannot erase a
+valid transition. It serves historical recording and debugger analysis; current
+high-throughput metrics use the numerical evaluation workflow.
+
+All models and reducers here run on the host. Reducers are trusted deterministic
+code with immutable replacement state. Their raw statistics are analysis data,
+not additional information an acting policy may consume.
 """
 
 from __future__ import annotations
@@ -131,12 +137,14 @@ _ClassId = Annotated[int, Field(ge=1, le=5)]
 
 
 def _require_binary_int(value: object) -> object:
+    """Return exact integer 0 or 1; reject bool and other values with ValueError."""
     if type(value) is not int or value not in (0, 1):
         raise ValueError("value must be an exact integer 0 or 1")
     return value
 
 
 def _require_schema_version_one(value: object) -> object:
+    """Return exact integer 1; reject bool and other versions with ValueError."""
     if type(value) is not int or value != 1:
         raise ValueError("schema_version must be the exact integer 1")
     return value
@@ -270,40 +278,90 @@ _RESERVED_DIMENSION_NAMES = frozenset(
 
 
 class StatisticDimensionV1(EvaluationModel):
-    """One metric-defined categorical coordinate, excluding context truth."""
+    """Add one metric-specific category without replacing context-owned facts.
+
+    Attributes
+    ----------
+    name : _AsciiIdentifier
+        Nonempty ASCII identifier absent from the reserved context/metric field names.
+    value : _AsciiIdentifier
+        Nonempty ASCII category identifier.
+
+    Notes
+    -----
+    Drafts require dimensions to be sorted and unique by name. Raw rows also
+    reject names used by the context's aggregation keys.
+    """
 
     name: _AsciiIdentifier
     value: _AsciiIdentifier
 
     @model_validator(mode="after")
     def _reject_context_shadowing(self) -> StatisticDimensionV1:
+        """Reject reserved dimension names with ValueError; return this row
+        otherwise.
+        """
         if self.name in _RESERVED_DIMENSION_NAMES:
             raise ValueError(f"statistic dimension {self.name!r} shadows context truth")
         return self
 
 
 class EpisodeStatisticSubjectV1(EvaluationModel):
-    """The episode as a whole."""
+    """Select the whole episode as a statistic's subject.
+
+    Attributes
+    ----------
+    subject_type : Literal['episode']
+        Fixed discriminator "episode"; defaults to "episode".
+    """
 
     subject_type: Literal["episode"] = "episode"
 
 
 class TeamStatisticSubjectV1(EvaluationModel):
-    """One configured team."""
+    """Select one configured team as a statistic's subject.
+
+    Attributes
+    ----------
+    subject_type : Literal['team']
+        Fixed discriminator "team"; defaults to "team".
+    team_id : _TeamId
+        1 for Team A or 2 for Team B.
+    """
 
     subject_type: Literal["team"] = "team"
     team_id: _TeamId
 
 
 class AgentStatisticSubjectV1(EvaluationModel):
-    """One configured-active global agent slot."""
+    """Select one global agent slot as a statistic's subject.
+
+    Attributes
+    ----------
+    subject_type : Literal['agent']
+        Fixed discriminator "agent"; defaults to "agent".
+    global_slot : _GlobalSlot
+        Slot 0-9. Report validation additionally requires an active slot
+        with an assigned V1 policy record.
+    """
 
     subject_type: Literal["agent"] = "agent"
     global_slot: _GlobalSlot
 
 
 class TeamClassStatisticSubjectV1(EvaluationModel):
-    """One team/class stratum, including a declared absent class."""
+    """Select one class within a team, including a declared absent class.
+
+    Attributes
+    ----------
+    subject_type : Literal['team_class']
+        Fixed discriminator "team_class"; defaults to "team_class".
+    team_id : _TeamId
+        1 for Team A or 2 for Team B.
+    class_id : _ClassId
+        Class 1-5. An absent class must be reported as invalid_artifact
+        or structurally_inapplicable when joined to context.
+    """
 
     subject_type: Literal["team_class"] = "team_class"
     team_id: _TeamId
@@ -311,7 +369,21 @@ class TeamClassStatisticSubjectV1(EvaluationModel):
 
 
 class AgentPairStatisticSubjectV1(EvaluationModel):
-    """One ordered pair of distinct configured-active agent slots."""
+    """Select an ordered pair of distinct agent slots.
+
+    Attributes
+    ----------
+    subject_type : Literal['agent_pair']
+        Fixed discriminator "agent_pair"; defaults to "agent_pair".
+    primary_global_slot : _GlobalSlot
+        First slot, 0-9.
+    secondary_global_slot : _GlobalSlot
+        Different second slot, 0-9.
+
+    Notes
+    -----
+    Pair order is meaningful. Report validation requires both slots active and assigned.
+    """
 
     subject_type: Literal["agent_pair"] = "agent_pair"
     primary_global_slot: _GlobalSlot
@@ -319,6 +391,7 @@ class AgentPairStatisticSubjectV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _require_distinct_slots(self) -> AgentPairStatisticSubjectV1:
+        """Reject a self-pair with ValueError; preserve the supplied order otherwise."""
         if self.primary_global_slot == self.secondary_global_slot:
             raise ValueError("ordered agent-pair subjects require two distinct slots")
         return self
@@ -340,7 +413,11 @@ def _require_stable_nested_model(
     record_name: str,
     expected_types: tuple[type[EvaluationModel], ...],
 ) -> None:
-    """Reject undeclared subtypes and unchecked Pydantic model copies."""
+    """Require an exact allowed model class and unchanged strict revalidation.
+
+    Raise ValueError for undeclared subclasses or unchecked/coerced fields.
+    Do not mutate or silently repair the supplied model.
+    """
     if type(model) not in expected_types:
         expected_names = ", ".join(row.__name__ for row in expected_types)
         raise ValueError(
@@ -354,7 +431,17 @@ def _require_stable_nested_model(
 
 
 class DistributionObservationV1(EvaluationModel):
-    """One linked long-form observation retained without moment reduction."""
+    """Keep one finite sample and its stable source link.
+
+    Attributes
+    ----------
+    source_observation_id : _AsciiIdentifier
+        Nonempty ASCII source identifier, unique within its distribution.
+    ordinal : _NonNegativeInt
+        Zero-based position, required gap-free by the owning distribution.
+    value : _FiniteFloat
+        Finite sample value in the owning statistic's units.
+    """
 
     source_observation_id: _AsciiIdentifier
     ordinal: _NonNegativeInt
@@ -362,7 +449,21 @@ class DistributionObservationV1(EvaluationModel):
 
 
 class CountComponentV1(EvaluationModel):
-    """An additive event/row count with episode eligibility exposure."""
+    """Store an additive count and whether this episode contributes to it.
+
+    Attributes
+    ----------
+    component_type : Literal['count']
+        Fixed discriminator "count"; defaults to "count".
+    count : _NonNegativeInt
+        Nonnegative number of qualifying events or rows.
+    eligible_episode_count : _EpisodeEligibility
+        Exact integer 0 or 1, not bool.
+
+    Notes
+    -----
+    A zero count is a valid measured result and does not imply zero opportunity.
+    """
 
     component_type: Literal["count"] = "count"
     count: _NonNegativeInt
@@ -370,7 +471,24 @@ class CountComponentV1(EvaluationModel):
 
 
 class SumComponentV1(EvaluationModel):
-    """A finite additive total with observation and episode exposure."""
+    """Store a finite sum with its observation and episode counts.
+
+    Attributes
+    ----------
+    component_type : Literal['sum']
+        Fixed discriminator "sum"; defaults to "sum".
+    value : _FiniteFloat
+        Finite additive total in the statistic's units; negative totals are allowed.
+    observation_count : _NonNegativeInt
+        Nonnegative number of contributing observations.
+    eligible_episode_count : _EpisodeEligibility
+        Exact integer 0 or 1.
+
+    Notes
+    -----
+    Zero observations require a zero sum. Empty eligible sums carry zero-opportunity
+    evidence rather than an invented observation.
+    """
 
     component_type: Literal["sum"] = "sum"
     value: _FiniteFloat
@@ -379,13 +497,35 @@ class SumComponentV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_empty_sum(self) -> SumComponentV1:
+        """Require a zero total when observation_count is zero; otherwise raise
+        ValueError.
+        """
         if self.observation_count == 0 and self.value != 0.0:
             raise ValueError("zero observations require a zero sum")
         return self
 
 
 class RatioComponentV1(EvaluationModel):
-    """One episode-local numerator/denominator pair, never a computed ratio."""
+    """Store a numerator and denominator before choosing a cross-episode reduction.
+
+    Attributes
+    ----------
+    component_type : Literal['ratio']
+        Fixed discriminator "ratio"; defaults to "ratio".
+    numerator : _FiniteFloat
+        Finite numerator; not a precomputed ratio.
+    denominator : _NonNegativeFloat
+        Finite nonnegative exposure or opportunity amount.
+    zero_opportunity_occurrence : _BinaryInt
+        Exact integer 1 when denominator is zero, else 0.
+    eligible_episode_count : _EpisodeEligibility
+        Exact integer 0 or 1.
+
+    Notes
+    -----
+    A zero denominator requires a zero numerator. Retaining both terms lets a
+    later analysis choose episode means or pooled ratios explicitly.
+    """
 
     component_type: Literal["ratio"] = "ratio"
     numerator: _FiniteFloat
@@ -395,6 +535,11 @@ class RatioComponentV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_denominator(self) -> RatioComponentV1:
+        """Check numerator and zero-opportunity flag against denominator presence.
+
+        Zero denominator needs numerator zero and flag one; positive denominator needs
+        flag zero. Return this component or raise ValueError.
+        """
         if self.denominator == 0.0:
             if self.numerator != 0.0 or self.zero_opportunity_occurrence != 1:
                 raise ValueError(
@@ -409,7 +554,19 @@ class RatioComponentV1(EvaluationModel):
 
 
 class DurationComponentV1(EvaluationModel):
-    """Qualifying and eligible discrete transition durations."""
+    """Store qualifying and eligible durations in discrete transition ticks.
+
+    Attributes
+    ----------
+    component_type : Literal['duration']
+        Fixed discriminator "duration"; defaults to "duration".
+    qualifying_steps : _NonNegativeInt
+        Nonnegative count of qualifying ticks.
+    eligible_steps : _NonNegativeInt
+        Nonnegative eligible tick count, at least qualifying_steps.
+    eligible_episode_count : _EpisodeEligibility
+        Exact integer 0 or 1.
+    """
 
     component_type: Literal["duration"] = "duration"
     qualifying_steps: _NonNegativeInt
@@ -418,13 +575,24 @@ class DurationComponentV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_duration(self) -> DurationComponentV1:
+        """Reject qualifying ticks greater than eligible ticks with ValueError."""
         if self.qualifying_steps > self.eligible_steps:
             raise ValueError("qualifying duration cannot exceed eligible duration")
         return self
 
 
 class OpportunityComponentV1(EvaluationModel):
-    """An explicit opportunity denominator with episode exposure."""
+    """Store a count of actual opportunities and episode eligibility.
+
+    Attributes
+    ----------
+    component_type : Literal['opportunity']
+        Fixed discriminator "opportunity"; defaults to "opportunity".
+    opportunity_count : _NonNegativeInt
+        Nonnegative number of opportunities defined by the metric.
+    eligible_episode_count : _EpisodeEligibility
+        Exact integer 0 or 1.
+    """
 
     component_type: Literal["opportunity"] = "opportunity"
     opportunity_count: _NonNegativeInt
@@ -432,7 +600,22 @@ class OpportunityComponentV1(EvaluationModel):
 
 
 class DistributionComponentV1(EvaluationModel):
-    """Ordered long-form finite observations with episode exposure."""
+    """Keep ordered finite samples instead of reducing them to summary moments.
+
+    Attributes
+    ----------
+    component_type : Literal['distribution']
+        Fixed discriminator "distribution"; defaults to "distribution".
+    observations : tuple[DistributionObservationV1, ...]
+        Immutable sample tuple with ordinals 0 onward and unique source IDs.
+    eligible_episode_count : _EpisodeEligibility
+        Exact integer 0 or 1.
+
+    Notes
+    -----
+    Empty samples in an eligible episode provide zero-opportunity evidence.
+    Construction checks exact nested sample types.
+    """
 
     component_type: Literal["distribution"] = "distribution"
     observations: tuple[DistributionObservationV1, ...]
@@ -440,6 +623,11 @@ class DistributionComponentV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_observations(self) -> DistributionComponentV1:
+        """Check strict sample models, gap-free ordinals, and unique source IDs.
+
+        Return this distribution or raise ValueError; preserve the declared sample
+        order.
+        """
         for observation in self.observations:
             _require_stable_nested_model(
                 observation,
@@ -469,16 +657,23 @@ type SufficientStatisticComponentV1 = Annotated[
 def _dimensions_key(
     dimensions: tuple[StatisticDimensionV1, ...],
 ) -> tuple[tuple[str, str], ...]:
+    """Return ordered name/value coordinates for stable comparison without sorting."""
     return tuple((row.name, row.value) for row in dimensions)
 
 
 def _subject_key(subject: StatisticSubjectV1) -> str:
+    """Serialize a strict subject to stable JSON text used in row ordering."""
     return subject.model_dump_json()
 
 
 def _component_has_zero_opportunity(
     component: SufficientStatisticComponentV1,
 ) -> bool:
+    """Recognize an eligible component with no observations or denominator.
+
+    Counts deliberately return false because a measured zero count is not an
+    opportunity claim. Other component kinds use their own exposure field.
+    """
     if isinstance(component, CountComponentV1):
         return False
     if isinstance(component, SumComponentV1):
@@ -493,7 +688,49 @@ def _component_has_zero_opportunity(
 
 
 class SufficientStatisticDraftV1(EvaluationModel):
-    """Reducer-owned statistic semantics before observer provenance joins."""
+    """Describe one reducer-owned raw statistic before adding episode provenance.
+
+    Attributes
+    ----------
+    metric_id : _AsciiIdentifier
+        Stable identifier ending in ".vN" for metric_version.
+    metric_version : _PositiveInt
+        Positive version of the metric definition.
+    component_name : _AsciiIdentifier
+        Identifier distinguishing this component of the metric.
+    reducer_id : _AsciiIdentifier
+        Owning reducer's stable identifier.
+    reducer_version : _PositiveInt
+        Positive reducer version.
+    units : _AsciiIdentifier
+        Identifier naming the component's measurement units.
+    amount_stage : HealthAmountStage | None
+        Optional health-accounting stage; defaults to None.
+    subject : StatisticSubjectV1
+        Episode, team, agent, team/class, or ordered agent-pair subject.
+    dimensions : tuple[StatisticDimensionV1, ...]
+        Sorted unique metric-specific categories; defaults to an empty tuple.
+    completion_scope : StatisticCompletionScope
+        any_gap_free_prefix or complete_episode.
+    supports_right_censoring : bool
+        Whether the metric defines right-censored endpoints.
+    result_status : StatisticResultStatus
+        defined, zero_opportunity, insufficient_data,
+        ambiguous_attribution, structurally_inapplicable, or invalid_artifact.
+    status_reason : _AsciiText | None
+        None for defined results; required printable reason otherwise.
+    endpoint_observation_status : EndpointObservationStatus
+        not_applicable, observed, right_censored,
+        competing_event, or unavailable.
+    component : SufficientStatisticComponentV1 | None
+        Raw typed component, required for defined and zero_opportunity
+        results; other statuses may omit it.
+
+    Notes
+    -----
+    Context truth is added by the observer. Construction checks strict nested
+    types, dimensions, version suffix, status evidence, and censoring support.
+    """
 
     metric_id: _AsciiIdentifier
     metric_version: _PositiveInt
@@ -513,6 +750,12 @@ class SufficientStatisticDraftV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_draft(self) -> SufficientStatisticDraftV1:
+        """Check draft identity, dimensions, typed payload, status, and censoring
+        support.
+
+        Raise ValueError on a contradiction. Episode-level eligibility is applied later
+        because a draft does not yet own completion or processing progress.
+        """
         _require_stable_nested_model(
             self.subject,
             record_name="statistic subject",
@@ -580,6 +823,11 @@ class SufficientStatisticDraftV1(EvaluationModel):
 def _draft_row_key(
     draft: SufficientStatisticDraftV1,
 ) -> tuple[object, ...]:
+    """Return metric/version/component/subject/dimensions as the unique row key.
+
+    Reducer identity is not part of this key, so two reducers cannot publish the
+    same metric row under different producer names.
+    """
     return (
         draft.metric_id,
         draft.metric_version,
@@ -590,14 +838,65 @@ def _draft_row_key(
 
 
 class EvaluationMetricReducerStateV1(EvaluationModel):
-    """Frozen identity-bearing base for trusted reducer replacement state."""
+    """Provide the identity fields for an immutable reducer-specific state model.
+
+    Attributes
+    ----------
+    reducer_id : _AsciiIdentifier
+        Stable owner identifier matching the registered reducer.
+    reducer_version : _PositiveInt
+        Positive owner version matching the registered reducer.
+
+    Notes
+    -----
+    Subclasses add only scalar, tuple, or strict frozen model fields. Reducers
+    return replacement instances and keep one exact state class after initialization.
+    """
 
     reducer_id: _AsciiIdentifier
     reducer_version: _PositiveInt
 
 
 class EvaluationEpisodeCompletionV1(EvaluationModel):
-    """Rollout completion truth, independent of host metric processing."""
+    """Record captured rollout completion independently of metric-processing success.
+
+    Attributes
+    ----------
+    schema_id : Literal['marl_battlegrounds.evaluation.episode_completion']
+        Fixed episode-completion schema identifier.
+    schema_version : _Cp3SchemaVersion
+        Exact integer 1; defaults to 1.
+    episode_id : _AsciiIdentifier
+        Episode owning this captured prefix.
+    completion_state : CompletionState
+        complete, partial, interrupted, or failed.
+    expected_transition_count : _PositiveInt
+        Positive declared artifact horizon.
+    validated_transition_count : _NonNegativeInt
+        Valid prefix length from zero through the horizon.
+    last_valid_frame_index : _NonNegativeInt
+        Equal to validated_transition_count.
+    last_valid_frame_id : _AsciiIdentifier
+        Canonical episode/frame ID at that index.
+    terminated : bool
+        Recorded task-termination flag at the valid tail.
+    truncated : bool
+        Recorded truncation flag at the valid tail.
+    completion_bases : tuple[CompletionBasis, ...]
+        Ordered task_terminal when terminated, then declared_horizon
+        when the validated count reaches its declared horizon; empty otherwise.
+    end_or_failure_reason : _AsciiText | None
+        Required for incomplete states; defaults to None.
+    failure_origin : RolloutFailureOrigin | None
+        simulation, policy, validation, or capture only for failed
+        rollouts; defaults to None and is required when failed.
+
+    Notes
+    -----
+    Truncated alone does not establish a declared horizon. A complete record
+    needs termination or the full declared count. Zero-transition prefixes
+    cannot carry either done flag.
+    """
 
     schema_id: Literal["marl_battlegrounds.evaluation.episode_completion"] = (
         EPISODE_COMPLETION_SCHEMA_ID
@@ -617,6 +916,13 @@ class EvaluationEpisodeCompletionV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_completion(self) -> EvaluationEpisodeCompletionV1:
+        """Check counts, canonical tail identity, exact completion evidence, and failure
+        fields.
+
+        Require complete labeling once task termination or the declared horizon is
+        observed. Reject incomplete records without reasons and contradictory failure
+        origins with ValueError.
+        """
         if self.validated_transition_count > self.expected_transition_count:
             raise ValueError("validated transitions cannot exceed the declared horizon")
         if self.validated_transition_count == 0 and (self.terminated or self.truncated):
@@ -668,7 +974,29 @@ class EvaluationEpisodeCompletionV1(EvaluationModel):
 
 
 class EvaluationProcessingFailureV1(EvaluationModel):
-    """One stable failure of host observation or metric processing."""
+    """Record the first stable failure in host validation or metric processing.
+
+    Attributes
+    ----------
+    stage : ProcessingFailureStage
+        Named processing stage, from initial validation through lifecycle checks.
+    code : _AsciiIdentifier
+        Stable machine-readable failure identifier.
+    reducer_id : _AsciiIdentifier | None
+        Reducer identifier for reducer stages, otherwise None.
+    reducer_version : _PositiveInt | None
+        Positive reducer version paired with reducer_id, otherwise None.
+    attempted_transition_index : _NonNegativeInt | None
+        Optional zero-based failed transition coordinate;
+        required for reducer advance and forbidden outside transition-related stages.
+    detail : _AsciiText
+        Nonempty printable ASCII explanation.
+
+    Notes
+    -----
+    This is processing failure metadata, separate from a policy or simulator
+    rollout failure. Optional fields default to None.
+    """
 
     stage: ProcessingFailureStage
     code: _AsciiIdentifier
@@ -679,6 +1007,13 @@ class EvaluationProcessingFailureV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_reducer_identity(self) -> EvaluationProcessingFailureV1:
+        """Require reducer identity and attempted-index fields only for their owning
+        stages.
+
+        Return this failure or raise ValueError when required pairs/coordinates are
+        absent
+        or a nonowning stage carries them.
+        """
         if (self.reducer_id is None) != (self.reducer_version is None):
             raise ValueError(
                 "processing failure reducer ID and version must appear together"
@@ -713,7 +1048,26 @@ class EvaluationProcessingFailureV1(EvaluationModel):
 
 
 class EvaluationProcessingStatusV1(EvaluationModel):
-    """Metric-processing progress, separate from physical rollout completion."""
+    """Record how much validated trajectory every reducer processed successfully.
+
+    Attributes
+    ----------
+    schema_id : Literal['marl_battlegrounds.evaluation.processing_status']
+        Fixed processing-status schema identifier.
+    schema_version : _Cp3SchemaVersion
+        Exact integer 1; defaults to 1.
+    status : ProcessingState
+        succeeded or failed.
+    processed_transition_count : _NonNegativeInt
+        Nonnegative fully committed prefix length.
+    failure : EvaluationProcessingFailureV1 | None
+        Required strict failure model when failed, otherwise None; defaults to None.
+
+    Notes
+    -----
+    This model checks failure presence. The separate progress validator compares
+    this count with the captured trajectory's validated count.
+    """
 
     schema_id: Literal["marl_battlegrounds.evaluation.processing_status"] = (
         PROCESSING_STATUS_SCHEMA_ID
@@ -725,6 +1079,10 @@ class EvaluationProcessingStatusV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_status(self) -> EvaluationProcessingStatusV1:
+        """Require failure metadata exactly when status is failed.
+
+        Revalidate the nested failure type and return this status or raise ValueError.
+        """
         if self.failure is not None:
             _require_stable_nested_model(
                 self.failure,
@@ -765,7 +1123,31 @@ def validate_evaluation_processing_progress_v1(
     validated_transition_count: int,
     processing_status: EvaluationProcessingStatusV1,
 ) -> None:
-    """Validate CP3 processed progress against authoritative validated progress."""
+    """Check processing progress against the valid captured trajectory.
+
+    Parameters
+    ----------
+    validated_transition_count : int
+        Exact nonnegative Python int counting valid transitions.
+    processing_status : EvaluationProcessingStatusV1
+        Strict V1 status with committed reducer count and any failure.
+
+    Returns
+    -------
+    None
+        None.
+
+    Raises
+    ------
+    ValueError
+        Types, counts, failure stage, or attempted-transition coordinate disagree.
+
+    Notes
+    -----
+    Success requires equal counts. Online advance failure leaves exactly one
+    validated but unprocessed transition. Offline analysis may leave a longer
+    unprocessed suffix, with the failed index naming its first transition.
+    """
     if type(validated_transition_count) is not int or validated_transition_count < 0:
         raise ValueError("validated transition count must be a nonnegative integer")
     _require_stable_nested_model(
@@ -827,6 +1209,11 @@ def _replace_draft(
     draft: SufficientStatisticDraftV1,
     **updates: object,
 ) -> SufficientStatisticDraftV1:
+    """Make an unchecked immutable draft copy with observer-owned field updates.
+
+    Only trusted eligibility normalization calls this helper; external drafts still
+    need strict model admission.
+    """
     return draft.model_copy(update=updates)
 
 
@@ -834,6 +1221,11 @@ def _with_episode_eligibility(
     draft: SufficientStatisticDraftV1,
     eligible_episode_count: _EpisodeEligibility,
 ) -> SufficientStatisticDraftV1:
+    """Replace a present component's zero/one episode exposure without changing its
+    data.
+
+    Return the original draft when no component or no change is needed.
+    """
     component = draft.component
     if component is None or component.eligible_episode_count == eligible_episode_count:
         return draft
@@ -848,6 +1240,13 @@ def _apply_episode_eligibility(
     completion: EvaluationEpisodeCompletionV1,
     processing_status: EvaluationProcessingStatusV1,
 ) -> SufficientStatisticDraftV1:
+    """Apply completion, processing-prefix, and endpoint rules to a trusted draft.
+
+    Preserve stronger failure statuses. Complete-episode rows need a complete fully
+    processed trajectory; otherwise make them ineligible and, when appropriate,
+    insufficient_data. Right censoring requires a complete declared horizon.
+    Raise ValueError for contradictory endpoint or defined-result exposure claims.
+    """
     endpoint = draft.endpoint_observation_status
     is_complete = completion.completion_state == "complete"
     reached_horizon = "declared_horizon" in completion.completion_bases
@@ -909,7 +1308,35 @@ def _apply_episode_eligibility(
 
 
 class RawSufficientStatisticV1(SufficientStatisticDraftV1):
-    """One raw statistic plus observer-owned episode/progress provenance."""
+    """Add observer-owned episode and processing facts to a statistic draft.
+
+    Attributes
+    ----------
+    schema_id : Literal['marl_battlegrounds.evaluation.raw_sufficient_statistic']
+        Fixed raw-statistic schema identifier.
+    schema_version : _Cp3SchemaVersion
+        Exact integer 1; defaults to 1.
+    episode_id : _AsciiIdentifier
+        Owning episode ID.
+    aggregation_keys : tuple[AggregationKeyV1, ...]
+        Sorted unique experiment coordinates copied from context.
+    source_schema_versions : tuple[SchemaVersionEntryV1, ...]
+        Exact ordered V1 source bindings copied from context.
+    rollout_completion : EvaluationEpisodeCompletionV1
+        Captured prefix's completion record.
+    validated_transition_count : _NonNegativeInt
+        Valid count, equal to rollout_completion.
+    processed_transition_count : _NonNegativeInt
+        Committed reducer count, equal to processing_status.
+    processing_status : EvaluationProcessingStatusV1
+        Metric-processing result for the prefix.
+
+    Notes
+    -----
+    All semantic fields from SufficientStatisticDraftV1 also apply. Construction
+    checks joins, forbidden dimension shadowing, publishing eligibility, and
+    failure stages. It does not average or normalize raw components.
+    """
 
     schema_id: Literal["marl_battlegrounds.evaluation.raw_sufficient_statistic"] = (
         RAW_SUFFICIENT_STATISTIC_SCHEMA_ID
@@ -925,6 +1352,14 @@ class RawSufficientStatisticV1(SufficientStatisticDraftV1):
 
     @model_validator(mode="after")
     def _validate_provenance(self) -> RawSufficientStatisticV1:
+        """Check copied context coordinates, counts, failure publishing rules, and
+        eligibility.
+
+        Require final status to equal episode-aware normalization of the inherited
+        draft.
+        Return this row or raise ValueError; do not silently repair inconsistent
+        provenance.
+        """
         for aggregation_key in self.aggregation_keys:
             _require_stable_nested_model(
                 aggregation_key,
@@ -1008,6 +1443,9 @@ class RawSufficientStatisticV1(SufficientStatisticDraftV1):
 
 
 def _raw_row_key(row: RawSufficientStatisticV1) -> tuple[object, ...]:
+    """Use the draft's metric/component/subject/dimensions key for final row
+    ordering.
+    """
     return _draft_row_key(row)
 
 
@@ -1015,6 +1453,12 @@ def _validate_subject_join(
     context: EvaluationEpisodeContextV1,
     row: RawSufficientStatisticV1,
 ) -> None:
+    """Check statistic subjects against active roster/policy assignments.
+
+    Agent and pair subjects require active V1 assigned slots. An absent team/class
+    requires invalid or structurally inapplicable status. Episode/team subjects need
+    no additional roster join. Raise ValueError for a contradiction.
+    """
     subject = row.subject
     if isinstance(subject, EpisodeStatisticSubjectV1):
         return
@@ -1051,7 +1495,32 @@ def _validate_subject_join(
 
 
 class EvaluationMetricReportV1(EvaluationModel):
-    """Immutable CP3 metric result; trajectory persistence remains Step 6."""
+    """Keep one historical episode's raw statistics and processing result.
+
+    Attributes
+    ----------
+    schema_id : Literal['marl_battlegrounds.evaluation.metric_report']
+        Fixed metric-report schema identifier.
+    schema_version : _Cp3SchemaVersion
+        Exact integer 1; defaults to 1.
+    report_id : _AsciiIdentifier
+        Canonical episode ID followed by ":metric-report".
+    context : EvaluationEpisodeContextV1
+        Exact historical V1 context.
+    completion : EvaluationEpisodeCompletionV1
+        Physical rollout completion or valid partial-prefix status.
+    processing_status : EvaluationProcessingStatusV1
+        Separate metric-processing progress and failure status.
+    statistics : tuple[RawSufficientStatisticV1, ...]
+        Immutable, uniquely keyed, canonically sorted raw rows joined to
+        the same episode, context coordinates, completion, and progress.
+
+    Notes
+    -----
+    A report can preserve processing failure. Initial or completion validation
+    failure cannot produce a structurally valid report. Replay persistence lives
+    in the replay and replay_io modules.
+    """
 
     schema_id: Literal["marl_battlegrounds.evaluation.metric_report"] = (
         METRIC_REPORT_SCHEMA_ID
@@ -1065,6 +1534,12 @@ class EvaluationMetricReportV1(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_report(self) -> EvaluationMetricReportV1:
+        """Check strict record types, canonical report ID, progress, and every statistic
+        join.
+
+        Require sorted unique row keys and eligible active subjects. Reject inconsistent
+        or unreportable failure metadata with ValueError.
+        """
         _require_stable_nested_model(
             self.context,
             record_name="metric report context",
@@ -1132,7 +1607,27 @@ class EvaluationMetricReportV1(EvaluationModel):
 
 @dataclass(frozen=True, slots=True)
 class EvaluationTransitionViewV1:
-    """One fully validated context/start/transition/successor consumer view."""
+    """Join one context, start frame, transition, and successor for a host consumer.
+
+    Attributes
+    ----------
+    context : EvaluationEpisodeContext
+        Supported episode context.
+    start_frame : EvaluationFrame
+        Decision frame before the transition.
+    transition : EvaluationTransitionV1
+        V1 transition linking the two frames.
+    successor_frame : EvaluationFrame
+        Matching-version frame one simulator tick after start_frame.
+
+    Notes
+    -----
+    Context V1 construction performs full semantic validation and stores detached
+    canonical copies. Context V2/V3 construction checks version/episode/frame
+    links and adjacent simulator ticks only, retaining supplied records; their
+    replay admission path owns full integrity checks. The class name alone
+    does not promise equally deep validation for every context version.
+    """
 
     context: EvaluationEpisodeContext
     start_frame: EvaluationFrame
@@ -1140,6 +1635,11 @@ class EvaluationTransitionViewV1:
     successor_frame: EvaluationFrame
 
     def __post_init__(self) -> None:
+        """Validate the context-specific join and canonicalize historical V1 records.
+
+        Newer contexts use the narrow captured-record join; V1 uses full semantic
+        validation and detached copies. Raise ValueError on an invalid join.
+        """
         if type(self.context) in (
             EvaluationEpisodeContextV2,
             EvaluationEpisodeContextV3,
@@ -1195,7 +1695,11 @@ def _view_from_owned_records(
     transition: EvaluationTransitionV1,
     successor_frame: EvaluationFrame,
 ) -> EvaluationTransitionViewV1:
-    """Reuse the observer's validated records without repeating unit validation."""
+    """Build a view from observer-owned validated records without revalidating.
+
+    Caller must already own a coherent unit. This deliberately bypasses dataclass
+    post-init to avoid repeating the same transition check.
+    """
     view = object.__new__(EvaluationTransitionViewV1)
     object.__setattr__(view, "context", context)
     object.__setattr__(view, "start_frame", start_frame)
@@ -1205,12 +1709,21 @@ def _view_from_owned_records(
 
 
 class EvaluationMetricReducerV1(Protocol):
-    """Trusted deterministic reducer using explicit frozen replacement state.
+    """Define a trusted deterministic reducer with immutable replacement state.
 
-    The observer can make state replacement atomic, but Python cannot undo a
-    plugin that violates this protocol by mutating external state. Reducer
-    implementations therefore must not use mutable internals, RNG, clocks,
-    global discovery, files, network access, logging, or callbacks.
+    Attributes
+    ----------
+    reducer_id : str
+        Stable ASCII identifier, unique within an observer.
+    reducer_version : int
+        Positive exact Python int identifying reducer behavior.
+
+    Notes
+    -----
+    Implement initialize, advance, and finalize without mutable internals, RNG,
+    clocks, discovery, files, network, logging, or callbacks. The observer can
+    commit state replacements atomically, but cannot undo external side effects
+    from a reducer that breaks this protocol.
     """
 
     reducer_id: str
@@ -1220,23 +1733,92 @@ class EvaluationMetricReducerV1(Protocol):
         self,
         context: EvaluationEpisodeContextV1,
         initial_frame: EvaluationFrameV1,
-    ) -> EvaluationMetricReducerStateV1: ...
+    ) -> EvaluationMetricReducerStateV1:
+        """Create this reducer's immutable state from the accepted initial frame.
+
+        Parameters
+        ----------
+        context : EvaluationEpisodeContextV1
+            Validated V1 episode metadata.
+        initial_frame : EvaluationFrameV1
+            Validated artifact frame zero, possibly at a nonzero simulator tick.
+
+        Returns
+        -------
+        EvaluationMetricReducerStateV1
+            Frozen scalar/tuple-backed state bearing this reducer's exact ID/version.
+
+        Notes
+        -----
+        The observer calls this once at start and checks the declared state schema.
+        Do not mutate inputs or store hidden evolving state on the reducer.
+        """
+        ...
 
     def advance(
         self,
         previous_state: EvaluationMetricReducerStateV1,
         view: EvaluationTransitionViewV1,
-    ) -> EvaluationMetricReducerStateV1: ...
+    ) -> EvaluationMetricReducerStateV1:
+        """Return replacement state after consuming one validated transition view.
+
+        Parameters
+        ----------
+        previous_state : EvaluationMetricReducerStateV1
+            Last committed state of this reducer's exact initialized class.
+        view : EvaluationTransitionViewV1
+            Owned context/start/transition/successor records for the next transition.
+
+        Returns
+        -------
+        EvaluationMetricReducerStateV1
+            New state with the same exact type and reducer identity.
+
+        Notes
+        -----
+        Do not mutate previous_state or external objects. If any reducer fails, the
+        observer discards all candidate reducer replacements for this transition.
+        """
+        ...
 
     def finalize(
         self,
         state: EvaluationMetricReducerStateV1,
         completion: EvaluationEpisodeCompletionV1,
         processing_status: EvaluationProcessingStatusV1,
-    ) -> tuple[SufficientStatisticDraftV1, ...]: ...
+    ) -> tuple[SufficientStatisticDraftV1, ...]:
+        """Project immutable reducer state into raw statistic drafts.
+
+        Parameters
+        ----------
+        state : EvaluationMetricReducerStateV1
+            Last committed reducer state.
+        completion : EvaluationEpisodeCompletionV1
+            Captured rollout completion or partial-prefix facts.
+        processing_status : EvaluationProcessingStatusV1
+            Shared reducer progress and any processing failure.
+
+        Returns
+        -------
+        tuple[SufficientStatisticDraftV1, ...]
+            Immutable tuple of exact SufficientStatisticDraftV1 rows carrying this
+            reducer's identity/version. An empty tuple is allowed.
+
+        Notes
+        -----
+        Must be deterministic and side-effect free because previews may call it
+        before finalization. The observer supplies episode provenance and final
+        eligibility; reducers own valid metric meaning and raw component values.
+        """
+        ...
 
 
 def _ascii_failure_detail(error: BaseException) -> str:
+    """Turn an exception into one printable ASCII diagnostic without raising from str.
+
+    Collapse whitespace, escape non-ASCII/control characters, and fall back to the
+    exception class name when its message is missing or cannot be rendered.
+    """
     try:
         raw_detail = str(error)
     except Exception:
@@ -1252,6 +1834,11 @@ def _ascii_failure_detail(error: BaseException) -> str:
 def _validate_reducer_registration(
     reducer: EvaluationMetricReducerV1,
 ) -> tuple[str, int]:
+    """Return a reducer's validated ASCII ID and positive exact integer version.
+
+    Raise ValueError for malformed registration. The observer uses the pair to
+    sort reducers and separately rejects duplicate IDs.
+    """
     reducer_id = reducer.reducer_id
     reducer_version = reducer.reducer_version
     if (
@@ -1265,6 +1852,7 @@ def _validate_reducer_registration(
 
 
 def _uses_strict_frozen_model_config(model_type: type[EvaluationModel]) -> bool:
+    """Check that a state model forbids extras/nonfinite values and is strict/frozen."""
     model_config = model_type.model_config
     return (
         model_config.get("allow_inf_nan") is False
@@ -1277,7 +1865,12 @@ def _uses_strict_frozen_model_config(model_type: type[EvaluationModel]) -> bool:
 def _immutable_state_schema(
     annotation: object, seen: set[type[EvaluationModel]]
 ) -> bool:
-    """Inspect the declared state shape once; never traverse accumulated values."""
+    """Check declared state types once without traversing accumulated values.
+
+    Allow scalar leaves, tuples, literals, unions, aliases, and strict frozen
+    EvaluationModel trees without private attributes. Track seen model classes to
+    handle recursive declarations and reject mutable or arbitrary-object fields.
+    """
     if any(annotation is scalar for scalar in (type(None), bool, int, float, str)):
         return True
     if isinstance(annotation, TypeAliasType):
@@ -1319,6 +1912,13 @@ def _validate_reducer_state(
     reducer_version: int,
     expected_type: type[EvaluationMetricReducerStateV1] | None,
 ) -> EvaluationMetricReducerStateV1:
+    """Check a trusted replacement state's schema, exact type, and reducer identity.
+
+    At initialization inspect immutable field declarations; later replacements must
+    use the established exact class. Reject wrong types/private or mutable top-level
+    fields with TypeError and identity mismatches with ValueError. This does not
+    deeply revalidate all accumulated component values on every step.
+    """
     if not isinstance(state, EvaluationMetricReducerStateV1):
         raise TypeError("reducers must return EvaluationMetricReducerStateV1")
     if not _uses_strict_frozen_model_config(type(state)):
@@ -1351,6 +1951,12 @@ def _materialize_raw_statistic(
     completion: EvaluationEpisodeCompletionV1,
     processing_status: EvaluationProcessingStatusV1,
 ) -> RawSufficientStatisticV1:
+    """Add context/progress provenance to an eligibility-adjusted trusted draft.
+
+    Reject dimensions that shadow aggregation keys. Reuse validated immutable values
+    instead of serializing accumulated history; external admission still performs
+    full raw-row validation.
+    """
     eligible = _apply_episode_eligibility(draft, completion, processing_status)
     if {dimension.name for dimension in eligible.dimensions}.intersection(
         key.name for key in context.aggregation_keys
@@ -1379,7 +1985,11 @@ def _reducer_drafts(
     completion: EvaluationEpisodeCompletionV1,
     processing: EvaluationProcessingStatusV1,
 ) -> tuple[SufficientStatisticDraftV1, ...]:
-    """Check the producer boundary without walking accumulated component values."""
+    """Call a trusted reducer's finalize and check tuple, row type, and owner identity.
+
+    Reject mutable containers or wrong types with TypeError and mismatched reducer
+    identity with ValueError. Do not traverse accumulated component values again.
+    """
     drafts = reducer.finalize(state, completion, processing)
     if type(drafts) is not tuple:
         raise TypeError("reducer finalize must return an immutable tuple")
@@ -1395,11 +2005,42 @@ def _reducer_drafts(
 
 
 class EvaluationEpisodeObserverV1:
-    """Coordinate immutable metric records with strict input validation.
+    """Validate a historical episode and coordinate atomic host metric updates.
 
-    Reducers are trusted pure code. Their declared state shape is checked at
-    initialization, and replacements preserve cheap identity/type boundaries.
-    Deep scientific-record validation belongs to ingestion and independent tests.
+    Parameters
+    ----------
+    context : object
+        Exact V1 episode context; construction retains a detached validated copy.
+    reducers : object
+        Immutable tuple of trusted reducers, sorted by ID/version internally.
+        IDs must be unique. Defaults to an empty tuple for capture without metrics.
+
+    Attributes
+    ----------
+    context : object
+        Detached copy of the immutable owned context.
+    lifecycle_state : object
+        awaiting_initial, open, sealed, poisoned, or finalized.
+    validated_transition_count : object
+        Number of accepted physical/artifact transition units.
+    processed_transition_count : object
+        Number atomically consumed by every reducer.
+    retained_frames : object
+        Detached T+1 frame tuple for metric-complete profiles, otherwise None.
+    retained_transitions : object
+        Detached T transition tuple for those profiles, otherwise None.
+    finalized_report : object
+        Detached committed report after finalization, otherwise None.
+    reducer_states : object
+        Detached tuple of last committed immutable states, otherwise None.
+
+    Notes
+    -----
+    Call start once, append consecutive transitions, then finalize once. Completion
+    seals appends. Invalid input or reducer failure poisons the observer while
+    retaining its last valid trajectory and committed reducer prefix.
+    Only evaluation_metric_complete and scenario_metric_complete retain history.
+    This is a host analysis boundary, not the numerical rollout API or actor input.
     """
 
     __slots__ = (
@@ -1424,6 +2065,34 @@ class EvaluationEpisodeObserverV1:
         context: EvaluationEpisodeContextV1,
         reducers: tuple[EvaluationMetricReducerV1, ...] = (),
     ) -> None:
+        """Create an observer without accepting an initial frame or running reducers.
+
+        Parameters
+        ----------
+        context : EvaluationEpisodeContextV1
+            Exact, structurally valid historical V1 context.
+        reducers : tuple[EvaluationMetricReducerV1, ...]
+            Immutable tuple of trusted reducers with unique valid IDs and
+            positive versions. Defaults to no reducers.
+
+        Returns
+        -------
+        None
+            None.
+
+        Raises
+        ------
+        TypeError
+            reducers is not an immutable tuple.
+        ValueError
+            Context admission or reducer registration fails.
+
+        Notes
+        -----
+        Copies the context, orders reducers, sets both progress counts to zero, and
+        chooses history retention from capture_profile. start initializes reducer
+        states.
+        """
         if type(context) is not EvaluationEpisodeContextV1:
             raise ValueError(
                 "observer context must use exact declared root type "
@@ -1471,46 +2140,76 @@ class EvaluationEpisodeObserverV1:
 
     @property
     def context(self) -> EvaluationEpisodeContextV1:
-        """Return a detached copy of the observer's immutable episode context."""
+        """Return a detached deep copy of the immutable context.
+
+        Repeated access copies the record tree; internal processing uses the owned copy.
+        """
         return deepcopy(self._context)
 
     @property
     def lifecycle_state(self) -> ObserverLifecycleState:
-        """Return the current observer lifecycle state."""
+        """Return the current lifecycle label without changing or copying observer
+        state.
+
+        The labels are awaiting_initial, open, sealed, poisoned, and finalized.
+        """
         return self._lifecycle_state
 
     @property
     def validated_transition_count(self) -> int:
-        """Return the count of semantically validated CP2 transition units."""
+        """Return the count of accepted transition units, even after a reducer failure.
+
+        This counts physical/artifact validation, not completed metric processing.
+        """
         return self._validated_transition_count
 
     @property
     def processed_transition_count(self) -> int:
-        """Return the count atomically consumed by every reducer."""
+        """Return the prefix length committed successfully by every reducer.
+
+        A failing transition can increase validated progress without increasing this
+        count.
+        """
         return self._processed_transition_count
 
     @property
     def retained_frames(self) -> tuple[EvaluationFrameV1, ...] | None:
-        """Return metric-complete frame history, or ``None`` when not retained."""
+        """Return a detached tuple of retained frames, or None when history is disabled.
+
+        Metric-complete profiles retain frame zero and each validated successor. Before
+        start, their tuple is empty. Reading this property copies the retained history.
+        """
         if self._retained_frames is None:
             return None
         return deepcopy(tuple(self._retained_frames))
 
     @property
     def retained_transitions(self) -> tuple[EvaluationTransitionV1, ...] | None:
-        """Return metric-complete transition history, or ``None`` otherwise."""
+        """Return a detached tuple of validated transitions, or None without retention.
+
+        The tuple includes a validated transition whose reducer update later failed.
+        Reading it copies the retained history.
+        """
         if self._retained_transitions is None:
             return None
         return deepcopy(tuple(self._retained_transitions))
 
     @property
     def finalized_report(self) -> EvaluationMetricReportV1 | None:
-        """Return a detached copy of the committed immutable report, if any."""
+        """Return a detached deep copy of the committed report, or None before
+        finalization.
+
+        The caller cannot mutate the observer's owned report through this result.
+        """
         return deepcopy(self._finalized_report)
 
     @property
     def reducer_states(self) -> tuple[EvaluationMetricReducerStateV1, ...] | None:
-        """Return detached copies of the last committed frozen reducer states."""
+        """Return detached last-committed reducer states, or None before successful
+        start.
+
+        Candidate states from a failing update are never exposed as committed states.
+        """
         return deepcopy(self._reducer_states)
 
     def _set_failure(
@@ -1523,6 +2222,12 @@ class EvaluationEpisodeObserverV1:
         attempted_transition_index: int | None = None,
         replace: bool = False,
     ) -> None:
+        """Keep the first processing failure and optionally append a later diagnostic.
+
+        Optional reducer and attempted index default to None. replace=False preserves
+        an existing failure; replace=True appends secondary detail while retaining the
+        first failure's stage, code, identity, and progress boundary.
+        """
         if self._processing_failure is not None:
             if replace:
                 first = self._processing_failure
@@ -1543,6 +2248,11 @@ class EvaluationEpisodeObserverV1:
         )
 
     def _reject_lifecycle(self, operation: str) -> None:
+        """Reject an operation and poison unfinished observers with a lifecycle failure.
+
+        A finalized observer remains finalized. Raise RuntimeError naming the operation
+        and previous state; retain the first processing failure when one already exists.
+        """
         previous = self._lifecycle_state
         if previous != "finalized":
             self._set_failure(
@@ -1554,7 +2264,31 @@ class EvaluationEpisodeObserverV1:
         raise RuntimeError(f"{operation} is not allowed while observer is {previous}")
 
     def start(self, initial_frame: EvaluationFrameV1) -> None:
-        """Accept frame zero and atomically initialize every reducer once."""
+        """Accept frame zero and initialize all reducer states as one transaction.
+
+        Parameters
+        ----------
+        initial_frame : EvaluationFrameV1
+            Exact V1 frame zero matching context and any remaining TDM horizon.
+
+        Returns
+        -------
+        None
+            None.
+
+        Raises
+        ------
+        RuntimeError
+            Called outside awaiting_initial, or a reducer fails initialization.
+        ValueError
+            Initial frame/context semantic validation fails.
+
+        Notes
+        -----
+        Retains a detached valid initial frame before reducer initialization.
+        Reducer states commit only when every initializer succeeds. Any failure
+        poisons the observer; invalid initial data cannot later produce a report.
+        """
         if self._lifecycle_state != "awaiting_initial":
             self._reject_lifecycle("start")
         try:
@@ -1612,7 +2346,34 @@ class EvaluationEpisodeObserverV1:
         transition: EvaluationTransitionV1,
         successor_frame: EvaluationFrameV1,
     ) -> None:
-        """Validate one unit, then atomically replace every reducer state."""
+        """Accept one adjacent transition, then atomically advance all reducers.
+
+        Parameters
+        ----------
+        transition : EvaluationTransitionV1
+            Exact V1 transition from the observer's current frame.
+        successor_frame : EvaluationFrameV1
+            Exact V1 successor frame one artifact index and simulator tick later.
+
+        Returns
+        -------
+        None
+            None.
+
+        Raises
+        ------
+        RuntimeError
+            Observer is not open or a reducer update fails.
+        ValueError
+            Strict transition-unit validation fails.
+
+        Notes
+        -----
+        A valid transition and its successor commit to trajectory history before
+        reducers run. All reducer replacements commit together; on failure their
+        previous states remain and processed count does not advance. Invalid inputs
+        or reducer errors poison further capture. Done or declared horizon seals it.
+        """
         if self._lifecycle_state != "open":
             self._reject_lifecycle("append")
         if self._current_frame is None:
@@ -1644,7 +2405,12 @@ class EvaluationEpisodeObserverV1:
         self._append_validated_view(view)
 
     def _append_validated_view(self, view: EvaluationTransitionViewV1) -> None:
-        """Consume owned validated records through the same atomic transaction."""
+        """Commit an owned valid trajectory unit before the atomic reducer transaction.
+
+        Caller supplies a previously validated V1 view. On reducer failure, preserve the
+        new validated frame/history and old reducer states, then poison the observer.
+        Successful terminal or horizon-reaching updates seal further appends.
+        """
         if self._lifecycle_state != "open":
             self._reject_lifecycle("append")
         attempted_index = view.transition.transition_index
@@ -1708,6 +2474,12 @@ class EvaluationEpisodeObserverV1:
         end_or_failure_reason: str | None,
         failure_origin: RolloutFailureOrigin | None,
     ) -> EvaluationEpisodeCompletionV1:
+        """Build completion from the last valid frame and task-owned tail facts.
+
+        Require a valid initial frame. The caller's requested state/reason/origin must
+        fit captured termination and declared-horizon evidence. An authoritative task
+        reason replaces an omitted reason and rejects a conflicting one.
+        """
         if self._current_frame is None:
             raise RuntimeError("a valid initial frame is required before finalization")
         terminated = (
@@ -1750,6 +2522,12 @@ class EvaluationEpisodeObserverV1:
         )
 
     def _processing_status(self) -> EvaluationProcessingStatusV1:
+        """Build status from committed progress, recording an unexplained mismatch as
+        failure.
+
+        If no failure exists, equal validated/processed counts succeed; unequal counts
+        create a statistic_materialization failure. Preserve any earlier failure.
+        """
         if self._processing_failure is None:
             if self._processed_transition_count != self._validated_transition_count:
                 self._set_failure(
@@ -1774,12 +2552,34 @@ class EvaluationEpisodeObserverV1:
         self,
         reducers: tuple[EvaluationMetricReducerV1, ...],
     ) -> None:
-        """Evaluate captured facts once, after recording, without rerunning Core.
+        """Run reducers over captured history without rerunning the simulator.
 
-        The original validated trajectory remains authoritative even when a
-        reducer fails partway through analysis. Only metric processing progress
-        and state transfer from the temporary evaluator; capture never shrinks
-        to the successfully processed metric prefix.
+        Parameters
+        ----------
+        reducers : tuple[EvaluationMetricReducerV1, ...]
+            Immutable tuple of trusted reducers to attach to a capture created
+            without reducers.
+
+        Returns
+        -------
+        None
+            None.
+
+        Raises
+        ------
+        RuntimeError
+            Reducers are already attached, finalization was attempted,
+            or no initial frame/history was retained.
+        ValueError
+            Reducer registration or an unhandled retained-record invariant fails.
+
+        Notes
+        -----
+        Uses a temporary observer and copies its reducer state/progress back.
+        Reducer failures are recorded as offline failures; the original valid
+        trajectory is never shortened to the processed prefix. If capture already
+        has a processing failure, this method leaves it unchanged and returns.
+        It is host analysis and does not reset or step Core.
         """
         if self._reducers or self._finalize_attempted:
             raise RuntimeError("offline evaluation requires an unfinalized capture")
@@ -1827,12 +2627,37 @@ class EvaluationEpisodeObserverV1:
         end_or_failure_reason: str | None = None,
         failure_origin: RolloutFailureOrigin | None = None,
     ) -> tuple[SufficientStatisticDraftV1, ...]:
-        """Project the current prefix without finalizing or mutating the observer.
+        """Project current raw statistics without finalizing or changing the observer.
 
-        This is researcher analysis, not an actor observation. Callers supply
-        completion only when that endpoint has actually been captured. Complete-
-        episode rows retain the same eligibility rules as the final report.
-        A failing projection raises without poisoning continued capture.
+        Parameters
+        ----------
+        completion_state : CompletionState
+            Requested captured-prefix state. Defaults to "partial";
+            use "complete" only when completion evidence is already present.
+        end_or_failure_reason : str | None
+            Optional reason. Partial previews default to
+            "cursor_prefix"; other incomplete states require an explicit reason.
+        failure_origin : RolloutFailureOrigin | None
+            Required only for a failed rollout; defaults to None.
+
+        Returns
+        -------
+        tuple[SufficientStatisticDraftV1, ...]
+            Immutable, sorted tuple of eligibility-adjusted drafts with unique row keys.
+
+        Raises
+        ------
+        RuntimeError
+            No initialized reducer states are available.
+        ValueError
+            Completion evidence, endpoint rules, draft identity, or row uniqueness
+            fails.
+
+        Notes
+        -----
+        Reducer exceptions also propagate. A failing preview does not poison capture.
+        Complete-episode rows keep final-report eligibility rules. These statistics
+        are researcher analysis, not authorized policy observations.
         """
         if self._reducer_states is None:
             raise RuntimeError("a valid initial frame is required for a preview")
@@ -1866,7 +2691,42 @@ class EvaluationEpisodeObserverV1:
         end_or_failure_reason: str | None = None,
         failure_origin: RolloutFailureOrigin | None = None,
     ) -> EvaluationMetricReportV1:
-        """Atomically finalize raw rows and return the only CP3 report seam."""
+        """Commit the observer's one report using captured completion evidence.
+
+        Parameters
+        ----------
+        completion_state : CompletionState
+            Required state: complete, partial, interrupted, or failed.
+            Must agree with the valid transition tail and declared horizon.
+        end_or_failure_reason : str | None
+            Optional reason; required for incomplete rollout states.
+            A recorded task end reason is used when omitted and must match if supplied.
+        failure_origin : RolloutFailureOrigin | None
+            Required for failed rollouts and forbidden otherwise; defaults to None.
+
+        Returns
+        -------
+        EvaluationMetricReportV1
+            Detached EvaluationMetricReportV1 with owned context, completion, processing
+            status, and sorted raw rows. Metric failure may yield an empty statistic
+            tuple
+            while preserving valid rollout progress.
+
+        Raises
+        ------
+        RuntimeError
+            No valid start exists, finalization was already attempted, or
+            lifecycle disallows finalization.
+        ValueError
+            Requested completion conflicts with captured evidence.
+
+        Notes
+        -----
+        Finalization is single-use, including failed completion requests. Reducer
+        finalization/materialization/report failures are recorded in processing
+        status; they do not rewrite physical completion. The committed observer
+        becomes finalized and cannot accept more transitions. Performs no file I/O.
+        """
         if self._lifecycle_state in ("awaiting_initial", "finalized"):
             self._reject_lifecycle("finalize")
         if self._current_frame is None:
@@ -1977,7 +2837,33 @@ def build_evaluation_observer_v1(
     context: EvaluationEpisodeContextV1,
     reducers: tuple[EvaluationMetricReducerV1, ...] = (),
 ) -> EvaluationEpisodeObserverV1:
-    """Build one explicitly enabled observer; disabled callers retain ``None``."""
+    """Create an explicitly enabled historical host observer.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContextV1
+        Exact valid V1 episode context.
+    reducers : tuple[EvaluationMetricReducerV1, ...]
+        Immutable tuple of trusted reducers; defaults to no reducers.
+
+    Returns
+    -------
+    EvaluationEpisodeObserverV1
+        New observer awaiting its initial frame. History retention follows
+        context.capture_profile.
+
+    Raises
+    ------
+    TypeError
+        reducers is not a tuple.
+    ValueError
+        Context or reducer registration is invalid.
+
+    Notes
+    -----
+    Disabled integrations should retain None instead of constructing an observer.
+    This helper does not start capture, run reducers, or write artifacts.
+    """
     return EvaluationEpisodeObserverV1(context=context, reducers=reducers)
 
 

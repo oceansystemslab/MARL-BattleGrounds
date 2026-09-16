@@ -1,4 +1,4 @@
-"""Check neutral contact handling through the public movement helpers."""
+"""Check that contact handling does not depend on arbitrary actor ordering."""
 
 from collections.abc import Callable, Sequence
 from typing import cast
@@ -59,7 +59,6 @@ def _scene(
     width: float = 20.0,
     height: float = 20.0,
 ) -> GeometryInputs:
-    """Pad a small scene to the simulator's fixed array shapes."""
     count = len(positions)
     centers = np.zeros((MAX_AGENT_SLOTS, 2), np.float32)
     centers[:count] = positions
@@ -91,7 +90,6 @@ def _scene(
 
 
 def _assert_positions(result: Array, expected: Array | np.ndarray) -> None:
-    """Simple controls keep their strict position and finite-value checks."""
     actual = np.asarray(result)
     assert actual.shape == (MAX_AGENT_SLOTS, 2)
     assert actual.dtype == np.float32
@@ -100,7 +98,6 @@ def _assert_positions(result: Array, expected: Array | np.ndarray) -> None:
 
 
 def _assert_same_position_bits(result: Array, expected: Array) -> None:
-    """Row changes must preserve every float32 bit, including signed zeros."""
     actual, wanted = np.asarray(result), np.asarray(expected)
     assert actual.shape == wanted.shape == (MAX_AGENT_SLOTS, 2)
     assert actual.dtype == wanted.dtype == np.float32
@@ -160,7 +157,6 @@ def test_movement_respects_body_radius_at_every_map_edge(
 def test_movement_stops_at_actual_pillar_or_rectangle_surface(
     kind: int, angle: float, corner: bool, direction: tuple[float, float]
 ) -> None:
-    """Radial approaches check faces and rounded corners without a box surrogate."""
     rotation = np.array(
         [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]]
     )
@@ -201,7 +197,6 @@ def test_movement_ignores_inactive_and_none_obstacle_rows(
 def test_charge_at_obstacle_center_uses_its_physical_approach(
     kind: int, direction: tuple[float, float]
 ) -> None:
-    """A center tie keeps the approach side instead of choosing a fixed axis."""
     normal = np.asarray(direction, np.float32)
     position = np.array([10, 10], np.float32) + normal * 3
     args = _scene(
@@ -227,7 +222,6 @@ def test_charge_at_obstacle_center_uses_its_physical_approach(
 def test_saved_body_contact_is_exact_after_agent_reordering(
     permutation: tuple[int, ...],
 ) -> None:
-    """Use the first saved body-order witness, with all ten original positions."""
     args = _scene(
         [
             (7.7620930671691895, 4.916223049163818),
@@ -255,7 +249,6 @@ def test_saved_body_contact_is_exact_after_agent_reordering(
 
 
 def test_simultaneous_obstacle_contacts_are_exact_after_row_reordering() -> None:
-    """Two pillars block one approach; neither obstacle row may choose a side."""
     args = _scene(
         [(8, 10)],
         [(2, 0)],
@@ -329,7 +322,6 @@ def test_ordinary_and_charge_body_contacts(
     deltas: list[tuple[float, float]],
     expected: list[tuple[float, float]],
 ) -> None:
-    """Keep the reviewed crossing and Charge controls at the public boundary."""
     args = _scene(positions, deltas)
     if charge:
         result = _charge(*args, collision_projection_passes=4)
@@ -356,7 +348,6 @@ def test_near_touching_ordinary_bodies_cannot_exchange_sides() -> None:
 def test_only_newly_joining_overlap_can_recover_on_its_arrival_side(
     joining: bool,
 ) -> None:
-    """A body that was intangible can already be inside another body when it joins."""
     args = _scene([(5, 5), (5.5, 5)], [(1, 0)])
     if joining:
         args = (*args[:8], args[8].at[0].set(False), args[9])
@@ -399,7 +390,6 @@ def test_default_collision_budget_matches_28_literal_rounds() -> None:
 
 
 def test_saved_body_push_keeps_useful_wall_slide_and_static_clearance() -> None:
-    """Replay the named 10517 equal-body wall-slide control without changing inputs."""
     args = _scene(
         [
             (3.08526349067688, 3.9732162952423096),

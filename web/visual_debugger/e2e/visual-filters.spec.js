@@ -1,3 +1,7 @@
+/**
+ * @file Check page-local visual preferences across live/replay audiences and dense
+ * real scenario displays.
+ */
 import { expect, test } from "@playwright/test";
 
 import { REPLAY_AUTOPLAY_CADENCE_MS } from "../src/replay-controls.js";
@@ -129,12 +133,10 @@ test.afterAll(async () => {
   }
 });
 
-/**
- * @template T
+/** @template T
  * @param {T | null} value
  * @param {string} label
- * @returns {T}
- */
+ * @returns {T} */
 function requiredService(value, label) {
   if (value === null) {
     throw new Error(`${label} was not started.`);
@@ -168,10 +170,8 @@ function captureApiRequests(page) {
   return requests;
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} path
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} path */
 async function authenticatedText(page, path) {
   return page.evaluate(async (requestPath) => {
     const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
@@ -191,11 +191,9 @@ async function authenticatedText(page, path) {
   }, path);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} url
- * @param {{viewerMode: "live" | "replay", audience: string, presentationKind: string}} expected
- */
+ * @param {{viewerMode: "live" | "replay", audience: string, presentationKind: string}} expected */
 async function openInstalled(page, url, expected) {
   await page.goto(url);
   await expect(page.locator("#connection-status")).toHaveText("Online", {
@@ -223,12 +221,10 @@ async function settleLocalRender(page) {
   );
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {{method: string, path: string}[]} apiRequests
  * @param {() => Promise<void>} action
- * @param {{label: string, delayMs?: number}} options
- */
+ * @param {{label: string, delayMs?: number}} options */
 async function expectLocalOnly(page, apiRequests, action, options) {
   const mark = apiRequests.length;
   await action();
@@ -240,11 +236,9 @@ async function expectLocalOnly(page, apiRequests, action, options) {
   expect(apiRequests.slice(mark), `${options.label} caused an API request`).toEqual([]);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {"/api/command" | "/api/replay/command"} path
- * @param {() => Promise<unknown>} action
- */
+ * @param {() => Promise<unknown>} action */
 async function performCommand(page, path, action) {
   const responsePromise = page.waitForResponse(
     (response) =>
@@ -276,11 +270,9 @@ async function openVisualFilters(page) {
   await expect(page.locator("#visual-filter-options")).toBeVisible();
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string[]} disabledIds
- * @param {boolean} rangesEnabled
- */
+ * @param {boolean} rangesEnabled */
 async function expectFilterSurface(page, disabledIds = [], rangesEnabled = true) {
   const expectedDisabled = new Set(disabledIds);
   const rows = await page
@@ -344,13 +336,11 @@ async function expectFilterSurface(page, disabledIds = [], rangesEnabled = true)
   ]);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {{method: string, path: string}[]} apiRequests
  * @param {string} filterId
  * @param {boolean} enabled
- * @param {string} label
- */
+ * @param {string} label */
 async function setFilter(page, apiRequests, filterId, enabled, label) {
   const input = page.locator(`${FILTER_INPUT}[data-visual-filter-id="${filterId}"]`);
   await expectLocalOnly(
@@ -368,13 +358,8 @@ async function setFilter(page, apiRequests, filterId, enabled, label) {
   await expect(input).toBeChecked({ checked: enabled });
 }
 
-/**
- * Exact science, inspector, legality, authority, and authorized-panel bytes.
- * Deliberately excludes filter paint and playback state.
- *
- * @param {import("@playwright/test").Page} page
- * @param {boolean} replay
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {boolean} replay */
 async function scientificSignature(page, replay) {
   const apiPaths = replay
     ? ["/api/frame", "/api/presentation/frame", "/api/replay/timeline"]
@@ -462,11 +447,7 @@ async function scientificSignature(page, replay) {
   return { api, dom };
 }
 
-/**
- * Remove one presentation source's service revision pair.
- *
- * @param {unknown} value
- */
+/** @param {unknown} value */
 function omitPresentationRevision(value) {
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
     Reflect.deleteProperty(value, "source_revision");
@@ -474,15 +455,9 @@ function omitPresentationRevision(value) {
   }
 }
 
-/**
- * Normalize only the exact transport paths changed by the existing Ranges
- * service command. No scientific scene, action, lifecycle, panel, or authority
- * content is excluded.
- *
- * @param {string} path
+/** @param {string} path
  * @param {string} serialized
- * @returns {unknown}
- */
+ * @returns {unknown} */
 function rangeIndependentApiPayload(path, serialized) {
   /** @type {Record<string, any>} */
   const payload = JSON.parse(serialized);
@@ -509,13 +484,8 @@ function rangeIndependentApiPayload(path, serialized) {
   return payload;
 }
 
-/**
- * Exact scientific, authority, and panel bytes with only the expected Ranges
- * presentation toggle normalized away.
- *
- * @param {import("@playwright/test").Page} page
- * @param {boolean} replay
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {boolean} replay */
 async function rangeIndependentScientificSignature(page, replay) {
   const signature = await scientificSignature(page, replay);
   return {
@@ -529,10 +499,8 @@ async function rangeIndependentScientificSignature(page, replay) {
   };
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {"#live-ranges-button" | "#replay-ranges-button"} buttonSelector
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {"#live-ranges-button" | "#replay-ranges-button"} buttonSelector */
 async function rangeSignature(page, buttonSelector) {
   return page.evaluate((selector) => {
     const button = document.querySelector(selector);
@@ -567,17 +535,11 @@ async function targetSelectionPaintSignature(page) {
   }));
 }
 
-/**
- * Exercise the target-selection paint boundary through one real Replay Agent
- * authority. Replay selection changes the inspected POV, so hidden-target
- * retention is intentionally proved only by the live draft path.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {{method: string, path: string}[]} apiRequests
  * @param {{url: string}} replay
  * @param {string} expectedPresentationKind
- * @param {string} label
- */
+ * @param {string} label */
 async function expectReplayAgentTargetFilter(
   page,
   apiRequests,
@@ -689,10 +651,8 @@ async function expectReplayAgentTargetFilter(
   await page.goto("about:blank");
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {"live" | "replay"} mode
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {"live" | "replay"} mode */
 async function ensureRangesOn(page, mode) {
   const selector = mode === "live" ? "#live-ranges-button" : "#replay-ranges-button";
   const path = mode === "live" ? "/api/command" : "/api/replay/command";
@@ -757,10 +717,8 @@ async function ultimateInventory(page) {
     );
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string[]} eventIds
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string[]} eventIds */
 async function expectUltimateAbsent(page, eventIds) {
   const residue = await page.locator("#battlefield").evaluate((battlefield, ids) => {
     const markup = battlefield.innerHTML;
@@ -776,9 +734,7 @@ async function expectUltimateAbsent(page, eventIds) {
   await expectTooltipCleared(page);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function disableAllFilters(page) {
   const replay =
     (await page.locator("html").getAttribute("data-viewer-mode")) === "replay";
@@ -1607,14 +1563,8 @@ test("amended regular and stress scenarios retain Oracle-Agent presentation cont
     "#battlefield .combat-choreography-routes[data-state=playing]",
   ].join(", ");
 
-  /**
-   * Agent observation facts are serialized at their native binary32 precision.
-   * Normalize Oracle numbers to that same public wire precision before comparing
-   * the otherwise exact public structures.
-   *
-   * @param {any} value
-   * @returns {any}
-   */
+  /** @param {any} value
+   * @returns {any} */
   const atAuthorizedWirePrecision = (value) => {
     if (typeof value === "number" && Number.isFinite(value)) {
       return Math.fround(value);
@@ -1650,11 +1600,9 @@ test("amended regular and stress scenarios retain Oracle-Agent presentation cont
     });
   };
 
-  /**
-   * @param {"researcher" | "agent_pov"} audience
+  /** @param {"researcher" | "agent_pov"} audience
    * @param {number} frameIndex
-   * @param {Record<string, any> | null} oracle
-   */
+   * @param {Record<string, any> | null} oracle */
   const inspectInstalledFrame = async (audience, frameIndex, oracle) => {
     await expect(page.locator("#connection-status")).toHaveText("Online");
     await expect(page.locator("html")).toHaveAttribute(

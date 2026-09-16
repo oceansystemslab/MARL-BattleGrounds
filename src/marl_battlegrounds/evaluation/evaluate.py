@@ -1,4 +1,10 @@
-"""Eager scheduling over bounded compiled evaluation chunks, without a trainer."""
+"""Run fixed-policy evaluation with a host scheduler and compiled game chunks.
+
+The schedule owns exact configs, episode IDs and random-stream identities.
+JAX policies run in batches; host methods use synchronous Python calls with
+the same decision inputs. Optional metrics/replays go to memory or RunWriter.
+This module does not train policies or apply future phase-specific map rules.
+"""
 
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack
@@ -67,24 +73,47 @@ from marl_battlegrounds.tasks import (
     CANONICAL_TDM_EVALUATION_MAP_IDS,
     AgentClassName,
     TDMMapInfo,
+    canonical_tournament_rosters,
     make_standard_team_deathmatch_config,
 )
 
 type Columns = dict[str, NDArray[np.generic]]
 type MapInput = int | TDMMapInfo | EnvConfig
-_ROSTER: tuple[AgentClassName, ...] = ("mage", "warrior", "hunter", "rogue", "priest")
+_ROSTER_A, _ROSTER_B = canonical_tournament_rosters()
 
 
 @dataclass(frozen=True)
 class EpisodeSpec:
     """One planned episode; RNG identity is independent of its unique row ID.
 
-    A tournament may deliberately reuse ``seed_id`` across paired side swaps.
-    Reordering these specifications never changes their random streams.
+    Parameters
+    ----------
+    episode_id : int
+        Positive int32-compatible ID, unique within the scheduled pass.
+    env_config : EnvConfig
+        Exact scalar EnvConfig. Evaluation does not move agents or
+        exchange its banks implicitly. This public field replaces config;
+        positional construction and historical serialized keys are unchanged.
+    map_id : int | None
+        Optional public map identity for recorded metadata. The config
+        supplies actual conditions; a label does not change its values.
+    seed_id : int | None
+        Optional uint32 seed identity. If omitted, episode_id supplies
+        it. A paired experiment may deliberately reuse seed_id in two games.
+    initial_state : EnvState | None
+        Optional exact Core EnvState for an authored start. It
+        must be valid for env_config; the executor prepares its paired inputs.
+    metadata : Mapping[str, object] | None
+        Optional descriptive fields retained with the scheduled episode.
+
+    Construction only stores this immutable description. evaluate_episodes owns
+    schedule/config/start validation before execution. Reordering specifications
+    does not change their assigned random streams. Matching seeds do not promise
+    matching sampled actions when observations or other conditions differ.
     """
 
     episode_id: int
-    config: EnvConfig
+    env_config: EnvConfig
     map_id: int | None = None
     seed_id: int | None = None
     initial_state: EnvState | None = None
@@ -92,12 +121,35 @@ class EpisodeSpec:
 
     @property
     def random_seed_id(self) -> int:
+        """Return explicit seed_id, or episode_id when no seed was supplied."""
         return self.episode_id if self.seed_id is None else self.seed_id
 
 
 @dataclass(frozen=True)
 class EpisodeResult:
-    """Compact execution evidence, also usable by the tournament result writer."""
+    """Compact host result for one completed episode.
+
+    Attributes
+    ----------
+    episode_id : int
+        Positive schedule ID identifying the completed row.
+    seed_id : int
+        uint32-compatible random-stream identity assigned by the schedule.
+    map_id : int | None
+        Declared map ID, or None for an unlabeled explicit config.
+    outcome : int
+        Core terminal code: 1 Team A win, 2 Team B win, 3 draw.
+    episode_length : int
+        Number of real transitions since this episode's start.
+    team_a_score : int
+        Final Team A score, including any authored starting score.
+    team_b_score : int
+        Final Team B score, including any authored starting score.
+    config_id : str
+        Content digest linking to metadata's resolved configuration.
+
+    The frozen record contains no trajectory, model weights or open file handle.
+    """
 
     episode_id: int
     seed_id: int
@@ -111,7 +163,33 @@ class EpisodeResult:
 
 @dataclass(frozen=True)
 class EvaluationResult:
-    """Completed execution evidence and directly pandas-compatible metric tables."""
+    """Evaluation outputs and the identities needed to interpret them.
+
+    Attributes
+    ----------
+    priority_metrics : Columns
+        Selected priority table as NumPy columns, or {} when
+        unselected or retained by a writer.
+    full_metrics : Columns
+        Selected full table with the same ownership rule.
+    episodes : tuple[EpisodeResult, ...]
+        Compact results newly completed by this call, in episode-ID order.
+    metadata : dict[str, object]
+        Run, policy, config, schedule and runtime descriptions.
+    completed_episode_ids : tuple[int, ...]
+        Sorted union of prior durable and new completions;
+        default () when constructing a result directly.
+    paths : dict[str, Path] | None
+        Produced run-file paths when a writer was used; otherwise None.
+    replays : tuple[ReplayArtifactV3, ...]
+        Completed in-memory replay artifacts; default (), and empty when
+        a writer owns the replay files.
+
+    Columns are one-dimensional arrays. Valid scalar metrics are float32;
+    unavailable values are NaN. Identity columns keep their own string/integer
+    types. The descriptor is frozen but its contained dicts/arrays are not deeply
+    immutable. Results never own an open RunWriter.
+    """
 
     priority_metrics: Columns
     full_metrics: Columns
@@ -123,6 +201,8 @@ class EvaluationResult:
 
 
 class _Completed(NamedTuple):
+    """Keep each lane's first terminal payload until the host handles this chunk."""
+
     completed: Array
     episode_id: Array
     outcome: Array
@@ -134,7 +214,7 @@ class _Completed(NamedTuple):
 
     @property
     def info(self) -> EpisodeInfo:
-        """The completed old-episode payload consumed by persistence."""
+        """Package retained old-episode completion data for metric persistence."""
         return EpisodeInfo(
             self.episode_id,
             self.completed,
@@ -147,6 +227,8 @@ class _Completed(NamedTuple):
 
 
 class _Carry(NamedTuple):
+    """JAX chunk state: compact inputs, game state, two memory trees and completions."""
+
     observations: Observations
     state: EnvironmentState
     policy_a: PolicyTree
@@ -157,7 +239,31 @@ class _Carry(NamedTuple):
 def episode_keys(
     root: Array, seed_ids: Array, local_steps: Array, stream: int
 ) -> Array:
-    """Derive keys by stream, planned seed identity and local episode transition."""
+    """Derive one random key per planned episode and local transition.
+
+    Parameters
+    ----------
+    root : Array
+        One typed or legacy JAX root key.
+    seed_ids : Array
+        uint32-compatible vector (B,) of planned episode seed identities.
+    local_steps : Array
+        Integer vector (B,) of steps since each episode's start.
+    stream : int
+        Integer stream tag; callers separate reset, game and actor draws.
+
+    Returns
+    -------
+    Array
+        B typed keys, or legacy keys shaped (B, 2). Each key folds stream, then
+        its seed identity, then its local step into root.
+
+    Notes
+    -----
+        Pure numerical and jittable. Equal coordinates reproduce equal keys;
+        changing scheduling order or chunk size does not change those coordinates.
+        The caller validates values and chooses distinct stream tags.
+    """
     roots = jax.vmap(jax.random.fold_in, in_axes=(None, 0))(
         jax.random.fold_in(root, stream), seed_ids
     )
@@ -165,6 +271,7 @@ def episode_keys(
 
 
 def _actor_keys(root: Array, seed_ids: Array, local_steps: Array) -> Array:
+    """Fold ten global actor slots into each lane's dedicated policy stream."""
     keys = episode_keys(root, seed_ids, local_steps, 2)
     return jax.vmap(jax.vmap(jax.random.fold_in, in_axes=(None, 0)), in_axes=(0, None))(
         keys, jnp.arange(10, dtype=jnp.uint32)
@@ -172,9 +279,13 @@ def _actor_keys(root: Array, seed_ids: Array, local_steps: Array) -> Array:
 
 
 def _empty_completed(state: EnvironmentState) -> _Completed:
+    """Allocate empty per-lane completion buffers matching enabled metric structures."""
     count = state.episode_id.shape[0]
 
     def empty(size: int) -> MetricValues:
+        """Create unavailable metric rows with one environment axis and fixed column
+        count.
+        """
         return MetricValues(
             jnp.zeros((count, size), jnp.float32), jnp.zeros((count, size), jnp.bool_)
         )
@@ -194,6 +305,9 @@ def _empty_completed(state: EnvironmentState) -> _Completed:
 def _retain_completion(
     old: _Completed, state: EnvironmentState, info: EpisodeInfo
 ) -> _Completed:
+    """Replace only newly completed lanes, preserving prior terminal data in the
+    chunk.
+    """
     current = _Completed(
         info.completed,
         info.episode_id,
@@ -207,7 +321,7 @@ def _retain_completion(
     return cast(_Completed, select_policy_carry(info.completed, current, old))
 
 
-@jax.jit(static_argnames=("env",))
+@jax.jit
 def _reset(
     env: Environment,
     keys: Array,
@@ -217,6 +331,7 @@ def _reset(
     reset_mask: Array | None = None,
     initial: InitialSnapshot | None = None,
 ) -> tuple[Observations, EnvironmentState]:
+    """Call the shared compiled reset boundary with scheduled IDs and exact configs."""
     return env.reset(
         keys,
         config,
@@ -231,25 +346,31 @@ def _initial_snapshots(
     specs: Sequence[EpisodeSpec],
     keys: Array,
 ) -> InitialSnapshot | None:
-    """Build only the active batch's optional authored starts through Core."""
+    """Prepare authored starts only when this batch contains one.
+
+    Build matching Core state/observation/masks for every lane, using ordinary
+    reset for the remaining lanes. Inputs have already passed host validation.
+    Return None for an entirely ordinary batch; do not retain extra start history.
+    """
     if all(spec.initial_state is None for spec in specs):
         return None
     rows: list[InitialSnapshot] = []
     for index, spec in enumerate(specs):
         state, observation, mask, _ = (
-            core.reset(spec.config, keys[index])
+            core.reset(spec.env_config, keys[index])
             if spec.initial_state is None
-            else core.initialize_scenario_state(spec.initial_state, spec.config)
+            else core.initialize_scenario_state(spec.initial_state, spec.env_config)
         )
         rows.append((state, observation, mask))
 
     def stack(*values: Array) -> Array:
+        """Stack scalar authored/ordinary starts into the active native batch."""
         return jnp.stack(values)
 
     return cast(InitialSnapshot, jax.tree.map(stack, *rows))
 
 
-@jax.jit(static_argnames=("env", "apply_a", "apply_b", "chunk_size"))
+@jax.jit(static_argnames=("apply_a", "apply_b", "chunk_size"))
 def _jax_chunk(
     env: Environment,
     apply_a: PolicyApply,
@@ -261,7 +382,18 @@ def _jax_chunk(
     seed_ids: Array,
     chunk_size: int,
 ) -> tuple[_Carry, ReplayPackets | None]:
+    """Advance a fixed number of numerical rounds without host scheduling.
+
+    Parameters and actor memory remain dynamic; policy callables and chunk length
+    fix the program structure. Retain terminal payloads and freeze finished-lane
+    memory until the host replaces lanes. Return final carry and optional selected
+    replay packets, not a full observation history.
+    """
+
     def advance(current: _Carry, unused: None) -> tuple[_Carry, ReplayPackets | None]:
+        """Choose both teams' actions at one epoch, step once and retain first
+        completions.
+        """
         del unused
         local_steps = (
             current.state.core_state.step_count - current.state.initial_step_count
@@ -297,13 +429,14 @@ def _jax_chunk(
     return jax.lax.scan(advance, carry, None, length=chunk_size)
 
 
-@jax.jit(static_argnames=("env",))
+@jax.jit
 def _step_environment(
     env: Environment,
     key: Array,
     state: EnvironmentState,
     action: Action,
 ) -> tuple[Observations, EnvironmentState, Reward, DoneFlags, EpisodeInfo]:
+    """Reuse the wrapper's compiled step for batches driven by host policies."""
     return env.step(key, state, action)
 
 
@@ -318,7 +451,12 @@ def _host_chunk(
     seed_ids: Array,
     chunk_size: int,
 ) -> tuple[_Carry, ReplayPackets | None]:
-    """Keep the same actor barrier for synchronous non-JAX providers."""
+    """Advance synchronous host policies at the same pre-step decision boundary.
+
+    Skip method calls for finished lanes, retain their memory and submit inert
+    padding actions. Each round may transfer inputs; stack returned actions before
+    one batched game step. Return final carry and optional per-round capture.
+    """
     packets: list[ReplayPackets] = []
     for _ in range(chunk_size):
         local_steps = carry.state.core_state.step_count - carry.state.initial_step_count
@@ -328,6 +466,9 @@ def _host_chunk(
         for index in range(done.size):
 
             def row(value: Array, index: int = index) -> Array:
+                """Read one lane's actor inputs and memory for its Python policy
+                calls.
+                """
                 return value[index]
 
             memory_a = jax.tree.map(row, carry.policy_a)
@@ -353,6 +494,7 @@ def _host_chunk(
                 )
 
         def stack(*values: Array) -> Array:
+            """Restore the environment axis after separate lane policy calls."""
             return jnp.stack(values)
 
         action, next_a, next_b = jax.tree.map(stack, *rows)
@@ -376,6 +518,7 @@ def _host_chunk(
             packets.append(info.replay)
 
     def stack_packets(*values: Array) -> Array:
+        """Stack selected replay packets over the fixed host chunk length."""
         return jnp.stack(values)
 
     return carry, (
@@ -384,13 +527,34 @@ def _host_chunk(
 
 
 def positive_int(value: object, name: str) -> int:
+    """Validate a positive integer setting at a host boundary.
+
+    Parameters
+    ----------
+    value : object
+        Python or NumPy Integral value; booleans are rejected.
+    name : str
+        Setting name used in the error message.
+
+    Returns
+    -------
+    int
+        Equivalent Python int greater than zero.
+
+    Raises
+    ------
+    ValueError
+        value is boolean, non-integral or less than one.
+    """
     if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
         raise ValueError(f"{name} must be a positive integer")
     return int(value)
 
 
 def _tree_digest(tree: PolicyTree) -> str:
-    """Fingerprint frozen numerical content once at the recording boundary."""
+    """Hash frozen tree structure, leaf shapes/dtypes and host bytes once for
+    recording.
+    """
     leaves = jax.tree.leaves(tree)
     structure = cast(object, jax.tree.structure(tree))
     digest = sha256(str(structure).encode())
@@ -404,6 +568,9 @@ def _tree_digest(tree: PolicyTree) -> str:
 
 
 def _callable_name(apply: PolicyApply) -> str:
+    """Describe a callable by module/name, using its type when those fields are
+    absent.
+    """
     owner = type(apply)
     module = getattr(apply, "__module__", owner.__module__)
     name = getattr(apply, "__qualname__", owner.__qualname__)
@@ -417,7 +584,31 @@ def policy_description(
     *,
     include_digests: bool,
 ) -> dict[str, object]:
-    """Describe a frozen policy with only identities the executor actually knows."""
+    """Describe the fixed policy values used by an evaluation pass.
+
+    Parameters
+    ----------
+    team : Policy
+        Policy descriptor supplying label, callable, execution and checkpoint.
+    variables : PolicyTree
+        Numerical variable tree already snapshotted for this pass.
+    initial_carry : PolicyTree
+        Numerical actor-memory template already snapshotted.
+    include_digests : bool
+        Whether recording needs content/controller hashes.
+
+    Returns
+    -------
+    dict[str, object]
+        Fresh metadata dict. The callable name and declared checkpoint are kept;
+        variables_frozen is True. Digest/controller fields are None when disabled.
+
+    Notes
+    -----
+        Host-only. Call after freezing values; this function does not freeze them
+        itself or verify a caller's checkpoint label. Enabled hashes read numerical
+        leaves to the host. Disabled hashes skip that content work.
+    """
     return {
         "name": team.name,
         "checkpoint": team.checkpoint,
@@ -433,10 +624,15 @@ def policy_description(
 
 
 def _stack_configs(specs: Sequence[EpisodeSpec]) -> EnvConfig:
+    """Stack validated scalar episode configs into a native numerical batch."""
+
     def stack(*values: object) -> Array:
+        """Convert matching scalar-config leaves to arrays and stack their episode
+        axis.
+        """
         return jnp.stack(tuple(jnp.asarray(value) for value in values))
 
-    return cast(EnvConfig, jax.tree.map(stack, *(spec.config for spec in specs)))
+    return cast(EnvConfig, jax.tree.map(stack, *(spec.env_config for spec in specs)))
 
 
 def normalize_episode_specs(
@@ -447,6 +643,44 @@ def normalize_episode_specs(
     score_threshold: int,
     max_steps: int,
 ) -> tuple[EpisodeSpec, ...]:
+    """Resolve map choices into an exact cyclic episode schedule.
+
+    Parameters
+    ----------
+    maps : Iterable[MapInput] | None
+        Integer IDs, TDMMapInfo or scalar EnvConfig entries. None uses the
+        canonical evaluation map IDs; an explicit sequence must not be empty.
+    num_episodes : int
+        Positive total count, already validated by the caller.
+    team_a_roster : Sequence[AgentClassName]
+        Ordered classes for map-built Team A configs.
+    team_b_roster : Sequence[AgentClassName]
+        Ordered classes for map-built Team B configs.
+    score_threshold : int
+        Score target for map-built configs.
+    max_steps : int
+        Horizon in ticks for map-built configs.
+
+    Returns
+    -------
+    tuple[EpisodeSpec, ...]
+        Tuple of num_episodes EpisodeSpec rows with IDs 1..N. Choices cycle in
+        supplied order. Repeated IDs reuse one factory config; explicit configs
+        are kept exactly and receive no inferred map label.
+
+    Raises
+    ------
+    TypeError
+        A choice is neither EnvConfig, TDMMapInfo nor an integer ID.
+    ValueError
+        Choices are empty or a map-built config is invalid.
+
+    Notes
+    -----
+        Host setup only. Explicit configs ignore the roster/rule arguments and are
+        validated later by evaluate_episodes. No bank exchange, phase-based map
+        selection or random episode sampling occurs.
+    """
     choices = tuple(CANONICAL_TDM_EVALUATION_MAP_IDS if maps is None else maps)
     if not choices:
         raise ValueError("maps must contain at least one map or configuration")
@@ -480,6 +714,8 @@ def normalize_episode_specs(
 
 @dataclass
 class _MetricTable:
+    """Preallocate selected host metric rows, using NaN for unavailable values."""
+
     names: tuple[str, ...]
     ids: tuple[int, ...]
     rows: dict[int, int]
@@ -487,6 +723,9 @@ class _MetricTable:
 
     @classmethod
     def create(cls, names: tuple[str, ...], ids: Iterable[int]) -> _MetricTable:
+        """Allocate rows in sorted ID order; an empty selection allocates no value
+        rows.
+        """
         ordered = tuple(sorted(ids))
         return cls(
             names,
@@ -496,6 +735,9 @@ class _MetricTable:
         )
 
     def append(self, episode_id: int, values: MetricValues | None, lane: int) -> None:
+        """Store one selected completion's valid values without retaining device
+        history.
+        """
         if episode_id not in self.rows:
             return
         if values is None:
@@ -510,6 +752,7 @@ class _MetricTable:
         identity: dict[str, str | None],
         config_ids: dict[int, str],
     ) -> Columns:
+        """Build aligned identity and value columns in the fixed output schema order."""
         if not self.ids:
             return {}
         columns: Columns = {
@@ -523,19 +766,21 @@ class _MetricTable:
             ),
             "map_id": np.asarray([specs[value].map_id for value in self.ids]),
             "config_id": np.asarray(
-                [config_ids[id(specs[value].config)] for value in self.ids]
+                [config_ids[id(specs[value].env_config)] for value in self.ids]
             ),
         }
-        configs = {id(specs[value].config): specs[value].config for value in self.ids}
+        configs = {
+            id(specs[value].env_config): specs[value].env_config for value in self.ids
+        }
         profiles = {
             identity: jax.device_get(config.agent_profile)
             for identity, config in configs.items()
         }
         classes = np.asarray(
-            [profiles[id(specs[value].config)].class_ids for value in self.ids]
+            [profiles[id(specs[value].env_config)].class_ids for value in self.ids]
         )
         active = np.asarray(
-            [profiles[id(specs[value].config)].active_mask for value in self.ids]
+            [profiles[id(specs[value].env_config)].active_mask for value in self.ids]
         )
         for slot in range(10):
             columns[f"agent_{slot}_class_id"] = classes[:, slot]
@@ -564,7 +809,102 @@ def evaluate_episodes(
     chunk_size: int = 16,
     run_id: str | None = None,
 ) -> EvaluationResult:
-    """Execute a frozen schedule; validation and tournaments reuse this boundary."""
+    """Run two fixed policies over an explicit, nonempty TDM episode schedule.
+
+    Parameters
+    ----------
+    team_a : Policy
+        Team A Policy, including its callable, variables, initial actor
+        memory and execution mode. This call does not train the policy.
+    team_b : Policy
+        Team B Policy with the same contract. Use policy(name) to adapt
+        a built-in controller; this function requires Policy objects.
+    episodes : Sequence[EpisodeSpec]
+        EpisodeSpec sequence in scheduling order. Each item supplies
+        an exact scalar config, a unique positive int32 episode ID, an
+        optional seed ID and an optional authored start. Banks are not
+        exchanged. Configs must pass Core's host validator: rule scalars
+        are Python int/float values, while array fields are JAX arrays.
+    seed : int
+        Root uint32 integer, default 0. Episode seed IDs and local step
+        counts determine streams independently of scheduling order.
+    num_envs : int
+        Positive maximum batch size, default 128. The actual batch is
+        capped by the number of pending episodes. One lane runs one game.
+    metrics : MetricMode
+        "priority" by default; "full" adds all full metrics for every
+        episode, and "none" skips default collection. Explicit full metric
+        selections still collect their full and priority values.
+    full_metrics_episodes : Iterable[int]
+        Episode IDs selected for full metrics, default
+        empty. Every selected ID must appear in episodes.
+    replay_episodes : Iterable[int]
+        Episode IDs selected for replay capture, default empty.
+        Every selected ID must appear in episodes. Without a writer, replay
+        objects are returned in memory; capture does not require a folder.
+    output_dir : str | Path | None
+        Optional parent folder for a new run. RunWriter creates a
+        run folder below it. This call closes the writer it creates.
+    resume_from : str | Path | None
+        Optional existing run folder. Resume the same recorded
+        pass and schedule, skipping its durably completed episode IDs.
+        Partial episodes restart; policy memory is not a saved checkpoint.
+        Batch size and chunk size may change. Supply this or output_dir,
+        not both.
+    writer : RunWriter | None
+        Optional caller-owned open RunWriter. This call starts the named
+        pass, writes and flushes its results, and records failures. It leaves
+        the writer open. Do not also supply output_dir or resume_from.
+    phase : str
+        Nonempty saved label, default "evaluation". It does not choose
+        maps, enforce map enrollment or change the supplied game conditions.
+        With a writer, "tournament" selects match tables and requires pairing
+        metadata; run_tournament supplies that metadata.
+    pass_id : str
+        Nonempty pass label, default "1". Together with phase it names
+        the writer pass; resume checks that its saved details still match.
+    chunk_size : int
+        Positive number of steps per scheduling chunk, default 16.
+        Finished lanes keep their terminal state until the chunk ends;
+        pending episodes then replace those lanes and reset actor memory.
+    run_id : str | None
+        Optional in-memory run identity. The default is a fresh generated
+        identity. With a writer, any supplied value must equal writer.run_id.
+
+    Returns
+    -------
+    EvaluationResult
+        EvaluationResult. Without a writer, priority_metrics and full_metrics
+        map column names to one-dimensional NumPy arrays ordered by episode ID;
+        metric values are float32 and unavailable values are NaN. Unselected
+        tables are empty dicts. These columns can be passed to pandas.DataFrame.
+        With a writer, metric tables and replays stay in its files, and their
+        in-memory result fields are empty. paths names those files, or is None.
+        episodes contains compact results from this call. completed_episode_ids
+        includes both earlier durable completions and this call's completions.
+        metadata records the actual schedule, policies, settings and run identity.
+
+    Raises
+    ------
+    TypeError
+        A config, authored start or numerical policy input has an
+        unsupported type or dtype.
+    ValueError
+        A setting, schedule, config, selection or output combination
+        is invalid, or saved run details do not match the resumed pass.
+    RuntimeError
+        The writer is closed/failed, or execution violates an
+        internal completion or requested-metric contract.
+    OSError
+        Run files cannot be opened, locked, read or written.
+
+    This is a Python scheduling boundary, not a function to wrap in jax.jit.
+    JAX policies run in compiled batches with dynamic variables and actor memory.
+    If either policy uses host execution, policy calls run in Python and add
+    per-step transfers. Both routes copy completion data to the host per chunk.
+    Mutable NumPy policy values are copied at entry; input descriptions are not
+    edited. Policy/provider errors propagate, including provider timeouts.
+    """
     specs = tuple(episodes)
     if not specs:
         raise ValueError("episodes must contain at least one specification")
@@ -592,15 +932,15 @@ def evaluate_episodes(
         ):
             raise ValueError("episode seed IDs must be uint32 integers")
         if spec.initial_state is not None:
-            start_identity = (id(spec.config), id(spec.initial_state))
+            start_identity = (id(spec.env_config), id(spec.initial_state))
             if start_identity not in validated_starts:
-                validate_scenario_initial_state(spec.config, spec.initial_state)
+                validate_scenario_initial_state(spec.env_config, spec.initial_state)
                 validated_starts.add(start_identity)
-        if id(spec.config) not in validated:
-            validate_env_config(spec.config)
-            if int(spec.config.task_mode) != 1:
+        if id(spec.env_config) not in validated:
+            validate_env_config(spec.env_config)
+            if int(spec.env_config.task_mode) != 1:
                 raise ValueError("evaluate currently supports TDM configurations")
-            validated.add(id(spec.config))
+            validated.add(id(spec.env_config))
     if writer is not None and (output_dir is not None or resume_from is not None):
         raise ValueError("writer cannot be combined with output_dir or resume_from")
     if not phase or not pass_id:
@@ -612,13 +952,15 @@ def evaluate_episodes(
         full_metrics_episodes=full_metrics_episodes,
         replay_episodes=replay_episodes,
     )
+    full_selection = env.full_metrics_episodes
+    replay_selection = env.replay_episodes
     for name, selected in (
-        ("full_metrics_episodes", env.full_metrics_episodes),
-        ("replay_episodes", env.replay_episodes),
+        ("full_metrics_episodes", full_selection),
+        ("replay_episodes", replay_selection),
     ):
         if not set(selected) <= spec_by_id.keys():
             raise ValueError(f"{name} contains an episode outside the schedule")
-    full_ids = set(spec_by_id) if metrics == "full" else set(env.full_metrics_episodes)
+    full_ids = set(spec_by_id) if metrics == "full" else set(full_selection)
     priority_ids = set(spec_by_id) if metrics != "none" else full_ids
     variables_a, variables_b = (
         freeze_variables(team_a.variables),
@@ -630,7 +972,7 @@ def evaluate_episodes(
         writer is not None
         or output_dir is not None
         or resume_from is not None
-        or env.replay_episodes
+        or replay_selection
     )
     metadata: dict[str, object] = {
         "metric_schema_id": METRIC_SCHEMA_ID,
@@ -645,7 +987,7 @@ def evaluate_episodes(
         "chunk_size": chunk_size,
         "metrics": metrics,
         "full_metrics_episodes": sorted(full_ids),
-        "replay_episodes": list(env.replay_episodes),
+        "replay_episodes": list(replay_selection),
         "policies": [
             policy_description(
                 team, variables, initial_carry, include_digests=recording
@@ -680,6 +1022,9 @@ def evaluate_episodes(
                 traceback: object,
                 recorder: RunWriter = writer,
             ) -> None:
+                """Record an escaping failure without taking ownership of the caller's
+                writer.
+                """
                 if error is not None:
                     recorder.record_failure(error)
 
@@ -694,9 +1039,12 @@ def evaluate_episodes(
         elif run_id is None:
             run_id = "in-memory-" + uuid4().hex
         metadata["run_id"] = run_id
-        configs = {id(spec.config): spec.config for spec in specs}
+        configs = {id(spec.env_config): spec.env_config for spec in specs}
 
         def normalize(value: object) -> Array:
+            """Convert a resolved config leaf to the numerical form used by content
+            hashing.
+            """
             return jnp.asarray(value)
 
         configuration_records = {
@@ -729,13 +1077,13 @@ def evaluate_episodes(
                     "episode_id": spec.episode_id,
                     "seed_id": spec.random_seed_id,
                     "map_id": spec.map_id,
-                    "configuration_digest": config_ids[id(spec.config)],
+                    "configuration_digest": config_ids[id(spec.env_config)],
                     "initial_state_digest": (
                         start_digests[id(spec.initial_state)]
                         if spec.initial_state is not None
                         else None
                     ),
-                    "expected_horizon": int(spec.config.max_steps)
+                    "expected_horizon": int(spec.env_config.max_steps)
                     - (
                         int(spec.initial_state.step_count)
                         if spec.initial_state is not None
@@ -783,8 +1131,8 @@ def evaluate_episodes(
             "tdm",
             num_envs=batch_size,
             metrics=metrics,
-            full_metrics_episodes=env.full_metrics_episodes,
-            replay_episodes=env.replay_episodes,
+            full_metrics_episodes=full_selection,
+            replay_episodes=replay_selection,
         )
         priority = _MetricTable.create(
             PRIORITY_METRIC_NAMES, priority_ids if writer is None else ()
@@ -794,11 +1142,14 @@ def evaluate_episodes(
         )
         replays: list[ReplayArtifactV3] = []
         collector = None
-        if env.replay_episodes and writer is None:
+        if replay_selection and writer is None:
 
             def context(
                 packet: ReplayPackets,
             ) -> tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]:
+                """Build known context for the first packet of one selected in-memory
+                replay.
+                """
                 return build_recording_context(
                     packet.config,
                     run_id=run_id,
@@ -817,11 +1168,13 @@ def evaluate_episodes(
         lanes = list(pending[:batch_size])
 
         def seeds() -> Array:
+            """Read the current lane schedule's independent uint32 random-stream IDs."""
             return jnp.asarray(
                 [spec.random_seed_id for spec in lanes], dtype=jnp.uint32
             )
 
         def ids() -> Array:
+            """Read current lane episode identities as positive int32 values."""
             return jnp.asarray([spec.episode_id for spec in lanes], dtype=jnp.int32)
 
         reset_keys = episode_keys(root, seeds(), jnp.zeros(batch_size, jnp.int32), 0)
@@ -902,7 +1255,7 @@ def evaluate_episodes(
                     int(completed.length[lane]),
                     int(completed.scores[lane, 0]),
                     int(completed.scores[lane, 1]),
-                    config_ids[id(spec.config)],
+                    config_ids[id(spec.env_config)],
                 )
                 priority.append(episode_id, completed.priority, int(lane))
                 full.append(episode_id, completed.full, int(lane))
@@ -961,20 +1314,117 @@ def evaluate(
     output_dir: str | Path | None = None,
     resume_from: str | Path | None = None,
     writer: RunWriter | None = None,
-    team_a_roster: Sequence[AgentClassName] = _ROSTER,
-    team_b_roster: Sequence[AgentClassName] = _ROSTER,
+    team_a_roster: Sequence[AgentClassName] = _ROSTER_A,
+    team_b_roster: Sequence[AgentClassName] = _ROSTER_B,
     score_threshold: int = 20,
     max_steps: int = 300,
     phase: str = "evaluation",
     pass_id: str = "1",
     chunk_size: int = 16,
 ) -> EvaluationResult:
-    """Evaluate two frozen policies with one total budget across the supplied maps.
+    """Run two fixed policies with one total episode budget across chosen maps.
 
-    Maps cycle in supplied order; defaults are the five canonical evaluation maps.
-    Parameters and recurrent memory remain dynamic JAX inputs. In-memory results
-    contain numeric columns, ready for ``pandas.DataFrame(result.priority_metrics)``.
-    No file or replay is needed to compute either metric selection.
+    Parameters
+    ----------
+    team_a : Policy | str
+        Team A Policy, or built-in name "random", "tdm-alpha" or
+        "tdm-beta". Variables stay fixed throughout this evaluation.
+    team_b : Policy | str
+        Team B Policy or built-in name, with the same contract.
+    num_episodes : int
+        Required positive total episode count across all maps.
+        Episodes receive IDs 1 through num_episodes in scheduling order.
+    maps : Iterable[MapInput] | None
+        Optional nonempty iterable of integer map IDs, TDMMapInfo objects
+        or exact scalar TDM EnvConfig objects. Entries cycle in supplied
+        order, including repeats. None selects canonical evaluation maps
+        47, 48, 49, 50 and 51. Explicit configs keep their own rules, roster
+        and banks; use host configs accepted by Core's validator.
+    seed : int
+        Root uint32 integer, default 0. Episode IDs supply seed identities;
+        streams also use local step counts, not batch placement.
+    num_envs : int
+        Positive maximum simultaneous games, default 128. The actual
+        batch is capped by the number of pending episodes.
+    metrics : MetricMode
+        "priority" by default. "full" collects priority and full values
+        for every episode; "none" skips default collection. Explicit full
+        metric selections still collect both kinds of values.
+    full_metrics_episodes : Iterable[int]
+        IDs in 1..num_episodes selected for full metrics,
+        default empty. No replay or file output is required.
+    replay_episodes : Iterable[int]
+        IDs in 1..num_episodes selected for replay capture,
+        default empty. Replays are returned in memory without a writer.
+    output_dir : str | Path | None
+        Optional parent folder for a new run. This call creates and
+        closes a RunWriter, which creates a run folder below this parent.
+    resume_from : str | Path | None
+        Optional existing run folder for the same pass and settings.
+        Skip durable completions and restart unfinished episodes. Supply
+        this or output_dir, not both; this is not a policy-memory checkpoint.
+        Batch size and chunk size may change on resume.
+    writer : RunWriter | None
+        Optional caller-owned open RunWriter. This call starts the pass,
+        writes and flushes results, and leaves it open. Do not combine it
+        with output_dir or resume_from.
+    team_a_roster : Sequence[AgentClassName]
+        Ordered classes used when building configs from map IDs
+        or TDMMapInfo. Defaults to the canonical tournament roster: mage,
+        warrior, hunter, rogue, priest. Explicit EnvConfig entries ignore it.
+    team_b_roster : Sequence[AgentClassName]
+        Same rule and default class order for Team B.
+    score_threshold : int
+        Positive score target for constructed map configs,
+        default 20. Explicit EnvConfig entries keep their own target.
+    max_steps : int
+        Positive episode horizon for constructed map configs,
+        default 300. Explicit EnvConfig entries keep their own horizon.
+    phase : str
+        Nonempty saved label, default "evaluation". Changing it does not
+        select maps or apply phase-specific map enrollment rules. With a writer,
+        "tournament" selects match tables and requires pairing metadata;
+        run_tournament supplies that metadata.
+    pass_id : str
+        Nonempty saved pass label, default "1". A resumed pass must
+        match its recorded policies, schedule, seed and output selections.
+    chunk_size : int
+        Positive steps per scheduling chunk, default 16. Completed
+        lanes are replaced by pending episodes at chunk boundaries.
+
+    Returns
+    -------
+    EvaluationResult
+        EvaluationResult from evaluate_episodes. Without a writer, selected
+        metric tables are dicts of one-dimensional NumPy columns ordered by
+        episode ID, ready for pandas.DataFrame. Metric values are float32; NaN
+        means unavailable. Unselected tables are empty. Selected replay objects
+        are also returned in memory. With a writer, tables/replays stay in its
+        files and those in-memory fields are empty; paths names the files.
+        episodes contains results completed by this call; completed_episode_ids
+        also includes earlier durable completions. metadata records the run.
+
+    Raises
+    ------
+    TypeError
+        A map entry, config, roster or policy input has an unsupported
+        type or dtype.
+    ValueError
+        A controller name, setting, map, config, selection or output
+        combination is invalid, or resumed pass details do not match.
+    RuntimeError
+        The writer is closed/failed or execution breaks a required
+        completion or metric contract.
+    OSError
+        Run files cannot be opened, locked, read or written.
+
+    This host function prepares the schedule and calls evaluate_episodes; do not
+    wrap it in jax.jit. JAX policies use compiled batches with dynamic variables
+    and actor memory. Host policies use Python calls and per-step transfers.
+    Both routes copy completion data to the host per chunk. Input configs and
+    policy descriptions are not edited; mutable NumPy policy values are copied
+    at entry. Errors from policy callables propagate. No bank exchange, training,
+    checkpoint selection or tournament ranking is performed here.
     """
     count = positive_int(num_episodes, "num_episodes")
     first = policy(team_a) if isinstance(team_a, str) else team_a

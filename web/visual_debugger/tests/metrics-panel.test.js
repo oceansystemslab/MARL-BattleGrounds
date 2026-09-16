@@ -1,3 +1,7 @@
+/**
+ * @file Check metric ordering, missing/applicable values, source-to-recipient views
+ * and exact/natural-language searches.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -17,10 +21,8 @@ const testAgents = [1, 2, 2, 4, 5, 1, 2, 2, 4, 5].map((class_id, slot) => ({
   active: true,
 }));
 
-/** Test facts are declared here, independently of labels and descriptions.
- * @param {string} kind @param {string} subject
- * @param {Record<string, any>} [extra]
- */
+/** @param {string} kind @param {string} subject
+ * @param {Record<string, any>} [extra] */
 function facts(kind, subject, extra = {}) {
   return {
     kind,

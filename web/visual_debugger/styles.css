@@ -1,3 +1,10 @@
+/*
+ * Shared appearance for DevClient and Replay Viewer.
+ * Own layout, responsive sizing, semantic colors, native controls and SVG
+ * presentation classes. JavaScript supplies authorized data and state markers;
+ * CSS does not determine game rules or information rights. Bundled Atkinson
+ * fonts keep offline rendering and screenshot/export appearance consistent.
+ */
 @font-face {
   font-family: "Atkinson Hyperlegible";
   font-style: normal;

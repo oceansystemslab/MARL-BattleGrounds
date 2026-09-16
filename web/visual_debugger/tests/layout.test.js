@@ -1,3 +1,7 @@
+/**
+ * @file Check map-to-viewport coordinates, bounded status/route layouts and readable
+ * dense displays.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -21,12 +25,10 @@ const VIEWPORT = Object.freeze({
   height: 400,
 });
 
-/**
- * @param {number} left
+/** @param {number} left
  * @param {number} top
  * @param {number} right
- * @param {number} bottom
- */
+ * @param {number} bottom */
 function testRectangle(left, top, right, bottom) {
   return Object.freeze({
     left,
@@ -38,31 +40,25 @@ function testRectangle(left, top, right, bottom) {
   });
 }
 
-/**
- * @param {number} count
- * @param {string} prefix
- */
+/** @param {number} count
+ * @param {string} prefix */
 function statuses(count, prefix = "status") {
   return Array.from({ length: count }, (_, index) =>
     Object.freeze({ token_id: `${prefix}-${index}`, duration: index + 1 }),
   );
 }
 
-/**
- * @param {ReturnType<typeof layoutStatusDocks>} layout
- * @param {number} globalSlot
- */
+/** @param {ReturnType<typeof layoutStatusDocks>} layout
+ * @param {number} globalSlot */
 function dockBySlot(layout, globalSlot) {
   const dock = layout.docks.find((candidate) => candidate.globalSlot === globalSlot);
   assert.ok(dock, `expected a status dock for slot ${globalSlot}`);
   return dock;
 }
 
-/**
- * @param {number} actual
+/** @param {number} actual
  * @param {number} expected
- * @param {number} tolerance
- */
+ * @param {number} tolerance */
 function assertClose(actual, expected, tolerance = 1e-9) {
   assert.ok(
     Math.abs(actual - expected) <= tolerance,
@@ -70,11 +66,9 @@ function assertClose(actual, expected, tolerance = 1e-9) {
   );
 }
 
-/**
- * @param {{x: number, y: number}} start
+/** @param {{x: number, y: number}} start
  * @param {{x: number, y: number}} end
- * @param {ReturnType<typeof testRectangle>} bounds
- */
+ * @param {ReturnType<typeof testRectangle>} bounds */
 function segmentTouchesRectangle(start, end, bounds) {
   let minimum = 0;
   let maximum = 1;
@@ -1297,13 +1291,11 @@ test("cross-phase routes use bounded lanes and deterministic bridge gaps", () =>
       bounds: testRectangle(275, 325, 325, 375),
     },
   ];
-  /**
-   * @param {string} layoutKey
+  /** @param {string} layoutKey
    * @param {number} stableOrder
    * @param {{x: number, y: number}} source
    * @param {{x: number, y: number}} target
-   * @param {string[]} allowProtectedKeys
-   */
+   * @param {string[]} allowProtectedKeys */
   const route = (layoutKey, stableOrder, source, target, allowProtectedKeys) => ({
     layoutKey,
     kind: /** @type {const} */ ("route"),
@@ -1683,10 +1675,8 @@ test("cross-phase recovery route uses an exact-owner polyline through the full d
   )?.bounds;
   assert.ok(sourceBounds);
   assert.ok(targetBounds);
-  /**
-   * @param {{x: number, y: number}} point
-   * @param {ReturnType<typeof testRectangle>} bounds
-   */
+  /** @param {{x: number, y: number}} point
+   * @param {ReturnType<typeof testRectangle>} bounds */
   const onBoundary = (point, bounds) =>
     point.x >= bounds.left - 1e-9 &&
     point.x <= bounds.right + 1e-9 &&
@@ -2218,8 +2208,7 @@ test("cross-phase Charge route escapes an occluding free-endpoint status without
 });
 
 test("cross-phase Charge displacement clips only its successor target and keeps the full marker clear", () => {
-  /**
-   * @param {{
+  /** @param {{
    *   name: string,
    *   viewport: ReturnType<typeof testRectangle>,
    *   protectedEntries: Array<[string, ReturnType<typeof testRectangle>]>,
@@ -2228,8 +2217,7 @@ test("cross-phase Charge displacement clips only its successor target and keeps 
    *   target: {x: number, y: number},
    *   targetRadius: number,
    *   stableOrder: number,
-   * }} scenario
-   */
+   * }} scenario */
   const proveScenario = (scenario) => {
     const protectedRects = scenario.protectedEntries.map(([layoutKey, bounds]) => ({
       layoutKey,

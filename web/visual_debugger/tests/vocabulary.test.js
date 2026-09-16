@@ -1,3 +1,7 @@
+/**
+ * @file Check stable display tokens and status lifecycle labels against the current
+ * semantic registry.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 

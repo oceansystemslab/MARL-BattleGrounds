@@ -1,6 +1,18 @@
 /**
- * Format one finite human-facing number without changing the authoritative
- * value retained in frame records or data attributes.
+ * @file Format numbers for browser labels without changing recorded measurements.
+ * Use formatDisplayNumber for ordinary values and formatCompactDisplayNumber
+ * for small battlefield labels. These pure helpers return text; callers retain
+ * the exact value for exports, tooltips and accessible labels.
+ */
+/**
+ * Format a finite number with zero to two decimal places.
+ *
+ * value is the measurement to display. Non-numbers, NaN and infinities return
+ * an em dash before precision options are checked. options defaults to {};
+ * minimumFractionDigits defaults to 0 and maximumFractionDigits to 2. Both
+ * must be integers with 0 <= minimum <= maximum <= 2, or a RangeError is thrown.
+ * Trailing zeros are removed down to the minimum. Rounded negative zero is
+ * shown as zero. The result is a string and the input is not changed.
  *
  * @param {unknown} value
  * @param {{minimumFractionDigits?: number, maximumFractionDigits?: number}} [options]
@@ -40,9 +52,13 @@ export function formatDisplayNumber(value, options = {}) {
 }
 
 /**
- * Produce a short, honest visual label for a value that cannot fit its compact
- * battlefield cell. The exact value remains in the owning cue's accessible
- * label, tooltip, and data attributes; this label is presentation-only.
+ * Shorten a finite number with K, M, B, T or P when its magnitude reaches 1,000.
+ *
+ * value accepts any input; invalid or non-finite numbers return an em dash.
+ * Smaller values use formatDisplayNumber. Larger values use a power-of-1,000
+ * suffix and zero, one or two decimal places based on the scaled magnitude.
+ * The suffix stops at P; very large values keep growing in that unit. Returns
+ * text only. Callers must keep the exact number in the tooltip/export data.
  *
  * @param {unknown} value
  * @returns {string}

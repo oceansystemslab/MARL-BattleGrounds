@@ -1,4 +1,4 @@
-"""Focused presentation-only local-Oracle corpse authorization proofs."""
+"""Check which local Oracle corpse details may be displayed."""
 
 # pyright: reportPrivateUsage=false
 

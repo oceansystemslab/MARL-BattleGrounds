@@ -1,8 +1,10 @@
-"""Fixed-shape JAX collection for the scalar TDM metric catalog.
+"""Collect and read full scalar metrics using fixed-size JAX state.
 
-Only sufficient statistics survive a transition. Dictionary keys are static
-PyTree structure, and all values are arrays; no replay, report or host callback
-is required. Final and prefix analysis use this same collection authority.
+initialize_full creates compact totals; update_full consumes authoritative
+Core facts; full_values packs the current metric catalog. Live evaluation and
+replay prefix analysis share these functions. Keys are static tree structure,
+values are arrays, and no host report, callback or replay buffer is retained.
+Optional collection is selected by the environment wrapper.
 """
 
 from functools import cache
@@ -111,10 +113,14 @@ _AMOUNT_SHAPES = {
 
 
 def _team_sum(values: Array) -> Array:
+    """Sum ten global source rows into Team A/Team B while retaining payload axes."""
     return values.reshape((2, 5, *values.shape[1:])).sum(axis=1)
 
 
 def _pair_indices(relation: str) -> tuple[Array, Array]:
+    """Return fixed source/recipient indexes for a catalog relation such as ally or
+    enemy.
+    """
     pairs = RECIPIENT_PAIRS_BY_RELATION[relation]
     return (
         jnp.asarray(tuple(source for source, _ in pairs)),
@@ -123,10 +129,14 @@ def _pair_indices(relation: str) -> tuple[Array, Array]:
 
 
 def _pairs(matrix: Array, relation: str) -> Array:
+    """Gather a matrix's catalog-ordered relation pairs without changing trailing
+    axes.
+    """
     return matrix[_pair_indices(relation)]
 
 
 def _matrix(pairs: Array, relation: str) -> Array:
+    """Expand compact relation rows to a zero-padded global (10, 10, ...) matrix."""
     return (
         jnp.zeros((10, 10, *pairs.shape[1:]), pairs.dtype)
         .at[_pair_indices(relation)]
@@ -135,7 +145,31 @@ def _matrix(pairs: Array, relation: str) -> Array:
 
 
 def initialize_full(config: EnvConfig, state: EnvState) -> FullTotals:
-    """Retain initial dead flags and Trap periods; other evidence starts empty."""
+    """Create compact full-metric totals for one episode's initial state.
+
+    Parameters
+    ----------
+    config : EnvConfig
+        Exact scalar episode config with ten active-slot flags.
+    state : EnvState
+        Matching initial Core state, including authored deaths and Traps.
+
+    Returns
+    -------
+    FullTotals
+        FullTotals, a dict with fixed keys and JAX leaves. Counts are int32,
+        amounts float32, and initial_dead is bool (10,). Shapes are fixed by the
+        private counter/amount declarations: global agent/team vectors, directed
+        matrices, compact relation pairs and status-channel axes.
+
+    Notes
+    -----
+    Use this initializer rather than constructing or changing keys manually.
+    Existing living trapped recipients start one Trap period; initial dead
+    flags are preserved separately, while other evidence starts at zero.
+    Pure numerical and compatible with jit and outer vmap. Inputs are unchanged;
+    no trajectory or completed report is allocated.
+    """
     totals = {
         name: jnp.zeros(shape, jnp.int32) for name, shape in _COUNTER_SHAPES.items()
     }
@@ -155,6 +189,13 @@ def initialize_full(config: EnvConfig, state: EnvState) -> FullTotals:
 def _aura_counts(
     config: EnvConfig, state: EnvState, coverage: Array, class_id: int
 ) -> tuple[Array, Array, Array, Array]:
+    """Return directed and unique-recipient aura coverage/eligibility.
+
+    Use scalar start state, Core's bool (10, 10) coverage and the emitter class ID.
+    Living active unshielded teammates are eligible, including self. Return two
+    compact ally-pair masks and two bool (10,) recipient masks; repeated emitters
+    do not multiply unique recipient counts.
+    """
     available = (
         config.agent_profile.active_mask
         & state.alive_mask
@@ -178,7 +219,37 @@ def update_full(
     action_mask: ActionMask,
     info: Info,
 ) -> FullTotals:
-    """Collect one real transition; no-transition facts preserve all counters."""
+    """Accumulate one transition's full metrics without retaining its trajectory.
+
+    Parameters
+    ----------
+    totals : FullTotals
+        FullTotals from initialize_full or the preceding update, with
+        unchanged key/leaf structure.
+    config : EnvConfig
+        Exact scalar episode config.
+    state : EnvState
+        Acting Core state from the same decision epoch as action_mask.
+    action_mask : ActionMask
+        Acting masks, including joint target/Ultimate legality.
+    info : Info
+        Authoritative Core Info for the transition from that state.
+
+    Returns
+    -------
+    FullTotals
+        New FullTotals with the same shapes and dtypes. has_transition=False
+        preserves every leaf; initial_dead is always carried unchanged.
+
+    Notes
+    -----
+    Pure numerical JAX path; external vmap adds environment axes. State and
+    masks are pre-step values, so status-conditioned amounts and eligibility
+    use the decision start. Actual amounts/actions/deaths come from Core facts;
+    hypothetical healing/aura/speed comparisons reuse existing Core helpers.
+    Inputs are unchanged. Named counters are sufficient statistics only:
+    no episode-length arrays, host callbacks or CSV serialization occur.
+    """
     facts = info.transition_facts
     combat = facts.combat_transition_facts
     quantities = combat_quantities(config, state, action_mask, info)
@@ -279,6 +350,9 @@ def update_full(
 
     # Unit speed/scale compares the applicable restriction, not movement chosen.
     def restricted_speed(duration: Array) -> Array:
+        """Compare Core's movement restriction with unit speed, varying only Freedom
+        duration.
+        """
         return derive_effective_movement_speeds(
             state.slow_durations,
             duration,
@@ -431,10 +505,12 @@ def update_full(
 
 
 def _available(value: Array) -> MetricValues:
+    """Pair a measured numerical array with an all-true availability mask."""
     return MetricValues(value, jnp.ones(value.shape, bool))
 
 
 def _ratio(numerator: Array, denominator: Array) -> MetricValues:
+    """Divide safely and mark nonpositive-denominator entries unavailable."""
     valid = jnp.broadcast_to(denominator > 0, numerator.shape)
     return MetricValues(numerator / jnp.where(valid, denominator, 1), valid)
 
@@ -442,10 +518,33 @@ def _ratio(numerator: Array, denominator: Array) -> MetricValues:
 def full_values(
     totals: FullTotals, config: EnvConfig, priority: MetricValues
 ) -> MetricValues:
-    """Reduce sufficient statistics to the fixed catalog, copying priority values.
+    """Read full metrics in fixed catalog order, reusing supplied priority values.
 
-    The mappings are static tracing structure, not host dispatch in a rollout.
-    Only numerical reductions, ratios and fixed gathers enter compiled execution.
+    Parameters
+    ----------
+    totals : FullTotals
+        Scalar-episode FullTotals with its complete initialized key structure.
+    config : EnvConfig
+        Matching exact scalar config, including active classes/teams.
+    priority : MetricValues
+        MetricValues for the same episode boundary, in the 26-column
+        PRIORITY_METRIC_COLUMNS order.
+
+    Returns
+    -------
+    MetricValues
+        MetricValues with float32 values and boolean availability, each shape
+        (len(METRIC_COLUMNS),). The first 26 entries copy priority exactly.
+        Invalid entries are unavailable, not measurements of zero; consumers must
+        apply valid before publishing them.
+
+    Notes
+    -----
+    Pure numerical JAX route with fixed tracing structure and dynamic values.
+    Static dictionaries describe reductions and gathers, not per-step Python
+    callbacks. Class/roster/target applicability and denominator availability
+    are enforced while packing. Local expanded views are temporary; totals
+    are not edited and no additional episode history is retained.
     """
     stored = totals
     expanded = {
@@ -513,6 +612,9 @@ def full_values(
         team: MetricValues | None = None,
         pair: MetricValues | None = None,
     ) -> None:
+        """Register one metric's existing agent/team/pair views in the local static
+        mapping.
+        """
         if agent is not None:
             data[("agent", name)] = agent
         if team is not None:
@@ -522,6 +624,7 @@ def full_values(
             data[("ally_pair", name)] = pair
 
     def amount(name: str, agents: Array, teams: Array | None = None) -> None:
+        """Expose measured agent amounts and either supplied or summed team totals."""
         add(
             name,
             agent=_available(agents),
@@ -529,6 +632,9 @@ def full_values(
         )
 
     def fraction_of_team(name: str, agents: Array) -> None:
+        """Read each agent's fraction using its own team's total and safe
+        availability.
+        """
         add(name, agent=_ratio(agents, jnp.repeat(_team_sum(agents), 5)))
 
     deaths = totals["deaths"]
@@ -824,7 +930,13 @@ def _directed_values(
     expanded: dict[str, Array],
     config: EnvConfig,
 ) -> None:
-    """Expose one shared matrix per family through the catalog's scalar views."""
+    """Add scalar views of shared source/recipient evidence to the local mapping.
+
+    The data dict is local tracing structure; totals and expanded numerical leaves
+    stay unchanged. Use unique recipient/team event denominators for shared kills
+    and rescues, never a sum of credited contributors. Basic/Ultimate categories
+    may both include one shared event without inventing another team event.
+    """
     matrices = {
         "basic_applications": totals["basic_applications"],
         "ultimate_applications": totals["ultimate_applications"],
@@ -998,7 +1110,11 @@ def _directed_values(
 
 @cache
 def _packing_groups() -> tuple[tuple[tuple[MetricScope, str], tuple[int, ...]], ...]:
-    """Group static column indices so tracing never creates one kernel per cell."""
+    """Cache fixed catalog indexes grouped by metric scope/stem.
+
+    Return immutable host tuples used during tracing. Grouped gathers avoid
+    building a separate numerical operation for every exported scalar column.
+    """
     groups: dict[tuple[MetricScope, str], list[int]] = {}
     for column in METRIC_COLUMNS[len(PRIORITY_METRIC_COLUMNS) :]:
         if column.scope == "team":
@@ -1015,6 +1131,7 @@ def _packing_groups() -> tuple[tuple[tuple[MetricScope, str], tuple[int, ...]], 
 
 @cache
 def _packing_order() -> tuple[int, ...]:
+    """Cache the fixed permutation that restores catalog order after grouped gathers."""
     groups: dict[tuple[MetricScope, str], list[int]] = {}
     for index, column in enumerate(METRIC_COLUMNS[len(PRIORITY_METRIC_COLUMNS) :]):
         groups.setdefault((column.scope, column.stem), []).append(index)
@@ -1027,6 +1144,13 @@ def _pack_values(
     config: EnvConfig,
     priority: MetricValues,
 ) -> MetricValues:
+    """Pack grouped values and apply config-dependent availability masks.
+
+    data must contain all nonpriority scope/stem entries required by the catalog.
+    Preserve exact supplied priority values; mask inactive sources/recipients,
+    missing required classes, invalid target relationships and unavailable ratios.
+    Return one float32/bool vector pair without writing host tables.
+    """
     values: list[Array] = []
     valid: list[Array] = []
     for key, indices in _packing_groups():

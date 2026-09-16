@@ -1,3 +1,7 @@
+/**
+ * @file Exercise real-service presentation installs, pending views, replay endpoints,
+ * forged-root rejection and death/respawn identity.
+ */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -314,12 +318,7 @@ async function cp5Slice5CheckedSampleSnapshot() {
   return snapshot;
 }
 
-/**
- * Read the exact authorized response body so hidden raw-transport mutations
- * can be proved byte-inert rather than merely object-equal.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function cp5Slice5PresentationBody(page) {
   return page.evaluate(async () => {
     const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
@@ -339,13 +338,8 @@ async function cp5Slice5PresentationBody(page) {
   });
 }
 
-/**
- * Project one real authorized response through the pure planner and collect
- * only stable semantic DOM state from the installed product.
- *
- * @param {import("@playwright/test").Page} page
- * @param {Record<string, any>} rawPresentation
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} rawPresentation */
 async function cp5Slice5PlanAndDomSignature(page, rawPresentation) {
   return page.evaluate(async (raw) => {
     const moduleRoot = "/src";
@@ -578,14 +572,9 @@ async function cp5Slice5PlanAndDomSignature(page, rawPresentation) {
   }, rawPresentation);
 }
 
-/**
- * Reinstall one real leaf with a schema-valid private raw transport mutation.
- * The certified presentation response is deliberately left untouched.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} productUrl
- * @param {string} expectedPresentationKind
- */
+ * @param {string} expectedPresentationKind */
 async function cp5Slice5AssertHiddenTransportNoninterference(
   page,
   productUrl,
@@ -764,15 +753,10 @@ function expectedAgentIdentity(agent, presentation) {
   };
 }
 
-/**
- * Prove the compact agent card is current-fact-only and cannot replace the
- * persistent certified class-documentation card.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {Record<string, any>} agent
  * @param {unknown} persistentCardBefore
- * @param {Record<string, any>} presentation
- */
+ * @param {Record<string, any>} presentation */
 async function expectCompactAgentTooltip(
   page,
   agent,
@@ -820,11 +804,9 @@ async function expectCompactAgentTooltip(
   );
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {Record<string, any>} agent
- * @param {Record<string, any>} presentation
- */
+ * @param {Record<string, any>} presentation */
 async function expectCertifiedDocumentationCard(page, agent, presentation) {
   const identity = expectedAgentIdentity(agent, presentation);
   await expect(page.locator("#selection-card > .sr-only")).toHaveText(identity.title);
@@ -935,10 +917,8 @@ const FORBIDDEN_TECHNICAL_FACT_IDS = Object.freeze([
   "presentation_key",
 ]);
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {Record<string, any>} presentation
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} presentation */
 async function expectTechnicalFrameDom(page, presentation) {
   const liveResearcherTechnical =
     presentation.presentation_kind === "live_no_shared_obs_agent_pov" ||
@@ -1121,10 +1101,8 @@ async function expectTechnicalFrameDom(page, presentation) {
   }
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {Record<string, any>} presentation
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} presentation */
 async function expectLatestTransitionDom(page, presentation) {
   const researcher = presentation.researcher_space ?? null;
   const rawRows =
@@ -1185,10 +1163,8 @@ async function expectLatestTransitionDom(page, presentation) {
   }
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {Record<string, any>} presentation
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} presentation */
 async function expectPendingJointActionDom(page, presentation) {
   const researcher = presentation.researcher_space ?? null;
   const pending = researcher?.pending_joint_action ?? presentation.pending_joint_action;
@@ -1292,11 +1268,9 @@ async function scientificDisclosureState(page) {
   }, SCIENTIFIC_DISCLOSURE_SELECTORS);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} panelSelector
- * @param {number} scrollTop
- */
+ * @param {number} scrollTop */
 async function installScientificDisclosureScroll(page, panelSelector, scrollTop) {
   const installed = await page.locator(panelSelector).evaluate((panel, top) => {
     const body = panel.querySelector(":scope > :not(summary)");
@@ -1335,13 +1309,8 @@ async function observeAgentDetailsOpenMutations(page) {
   });
 }
 
-/**
- * Restore the retained trajectory's native baseline after one screenshot-only
- * viewport and disclosure state.
- *
- * @param {import("@playwright/test").Page} page
- * @param {string[]} openedDetails
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string[]} openedDetails */
 async function cleanupAfterCp4ECapture(page, openedDetails) {
   await page.setViewportSize({ width: 1440, height: 900 });
   await closeDetails(page, openedDetails);
@@ -1354,12 +1323,8 @@ async function cleanupAfterCp4ECapture(page, openedDetails) {
   await page.evaluate(() => window.scrollTo(0, 0));
 }
 
-/**
- * Capture one prescribed native state only when the CP4-E evidence run opts in.
- *
- * @param {import("@playwright/test").Page} page
- * @param {{filename: string, width: number, height: number, presentation: Record<string, any>, selectedAgent: Record<string, any>}} options
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {{filename: string, width: number, height: number, presentation: Record<string, any>, selectedAgent: Record<string, any>}} options */
 async function captureCp4ENativeState(page, options) {
   if (cp4ECaptureDirectory === null) {
     return;
@@ -1486,12 +1451,10 @@ async function captureCp4ENativeState(page, options) {
   });
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} url
  * @param {"live" | "replay"} mode
- * @param {{allVisualFilters?: boolean}} [options]
- */
+ * @param {{allVisualFilters?: boolean}} [options] */
 async function openProduct(page, url, mode, { allVisualFilters = false } = {}) {
   captureBrowserErrors(page);
   await page.goto(url);
@@ -1522,17 +1485,10 @@ async function enableAllVisualFilters(page) {
   await expect(page.locator("#connection-status")).toHaveText("Online");
 }
 
-/**
- * Hold only the initial authorized-presentation response after the synchronous
- * route bootstrap has established product identity. The pending shell must
- * remain product-correct without exposing any previously or partially joined
- * scientific presentation.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} url
  * @param {"live" | "replay"} mode
- * @param {"combat_debugger" | "replay_viewer"} productKind
- */
+ * @param {"combat_debugger" | "replay_viewer"} productKind */
 async function openProductWithHeldInitialPresentation(page, url, mode, productKind) {
   let releasePresentation = () => {};
   let markPresentationHeld = () => {};
@@ -1631,14 +1587,9 @@ async function openProductWithHeldInitialPresentation(page, url, mode, productKi
   await opening;
 }
 
-/**
- * Prove one replay utility activation emits one exact command and installs the
- * response's joined successor presentation before this helper returns.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} selector
- * @param {Readonly<Record<string, unknown>>} expectedCommand
- */
+ * @param {Readonly<Record<string, unknown>>} expectedCommand */
 async function expectSingleReplayUtilityCommand(page, selector, expectedCommand) {
   /** @type {import("@playwright/test").Request[]} */
   const commandRequests = [];
@@ -1682,15 +1633,10 @@ async function expectSingleReplayUtilityCommand(page, selector, expectedCommand)
   return responsePayload;
 }
 
-/**
- * Run one native activation and prove it crosses exactly one product command
- * boundary with the exact existing command body.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {"/api/command" | "/api/replay/command"} path
  * @param {() => Promise<void>} activate
- * @param {Readonly<Record<string, unknown>>} expectedCommand
- */
+ * @param {Readonly<Record<string, unknown>>} expectedCommand */
 async function expectSingleActivationCommand(page, path, activate, expectedCommand) {
   /** @type {import("@playwright/test").Request[]} */
   const requests = [];
@@ -1731,15 +1677,10 @@ async function expectSingleActivationCommand(page, path, activate, expectedComma
   expect(requests[0].postDataJSON().command).toEqual(expectedCommand);
 }
 
-/**
- * Prove one native interaction emits exactly one product command while letting
- * the caller validate runtime-derived pointer coordinates.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {"/api/command" | "/api/replay/command"} path
  * @param {() => Promise<void>} activate
- * @param {(command: Record<string, any>) => void} verifyCommand
- */
+ * @param {(command: Record<string, any>) => void} verifyCommand */
 async function expectSingleCommandMatching(page, path, activate, verifyCommand) {
   /** @type {import("@playwright/test").Request[]} */
   const requests = [];
@@ -1773,13 +1714,8 @@ async function expectSingleCommandMatching(page, path, activate, verifyCommand) 
   verifyCommand(requests[0].postDataJSON().command);
 }
 
-/**
- * Run one local interaction through a real browser event and prove neither
- * product command route was touched.
- *
- * @param {import("@playwright/test").Page} page
- * @param {() => Promise<void>} activate
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {() => Promise<void>} activate */
 async function expectZeroCommandInteraction(page, activate) {
   /** @type {import("@playwright/test").Request[]} */
   const requests = [];
@@ -1806,30 +1742,19 @@ async function expectZeroCommandInteraction(page, activate) {
   expect(requests).toEqual([]);
 }
 
-/**
- * Pointer activation restores the debugger's battlefield-owned command focus
- * and never exposes the oversized SVG-agent focus outline.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function expectBattlefieldRootCommandFocus(page) {
   await expect(page.locator("#battlefield")).toBeFocused();
   await expect(page.locator("#battlefield .agent:focus-visible")).toHaveCount(0);
 }
 
-/**
- * Exercise the one authorized activation through both public surfaces and all
- * three native activation gestures. Oracle cells cross one exact command
- * boundary; local inspection cells cross none.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {{
  *   body: import("@playwright/test").Locator,
  *   row: import("@playwright/test").Locator,
  *   path: "/api/command" | "/api/replay/command" | null,
  *   command: Readonly<Record<string, unknown>> | null,
- * }} options
- */
+ * }} options */
 async function expectNativeAgentActivationMatrix(page, { body, row, path, command }) {
   const scrollY = () => page.evaluate(() => window.scrollY);
   const cells = [
@@ -1865,13 +1790,8 @@ async function expectNativeAgentActivationMatrix(page, { body, row, path, comman
   }
 }
 
-/**
- * A terminal replay has no outgoing transition, but its frozen snapshot stays
- * researcher-selectable without advancing the cursor.
- *
- * @param {import("@playwright/test").Page} page
- * @returns {Promise<Record<string, any>>}
- */
+/** @param {import("@playwright/test").Page} page
+ * @returns {Promise<Record<string, any>>} */
 async function expectTerminalReplayAgentSelection(page) {
   await expect(page.locator("#battlefield")).toHaveAttribute("role", "group");
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
@@ -1920,13 +1840,8 @@ async function expectTerminalReplayAgentSelection(page) {
   return candidate;
 }
 
-/**
- * Read one exact authenticated product resource without bypassing the real
- * loopback service or hand-authoring an authority payload.
- *
- * @param {import("@playwright/test").Page} page
- * @param {string} path
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} path */
 async function authenticatedGet(page, path) {
   return page.evaluate(async (requestPath) => {
     const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
@@ -1946,11 +1861,9 @@ async function authenticatedGet(page, path) {
   }, path);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} transportKind
- * @param {string} presentationKind
- */
+ * @param {string} presentationKind */
 async function expectInstalledLeaf(page, transportKind, presentationKind) {
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page.locator("html")).toHaveAttribute(
@@ -1976,13 +1889,8 @@ async function expectInstalledLeaf(page, transportKind, presentationKind) {
   return { transport, presentation };
 }
 
-/**
- * Prove the retained researcher-space session fact uses the global incoming
- * transition while battlefield choreography keeps its audience-local ID.
- *
- * @param {import("@playwright/test").Page} page
- * @param {Record<string, any>} presentation
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} presentation */
 async function expectAuthorizedIncomingTransitionDom(page, presentation) {
   const latestEvents = presentation.latest_events;
   const researcherSpace = presentation.researcher_space;
@@ -2004,15 +1912,9 @@ async function expectAuthorizedIncomingTransitionDom(page, presentation) {
   await expect(page.locator("#transition-value")).toHaveText(expected ?? "—");
 }
 
-/**
- * Prove current selected-owner facts remain separate from the optional outgoing
- * inspection overlay. This reuses the real service trajectory already owned by
- * the five-leaf test; it adds no fixture server or viewport loop.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {Record<string, any>} presentation
- * @param {{agentDetailsActivated?: boolean, retainedAgent?: Record<string, any> | null, rangesVisible?: boolean}} [options]
- */
+ * @param {{agentDetailsActivated?: boolean, retainedAgent?: Record<string, any> | null, rangesVisible?: boolean}} [options] */
 async function expectReplayInspectionDom(
   page,
   presentation,
@@ -2243,12 +2145,7 @@ async function expectReplayInspectionDom(
   }
 }
 
-/**
- * Snapshot every browser-owned DOM string and attribute at the authority
- * boundary. Source JavaScript is intentionally outside this scan.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function authorityDomSnapshot(page) {
   return page.evaluate(() => ({
     attributes: [document.body, ...document.body.querySelectorAll("*")].flatMap(
@@ -2262,12 +2159,10 @@ async function authorityDomSnapshot(page) {
   }));
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {Record<string, any>} presentation
  * @param {string[]} forbiddenValues
- * @param {boolean} [activationEnabled]
- */
+ * @param {boolean} [activationEnabled] */
 async function expectAgentAuthoritySurface(
   page,
   presentation,
@@ -2444,10 +2339,8 @@ async function expectAuthorizedRosterColors(page) {
   expect(new Set(colors.mutedClassLabels)).toEqual(new Set([colors.expectedMuted]));
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {number} frameIndex
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {number} frameIndex */
 async function seekReplay(page, frameIndex) {
   const responsePromise = page.waitForResponse(
     (response) =>
@@ -2473,14 +2366,9 @@ async function seekReplay(page, frameIndex) {
   );
 }
 
-/**
- * Prove the synchronous clear boundary while one real authority response is
- * deliberately held after the server has accepted the audience command.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} oldScientificSentinel
- * @param {string} oldPresentationKey
- */
+ * @param {string} oldPresentationKey */
 async function expectPendingAuthorityIsEmpty(
   page,
   oldScientificSentinel,
@@ -4142,10 +4030,8 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
       [4, "rogue"],
       [5, "priest"],
     ]);
-    /**
-     * @param {Record<string, any>} presentation
-     * @param {string} frameLabel
-     */
+    /** @param {Record<string, any>} presentation
+     * @param {string} frameLabel */
     const expectCombatIdentityMatrix = async (presentation, frameLabel) => {
       const authorizedAgents = /** @type {Record<string, any>[]} */ (
         presentation.current_endpoint.scene.agents
@@ -4784,13 +4670,9 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
   }
 });
 
-/**
- * Run one independently collected partition of the CP5 causal/privacy proof.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {readonly string[]} selectedContractNames
- * @param {boolean} includeSharedArtifactProof
- */
+ * @param {boolean} includeSharedArtifactProof */
 async function runCp5Slice5Proof(
   page,
   selectedContractNames,
@@ -5224,19 +5106,10 @@ async function runCp5Slice5Proof(
   /** @param {Record<string, any>} signature */
   const signaturePlanEvents = (signature) =>
     /** @type {Record<string, any>[]} */ (signature.plan.events);
-  /**
-   * Prove the exact product-installed effect and route surface against a
-   * scenario-owned list whose IDs, vocabulary, and endpoint slots were
-   * extracted independently from the real registered trajectory.
-   *
-   * Row shape: ordinal, type, source slot, target slot, recipient slot,
-   * agent slot, persistent.
-   *
-   * @param {{presentation: Record<string, any>, signature: Record<string, any>}} frame
+  /** @param {{presentation: Record<string, any>, signature: Record<string, any>}} frame
    * @param {string} label
    * @param {Array<[number, string, number | null, number | null, number | null, number | null, boolean?]>} effectRows
-   * @param {number[]} routeOrdinals
-   */
+   * @param {number[]} routeOrdinals */
   const expectExactInstalledSurface = (frame, label, effectRows, routeOrdinals) => {
     const { presentation, signature } = frame;
     const transitionId = presentation.latest_events?.incoming_transition_id;
@@ -5369,14 +5242,9 @@ async function runCp5Slice5Proof(
       inspection.decision_mask.target_use_ultimate_joint_mask,
   });
 
-  /**
-   * Select every named acting owner at the real predecessor, prove its exact
-   * tuple against that epoch's mask, then join it to the successor action row.
-   *
-   * @param {string} contractName
+  /** @param {string} contractName
    * @param {number} frameIndex
-   * @param {Array<Record<string, any>>} expectations
-   */
+   * @param {Array<Record<string, any>>} expectations */
   const proveOutgoingOwnerSet = async (contractName, frameIndex, expectations) => {
     if (
       (await page.locator("#replay-frame-slider").inputValue()) !== String(frameIndex)
@@ -5512,10 +5380,8 @@ async function runCp5Slice5Proof(
     );
   };
 
-  /**
-   * @param {string} productUrl
-   * @param {Record<string, any>} contract
-   */
+  /** @param {string} productUrl
+   * @param {Record<string, any>} contract */
   const proveOracleTrajectory = async (productUrl, contract) => {
     if (!contract.povFirst) {
       await page.goto("about:blank");
@@ -6479,8 +6345,7 @@ async function runCp5Slice5Proof(
             expectedStatuses[frameIndex],
           );
         }
-        /**
-         * @param {number} frameIndex
+        /** @param {number} frameIndex
          * @param {number} primaryOrdinal
          * @param {string} eventType
          * @param {string} tokenId
@@ -6488,8 +6353,7 @@ async function runCp5Slice5Proof(
          * @param {string} lifecycleLabel
          * @param {string} lifecycleAccessibleName
          * @param {number[]} atomicOrdinals
-         * @param {number[]} applicationOrdinals
-         */
+         * @param {number[]} applicationOrdinals */
         const lifecycleEvent = (
           frameIndex,
           primaryOrdinal,
@@ -7989,10 +7853,8 @@ async function corpsePresentationState(page) {
   return { transport, presentation };
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} presentationKey
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} presentationKey */
 async function corpseBodyPaint(page, presentationKey) {
   const body = page.locator(
     `#battlefield .agent[data-presentation-key="${presentationKey}"]`,
@@ -8016,10 +7878,8 @@ async function corpseBodyPaint(page, presentationKey) {
   });
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {() => Promise<void>} activate
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {() => Promise<void>} activate */
 async function expectNoCorpseCommands(page, activate) {
   /** @type {import("@playwright/test").Request[]} */
   const requests = [];

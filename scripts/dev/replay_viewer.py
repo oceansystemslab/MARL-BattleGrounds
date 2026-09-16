@@ -1,4 +1,11 @@
-"""CLI entry point for immutable replays and scripted demonstrations."""
+"""List or view saved replays and scripted demonstrations from the command line.
+
+Run ``scripts/dev/run_replay_viewer.sh --help`` for source and display options.
+The viewer reads one validated immutable replay, then serves a loopback browser
+view or displays a static frame. A requested scripted demonstration is generated
+in a separate process before viewing. Listing metadata avoids simulator imports.
+Manual control and live recording belong to the separate DevClient launcher.
+"""
 
 from __future__ import annotations
 
@@ -96,7 +103,18 @@ def _parse_compatibility_preset(value: str) -> Literal["analysis"]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the replay-only CLI without importing simulator or array backends."""
+    """Build the replay-only argument parser without importing numerical backends.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Parser for replay files, bundled samples, scripted sources, listing, selected
+        frame/actor, static display, and loopback server options.
+
+    Notes
+    -----
+    No file is loaded and no server or simulator is started here.
+    """
     parser = argparse.ArgumentParser(
         description=(
             "Open immutable MARL-BattleGrounds artifacts and scripted "
@@ -223,6 +241,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_launch_options(namespace: argparse.Namespace) -> _LaunchOptions:
+    """Fill replay-launch defaults while retaining the explicitly supplied options."""
     supplied = frozenset(vars(namespace)) - {"preset", "verbose"}
     return _LaunchOptions(
         replay=cast(Path | None, getattr(namespace, "replay", None)),
@@ -268,6 +287,7 @@ def _validate_option_matrix(
     parser: argparse.ArgumentParser,
     options: _LaunchOptions,
 ) -> None:
+    """Enforce one replay source and reject options that belong to another mode."""
     if "record_replay" in options.supplied or "controlled_slot" in options.supplied:
         parser.error(
             "manual control and recording use the Combat Debugger; "
@@ -406,6 +426,7 @@ def _validate_scripted_scenario(
     parser: argparse.ArgumentParser,
     options: _LaunchOptions,
 ) -> None:
+    """Require a known scripted scenario and explicit opt-in for stress scenarios."""
     from scripts.dev.visual_debugger.scenario_catalog import SCENARIO_CATALOG_BY_NAME
 
     assert options.scenario is not None
@@ -574,7 +595,30 @@ def _materializer_main(argv: Sequence[str]) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """List or launch one immutable replay authority."""
+    """List available replay sources or open one selected immutable replay.
+
+    Parameters
+    ----------
+    argv : sequence of str or None, optional
+        Argument tokens without the executable name. None reads process arguments.
+
+    Returns
+    -------
+    int
+        Zero for successful listing or the selected viewer's exit status. Handled
+        loading, launch or materialization failures return one and print an error.
+
+    Raises
+    ------
+    SystemExit
+        If the parser displays help or rejects invalid source/option combinations.
+
+    Notes
+    -----
+    Browser mode opens a loopback service; static mode opens a Matplotlib window.
+    Scripted demonstrations are recorded in a temporary child-process workspace before
+    loading. Viewing an existing replay does not advance the simulator or edit it.
+    """
     arguments = tuple(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] == _PRIVATE_MATERIALIZE_OPTION:
         return _materializer_main(arguments)

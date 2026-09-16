@@ -1,4 +1,4 @@
-"""All-eight package-to-replay joins for the approved TDM scenario suite."""
+"""Check all eight packaged TDM scenarios through their replay records."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Reactive host eligibility, coherent execution, and diagnostic provenance."""
+"""Check DevClient controller selection, execution and recorded identities."""
 
 import json
 from dataclasses import replace

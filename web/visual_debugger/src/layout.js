@@ -1,3 +1,13 @@
+/**
+ * @file Place battlefield labels and transient cues in screen space without changing game facts.
+ * createViewportTransform owns the fitted world/pixel conversion. layoutStatusDocks
+ * and layoutRequiredDocks place disclosed status payloads around protected bodies.
+ * layoutCrossPhaseOccupancy places transient cue boxes and directed routes across
+ * animation phases. These functions use deterministic geometry only: no DOM reads,
+ * network calls, random draws or simulator decisions. Distances are CSS pixels
+ * except the world dimensions accepted by the transform. Returned layout records
+ * are frozen; opaque status payload objects remain owned by their caller.
+ */
 import {
   createPolylineRouteGeometry,
   createRouteGeometry,
@@ -29,6 +39,7 @@ const CROSS_PHASE_RECIPIENT_COMPACTION_ANGLE_OFFSET_DEGREES = 4;
 const CROSS_PHASE_RECIPIENT_COMPACTION_ANGLE_STEP_DEGREES = 12;
 const CROSS_PHASE_RECIPIENT_REFINEMENT_ANGLE_OFFSET_DEGREES = 10;
 
+/** Default cue clearances and route lanes in CSS pixels; routeLaneSearch is a count. */
 export const DEFAULT_CROSS_PHASE_LAYOUT_OPTIONS = Object.freeze({
   clearance: 3,
   cueGap: 8,
@@ -38,11 +49,16 @@ export const DEFAULT_CROSS_PHASE_LAYOUT_OPTIONS = Object.freeze({
   bridgeGap: 10,
 });
 
-/** @type {ReadonlyArray<"north" | "east" | "west" | "south">} */
+/**
+ * Preferred body sides, in deterministic tie-breaking order.
+ * @type {ReadonlyArray<"north" | "east" | "west" | "south">}
+ */
 export const STATUS_DOCK_ANCHORS = Object.freeze(["north", "east", "west", "south"]);
 
+/** Maximum dock cells, including any overflow-count cell, in a three-by-three grid. */
 export const STATUS_DOCK_CAPACITY = 9;
 
+/** Default body/label distances in CSS pixels and visible payload limits in cells. */
 export const DEFAULT_STATUS_DOCK_OPTIONS = Object.freeze({
   bodyPadding: 3,
   selectionAllowance: 5,
@@ -267,8 +283,19 @@ export const DEFAULT_STATUS_DOCK_OPTIONS = Object.freeze({
  */
 
 /**
- * Build the sole fitted world-to-screen transform for the battlefield.
- * World Y increases upward; screen Y increases downward.
+ * Fit a world rectangle inside a padded viewport while preserving its aspect ratio.
+ *
+ * input gives positive finite worldWidth/worldHeight in world units and
+ * viewportWidth/viewportHeight in CSS pixels. padding defaults to zero; a finite
+ * nonnegative number applies to all sides, or an inset object supplies individual
+ * top/right/bottom/left values with omitted sides set to zero. Center the fitted
+ * map in the remaining space. World Y increases upward; screen Y increases downward.
+ *
+ * Return a frozen transform with pixels-per-world-unit scale, original world
+ * dimensions, full viewportBounds, fitted mapBounds and three conversion methods.
+ * Conversions do not clamp points to the map. No input is changed. Throw TypeError
+ * for malformed objects or nonfinite/nonnumeric values, and RangeError for
+ * nonpositive dimensions, negative padding or padding that leaves no map area.
  *
  * @param {ViewportTransformInput} input
  * @returns {ViewportTransform}
@@ -302,6 +329,13 @@ export function createViewportTransform(input) {
     worldHeight,
     viewportBounds,
     mapBounds,
+    /**
+     * Convert a world point to CSS pixels using this fitted map.
+     *
+     * point is a finite {x,y} record or coordinate array with at least two entries.
+     * Return a frozen {x,y} point, reversing the Y direction. Points outside the world
+     * remain outside the fitted map. Throw TypeError for invalid coordinates.
+     */
     worldToScreen(point) {
       const world = normalizePoint(point, "world point");
       return frozenPoint(
@@ -309,6 +343,13 @@ export function createViewportTransform(input) {
         mapBounds.top + (worldHeight - world.y) * scale,
       );
     },
+    /**
+     * Convert a CSS-pixel point back to world coordinates.
+     *
+     * point is a finite {x,y} record or coordinate array with at least two entries.
+     * Return a frozen {x,y} point without clipping; viewport padding can therefore
+     * map outside the world. Throw TypeError for invalid coordinates.
+     */
     screenToWorld(point) {
       const screen = normalizePoint(point, "screen point");
       return frozenPoint(
@@ -316,6 +357,13 @@ export function createViewportTransform(input) {
         worldHeight - (screen.y - mapBounds.top) / scale,
       );
     },
+    /**
+     * Scale a nonnegative world distance into CSS pixels.
+     *
+     * length must be a finite number. Return length times the fitted scale; zero stays
+     * zero. Throw TypeError for nonnumeric/nonfinite input and RangeError for a negative
+     * length. This conversion does not change direction or position.
+     */
     worldLengthToScreen(length) {
       return nonNegativeFinite(length, "world length") * scale;
     },
@@ -323,8 +371,14 @@ export function createViewportTransform(input) {
 }
 
 /**
- * Return the immutable screen-space rectangle reserved for one agent body,
- * its durable rings, and any selected/controlled focus decoration.
+ * Reserve a square around a rendered circular body and its optional selection ring.
+ *
+ * body supplies a finite center and positive radius in CSS pixels. options defaults
+ * to an empty object: bodyPadding adds 3 pixels, and selectionAllowance adds another
+ * 5 only when controlled or selected is exactly true. Both options must be finite
+ * and nonnegative. Return a frozen rectangle with edges, width and height. Throw
+ * TypeError for malformed body/coordinates or nonfinite values, and RangeError for
+ * invalid radius or negative allowances. Inputs are unchanged.
  *
  * @param {ProtectedBodyInput} body
  * @param {ProtectedBodyOptions} [options]
@@ -358,8 +412,12 @@ export function protectedBodyRect(body, options = {}) {
 }
 
 /**
- * Whether two rectangles have positive-area overlap. Merely touching edges
- * is allowed.
+ * Check whether two rectangles overlap by more than the geometry tolerance.
+ *
+ * first and second supply finite ordered left/top/right/bottom edges. Return true
+ * when their shared area exceeds 1e-9 square pixels; touching edges return false.
+ * Throw TypeError for malformed edges and RangeError for reversed edges. Any supplied
+ * width/height fields are ignored and recomputed during validation.
  *
  * @param {Rectangle} first
  * @param {Rectangle} second
@@ -372,7 +430,12 @@ export function rectanglesIntersect(first, second) {
 }
 
 /**
- * Sum the screen-pixel distance by which a rectangle escapes a viewport.
+ * Measure how far a rectangle extends beyond the four viewport edges.
+ *
+ * bounds and viewport supply finite ordered edges in CSS pixels. Return the sum
+ * of positive left, right, top and bottom excess distances; zero means contained.
+ * Throw TypeError for malformed edges and RangeError for reversed edges. This is
+ * an edge-distance score, not the area outside the viewport.
  *
  * @param {Rectangle} bounds
  * @param {Rectangle} viewport
@@ -390,9 +453,27 @@ export function viewportOverflow(bounds, viewport) {
 }
 
 /**
- * Lay out status docks from already-authorized screen-space agent facts.
- * The function never sorts or interprets statuses; their payload order is
- * retained verbatim.
+ * Place one status dock per body, keeping labels off bodies and reserved rectangles.
+ *
+ * input supplies agents, a viewport and optional reservedRects (default empty).
+ * Each agent needs a unique nonnegative integer globalSlot, finite center, positive
+ * radius and statuses array. Status order is kept; payload contents are not read.
+ * required, controlled and selected count only when exactly true. Empty status
+ * lists have no dock but still protect their body.
+ *
+ * options defaults to DEFAULT_STATUS_DOCK_OPTIONS: bodyPadding 3,
+ * selectionAllowance 5, cellWidth 28, cellHeight 20, cellGap 3, dockGap 7,
+ * tangentStep 8 and maxTangentShift 24 pixels; both visible limits default to 9.
+ * Cell dimensions and tangentStep must be positive; other distances nonnegative;
+ * maxTangentShift is at most 24 and visible limits are integers from 0 through 9.
+ *
+ * Required/controlled/selected docks are searched together with a bounded search.
+ * If that set cannot be placed within the search, suppress that whole set. Place
+ * remaining docks greedily in priority order. Return frozen docks sorted by slot,
+ * protectedBodies, attempted placementOrder and sorted suppressedGlobalSlots.
+ * Hidden statuses stay in each placed dock with an overflow count. Inputs are
+ * unchanged; status objects are not deep-copied. Invalid structure/numbers throw
+ * TypeError; duplicate slots, invalid sizes/limits or reversed edges throw RangeError.
  *
  * @param {StatusDockLayoutInput} input
  * @param {StatusDockOptions} [options]
@@ -474,12 +555,28 @@ export function layoutStatusDocks(input, options = {}) {
 }
 
 /**
- * Jointly place heterogeneous required docks around one shared body field.
+ * Place named required docks, then compact requests that cannot keep their full size.
  *
- * Required status truth and required cooldown cues can have different cell
- * dimensions while still participating in the same deterministic search.
- * This avoids the priority inversion produced by laying out one category and
- * asking the other category to fit only after the first result is fixed.
+ * input supplies agent body geometry, a viewport, optional reservedRects (empty by
+ * default) and requests. Each request needs a unique nonempty layoutKey, an existing
+ * agent globalSlot and nonempty statuses. Multiple requests may belong to one body.
+ * priority is a nonnegative finite number, default zero; lower values go first,
+ * then controlled/selected bodies, larger status lists, slot and key break ties.
+ * Agent statuses are ignored here; each request owns its ordered opaque payload.
+ *
+ * options uses the same validated defaults as layoutStatusDocks. A request's
+ * dockOptions overrides shared settings. Its fallbackDockOptions overrides shared
+ * settings plus compact defaults: 32 by 16 cells, cellGap 0, dockGap 3,
+ * tangentStep 6 and maxTangentShift 24 pixels. Try a bounded joint search for at
+ * most six requests, then greedy priority placement. Rejected requests get a
+ * one-cell local or remote fallback; a marker retains every hidden payload.
+ *
+ * Return frozen docks sorted by slot/key, protectedBodies, priority placementOrder,
+ * sorted compactedLayoutKeys and sorted suppressedLayoutKeys. Suppression means no
+ * collision-free marker was found. Inputs are unchanged; payload objects are shared.
+ * Throw TypeError for malformed records/numeric fields and RangeError for duplicate
+ * or unknown IDs, missing/empty payload arrays, invalid dimensions/limits or reversed
+ * edges. An Error also guards against an unexpectedly missing protected body.
  *
  * @param {RequiredDockLayoutInput} input
  * @param {StatusDockOptions} [options]
@@ -654,18 +751,45 @@ export function layoutRequiredDocks(input, options = {}) {
 }
 
 /**
- * Allocate one immutable presentation ledger across every enabled phase.
- * Rectangular semantic cues reserve space before routes. Their direct
- * connectors are a low-priority underlay and never participate in placement;
- * only the information-bearing cue rectangles avoid durable and peer bounds.
- * Routes occupy a dedicated layer behind those cues, so cue rectangles are not
- * route blockers. Routes still avoid every non-allowed durable protected region
- * and may cross one another; deterministic bridge-gap metadata marks route
- * crossings for the painter.
+ * Allocate transient cue boxes and routes against durable screen-space regions.
  *
- * Disabled requests are removed before their geometry fields are inspected.
- * An enabled request is either placed or causes a loud bounded-layout error;
- * this API never converts an information-bearing fact into suppression.
+ * input supplies viewport, requests and optional protectedRects (default empty).
+ * Every request needs a unique nonempty layoutKey. enabled defaults to true; false
+ * requests are filtered before geometry validation. Enabled requests need a supported
+ * kind, nonnegative integer stableOrder and finite nonnegative priority (default 0).
+ * Lower priority/stableOrder/key sorts first. Protected keys must also be unique
+ * and cannot equal an enabled request key.
+ *
+ * recipient_cue and perimeter_callout need anchor plus positive width/height.
+ * anchorRadius defaults to 0; recipientKey defaults to the anchor's coordinate key.
+ * route needs source/target. Its radii and pathPadding/markerPadding default to 0;
+ * endpoint gaps default to 3 pixels. markerProgress is optional, or a number in
+ * [0,1]. compactMarkerPadding is optional, positive and smaller than markerPadding.
+ * Points need finite x/y coordinates. Radii, endpoint gaps and padding must be
+ * finite and nonnegative; cue width/height must be finite and positive. Padding
+ * reserves paint around a line or marker; endpoint gaps separate lines from bodies.
+ * allowProtectedKeys defaults to empty and removes only named route-path blockers.
+ * Optional sourceProtectedKey/targetProtectedKey must occur in that allowed list;
+ * they identify endpoint ownership for fallback routing. Markers still avoid all
+ * protected regions. Cue placement does not use protected-region exceptions.
+ *
+ * options defaults to clearance 3, cueGap 8, stackGap 5, routeLaneSpacing 18 and
+ * bridgeGap 10 pixels, plus routeLaneSearch 8. The first three distances are
+ * nonnegative; lane spacing and bridge gap are positive; lane search is an integer
+ * from 0 through 32. clearance expands protected/cue boxes; cueGap and stackGap
+ * set local candidate spacing. Lane spacing/search set route alternatives and
+ * bridgeGap sets crossing backplate size and separation. Place all cue boxes
+ * before compacting them toward recipients.
+ * Place routes behind those cues, allowing route crossings with bridge metadata.
+ * Leader lines are an underlay and do not reserve space. Curve clearance uses 32
+ * line segments; fallback route graphs have a fixed node limit.
+ *
+ * Return frozen ordered placements, cuePlacements, routePlacements, occupancyLedger,
+ * protectedRegions, placementOrder and sorted filteredLayoutKeys. The ledger records
+ * bounds, not a claim that every layer blocks every other layer. Inputs are unchanged.
+ * Throw TypeError for malformed fields, RangeError for invalid ranges/keys or when an
+ * enabled cue/route has no supported placement, and Error if an allocated record is
+ * unexpectedly missing. This function does not infer disclosure or game legality.
  *
  * @param {CrossPhaseLayoutInput} input
  * @param {Partial<typeof DEFAULT_CROSS_PHASE_LAYOUT_OPTIONS>} [options]
@@ -1076,6 +1200,13 @@ export function layoutCrossPhaseOccupancy(input, options = {}) {
 }
 
 /**
+ * Validate transient-layout options and fill their omitted defaults.
+ *
+ * options must be a record. Return frozen nonnegative clearance/cueGap/stackGap
+ * (defaults 3/8/5), positive routeLaneSpacing/bridgeGap (18/10) and integer
+ * routeLaneSearch from 0 through 32 (8). Distances are CSS pixels. Throw TypeError
+ * for malformed/nonfinite values and RangeError for values outside these bounds.
+ *
  * @param {Partial<typeof DEFAULT_CROSS_PHASE_LAYOUT_OPTIONS>} options
  */
 function resolveCrossPhaseOptions(options) {
@@ -1124,6 +1255,13 @@ function resolveCrossPhaseOptions(options) {
 }
 
 /**
+ * Copy and sort the named durable rectangles used by transient layout.
+ *
+ * regions must be an array of records with unique nonempty layoutKey values. Each row
+ * supplies bounds, or supplies its rectangle edges directly when bounds is nullish.
+ * Return a frozen key-sorted array with validated frozen rectangles. Throw TypeError
+ * for bad records/edges/keys and RangeError for duplicate keys or reversed edges.
+ *
  * @param {ReadonlyArray<CrossPhaseProtectedRegionInput>} regions
  */
 function normalizeCrossPhaseProtectedRegions(regions) {
@@ -1158,7 +1296,15 @@ function normalizeCrossPhaseProtectedRegions(regions) {
 }
 
 /**
- * Filter before inspecting any geometry-bearing request fields.
+ * Validate enabled requests and separate explicitly disabled layout keys.
+ *
+ * rawRequests is the request array already checked by the public caller. Every row
+ * must have a unique nonempty key and an optional Boolean enabled flag. Disabled rows
+ * need no geometry. Enabled cue and route fields receive the defaults and checks
+ * documented by layoutCrossPhaseOccupancy. Allowed protected keys are copied, sorted
+ * and required to be unique. Return frozen requests and sorted filteredLayoutKeys;
+ * do not mutate source rows. Throw TypeError for malformed fields and RangeError
+ * for duplicate keys, unsupported kinds or invalid numeric bounds/ownership lists.
  *
  * @param {ReadonlyArray<CrossPhaseRequest>} rawRequests
  */
@@ -1345,10 +1491,11 @@ function normalizeCrossPhaseRequests(rawRequests) {
 }
 
 /**
- * Lower numeric priority and earlier factual order place first. The key is the
- * total-order tie breaker that makes input permutations observationally equal.
- */
-/**
+ * Order validated requests by priority, stable order and finally layout key.
+ *
+ * first and second are normalized requests. Return a sort comparator number;
+ * lower numeric values come first. The key tie-breaker uses localeCompare.
+ *
  * @param {NormalizedCrossPhaseRequest} first
  * @param {NormalizedCrossPhaseRequest} second
  */
@@ -1361,6 +1508,11 @@ function compareCrossPhaseRequests(first, second) {
 }
 
 /**
+ * Narrow a validated request to a cue when its kind is not route.
+ *
+ * request must already belong to the normalized request union. Return a Boolean;
+ * this helper does not validate unknown objects or recognize additional kinds.
+ *
  * @param {NormalizedCrossPhaseRequest} request
  * @returns {request is NormalizedCrossPhaseCueRequest}
  */
@@ -1369,6 +1521,11 @@ function isCrossPhaseCueRequest(request) {
 }
 
 /**
+ * Narrow a validated request to a route by its exact kind.
+ *
+ * request must already belong to the normalized request union. Return true only
+ * for kind route; no object or geometry validation occurs here.
+ *
  * @param {NormalizedCrossPhaseRequest} request
  * @returns {request is NormalizedCrossPhaseRouteRequest}
  */
@@ -1377,6 +1534,11 @@ function isCrossPhaseRouteRequest(request) {
 }
 
 /**
+ * Return value when it is a string with at least one character.
+ *
+ * name identifies the field in a TypeError for other values. Whitespace is accepted
+ * and is not trimmed; callers own any vocabulary or identity rules.
+ *
  * @param {unknown} value
  * @param {string} name
  */
@@ -1387,12 +1549,24 @@ function nonEmptyString(value, name) {
   return value;
 }
 
-/** @param {Point} point */
+/**
+ * Use the point's exact x/y number strings as a deterministic grouping key.
+ *
+ * point is already normalized. Return x,y joined by a comma without rounding;
+ * this is a geometry key and does not identify an actor.
+ *
+ * @param {Point} point
+ */
 function pointKey(point) {
   return `${point.x},${point.y}`;
 }
 
 /**
+ * Move all four rectangle edges outward by amount pixels.
+ *
+ * bounds is an existing rectangle and amount is supplied by validated callers.
+ * Return a new frozen rectangle; do not validate amount or mutate bounds.
+ *
  * @param {Rectangle} bounds
  * @param {number} amount
  */
@@ -1406,6 +1580,11 @@ function expandRectangle(bounds, amount) {
 }
 
 /**
+ * Package one proposed cue center and its rectangular bounds.
+ *
+ * center is a pixel point; width and height are validated positive pixel dimensions.
+ * Return a frozen candidate with a copied frozen center and frozen bounds.
+ *
  * @param {Point} center
  * @param {number} width
  * @param {number} height
@@ -1424,6 +1603,15 @@ function cueCandidate(center, width, height) {
 }
 
 /**
+ * List nearby cue boxes in deterministic distance-and-direction order.
+ *
+ * request supplies normalized anchor/radius/box size; viewport bounds the candidates
+ * and options supplies cue/stack gaps. With compactBeforeDistance null (default),
+ * try eight radial rings and eight directions. A distance enables additional closer
+ * rings and angles for the later compaction pass. compactAngleOffsetDegrees defaults
+ * to 4 and rotates only those extra angles. Return frozen, deduplicated candidates
+ * that fit the viewport. This helper does not check obstacles or mutate inputs.
+ *
  * @param {NormalizedCrossPhaseCueRequest} request
  * @param {Rectangle} viewport
  * @param {ReturnType<typeof resolveCrossPhaseOptions>} options
@@ -1522,6 +1710,14 @@ function crossPhaseRecipientCandidates(
 }
 
 /**
+ * Build viewport/blocker-edge cue positions for the global placement fallback.
+ *
+ * request supplies cue size and anchor, viewport bounds the search, and occupied
+ * contains blocker rectangles. Return candidates ordered by distance to the anchor,
+ * then distance to a viewport edge, top and left. Positions come from edge-derived
+ * coordinates and may lie inside the viewport rather than on its boundary. Obstacle
+ * overlap is checked later by firstFreeCueCandidate.
+ *
  * @param {NormalizedCrossPhaseCueRequest} request
  * @param {Rectangle} viewport
  * @param {ReadonlyArray<Rectangle>} occupied
@@ -1586,6 +1782,14 @@ function crossPhasePerimeterCandidates(request, viewport, occupied) {
 }
 
 /**
+ * Choose the first cue box that clears occupied boxes and other cue anchors.
+ *
+ * candidates are already ordered; occupied contains padded rectangles. anchor is
+ * this cue's attachment point, cueAnchors carries all keyed anchors, and layoutKey
+ * identifies the one anchor that may lie under its own box. Also reserve one pixel
+ * around candidate paint before checking other anchors. Return a frozen candidate
+ * and direct leader, or null. Leader lines themselves do not block placement.
+ *
  * @param {ReadonlyArray<CrossPhaseCueCandidate>} candidates
  * @param {ReadonlyArray<Rectangle>} occupied
  * @param {Point} anchor
@@ -1620,6 +1824,12 @@ function firstFreeCueCandidate(candidates, occupied, anchor, cueAnchors, layoutK
 }
 
 /**
+ * Describe a straight screen-space leader from the source anchor to the cue center.
+ *
+ * anchor and center are normalized points. Return a frozen line record with start,
+ * copied end, points and SVG path. The anchor reference is reused. No clipping or
+ * obstacle avoidance is applied to this low-priority underlay.
+ *
  * @param {Point} anchor
  * @param {Point} center
  */
@@ -1635,6 +1845,12 @@ function cueLeader(anchor, center) {
 }
 
 /**
+ * Check a polyline's points against the viewport and its segments against blockers.
+ *
+ * points and blockers contain normalized pixel geometry; viewport is the allowed
+ * rectangle. Return false for any out-of-bounds point or intersecting segment.
+ * An empty or single-point line has no segments to reject. Inputs are unchanged.
+ *
  * @param {ReadonlyArray<Point>} points
  * @param {ReadonlyArray<Rectangle>} blockers
  * @param {Rectangle} viewport
@@ -1656,6 +1872,15 @@ function polylineIsClear(points, blockers, viewport) {
 }
 
 /**
+ * Find a short obstacle-avoiding polyline through a bounded corner graph.
+ *
+ * start/end are pixel points, blockers are forbidden rectangles, and viewport bounds
+ * all graph nodes. Nodes use endpoints and corners one pixel outside blockers.
+ * Return a frozen simplified path, or null for blocked/outside endpoints, too many
+ * nodes, no connection or a failed final clearance check. Deterministic shortest-path
+ * ties use coordinate signatures. The 384-node cap and candidate graph bound the
+ * search; null does not prove that no continuous path exists.
+ *
  * @param {Point} start
  * @param {Point} end
  * @param {ReadonlyArray<Rectangle>} blockers
@@ -1772,6 +1997,13 @@ function boundedVisibilityPolyline(start, end, blockers, viewport) {
 }
 
 /**
+ * Assign initial lane offsets to routes sharing the same endpoint coordinates.
+ *
+ * requests contains normalized routes and spacing is the validated lane distance.
+ * Return a Map from layoutKey to pixel offset. Single-direction groups are centered;
+ * opposite directions use separated positive lanes relative to their own direction.
+ * Sort each group by request priority. Grouping uses points, not actor identity.
+ *
  * @param {ReadonlyArray<NormalizedCrossPhaseRouteRequest>} requests
  * @param {number} spacing
  * @returns {Map<string, number>}
@@ -1816,6 +2048,13 @@ function crossPhaseRouteSeeds(requests, spacing) {
 }
 
 /**
+ * Try a route's preferred offset before symmetric neighboring lanes.
+ *
+ * preferred is the initial pixel offset, spacing is the positive lane distance,
+ * and search is the validated number of neighboring lanes. Return a frozen
+ * deduplicated array beginning with preferred, then preferred plus/minus each
+ * successive multiple of spacing.
+ *
  * @param {number} preferred
  * @param {number} spacing
  * @param {number} search
@@ -1829,9 +2068,11 @@ function crossPhaseRouteOffsets(preferred, spacing, search) {
 }
 
 /**
- * Keep the authored marker position as the fast path, then search a small,
- * symmetric interior set. The chosen progress is stored on the immutable
- * route geometry, so allocation and paint consume exactly the same pose.
+ * Try the preferred marker fraction before fixed interior alternatives.
+ *
+ * preferred is the normalized progress fraction selected by the caller. Return a
+ * frozen deduplicated list with preferred first, then 0.5, 0.4, 0.6, 0.3, 0.7,
+ * 0.2 and 0.8. This helper does not validate range or inspect obstacles.
  *
  * @param {number} preferred
  */
@@ -1840,10 +2081,16 @@ function crossPhaseMarkerProgresses(preferred) {
 }
 
 /**
- * Find a bounded, deterministic multi-segment route. Named endpoint bodies use
- * only their exact planner-supplied keys; free endpoints remain exact unless a
- * durable foreground region already occludes them. Quadratic lanes stay the
- * fast path; this graph is the dense-scene completeness fallback.
+ * Route between endpoint ports through a bounded visibility graph.
+ *
+ * request supplies normalized route fields and optional endpoint owner keys.
+ * protectedRegions supplies the named durable rectangles; blockers already reflects
+ * path clearance and allowed-region exclusions. viewport bounds all nodes. A named
+ * endpoint must lie within its named region; unnamed blocked endpoints can use
+ * nearby clear ports. Search ports and one-pixel-outside blocker corners with
+ * deterministic shortest-path ties. Return polyline route geometry, or null for bad
+ * ownership, an oversized graph, no connection or a zero-length route. Ports move
+ * visible line endpoints without changing the request's underlying disclosed facts.
  *
  * @param {NormalizedCrossPhaseRouteRequest} request
  * @param {ReadonlyArray<{layoutKey: string, bounds: Rectangle}>} protectedRegions
@@ -1888,7 +2135,15 @@ function protectedPolylineRoute(request, protectedRegions, blockers, viewport) {
 
   /** @type {Map<string, {point: Point, source: boolean, target: boolean}>} */
   const nodeByPoint = new Map();
-  /** @param {Point} candidate @param {"source" | "target" | "waypoint"} role */
+  /**
+   * Add a clear in-viewport graph point and merge its endpoint roles.
+   *
+   * candidate is a pixel point and role is source, target or waypoint. Mutate the
+   * enclosing node map: duplicate coordinate keys retain one node and combine source/
+   * target flags. Blocked or outside candidates are ignored. Return undefined.
+   *
+   * @param {Point} candidate @param {"source" | "target" | "waypoint"} role
+   */
   const addNode = (candidate, role) => {
     if (
       !pointInOrOnRectangle(candidate, viewport) ||
@@ -2010,10 +2265,14 @@ function protectedPolylineRoute(request, protectedRegions, blockers, viewport) {
 }
 
 /**
- * Detour an otherwise valid protected polyline through one point where the
- * complete visible marker fits. Endpoint bodies remain path-only allowances:
- * marker candidates are checked against every durable region, including both
- * explicitly named endpoint owners.
+ * Try polyline detours with enough room for the route's direction marker.
+ *
+ * route supplies endpoints; pathBlockers restrict the line and markerBlockers restrict
+ * the marker, including endpoint bodies. viewport, markerPadding and pathPadding are
+ * validated pixel geometry. Candidate marker sites come from the inset viewport and
+ * padded blocker corners. Return the first clear polyline with marker progress set
+ * at its detour join, or null when the marker has no positive size, the viewport is
+ * too small or no supported detour passes. The search does not mutate the route.
  *
  * @param {ReturnType<typeof createPolylineRouteGeometry>} route
  * @param {ReadonlyArray<Rectangle>} pathBlockers
@@ -2122,6 +2381,12 @@ function markerSafePolylineRoute(
 }
 
 /**
+ * Score a possible marker waypoint by straight-line travel through it.
+ *
+ * route supplies pixel start/end points and candidate is a possible marker point.
+ * Return start-to-candidate plus candidate-to-end distance; obstacles can make the
+ * actual route longer. No geometry is changed.
+ *
  * @param {ReturnType<typeof createPolylineRouteGeometry>} route
  * @param {Point} candidate
  */
@@ -2132,7 +2397,14 @@ function markerDetourLowerBound(route, candidate) {
   );
 }
 
-/** @param {ReadonlyArray<Point>} points */
+/**
+ * Sum the Euclidean lengths between consecutive pixel points.
+ *
+ * points is an ordered, already-normalized list. Return zero for fewer than two
+ * points. No validation, closing segment or input mutation is added.
+ *
+ * @param {ReadonlyArray<Point>} points
+ */
 function polylineLength(points) {
   let length = 0;
   for (let index = 1; index < points.length; index += 1) {
@@ -2144,7 +2416,15 @@ function polylineLength(points) {
   return length;
 }
 
-/** @param {Rectangle} bounds */
+/**
+ * Return the four corners one pixel outside a blocking rectangle.
+ *
+ * bounds is normalized. The frozen result is ordered top-left, top-right,
+ * bottom-right, bottom-left. The margin protects serialized SVG paths from rounding
+ * back onto the blocker; viewport and other-blocker checks happen later.
+ *
+ * @param {Rectangle} bounds
+ */
 function visibilityCorners(bounds) {
   const margin = CROSS_PHASE_ROUTE_GRAPH_MARGIN;
   return Object.freeze([
@@ -2156,11 +2436,13 @@ function visibilityCorners(bounds) {
 }
 
 /**
- * A free route endpoint or cue anchor normally remains exact. When durable
- * foreground already covers that point, begin or end the visible geometry
- * immediately outside the complete set of containing blockers. The occluded
- * scientific point remains unchanged; the blocker is never inferred as an
- * owner or removed from later collision checks.
+ * Find visible ports near an endpoint that lies under a protected rectangle.
+ *
+ * endpoint is the disclosed anchor; blockers and viewport contain pixel rectangles.
+ * If no blocker contains/touches the endpoint, return it directly. Otherwise try
+ * one-pixel-outside edges/corners of containing blockers, keeping only points inside
+ * the viewport and clear of every blocker. Return frozen deduplicated ports sorted
+ * by x/y, possibly empty. This does not grant ownership or remove any blocker.
  *
  * @param {Point} endpoint
  * @param {ReadonlyArray<Rectangle>} blockers
@@ -2209,6 +2491,13 @@ function freeEndpointPorts(endpoint, blockers, viewport) {
 }
 
 /**
+ * Build possible line attachment points on a named body's rectangle.
+ *
+ * bounds is the owner's normalized rectangle and aims lists destination/waypoint
+ * points. Return frozen deduplicated edge centers, corners and intersections of
+ * center-to-aim rays with the boundary. Zero-length aim rays are skipped. The caller
+ * checks viewport containment and other blockers; this helper does not.
+ *
  * @param {Rectangle} bounds
  * @param {ReadonlyArray<Point>} aims
  */
@@ -2244,7 +2533,14 @@ function bodyBoundaryPorts(bounds, aims) {
   ]);
 }
 
-/** @param {Point} point @param {Rectangle} bounds */
+/**
+ * Check inclusive rectangle membership with the 1e-9 coordinate tolerance.
+ *
+ * point and bounds are normalized pixel geometry. Return a Boolean; values within
+ * the tolerance beyond an edge count as touching that rectangle.
+ *
+ * @param {Point} point @param {Rectangle} bounds
+ */
 function pointInOrOnRectangle(point, bounds) {
   return (
     point.x >= bounds.left - EPSILON &&
@@ -2254,22 +2550,51 @@ function pointInOrOnRectangle(point, bounds) {
   );
 }
 
-/** @param {Point} point @param {Rectangle} bounds */
+/**
+ * Use inclusive rectangle membership for blocker contact checks.
+ *
+ * point and bounds are normalized pixel geometry. Return the same Boolean as
+ * pointInOrOnRectangle, including its 1e-9 edge tolerance.
+ *
+ * @param {Point} point @param {Rectangle} bounds
+ */
 function pointTouchesRectangle(point, bounds) {
   return pointInOrOnRectangle(point, bounds);
 }
 
-/** @param {Point} point */
+/**
+ * Format a pixel point for deterministic shortest-path tie breaking.
+ *
+ * point is normalized. Return its x and y values at 15 significant digits, joined
+ * by a comma. This presentation-graph signature is not a public entity identity.
+ *
+ * @param {Point} point
+ */
 function graphPointSignature(point) {
   return `${numberKey(point.x)},${numberKey(point.y)}`;
 }
 
-/** @param {number} value */
+/**
+ * Format a validated number with 15 significant digits.
+ *
+ * value must be a number. Return its string for stable path signatures and SVG
+ * leader text; this helper does not clamp, validate or round the stored geometry.
+ *
+ * @param {number} value
+ */
 function numberKey(value) {
   return value.toPrecision(15);
 }
 
-/** @param {ReadonlyArray<Point>} points */
+/**
+ * Remove interior points that are collinear with their retained neighbors.
+ *
+ * points is an ordered path. Return a frozen array reusing the point objects; the
+ * first and last points are kept. Collinearity uses an absolute 1e-9 cross-product
+ * tolerance. The caller owns route validation; direction reversals are not checked.
+ *
+ * @param {ReadonlyArray<Point>} points
+ */
 function simplifyPolyline(points) {
   /** @type {Point[]} */
   const simplified = [];
@@ -2289,6 +2614,13 @@ function simplifyPolyline(points) {
 }
 
 /**
+ * Expose route vertices or sample a curved route for geometry checks.
+ *
+ * route is valid route geometry. Return its existing polyline points unchanged, or
+ * a frozen array of 33 points across a quadratic curve or directed circular arc.
+ * The resulting 32 segments approximate curved paint; they are not an analytic
+ * intersection test. Inputs are unchanged.
+ *
  * @param {ReturnType<typeof createRouteGeometry>} route
  * @returns {ReadonlyArray<Point>}
  */
@@ -2335,6 +2667,11 @@ function routePoints(route) {
 }
 
 /**
+ * Test strict interior membership, leaving a small margin beside each edge.
+ *
+ * point and bounds are normalized. Return true only when every coordinate is more
+ * than 1e-9 inside the matching edge. Boundary contact is handled separately.
+ *
  * @param {Point} point
  * @param {Rectangle} bounds
  */
@@ -2348,6 +2685,13 @@ function pointInRectangle(point, bounds) {
 }
 
 /**
+ * Find the crossing point of two finite nonparallel line segments.
+ *
+ * The four inputs are normalized pixel endpoints. Return a frozen intersection
+ * point when both segment fractions lie in [0,1] within the 1e-9 tolerance.
+ * Return null for parallel/collinear segments or a crossing outside either segment.
+ * This helper does not report the overlap interval of collinear segments.
+ *
  * @param {Point} firstStart
  * @param {Point} firstEnd
  * @param {Point} secondStart
@@ -2382,6 +2726,12 @@ function segmentsIntersect(firstStart, firstEnd, secondStart, secondEnd) {
 }
 
 /**
+ * Check a segment's interior endpoints and crossings with rectangle edges.
+ *
+ * start/end and bounds are normalized pixel geometry. Return true when either
+ * endpoint is strictly inside or a nonparallel segment-edge intersection exists.
+ * Use the shared tolerance; collinear edge overlap alone is not a separate test.
+ *
  * @param {Point} start
  * @param {Point} end
  * @param {Rectangle} bounds
@@ -2402,9 +2752,15 @@ function segmentIntersectsRectangle(start, end, bounds) {
 }
 
 /**
- * Validate the visible route corridor and its finite direction marker. The
- * transparent 10px interaction path and battlefield-coloured bridge
- * backplates are deliberately not foreground collision claims.
+ * Check a visible route corridor and its finite direction marker.
+ *
+ * route is valid geometry. paddedBlockers already includes path clearance; blockers
+ * is the full marker-blocker list. viewport bounds paint; pathPadding and
+ * markerPadding are pixel half-extents. markerProgress may be null to use the route
+ * default. Return false for sampled line intersections, padded sampled bounds outside
+ * the viewport or a marker touching a padded blocker. Nonpositive markerPadding
+ * skips marker checks. Transparent interaction paths and bridge backplates are not
+ * foreground collision claims. No geometry is modified.
  *
  * @param {ReturnType<typeof createRouteGeometry>} route
  * @param {ReadonlyArray<Rectangle>} paddedBlockers
@@ -2454,6 +2810,12 @@ function routePaintIsClear(
 }
 
 /**
+ * Check sampled route segments against each forbidden rectangle.
+ *
+ * route is valid route geometry and blockers is the rectangle list. Return true on
+ * the first segment intersection, otherwise false. Polylines use their own vertices;
+ * curves/arcs use the 32-segment approximation from routePoints.
+ *
  * @param {ReturnType<typeof createRouteGeometry>} route
  * @param {ReadonlyArray<Rectangle>} blockers
  */
@@ -2472,6 +2834,14 @@ function routeIntersectsRectangles(route, blockers) {
 }
 
 /**
+ * Annotate later routes where they cross earlier painted routes.
+ *
+ * routes is already in paint order and bridgeGap is a positive pixel distance.
+ * Return a frozen array of copied frozen routes with bridgeGaps naming the earlier
+ * layout key, intersection point and gap. Use sampled segments, skip intersections
+ * near the current route's endpoints, and merge crossings closer than bridgeGap.
+ * No route path is moved; the painter decides how to draw each bridge.
+ *
  * @param {ReadonlyArray<CrossPhaseRoutePlacement>} routes
  * @param {number} bridgeGap
  * @returns {ReadonlyArray<CrossPhaseRoutePlacement>}
@@ -2524,6 +2894,11 @@ function addCrossPhaseRouteBridges(routes, bridgeGap) {
 }
 
 /**
+ * Check whether a point is closer than distance to either route endpoint.
+ *
+ * point, route and distance use pixels and are already normalized. Return a Boolean;
+ * equality at the distance threshold is false.
+ *
  * @param {Point} point
  * @param {ReturnType<typeof createRouteGeometry>} route
  * @param {number} distance
@@ -2535,7 +2910,14 @@ function nearRouteEndpoint(point, route, distance) {
   );
 }
 
-/** @param {ReturnType<typeof createRouteGeometry>} route */
+/**
+ * Bound the route's vertices or sampled curve points with a rectangle.
+ *
+ * route is valid geometry. Return frozen min/max bounds of routePoints, without
+ * stroke or marker padding. Curved bounds are sampled rather than analytic extrema.
+ *
+ * @param {ReturnType<typeof createRouteGeometry>} route
+ */
 function routeGeometryBounds(route) {
   const points = routePoints(route);
   return rectangle(
@@ -2547,6 +2929,10 @@ function routeGeometryBounds(route) {
 }
 
 /**
+ * Return whether value is a non-null object other than an array.
+ *
+ * This structural check does not require a plain object or validate its fields.
+ *
  * @param {unknown} value
  * @returns {value is Record<string, any>}
  */
@@ -2555,6 +2941,11 @@ function isRecord(value) {
 }
 
 /**
+ * Return a finite numeric field unchanged or raise TypeError.
+ *
+ * value is unknown and name appears in the error message. Numeric strings, NaN and
+ * infinities are rejected. No coercion occurs.
+ *
  * @param {unknown} value
  * @param {string} name
  * @returns {number}
@@ -2567,6 +2958,11 @@ function finite(value, name) {
 }
 
 /**
+ * Require a finite number greater than zero for a named field.
+ *
+ * value is unknown and name labels errors. Return the number unchanged. Throw
+ * TypeError for nonnumeric/nonfinite input and RangeError for zero or negatives.
+ *
  * @param {unknown} value
  * @param {string} name
  * @returns {number}
@@ -2580,6 +2976,11 @@ function positiveFinite(value, name) {
 }
 
 /**
+ * Require a finite number greater than or equal to zero for a named field.
+ *
+ * value is unknown and name labels errors. Return the number unchanged. Throw
+ * TypeError for nonnumeric/nonfinite input and RangeError for negatives.
+ *
  * @param {unknown} value
  * @param {string} name
  * @returns {number}
@@ -2593,6 +2994,12 @@ function nonNegativeFinite(value, name) {
 }
 
 /**
+ * Use fallback for an omitted option, otherwise validate a nonnegative number.
+ *
+ * Only undefined selects fallback, which the caller has already validated. name
+ * labels TypeError/RangeError from nonNegativeFinite. Return the selected number;
+ * null is an invalid supplied value rather than an omission.
+ *
  * @param {unknown} value
  * @param {number} fallback
  * @param {string} name
@@ -2603,6 +3010,12 @@ function optionNonNegative(value, fallback, name) {
 }
 
 /**
+ * Use fallback for an omitted option, otherwise validate a positive number.
+ *
+ * Only undefined selects fallback, which the caller has already validated. name
+ * labels TypeError/RangeError from positiveFinite. Return the selected number;
+ * null is an invalid supplied value rather than an omission.
+ *
  * @param {unknown} value
  * @param {number} fallback
  * @param {string} name
@@ -2613,6 +3026,12 @@ function optionPositive(value, fallback, name) {
 }
 
 /**
+ * Normalize optional viewport padding into four nonnegative pixel values.
+ *
+ * value may be undefined (all zero), one number (all sides), or an inset object
+ * whose omitted sides default to zero. Return a frozen top/right/bottom/left record.
+ * Throw TypeError for malformed/nonfinite values and RangeError for negatives.
+ *
  * @param {number | Partial<Insets> | undefined} value
  * @returns {Insets}
  */
@@ -2641,6 +3060,12 @@ function normalizeInsets(value) {
 }
 
 /**
+ * Copy finite coordinates from a point record or coordinate array.
+ *
+ * value may be {x,y} or an array with at least two entries; extra entries are ignored.
+ * name labels TypeError for invalid shape or nonfinite/nonnumeric coordinates.
+ * Return a new frozen point without changing the input.
+ *
  * @param {unknown} value
  * @param {string} name
  * @returns {Point}
@@ -2656,6 +3081,11 @@ function normalizePoint(value, name) {
 }
 
 /**
+ * Package x and y in a new frozen point record.
+ *
+ * Both numbers are already checked by the caller. Return {x,y} without conversion
+ * or further validation.
+ *
  * @param {number} x
  * @param {number} y
  * @returns {Point}
@@ -2665,6 +3095,11 @@ function frozenPoint(x, y) {
 }
 
 /**
+ * Package four edges and their derived width/height in a frozen rectangle.
+ *
+ * left/top/right/bottom use the same coordinate units. Return the new record;
+ * ordering and finiteness are caller preconditions, not checks in this helper.
+ *
  * @param {number} left
  * @param {number} top
  * @param {number} right
@@ -2683,6 +3118,12 @@ function rectangle(left, top, right, bottom) {
 }
 
 /**
+ * Validate rectangle edges and recompute its dimensions.
+ *
+ * value must be a record with finite left/top/right/bottom edges; name labels
+ * errors. Equal edges are accepted. Return a new frozen rectangle, ignoring any
+ * input width/height. Throw TypeError for malformed edges and RangeError if reversed.
+ *
  * @param {unknown} value
  * @param {string} name
  * @returns {Rectangle}
@@ -2702,6 +3143,11 @@ function normalizeRectangle(value, name) {
 }
 
 /**
+ * Compute the shared area of two already-normalized rectangles.
+ *
+ * first and second use the same coordinate units. Return zero for disjoint or
+ * edge-touching rectangles, otherwise their overlap area. Inputs are unchanged.
+ *
  * @param {Rectangle} first
  * @param {Rectangle} second
  * @returns {number}
@@ -2719,6 +3165,14 @@ function intersectionArea(first, second) {
 }
 
 /**
+ * Fill and validate the numeric settings shared by status-dock searches.
+ *
+ * options is the caller-supplied options object. Omitted fields use
+ * DEFAULT_STATUS_DOCK_OPTIONS. Return a frozen record: positive cell dimensions and
+ * tangentStep; nonnegative padding/gaps; maxTangentShift at most 24 pixels; and
+ * integer visible limits from 0 through 9. Throw TypeError for nonfinite/nonnumeric
+ * distance fields and RangeError for invalid bounds or visible limits.
+ *
  * @param {StatusDockOptions} options
  */
 function resolveDockOptions(options) {
@@ -2800,6 +3254,14 @@ function resolveDockOptions(options) {
 }
 
 /**
+ * Copy the geometry and ordered payload list for one dock owner.
+ *
+ * agent needs a nonnegative integer globalSlot, finite center, positive radius and
+ * statuses array. Optional required/controlled/selected flags mean true only when
+ * exactly true. Return a frozen row with a frozen shallow status-array copy; payload
+ * objects stay shared. Throw TypeError for malformed fields and RangeError for an
+ * invalid slot or nonpositive radius.
+ *
  * @param {StatusDockAgent} agent
  */
 function normalizeAgent(agent) {
@@ -2824,6 +3286,11 @@ function normalizeAgent(agent) {
 }
 
 /**
+ * Reject a second normalized agent with the same global slot.
+ *
+ * agents supplies normalized rows. Return undefined when all slots differ; throw
+ * RangeError naming the duplicate otherwise. The list is not changed.
+ *
  * @param {ReadonlyArray<ReturnType<typeof normalizeAgent>>} agents
  */
 function assertUniqueSlots(agents) {
@@ -2837,6 +3304,11 @@ function assertUniqueSlots(agents) {
 }
 
 /**
+ * Order agents by required, controlled, selected, status count and slot.
+ *
+ * first and second are normalized rows. True flags and larger payload lists come
+ * first; lower globalSlot breaks the final tie. Return a sort comparator number.
+ *
  * @param {ReturnType<typeof normalizeAgent>} first
  * @param {ReturnType<typeof normalizeAgent>} second
  * @returns {number}
@@ -2866,10 +3338,14 @@ function comparePlacementPriority(first, second) {
  */
 
 /**
- * Find the first complete collision-free arrangement in priority order.
- * Candidate order preserves expanded-before-collapsed disclosure and the
- * deterministic anchor/tangent score. The bounded fallback below retains a
- * usable result when the local geometry is physically unsatisfiable.
+ * Search for the first complete dock arrangement in supplied priority order.
+ *
+ * inputs contains normalized body/viewport/options records. searchLimit defaults
+ * to 100000 candidate visits. Try disclosure levels and anchor/tangent scores in
+ * their existing order, backtracking around earlier choices. Return the first full
+ * placement array (empty for no inputs), or null when the bounded search fails.
+ * Null can mean exhausted budget rather than physical impossibility. No partial
+ * result is returned and inputs are unchanged.
  *
  * @param {ReadonlyArray<StatusDockPlacementInput>} inputs
  * @param {number} [searchLimit]
@@ -2879,6 +3355,13 @@ function searchStatusDockPlacements(inputs, searchLimit = STATUS_DOCK_SEARCH_LIM
   let visited = 0;
 
   /**
+   * Extend one partial dock arrangement using the next request's candidates.
+   *
+   * index selects the next input; priorDockBounds and placements hold accepted choices
+   * on this branch. Mutate only the enclosing visited counter. Return the complete
+   * placement array, or null for a failed branch/budget. Candidate bounds are passed
+   * in new arrays so backtracking does not alter an earlier branch.
+   *
    * @param {number} index
    * @param {ReadonlyArray<Rectangle>} priorDockBounds
    * @param {ReadonlyArray<StatusDockPlacement>} placements
@@ -2920,11 +3403,14 @@ function searchStatusDockPlacements(inputs, searchLimit = STATUS_DOCK_SEARCH_LIM
 }
 
 /**
- * Preserve the complete joint result when it exists. If one lower-priority
- * request makes the complete set impossible, retain every higher-priority
- * request that remains jointly feasible and continue considering later
- * requests around that accepted set. A rejected request can never displace an
- * earlier accepted request.
+ * Try a small joint dock search, then keep greedy choices in priority order.
+ *
+ * inputs is already priority-sorted. For at most six requests, first try the complete
+ * set with a 5000-visit budget. If that fails, or there are more requests, choose each
+ * request's first clear candidate around already accepted docks. Rejected requests
+ * cannot move earlier accepted docks. Return placements and suppressedPriorityIndexes
+ * in a frozen record. The greedy fallback does not prove joint feasibility of every
+ * accepted/rejected combination.
  *
  * @param {ReadonlyArray<StatusDockPlacementInput>} inputs
  * @returns {{
@@ -2971,10 +3457,13 @@ function searchPriorityPreservingDockPlacements(inputs) {
 }
 
 /**
- * Reduce one unplaceable required request to a single associated marker while
- * retaining the complete authoritative payload behind that marker. Local
- * anchors are preferred. A deterministic viewport search is the final
- * collision-safe fallback for dense but supported layouts.
+ * Reduce an unplaced required dock to one associated marker when space permits.
+ *
+ * input supplies a normalized request and compact sizing options; priorDockBounds
+ * reserves already accepted docks. Try ordinary local candidates first, then the
+ * edge-derived remote search. Return a frozen placement or null. A single payload
+ * stays visible; multiple payloads remain together behind an overflow marker. The
+ * original payload list and prior placements are unchanged.
  *
  * @param {StatusDockPlacementInput} input
  * @param {ReadonlyArray<Rectangle>} priorDockBounds
@@ -3015,11 +3504,14 @@ function placeCompactRequiredDockFallback(input, priorDockBounds) {
 }
 
 /**
- * Find a remote one-cell marker when every normal anchor is occupied. Candidate
- * coordinates are derived from viewport and blocker edges, which bounds the
- * search quadratically in the number of rectangles rather than in viewport
- * pixels. Any axis-aligned free region has an equivalent placement touching a
- * viewport or blocker edge, so this remains complete for the compact marker.
+ * Find a nearby one-cell marker using viewport and blocker edges.
+ *
+ * input supplies the body, viewport, reserved/body rectangles and compact cell size;
+ * priorDockBounds adds occupied dock rectangles. Search combinations of edge-derived
+ * x/y coordinates, choosing the clear candidate nearest the body center, then top
+ * and left. Return a frozen placeholder placement containing one null payload, or
+ * null when none fits. The caller replaces that placeholder with the original facts.
+ * The search depends on rectangle count rather than the viewport's pixel count.
  *
  * @param {StatusDockPlacementInput} input
  * @param {ReadonlyArray<Rectangle>} priorDockBounds
@@ -3117,8 +3609,12 @@ function remoteCompactRequiredDockPlacement(input, priorDockBounds) {
 }
 
 /**
- * Candidate starts where a compact rectangle touches either the viewport or
- * one blocker edge. Filtering and sorting make the result deterministic.
+ * List possible rectangle starts touching viewport or blocker edges on one axis.
+ *
+ * viewportStart/end bounds the axis, extent is the candidate's validated size, and
+ * blockers supplies start/end intervals. Return frozen sorted unique starts that
+ * keep the extent within the viewport, with 1e-9 edge tolerance. Return empty if
+ * the extent cannot fit. This checks one axis only, not rectangle collisions.
  *
  * @param {number} viewportStart
  * @param {number} viewportEnd
@@ -3152,6 +3648,10 @@ function candidateEdgePositions(viewportStart, viewportEnd, extent, blockers) {
 }
 
 /**
+ * Return a new frozen midpoint of the rectangle's edges.
+ *
+ * bounds is already normalized. Coordinates use the same units as its edges.
+ *
  * @param {Rectangle} bounds
  * @returns {Point}
  */
@@ -3163,6 +3663,12 @@ function rectangleCenter(bounds) {
 }
 
 /**
+ * Name the cardinal direction from source to target in screen coordinates.
+ *
+ * source and target are normalized points. Return east/west when horizontal distance
+ * is larger, otherwise south/north by vertical sign. Equal-axis ties use vertical;
+ * coincident points return south. No geometry changes.
+ *
  * @param {Point} source
  * @param {Point} target
  * @returns {"north" | "east" | "west" | "south"}
@@ -3177,8 +3683,14 @@ function relativeAnchor(source, target) {
 }
 
 /**
- * Generate deterministic placement alternatives in disclosure-priority order:
- * every expanded anchor is considered before an ordinary dock collapses.
+ * Generate candidate docks from greatest allowed disclosure to most compact.
+ *
+ * input supplies normalized agent/body/viewport/options plus previously occupied
+ * docks. Respect the required or ordinary visible limit and the nine-cell capacity;
+ * hidden payloads reserve one overflow cell. A fully visible required dock does not
+ * collapse here. Return candidates sorted by geometric score within each disclosure
+ * level, including candidates marked collisionFree false. Callers choose or search
+ * that list; no payload is dropped.
  *
  * @param {PlaceStatusDockInput} input
  * @returns {StatusDockPlacement[]}
@@ -3226,6 +3738,14 @@ function statusDockPlacementOptions(input) {
 }
 
 /**
+ * Attach ordered status payloads and a leader to one geometric dock candidate.
+ *
+ * input owns the original payload list and candidate supplies bounds, grid and score.
+ * If only one payload would be hidden, show it in the already reserved overflow cell
+ * instead of a redundant +1 marker. Return a frozen placement with frozen visible/
+ * hidden array copies, counts, expanded/collisionFree flags and optional +N label.
+ * Payload objects remain shared; collisionFree reports the candidate's earlier score.
+ *
  * @param {PlaceStatusDockInput} input
  * @param {ReturnType<typeof buildCandidates>[number]} candidate
  * @returns {StatusDockPlacement}
@@ -3271,6 +3791,14 @@ function placementFromCandidate(input, candidate) {
  */
 
 /**
+ * Enumerate cardinal anchors and tangent shifts for one disclosure level.
+ *
+ * input includes visibleCount and hiddenCount alongside the normalized placement
+ * data. A nonzero hidden count adds one overflow cell. Return frozen candidate
+ * records with bounds, grid size, scores and collisionFree flags; the containing
+ * array is a new mutable array. Throw RangeError if the resulting grid is empty
+ * or exceeds three rows. This helper does not select a winner.
+ *
  * @param {BuildCandidatesInput} input
  */
 function buildCandidates(input) {
@@ -3317,6 +3845,12 @@ function buildCandidates(input) {
 }
 
 /**
+ * Size a grid of one through nine dock cells, using at most three columns.
+ *
+ * cellCount must be a positive integer; options supplies validated cell width,
+ * height and gap in pixels. Return frozen columns, rows, width and height. Throw
+ * RangeError for an empty/noninteger count or a grid needing more than three rows.
+ *
  * @param {number} cellCount
  * @param {ReturnType<typeof resolveDockOptions>} options
  */
@@ -3338,6 +3872,12 @@ function dockDimensions(cellCount, options) {
 }
 
 /**
+ * Try zero shift, then symmetric offsets up to the permitted maximum.
+ *
+ * step must be positive and maximum nonnegative; callers validate both pixel values.
+ * Return a frozen array ordered zero, negative step, positive step, and so on.
+ * Include the exact maximum in both directions even when step does not divide it.
+ *
  * @param {number} step
  * @param {number} maximum
  * @returns {ReadonlyArray<number>}
@@ -3366,6 +3906,13 @@ function candidateTangentShifts(step, maximum) {
 }
 
 /**
+ * Position a dock beside a protected body at a cardinal anchor.
+ *
+ * body is its protected rectangle; dimensions gives dock width/height. anchor is
+ * north/east/west/south, tangentShift moves along that side, and gap separates the
+ * normal edges. All distances are pixels and already validated. Return a frozen
+ * rectangle; do not clamp it to the viewport or avoid other bodies here.
+ *
  * @param {Rectangle} body
  * @param {{width: number, height: number}} dimensions
  * @param {"north" | "east" | "west" | "south"} anchor
@@ -3408,6 +3955,14 @@ function anchoredDockBounds(body, dimensions, anchor, tangentShift, gap) {
  */
 
 /**
+ * Measure a dock candidate's conflicts and preferred displacement.
+ *
+ * input provides bounds, viewport, bodyAndReservedRects, priorDockBounds,
+ * tangentShift and anchorIndex. Return a frozen score with summed edge overflow
+ * in pixels, overlap areas in square pixels, absolute displacement and anchor index.
+ * Overlapping blocker regions can contribute area more than once; the score is a
+ * placement ordering aid, not a union-area measurement.
+ *
  * @param {ScoreCandidateInput} input
  * @returns {StatusDockScore}
  */
@@ -3430,6 +3985,12 @@ function scoreCandidate(input) {
 }
 
 /**
+ * Order dock candidates by conflicts before cosmetic preferences.
+ *
+ * first and second are scored candidates. Return a sort comparator number comparing
+ * viewport overflow, body/reserved overlap, previous-dock overlap, displacement,
+ * anchor index and finally candidate index, in that order.
+ *
  * @param {ReturnType<typeof buildCandidates>[number]} first
  * @param {ReturnType<typeof buildCandidates>[number]} second
  * @returns {number}
@@ -3446,6 +4007,12 @@ function compareCandidates(first, second) {
 }
 
 /**
+ * Join a body's facing edge center to a dock's facing edge center.
+ *
+ * body and dock are pixel rectangles; anchor is north/east/west/south relative to
+ * the body. Return frozen start/end points in a frozen line record. No clipping,
+ * obstacle avoidance or DOM drawing occurs here.
+ *
  * @param {Rectangle} body
  * @param {Rectangle} dock
  * @param {"north" | "east" | "west" | "south"} anchor

@@ -1,4 +1,4 @@
-"""Focused CP2.5-B presentation protocol, integrity, and privacy proofs."""
+"""Check V1 presentation messages, record agreement and privacy limits."""
 # pyright: reportPrivateUsage=false
 
 from __future__ import annotations

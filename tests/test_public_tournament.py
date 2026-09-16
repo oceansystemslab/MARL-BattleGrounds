@@ -1,4 +1,4 @@
-"""Small complete tournaments exercise paired execution, selection and resumption."""
+"""Check small complete tournaments, selected outputs and resumed execution."""
 
 import csv
 from collections.abc import Sequence

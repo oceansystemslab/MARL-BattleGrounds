@@ -1,8 +1,15 @@
-"""Strict additive contracts for authority-filtered presentation frames.
+"""Define and check the browser's authorized presentation records.
 
-This module is deliberately transport- and service-neutral. Its six final
-leaves bind an authority-local current endpoint to one source epoch while
-keeping incoming history and outgoing inspection in separate branches.
+Six final frame types cover live and replay views for Oracle, NoSharedObs,
+and SharedObs. Each binds the current display to one source frame, session,
+and revision. Incoming actions describe the step that reached that frame;
+outgoing inspection describes the next decision or recorded transition.
+
+Endpoint builders consume already authorized scene material and recorded
+action axes. Digest helpers validate and hash their content. These are host
+model and serialization operations; they run no simulator, write no files,
+and grant no policy access to researcher-only panels. Local corpse overlays
+are paint-only data whose source authority the service must verify.
 """
 
 from __future__ import annotations
@@ -158,16 +165,20 @@ class _PresentationProtocolModel(BaseModel):
 
 
 def _require_exact_type(value: object, expected: type[object], *, name: str) -> None:
+    """Reject a subclass or different model root, naming the required exact type."""
     if type(value) is not expected:
         raise ValueError(f"{name} must use the exact {expected.__name__} root.")
 
 
 def _require_ordered_unique(values: tuple[object, ...], *, name: str) -> None:
+    """Reject duplicate values while preserving the caller's existing order."""
     if len(values) != len(set(values)):
         raise ValueError(f"{name} must contain unique ordered values.")
 
 
 class LiveOraclePresentationSourceIdentityV1(_PresentationProtocolModel):
+    """Identify one live global frame, its run, revision, and sealed endpoint."""
+
     source_kind: Literal["live_oracle_frame"]
     source_session_id: _OpaqueId
     source_run_generation: _NonNegativeInt
@@ -182,6 +193,7 @@ class LiveOraclePresentationSourceIdentityV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> Self:
+        """Require revision/authority equality and the canonical global frame ID."""
         if self.source_authority_epoch != self.source_revision:
             raise ValueError("source authority epoch must equal source revision.")
         if self.source_frame_id != f"{self.episode_id}:frame:{self.source_frame_index}":
@@ -190,6 +202,10 @@ class LiveOraclePresentationSourceIdentityV1(_PresentationProtocolModel):
 
 
 class LiveNoSharedObsPresentationSourceIdentityV1(_PresentationProtocolModel):
+    """Identify one live recipient-local frame built from that actor's own
+    observation.
+    """
+
     source_kind: Literal["live_no_shared_obs_frame"]
     source_session_id: _OpaqueId
     source_run_generation: _NonNegativeInt
@@ -205,6 +221,9 @@ class LiveNoSharedObsPresentationSourceIdentityV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> Self:
+        """Require revision/authority equality and the canonical recipient-local
+        frame ID.
+        """
         if self.source_authority_epoch != self.source_revision:
             raise ValueError("source authority epoch must equal source revision.")
         expected = (
@@ -217,6 +236,10 @@ class LiveNoSharedObsPresentationSourceIdentityV1(_PresentationProtocolModel):
 
 
 class LiveSharedObsPresentationSourceIdentityV1(_PresentationProtocolModel):
+    """Identify one live recipient-local visual union from allowed same-frame
+    sensors.
+    """
+
     source_kind: Literal["live_shared_obs_visual_union_frame"]
     source_session_id: _OpaqueId
     source_run_generation: _NonNegativeInt
@@ -232,6 +255,9 @@ class LiveSharedObsPresentationSourceIdentityV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> Self:
+        """Require revision/authority equality and the canonical SharedObs recipient
+        frame ID.
+        """
         if self.source_authority_epoch != self.source_revision:
             raise ValueError("source authority epoch must equal source revision.")
         expected = (
@@ -245,6 +271,13 @@ class LiveSharedObsPresentationSourceIdentityV1(_PresentationProtocolModel):
 
 
 class ReplayOraclePresentationSourceIdentityV1(_PresentationProtocolModel):
+    """Bind a global replay frame to its artifact, timeline, and viewer revision.
+
+    Frame indices and simulator steps are nonnegative. The selected index cannot
+    exceed the final retained frame; choreography generation cannot exceed cursor
+    generation. The recorded ordinary movement scale must be positive and finite.
+    """
+
     source_kind: Literal["replay_oracle_frame"]
     source_session_id: _OpaqueId
     source_revision: _NonNegativeInt
@@ -270,6 +303,9 @@ class ReplayOraclePresentationSourceIdentityV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> Self:
+        """Check global artifact, timeline, cursor, generation, and finite
+        movement-scale facts.
+        """
         if self.source_authority_epoch != self.source_revision:
             raise ValueError("source authority epoch must equal source revision.")
         if self.source_frame_index > self.source_final_frame_index:
@@ -292,6 +328,10 @@ class ReplayOraclePresentationSourceIdentityV1(_PresentationProtocolModel):
 
 
 class ReplayNoSharedObsPresentationSourceIdentityV1(_PresentationProtocolModel):
+    """Bind an actor's replay frame to a viewer revision without global artifact
+    details.
+    """
+
     source_kind: Literal["replay_no_shared_obs_frame"]
     source_session_id: _OpaqueId
     source_revision: _NonNegativeInt
@@ -307,11 +347,14 @@ class ReplayNoSharedObsPresentationSourceIdentityV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> Self:
+        """Check replay cursor and recipient-local NoSharedObs source identity."""
         _validate_replay_agent_source(self, mode="actor-pov")
         return self
 
 
 class ReplaySharedObsPresentationSourceIdentityV1(_PresentationProtocolModel):
+    """Bind a SharedObs recipient's visual replay frame to its viewer revision."""
+
     source_kind: Literal["replay_shared_obs_visual_union_frame"]
     source_session_id: _OpaqueId
     source_revision: _NonNegativeInt
@@ -327,6 +370,7 @@ class ReplaySharedObsPresentationSourceIdentityV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> Self:
+        """Check replay cursor and recipient-local SharedObs source identity."""
         _validate_replay_agent_source(
             self,
             mode="shared-obs-visual-union",
@@ -340,6 +384,9 @@ def _validate_replay_agent_source(
     *,
     mode: Literal["actor-pov", "shared-obs-visual-union"],
 ) -> None:
+    """Require recipient-local canonical frame identity, matching revision, and valid
+    cursor.
+    """
     if source.source_authority_epoch != source.source_revision:
         raise ValueError("source authority epoch must equal source revision.")
     if source.source_frame_index > source.source_final_frame_index:
@@ -353,11 +400,19 @@ def _validate_replay_agent_source(
 
 
 class OraclePresentationAuthorityV1(_PresentationProtocolModel):
+    """Declare a global evaluation projection for the researcher's Oracle scene."""
+
     authority_kind: Literal["oracle"]
     projection_basis: Literal["global_evaluation_projection"]
 
 
 class NoSharedObsPresentationAuthorityV1(_PresentationProtocolModel):
+    """Declare the actor and own-observation basis of a NoSharedObs scene.
+
+    The export flag separately states whether this replay can provide exact actor
+    inputs. A visual projection alone does not establish that capability.
+    """
+
     authority_kind: Literal["agent_pov"]
     observation_mode: Literal["no_shared_obs"]
     recipient_public_agent_id: _ScientificId
@@ -367,6 +422,12 @@ class NoSharedObsPresentationAuthorityV1(_PresentationProtocolModel):
 
 
 class SharedObsPresentationAuthorityV1(_PresentationProtocolModel):
+    """Declare a recipient-local visual union from authorized same-frame sensors.
+
+    This display projection does not provide an exact actor-input export. It
+    must not be substituted for the policy observation contract.
+    """
+
     authority_kind: Literal["agent_pov"]
     observation_mode: Literal["shared_obs_visual_union"]
     recipient_public_agent_id: _ScientificId
@@ -409,6 +470,9 @@ class LocalOracleCorpsePublicFactsV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_public_facts(self) -> Self:
+        """Check finite corpse facts, bounded durations, exact statuses, and absent
+        hidden sources.
+        """
         if not all(isfinite(value) for value in self.position):
             raise ValueError("local-Oracle corpse position must be finite.")
         if self.current_health > self.maximum_health:
@@ -476,6 +540,9 @@ class LocalOracleCorpseObservationV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_observation(self) -> Self:
+        """Require a recipient-relative corpse matching its public facts and observed
+        by a sensor.
+        """
         _require_exact_type(self.corpse, AuthorizedAgentV1, name="corpse")
         _require_exact_type(
             self.oracle_public_facts,
@@ -529,6 +596,9 @@ class _LocalOracleCorpseOverlayContentV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_overlay(self) -> Self:
+        """Check frame identity, unique corpses, ordered sensor evidence, and
+        recipient exclusion.
+        """
         if self.source_frame_id != (
             f"{self.source_episode_id}:frame:{self.source_frame_index}"
         ):
@@ -573,10 +643,13 @@ class _LocalOracleCorpseOverlayContentV1(_PresentationProtocolModel):
 
 
 class LocalOracleCorpseOverlayV1(_LocalOracleCorpseOverlayContentV1):
+    """Carry checked paint-only corpse content plus its canonical SHA-256 digest."""
+
     authorized_overlay_digest_sha256: _Sha256Hex
 
     @model_validator(mode="after")
     def _validate_digest(self) -> Self:
+        """Require the stored corpse-overlay digest to match its checked content."""
         if self.authorized_overlay_digest_sha256 != (
             canonical_local_oracle_corpse_overlay_digest_sha256(self)
         ):
@@ -587,7 +660,30 @@ class LocalOracleCorpseOverlayV1(_LocalOracleCorpseOverlayContentV1):
 def canonical_local_oracle_corpse_overlay_digest_sha256(
     overlay: _LocalOracleCorpseOverlayContentV1 | LocalOracleCorpseOverlayV1,
 ) -> str:
-    """Hash one exact local-Oracle overlay, excluding only its digest."""
+    """Hash validated corpse-overlay content, excluding its digest field.
+
+    Parameters
+    ----------
+    overlay : _LocalOracleCorpseOverlayContentV1 or LocalOracleCorpseOverlayV1
+        Exact supported content or sealed overlay root.
+
+    Returns
+    -------
+    str
+        Lowercase SHA-256 of sorted compact UTF-8 JSON content.
+
+    Raises
+    ------
+    TypeError
+        The root has an unsupported exact type.
+    ValueError
+        Nested content is invalid or changes during strict revalidation.
+
+    Notes
+    -----
+    A matching hash proves content identity, not trusted visibility authority.
+    The service separately checks the overlay against source state.
+    """
     if type(overlay) not in (
         _LocalOracleCorpseOverlayContentV1,
         LocalOracleCorpseOverlayV1,
@@ -629,7 +725,42 @@ def seal_local_oracle_corpse_overlay_v1(
     living_sensor_public_agent_ids: tuple[str, ...],
     corpse_observations: tuple[LocalOracleCorpseObservationV1, ...],
 ) -> LocalOracleCorpseOverlayV1:
-    """Seal a server-derived same-epoch corpse overlay."""
+    """Validate and hash a service-derived paint-only corpse overlay.
+
+    Parameters
+    ----------
+    source_episode_id : str
+        Episode owning all overlay facts.
+    source_frame_index : int
+        Nonnegative captured frame index; the global frame ID is derived from it.
+    source_simulator_step_count : int
+        Nonnegative simulator step represented by the source.
+    source_authority_epoch : int
+        Nonnegative service revision authorizing this display.
+    recipient_public_agent_id : str
+        Actor receiving the local display.
+    recipient_presentation_key : str
+        That actor's authority-local display key.
+    living_sensor_public_agent_ids : tuple of str
+        Unique ordered living sensors whose visibility supports the overlay.
+    corpse_observations : tuple of LocalOracleCorpseObservationV1
+        Exact checked corpse rows and their observing sensor identities.
+
+    Returns
+    -------
+    LocalOracleCorpseOverlayV1
+        Checked immutable content with its canonical SHA-256 digest.
+
+    Raises
+    ------
+    ValueError
+        IDs, counts, corpse rows, or sensor provenance violate the model contract.
+
+    Notes
+    -----
+    The caller must derive visibility from trusted source state. This function
+    checks and seals supplied facts; it does not perform line-of-sight geometry.
+    """
     content = _LocalOracleCorpseOverlayContentV1(
         overlay_kind="local_oracle_corpse_overlay",
         projection_basis=("same_epoch_living_sensor_radius_and_static_line_of_sight"),
@@ -655,6 +786,12 @@ def seal_local_oracle_corpse_overlay_v1(
 
 
 class OraclePublicIdentityDirectoryRowV1(_PresentationProtocolModel):
+    """Describe one fixed roster slot without battlefield geometry.
+
+    Team IDs are 1 or 2 and team-local slots are 0 through 4. Active entries
+    require a class ID and name; class identity fields must appear as a pair.
+    """
+
     public_agent_id: _ScientificId
     configured_active: bool
     team_id: Annotated[int, Field(ge=1, le=2)]
@@ -664,6 +801,7 @@ class OraclePublicIdentityDirectoryRowV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_row(self) -> Self:
+        """Require paired class fields and a class identity for every active slot."""
         if self.configured_active != (self.class_id is not None):
             raise ValueError("active directory rows require a class identity.")
         if (self.class_id is None) != (self.class_name is None):
@@ -672,11 +810,14 @@ class OraclePublicIdentityDirectoryRowV1(_PresentationProtocolModel):
 
 
 class OraclePublicIdentityDirectoryV1(_PresentationProtocolModel):
+    """Keep exactly ten unique identity rows in Team A then Team B slot order."""
+
     directory_kind: Literal["oracle_public_identity_directory"]
     identities: tuple[OraclePublicIdentityDirectoryRowV1, ...]
 
     @model_validator(mode="after")
     def _validate_directory(self) -> Self:
+        """Require ten exact unique rows in the fixed two-team slot order."""
         if len(self.identities) != 10 or any(
             type(row) is not OraclePublicIdentityDirectoryRowV1
             for row in self.identities
@@ -714,6 +855,9 @@ class ReplayResearcherRosterAgentV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_row(self) -> Self:
+        """Check health, combat timers, and exact status/aura records in a
+        geometry-free row.
+        """
         if self.current_health > self.maximum_health:
             raise ValueError("researcher roster health exceeds maximum health.")
         if self.steps_until_out_of_combat > self.out_of_combat_delay_steps:
@@ -742,6 +886,7 @@ def _researcher_optional_catalog_float_joins(
     recorded: float | None,
     catalog: float | None,
 ) -> bool:
+    """Compare optional catalog floats, requiring None to match None."""
     if recorded is None or catalog is None:
         return recorded is catalog
     return _researcher_catalog_float_joins(recorded, catalog)
@@ -884,17 +1029,25 @@ def _validate_researcher_roster_facts(
 
 
 class MovementActionDisplayRowV1(_PresentationProtocolModel):
+    """Name one movement category from 0 through 8 without changing action semantics."""
+
     move_action: Annotated[int, Field(ge=0, lt=9)]
     display_name: _DisplayText
 
 
 class TargetNoneActionDisplayRowV1(_PresentationProtocolModel):
+    """Name target category zero, which selects no agent."""
+
     target_kind: Literal["target_none"]
     target_action: Literal[0]
     display_name: _DisplayText
 
 
 class TargetAgentActionDisplayRowV1(_PresentationProtocolModel):
+    """Bind target category 1 through 10 to a public identity and actor-relative
+    team.
+    """
+
     target_kind: Literal["public_agent"]
     target_action: Annotated[int, Field(ge=1, lt=11)]
     display_name: _DisplayText
@@ -909,11 +1062,20 @@ type TargetActionDisplayRowV1 = Annotated[
 
 
 class UltimateChoiceDisplayRowV1(_PresentationProtocolModel):
+    """Name the Basic-or-Ultimate choice category, zero or one."""
+
     use_ultimate_action: Annotated[int, Field(ge=0, lt=2)]
     display_name: _DisplayText
 
 
 class _ActionAxisBaseV1(_PresentationProtocolModel):
+    """Describe one actor's ordered movement, target, and Ultimate choices.
+
+    Axes contain 9 movement rows, 11 target rows, and 2 Ultimate rows. Target
+    zero means none; the next five slots belong to the actor's team, followed by
+    five opponent slots. Rows describe meaning, not current action legality.
+    """
+
     owner_presentation_key: _ScientificId
     owner_public_agent_id: _ScientificId
     movement_actions: tuple[MovementActionDisplayRowV1, ...]
@@ -922,6 +1084,7 @@ class _ActionAxisBaseV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_axis(self) -> Self:
+        """Require ordered 9/11/2 categories and own-team then opponent target slots."""
         if (
             len(self.movement_actions) != 9
             or any(
@@ -980,6 +1143,7 @@ class _ActionAxisBaseV1(_PresentationProtocolModel):
 
     @property
     def target_public_agent_id_by_action(self) -> tuple[str | None, ...]:
+        """Return the ordered eleven target identities, with None at target zero."""
         return (
             None,
             *(
@@ -990,10 +1154,14 @@ class _ActionAxisBaseV1(_PresentationProtocolModel):
 
 
 class OracleActionAxisV1(_ActionAxisBaseV1):
+    """Describe one global-view actor's action categories using public identities."""
+
     axis_kind: Literal["oracle_actor_action_axis"]
 
 
 class AgentPovActionAxisV1(_ActionAxisBaseV1):
+    """Describe the recipient's recorded action categories without extra scene data."""
+
     axis_kind: Literal["agent_pov_action_axis"]
 
 
@@ -1009,6 +1177,7 @@ class AgentPovDecisionMaskV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_mask(self) -> Self:
+        """Require 9/11/2/11-by-2 mask shapes and marginals equal to the joint mask."""
         if (
             len(self.move) != 9
             or len(self.select_target) != 11
@@ -1043,6 +1212,7 @@ class AgentPovDecisionMaskV1(_PresentationProtocolModel):
 
 
 def _strict_agent_mask_v1(mask: ActorPovActionMaskV1) -> AgentPovDecisionMaskV1:
+    """Copy an accepted actor mask into the strict required-field presentation model."""
     if type(mask) is not ActorPovActionMaskV1:
         raise TypeError("Agent mask projection requires the exact accepted mask root.")
     validated = ActorPovActionMaskV1.model_validate(mask.model_dump(mode="python"))
@@ -1057,6 +1227,7 @@ def _strict_agent_mask_v1(mask: ActorPovActionMaskV1) -> AgentPovDecisionMaskV1:
 
 
 def _accepted_agent_mask_v1(mask: AgentPovDecisionMaskV1) -> ActorPovActionMaskV1:
+    """Rebuild the accepted actor mask model from its strict presentation copy."""
     return ActorPovActionMaskV1(
         schema_id=mask.schema_id,
         schema_version=mask.schema_version,
@@ -1068,6 +1239,12 @@ def _accepted_agent_mask_v1(mask: AgentPovDecisionMaskV1) -> ActorPovActionMaskV
 
 
 class NoSharedObsPresentationEndpointPartsV1(_PresentationProtocolModel):
+    """Join an actor's current scene and next-decision mask to one local frame.
+
+    The recipient, episode, frame index, simulator step, and scene must agree.
+    The mask describes the next action at this state, not the incoming action.
+    """
+
     source_episode_id: _ScientificId
     source_frame_index: _NonNegativeInt
     source_recipient_frame_id: _ScientificId
@@ -1079,6 +1256,9 @@ class NoSharedObsPresentationEndpointPartsV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_parts(self) -> Self:
+        """Revalidate accepted scene parts and their canonical recipient-local frame
+        ID.
+        """
         _require_exact_type(self.scene, AuthorizedBattlefieldSceneV1, name="scene")
         _require_exact_type(
             self.next_decision_action_mask,
@@ -1107,6 +1287,12 @@ class NoSharedObsPresentationEndpointPartsV1(_PresentationProtocolModel):
 
 
 class SharedObsPresentationEndpointPartsV1(_PresentationProtocolModel):
+    """Join a SharedObs scene and recipient mask to their allowed sensor evidence.
+
+    All material belongs to one recipient and frame. Sensor-source and observation
+    provenance records explain which allowed sources support the visual union.
+    """
+
     source_episode_id: _ScientificId
     source_frame_index: _NonNegativeInt
     source_recipient_frame_id: _ScientificId
@@ -1123,6 +1309,9 @@ class SharedObsPresentationEndpointPartsV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_parts(self) -> Self:
+        """Revalidate scene, mask, source evidence, and canonical SharedObs recipient
+        frame ID.
+        """
         _require_exact_type(self.scene, AuthorizedBattlefieldSceneV1, name="scene")
         _require_exact_type(
             self.next_decision_action_mask,
@@ -1153,6 +1342,10 @@ class SharedObsPresentationEndpointPartsV1(_PresentationProtocolModel):
 
 
 class _OracleAuthorizedCurrentEndpointContentV1(_PresentationProtocolModel):
+    """Join the current global scene, fixed identity directory, and optional actor
+    axis.
+    """
+
     endpoint_kind: Literal["oracle_authorized_current"]
     episode_id: _ScientificId
     frame_index: _NonNegativeInt
@@ -1164,6 +1357,9 @@ class _OracleAuthorizedCurrentEndpointContentV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_content(self) -> Self:
+        """Join active scene agents, spawn assignments, and action targets to the
+        fixed directory.
+        """
         if self.frame_id != f"{self.episode_id}:frame:{self.frame_index}":
             raise ValueError("Oracle endpoint frame ID is not canonical.")
         _require_exact_type(self.scene, AuthorizedBattlefieldSceneV1, name="scene")
@@ -1248,12 +1444,17 @@ class _OracleAuthorizedCurrentEndpointContentV1(_PresentationProtocolModel):
 
 
 class _NoSharedObsAuthorizedCurrentEndpointContentV1(_PresentationProtocolModel):
+    """Bind NoSharedObs scene parts to the same recipient's recorded action axis."""
+
     endpoint_kind: Literal["no_shared_obs_authorized_current"]
     parts: NoSharedObsPresentationEndpointPartsV1
     action_axis: AgentPovActionAxisV1
 
     @model_validator(mode="after")
     def _validate_content(self) -> Self:
+        """Require exact NoSharedObs parts and an action axis matching the recipient
+        scene.
+        """
         _require_exact_type(
             self.parts,
             NoSharedObsPresentationEndpointPartsV1,
@@ -1265,12 +1466,17 @@ class _NoSharedObsAuthorizedCurrentEndpointContentV1(_PresentationProtocolModel)
 
 
 class _SharedObsAuthorizedCurrentEndpointContentV1(_PresentationProtocolModel):
+    """Bind SharedObs scene parts and sensor evidence to the recipient's action axis."""
+
     endpoint_kind: Literal["shared_obs_authorized_current"]
     parts: SharedObsPresentationEndpointPartsV1
     action_axis: AgentPovActionAxisV1
 
     @model_validator(mode="after")
     def _validate_content(self) -> Self:
+        """Require exact SharedObs parts and an axis matching recipient and sensor
+        identities.
+        """
         _require_exact_type(
             self.parts,
             SharedObsPresentationEndpointPartsV1,
@@ -1288,6 +1494,9 @@ def _agent_axis_relation_and_team(
     recipient_team_id: int,
     public_agent_id: str,
 ) -> tuple[Literal["self", "ally", "opponent"], int]:
+    """Resolve one public target's relation and team from the recipient's action
+    axis.
+    """
     try:
         target_index = action_axis.target_public_agent_id_by_action.index(
             public_agent_id
@@ -1311,6 +1520,9 @@ def _validate_shared_sensor_source_axis(
     source: SharedObsAuthorizedSensorSourceV1,
     action_axis: AgentPovActionAxisV1,
 ) -> None:
+    """Require each SharedObs source identity and relation to match the recipient
+    axis.
+    """
     _require_exact_type(
         source,
         SharedObsAuthorizedSensorSourceV1,
@@ -1346,6 +1558,9 @@ def _validate_agent_endpoint_parts(
     | SharedObsPresentationEndpointPartsV1,
     action_axis: AgentPovActionAxisV1,
 ) -> None:
+    """Require scene identities, recipient, mask, and sensor evidence to join one
+    axis.
+    """
     if (
         action_axis.owner_public_agent_id != parts.recipient_public_agent_id
         or action_axis.owner_presentation_key != parts.recipient_presentation_key
@@ -1419,6 +1634,7 @@ def _oracle_target_public_axis(
     *,
     owner_team_id: int,
 ) -> tuple[str, ...]:
+    """Return target-none then own-team and opposing-team directory identities."""
     own = tuple(
         row.public_agent_id
         for row in directory.identities
@@ -1433,10 +1649,13 @@ def _oracle_target_public_axis(
 
 
 class OracleAuthorizedCurrentEndpointV1(_OracleAuthorizedCurrentEndpointContentV1):
+    """Seal a global current-frame endpoint with its canonical content digest."""
+
     authorized_endpoint_digest_sha256: _Sha256Hex
 
     @model_validator(mode="after")
     def _validate_digest(self) -> Self:
+        """Require the global endpoint digest to match its checked content."""
         if self.authorized_endpoint_digest_sha256 != (
             canonical_authorized_endpoint_digest_sha256(self)
         ):
@@ -1447,10 +1666,13 @@ class OracleAuthorizedCurrentEndpointV1(_OracleAuthorizedCurrentEndpointContentV
 class NoSharedObsAuthorizedCurrentEndpointV1(
     _NoSharedObsAuthorizedCurrentEndpointContentV1
 ):
+    """Seal a NoSharedObs recipient endpoint with its canonical content digest."""
+
     authorized_endpoint_digest_sha256: _Sha256Hex
 
     @model_validator(mode="after")
     def _validate_digest(self) -> Self:
+        """Require the NoSharedObs endpoint digest to match its checked content."""
         if self.authorized_endpoint_digest_sha256 != (
             canonical_authorized_endpoint_digest_sha256(self)
         ):
@@ -1461,10 +1683,13 @@ class NoSharedObsAuthorizedCurrentEndpointV1(
 class SharedObsAuthorizedCurrentEndpointV1(
     _SharedObsAuthorizedCurrentEndpointContentV1
 ):
+    """Seal a SharedObs recipient endpoint with its canonical content digest."""
+
     authorized_endpoint_digest_sha256: _Sha256Hex
 
     @model_validator(mode="after")
     def _validate_digest(self) -> Self:
+        """Require the SharedObs endpoint digest to match its checked content."""
         if self.authorized_endpoint_digest_sha256 != (
             canonical_authorized_endpoint_digest_sha256(self)
         ):
@@ -1492,7 +1717,30 @@ def canonical_authorized_endpoint_digest_sha256(
     | NoSharedObsAuthorizedCurrentEndpointV1
     | SharedObsAuthorizedCurrentEndpointV1,
 ) -> str:
-    """Hash one exact authority-local endpoint, excluding only its digest."""
+    """Hash checked endpoint content while excluding only its digest field.
+
+    Parameters
+    ----------
+    endpoint : authorized endpoint content or sealed endpoint
+        Exact Oracle, NoSharedObs, or SharedObs endpoint root accepted by this module.
+
+    Returns
+    -------
+    str
+        Lowercase SHA-256 of sorted compact UTF-8 JSON content.
+
+    Raises
+    ------
+    TypeError
+        The root has an unsupported exact type.
+    ValueError
+        Nested types, identities, or values fail strict round-trip validation.
+
+    Notes
+    -----
+    This performs host validation and serialization, with no file I/O. Content
+    identity alone does not replace the service's source-authorization checks.
+    """
     if type(endpoint) not in (*_ENDPOINT_CONTENT_TYPES, *_ENDPOINT_TYPES):
         raise TypeError("endpoint digest requires one exact endpoint content root.")
     _validate_recursive_exact_runtime_types(endpoint)
@@ -1547,6 +1795,7 @@ def _seal_oracle_authorized_current_endpoint_v1(
     identity_directory: OraclePublicIdentityDirectoryV1,
     action_axis: OracleActionAxisV1 | None,
 ) -> OracleAuthorizedCurrentEndpointV1:
+    """Validate the global endpoint fields and attach their canonical content digest."""
     content = _OracleAuthorizedCurrentEndpointContentV1(
         endpoint_kind="oracle_authorized_current",
         episode_id=episode_id,
@@ -1575,6 +1824,7 @@ def _seal_oracle_authorized_current_endpoint_v1(
 def _oracle_public_identity_directory_v1(
     context: EvaluationEpisodeContext,
 ) -> OraclePublicIdentityDirectoryV1:
+    """Build the ten-slot public identity directory from the recorded roster."""
     catalog = context.static_mechanics_catalog
     return OraclePublicIdentityDirectoryV1(
         directory_kind="oracle_public_identity_directory",
@@ -1604,6 +1854,7 @@ def _oracle_action_axis_from_context_v1(
     authority_session_id: str,
     selected_internal_slot: int | None,
 ) -> OracleActionAxisV1 | None:
+    """Build the selected active actor's target axis from recorded roster order."""
     if selected_internal_slot is None:
         return None
     if type(selected_internal_slot) is not int or not (
@@ -1688,7 +1939,37 @@ def build_oracle_authorized_current_endpoint_v1(
     authority_session_id: str,
     selected_internal_slot: int | None,
 ) -> OracleAuthorizedCurrentEndpointV1:
-    """Derive the full Oracle endpoint from exact epoch-bearing authority."""
+    """Build a sealed global display endpoint from one trusted source frame.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact supported episode context declaring roster and action meaning.
+    source_scene : BattlefieldSceneV2
+        Exact source scene with episode, frame, and simulator-step identity.
+    authority_session_id : str
+        Nonempty session token used to scope display keys.
+    selected_internal_slot : int or None
+        Active global slot whose action axis to include, or None for no axis.
+
+    Returns
+    -------
+    OracleAuthorizedCurrentEndpointV1
+        Validated global scene, ten-slot identity directory, optional action axis,
+        and content digest.
+
+    Raises
+    ------
+    TypeError
+        Context or scene uses an unsupported exact model type.
+    ValueError
+        Source identity, selected actor, or authorized scene fields do not agree.
+
+    Notes
+    -----
+    This builds host display data. It does not grant an actor access to the global
+    scene or change simulator state.
+    """
     evaluation_context_type(context)
     if type(source_scene) is not BattlefieldSceneV2:
         raise TypeError("source_scene must use the exact BattlefieldSceneV2 root.")
@@ -1725,7 +2006,32 @@ def build_no_shared_obs_authorized_current_endpoint_v1(
     parts: NoSharedObsAuthorizedScenePartsV1,
     axis_mapping: ActorPovAxisMapping,
 ) -> NoSharedObsAuthorizedCurrentEndpointV1:
-    """Bind accepted NoShared parts to their trusted recorded action axis."""
+    """Bind accepted NoSharedObs scene material to the recipient's recorded action axis.
+
+    Parameters
+    ----------
+    parts : NoSharedObsAuthorizedScenePartsV1
+        Exact already authorized current scene, mask, and source identity.
+    axis_mapping : ActorPovAxisMapping
+        Exact supported recorded axis mapping for the same recipient.
+
+    Returns
+    -------
+    NoSharedObsAuthorizedCurrentEndpointV1
+        Strict endpoint copy, matching action axis, and canonical content digest.
+
+    Raises
+    ------
+    TypeError
+        Scene parts or axis mapping use unsupported exact roots.
+    ValueError
+        Revalidation, recipient identity, target ordering, or scene facts disagree.
+
+    Notes
+    -----
+    The builder rechecks accepted inputs. It adds no simulator data and performs
+    no file I/O; the trusted source projection owns visibility authorization.
+    """
     if type(parts) is not NoSharedObsAuthorizedScenePartsV1:
         raise TypeError("parts must use the exact accepted NoSharedObs root.")
     parts.__post_init__()
@@ -1766,7 +2072,32 @@ def build_shared_obs_authorized_current_endpoint_v1(
     parts: SharedObsAuthorizedScenePartsV1,
     axis_mapping: ActorPovAxisMapping,
 ) -> SharedObsAuthorizedCurrentEndpointV1:
-    """Bind accepted Shared visual-union parts to the recipient source axis."""
+    """Bind accepted SharedObs scene material to the recipient's recorded action axis.
+
+    Parameters
+    ----------
+    parts : SharedObsAuthorizedScenePartsV1
+        Exact already authorized current scene, mask, and source identity.
+    axis_mapping : ActorPovAxisMapping
+        Exact supported recorded axis mapping for the same recipient.
+
+    Returns
+    -------
+    SharedObsAuthorizedCurrentEndpointV1
+        Strict endpoint copy, matching action axis, and canonical content digest.
+
+    Raises
+    ------
+    TypeError
+        Scene parts or axis mapping use unsupported exact roots.
+    ValueError
+        Revalidation, recipient identity, target ordering, or scene facts disagree.
+
+    Notes
+    -----
+    The builder rechecks accepted inputs. It adds no simulator data and performs
+    no file I/O; the trusted source projection owns visibility authorization.
+    """
     if type(parts) is not SharedObsAuthorizedScenePartsV1:
         raise TypeError("parts must use the exact accepted SharedObs root.")
     parts.__post_init__()
@@ -1810,6 +2141,7 @@ def _agent_pov_action_axis_v1(
     owner_presentation_key: str,
     owner_public_agent_id: str,
 ) -> AgentPovActionAxisV1:
+    """Convert an exact recorded actor-axis model into ordered display categories."""
     if (
         type(axis_mapping) is not ActorPovAxisMappingV1
         and type(axis_mapping) is not ActorPovAxisMappingV2
@@ -1868,6 +2200,12 @@ def _agent_pov_action_axis_v1(
 
 
 class LatestTransitionActionRowV1(_PresentationProtocolModel):
+    """Pair an actor's submitted and accepted actions with their target meaning.
+
+    The target identity tuple has eleven entries, with None at zero. Public and
+    presentation identities bind both action tuples to the same actor.
+    """
+
     actor_presentation_key: _ScientificId
     actor_public_agent_id: _ScientificId
     target_action_recipient_public_agent_id_by_id: tuple[_ScientificId | None, ...]
@@ -1876,6 +2214,7 @@ class LatestTransitionActionRowV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_row(self) -> Self:
+        """Require exact action tuples and an eleven-entry target-identity axis."""
         if (
             len(self.target_action_recipient_public_agent_id_by_id) != 11
             or self.target_action_recipient_public_agent_id_by_id[0] is not None
@@ -1916,6 +2255,9 @@ class LivePendingActionTupleV1(_PresentationProtocolModel):
     def _validate_tuple(self) -> Self:
         # Reuse the exact bounded action vocabulary without mislabelling this
         # not-yet-submitted tuple as accepted on the wire.
+        """Validate all three pending categories through the accepted-action tuple
+        contract.
+        """
         AcceptedActionTupleV1(
             move_action=self.move_action,
             target_action=self.target_action,
@@ -1925,12 +2267,17 @@ class LivePendingActionTupleV1(_PresentationProtocolModel):
 
 
 class LivePendingJointActionRowV1(_PresentationProtocolModel):
+    """Pair one active actor's identity with the action tuple prepared for
+    submission.
+    """
+
     actor_presentation_key: _ScientificId
     actor_public_agent_id: _ScientificId
     pending_action: LivePendingActionTupleV1
 
     @model_validator(mode="after")
     def _validate_row(self) -> Self:
+        """Require the exact pending-action tuple model."""
         _require_exact_type(
             self.pending_action,
             LivePendingActionTupleV1,
@@ -1940,11 +2287,14 @@ class LivePendingJointActionRowV1(_PresentationProtocolModel):
 
 
 class LivePendingJointActionV1(_PresentationProtocolModel):
+    """Hold ordered pending actor actions for one current simulator step."""
+
     current_simulator_step_count: _NonNegativeInt
     action_rows: tuple[LivePendingJointActionRowV1, ...]
 
     @model_validator(mode="after")
     def _validate_rows(self) -> Self:
+        """Require exact rows and unique ordered actor identities."""
         if not self.action_rows or any(
             type(row) is not LivePendingJointActionRowV1 for row in self.action_rows
         ):
@@ -1960,6 +2310,7 @@ def _pending_action_matches_live_draft(
     pending: LivePendingActionTupleV1,
     draft: LiveDraftActionTupleV1,
 ) -> bool:
+    """Compare all three submitted categories against the selected actor's draft."""
     target_action = 0 if draft.armed_lane == "none" else draft.target_action
     use_ultimate_action = 1 if draft.armed_lane == "ultimate" else 0
     return (
@@ -1970,6 +2321,10 @@ def _pending_action_matches_live_draft(
 
 
 class _LatestTransitionBaseV1(_PresentationProtocolModel):
+    """Describe adjacent start/successor states for the transition entering this
+    frame.
+    """
+
     episode_id: _ScientificId
     incoming_transition_index: _NonNegativeInt
     incoming_transition_id: _ScientificId
@@ -1981,6 +2336,7 @@ class _LatestTransitionBaseV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_epoch(self) -> Self:
+        """Require adjacent simulator steps and exact incoming action rows."""
         if self.incoming_successor_simulator_step_count != (
             self.incoming_start_simulator_step_count + 1
         ):
@@ -1997,34 +2353,43 @@ class _LatestTransitionBaseV1(_PresentationProtocolModel):
 
 
 class OracleLatestTransitionV1(_LatestTransitionBaseV1):
+    """Expose recorded incoming actions using global researcher frame identities."""
+
     transition_kind: Literal["oracle_incoming_submitted_accepted"]
 
     @model_validator(mode="after")
     def _validate_ids(self) -> Self:
+        """Require canonical global incoming transition and frame identities."""
         prefix = self.episode_id
         _validate_latest_transition_ids(self, prefix=prefix)
         return self
 
 
 class NoSharedObsLatestTransitionV1(_LatestTransitionBaseV1):
+    """Expose the recipient's incoming submitted and accepted actions with local IDs."""
+
     transition_kind: Literal["no_shared_obs_incoming_submitted_accepted"]
     recipient_public_agent_id: _ScientificId
     recipient_presentation_key: _ScientificId
 
     @model_validator(mode="after")
     def _validate_ids(self) -> Self:
+        """Require one recipient-local NoSharedObs incoming action row."""
         prefix = f"{self.episode_id}:actor-pov:{self.recipient_public_agent_id}"
         _validate_agent_latest_transition(self, prefix=prefix)
         return self
 
 
 class SharedObsLatestTransitionV1(_LatestTransitionBaseV1):
+    """Expose one SharedObs recipient's incoming actions with recipient-local IDs."""
+
     transition_kind: Literal["shared_obs_incoming_submitted_accepted"]
     recipient_public_agent_id: _ScientificId
     recipient_presentation_key: _ScientificId
 
     @model_validator(mode="after")
     def _validate_ids(self) -> Self:
+        """Require one recipient-local SharedObs incoming action row."""
         prefix = (
             f"{self.episode_id}:shared-obs-visual-union:"
             f"{self.recipient_public_agent_id}"
@@ -2040,7 +2405,37 @@ def build_shared_obs_latest_transition_v1(
     action_axis: AgentPovActionAxisV1,
     authorized_recipient_global_slot: int,
 ) -> SharedObsLatestTransitionV1 | None:
-    """Project one recipient-local SharedObs incoming action row."""
+    """Project only the recipient's submitted and accepted incoming actions.
+
+    Parameters
+    ----------
+    incoming_transition : EvaluationTransitionV1 or None
+        Exact transition reaching successor, or None at frame zero.
+    successor : SharedObsAuthorizedScenePartsV1
+        Already accepted scene material for the current recipient and frame.
+    action_axis : AgentPovActionAxisV1
+        Recipient's trusted recorded action meaning.
+    authorized_recipient_global_slot : int
+        Exact simulator slot from 0 through 9, supplied by the trusted service.
+
+    Returns
+    -------
+    SharedObsLatestTransitionV1 or None
+        One recipient-local action row and adjacent frame identities, or None
+        for the initial frame.
+
+    Raises
+    ------
+    TypeError
+        A required transition or nested action/fact root has the wrong exact type.
+    ValueError
+        Slot, frame adjacency, schema, identity, or fixed action shape is invalid.
+
+    Notes
+    -----
+    The caller owns the trusted slot-to-recipient binding. Other actors' joint
+    rows are not copied into the returned display resource.
+    """
     if type(authorized_recipient_global_slot) is not int or not (
         0 <= authorized_recipient_global_slot < 10
     ):
@@ -2153,6 +2548,8 @@ def build_shared_obs_latest_transition_v1(
 
 
 class _UpcomingTransitionBaseV1(_PresentationProtocolModel):
+    """Describe the recorded transition leaving the selected replay frame."""
+
     episode_id: _ScientificId
     outgoing_transition_index: _NonNegativeInt
     outgoing_transition_id: _ScientificId
@@ -2164,6 +2561,7 @@ class _UpcomingTransitionBaseV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_epoch(self) -> Self:
+        """Require adjacent simulator steps and exact outgoing action rows."""
         if self.outgoing_successor_simulator_step_count != (
             self.outgoing_start_simulator_step_count + 1
         ):
@@ -2180,33 +2578,42 @@ class _UpcomingTransitionBaseV1(_PresentationProtocolModel):
 
 
 class OracleUpcomingTransitionV1(_UpcomingTransitionBaseV1):
+    """Expose the next recorded transition through global researcher identities."""
+
     transition_kind: Literal["oracle_outgoing_submitted_accepted"]
 
     @model_validator(mode="after")
     def _validate_ids(self) -> Self:
+        """Require canonical global outgoing transition and frame identities."""
         _validate_upcoming_transition_ids(self, prefix=self.episode_id)
         return self
 
 
 class NoSharedObsUpcomingTransitionV1(_UpcomingTransitionBaseV1):
+    """Expose the recipient's next recorded actions using actor-local identities."""
+
     transition_kind: Literal["no_shared_obs_outgoing_submitted_accepted"]
     recipient_public_agent_id: _ScientificId
     recipient_presentation_key: _ScientificId
 
     @model_validator(mode="after")
     def _validate_ids(self) -> Self:
+        """Require one recipient-local NoSharedObs outgoing action row."""
         prefix = f"{self.episode_id}:actor-pov:{self.recipient_public_agent_id}"
         _validate_agent_upcoming_transition(self, prefix=prefix)
         return self
 
 
 class SharedObsUpcomingTransitionV1(_UpcomingTransitionBaseV1):
+    """Expose the recipient's next recorded actions using SharedObs-local identities."""
+
     transition_kind: Literal["shared_obs_outgoing_submitted_accepted"]
     recipient_public_agent_id: _ScientificId
     recipient_presentation_key: _ScientificId
 
     @model_validator(mode="after")
     def _validate_ids(self) -> Self:
+        """Require one recipient-local SharedObs outgoing action row."""
         prefix = (
             f"{self.episode_id}:shared-obs-visual-union:"
             f"{self.recipient_public_agent_id}"
@@ -2220,6 +2627,9 @@ def _validate_latest_transition_ids(
     *,
     prefix: str,
 ) -> None:
+    """Require canonical incoming transition and adjacent frame IDs under the given
+    prefix.
+    """
     index = transition.incoming_transition_index
     if (
         transition.incoming_transition_id != f"{prefix}:transition:{index}"
@@ -2234,6 +2644,7 @@ def _validate_agent_latest_transition(
     *,
     prefix: str,
 ) -> None:
+    """Require exactly the recipient's incoming action row and local identities."""
     _validate_latest_transition_ids(transition, prefix=prefix)
     if len(transition.action_rows) != 1:
         raise ValueError("Agent Latest Transition requires exactly the fixed owner.")
@@ -2250,6 +2661,9 @@ def _validate_upcoming_transition_ids(
     *,
     prefix: str,
 ) -> None:
+    """Require canonical outgoing transition and adjacent frame IDs under the given
+    prefix.
+    """
     index = transition.outgoing_transition_index
     if (
         transition.outgoing_transition_id != f"{prefix}:transition:{index}"
@@ -2264,6 +2678,7 @@ def _validate_agent_upcoming_transition(
     *,
     prefix: str,
 ) -> None:
+    """Require exactly the recipient's outgoing action row and local identities."""
     _validate_upcoming_transition_ids(transition, prefix=prefix)
     if len(transition.action_rows) != 1:
         raise ValueError("Agent Upcoming Transition requires exactly the fixed owner.")
@@ -2292,6 +2707,9 @@ class ReplayResearcherSpaceV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_space(self) -> Self:
+        """Check cursor bounds, active roster coverage, selection, class mechanics,
+        and transitions.
+        """
         if self.frame_index > self.final_frame_index:
             raise ValueError("researcher-space frame exceeds the replay prefix.")
         active_directory = tuple(
@@ -2344,6 +2762,9 @@ class ReplayResearcherSpaceV1(_PresentationProtocolModel):
         *,
         incoming: bool,
     ) -> None:
+        """Join incoming or outgoing rows to the active roster and the correct side
+        of this cursor.
+        """
         expected_present = (
             self.frame_index > 0
             if incoming
@@ -2415,6 +2836,8 @@ class ReplayResearcherSpaceV1(_PresentationProtocolModel):
 
 
 class LiveOracleTechnicalFrameV1(_PresentationProtocolModel):
+    """Show global episode, frame, step, and incoming-transition identifiers."""
+
     technical_kind: Literal["live_oracle_technical_frame"]
     episode_id: _ScientificId
     evaluation_frame_index: _NonNegativeInt
@@ -2423,6 +2846,8 @@ class LiveOracleTechnicalFrameV1(_PresentationProtocolModel):
 
 
 class LiveNoSharedObsTechnicalFrameV1(_PresentationProtocolModel):
+    """Show only recipient-local live frame and incoming-transition identifiers."""
+
     technical_kind: Literal["live_no_shared_obs_technical_frame"]
     episode_id: _ScientificId
     recipient_frame_index: _NonNegativeInt
@@ -2431,6 +2856,8 @@ class LiveNoSharedObsTechnicalFrameV1(_PresentationProtocolModel):
 
 
 class LiveSharedObsTechnicalFrameV1(_PresentationProtocolModel):
+    """Show recipient-local SharedObs live frame and incoming-transition identifiers."""
+
     technical_kind: Literal["live_shared_obs_technical_frame"]
     episode_id: _ScientificId
     recipient_frame_index: _NonNegativeInt
@@ -2439,6 +2866,8 @@ class LiveSharedObsTechnicalFrameV1(_PresentationProtocolModel):
 
 
 class ReplayOracleTechnicalFrameV1(_PresentationProtocolModel):
+    """Show replay digest prefix, cursor, step, and recorded ordinary movement scale."""
+
     technical_kind: Literal["replay_oracle_technical_frame"]
     artifact_digest_prefix: _Sha256Prefix
     frame_index: _NonNegativeInt
@@ -2448,12 +2877,15 @@ class ReplayOracleTechnicalFrameV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_scale(self) -> Self:
+        """Reject nonfinite recorded ordinary movement scales."""
         if not isfinite(self.recorded_ordinary_movement_distance_scale):
             raise ValueError("recorded movement scale must be finite.")
         return self
 
 
 class ReplayNoSharedObsTechnicalFrameV1(_PresentationProtocolModel):
+    """Show actor-local replay cursor, step, and incoming-transition identifiers."""
+
     technical_kind: Literal["replay_no_shared_obs_technical_frame"]
     frame_index: _NonNegativeInt
     simulator_step_count: _NonNegativeInt
@@ -2461,6 +2893,8 @@ class ReplayNoSharedObsTechnicalFrameV1(_PresentationProtocolModel):
 
 
 class ReplaySharedObsTechnicalFrameV1(_PresentationProtocolModel):
+    """Show SharedObs-local replay cursor, step, and incoming-transition identifiers."""
+
     technical_kind: Literal["replay_shared_obs_technical_frame"]
     frame_index: _NonNegativeInt
     simulator_step_count: _NonNegativeInt
@@ -2468,6 +2902,8 @@ class ReplaySharedObsTechnicalFrameV1(_PresentationProtocolModel):
 
 
 class PresentationApiErrorV1(_PresentationProtocolModel):
+    """Report unavailable audience presentation with one fixed public error message."""
+
     schema_version: Literal[1]
     error_code: Literal["audience_unavailable"]
     message: Literal["Authorized presentation is unavailable for the active audience."]
@@ -2497,6 +2933,9 @@ _allowed_exact_runtime_types_cache: frozenset[type[object]] | None = None
 
 
 def _object_field_values(value: object) -> Mapping[str, object] | None:
+    """Return declared model or dataclass field values for recursive authority
+    checks.
+    """
     if isinstance(value, BaseModel):
         field_names = set(type(value).model_fields)
         if (
@@ -2589,6 +3028,9 @@ def _validate_recursive_exact_runtime_types(root: object) -> None:
     visited: set[int] = set()
 
     def visit(value: object, *, path: str) -> None:
+        """Walk nested models and containers, rejecting runtime roots outside the
+        accepted set.
+        """
         if value is None or type(value) in (str, int, float, bool):
             return
         if type(value) is tuple:
@@ -2626,10 +3068,14 @@ def _validate_recursive_presentation_keys(
     recipient_public_agent_id: str | None,
     excluded_root_fields: frozenset[str] = frozenset(),
 ) -> None:
+    """Require every nested presentation key to belong to this session and audience."""
     _validate_recursive_exact_runtime_types(root)
     visited: set[int] = set()
 
     def visit(value: object, *, path: str) -> None:
+        """Walk nested display fields and validate authority-local keys at their
+        exact paths.
+        """
         if value is None or type(value) in (str, int, float, bool):
             return
         if type(value) is tuple:
@@ -2701,6 +3147,7 @@ def _validate_source_endpoint_join(
     | NoSharedObsAuthorizedCurrentEndpointV1
     | SharedObsAuthorizedCurrentEndpointV1,
 ) -> None:
+    """Require source episode, frame, step, and digest to match the current endpoint."""
     digest = source.source_authorized_endpoint_digest_sha256
     if digest != endpoint.authorized_endpoint_digest_sha256:
         raise ValueError("source and current endpoint digests do not join.")
@@ -2712,6 +3159,9 @@ def _validate_decision_axis(
     *,
     scene: AuthorizedBattlefieldSceneV1,
 ) -> None:
+    """Check owner, category order, target identities, and legality against the
+    scene.
+    """
     if (
         decision_mask.owner_presentation_key != axis.owner_presentation_key
         or decision_mask.owner_public_agent_id != axis.owner_public_agent_id
@@ -2776,6 +3226,9 @@ def _validate_oracle_incoming(
     latest_events: ReplayIncomingSummaryV1 | None,
     latest_transition: OracleLatestTransitionV1 | None,
 ) -> None:
+    """Require global incoming events and actions to reach exactly the current source
+    frame.
+    """
     index = source.source_frame_index
     if index == 0:
         if latest_events is not None or latest_transition is not None:
@@ -2914,6 +3367,9 @@ def _validate_agent_incoming(
     | None,
     shared: bool,
 ) -> None:
+    """Require local incoming material to match the recipient, current frame, and
+    mode.
+    """
     index = source.source_frame_index
     parts = endpoint.parts
     if index == 0:
@@ -3012,6 +3468,7 @@ def _validate_agent_latest_event_axis(
     parts: NoSharedObsPresentationEndpointPartsV1
     | SharedObsPresentationEndpointPartsV1,
 ) -> None:
+    """Validate incoming observed identities and values against the recipient's axis."""
     scene = parts.scene
     recipient_public_agent_id = parts.recipient_public_agent_id
     allowed_public_ids = set(
@@ -3026,6 +3483,9 @@ def _validate_agent_latest_event_axis(
     recipient_team_id = recipient_rows[0].team_id
 
     def project_observation(agent: AuthorizedAgentV1) -> AgentIncomingObservationV1:
+        """Copy an authorized agent into the observable incoming-event comparison
+        fields.
+        """
         return AgentIncomingObservationV1(
             presentation_key=agent.presentation_key,
             public_agent_id=agent.public_agent_id,
@@ -3068,6 +3528,9 @@ def _validate_agent_latest_event_axis(
         )
 
     def validate_observation(observation: AgentIncomingObservationV1) -> None:
+        """Require an incoming observation's identity and public facts to match the
+        axis.
+        """
         expected_relation, expected_team_id = _agent_axis_relation_and_team(
             action_axis,
             recipient_public_agent_id=recipient_public_agent_id,
@@ -3083,6 +3546,9 @@ def _validate_agent_latest_event_axis(
             )
 
     def visit(value: object, *, path: str) -> None:
+        """Walk incoming-event records and check each observed agent against the
+        allowed axis.
+        """
         if value is None or type(value) in (str, int, float, bool):
             return
         if type(value) is tuple:
@@ -3232,6 +3698,7 @@ def _validate_oracle_inspection(
     | None,
     replay: bool,
 ) -> None:
+    """Bind global inspection to the current actor, mask, and live or replay epoch."""
     if inspection is None:
         if not replay:
             raise ValueError("a live Oracle endpoint requires its draft inspection.")
@@ -3296,6 +3763,7 @@ def _validate_agent_inspection(
     inspection: LiveDraftInspectionPresentationV1 | ReplayInspectionPresentationV1,
     replay: bool,
 ) -> None:
+    """Bind recipient inspection to its own decision mask and allowed local targets."""
     expected = (
         ReplayInspectionPresentationV1 if replay else LiveDraftInspectionPresentationV1
     )
@@ -3358,12 +3826,15 @@ def _validate_agent_inspection(
 
 
 class LiveEditableDraftInspectionV1(_PresentationProtocolModel):
+    """Carry a checked editable live action draft for joint-turn submission."""
+
     inspection_kind: Literal["editable_live_draft"]
     submission_scope: Literal["joint_turn"]
     draft: LiveDraftInspectionPresentationV1
 
     @model_validator(mode="after")
     def _validate_draft(self) -> Self:
+        """Require the exact editable live-draft inspection model."""
         _require_exact_type(
             self.draft,
             LiveDraftInspectionPresentationV1,
@@ -3373,6 +3844,10 @@ class LiveEditableDraftInspectionV1(_PresentationProtocolModel):
 
 
 class LiveScriptedPlaybackInspectionV1(_PresentationProtocolModel):
+    """Declare that advance runs a registered script frame and offers no editable
+    draft.
+    """
+
     inspection_kind: Literal["scripted_playback_inspection"]
     submission_scope: Literal["scripted_playback"]
     editable_draft_available: Literal[False]
@@ -3394,6 +3869,9 @@ class LiveResearcherDraftInspectionV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_draft(self) -> Self:
+        """Require geometry-free target rows and draft legality matching the selected
+        decision mask.
+        """
         _require_exact_type(
             self.decision_mask,
             AuthorizedDecisionMaskV1,
@@ -3458,12 +3936,17 @@ class LiveResearcherDraftInspectionV1(_PresentationProtocolModel):
 
 
 class LiveResearcherEditableDraftInspectionV1(_PresentationProtocolModel):
+    """Wrap a global researcher draft whose target rows contain no battlefield
+    anchors.
+    """
+
     inspection_kind: Literal["editable_live_draft"]
     submission_scope: Literal["joint_turn"]
     draft: LiveResearcherDraftInspectionV1
 
     @model_validator(mode="after")
     def _validate_draft(self) -> Self:
+        """Require the exact geometry-free researcher draft model."""
         _require_exact_type(
             self.draft,
             LiveResearcherDraftInspectionV1,
@@ -3500,6 +3983,9 @@ class LiveResearcherSpaceV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_space(self) -> Self:
+        """Join global roster, source epoch, incoming actions, pending actions, and
+        selected draft.
+        """
         if self.source_authority_epoch != self.source_revision:
             raise ValueError("live researcher authority epoch changed.")
         active_directory = tuple(
@@ -3686,6 +4172,8 @@ type LiveInputInspectionV1 = Annotated[
 
 
 class LiveOracleInspectionEnvelopeV1(_PresentationProtocolModel):
+    """Bind a live global draft or script inspection to its source session and frame."""
+
     envelope_kind: Literal["live_oracle_source_bound_inspection"]
     source_session_id: _OpaqueId
     source_run_generation: _NonNegativeInt
@@ -3699,6 +4187,7 @@ class LiveOracleInspectionEnvelopeV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_inspection(self) -> Self:
+        """Require an exact editable-draft or scripted-playback inspection variant."""
         if type(self.inspection) not in (
             LiveEditableDraftInspectionV1,
             LiveScriptedPlaybackInspectionV1,
@@ -3708,6 +4197,10 @@ class LiveOracleInspectionEnvelopeV1(_PresentationProtocolModel):
 
 
 class LiveNoSharedObsInspectionEnvelopeV1(_PresentationProtocolModel):
+    """Bind a NoSharedObs draft or script inspection to one recipient-local source
+    frame.
+    """
+
     envelope_kind: Literal["live_no_shared_obs_source_bound_inspection"]
     source_session_id: _OpaqueId
     source_run_generation: _NonNegativeInt
@@ -3722,6 +4215,7 @@ class LiveNoSharedObsInspectionEnvelopeV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_inspection(self) -> Self:
+        """Require an exact actor draft or scripted-playback inspection variant."""
         if type(self.inspection) not in (
             LiveEditableDraftInspectionV1,
             LiveScriptedPlaybackInspectionV1,
@@ -3731,6 +4225,10 @@ class LiveNoSharedObsInspectionEnvelopeV1(_PresentationProtocolModel):
 
 
 class LiveSharedObsInspectionEnvelopeV1(_PresentationProtocolModel):
+    """Bind a SharedObs draft or script inspection to one recipient-local source
+    frame.
+    """
+
     envelope_kind: Literal["live_shared_obs_source_bound_inspection"]
     source_session_id: _OpaqueId
     source_run_generation: _NonNegativeInt
@@ -3745,6 +4243,7 @@ class LiveSharedObsInspectionEnvelopeV1(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_inspection(self) -> Self:
+        """Require an exact SharedObs draft or scripted-playback inspection variant."""
         if type(self.inspection) not in (
             LiveEditableDraftInspectionV1,
             LiveScriptedPlaybackInspectionV1,
@@ -3760,6 +4259,9 @@ class _MatchPresentationProtocolModel(_PresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_match_source(self) -> Self:
+        """Require optional match facts to share the surrounding source episode and
+        step.
+        """
         if self.match_summary is not None:
             source = cast(
                 LiveOraclePresentationSourceIdentityV1
@@ -3781,6 +4283,13 @@ class _MatchPresentationProtocolModel(_PresentationProtocolModel):
 
 
 class LiveOracleAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel):
+    """Carry one complete live global presentation at a checked source revision.
+
+    Current scene, incoming events/actions, pending joint actions, technical
+    identities, inspection, and optional match facts must agree. Scripted playback
+    cannot carry an editable pending joint action.
+    """
+
     schema_version: Literal[1]
     presentation_kind: Literal["live_oracle"]
     product_kind: Literal["combat_debugger"]
@@ -3796,6 +4305,9 @@ class LiveOracleAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel):
 
     @model_validator(mode="after")
     def _validate_frame(self) -> Self:
+        """Validate global source, endpoint, incoming facts, draft, and pending joint
+        actions together.
+        """
         _require_exact_type(
             self.source, LiveOraclePresentationSourceIdentityV1, name="source"
         )
@@ -3880,6 +4392,14 @@ class LiveOracleAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel):
 
 
 class LiveNoSharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel):
+    """Carry a live actor's own-observation scene and separately scoped researcher
+    panels.
+
+    The current endpoint, local corpse overlay, incoming material, inspection,
+    and source epoch are checked together. Researcher panels do not become policy
+    inputs and do not supply a second global battlefield scene.
+    """
+
     schema_version: Literal[1]
     presentation_kind: Literal["live_no_shared_obs_agent_pov"]
     product_kind: Literal["combat_debugger"]
@@ -3897,6 +4417,9 @@ class LiveNoSharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolMod
 
     @model_validator(mode="after")
     def _validate_frame(self) -> Self:
+        """Validate NoSharedObs authority, local display branches, and separate
+        researcher panels.
+        """
         _validate_no_shared_agent_types(self, live=True)
         _validate_agent_common(self, shared=False)
         _validate_live_agent_technical(self)
@@ -3917,6 +4440,13 @@ class LiveNoSharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolMod
 
 
 class LiveSharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel):
+    """Carry a live SharedObs recipient's visual union and separate researcher panels.
+
+    Scene contributors must have allowed same-frame sensor evidence. Incoming
+    facts, draft inspection, overlay, and current endpoint share one recipient
+    and source revision. This is a display contract, not an actor-input export.
+    """
+
     schema_version: Literal[1]
     presentation_kind: Literal["live_shared_obs_agent_pov"]
     product_kind: Literal["combat_debugger"]
@@ -3934,6 +4464,9 @@ class LiveSharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel
 
     @model_validator(mode="after")
     def _validate_frame(self) -> Self:
+        """Validate SharedObs sensors, local display branches, and separate
+        researcher panels.
+        """
         _require_exact_type(
             self.source,
             LiveSharedObsPresentationSourceIdentityV1,
@@ -3973,6 +4506,12 @@ class LiveSharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel
 
 
 class ReplayOracleAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel):
+    """Carry global replay presentation at one source cursor and viewer revision.
+
+    Incoming history reaches the current frame. Outgoing actions describe the
+    recorded next transition and are absent at the final captured frame.
+    """
+
     schema_version: Literal[1]
     presentation_kind: Literal["replay_oracle"]
     product_kind: Literal["replay_viewer"]
@@ -3988,6 +4527,9 @@ class ReplayOracleAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel)
 
     @model_validator(mode="after")
     def _validate_frame(self) -> Self:
+        """Validate global replay branches and forbid outgoing intent at the final
+        frame.
+        """
         _require_exact_type(
             self.source, ReplayOraclePresentationSourceIdentityV1, name="source"
         )
@@ -4038,6 +4580,13 @@ class ReplayOracleAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel)
 
 
 class ReplayNoSharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel):
+    """Carry recipient-local replay display plus separate geometry-free researcher
+    facts.
+
+    Scene, incoming history, outgoing inspection, overlay, and source revision
+    must agree. A visual projection does not by itself promise exact actor inputs.
+    """
+
     schema_version: Literal[1]
     presentation_kind: Literal["replay_no_shared_obs_agent_pov"]
     product_kind: Literal["replay_viewer"]
@@ -4056,6 +4605,9 @@ class ReplayNoSharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolM
 
     @model_validator(mode="after")
     def _validate_frame(self) -> Self:
+        """Validate NoSharedObs replay source, local branches, and separate
+        researcher facts.
+        """
         _validate_no_shared_agent_types(self, live=False)
         _validate_agent_common(self, shared=False)
         _validate_replay_agent_upcoming(self, shared=False)
@@ -4066,6 +4618,12 @@ class ReplayNoSharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolM
 
 
 class ReplaySharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolModel):
+    """Carry a recipient's SharedObs replay visual union at one checked source frame.
+
+    Incoming and outgoing material stays recipient-local. Separate researcher
+    facts do not change the sensor authorization of the battlefield display.
+    """
+
     schema_version: Literal[1]
     presentation_kind: Literal["replay_shared_obs_agent_pov"]
     product_kind: Literal["replay_viewer"]
@@ -4084,6 +4642,9 @@ class ReplaySharedObsAuthorizedPresentationFrameV1(_MatchPresentationProtocolMod
 
     @model_validator(mode="after")
     def _validate_frame(self) -> Self:
+        """Validate SharedObs replay source, local branches, and separate researcher
+        facts.
+        """
         _require_exact_type(
             self.source, ReplaySharedObsPresentationSourceIdentityV1, name="source"
         )
@@ -4113,6 +4674,7 @@ def _validate_oracle_source_endpoint(
     | ReplayOraclePresentationSourceIdentityV1,
     endpoint: OracleAuthorizedCurrentEndpointV1,
 ) -> None:
+    """Require the exact global endpoint and its complete source identity join."""
     if (
         endpoint.episode_id != source.episode_id
         or endpoint.frame_index != source.source_frame_index
@@ -4128,6 +4690,7 @@ def _validate_no_shared_agent_types(
     *,
     live: bool,
 ) -> None:
+    """Require exact NoSharedObs frame components for the chosen live or replay mode."""
     source_type = (
         LiveNoSharedObsPresentationSourceIdentityV1
         if live
@@ -4154,6 +4717,9 @@ def _validate_agent_visual_events(
     | ReplayNoSharedObsAuthorizedPresentationFrameV1
     | ReplaySharedObsAuthorizedPresentationFrameV1,
 ) -> None:
+    """Check that paint-only visual events match current and incoming authorized
+    material.
+    """
     source = frame.source
     endpoint = frame.current_endpoint
     index = source.source_frame_index
@@ -4307,6 +4873,9 @@ def _validate_agent_common(
     *,
     shared: bool,
 ) -> None:
+    """Check shared recipient identity, endpoint digest, epoch, and mode across frame
+    branches.
+    """
     source = frame.source
     authority = frame.authority
     endpoint = frame.current_endpoint
@@ -4348,6 +4917,9 @@ def _validate_local_oracle_corpse_overlay(
     *,
     shared: bool,
 ) -> None:
+    """Check overlay frame, recipient, sensors, corpse facts, and links to the base
+    scene.
+    """
     overlay = frame.local_oracle_corpse_overlay
     _require_exact_type(
         overlay,
@@ -4536,6 +5108,9 @@ def _aura_semantics_match(
     global_aura: AuthorizedAuraModifierV1,
     local_aura: AuthorizedAuraModifierV1,
 ) -> bool:
+    """Compare observable aura meaning while ignoring projection-local presentation
+    identity.
+    """
     return global_aura.aura_id == local_aura.aura_id and isclose(
         global_aura.multiplier,
         local_aura.multiplier,
@@ -4548,6 +5123,9 @@ def _validate_live_researcher_space(
     frame: LiveNoSharedObsAuthorizedPresentationFrameV1
     | LiveSharedObsAuthorizedPresentationFrameV1,
 ) -> None:
+    """Require live global panels to match source epoch and observable local actor
+    facts.
+    """
     researcher = frame.researcher_space
     _require_exact_type(
         researcher,
@@ -4716,6 +5294,9 @@ def _validate_replay_researcher_space(
     frame: ReplayNoSharedObsAuthorizedPresentationFrameV1
     | ReplaySharedObsAuthorizedPresentationFrameV1,
 ) -> None:
+    """Require replay global panels to match cursor, roster, and observable local
+    facts.
+    """
     researcher = frame.researcher_space
     _require_exact_type(
         researcher,
@@ -4809,6 +5390,9 @@ def _validate_live_oracle_inspection_envelope(
     endpoint: OracleAuthorizedCurrentEndpointV1,
     envelope: LiveOracleInspectionEnvelopeV1,
 ) -> None:
+    """Require global live inspection to share source identity, actor axis, and
+    current epoch.
+    """
     _require_exact_type(
         envelope,
         LiveOracleInspectionEnvelopeV1,
@@ -4847,6 +5431,9 @@ def _validate_live_no_shared_inspection_envelope(
     endpoint: NoSharedObsAuthorizedCurrentEndpointV1,
     envelope: LiveNoSharedObsInspectionEnvelopeV1,
 ) -> None:
+    """Require NoSharedObs live inspection to share recipient, source frame, and
+    authority.
+    """
     _require_exact_type(
         envelope,
         LiveNoSharedObsInspectionEnvelopeV1,
@@ -4887,6 +5474,9 @@ def _validate_live_shared_inspection_envelope(
     endpoint: SharedObsAuthorizedCurrentEndpointV1,
     envelope: LiveSharedObsInspectionEnvelopeV1,
 ) -> None:
+    """Require SharedObs live inspection to share recipient, source frame, and
+    authority.
+    """
     _require_exact_type(
         envelope,
         LiveSharedObsInspectionEnvelopeV1,
@@ -4925,6 +5515,9 @@ def _validate_live_shared_inspection_envelope(
 def _validate_live_oracle_technical(
     frame: LiveOracleAuthorizedPresentationFrameV1,
 ) -> None:
+    """Require global live technical IDs to match the current source and incoming
+    step.
+    """
     technical = frame.technical_frame
     incoming_id = (
         None
@@ -4944,6 +5537,9 @@ def _validate_live_agent_technical(
     frame: LiveNoSharedObsAuthorizedPresentationFrameV1
     | LiveSharedObsAuthorizedPresentationFrameV1,
 ) -> None:
+    """Require actor-local live technical IDs to match the recipient and current
+    epoch.
+    """
     technical = frame.technical_frame
     incoming_id = (
         None
@@ -4962,6 +5558,9 @@ def _validate_live_agent_technical(
 def _validate_replay_oracle_technical(
     frame: ReplayOracleAuthorizedPresentationFrameV1,
 ) -> None:
+    """Require global replay technical facts to match digest, cursor, and recorded
+    scale.
+    """
     technical = frame.technical_frame
     incoming_id = (
         None
@@ -4989,6 +5588,9 @@ def _validate_replay_oracle_upcoming(
     upcoming_transition: OracleUpcomingTransitionV1 | None,
     inspection: ReplayInspectionPresentationV1 | None,
 ) -> None:
+    """Require global next-transition inspection to leave the current nonfinal replay
+    frame.
+    """
     final = source.source_frame_index == source.source_final_frame_index
     if final:
         if upcoming_transition is not None:
@@ -5074,6 +5676,9 @@ def _validate_replay_agent_technical(
     *,
     shared: bool,
 ) -> None:
+    """Require recipient-local replay technical IDs to match cursor and observation
+    mode.
+    """
     technical = frame.technical_frame
     expected_type = (
         ReplaySharedObsTechnicalFrameV1 if shared else ReplayNoSharedObsTechnicalFrameV1
@@ -5098,6 +5703,9 @@ def _validate_replay_agent_upcoming(
     *,
     shared: bool,
 ) -> None:
+    """Require recipient outgoing actions to leave this cursor and be absent at the
+    final frame.
+    """
     final = frame.source.source_frame_index == frame.source.source_final_frame_index
     transition = frame.upcoming_transition
     if final:
@@ -5148,6 +5756,9 @@ def _validate_replay_agent_inspection_state(
     frame: ReplayNoSharedObsAuthorizedPresentationFrameV1
     | ReplaySharedObsAuthorizedPresentationFrameV1,
 ) -> None:
+    """Check the selected recipient's replay inspection against recorded next
+    actions.
+    """
     final = frame.source.source_frame_index == frame.source.source_final_frame_index
     if final:
         if frame.replay_inspection is not None:
@@ -5199,6 +5810,12 @@ class PresentationResourceResultV1:
     payload: _AuthorizedPresentationFrameConcreteV1 | PresentationApiErrorV1
 
     def __post_init__(self) -> None:
+        """Require the exact result root and fully revalidate its success or error
+        payload.
+
+        Reject subclasses and any runtime value changed by serialization and strict
+        revalidation. A digest alone does not replace these whole-frame checks.
+        """
         if type(self) is not PresentationResourceResultV1:
             raise TypeError("presentation resource result requires its exact root")
         if type(self.outcome) is not str:

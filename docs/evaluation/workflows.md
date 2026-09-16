@@ -1,14 +1,17 @@
-# Research workflows
+# Research Workflows
 
-Use your own training, validation or evaluation loop with `make`, `reset` and
-`step`. Optional helpers provide `evaluate` for repeated matches and
-`run_tournament` for paired cross-play. The
-[runnable example](../../examples/evaluation.py) exercises these public calls
-with the existing ALPHA and BETA controllers. All examples use complete standard
-TDM episodes; changing the batch size does not change episode identities.
-For evaluation and validation, `--episodes` is the total budget across maps,
-cycled in order. Four episodes cover four of the five maps; use five or a
-multiple of five when demonstrating coverage of the complete five-map split.
+Start with ordinary environment calls. Add the evaluator, recorder or tournament
+helper when that saves work. You own the method that chooses actions and learns;
+MARL-BGs owns environment behavior and the shared measurement/recording rules.
+The [environment example](../../examples/environment.py) and
+[evaluation example](../../examples/evaluation.py) run the public interfaces.
+
+This page describes implemented behavior. Later accepted M8 contracts, including
+Systems, stage tracking, phase-specific map defaults, fixed-team spawn-paired
+evaluation and official snapshot reuse, are not all implemented by the current
+raw-environment packet. Do not assume a proposed call exists until its packet is
+qualified. In particular, current `evaluate(..., phase="validation")` still needs
+explicit validation maps, and the current generic tournament pairs team roles.
 
 ## Map ID Change — 2026-09-12
 
@@ -106,120 +109,236 @@ input contract. This change makes no new learning or slot-fairness claim.
 
 ### Run Evaluation
 
+Run four complete ALPHA/BETA episodes and save full measurements plus two replays:
+
 ```bash
-JAX_PLATFORMS=cpu .venv/bin/python examples/evaluation.py evaluate \
+JAX_PLATFORMS=cuda .venv/bin/python examples/evaluation.py evaluate \
   --episodes 4 --num-envs 4 --metrics full --save-replays 2 \
   --output-dir runs/evaluation
 ```
 
-Use `JAX_PLATFORMS=cuda` with a CUDA-enabled JAX installation to select GPU.
-Compilation affects the first call. The output prints the unique run directory
-and named file paths. Open one saved replay with:
+`--episodes` is the total evaluation budget, cycled across the chosen maps in
+order. Four episodes cover four of five maps; use a multiple of five for equal
+coverage of that split. The executor batch changes concurrency, not schedule
+identities. Compilation affects the first call. The command prints the unique
+run directory and saved paths. CPU execution remains available for correctness
+checks; GPU JAX is the performance target.
+
+Open a selected replay with its printed path:
 
 ```bash
 .venv/bin/python scripts/dev/replay_viewer.py --replay PATH_TO_REPLAY
 ```
 
-The viewer offers **Up to Current Tick** and **Entire Episode**, plus scalar CSV
-and explicitly named episode-configuration exports. Historical replay files
-remain readable. A saved replay does not automatically request full metrics
-during execution.
+The Viewer reads saved evidence; it does not run the policy again. **Up to Current
+Tick** analyzes the selected prefix and **Entire Episode** analyzes the recorded
+endpoint, which may itself be incomplete. CSV exports are numeric measurements.
+**Episode Details** exports context/configuration/completion/runtime metadata,
+without trajectory arrays. Replay export and full metric collection are separate.
 
-Viewer CSV exports contain one row for the selected replay boundary. Their numeric
-column names and order are the same scalar catalog used by completed run tables;
-unavailable values remain empty. Viewer provenance also records the replay digest,
-analysis source digest, scope, local `frame_index`, and recorded
-`simulator_step_count`, plus all ten slots' classes, activity and policy identities.
-Local frame zero may represent a later simulator tick in an authored or resumed
-capture. Historical episode and policy identifiers remain unchanged. Completed
-run tables instead use run/phase/pass, scheduled episode/seed/map/configuration,
-policy and checkpoint identity columns. **Episode Details** downloads the recorded
-context, configuration, completion and runtime metadata as JSON; it is separate
-from the numeric CSV and contains no trajectory arrays.
-
-Without `output_dir`, the same call creates no files:
+Without `output_dir`, `resume_from` or a supplied writer, evaluation creates no files. For optional pandas analysis:
 
 ```python
 import pandas as pd
-from marl_battlegrounds import evaluate
+import marl_battlegrounds as marl_bgs
 
-result = evaluate("tdm-alpha", "tdm-beta", num_episodes=100, metrics="full")
+result = marl_bgs.evaluate("tdm-alpha", "tdm-beta", num_episodes=100, metrics="full")
 episodes = pd.DataFrame(result.full_metrics)
 print(episodes["team_a_score"].mean())
 ```
 
-Pandas is optional analysis software, not a simulator dependency. With file
-output, load `pd.read_csv(result.paths["full_metrics"])` instead; persisted full
-rows are not also retained in memory. Blank cells represent unavailable values;
-real zeros remain zero. See the [column dictionary](metric_columns.csv).
+Pandas is not a runtime dependency. For a saved run, read the path in
+`result.paths["full_metrics"]`; the evaluator does not also retain those saved
+full rows in memory. Read selected columns with `usecols` when a full table is
+unnecessarily large. Blank cells mean unavailable measurements, not zero.
 
-Schema 13 contains 26 priority measurements and 11,158 full measurements (including
-priority), with the same headers for every supported roster. A full run table has
-11,188 columns, including 30 identity columns. A replay CSV has 11,207 columns,
-including 49 identity columns. The viewer has 27 topics and 43 tables. Different
-topics can share the same exported columns. Only the five named Ultimate topics
-may use their ability's name in row labels and tooltips.
-The full count reflects recipient and status dimensions, not that many
-independent scientific concepts; the
-[family summary](metric_specification.md#manuscript-family-summary)
-explains the grouping. Existing CSV files from schemas 1 through 12 stay unchanged. Resume
-rejects an older scalar schema before recovery, truncation, or writing; use a new
-run directory for schema 13. The replay format version is separate from its current
-analysis version.
+Current scalar schema 13 has 26 priority measurements and 11,158 full measurements,
+including priority. A full run CSV adds 30 identity columns; a Viewer CSV adds 49.
+The accepted future 16-measurement priority migration belongs to a later packet.
+Existing files retain their headers; incompatible append/resume is rejected.
+Replay format versions and analysis schema versions are separate.
 
-Choose a **Topic**, then **Totals** or **By Recipient** where both are useful.
-Totals contain team-wide and acting-agent measurements. By Recipient contains
-affected-agent totals and who did what to whom. Related tables do not repeat rows.
-Use **Find a Measurement** to search topics, plain names, related words, agent
-labels or exact CSV names. You can type the start of a word: `regen` finds
-regeneration and `crippl pois` finds Crippling Poison. Related phrases work too:
-`overhealing` finds excess healing and `spread out` finds teammate distances.
-Connecting words do not block a match: `damage received while slowed by rogue
-poison` finds the same measurements with or without `by`. `Damage taken` and
-`damage received` mean the same thing in search, as do `damage dealt` and
-`damage done`. You can stop typing at `damage tak`. The same rules apply across
-topics. Words such as `from`, `to`, `not`, `before` and `after` still matter;
-Team A and Team B remain different. Exact CSV names still come first.
-Search checks what is measured and who gives or receives it before matching
-names and keywords. It checks longer descriptions only within those matching
-roles and measurement kinds. A description cannot turn regeneration into
-damage or reverse the giver and receiver.
+The [metric specification](metric_specification.md) owns formulas, applicability,
+zero/blank rules and display mappings. The [column dictionary](metric_columns.csv)
+provides exact CSV names and positions. In the Viewer, choose a topic and its
+**Totals** or **By Recipient** view. **Find a Measurement** accepts plain words,
+partial words, agent labels and exact CSV names. Arrow keys select a result,
+Enter opens it and Escape closes the list. Hover/focus help names its CSV column,
+who acted, who was affected, numerator, denominator and blank-value rule.
 
-Use Up/Down to highlight a result and Enter to open it; you can keep typing while
-moving through the list. Click outside or press Escape to close the list, then
-click the search box to reopen it with the same text. Search also finds columns
-that do not apply to this replay and explains why. Those columns remain in the
-fixed CSV even when their rows do not belong in this replay's table.
+Tables hide structurally impossible rows using the recorded active roster;
+the fixed CSV still contains every column. A valid zero or an undefined fraction
+does not make a row structurally impossible. Amounts/counts display up to two
+decimal places and fractions/ratios up to four; CSV retains stored precision.
+Viewer identity includes replay and analysis digests, scope, local frame index,
+simulator step and recorded roster/policy identity. Local frame zero can start
+at a later simulator step. Run CSV identity instead names run, phase, pass,
+episode, seed, map, configuration and policies/checkpoints.
 
-Tables follow the recorded classes and active slots. Healing Done shows Priests
-as healers; Healing Received can show any class as a patient. A Mage's Healing
-Done row is hidden, but its zero CSV value and searchable definition stay.
-A Priest who has not healed yet keeps its zero row. Received Priest healing
-needs a friendly Priest; regeneration does not. These rules apply to all topics
-and both views, including totals, fractions and source-to-recipient details.
-They do not depend on an agent's current health, range or cooldowns.
+## Choose metrics and replays independently
 
-The [navigation table](metric_specification.md#find-a-measurement-by-topic-or-csv-name)
-lists every primary location. In the dictionary, `primary_topic` and `primary_view`
-give a column's CSV home; `gui_groups` lists the tables that show it. Column
-numbers include the 30 full-run identity fields or the 49 replay identity fields.
-`gui_text_by_topic` records row and tooltip wording used in named Ultimate views.
-Only those five topics may replace the display name or the words explaining a
-numerator, denominator, guidance or blank value. Extra context
-and clearer names do not add numerical measurements.
-For example, read only the columns from the healing recipient table:
+`metrics="priority"` is the default. `none` skips optional measurements, while
+`full` collects the complete scalar set. Explicit full/replay selections are
+finite Python integer iterables of episode IDs, not a sampling frequency:
 
 ```python
-guide = pd.read_csv("docs/evaluation/metric_columns.csv")
-columns = guide.loc[
-    (guide["primary_topic"] == "Healing Done")
-    & (guide["primary_view"] == "By Recipient"),
-    "column",
-].tolist()
-healing = pd.read_csv(result.paths["full_metrics"], usecols=["episode_id", *columns])
+import marl_battlegrounds as marl_bgs
+
+env = marl_bgs.make(
+    "tdm", map_id=0, num_envs=128, metrics="priority",
+    full_metrics_episodes=range(1000, 50_001, 1000),
+    replay_episodes=range(49_951, 50_001),
+)
 ```
 
-This selection is optional; ordinary `pd.read_csv` still loads the complete run.
+Selectors are prepared during setup. Numerical membership stays on device;
+there is no per-transition Python lookup or file write. IDs not reached by a
+run produce no capture. Automatic reset allocation may leave unused IDs, so a
+numeric range does not promise a particular number of completed games. Metrics
+consume authoritative transition facts without needing a replay or second game.
+
+## Train and record
+
+The basic explicit-reset workflow needs no researcher-written spawn or ID logic:
+
+```python
+import jax
+import marl_battlegrounds as marl_bgs
+
+env = marl_bgs.make("tdm", map_id=0, num_envs=128)
+reset_key, action_key, step_key, next_reset_key = jax.random.split(jax.random.key(42), 4)
+obs, state = env.reset(reset_key)
+actions = env.sample_actions(action_key, state)
+obs, state, reward, done, info = env.step(step_key, state, actions)
+# Keep any terminal transition before replacing its finished lane.
+obs, state = env.reset_done(next_reset_key, state)
+```
+
+Map defaults use canonical rosters and split an even native batch equally between
+the source's complete spawn banks and their exchange. Teams, supplied roster
+order, agent slots and world directions stay fixed. Scalar and odd-sized map batches must
+set `balance_spawn_locations=False`. Exact `env_config=` bypasses automatic
+preparation without another opt-out. An unconfigured `make("tdm")` still works
+when reset receives its first configuration.
+
+For custom preparation, call `balanced_spawn_configs(env_config, num_envs=...)`
+once on the immutable source or selected sources. Reset consumes those exact
+values. Do not prepare `state.config` again: it already contains resolved banks.
+Both complete banks determine later respawn locations too.
+
+Reset chooses explicit `env_config`, then a supplied state's retained config,
+then constructor defaults. `reset_done` replaces only finished lanes. Advanced
+reset supports `state=`, `reset_mask=`, `initial=` and explicit `episode_id=`.
+Authored starts stay exact. The public keyword is `env_config`, including in
+`EpisodeSpec`; positional meaning, Core `state.config` and saved keys stay intact.
+
+Native batches initially allocate IDs 1 through B and reserve a fresh B-ID block
+when any lane resets. Gaps are valid. External `vmap` of independent scalar
+contexts starts each at ID 1: use explicit globally distinct IDs or separate
+passes before combining recordings. Exact evaluation schedules own their IDs.
+Checked int32 counters/IDs stop being valid at overflow and set persistent
+`state.lifecycle_error`; they do not silently wrap. Real counts include terminal
+transitions and exclude reset calls and terminal padding.
+
+Equal lane counts alone do not prove balanced training. A supported training
+stage must consume equal real advances from each spawn choice; equal completed
+game counts are insufficient. This raw API exposes the underlying lifecycle,
+while library stage tracking and coordinated recorded-training recovery belong
+to later packets. Do not claim those later checks from this example.
+
+Scalar/native calls compose with `jit`, external `vmap` and `lax.scan`. Reuse a
+callable and pass changing numerical data dynamically; repeatedly making new
+jitted bound functions does not promise reuse. `scenario=` is a host shortcut;
+prepare an `initial=` snapshot before compiled loops. `env.agents` names capacity
+slots, while `agent_info(state)` describes active rosters. Spaces describe
+structure; masks describe current legality. `sample_actions` respects coupled
+target/Ultimate choices without constructing unnecessary SharedObs input.
+
+Your learner owns its update and logging decisions. For optional recording,
+create `RunWriter(..., phase="training", pass_id=...)` and send every returned
+`info`, or the complete stacked `infos` from a scan, to `writer.write` on the
+host. Sending only the final scan step loses earlier packets/completions. Bind
+recorded policy/configuration context through the writer's documented methods.
+Training episodes spanning updates must be labelled as evolving policies,
+not assigned falsely to a single checkpoint.
+
+Full info arrays are dense even on nonterminal steps or sparse full selection.
+Schema 13 returns 55,790 logical bytes of values/validity per full-result lane;
+retaining 1,024 lanes over 128 steps is about 6.81 GiB for that subtree alone.
+This is a size calculation, not peak-memory measurement. Priority without full
+selection has no full subtree. Empty replay selection has no capture subtree;
+selected scan packets still cost chunk memory. Use bounded chunks. The writer
+spools incomplete replay data and publishes completed artifacts.
+
+The writer defaults to a 128-row buffer. A larger buffer can reduce repeated
+metadata writes but uses more RAM and can leave more completions to repeat after
+abrupt interruption. Full rows are much wider than priority rows. `flush()` and
+normal context-manager exit establish durability and report write failures.
+See the [replay contract](replay_format.md) for versioned persistence behavior.
+
+## Repeat validation in one run
+
+```bash
+JAX_PLATFORMS=cuda .venv/bin/python examples/evaluation.py validation \
+  --episodes 10 --num-envs 4 --metrics full --output-dir runs/validation
+```
+
+This runnable example explicitly discovers validation maps and shares a writer
+across two differently named passes. The current `phase` label does not choose
+the split for you. Freeze the checkpoint and pass explicit maps; use a new
+`pass_id` for each selection point. A `Policy` carries the apply function,
+variables, initial recurrent carry and optional checkpoint identity. Each actor
+receives only its authorized input and mask. Validation results must follow the
+predeclared selection rule and must not train on held-out evaluation evidence.
+
+## Run a tournament
+
+```bash
+JAX_PLATFORMS=cuda .venv/bin/python examples/evaluation.py tournament \
+  --episodes 20 --num-envs 8 --output-dir runs/tournament
+```
+
+Here the budget is per unordered policy pair, covering every chosen map and both
+current team assignments. Twenty games across five maps gives two complete
+paired blocks per map. This is a workflow check, not enough evidence for a broad
+scientific claim. The current generic default of 100 is not the final official
+snapshot budget; that official number remains undecided.
+
+Current ratings center on 1,200. The shared fitter and 5,000 matched bootstrap
+resamples run after complete coverage. Missing matches or failed fits are errors;
+insufficient uncertainty evidence stays unavailable. Required outcomes support
+rankings and matchup/map summaries even with optional metrics disabled.
+
+The accepted official design is a monthly frozen Big 12 snapshot, optionally
+with one challenger. The wider baseline library can grow independently. Verified
+reuse, uniform budget overrides, promotion rules and the automatic headline
+report require their later implementation/qualification packets. Local generic
+results do not admit or publish an entrant. See the
+[protocol](protocol.md#big-12-tournament-and-baseline-library) for scientific rules.
+
+## Resume and combine results
+
+A new `output_dir` call creates a unique child run directory. Use
+`resume_from=run_dir` for explicit compatible continuation. Preserve recorded
+policies, maps, seeds and capture settings; a changed execution batch/chunk size
+does not change schedule identity. Durable completed episodes are skipped and
+interrupted suffixes recovered under the existing writer contract. Failures name
+the run and are recorded when storage remains usable. This evaluator recovery is
+separate from future coordinated learner-checkpoint/writer restart.
+
+Episode IDs are local to a pass. Join with `run_id`, `phase`, `pass_id` and
+`episode_id`, plus the recorded participant ownership. Choose means, medians or
+pooled count ratios deliberately; they answer different questions. Required
+tournament population weights belong to its shared statistics authority.
+
+## Historical Reporting and Viewer Evidence
+
+The following retained notes record schema changes, exact comparisons and
+Viewer evidence from their original revisions. Preserve their numbers and raw
+references. They do not establish a new performance result for the present
+source. Current formulas and navigation are owned by the metric specification.
+Code fragments in this historical record assume the analysis variables above.
+
 Schema 8 changed column order. Schema 9 changed the healing term to **Excess**
 in column names, the dictionary and the viewer. Schema 10 removed 46 observed
 respawn-wait columns. **Respawning** shows each
@@ -475,133 +594,48 @@ number of activations. Both counts are exported; researchers choose the summary
 that answers their question. Reading a subset saves analysis memory without
 changing collection or the original CSV.
 
-## Choose metrics and replays independently
-
-`metrics="priority"` is the default. `"none"` disables optional measurements;
-`"full"` collects the complete scalar suite. Both selectors accept finite
-Python integer iterables and use one-based episode IDs:
-
-```python
-from marl_battlegrounds import make
-
-env = make(
-    "tdm", num_envs=128, metrics="priority",
-    full_metrics_episodes=range(1000, 50_001, 1000),
-    replay_episodes=range(49_951, 50_001),
-)
-```
-
-Selections are resolved once. No Python membership checks or file writes occur
-inside a transition. Metrics use authoritative facts directly; they do not need
-a replay file or a second simulator run.
-
-## Train and record
-
-`reset(key, config, episode_id=ids)` returns observations and wrapper state.
-The state owns the dynamic configuration, exact masks and episode counters, so
-`step(key, state, actions)` has the inputs Core needs. Configuration changes enter
-through reset. Use `env.get_action_mask(state)` before sampling actions.
-
-The unbatched environment composes with `jit`, `vmap` and `lax.scan`.
-`num_envs=128` supplies native batching directly. Reset completed lanes with
-`env.reset(key, next_config, episode_id=next_ids, state=state,
-reset_mask=done.done)`. Other lanes continue unchanged. Reset is explicit;
-terminal results retain the completed episode's ID.
-
-Your trainer supplies actions, updates parameters and chooses when to log.
-An optional `RunWriter` accepts `info` from one step or the entire `infos` tree
-returned by a collected scan chunk. Call `writer.write(infos)` on the host;
-passing only the last step would lose earlier completions and replay packets.
-Full results use a fixed dense output shape, including on nonterminal steps and
-with sparse full selection. The following is retained schema-7 evidence, before
-schema 10 removed the wait fields. Schema 7 returned 55,730 logical bytes per lane
-(11,146 float32 values and boolean validity flags), 100 bytes more than schema 6.
-Retaining every full `info` in a 1,024-environment, 128-step scan therefore retained
-**6.80 GiB** of full-result arrays alone. This is separate from the 13,618-byte
-running collector per lane, observations, replay packets and learner memory.
-Schema 10 had 55,500 logical bytes per full output, or about 6.77 GiB for that
-same retained scan shape. Schema 11 added 200 output bytes per lane; schema 12
-added another 60, giving 55,760 bytes and about 6.81 GiB for that scan shape.
-Schema 13 adds 30 output bytes for the six team ability counts, giving 55,790
-bytes per lane. No old column is renamed or removed. These later changes
-add no per-tick counters. The collector added 40 bytes in schema 7
-for a `(5, 2)` array of 32-bit class/team Basic kill counts. These are logical
-storage calculations, not measurements of peak memory or speed.
-Priority-only training with no full selection has no
-full-result subtree. Use bounded logging chunks when full
-collection is enabled; do not assume sparse episode selection also compacts the
-returned arrays.
-Initialize training recording with
-`RunWriter("runs/training", phase="training", pass_id="1")` so episodes are
-truthfully labelled as belonging to an evolving policy.
-`writer.flush()` and context-manager exit establish durability and raise write
-failures. No logger is required for training.
-
-The default writer buffer holds 128 completed rows. For a large predeclared
-priority-only evaluation, an existing control such as
-`RunWriter("runs/evaluation", buffer_size=4096)` reduces repeated metadata writes.
-Pass that writer to `evaluate(..., writer=writer)`. Larger buffers use more RAM
-and leave more completions to repeat after abrupt interruption; full-metric rows
-are substantially wider. Explicit `flush()` and normal closing establish the
-same durability regardless of buffer size.
-
-Replay capture has no horizon-sized buffer in environment state. Selected
-packets returned by a scan still occupy that chunk's output memory; choose a
-bounded logging chunk. The writer spools selected packets and publishes complete
-replays. Empty replay selection removes the capture subtree entirely.
-
-## Repeat validation in one run
-
-```bash
-JAX_PLATFORMS=cpu .venv/bin/python examples/evaluation.py validation \
-  --episodes 4 --num-envs 4 --metrics full --output-dir runs/validation
-```
-
-This example reuses one writer for two passes on maps labelled `validation`.
-Both passes append to the same tables, distinguished by `phase` and `pass_id`.
-In your trainer, invoke these passes at the training episodes you choose. Wrap
-the current frozen model with `Policy(name, apply, variables, initial_carry,
-checkpoint=...)`; the callable receives exactly the authorized actor input and
-mask. The two teams' checkpoint identities are recorded separately in pass
-metadata. Episodes spanning training updates must be labelled as an evolving
-policy, not falsely attributed to one checkpoint.
-
-## Run a tournament
-
-```bash
-JAX_PLATFORMS=cpu .venv/bin/python examples/evaluation.py tournament \
-  --episodes 20 --num-envs 8 --output-dir runs/tournament
-```
-
-Here `--episodes` is the budget per unordered policy pair, including every map
-and both side assignments. Twenty episodes over five maps gives two independent
-paired blocks per map: suitable for a workflow check, not a strong research
-claim. The official Big 12 budget is 100 episodes per pair, or 6,600 total.
-
-Ratings center on **1,200**. Qualified CPU fitting and 5,000 matched bootstrap
-resamples run once after all matches. Missing matches or failed fits are errors.
-Insufficient evidence produces an explicit unavailable interval. Full metrics
-and replays are optional; mandatory match outcomes support ratings and the
-matchup/per-map summaries. See the [statistical protocol](protocol.md#frozen-rating-and-uncertainty-contract).
-
-## Resume and combine results
-
-Each new `output_dir` call creates a unique child directory. Supplying an
-existing run itself as a new output destination fails. Explicitly resume with
-`resume_from=run_dir`, preserving policies, maps, seed and selections. A changed
-batch or logging-chunk size does not change the scheduled matches. Durable
-completed episodes are skipped; interrupted table suffixes are recovered before
-continuing. Failures name the affected run directory and are raised and recorded
-when storage permits.
-
-Episode IDs are local to a pass. When combining runs, use
-`run_id`, `phase`, `pass_id`, and `episode_id` together. Compute your own means,
-medians, learning curves or other summaries from the scalar tables. The
-tournament's specified population weighting is handled by its report.
-
 ## Performance qualification
 
-For a focused full-metric CPU/GPU comparison, run:
+**GPU execution with JAX is the performance target.** Measure compilation and
+reuse, synchronized execution, peak GPU memory, transfers, and the setup and
+recording work needed by the complete GPU workflow. Host work still matters
+when it makes that workflow slower or uses extra memory. Separate CPU rollout
+speed is not an acceptance requirement. CPU tests check correctness and
+compatibility; their elapsed times help maintain the test shards, not compare
+simulator performance.
+
+Future GPU environment batches are **32, 64, 128, 512 and 1024 only**. Follow
+the [shared GPU efficiency protocol](../dev/gpu_sanity.md#gpu-efficiency-protocol)
+for realistic play, timing, memory and complete-workflow comparisons. The
+report must include absolute speed and resource use as well as relative changes;
+profile remaining costs before calling the changed path efficient. The
+following existing foundations profile is a **short-episode reset stress test**
+with fixed neutral actions. It measures that focused workload, not normal combat
+or learning throughput. Its explicit sizes follow the new rule; older script
+defaults and GPU correctness fixtures still need alignment before their next use.
+
+```bash
+JAX_PLATFORMS=cuda,cpu XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  .venv/bin/python -m scripts.dev.benchmark_evaluation \
+  --foundations --backend gpu --api automatic --sizes 32 64 128 512 1024 \
+  --lengths 16 128 --rollout-modes none priority --repeats 5 \
+  --output artifacts/m8-api-foundations-gpu
+```
+
+Use `--api reference` for the matched manual configuration/ID path. The
+automatic mode also checks its result against that manual path. Freeze the
+compared package and map inputs with `--package-root` and `--assets-root` when
+collecting before/after evidence. The numerical workload must run on the GPU.
+Having a CPU backend available for
+host setup does not make this a CPU speed comparison. Compare the committed
+reference and the new API with identical configurations, actions and retained
+outputs. Check optional full metrics and replay capture separately. Report the
+actual workload and any missing evidence; do not replace a large batch with a
+smaller one or treat a correctness pass as a speed result.
+
+The following CPU/GPU command belongs to the **historical metric comparison**.
+It documents how those records were produced; its older sizes are not approved
+for a new GPU run under the current rule:
 
 ```bash
 JAX_PLATFORMS=cuda,cpu XLA_PYTHON_CLIENT_PREALLOCATE=false \
@@ -619,7 +653,8 @@ Use a new output directory for each qualification. Keep the historical evidence
 directories below intact. The current schema needs its own measured results;
 the retained older results do not establish its speed or peak memory.
 
-For the broader rollout/capture qualification, omit `--metrics-only --map-id 48`.
+For broader rollout/capture work, omit `--metrics-only --map-id 48` and explicitly
+pass `--sizes 32 64 128 512 1024`; do not inherit the older default size list.
 That developer profile cycles five maps with exploratory policies and varied
 rosters, and repeats complete GPU rollouts for none, priority, full, sparse full
 and selected replay capture. It is intentionally more expensive. Optional

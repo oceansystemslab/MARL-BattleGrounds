@@ -1,3 +1,7 @@
+/**
+ * @file Exercise artifact loading, replay endpoints, playback controls, reconnect
+ * boundaries and exported views in a real browser.
+ */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -198,10 +202,8 @@ function captureBrowserErrors(page) {
   }
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} url
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} url */
 async function openReplay(page, url) {
   captureBrowserErrors(page);
   await page.goto(url);
@@ -218,13 +220,8 @@ function expectNoBrowserErrors(page) {
   expect(browserErrors.get(page) ?? []).toEqual([]);
 }
 
-/**
- * Chromium reports an HTTP failure at the network-console layer even when the
- * application intentionally handles the exact replay conflict response.
- *
- * @param {import("@playwright/test").Page} page
- * @param {import("@playwright/test").Response} response
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {import("@playwright/test").Response} response */
 function expectOnlyHandledReplayConflictConsole(page, response) {
   expect(response.status()).toBe(409);
   expect(response.request().method()).toBe("POST");
@@ -234,9 +231,7 @@ function expectOnlyHandledReplayConflictConsole(page, response) {
   ]);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 function nextReplayResponse(page) {
   return page.waitForResponse(
     (response) =>
@@ -246,10 +241,8 @@ function nextReplayResponse(page) {
   );
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} selector
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} selector */
 async function clickReplayCommand(page, selector) {
   const responsePromise = nextReplayResponse(page);
   await page.locator(selector).click();
@@ -258,10 +251,8 @@ async function clickReplayCommand(page, selector) {
   return response.json();
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} key
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} key */
 async function pressReplayCommand(page, key) {
   await expect(page.locator("#replay-frame-slider")).toBeEnabled({
     timeout: 30_000,
@@ -274,11 +265,9 @@ async function pressReplayCommand(page, key) {
   return response.json();
 }
 
-/**
- * @param {Record<string, any>} frame
+/** @param {Record<string, any>} frame
  * @param {Record<string, any>} timeline
- * @param {number} frameIndex
- */
+ * @param {number} frameIndex */
 function expectResearcherJoin(frame, timeline, frameIndex) {
   const episodeId = frame.artifact_summary.replay_reference.episode_id;
   const row = timeline.rows[frameIndex];
@@ -315,11 +304,7 @@ function expectResearcherJoin(frame, timeline, frameIndex) {
   }
 }
 
-/**
- * Install frame zero through the user-facing replay keyboard boundary.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function installFirstFrame(page) {
   const slider = page.locator("#replay-frame-slider");
   if ((await slider.inputValue()) !== "0") {
@@ -332,12 +317,7 @@ async function installFirstFrame(page) {
   await expectReplayFrameIndex(page, 0);
 }
 
-/**
- * Prove the public presentation clock has no active replay animation. Motion
- * editing controls are intentionally absent from the product shell.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function expectReplayChoreographySettled(page) {
   await expect(
     page.locator("#battlefield .combat-choreography[data-state=playing]"),
@@ -348,15 +328,8 @@ async function expectReplayChoreographySettled(page) {
   );
 }
 
-/**
- * Freeze and prove the complete replay transport at one supported viewport.
- * The element screenshot is intentionally paired with its semantic ordering,
- * cursor, range, and overflow contract so a visually plausible but incomplete
- * transport cannot refresh the baseline.
- *
- * @param {import("@playwright/test").Page} page
- * @param {{width: number, height: number}} viewport
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {{width: number, height: number}} viewport */
 async function captureReplayTransportBaseline(page, viewport) {
   await page.setViewportSize(viewport);
   await waitForStablePresentation(page);
@@ -437,11 +410,9 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-/**
- * @param {Awaited<ReturnType<typeof startReplayViewer>> | null} viewer
+/** @param {Awaited<ReturnType<typeof startReplayViewer>> | null} viewer
  * @param {string} name
- * @returns {Awaited<ReturnType<typeof startReplayViewer>>}
- */
+ * @returns {Awaited<ReturnType<typeof startReplayViewer>>} */
 function requiredViewer(viewer, name) {
   if (!viewer) {
     throw new Error(`${name} replay viewer was not started.`);
@@ -504,12 +475,7 @@ function independentCanonicalJson(value) {
     .join(",")}}`;
 }
 
-/**
- * Independently validate the downloaded container rather than trusting the
- * production PNG inspector under test.
- *
- * @param {Buffer} bytes
- */
+/** @param {Buffer} bytes */
 function inspectDownloadedReplayPng(bytes) {
   expect(bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)).toBe(true);
   /** @type {Array<{type: string, data: Buffer}>} */
@@ -627,10 +593,8 @@ async function currentReplayPresentation(page) {
   });
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {"researcher" | "pov"} view
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {"researcher" | "pov"} view */
 async function installReplayView(page, view) {
   if ((await page.locator("#view-select").inputValue()) === view) {
     return;
@@ -832,15 +796,10 @@ function expectedReplayPngProvenance(snapshot) {
   };
 }
 
-/**
- * Decode the downloaded file through Chromium and return only bounded pixel
- * evidence rather than transferring the complete RGBA buffer back to Node.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {Buffer} bytes
  * @param {readonly [number, number, number]} resolvedShellBorderRgb
- * @param {Array<Record<string, any>>} rasterCues
- */
+ * @param {Array<Record<string, any>>} rasterCues */
 async function decodeReplayPngPixels(page, bytes, resolvedShellBorderRgb, rasterCues) {
   return page.evaluate(
     async ({ base64, shellBorderRgb, cues }) => {
@@ -965,10 +924,8 @@ async function decodeReplayPngPixels(page, bytes, resolvedShellBorderRgb, raster
   );
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {{label: string, expectRangeCue?: boolean}} options
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {{label: string, expectRangeCue?: boolean}} options */
 async function exportAndInspectReplayPng(page, options) {
   await waitForSettledReplayArtifactActions(page);
   const before = await replayExportSnapshot(page);
@@ -1115,10 +1072,8 @@ async function enableAllReplayVisualFilters(page) {
   await expect(page.locator("#disable-all-visual-filters-button")).toBeEnabled();
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {{proveVisibleUltimate?: boolean}} [options]
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {{proveVisibleUltimate?: boolean}} [options] */
 async function installRepresentativeReplayPresentationState(page, options = {}) {
   await page.locator("#visual-filters").evaluate((details) => {
     if (!(details instanceof HTMLDetailsElement)) {
@@ -1235,16 +1190,14 @@ async function installRepresentativeReplayPresentationState(page, options = {}) 
   await waitForSettledReplayArtifactActions(page);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {{
  *   url: string,
  *   view: "researcher" | "pov",
  *   presentationKind: string,
  *   label: string,
  *   repeatRepresentative?: boolean,
- * }} options
- */
+ * }} options */
 async function proveReplayLeafExports(page, options) {
   await openReplay(page, options.url);
   await installReplayView(page, options.view);
@@ -1302,10 +1255,8 @@ async function proveReplayLeafExports(page, options) {
   return Object.freeze({ allOn, representative, repeated });
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} sourceMetricPath
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} sourceMetricPath */
 async function downloadEpisodeDetails(page, sourceMetricPath) {
   await waitForSettledReplayArtifactActions(page);
   await expect(page.locator("#replay-episode-details-button")).toBeEnabled();

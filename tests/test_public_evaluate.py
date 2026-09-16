@@ -1,4 +1,4 @@
-"""Complete eager episodes through the public environment and actor boundary."""
+"""Check complete games through the public evaluation and policy interfaces."""
 
 import csv
 import io
@@ -7,7 +7,7 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from importlib import import_module
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -150,6 +150,67 @@ def test_selected_full_metrics_are_self_contained_with_uncomputed_rows_absent() 
         )
     assert result.full_metrics["episode_length"][0] == 2
     assert result.full_metrics["agent_0_damage_done"][0] == 0
+
+
+@pytest.mark.parametrize("execution", ("jax", "host"))
+def test_repeated_evaluation_reuses_kernels_when_capture_selections_change(
+    execution: Literal["jax", "host"],
+) -> None:
+    evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
+    controller = Policy("random", policy("random").apply, execution=execution)
+    specs = tuple(
+        EpisodeSpec(index + 1, _config(length), seed_id=100 + index)
+        for index, length in enumerate((1, 2, 2))
+    )
+    kernel = evaluator._jax_chunk if execution == "jax" else evaluator._step_environment
+    first = evaluate_episodes(
+        controller,
+        controller,
+        specs,
+        seed=28,
+        num_envs=2,
+        metrics="none",
+        full_metrics_episodes=(1,),
+        replay_episodes=(1, 2),
+        chunk_size=1,
+        run_id="selection-reuse-proof",
+    )
+    # Count the actual shared kernels, not only an outer caller's traces.
+    cache_sizes = (evaluator._reset._cache_size(), kernel._cache_size())
+    assert all(size > 0 for size in cache_sizes)
+    second = evaluate_episodes(
+        controller,
+        controller,
+        specs,
+        seed=28,
+        num_envs=2,
+        metrics="none",
+        full_metrics_episodes=(3,),
+        replay_episodes=(2, 3),
+        chunk_size=1,
+        run_id="selection-reuse-proof",
+    )
+    assert (evaluator._reset._cache_size(), kernel._cache_size()) == cache_sizes
+    assert first.episodes == second.episodes
+    assert tuple(row.episode_length for row in second.episodes) == (1, 2, 2)
+    np.testing.assert_array_equal(first.full_metrics["episode_id"], (1,))
+    np.testing.assert_array_equal(first.full_metrics["episode_length"], (1,))
+    np.testing.assert_array_equal(second.full_metrics["episode_id"], (3,))
+    np.testing.assert_array_equal(second.full_metrics["episode_length"], (2,))
+    np.testing.assert_array_equal(second.priority_metrics["episode_id"], (3,))
+
+    first_replays = {
+        replay.header.context.seed_protocol.episode_seed: replay
+        for replay in first.replays
+    }
+    second_replays = {
+        replay.header.context.seed_protocol.episode_seed: replay
+        for replay in second.replays
+    }
+    assert set(first_replays) == {100, 101}
+    assert set(second_replays) == {101, 102}
+    assert first_replays[101].frames == second_replays[101].frames
+    assert first_replays[101].transitions == second_replays[101].transitions
 
 
 def test_host_random_actions_and_recurrent_memory_survive_batch_order_and_refills() -> (

@@ -1,4 +1,14 @@
-"""Host-facing configuration, fixed-slot profile, and state validation."""
+"""Resolve fixed-slot profiles and validate concrete Core inputs on the host.
+
+resolve_agent_profile performs a pure JAX catalog lookup with team padding.
+The validators check complete configurations, product movement calibration,
+runtime states and authored starts. Runtime states allow the geometry solver's
+remaining body overlap; authored living starts require strict clearance.
+
+Validation reads array values through NumPy or scalar conversion and may copy
+or synchronize device data. Keep it at configuration, loading and tooling
+boundaries, outside compiled reset/step loops. These checks do not change inputs
+or create policies, episodes, logs or replay files."""
 
 import math
 from typing import Final
@@ -87,13 +97,30 @@ CANONICAL_PRODUCT_MOVEMENT_SCALE: Final = 1.0
 def resolve_agent_profile(
     requested_class_ids: Array, team_sizes: Array
 ) -> ResolvedAgentProfile:
-    """Resolve requested team rosters into immutable padded slot arrays.
+    """Resolve requested team rosters into fixed-slot class and capability arrays.
 
-    ``requested_class_ids`` has shape ``(MAX_AGENT_SLOTS,)`` and ``team_sizes``
-    has shape ``(2,)``. Padded slots receive neutral class/catalog values and
-    ``NO_TEAM_ID``; active team blocks receive their explicit public team IDs.
-    Host-side validation of the complete resolved configuration belongs to
-    :func:`validate_env_config`.
+    Parameters
+    ----------
+    requested_class_ids : jax.Array
+        Int32 (10,) requested IDs in Team A then Team B order. Active slots
+        use classes 1..5; unused slots are replaced by neutral class zero.
+    team_sizes : jax.Array
+        Int32 (2,) sizes in 0..5 for Team A and Team B. Each size selects a
+        prefix within that team's five fixed slots.
+
+    Returns
+    -------
+    ResolvedAgentProfile
+        Ten-slot arrays with bool membership, int32 classes/team IDs/recovery
+        delays, and float32 catalog capabilities. Unused slots have neutral
+        class and team IDs and zero capabilities.
+
+    Notes
+    -----
+    This numerical helper is pure JAX and may be mapped across games. It does
+    not validate roster inputs or the resulting configuration. Host builders
+    must call validate_env_config before reset; catalog indexing is not an
+    input-validation mechanism. No randomness or position sampling occurs.
     """
     team_local_indices = jnp.arange(MAX_AGENTS_PER_TEAM)
 
@@ -140,7 +167,12 @@ def _require_jax_array(
     expected_shape: tuple[int, ...],
     expected_dtype: object,
 ) -> Array:
-    """Return one JAX array after enforcing its public storage contract."""
+    """Return an array after checking its exact storage type, shape and dtype.
+
+    field_name labels errors; expected_shape and expected_dtype are the owned
+    schema. Reject non-JAX storage or wrong dtype with TypeError, and a wrong
+    shape with ValueError. No conversion or array-value read is performed here.
+    """
     if not isinstance(value, Array):
         raise TypeError(
             f"{field_name} must be a jax.Array, not {type(value).__name__}."
@@ -157,13 +189,23 @@ def _require_jax_array(
 
 
 def _require_finite_array(value: Array, *, field_name: str) -> None:
-    """Reject nonfinite host configuration values before JAX tracing."""
+    """Reject NaN or infinity in an already shape-checked JAX array.
+
+    Reading through NumPy may synchronize and copy device values. field_name
+    labels ValueError. Keep this host check outside JAX transforms.
+    """
     if not bool(np.all(np.isfinite(np.asarray(value)))):
         raise ValueError(f"{field_name} must contain only finite values.")
 
 
 def _validate_obstacles(obstacles: object) -> Array:
-    """Validate the fixed padded obstacle-table schema."""
+    """Check one float32 (32, 8) padded obstacle table and return the same array.
+
+    Require finite values, active flags zero or one, all-zero inactive rows,
+    positive pillar radii or wall dimensions, and zero unused shape columns.
+    Raise TypeError for wrong storage/dtype and ValueError for invalid shape
+    or geometry fields. Body clearance is checked separately on the host.
+    """
     obstacle_array = _require_jax_array(
         obstacles,
         field_name="obstacles",
@@ -226,7 +268,13 @@ def _validate_obstacles(obstacles: object) -> Array:
 
 
 def _validate_recovery_catalogs() -> tuple[Array, Array]:
-    """Validate the versioned class recovery catalogs at the host boundary."""
+    """Check the two class-recovery catalogs before resolving configuration rules.
+
+    Return the original delay int32 (6,) and regeneration float32 (6,) arrays.
+    Delays are in 0..16,777,216, fractions are in [0, 1], and neutral entries
+    are zero. Host reads raise TypeError for storage/dtype errors or ValueError
+    for bad shapes, nonfinite values, bounds or neutral entries.
+    """
     delay_catalog = _require_jax_array(
         combat.OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS,
         field_name="OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS",
@@ -283,7 +331,15 @@ def _validate_agent_profile(
     recovery_delay_catalog: Array,
     recovery_regeneration_fraction_catalog: Array,
 ) -> ResolvedAgentProfile:
-    """Validate one fully resolved fixed-slot agent profile."""
+    """Check a resolved roster against fixed team blocks and catalog capabilities.
+
+    profile must be a ResolvedAgentProfile with ten-slot JAX arrays. The two
+    supplied recovery catalogs have already passed their catalog checks. Active
+    classes, team IDs and prefix padding must agree; every capability must
+    exactly equal its class-catalog value. Return the unchanged profile.
+    Host checks raise TypeError for storage/dtype/container errors and ValueError
+    for shape, domain, padding or catalog mismatches.
+    """
     if type(profile) is not ResolvedAgentProfile:
         raise TypeError(
             "agent_profile must be a ResolvedAgentProfile, not "
@@ -461,7 +517,14 @@ def _validate_agent_obstacle_clearance(
     agent_radii: Array,
     field_name: str,
 ) -> None:
-    """Reject configured bodies intersecting authoritative M4 obstacles."""
+    """Reject body positions that overlap an active obstacle.
+
+    Positions (N, 2), matching radii (N,) and obstacles (32, 8) are already
+    validated arrays. Check that obstacle extent plus the largest radius fits
+    float32, then reuse the authoritative disc-overlap predicate for each pair.
+    Host reads may synchronize device work; ValueError names field_name and
+    the failing body/obstacle. Tangency follows the shared geometry predicate.
+    """
     host_obstacles = np.asarray(obstacles)
     host_radii = np.asarray(agent_radii)
     max_body_radius = float(np.max(host_radii)) if host_radii.size else 0.0
@@ -515,7 +578,14 @@ def _validate_team_spawn_pad_positions(
     obstacles: Array,
     profile: ResolvedAgentProfile,
 ) -> None:
-    """Validate all spawn pads and the complete fallback-body formation."""
+    """Check all ten pads as a complete fallback-body formation.
+
+    positions must be float32 (2, 5, 2), in Team A then Team B order. For each
+    team, use its largest configured radius on all five pads, including unused
+    slots; an empty team uses radius zero. Check finite coordinates, map bounds,
+    obstacles and pairwise body clearance. Return None; raise TypeError for
+    wrong storage/dtype or ValueError for a shape or geometry violation.
+    """
     position_array = _require_jax_array(
         positions,
         field_name="team_spawn_pad_positions",
@@ -587,15 +657,36 @@ def _validate_team_spawn_pad_positions(
 
 
 def validate_env_config(config: EnvConfig) -> None:
-    """Validate a resolved episode configuration before it reaches JAX core code.
+    """Validate one resolved episode configuration on the host before reset.
 
-    The validator is deliberately host-only. Official builders call it before
-    passing ``config`` to :func:`marl_battlegrounds.core.env.reset`; traced reset
-    and step code may therefore consume a compact, already-resolved contract.
+    Parameters
+    ----------
+    config : EnvConfig
+        One scalar configuration. Python int/float settings and JAX array
+        fields must meet the types, bounds and shapes documented by EnvConfig.
+        The supported modes are neutral and Team Deathmatch.
 
-    Raises:
-        TypeError: A field has the wrong Python/JAX type or array dtype.
-        ValueError: A field violates a shape, domain, padding, or geometry rule.
+    Returns
+    -------
+    None
+        Success means the configuration, class catalogs, roster, obstacle table
+        and complete spawn-pad formation satisfy the current Core contract.
+        The input is not changed.
+
+    Raises
+    ------
+    TypeError
+        A container, Python scalar, JAX array or dtype is wrong.
+    ValueError
+        A shape, finite-value check, bound, mode, padding, catalog agreement or
+        geometry rule fails. Reserved KOTH and CTF modes are rejected.
+
+    Notes
+    -----
+    This reads array values on the host and may synchronize device work. Call
+    it in builders before jit, vmap or scan, never inside a rollout. Generic
+    scientific configurations may use a validated movement scale in (0, 1];
+    validate_product_env_config adds the product's fixed calibration.
     """
     if type(config) is not EnvConfig:
         raise TypeError(f"config must be an EnvConfig, not {type(config).__name__}.")
@@ -757,12 +848,30 @@ def validate_env_config(config: EnvConfig) -> None:
 
 
 def validate_product_env_config(config: EnvConfig) -> None:
-    """Validate one product episode, including its fixed movement calibration.
+    """Validate one product episode with the fixed movement calibration.
 
-    This boundary composes the generic scientific configuration validator and
-    then applies the product-only movement-scale contract. Tests and explicit
-    experimental construction should continue to call :func:`validate_env_config`
-    when exercising noncanonical scales.
+    Parameters
+    ----------
+    config : EnvConfig
+        One concrete scalar episode configuration with the EnvConfig contract.
+
+    Returns
+    -------
+    None
+        The full generic configuration check passed and the ordinary movement
+        scale equals the product value 1.0. The input is not changed.
+
+    Raises
+    ------
+    TypeError
+        A generic configuration type or dtype check fails.
+    ValueError
+        A generic configuration check fails or the movement scale is not 1.0.
+
+    Notes
+    -----
+    This is host-only and may read device arrays. Explicit scientific tests
+    using other supported scales should use validate_env_config instead.
     """
     validate_env_config(config)
     if config.ordinary_movement_distance_scale != CANONICAL_PRODUCT_MOVEMENT_SCALE:
@@ -779,7 +888,15 @@ def _validate_state_positions(
     config: EnvConfig,
     active_mask: np.ndarray,
 ) -> None:
-    """Validate runtime positions against hard static-geometry rules."""
+    """Check a snapshot's hard static-geometry and unused-position rules.
+
+    Positions are float32 (10, 2); active_mask is a host bool (10,) array and
+    config is already valid. Unused positions must be zero. Configured bodies
+    must fit radius-adjusted map bounds within GEOMETRY_TOLERANCE and satisfy
+    the shared obstacle predicate. ValueError reports a violation.
+    Runtime body overlap is allowed because a fixed-pass solver may retain
+    crowded residuals; only authored starts require strict living-body clearance.
+    """
     host_positions = np.asarray(positions)
     host_radii = np.asarray(config.agent_profile.agent_radii)
 
@@ -829,7 +946,13 @@ def _validate_scenario_living_body_clearance(
     config: EnvConfig,
     alive_mask: Array,
 ) -> None:
-    """Reject positive-area overlap between living bodies in a curated start."""
+    """Reject overlapping configured living bodies in an authored start.
+
+    Positions (10, 2) and alive_mask (10,) have already passed state validation.
+    Read them on the host and compare each living pair using catalog radii.
+    Tangency is allowed and corpses do not participate. Raise ValueError for
+    positive-area overlap; runtime snapshots use the looser residual contract.
+    """
     host_positions = np.asarray(positions)
     host_radii = np.asarray(config.agent_profile.agent_radii)
     active_and_alive = np.asarray(config.agent_profile.active_mask) & np.asarray(
@@ -857,7 +980,12 @@ def _validate_nonnegative_bounded_integer_array(
     field_name: str,
     upper_bounds: np.ndarray | int,
 ) -> np.ndarray:
-    """Return host integer values after enforcing a closed duration domain."""
+    """Return a host array after checking a closed nonnegative duration range.
+
+    Storage and integer dtype were checked by the caller. upper_bounds is a
+    scalar or broadcastable host array; both endpoints are inclusive. A host
+    read may synchronize. ValueError names field_name when a bound is violated.
+    """
     host_values = np.asarray(values)
     if bool(np.any(host_values < 0)):
         raise ValueError(f"{field_name} must contain only nonnegative values.")
@@ -872,7 +1000,12 @@ def _validate_previous_action_domain(
     field_name: str,
     category_count: int,
 ) -> np.ndarray:
-    """Return host action history after enforcing one categorical domain."""
+    """Return host action-history values after checking one category range.
+
+    The caller has checked array shape and int32 dtype. Require categories in
+    [0, category_count), with field_name used in ValueError. This checks IDs,
+    not whether an old mask admitted the action; that mask is not available here.
+    """
     host_values = np.asarray(values)
     if bool(np.any((host_values < 0) | (host_values >= category_count))):
         raise ValueError(
@@ -882,23 +1015,39 @@ def _validate_previous_action_domain(
 
 
 def validate_env_state(config: EnvConfig, state: EnvState) -> None:
-    """Validate one runtime-representable state at a host-owned boundary.
+    """Validate one runtime snapshot at a host-owned boundary.
 
-    ``config`` must already have passed :func:`validate_env_config`. This
-    function is deliberately host-only: replay readers and tooling call it
-    before consuming simulator snapshots. It must never run from ``reset``,
-    ``step``, ``jax.jit``, ``jax.vmap``, or ``jax.lax.scan``.
+    Parameters
+    ----------
+    config : EnvConfig
+        Matching scalar configuration, already checked by validate_env_config.
+    state : EnvState
+        One ten-slot snapshot. Positions and health are float32; membership
+        flags are bool; counters and categorical history are int32. Shapes
+        and field meanings are documented on EnvState.
 
-    Dead agents retain valid cooldown and accepted-action history. Their health
-    and transient statuses are canonical zeros. This boundary cannot infer
-    collision provenance from one snapshot, so it accepts living-body residuals
-    emitted by the fixed-pass solver. Curated starts must additionally pass
-    :func:`validate_scenario_initial_state`.
+    Returns
+    -------
+    None
+        Storage, shapes, bounds, lifecycle relationships, padding and hard
+        static geometry are valid. Neither input is changed.
 
-    Raises:
-        TypeError: The container, array storage, or dtype is invalid.
-        ValueError: A shape, domain, lifecycle, padding, or geometry invariant
-            is invalid.
+    Raises
+    ------
+    TypeError
+        A container, JAX array storage type or dtype is wrong.
+    ValueError
+        A shape, finite-value, domain, lifecycle, padding or geometry rule fails.
+
+    Notes
+    -----
+    Replay readers and tools use this host-only check. It may copy/synchronize
+    device data and must stay outside reset, step, jit, vmap and scan. Dead
+    agents may retain cooldowns and accepted-action history, but their health
+    and transient statuses are zero. A snapshot cannot prove collision history,
+    so living-body residuals from the fixed-pass solver are allowed. Authored
+    starts also need validate_scenario_initial_state. This check does not rebuild
+    an old action mask or prove that submitted external mask history was correct.
     """
     if type(config) is not EnvConfig:
         raise TypeError(f"config must be an EnvConfig, not {type(config).__name__}.")
@@ -1237,14 +1386,41 @@ def validate_env_state(config: EnvConfig, state: EnvState) -> None:
 
 
 def validate_scenario_initial_state(config: EnvConfig, state: EnvState) -> None:
-    """Validate a curated start and its official transition provenance.
+    """Validate an authored start under the stricter scenario rules.
 
-    Runtime snapshots may contain deterministic fixed-pass collision residuals,
-    but authored scenario starts have no such transition provenance. Tangency is
-    legal, and preserved corpses remain nonphysical for pairwise clearance.
-    Authored previous-action history must also be compatible with the current
-    spawn-shield counters; general runtime validation deliberately remains
-    permissive so externally supplied mask provenance can still be inspected.
+    Parameters
+    ----------
+    config : EnvConfig
+        Matching scalar configuration, already checked by validate_env_config.
+    state : EnvState
+        Authored ten-slot snapshot satisfying the ordinary runtime schema.
+        A Team Deathmatch start must be below both the horizon and score limit.
+
+    Returns
+    -------
+    None
+        Runtime checks pass, living bodies do not overlap, and any accepted
+        action history agrees with the current shield-related restrictions.
+        Inputs are not changed and the simulator is not advanced.
+
+    Raises
+    ------
+    TypeError
+        A runtime container, storage or dtype check fails.
+    ValueError
+        A runtime check, Team Deathmatch start limit, shield-history rule or
+        living-body clearance rule fails.
+    AssertionError
+        An internal target mapping returns None for a validated nonzero category.
+
+    Notes
+    -----
+    This is host-only and may read device values. Authored starts have no solver
+    history to justify overlapping living bodies; exact tangency is allowed,
+    and corpses do not block that pairwise check. Shielded sources require
+    neutral combat history and history may not target a shielded recipient.
+    General runtime validation deliberately does not impose those history rules
+    so snapshots with external mask provenance can still be inspected.
     """
     validate_env_state(config, state)
 

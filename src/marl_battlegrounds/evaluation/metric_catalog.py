@@ -1,13 +1,11 @@
-"""Fixed scalar TDM measurements shared by numerical results, CSV and the UI.
+"""Define scalar metric meaning, stable column order and shared display text.
 
-This catalog describes columns; it performs no simulation or metric reduction.
-Roster and run identity are separate row metadata. All ten slot names remain in
-the schema even when a slot is inactive or contains another class.
-
-Directed columns describe attributable uses, output, events and coverage. Only
-formation has unordered ally-pair columns. Schema versions identify changes to
-column names or order. Status applications reuse ability
-uses, and GUI groups reference exported values without another numeric authority.
+MetricColumn and DirectedMetric describe the same outputs used by JAX results,
+CSV files and the Viewer. Helpers supply roster-aware grouping, labels, search
+facts and ordering; they compute no game metrics. All ten global slots remain
+in the schema even when inactive. Run/roster identity stays separate from
+numeric columns. Import builds immutable catalog tables once on the host.
+Schema versions protect names/order; presentation reuses existing values.
 """
 
 import re
@@ -369,12 +367,56 @@ METRIC_GROUPS = MappingProxyType(
 
 @dataclass(frozen=True, slots=True)
 class MetricColumn:
-    """One numeric measurement, with static interpretation and applicability.
+    """Describe one scalar output and the evidence needed to interpret it.
 
-    ``subjects`` contains a Core team ID, a global slot, or the ordered pair of
-    global slots appropriate to ``scope``. A class requirement applies to the
-    acting/emitting agent; for a team it requires that class in its active roster.
-    Recipient-scoped effects do not imply knowledge of a persistent status caster.
+    Attributes
+    ----------
+    name : str
+        Exact exported CSV/result key, including any subject prefix.
+    label : str
+        Readable display label.
+    family : str
+        Metric family used by grouping and search.
+    unit : str
+        Measurement unit, such as health, count, ticks or fraction.
+    scope : MetricScope
+        episode, team, agent, team_recipient, source_recipient or ally_pair.
+    subjects : tuple[int, ...]
+        Empty for episode; configured team ID 1/2 for team; global slots
+        0..9 for agent/pair roles. Team-recipient uses (team_id, global_slot).
+    description : str
+        Full meaning of this scalar.
+    missing_when : str
+        Conditions making the measurement unavailable.
+    direction : MetricDirection
+        higher, lower or descriptive; class context may refine guidance.
+    required_class_id : int | None
+        Required acting/emitting class, default None. Team scope
+        requires that class among active team slots.
+    status_channel : int | None
+        Relevant fixed status channel, default None.
+    priority : bool
+        Whether this column belongs to priority output, default False.
+    requires_ultimate_target : bool
+        Require the declared Ultimate target relationship,
+        default False.
+    stem : str
+        Subject-free metric key, default empty; catalog builders fill it.
+    subject_role : str
+        Source/recipient/contributor role, default source.
+    recipient_role : str | None
+        Meaning of a directed recipient, default None.
+    denominator : str | None
+        Meaning of the divisor for a ratio, default None.
+    numerator : str | None
+        Meaning of its counted amount, default None.
+    requires_basic_target : bool
+        Require the Basic target relationship, default False.
+
+    Notes
+    -----
+    Frozen host description, not a value or validity check. The catalog builder
+    owns consistent fields. A recipient's status does not identify its caster.
     """
 
     name: str
@@ -401,7 +443,28 @@ class MetricColumn:
 def metric_guidance(
     column: MetricColumn, class_ids: tuple[int, ...] | None = None
 ) -> tuple[MetricDirection, str]:
-    """Explain the direction for this row's team and, when known, its class."""
+    """Explain whether a scalar's direction helps its recorded team.
+
+    Parameters
+    ----------
+    column : MetricColumn
+        Catalog MetricColumn.
+    class_ids : tuple[int, ...] | None
+        Optional ten global-slot class IDs. None gives generic guidance;
+        a known Warrior can make incoming damage descriptive rather than lower.
+
+    Returns
+    -------
+    tuple[MetricDirection, str]
+        (direction, sentence). direction is higher, lower or descriptive. The
+        sentence names the relevant team and needed class/ability caveats.
+
+    Notes
+    -----
+    Host-only text generation. It does not score a policy or change the metric.
+    Values are interpreted in context; a larger count alone does not prove
+    better tactics. Callers supply a valid ten-slot class layout.
+    """
     direction = column.direction
     incoming_damage = (
         column.scope == "agent"
@@ -469,7 +532,25 @@ def metric_guidance(
 
 @dataclass(frozen=True, slots=True)
 class MetricTopic:
-    """A subject researchers can choose, with one table or two related tables."""
+    """Describe one Viewer metric topic and its table layout.
+
+    Attributes
+    ----------
+    name : str
+        Stable topic key.
+    label : str
+        Readable topic heading.
+    section : str
+        Parent navigation section.
+    description : str
+        What a researcher can inspect here.
+    paired : bool
+        False for one table; True for separate totals/recipients tables.
+
+    Notes
+    -----
+    Frozen host metadata; it does not duplicate the underlying scalar values.
+    """
 
     name: str
     label: str
@@ -752,12 +833,55 @@ _TOPIC_BY_FAMILY = {
 
 @dataclass(frozen=True, slots=True)
 class DirectedMetric:
-    """One bounded matrix and its canonical exported amounts and fractions.
+    """Name all scalar views of one source/recipient evidence matrix.
 
-    Numerical collection supplies the matrix and, for shared events, unique
-    recipient/team event counts. The catalog never substitutes a sum of credited
-    contributors for those unique counts. ``recipient_total`` may reference an
-    existing recipient-owned column instead of adding a team/recipient alias.
+    Attributes
+    ----------
+    key : str
+        Numerical matrix key and directed amount stem.
+    source_total : str
+        Per-source total stem.
+    recipient_total : str
+        Existing recipient-owned total stem.
+    recipient_scope : MetricScope
+        Scope used for that recipient total.
+    team_total : str
+        Team-level total stem.
+    allocation : str | None
+        Optional fraction of one source's total sent to this recipient.
+    contribution : str | None
+        Optional fraction of recipient/team events credited to a source.
+    relation : str
+        Fixed source/recipient relation used for valid pair enumeration.
+    family : str
+        Shared grouping/search family.
+    label : str
+        Base readable measurement label.
+    description : str
+        Base meaning used across scalar views.
+    unit : str
+        Unit of the amount; default health.
+    subject_role : str
+        Acting role; default source.
+    recipient_role : str
+        Receiving role; default recipient.
+    required_class_id : int | None
+        Required source class, default None.
+    status_channel : int | None
+        Relevant status channel, default None.
+    requires_basic_target : bool
+        Basic relationship applicability, default False.
+    requires_ultimate_target : bool
+        Ultimate relationship applicability, default False.
+    shared_events : bool
+        False for additive amounts; True when several contributors
+        can share a single recipient/team event.
+
+    Notes
+    -----
+    Frozen host metadata. Shared-event denominators come from unique event
+    counts, not a sum of credited helpers. Existing recipient totals are reused
+    instead of adding an equivalent exported column.
     """
 
     key: str
@@ -782,11 +906,12 @@ class DirectedMetric:
 
     @property
     def amount(self) -> str:
-        """The matrix key is also its source/recipient amount stem."""
+        """Return the matrix key used as its source/recipient amount stem."""
         return self.key
 
 
 def _subject_role(family: str, stem: str, scope: MetricScope) -> str:
+    """Choose a column's attribution role from its actual family/stem/scope."""
     if scope == "episode":
         return "episode"
     if scope == "ally_pair":
@@ -814,6 +939,12 @@ def _subject_role(family: str, stem: str, scope: MetricScope) -> str:
 
 
 def _directed_metrics() -> tuple[DirectedMetric, ...]:
+    """Build immutable directed-metric definitions for shared evidence matrices.
+
+    Runs during catalog construction on the host. Definitions distinguish additive
+    amounts from shared recipient events and keep fixed class/status/target roles.
+    This helper does not collect numerical evidence.
+    """
     metrics: list[DirectedMetric] = []
 
     def add(
@@ -839,6 +970,12 @@ def _directed_metrics() -> tuple[DirectedMetric, ...]:
         shared_events: bool = False,
         fractions: bool = True,
     ) -> None:
+        """Append one directed family using explicit attribution and fraction choices.
+
+        Required names describe matrix, grouping, relation and recipient ownership.
+        Optional source/team names fall back to key; fraction stems are generated only
+        when fractions=True. Flags describe applicability, not runtime event detection.
+        """
         metrics.append(
             DirectedMetric(
                 key=key,
@@ -1165,7 +1302,9 @@ ULTIMATE_CLASS_NAMES = ("mage", "warrior", "hunter", "rogue", "priest")
 def _directed_contexts() -> MappingProxyType[
     tuple[MetricScope, str], tuple[DirectedMetric, ...]
 ]:
-    """Reference existing totals from each directed view, without another column."""
+    """Index existing totals by scope/stem so display views share one scalar
+    authority.
+    """
     contexts: dict[tuple[MetricScope, str], list[DirectedMetric]] = {}
     for metric in DIRECTED_METRICS:
         keys: tuple[tuple[MetricScope, str], ...] = (
@@ -1184,7 +1323,9 @@ _DIRECTED_CONTEXTS = _directed_contexts()
 def _source_team_has_class(
     column: MetricColumn, class_ids: tuple[int, ...], class_id: int, relation: str
 ) -> bool:
-    """Locate the acting team, including ally/enemy recipient-owned context."""
+    """Find the acting team, including opposite-team sources for recipient-owned
+    effects.
+    """
     if column.scope in ("team", "team_recipient"):
         team = column.subjects[0] - 1
     else:
@@ -1195,12 +1336,26 @@ def _source_team_has_class(
 
 
 def metric_groups(column: MetricColumn, class_ids: tuple[int, ...]) -> tuple[str, ...]:
-    """Give each mechanic one group and reuse honestly scoped context.
+    """Choose relevant display groups for an existing scalar column.
 
-    Named status counts remain available in their cross-status table. An Ultimate
-    view uses one activation count rather than repeating equivalent source/status
-    counters. Target-owned healing never takes its ability class from the patient.
-    Inactive slots have class ID zero in this presentation roster.
+    Parameters
+    ----------
+    column : MetricColumn
+        Catalog MetricColumn whose numerical meaning stays unchanged.
+    class_ids : tuple[int, ...]
+        Ten global-slot class IDs for presentation; inactive slots use zero.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Ordered unique group-name tuple. It includes the primary group and useful
+        related mechanic/ability groups supported by the recorded source classes.
+
+    Notes
+    -----
+    Host-only. Shared groups reuse values; they do not add counters or change
+    CSV order. A healed recipient's class never stands in for its Priest
+    producer, and a named status does not identify a historical caster.
     """
     primary = _RETIRED_GROUPS.get(column.family, column.family)
     if column.stem in ULTIMATE_TEAM_ABILITY_STEMS.values():
@@ -1307,7 +1462,23 @@ def metric_groups(column: MetricColumn, class_ids: tuple[int, ...]) -> tuple[str
 
 
 def metric_view_order(column: MetricColumn) -> int:
-    """Order Ultimate details within each subject without changing CSV order."""
+    """Return an ability-detail sorting category for a catalog column.
+
+    Parameters
+    ----------
+    column : MetricColumn
+        Existing MetricColumn.
+
+    Returns
+    -------
+    int
+        Integer 0 for activation/application, 1 for amounts, 2 for events such as
+        kills/rescues/deaths, or 3 for other timing/control details.
+
+    Notes
+    -----
+    Host-only display ordering; the exported CSV order is unchanged.
+    """
     if "activation" in column.stem or "application" in column.stem:
         return 0
     if column.family in ("status_active_steps", "trap_breaks", "poison"):
@@ -1322,7 +1493,23 @@ def metric_view_order(column: MetricColumn) -> int:
 
 
 def metric_primary_location(column: MetricColumn) -> tuple[str, str]:
-    """Give a column one fixed CSV home, independent of the recorded roster."""
+    """Give a scalar column one fixed catalog home.
+
+    Parameters
+    ----------
+    column : MetricColumn
+        Existing MetricColumn with a known family/stem.
+
+    Returns
+    -------
+    tuple[str, str]
+        (topic_name, view_name), where view is single, totals or recipients.
+
+    Notes
+    -----
+    Host-only and independent of the current roster. Shared display locations
+    may add context elsewhere, but this fixed home controls canonical ordering.
+    """
     if column.priority:
         topic = "priority"
     elif column.stem in ULTIMATE_TEAM_ABILITY_STEMS.values():
@@ -1339,7 +1526,9 @@ def metric_primary_location(column: MetricColumn) -> tuple[str, str]:
 
 
 def _metric_view(column: MetricColumn, topic: str) -> str:
-    """Keep affected agents and directed rows together in paired topics."""
+    """Select single/totals/recipients for a known topic without duplicating sibling
+    rows.
+    """
     if not METRIC_TOPICS_BY_NAME[topic].paired:
         return "single"
     if column.scope in ("team_recipient", "source_recipient") or (
@@ -1353,7 +1542,26 @@ def _metric_view(column: MetricColumn, topic: str) -> str:
 def metric_locations(
     column: MetricColumn, class_ids: tuple[int, ...]
 ) -> tuple[tuple[str, str], ...]:
-    """Reuse existing measurements across topics, never across sibling tables."""
+    """List the tables that can reuse an existing scalar in this roster.
+
+    Parameters
+    ----------
+    column : MetricColumn
+        Catalog MetricColumn.
+    class_ids : tuple[int, ...]
+        Ten global-slot class IDs, with zero for inactive slots.
+
+    Returns
+    -------
+    tuple[tuple[str, str], ...]
+        Tuple of (topic, view) pairs in fixed topic order. The column's canonical
+        home is included; additional tables share the same numerical value.
+
+    Notes
+    -----
+    Host-only. Context can add useful ability/recipient views, but no scalar is
+    copied into both sibling tables or assigned a new meaning.
+    """
     topics = {
         _TOPIC_BY_FAMILY.get(group, group) for group in metric_groups(column, class_ids)
     }
@@ -1383,7 +1591,29 @@ _ULTIMATE_TOPIC_NAMES = (
 def metric_topic_text(
     column: MetricColumn, topic: str, class_ids: tuple[int, ...]
 ) -> dict[str, str]:
-    """Explain a shared column in its named ability view without changing its value."""
+    """Specialize a shared column's wording for a named Ultimate view.
+
+    Parameters
+    ----------
+    column : MetricColumn
+        Existing MetricColumn.
+    topic : str
+        Topic key. Non-Ultimate topics return no overrides.
+    class_ids : tuple[int, ...]
+        Ten global-slot class IDs used to identify actual source ability.
+
+    Returns
+    -------
+    dict[str, str]
+        Dict of changed text fields only: labels, description, guidance, ratio
+        wording or subtitle. {} means the ordinary catalog text remains sufficient.
+
+    Notes
+    -----
+    Host-only; values, validity and CSV identity stay unchanged. Wording keeps
+    combined team denominators explicit and never treats a recipient's class
+    as evidence that it produced the effect.
+    """
     if topic not in ULTIMATE_GROUP_BY_CLASS.values():
         return {}
     class_id = next(k for k, value in ULTIMATE_GROUP_BY_CLASS.items() if value == topic)
@@ -1532,6 +1762,7 @@ def metric_topic_text(
 
     def name_ability(value: str) -> str:
         # Received healing already names Priest; keep that class name once.
+        """Name the actual Ultimate consistently without repeating a class name."""
         value = value.replace("Ultimate Effective Priest", "Effective Priest Salvation")
         value = value.replace("Ultimate Priest", "Priest Salvation")
         value = re.sub(r"\ban Ultimate\b", ability, value)
@@ -1565,7 +1796,9 @@ def metric_topic_text(
 def _row_order(
     column: MetricColumn, topic: str, measure_order: dict[str, tuple[int, int]]
 ) -> tuple[int, ...]:
-    """Order subjects and related measurements without reading display labels."""
+    """Sort subjects and related measures using stable catalog keys rather than display
+    labels.
+    """
     if column.scope in ("episode", "team"):
         section = 0
     elif column.scope == "team_recipient" or column.subject_role == "recipient":
@@ -1600,12 +1833,46 @@ def _row_order(
 
 
 def metric_order_key(column: MetricColumn, topic: str) -> tuple[int, ...]:
-    """Use the same subject and measure order in every table, including shared rows."""
+    """Return the stable row-order key for a metric within a topic.
+
+    Parameters
+    ----------
+    column : MetricColumn
+        Existing catalog column.
+    topic : str
+        Known display topic controlling any Ultimate-detail ordering.
+
+    Returns
+    -------
+    tuple[int, ...]
+        Integer tuple ordering scope, subjects, ability/status and related measures.
+
+    Notes
+    -----
+    Host-only. Shared rows keep the same subject/measure order across tables;
+    no numerical data or mutable display state is read.
+    """
     return _row_order(column, topic, _MEASURE_ORDER)
 
 
 def metric_csv_order(column: MetricColumn) -> tuple[int, ...]:
-    """Sort full columns by their fixed topic and table, after priority values."""
+    """Return a column's fixed topic/table/measurement sort key.
+
+    Parameters
+    ----------
+    column : MetricColumn
+        Existing catalog column.
+
+    Returns
+    -------
+    tuple[int, ...]
+        Integer tuple based on its canonical home and row-order key.
+
+    Notes
+    -----
+    Host-only; consumers use this while building the full schema, preserving
+    the separately declared priority prefix. This does not sort runtime rows.
+    """
     topic, view = metric_primary_location(column)
     return (
         _TOPIC_ORDER[topic],
@@ -1615,6 +1882,9 @@ def metric_csv_order(column: MetricColumn) -> tuple[int, ...]:
 
 
 def _prefix(scope: MetricScope, subjects: tuple[int, ...]) -> str:
+    """Build the stable CSV subject prefix from scope and configured team/global
+    slots.
+    """
     if scope == "episode":
         return ""
     if scope == "team":
@@ -1630,7 +1900,7 @@ def _prefix(scope: MetricScope, subjects: tuple[int, ...]) -> str:
 
 
 def _allocation_label(metric: DirectedMetric) -> str:
-    """Say which part of one agent's total went to one target."""
+    """Describe how much of one source's total went to the named recipient."""
     ability = (
         "Basic "
         if metric.key.startswith("basic_")
@@ -1691,7 +1961,7 @@ def _allocation_label(metric: DirectedMetric) -> str:
 def _directed_description(
     metric: DirectedMetric, scope: MetricScope, *, recipient: bool = False
 ) -> str:
-    """Explain the same measurement from the row's actual point of view."""
+    """Build role-correct wording for one directed amount/fraction view."""
     pair = scope == "source_recipient"
     rules = metric.description
     if recipient:
@@ -1831,7 +2101,9 @@ def _directed_description(
 
 @cache
 def _numerator(stem: str, scope: MetricScope, status_channel: int | None) -> str:
-    """Name the counted part of each non-directed ratio explicitly."""
+    """Describe the counted quantity for a known ratio stem and optional status
+    channel.
+    """
     subject = "this team" if scope == "team" else "this agent"
     destination = " to this target" if scope == "source_recipient" else ""
     quantities = {
@@ -1969,7 +2241,7 @@ def _numerator(stem: str, scope: MetricScope, status_channel: int | None) -> str
 
 
 def _team_words(text: str, scope: MetricScope, subjects: tuple[int, ...]) -> str:
-    """Start row text with a capital letter and name its team explicitly."""
+    """Replace generic subject wording with the fixed team named by this column."""
     text = text.strip()
     text = text[:1].upper() + text[1:]
     if scope == "episode":
@@ -1986,10 +2258,13 @@ def _team_words(text: str, scope: MetricScope, subjects: tuple[int, ...]) -> str
 
 
 def _measure_order(columns: list[MetricColumn]) -> dict[str, tuple[int, int]]:
-    """Put each amount beside its fractions and each count beside its rate."""
+    """Group each amount/count beside its related fractions/rates using stable stems."""
     order: dict[str, int] = {}
 
     def place(*stems: str | None) -> None:
+        """Assign the next position once per non-None stem while keeping first-use
+        order.
+        """
         for stem in stems:
             if stem is not None and stem not in order:
                 order[stem] = len(order)
@@ -2107,6 +2382,12 @@ def _measure_order(columns: list[MetricColumn]) -> dict[str, tuple[int, int]]:
 
 
 def _build_columns() -> tuple[MetricColumn, ...]:
+    """Build the complete immutable scalar schema in its declared order.
+
+    Expand fixed scopes and pair relations, retain the priority prefix, and reuse
+    shared totals deliberately. Duplicate names fail unless a caller explicitly
+    requests reuse. This host construction changes no numerical metric behavior.
+    """
     columns: list[MetricColumn] = []
     names: set[str] = set()
 
@@ -2135,6 +2416,13 @@ def _build_columns() -> tuple[MetricColumn, ...]:
         pair_description: str | None = None,
         team_denominator: str | None = None,
     ) -> None:
+        """Expand one scalar definition across its declared subjects.
+
+        Required fields supply the stem, label, family, unit and meaning. Optional
+        scope/class/target/ratio fields define applicability and readable missing-value
+        rules; team/pair wording overrides only those roles. reuse skips an existing
+        name, otherwise duplicates raise ValueError. Append only to this local builder.
+        """
         if name.startswith("solo_kill"):
             description += " " + _KILL_HELP_TICK_RULE
         if "effective" in name and "healing" in name:
@@ -5707,6 +5995,7 @@ _METRIC_SEARCH_RULES = (
 
 
 def _build_metric_search_terms() -> Mapping[str, tuple[str, ...]]:
+    """Build immutable search aliases and reject aliases for unknown metric stems."""
     known_stems = {column.stem for column in METRIC_COLUMNS}
     by_stem: dict[str, list[str]] = {}
     for terms, stems in _METRIC_SEARCH_RULES:
@@ -5723,7 +6012,22 @@ _METRIC_SEARCH_TERMS = _build_metric_search_terms()
 
 
 def metric_search_terms(column: MetricColumn) -> tuple[str, ...]:
-    """Other words researchers can use to find this measurement."""
+    """Return extra words that can find a catalog measurement.
+
+    Parameters
+    ----------
+    column : MetricColumn
+        Existing MetricColumn.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Ordered alias tuple for its stem, or () when no extra aliases are needed.
+
+    Notes
+    -----
+    Host-only lookup. Aliases affect search, not metric values or CSV identity.
+    """
     return _METRIC_SEARCH_TERMS.get(column.stem, ())
 
 
@@ -5767,11 +6071,26 @@ _SEARCH_KIND_BY_FAMILY = MappingProxyType(
 
 
 def metric_search_facts(column: MetricColumn) -> dict[str, object]:
-    """Describe search meaning without changing a scalar or guessing its actors.
+    """Describe a metric's search roles without guessing actual actors.
 
-    A class inside a status name names the effect, not its recorded caster.
-    Source and recipient slots stay in the existing scope and subjects fields.
-    These facts belong only in the once-per-replay catalog, never tick summaries.
+    Parameters
+    ----------
+    column : MetricColumn
+        Existing MetricColumn with a known catalog family/stem.
+
+    Returns
+    -------
+    dict[str, object]
+        Dict with kind, ability, status, status subject, possible source/recipient
+        classes, subject role, source kind, relation and qualifiers. None marks
+        facts the static meaning does not establish.
+
+    Notes
+    -----
+    Host-only metadata for a once-per-replay catalog, not per-tick computation.
+    Source/recipient slots remain in scope/subjects. A class name inside a
+    status identifies the effect, not its recorded caster; persistent status
+    rows therefore keep unknown source identity where required.
     """
     stem, family, scope = column.stem, column.family, column.scope
     contexts = (

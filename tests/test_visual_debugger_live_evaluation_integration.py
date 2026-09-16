@@ -1,4 +1,4 @@
-"""Transactional CP2/CP3 integration proofs for the live debugger service."""
+"""Check live debugger evaluation updates as one consistent operation."""
 
 from __future__ import annotations
 

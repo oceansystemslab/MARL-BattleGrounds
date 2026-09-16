@@ -1,4 +1,4 @@
-"""Truthful debugger launch/context bridge contracts."""
+"""Check the recorded context created when the debugger starts an episode."""
 
 from __future__ import annotations
 

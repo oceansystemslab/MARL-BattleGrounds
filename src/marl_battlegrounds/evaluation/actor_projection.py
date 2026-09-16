@@ -1,4 +1,10 @@
-"""Host-only actor-input reconstruction from immutable evaluation context."""
+"""Reconstruct recorded actor inputs without inventing extra information.
+
+These host boundaries use immutable episode context and captured base rows.
+Historical V2 class maps and V1 shared banks keep their declared projection;
+current V3 context supplies current relative class rows and redacted V2 banks.
+Numerical policy/JAX imports stay local until reconstruction is requested.
+"""
 
 from __future__ import annotations
 
@@ -51,14 +57,21 @@ type ClassIdsByAgentByTeamV2 = tuple[ActorClassIdsByTeamV2, ...]
 
 
 def _require_context(context: EvaluationEpisodeContext) -> None:
-    """Require the exact immutable context model used by this projection."""
+    """Require one of the exact immutable context versions supported by model
+    readers.
+    """
     evaluation_context_type(context)
 
 
 def _derive_class_ids_by_agent_by_team(
     context: EvaluationEpisodeContext,
 ) -> ClassIdsByAgentByTeamV2:
-    """Derive actor-relative class rows from serialized roster/mapping authority."""
+    """Build public class rows using recorded actor-relative slot mappings.
+
+    Return native Python tuples shaped (10, 2, 5): observer, ally/enemy team, row.
+    Configured inactive observers get zero rows. No hidden state or global slot
+    identifier is appended to the policy input.
+    """
     _require_context(context)
     catalog = context.static_mechanics_catalog
     roster = context.roster
@@ -84,7 +97,7 @@ def _derive_class_ids_by_agent_by_team(
 
 
 def _require_class_id_payload_shape(class_ids_by_agent_by_team: object) -> None:
-    """Require one frozen native-Python ``(10, 2, 5)`` integer payload."""
+    """Require frozen Python tuples shaped (10, 2, 5) with exact int leaves."""
     if type(class_ids_by_agent_by_team) is not tuple:
         raise ValueError("class IDs must have shape (10, 2, 5)")
     observer_payload = cast(tuple[object, ...], class_ids_by_agent_by_team)
@@ -110,7 +123,33 @@ def validate_class_ids_by_agent_by_team_against_context_v1(
     context: EvaluationEpisodeContext,
     class_ids_by_agent_by_team: object,
 ) -> None:
-    """Fail when a live public class map disagrees with immutable V1 context."""
+    """Check a public class-ID observation against its recorded roster.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact supported immutable episode context.
+    class_ids_by_agent_by_team : object
+        Native Python tuple tree shaped (10, 2, 5),
+        ordered observer, own/opposing team, actor-relative roster row.
+
+    Returns
+    -------
+    None
+        None when shape, exact integer types and every class row agree.
+
+    Raises
+    ------
+    TypeError
+        Context or a class ID has the wrong exact type.
+    ValueError
+        The tuple shape or any class assignment disagrees.
+
+    Notes
+    -----
+    Host-only and read-only. Inactive observer rows must be zero. This checks
+    the public roster map; it does not derive visibility or simulator state.
+    """
     _require_class_id_payload_shape(class_ids_by_agent_by_team)
     expected = _derive_class_ids_by_agent_by_team(context)
     if class_ids_by_agent_by_team != expected:
@@ -120,7 +159,7 @@ def validate_class_ids_by_agent_by_team_against_context_v1(
 def _require_no_shared_obs_projection_v2(
     context: EvaluationEpisodeContext,
 ) -> None:
-    """Require the exact supported information regime and projection identity."""
+    """Require the historical NoSharedObs V2 projection identity and mode."""
     _require_context(context)
     if context.execution_information_mode != "no_shared_obs":
         raise ValueError("actor projection V2 requires no_shared_obs execution")
@@ -133,7 +172,7 @@ def _require_no_shared_obs_projection_v2(
 def _require_shared_obs_projection_v1(
     context: EvaluationEpisodeContext,
 ) -> None:
-    """Require the exact structured SharedObs projection identity."""
+    """Require the historical SharedObs V1 projection identity and mode."""
     _require_context(context)
     if context.execution_information_mode != "shared_obs":
         raise ValueError("SharedObs projection V1 requires shared_obs execution")
@@ -148,11 +187,35 @@ def reconstruct_shared_obs_sensor_source_bank_v1(
     context: EvaluationEpisodeContext,
     frame: EvaluationFrameV1,
 ) -> SharedObsSensorSourceBankV1:
-    """Rebuild the policy source bank from recorded base rows without persisting it.
+    """Rebuild the historical two-team sensor bank from recorded base rows.
 
-    The return value is the policy-layer ``SharedObsSensorSourceBankV1``. The
-    local import keeps ordinary host-model imports isolated from policy/JAX
-    execution until reconstruction is explicitly requested.
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Immutable context declaring the SharedObs V1 projection.
+    frame : EvaluationFrameV1
+        Exact EvaluationFrameV1 for that episode, including recorded source
+        availability and base observation rows.
+
+    Returns
+    -------
+    SharedObsSensorSourceBankV1
+        SharedObsSensorSourceBankV1 with JAX array leaves. The leading source layout
+        follows both teams' recorded actor mappings. This is the shared bank before
+        per-recipient redaction; callers must enforce each recipient's permissions.
+
+    Raises
+    ------
+    TypeError
+        Context/frame has an unsupported exact type.
+    ValueError
+        Projection/mode, episode join or recorded availability is wrong.
+
+    Notes
+    -----
+    Host-only reconstruction with local numerical imports; it may create device
+    arrays. It reads captured rows and fixed mappings rather than rerunning
+    visibility or persisting duplicated actor inputs. Inputs remain unchanged.
     """
     _require_shared_obs_projection_v1(context)
     if type(frame) is not EvaluationFrameV1:
@@ -203,7 +266,31 @@ def reconstruct_shared_obs_sensor_source_bank_v1(
 def reconstruct_class_ids_by_agent_by_team_v2(
     context: EvaluationEpisodeContext,
 ) -> ClassIdsByAgentByTeamV2:
-    """Reconstruct the complete public ``(10, 2, 5)`` class-ID observation leaf."""
+    """Rebuild all historical NoSharedObs V2 public roster rows.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Immutable context declaring the NoSharedObs V2 projection.
+
+    Returns
+    -------
+    ClassIdsByAgentByTeamV2
+        Python int tuples shaped (10, 2, 5): observer, own/opposing team, roster row.
+        Inactive observers have zeros.
+
+    Raises
+    ------
+    TypeError
+        Context is not an exact supported model.
+    ValueError
+        Information mode or projection identity is incompatible.
+
+    Notes
+    -----
+    Host-only, deterministic and read-only. Global slots are used only for
+    reconstruction; they are not added to an actor's public row.
+    """
     _require_no_shared_obs_projection_v2(context)
     return _derive_class_ids_by_agent_by_team(context)
 
@@ -212,7 +299,32 @@ def reconstruct_actor_class_ids_by_team_v2(
     context: EvaluationEpisodeContext,
     global_slot: int,
 ) -> ActorClassIdsByTeamV2:
-    """Reconstruct one actor's public ``(2, 5)`` class-ID observation row."""
+    """Rebuild one historical NoSharedObs V2 actor's public roster rows.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Immutable context declaring the NoSharedObs V2 projection.
+    global_slot : int
+        Exact Python int in 0..9 selecting the observer internally.
+
+    Returns
+    -------
+    ActorClassIdsByTeamV2
+        Python int tuples shaped (2, 5), own team first and opponent team second.
+        An inactive observer receives zero rows.
+
+    Raises
+    ------
+    TypeError
+        Context is not an exact supported model.
+    ValueError
+        Projection/mode or global_slot is invalid.
+
+    Notes
+    -----
+    Host-only. The selector is not returned as extra policy information.
+    """
     _require_no_shared_obs_projection_v2(context)
     if type(global_slot) is not int or not 0 <= global_slot < MAX_AGENT_SLOTS_V1:
         raise ValueError("global_slot must be an exact integer in [0, 10)")
@@ -239,6 +351,9 @@ __all__ = (
 
 
 def _require_current_projection(context: EvaluationEpisodeContext) -> None:
+    """Require exact context V3 and the current projection matching its information
+    mode.
+    """
     if type(context) is not EvaluationEpisodeContextV3:
         raise TypeError("current actor reconstruction requires context V3")
     expected = (
@@ -253,7 +368,32 @@ def _require_current_projection(context: EvaluationEpisodeContext) -> None:
 def reconstruct_class_ids_by_agent_by_team_v3(
     context: EvaluationEpisodeContext,
 ) -> ClassIdsByAgentByTeamV2:
-    """Restore the unchanged static public class map from current context."""
+    """Rebuild the current public class map from exact V3 context.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        EvaluationEpisodeContextV3 with its matching current actor
+        projection, either SharedObs V2 or NoSharedObs V3.
+
+    Returns
+    -------
+    ClassIdsByAgentByTeamV2
+        Python int tuples shaped (10, 2, 5): observer, own/opposing team, row.
+        Inactive observer rows are zero.
+
+    Raises
+    ------
+    TypeError
+        Context is not exact V3.
+    ValueError
+        The projection does not match the declared information mode.
+
+    Notes
+    -----
+    Host-only and read-only. This public roster data is static context; no
+    unseen positions, visibility or privileged dynamics are reconstructed.
+    """
     _require_current_projection(context)
     return _derive_class_ids_by_agent_by_team(context)
 
@@ -261,7 +401,33 @@ def reconstruct_class_ids_by_agent_by_team_v3(
 def reconstruct_actor_class_ids_by_team_v3(
     context: EvaluationEpisodeContext, global_slot: int
 ) -> ActorClassIdsByTeamV2:
-    """Restore one actor's public class map without adding global IDs to input."""
+    """Rebuild one current actor's public class rows from exact V3 context.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        EvaluationEpisodeContextV3 with the matching current projection.
+    global_slot : int
+        Exact Python int in 0..9 selecting the observer internally.
+
+    Returns
+    -------
+    ActorClassIdsByTeamV2
+        Python int tuples shaped (2, 5), ordered own team then opponent team.
+        Inactive observers receive zero rows.
+
+    Raises
+    ------
+    TypeError
+        Context is not exact V3.
+    ValueError
+        The projection or slot is invalid.
+
+    Notes
+    -----
+    Host-only and read-only. The global selector never becomes an added actor
+    input; it only locates that actor's recorded relative rows.
+    """
     _require_current_projection(context)
     if type(global_slot) is not int or not 0 <= global_slot < MAX_AGENT_SLOTS_V1:
         raise ValueError("global_slot must be an exact integer in [0, 10)")
@@ -273,7 +439,39 @@ def reconstruct_shared_obs_sensor_source_bank_v2(
     frame: EvaluationFrameV2,
     selected_global_slot: int,
 ) -> SharedObsSensorSourceBankV2:
-    """Restore one current actor's authorized five-source bank from recorded rows."""
+    """Restore one current actor's permitted five-source sensor bank.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact EvaluationEpisodeContextV3 declaring SharedObs V2.
+    frame : EvaluationFrameV2
+        Exact EvaluationFrameV2 for the same episode, with a recorded
+        boolean (10, 10) recipient/source availability matrix.
+    selected_global_slot : int
+        Exact Python int in 0..9 selecting the recipient.
+
+    Returns
+    -------
+    SharedObsSensorSourceBankV2
+        SharedObsSensorSourceBankV2 with five team-source rows in the recipient's
+        recorded ally order. Float data is float32, visibility/admission is boolean;
+        unavailable source rows are masked by the policy-layer authority.
+
+    Raises
+    ------
+    TypeError
+        Context is not exact V3.
+    ValueError
+        Projection, mode, frame join, slot or availability is invalid,
+        including self, inactive or opposing sources declared as admitted.
+
+    Notes
+    -----
+    Host-only reconstruction creates JAX arrays and may transfer to the current
+    device. It uses captured source visibility and recorded mappings, then
+    redacts for this actor. It does not run game physics or edit the recording.
+    """
     _require_current_projection(context)
     if context.execution_information_mode != "shared_obs":
         raise ValueError("SharedObs reconstruction requires shared_obs execution")

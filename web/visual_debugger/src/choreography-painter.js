@@ -1,3 +1,11 @@
+/**
+ * @file Paint authorized combat plans into retained SVG and animation descriptions.
+ * SvgChoreographyPainter owns its three installation roots: foreground events,
+ * connectors and route underlays. It creates and updates DOM geometry, registers
+ * semantic tooltips and returns animation specs for CombatChoreographer to run.
+ * All event identity, positions, phases and layout come from the supplied plan;
+ * this module does not query simulator state, infer hidden bodies or submit actions.
+ */
 import {
   canonicalAgentIdentity,
   exactAuthorizedAgentIdentityV1,
@@ -18,6 +26,12 @@ import { resolveVisualToken } from "./vocabulary.js";
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
 /**
+ * Format a public agent label through the shared identity authority.
+ *
+ * publicAgentId is the fallback; identity defaults to null and, when supplied,
+ * takes precedence as the complete identity input. Return publicIdentity text.
+ * Internal slot numbers are never used as the fallback display identity.
+ *
  * @param {unknown} publicAgentId
  */
 function formatAgentIdentity(publicAgentId, identity = null) {
@@ -25,19 +39,41 @@ function formatAgentIdentity(publicAgentId, identity = null) {
     .publicIdentity;
 }
 
-/** @param {unknown} value */
+/**
+ * Return the exact authorized public identity title, or null.
+ *
+ * value is checked by exactAuthorizedAgentIdentityV1. Missing or invalid identity
+ * cannot be replaced with an internal slot or a guessed source.
+ *
+ * @param {unknown} value
+ */
 function authorizedIdentityTitle(value) {
   return exactAuthorizedAgentIdentityV1(value)?.title ?? null;
 }
 
-/** @param {unknown} value */
+/**
+ * Turn a machine event name into a simple title.
+ *
+ * value defaults to event when nullish, is stringified, then has underscores
+ * replaced and word initials capitalized. This fallback adds no event facts.
+ *
+ * @param {unknown} value
+ */
 function humanizeEventName(value) {
   return String(value ?? "event")
     .replaceAll("_", " ")
     .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
-/** @param {Record<string, any>} event */
+/**
+ * Return frozen title/summary text for an already admitted event.
+ *
+ * event.cueSemantic selects death, respawn, team wave or finite regeneration text.
+ * Other values use a humanized eventType and generic incoming-transition sentence.
+ * No scientific event is detected or reconstructed here.
+ *
+ * @param {Record<string, any>} event
+ */
 function semanticEventCopy(event) {
   if (event.cueSemantic === "agent_died") {
     return Object.freeze({
@@ -73,9 +109,15 @@ function semanticEventCopy(event) {
 }
 
 /**
- * Build one structured semantic explanation from fields already authorized in
- * the choreography plan. Internal slots may key DOM records, but never supply
- * display identity.
+ * Build a semantic tooltip from already authorized plan fields.
+ *
+ * event supplies identity, kind/tokens, lifecycle and optional application sources.
+ * Apply the visible paint-part view first. Death announcements use their dedicated
+ * explanation. Include source attribution only when the supplied exact public
+ * identities are valid; multiple applications require all source titles to be known.
+ * Return the shared semantic descriptor with title, summary and source/recipient
+ * rows. Slot IDs may key DOM records but never supply display names. The input is
+ * unchanged; shared descriptor/identity validation errors may propagate.
  *
  * @param {Record<string, any>} event
  */
@@ -216,10 +258,29 @@ export function explainChoreographyEvent(event) {
  */
 
 /**
- * Retained SVG painter for presentation-only choreography plans.
+ * Own retained SVG for one controller's authorized combat explanations.
+ *
+ * install appends three owned roots and returns their mutable installation record.
+ * settle keeps persistent or explicitly retained explanations; clear removes only
+ * these roots. reproject updates supported geometry in place so browser animations
+ * keep their element identity. The controller owns actual animation handles/clocks.
  */
 export class SvgChoreographyPainter {
   /**
+   * Build and append one bounded SVG installation from an authorized plan.
+   *
+   * plan supplies ordered events, identity, timing and resource bounds. surface gives
+   * ownerDocument, foreground layer, optional routeLayer (defaults to layer) and
+   * viewportKey. options supplies motionMode, renderPolicy, settled and persistentOnly;
+   * retainTransientOnSettle is honored only when initially settled.
+   *
+   * Skip nonspatial/unknown rows and, in persistent-only mode, nonpersistent rows.
+   * Return a mutable installation with its roots, event map, frozen animation specs
+   * and counted nodes. Specs are not started here. Exceeding planned node/animation
+   * bounds throws RangeError before the roots are appended. DOM/descriptor errors
+   * propagate. The caller owns clear/settle and must remove an old authority before
+   * installing a replacement.
+   *
    * @param {JsonRecord} plan
    * @param {JsonRecord} surface
    * @param {PainterOptions} options
@@ -360,6 +421,12 @@ export class SvgChoreographyPainter {
   }
 
   /**
+   * Remove only the three roots owned by installation.
+   *
+   * installation may be null; _reason is an optional compatibility argument and is
+   * unused. Return undefined. This removes DOM but does not cancel animation handles
+   * or clear the installation object; the controller owns those resources.
+   *
    * @param {PainterInstallation | null} installation
    * @param {string} [_reason]
    */
@@ -370,6 +437,13 @@ export class SvgChoreographyPainter {
   }
 
   /**
+   * Mark this installation settled and remove its nonretained transient nodes.
+   *
+   * installation is the mutable result of install. Persistent events, or all events
+   * when retainTransientOnSettle is true, become fully opaque with settled metadata.
+   * Other event groups/connectors/underlays are removed from DOM and eventNodes.
+   * Return undefined; animation handles and original count/spec fields are unchanged.
+   *
    * @param {PainterInstallation} installation
    */
   settle(installation) {
@@ -400,7 +474,13 @@ export class SvgChoreographyPainter {
   }
 
   /**
-   * Update geometry in place so active WAAPI objects retain current time.
+   * Apply a new layout to retained event elements without restarting clocks.
+   *
+   * installation is active, plan describes the same authorized content with updated
+   * geometry, and surface provides the new viewportKey. Update viewport metadata and
+   * supported event geometry; remove existing events that are now absent/nonspatial.
+   * No new event subtree or animation is installed here. Return undefined. The caller
+   * owns identity compatibility and any rebuild needed for changed content.
    *
    * @param {PainterInstallation} installation
    * @param {JsonRecord} plan
@@ -427,6 +507,15 @@ export class SvgChoreographyPainter {
   }
 
   /**
+   * Create one event subtree and append its animation descriptions.
+   *
+   * ownerDocument creates SVG; event is an admitted spatial plan row; plan supplies
+   * phases; options supplies motion/render/settlement choices; animationSpecs is the
+   * caller's mutable output array. Return {group, connector, underlay}, with null
+   * unused layers, or null for unsupported/cooldown-start rows. Register matching
+   * semantic owners and layout metadata. Reduced motion rescales phase times; settled
+   * and off modes add no generic fade specs. No Web Animation is started here.
+   *
    * @param {Document} ownerDocument
    * @param {JsonRecord} event
    * @param {JsonRecord} plan
@@ -630,6 +719,15 @@ export class SvgChoreographyPainter {
   }
 
   /**
+   * Paint an accepted activation as a route, target impact or source-local cue.
+   *
+   * ownerDocument creates nodes in group, connector and optional underlay. event owns
+   * anchors, route, paintParts, token and allocation metadata. plan supplies timing;
+   * options selects motion/settlement; append specs to animationSpecs when needed.
+   * Normal unsettled routes may add a moving particle. Charge labels use public IDs;
+   * source-local Mage Burst gets its registered wave. Disabled/missing geometry is
+   * omitted. Return undefined; do not infer a target, route or game outcome.
+   *
    * @param {Document} ownerDocument
    * @param {SVGElement} group
    * @param {SVGElement} connector
@@ -911,6 +1009,13 @@ export class SvgChoreographyPainter {
   }
 
   /**
+   * Append enabled ability/semantic marks at a supplied impact anchor.
+   *
+   * ownerDocument creates SVG under group. target is a screen point or null, and event
+   * supplies token/paint choices. Return the new impact group, or null when the anchor
+   * is absent or both pieces are disabled. Shapes use registered footprints and the
+   * presentation-only impactTransform; no event or anchor is inferred.
+   *
    * @param {Document} ownerDocument
    * @param {SVGElement} group
    * @param {JsonRecord | null} target
@@ -1014,6 +1119,13 @@ export class SvgChoreographyPainter {
   }
 
   /**
+   * Append an impact fade spec for a positive authored display interval.
+   *
+   * impact may be null; event/plan supply impact and phase-end milliseconds. options
+   * selects normal/reduced/off and settled state; animationSpecs is mutated only when
+   * an animation is needed. Reduced motion rescales the interval. Null, settled, off
+   * or nonpositive intervals do nothing. Return undefined; no animation starts here.
+   *
    * @param {SVGElement | null} impact
    * @param {JsonRecord} event
    * @param {JsonRecord} plan
@@ -1058,8 +1170,12 @@ export class SvgChoreographyPainter {
   }
 
   /**
-   * Attach authorized-data-only explanations to the visible event and its
-   * independently layered route hit region.
+   * Bind matching semantic tooltips to a visible event and optional route underlay.
+   *
+   * group is the keyboard-focusable semantic owner; underlay may be null. event already
+   * contains authorized facts and filter pieces. Choose activation, health or general
+   * explanation accordingly, set accessible labels, and register both hit surfaces.
+   * Return undefined. Identity/data validation errors propagate; no hidden lookup occurs.
    *
    * @param {SVGElement} group
    * @param {SVGElement | null} underlay
@@ -1095,6 +1211,14 @@ export class SvgChoreographyPainter {
   }
 
   /**
+   * Paint selected health-change labels at an allocated recipient cue.
+   *
+   * ownerDocument creates nodes in group and connector. event supplies recipient,
+   * netDelta/outcome, optional public identity, paintParts and allocator geometry.
+   * Missing recipient does nothing. Add only enabled recipient/battle text, keep a hit
+   * surface and update its bounds/leader through updateNetGeometry. Primary pointer
+   * down on the hit region does not trigger a parent action. Return undefined.
+   *
    * @param {Document} ownerDocument
    * @param {SVGElement} group
    * @param {SVGElement} connector
@@ -1151,9 +1275,13 @@ export class SvgChoreographyPainter {
   }
 
   /**
-   * Paint one successor-anchored regeneration result with the same universal
-   * plus grammar as Priest healing. Its collision-packed cue remains linked to
-   * the exact authorized agent endpoint without inventing a route or source.
+   * Paint a recorded regeneration result beside its disclosed recipient.
+   *
+   * ownerDocument creates nodes in group/connector. event must supply recipient and
+   * finite value; otherwise do nothing. Respect effect/battleText filters, use the
+   * shared healing plus, and retain an allocated leader to the exact endpoint. Text
+   * compression preserves full text content. Return undefined; no healer or movement
+   * route is inferred.
    *
    * @param {Document} ownerDocument
    * @param {SVGElement} group
@@ -1231,6 +1359,14 @@ export class SvgChoreographyPainter {
   }
 
   /**
+   * Paint a filtered status change at its allocated recipient location.
+   *
+   * ownerDocument creates nodes in group/connector; event supplies recipient, token,
+   * lifecycle, paintParts and layout. Missing recipient does nothing. Render the status
+   * and change symbol, or the distinct break/death-clear mark, only when enabled.
+   * Keep the leader tied to the supplied recipient and stop primary pointerdown on
+   * the hit region. Return undefined; lifecycle meaning comes from the plan.
+   *
    * @param {Document} ownerDocument
    * @param {SVGElement} group
    * @param {SVGElement} connector
@@ -1344,8 +1480,13 @@ export class SvgChoreographyPainter {
   }
 
   /**
-   * Render a compact, event-specific pulse at an anchor supplied directly by
-   * the V2 visual adapter (or by the presentation-only team-clock corner).
+   * Paint one admitted pulse, life-state ring, team wave or death HUD.
+   *
+   * ownerDocument creates nodes in group and connector; event owns anchor/semantic and
+   * layout. plan/options supply timing and motion; animationSpecs receives any ring
+   * specs. Cooldown-start or absent-anchor rows do nothing. Dispatch special cases to
+   * their shared painters and otherwise draw a compact pulse at cue or anchor. Return
+   * undefined. Team corners are display positions, not simulator body locations.
    *
    * @param {Document} ownerDocument
    * @param {SVGElement} group
@@ -1451,9 +1592,13 @@ export class SvgChoreographyPainter {
   }
 
   /**
-   * Render one successor-anchored outward lifecycle ring. The DOM radius is
-   * the settled endpoint; only normal motion animates the child circle from a
-   * smaller radius, so reduced/off/settled modes never show an inward state.
+   * Paint an outward death or respawn ring at the authorized successor anchor.
+   *
+   * ownerDocument creates nodes under group; event supplies the anchor and phase.
+   * plan supplies fallback timing, options selects motion/settlement, and animationSpecs
+   * receives a ring-radius spec only for normal unsettled positive-duration motion.
+   * The DOM radius is already the final size, so reduced/off/settled views never show
+   * an inward intermediate state. Return undefined.
    *
    * @param {Document} ownerDocument
    * @param {SVGElement} group
@@ -1516,9 +1661,11 @@ export class SvgChoreographyPainter {
   }
 
   /**
-   * Render one compact persistent wave banner at its authorized team side.
-   * The banner itself is the event hit surface; its text is not a second
-   * tooltip or scientific owner.
+   * Append one persistent team-wave banner at its planned screen location.
+   *
+   * ownerDocument creates nodes under group. event supplies team identity, label,
+   * allocation and cue/anchor. Use the shared fixed footprint; the banner is the event
+   * hit surface and its text has no separate scientific owner. Return undefined.
    *
    * @param {Document} ownerDocument
    * @param {SVGElement} group
@@ -1564,7 +1711,15 @@ export class SvgChoreographyPainter {
     });
   }
 
-  /** Bounded team HUD with complete identities, on the existing transition clock.
+  /**
+   * Append the bounded team death HUD with full public identities and tooltips.
+   *
+   * ownerDocument creates nodes under group. event supplies panel dimensions/anchor,
+   * label, prewrapped textRows and matching members with contributor evidence. Each
+   * victim receives a focused explanation; missing attribution stays neutral as planned.
+   * Return undefined. This uses the existing transition clock and no world-space body
+   * position or actor-input permission is added.
+   *
    * @param {Document} ownerDocument @param {SVGElement} group @param {JsonRecord} event
    */
   #renderDeathAnnouncement(ownerDocument, group, event) {
@@ -1639,9 +1794,11 @@ export class SvgChoreographyPainter {
   }
 
   /**
-   * Paint the later route over a small battlefield-coloured backplate at each
-   * allocator-authored crossing. The transparent route hit path stays whole,
-   * so bridge treatment never fragments semantic inspection.
+   * Replace crossing backplates while preserving the continuous route hit path.
+   *
+   * underlay may be null and route may omit bridgeGaps. Remove prior backplates, then
+   * add circles only for finite positive-gap allocator records before the visible path.
+   * Invalid gap rows are skipped. Return undefined; no crossings are discovered here.
    *
    * @param {SVGElement | null} underlay
    * @param {JsonRecord | null | undefined} route
@@ -1681,6 +1838,14 @@ export class SvgChoreographyPainter {
   }
 
   /**
+   * Update supported retained event geometry from a compatible new plan row.
+   *
+   * group, optional connector and optional underlay are existing SVG nodes; event
+   * contains new allocated points/route metadata. Update activation, health, status,
+   * regeneration and pulse geometry plus crossing backplates. Existing animation
+   * objects keep their elements. Return undefined; content and authority changes need
+   * a separate installation rather than this geometry update.
+   *
    * @param {SVGElement} group
    * @param {SVGElement | null} connector
    * @param {SVGElement | null} underlay
@@ -1763,6 +1928,13 @@ export class SvgChoreographyPainter {
   }
 
   /**
+   * Reproject route, impact, local glyph and Charge label within existing nodes.
+   *
+   * group/connector/underlay belong to one event; event supplies the new geometry.
+   * Update path/hit data, reconcile direction-arrow count, move allocation-owned labels
+   * and leaders, and update an existing particle's offset path. Return undefined.
+   * No action endpoint is reconstructed and animation progress is not restarted.
+   *
    * @param {SVGElement} group
    * @param {SVGElement | null} connector
    * @param {SVGElement | null} underlay
@@ -1858,9 +2030,13 @@ export class SvgChoreographyPainter {
   }
 
   /**
-   * Keep a Charge ownership pill associated with its route while respecting
-   * the collision-aware plan. The leader is only needed when dense geometry
-   * displaces the pill away from its route anchor.
+   * Keep the Charge public-ID label attached to its planned route anchor.
+   *
+   * ownership is the existing label element and event supplies ownership cue/anchor,
+   * optional allocated leader and layout metadata. Hide it when either endpoint is
+   * absent. Prefer the allocator's leader; otherwise draw a local connector only when
+   * the label is displaced by more than four pixels. Return undefined. Labels never
+   * use this geometry to infer source or target identity.
    *
    * @param {Element} ownership
    * @param {JsonRecord} event
@@ -1932,6 +2108,13 @@ export class SvgChoreographyPainter {
   }
 
   /**
+   * Place existing health-change hit/text nodes inside their allocated cue.
+   *
+   * group/connector belong to the event. event supplies recipient, cue bounds/position,
+   * lane and optional leader. Without recipient do nothing. Invalid bounds hide the
+   * hit box; missing cue position uses the existing recipient/lane fallback. Compress
+   * long labels without changing text, then update the leader. Return undefined.
+   *
    * @param {SVGElement} group
    * @param {SVGElement | null} connector
    * @param {JsonRecord} event
@@ -2001,8 +2184,12 @@ export class SvgChoreographyPainter {
   }
 
   /**
-   * Retain collision-suppressed outcome nodes so resize reprojection can reveal
-   * them without replacing the event subtree or restarting its animation.
+   * Publish the plan's display disposition and clear stale hidden attributes.
+   *
+   * group is retained SVG; event supplies cue, impact or source disposition in that
+   * priority order, defaulting to rendered. Set data-spatial-disposition and remove
+   * visibility/aria-hidden. Return undefined. This helper records layout state; it
+   * does not suppress a row or grant new spatial authority.
    *
    * @param {SVGElement} group
    * @param {Record<string, any>} event
@@ -2020,8 +2207,12 @@ export class SvgChoreographyPainter {
   }
 
   /**
-   * Keep displaced recipient cues visibly associated without covering their
-   * glyph or label.
+   * Update the connector linking a displaced cue to its disclosed recipient.
+   *
+   * connector may be null; event supplies cueLeader or recipient/cue points. Prefer a
+   * valid allocated leader; otherwise update the existing line from recipient to cue.
+   * When points are absent, remove its x endpoints. Return undefined without creating
+   * new scientific anchors or moving the recipient.
    *
    * @param {SVGElement | null} connector
    * @param {JsonRecord} event
@@ -2050,6 +2241,12 @@ export class SvgChoreographyPainter {
 }
 
 /**
+ * Create a detached SVG element with supplied presentation attributes.
+ *
+ * ownerDocument owns the node, tagName selects its SVG tag, and attributes defaults
+ * to an empty object. Return the element after setAttributes; browser DOM errors
+ * propagate. The caller decides where to append it.
+ *
  * @param {Document} ownerDocument
  * @param {string} tagName
  * @param {Record<string, string | number | boolean | null | undefined>} attributes
@@ -2061,6 +2258,11 @@ function svgElement(ownerDocument, tagName, attributes = {}) {
 }
 
 /**
+ * Apply a presentation attribute map to an existing element.
+ *
+ * Remove names whose value is null, undefined or false; stringify all other values.
+ * Return undefined. This mutates DOM and performs no value/authority sanitization.
+ *
  * @param {Element} element
  * @param {Record<string, string | number | boolean | null | undefined>} attributes
  */
@@ -2075,6 +2277,11 @@ function setAttributes(element, attributes) {
 }
 
 /**
+ * Attach an integer value as the role-specific internal slot dataset field.
+ *
+ * group is an SVG node and role names source/target/etc. Nonintegers do nothing;
+ * no range/roster validation is performed. This metadata never supplies display IDs.
+ *
  * @param {SVGElement} group
  * @param {string} role
  * @param {unknown} value
@@ -2086,6 +2293,11 @@ function assignSlot(group, role, value) {
 }
 
 /**
+ * Attach a nonempty string value to the role-specific presentation-key field.
+ *
+ * group is SVG and role names the relationship. Other values do nothing; old values
+ * are not removed. The caller already owns disclosure and key validity.
+ *
  * @param {SVGElement} group
  * @param {string} role
  * @param {unknown} value
@@ -2097,6 +2309,10 @@ function assignPresentationKey(group, role, value) {
 }
 
 /**
+ * Attach nonempty string value as element's data-layout-key.
+ *
+ * Other values do nothing and do not clear an older key. This is display metadata.
+ *
  * @param {Element} element
  * @param {unknown} value
  */
@@ -2107,9 +2323,12 @@ function assignLayoutKey(element, value) {
 }
 
 /**
- * Publish allocator geometry on its visible semantic owner. These attributes
- * describe the reserved cue rectangle; decorative leaders are deliberately
- * outside that box.
+ * Publish allocator metadata on its visible semantic owner.
+ *
+ * element receives a nonempty layoutKey, finite bounds edges, optional nonempty
+ * disposition and Boolean collisionFree. Missing/invalid pieces are skipped rather
+ * than removing old attributes. Return undefined. Bounds describe the reserved cue
+ * rectangle; decorative leaders may extend outside it. No layout is solved here.
  *
  * @param {Element} element
  * @param {unknown} layoutKey
@@ -2137,6 +2356,12 @@ function assignLayoutPlacement(element, layoutKey, bounds, disposition, collisio
 }
 
 /**
+ * Create and append a line for valid allocator-supplied endpoints.
+ *
+ * ownerDocument creates the node under parent with className. leader must contain
+ * finite start/end; otherwise return null. origin defaults to {x:0,y:0} and converts
+ * absolute screen coordinates into the parent's local coordinates. Return the line.
+ *
  * @param {Document} ownerDocument
  * @param {Element} parent
  * @param {string} className
@@ -2163,6 +2388,13 @@ function appendAllocatedLeader(
 }
 
 /**
+ * Update or hide an existing selected leader under parent.
+ *
+ * parent may be null; selector identifies an existing SVG element. Invalid leader
+ * hides it; absent elements are not created. A non-line is replaced with an SVG line
+ * retaining its class. origin defaults to zero for coordinate conversion. Return
+ * undefined; a failed SVG replacement type check throws TypeError.
+ *
  * @param {Element | null} parent
  * @param {string} selector
  * @param {unknown} leader
@@ -2196,6 +2428,11 @@ function syncAllocatedLeader(parent, selector, leader, origin = { x: 0, y: 0 }) 
 }
 
 /**
+ * Return the supplied start/end references for a valid leader, or an empty array.
+ *
+ * leader needs four finite numeric coordinates. The array is new, but its point
+ * objects are not copied or frozen by this helper.
+ *
  * @param {unknown} leader
  * @returns {Array<{x: number, y: number}>}
  */
@@ -2208,6 +2445,12 @@ function allocatedLeaderPoints(leader) {
 }
 
 /**
+ * Write a valid leader as local line endpoints and inspection metadata.
+ *
+ * element is SVG; leader contains finite start/end; origin is a caller-validated
+ * finite point subtracted from both. Set x/y endpoints, record JSON points and remove
+ * path d. Invalid leader endpoints throw TypeError. Return undefined; inputs are unchanged.
+ *
  * @param {SVGElement} element
  * @param {Record<string, any>} leader
  * @param {{x: number, y: number}} origin
@@ -2233,6 +2476,10 @@ function setAllocatedLeaderGeometry(element, leader, origin) {
 }
 
 /**
+ * Return whether value provides finite start/end x/y numbers.
+ *
+ * Extra fields are ignored. This is a shape check, not layout or authority validation.
+ *
  * @param {unknown} value
  * @returns {value is {start: {x: number, y: number}, end: {x: number, y: number}}}
  */
@@ -2250,8 +2497,10 @@ function isAllocatedLeader(value) {
 }
 
 /**
- * Copy only inert event metadata to the route underlay. Presentation geometry
- * remains split while semantic inspection retains one keyed identity.
+ * Copy every data-* attribute from source to target.
+ *
+ * Both are owned SVG nodes. Other attributes and absent source fields are not copied
+ * or removed. Return undefined; the source metadata must already be safe to disclose.
  *
  * @param {SVGElement} source
  * @param {SVGElement} target
@@ -2265,6 +2514,11 @@ function copyEventMetadata(source, target) {
 }
 
 /**
+ * Return a CSS suffix for a lowercase letter/digit/underscore string.
+ *
+ * Replace underscores with hyphens. Any other value returns unknown; no HTML or
+ * CSS selector text is evaluated.
+ *
  * @param {unknown} value
  */
 function cssIdentifier(value) {
@@ -2274,9 +2528,11 @@ function cssIdentifier(value) {
 }
 
 /**
- * Render one intentionally non-numeric recipient mark. Damage and healing use
- * the universal minus/plus grammar; status-only or unknown activations fail
- * closed to a neutral diamond.
+ * Create a detached nonnumeric damage, healing or neutral recipient mark.
+ *
+ * ownerDocument creates SVG. value damage gives a minus, healing gives a plus, and
+ * all other values give a neutral diamond. Return the group; no magnitude or outcome
+ * is inferred from this display token.
  *
  * @param {Document} ownerDocument
  * @param {unknown} value
@@ -2317,9 +2573,11 @@ function semanticImpactGlyph(ownerDocument, value) {
 }
 
 /**
- * Keep the largest Ultimate ornaments outside the body they identify. Route
- * planning supplies an exterior impact port; this local scale bounds only the
- * transient flare and does not alter the authoritative source or recipient.
+ * Return a screen translation and display-only scale for an impact glyph.
+ *
+ * event token selects bounded Trap/Charge ornaments; four or more coincident Basic
+ * routes use a smaller Basic mark. anchor supplies the already authorized screen
+ * point. The transform does not alter source/recipient identity or route endpoints.
  *
  * @param {Record<string, any>} event
  * @param {Record<string, any>} anchor
@@ -2338,6 +2596,11 @@ function impactTransform(event, anchor) {
 }
 
 /**
+ * Return the event's semantic DOM phase label.
+ *
+ * event kind/semantic selects regeneration, pulse, outcome, target-only impact or
+ * activation. This label is for presentation inspection, not simulator phase logic.
+ *
  * @param {Record<string, any>} event
  */
 function phaseFor(event) {
@@ -2357,6 +2620,12 @@ function phaseFor(event) {
 }
 
 /**
+ * Format a compact signed health-change label without hiding a tiny nonzero value.
+ *
+ * delta is the recorded finite net change; outcome unchanged or exact zero returns
+ * HP unchanged. Other values use NET plus/minus; a magnitude rounded to zero is
+ * shown as <0.01. This formats the input and does not recompute combat resolution.
+ *
  * @param {number} delta
  * @param {string} outcome
  */
@@ -2370,9 +2639,12 @@ function netLabel(delta, outcome) {
 }
 
 /**
- * Compress only labels whose character count can exceed their frozen cue.
- * Exact authorized text remains the text node content and semantic owner copy;
- * SVG glyph spacing is the presentation-only bounded representation.
+ * Compress long visible SVG text without changing its full text content.
+ *
+ * element is a text owner, text supplies its Unicode character count, maximumLength
+ * is a pixel width and naturalCharacterLimit is the uncompressed length threshold.
+ * Set textLength/lengthAdjust only when both limits call for compression; otherwise
+ * remove them. Return undefined. Semantic tooltip text remains complete.
  *
  * @param {Element} element
  * @param {string} text
@@ -2392,9 +2664,10 @@ function constrainCompactText(element, text, maximumLength, naturalCharacterLimi
 }
 
 /**
- * Plans built before local visual filters existed remain all-on at this narrow
- * rendering boundary. Current plans carry an exact frozen boolean part map;
- * an omitted key in that map fails closed.
+ * Return whether the event's named paint part is enabled.
+ *
+ * event without an object paintParts uses legacy all-on behavior. Otherwise only
+ * an exact true at part enables it; missing keys fail closed. No filter is mutated.
  *
  * @param {JsonRecord} event
  * @param {string} part
@@ -2407,9 +2680,13 @@ function paintPartEnabled(event, part) {
 }
 
 /**
- * Keep tooltip semantics on the same side of a multipart filter gate as their
- * visible owner. Scientific event identity remains on the original plan row;
- * this shallow view exists only for explanatory copy.
+ * Return a shallow explanatory view matching the visible paint grammar.
+ *
+ * event is unchanged. When activation ability paint is hidden, omit its token and
+ * use the impact semantic as eventType. When health recipient text is hidden, clear
+ * recipientPublicAgentId in the view. Refresh/reapply lifecycle variants use the
+ * ordinary applied explanation. Otherwise return event itself. This is display-copy
+ * selection, not authorization or deletion of the original scientific identity.
  *
  * @param {JsonRecord} event
  */
@@ -2443,6 +2720,12 @@ function paintAwareExplanationEvent(event) {
 }
 
 /**
+ * Return opacity keyframes for the planned event and motion mode.
+ *
+ * event.persistent decides whether the final opacity remains one, except normal
+ * net-health fades always end at zero. motionMode is normal/reduced/off; the caller
+ * decides whether to schedule these frames. No browser animation starts here.
+ *
  * @param {JsonRecord} event
  * @param {"normal" | "reduced" | "off"} motionMode
  * @returns {Keyframe[]}
@@ -2465,6 +2748,13 @@ function eventKeyframes(event, motionMode) {
 }
 
 /**
+ * Package a deterministic animation description without starting it.
+ *
+ * element is the target, keyframes supplies browser frames, options gives browser
+ * timing, and plan/event/part form its stable ID. Return a frozen spec; options is
+ * frozen in place while element/keyframes remain shared references. The controller
+ * creates and owns the eventual browser animation.
+ *
  * @param {Element} element
  * @param {Keyframe[] | PropertyIndexedKeyframes} keyframes
  * @param {KeyframeAnimationOptions} options

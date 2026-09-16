@@ -1,4 +1,10 @@
-"""Self-contained replays: recorded trajectories and provenance, without metrics."""
+"""Build and validate self-contained V2 replay records without metric sidecars.
+
+Legacy frames keep their exact V1 observation layout. Builders seal captured
+frames/transitions with source/runtime identity and completion evidence;
+references describe their original canonical bytes. Shared private helpers
+also serve V3 capture while keeping explicit version roots separate.
+"""
 
 from __future__ import annotations
 
@@ -47,7 +53,35 @@ type _Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 def context_v2(
     context: EvaluationEpisodeContext, *, scenario_name: str | None = None
 ) -> EvaluationEpisodeContextV2:
-    """Keep known legacy provenance when recording a new V2 artifact."""
+    """Carry supported legacy context into the V2 recording schema.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact supported episode context with schema version 1 or 2.
+    scenario_name : str | None
+        Optional descriptive scenario name. None preserves an
+        existing V2 context or leaves the converted V1 name absent.
+
+    Returns
+    -------
+    EvaluationEpisodeContextV2
+        EvaluationEpisodeContextV2. Existing V2 context is reused when no new name
+        is supplied. V1 conversion keeps known provenance, updates schema bindings
+        and records assigned policies as frozen without invented training history.
+
+    Raises
+    ------
+    TypeError
+        Context has an unsupported exact model type.
+    ValueError
+        Context is current V3 or converted metadata violates V2.
+
+    Notes
+    -----
+    Host-only and read-only. This is legacy recording conversion, not permission
+    to downgrade the current actor-information contract.
+    """
     evaluation_context_type(context)
     if context.schema_version not in (1, 2):
         raise ValueError("legacy V2 recording cannot change a current input contract")
@@ -88,7 +122,42 @@ def context_v2(
 
 
 class ReplayArtifactHeaderV2(EvaluationModel):
-    """Recorded environment, policy and runtime identity for one trajectory."""
+    """V2 replay identity, capture bounds and runtime description.
+
+    Attributes
+    ----------
+    schema_id : Literal['marl_battlegrounds.evaluation.replay_header']
+        Fixed replay-header schema identifier.
+    schema_version : Literal[2]
+        Fixed integer 2.
+    header_id : _Identifier
+        Episode identity followed by :replay-header.
+    canonical_json_profile : Literal['marl_battlegrounds.canonical_json.v1']
+        Fixed canonical JSON encoding profile.
+    context : EvaluationEpisodeContextV2
+        Exact V2 recorded environment/policy context.
+    context_digest_sha256 : _Digest
+        Canonical digest of that context.
+    expected_transition_count : _Positive
+        Positive horizon declared by the context.
+    recorded_transition_count : _Count
+        Captured transition count, from zero to horizon.
+    recorded_frame_count : _Positive
+        Exactly recorded_transition_count + 1.
+    first_frame_id : _Identifier
+        Initial frame identity at index zero.
+    last_frame_id : _Identifier
+        Final captured frame identity at the transition count.
+    runtime_provenance : RuntimeProvenanceV1
+        Actual runtime with the same package version as source.
+    wrapper_stack : tuple[ReplayWrapperMetadataV1, ...]
+        Ordered wrapper metadata, default (); positions are 0..N-1.
+
+    Notes
+    -----
+    Frozen host model. Validation rejects mismatched identities/counts, source
+    versions or wrapper order. It describes captured evidence, not future work.
+    """
 
     schema_id: Literal["marl_battlegrounds.evaluation.replay_header"] = (
         "marl_battlegrounds.evaluation.replay_header"
@@ -110,6 +179,9 @@ class ReplayArtifactHeaderV2(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_header(self) -> ReplayArtifactHeaderV2:
+        """Require coherent context, horizon, frame bounds, runtime version and wrapper
+        order.
+        """
         episode_id = self.context.identity.episode_id
         if self.header_id != f"{episode_id}:replay-header":
             raise ValueError("replay header must join its episode")
@@ -139,7 +211,35 @@ class ReplayArtifactHeaderV2(EvaluationModel):
 
 
 class ReplayArtifactV2(EvaluationModel):
-    """A strict, content-addressed trajectory with no metric-report dependency."""
+    """Strict V2 captured trajectory with canonical content identity.
+
+    Attributes
+    ----------
+    schema_id : Literal['marl_battlegrounds.evaluation.replay_artifact']
+        Fixed replay-artifact schema identifier.
+    schema_version : Literal[2]
+        Fixed integer 2.
+    artifact_id : _Identifier
+        Episode identity followed by :replay.
+    canonical_digest_sha256 : _Digest
+        Digest of the artifact excluding this digest field.
+    trajectory_content_digest_sha256 : _Digest
+        Digest of header/completion/frames/transitions.
+    header : ReplayArtifactHeaderV2
+        Validated V2 identity and capture bounds.
+    completion : EvaluationEpisodeCompletionV1
+        Recorded prefix completion and failure information.
+    frames : tuple[EvaluationFrameV1, ...]
+        Tuple of exact V1 frames; T transitions require T+1 frames.
+    transitions : tuple[EvaluationTransitionV1, ...]
+        Contiguous V1 transition records joining those frames.
+
+    Notes
+    -----
+    Frozen host model. Validation checks sequential frame/transition identities,
+    simulator epochs, information regime, final flags and both digests. No
+    transition may follow a terminal one. Metrics and file paths are absent.
+    """
 
     schema_id: Literal["marl_battlegrounds.evaluation.replay_artifact"] = (
         "marl_battlegrounds.evaluation.replay_artifact"
@@ -155,6 +255,9 @@ class ReplayArtifactV2(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_artifact(self) -> ReplayArtifactV2:
+        """Check captured sequence joins, completion flags and canonical content
+        digests.
+        """
         episode_id = self.header.context.identity.episode_id
         count = len(self.transitions)
         if self.artifact_id != f"{episode_id}:replay":
@@ -227,6 +330,7 @@ class ReplayArtifactV2(EvaluationModel):
         return self
 
     def _trajectory_payload(self) -> dict[str, object]:
+        """Return the four content fields covered by the trajectory digest."""
         return {
             "header": self.header,
             "completion": self.completion,
@@ -236,7 +340,34 @@ class ReplayArtifactV2(EvaluationModel):
 
 
 class ReplayArtifactReferenceV2(EvaluationModel):
-    """Path-free provenance retaining the real V2 replay identity."""
+    """Path-free reference to original canonical V2 replay bytes.
+
+    Attributes
+    ----------
+    artifact_id : _Identifier
+        Recorded episode identity followed by :replay.
+    episode_id : _Identifier
+        Recorded episode identity.
+    context_digest_sha256 : _Digest
+        Digest of the recorded context.
+    trajectory_content_digest_sha256 : _Digest
+        Digest of trajectory content.
+    canonical_digest_sha256 : _Digest
+        Digest of the full canonical artifact.
+    canonical_byte_length : _Positive
+        Positive length of its canonical JSON bytes.
+    schema_version : Literal[2]
+        Fixed reference version 2.
+    replay_schema_version : Literal[2]
+        Fixed replay version 2.
+    schema_id : Literal['marl_battlegrounds.evaluation.replay_artifact_reference']
+        Fixed replay-reference schema identifier.
+
+    Notes
+    -----
+    Frozen host metadata. It identifies bytes but does not locate, load or
+    rewrite a replay. The artifact/episode join is validated.
+    """
 
     schema_id: Literal["marl_battlegrounds.evaluation.replay_artifact_reference"] = (
         "marl_battlegrounds.evaluation.replay_artifact_reference"
@@ -252,6 +383,7 @@ class ReplayArtifactReferenceV2(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_identity(self) -> ReplayArtifactReferenceV2:
+        """Require the reference artifact ID to join its recorded episode."""
         if self.artifact_id != f"{self.episode_id}:replay":
             raise ValueError("replay reference must join its episode")
         return self
@@ -269,7 +401,13 @@ def _build_replay_content(
     failure_origin: RolloutFailureOrigin | None,
     header_type: type[EvaluationModel],
 ) -> dict[str, object]:
-    """Share completion and content assembly across explicit replay versions."""
+    """Assemble version-specific replay content from a nonempty T+1/T prefix.
+
+    Infer complete only from a task-terminal flag or the declared transition
+    horizon; otherwise infer partial. Explicit completion/reason/failure values
+    must pass the completion model. header_type chooses the exact version root.
+    This host helper packages captured facts and never executes game rules.
+    """
     frames = tuple(frames)
     transitions = tuple(transitions)
     if not frames or len(frames) != len(transitions) + 1:
@@ -344,7 +482,48 @@ def build_replay_v2(
     end_or_failure_reason: str | None = None,
     failure_origin: RolloutFailureOrigin | None = None,
 ) -> ReplayArtifactV2:
-    """Seal captured facts once; never compute metrics or repeat simulator rules."""
+    """Seal a legacy captured trajectory into a validated V2 artifact.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Supported V1/V2 context; converted through context_v2.
+    frames : Sequence[EvaluationFrameV1]
+        Nonempty sequence of exact EvaluationFrameV1, contiguous from zero.
+    transitions : Sequence[EvaluationTransitionV1]
+        EvaluationTransitionV1 sequence with one fewer entry than frames.
+    runtime_provenance : RuntimeProvenanceV1
+        Actual runtime record matching the context's package version.
+    wrapper_stack : tuple[ReplayWrapperMetadataV1, ...]
+        Ordered wrapper descriptions, default ().
+    completion_state : CompletionState | None
+        Optional explicit completion status. None infers complete
+        from task termination or declared horizon, otherwise partial.
+    end_or_failure_reason : str | None
+        Optional truthful ending reason. None uses the
+        recorded task reason when complete, otherwise captured_prefix.
+    failure_origin : RolloutFailureOrigin | None
+        Optional declared origin for a failed rollout, default None.
+
+    Returns
+    -------
+    ReplayArtifactV2
+        Frozen ReplayArtifactV2 with validated joins, completion and canonical
+        context, trajectory and artifact digests.
+
+    Raises
+    ------
+    TypeError
+        Frames or context have incompatible exact types.
+    ValueError
+        Prefix shape, version, identities, completion or metadata is invalid.
+
+    Notes
+    -----
+    Host-only; inputs are retained as immutable records and are not edited.
+    An initial-only partial prefix is allowed. No metrics are computed, files
+    written or simulator transitions repeated.
+    """
     context = context_v2(context)
     if any(type(frame) is not EvaluationFrameV1 for frame in frames):
         raise TypeError("legacy replay V2 requires exact V1 observation frames")
@@ -373,7 +552,28 @@ def build_replay_v2(
 
 
 def replay_reference_v2(replay: ReplayArtifactV2) -> ReplayArtifactReferenceV2:
-    """Build a reference to the actual canonical replay bytes."""
+    """Describe the original canonical bytes of an exact V2 replay.
+
+    Parameters
+    ----------
+    replay : ReplayArtifactV2
+        Exact ReplayArtifactV2; current V3 is not silently relabeled.
+
+    Returns
+    -------
+    ReplayArtifactReferenceV2
+        ReplayArtifactReferenceV2 with existing IDs/digests and computed canonical
+        byte length. No path is included.
+
+    Raises
+    ------
+    TypeError
+        replay is not exact V2.
+
+    Notes
+    -----
+    Host-only serialization; no file read/write or replay conversion occurs.
+    """
     if type(replay) is not ReplayArtifactV2:
         raise TypeError("V2 references require exact ReplayArtifactV2")
     return ReplayArtifactReferenceV2(
@@ -396,7 +596,48 @@ def replay_from_packets(
     end_or_failure_reason: str | None = None,
     failure_origin: RolloutFailureOrigin | None = None,
 ) -> ReplayArtifactV2:
-    """Seal one ordered stream of scalar captured packets using existing wire leaves."""
+    """Build a legacy V2 replay from one ordered scalar packet stream.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContextV2
+        Exact EvaluationEpisodeContextV2 matching the initial packet config.
+    packets : Iterable[ReplayPackets]
+        Iterable of valid scalar ReplayPackets for one positive episode ID.
+        Start at transition zero with initial=True; no gaps, repeats or rows
+        after termination are allowed.
+    runtime_provenance : RuntimeProvenanceV1
+        Actual runtime matching the recorded package version.
+    wrapper_stack : tuple[ReplayWrapperMetadataV1, ...]
+        Ordered wrapper descriptions, default ().
+    completion_state : CompletionState | None
+        Optional explicit state; None infers complete at task
+        termination/horizon and partial for an unfinished prefix.
+    end_or_failure_reason : str | None
+        Optional reason, otherwise the task reason or
+        captured_prefix as appropriate.
+    failure_origin : RolloutFailureOrigin | None
+        Optional failure origin, default None.
+
+    Returns
+    -------
+    ReplayArtifactV2
+        Validated ReplayArtifactV2 with exact V1 frames and canonical digests.
+
+    Raises
+    ------
+    TypeError
+        Context/captured types are incompatible.
+    ValueError
+        The stream is empty, invalid, mixed, out of order, mismatched
+        with context, or inconsistent with declared completion.
+
+    Notes
+    -----
+    Host-only. Consumes the iterable fully and may read device values through
+    capture conversion. It does not edit source packets, compute metrics or
+    write files. Completion is never invented to hide an unfinished prefix.
+    """
     from marl_battlegrounds.evaluation.capture import (
         capture_evaluation_transition_unit_v1,
         capture_initial_evaluation_frame_v1,
@@ -429,7 +670,13 @@ def _frames_from_packets[FrameT: EvaluationFrame](
     capture_initial: Callable[..., FrameT],
     capture_transition: Callable[..., tuple[EvaluationTransitionV1, FrameT]],
 ) -> tuple[list[FrameT], list[EvaluationTransitionV1]]:
-    """Decode one packet stream with the requested exact observation capture."""
+    """Decode one admitted scalar packet stream through exact-version capture helpers.
+
+    Require positive single-episode identity, consecutive transition indexes,
+    correct initial flags and matching first config. Update the preceding frame's
+    next-decision availability from the next acting packet after validation.
+    Inputs remain unchanged; returned host lists retain every captured frame/fact.
+    """
     from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v1
     from marl_battlegrounds.evaluation.recording_context import restore_recording_config
 

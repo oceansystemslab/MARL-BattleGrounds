@@ -1,4 +1,11 @@
-"""Write the column guide from the same definitions used by the viewer."""
+"""Generate metric-column documentation from the shared metric catalog.
+
+Run ``python -m scripts.dev.export_metric_dictionary`` at the repository root to
+update the CSV dictionary and generated specification tables. Add ``--check`` to
+compare existing text without writing. The catalog remains the measurement
+naming/meaning authority; this module formats its data rather than computing
+metrics or replaying episodes.
+"""
 
 import argparse
 import csv
@@ -112,7 +119,18 @@ _MANUSCRIPT_FAMILIES = (
 
 
 def family_summary_markdown() -> str:
-    """Count each numerical column once for the paper."""
+    """Render the paper's measurement-family table with each column counted once.
+
+    Returns
+    -------
+    str
+        Markdown table wrapped in its generated-block markers.
+
+    Raises
+    ------
+    ValueError
+        If manuscript families duplicate or omit a metric catalog family.
+    """
     counts = Counter(column.family for column in METRIC_COLUMNS)
     assigned = [
         family for _, families, _ in _MANUSCRIPT_FAMILIES for family in families
@@ -140,7 +158,27 @@ def family_summary_markdown() -> str:
 
 
 def specification_with_summary(text: str) -> str:
-    """Update the generated table and keep the surrounding text."""
+    """Replace generated family and navigation tables inside existing Markdown.
+
+    Parameters
+    ----------
+    text : str
+        Complete specification text with one ordered marker pair for each table.
+
+    Returns
+    -------
+    str
+        Updated text with all content outside the generated blocks preserved.
+
+    Raises
+    ------
+    ValueError
+        If markers are missing, repeated or reversed, or family coverage is invalid.
+
+    Notes
+    -----
+    This transforms a string only. The caller owns reading and writing the file.
+    """
     if text.count(_SUMMARY_START) != 1 or text.count(_SUMMARY_END) != 1:
         raise ValueError("metric specification must contain one family-summary block")
     start = text.index(_SUMMARY_START)
@@ -158,7 +196,13 @@ def specification_with_summary(text: str) -> str:
 
 
 def navigation_markdown() -> str:
-    """List primary CSV homes once; shared table appearances are not new columns."""
+    """Render primary metric locations without recounting shared viewer appearances.
+
+    Returns
+    -------
+    str
+        Marked Markdown table listing topic/view column totals and a unique-column sum.
+    """
     counts = Counter(metric_primary_location(column) for column in METRIC_COLUMNS)
     lines = [
         _NAVIGATION_START,
@@ -223,7 +267,14 @@ _IDENTITY_MEANINGS = {
 
 
 def dictionary_csv() -> str:
-    """List every CSV column, including those that identify the episode."""
+    """Render the complete metric dictionary in the recorded CSV column order.
+
+    Returns
+    -------
+    str
+        CSV text with identity-field meanings, metric guidance, locations and indexes.
+        Values are formatted from the shared catalog; no numerical metrics are run.
+    """
     output = io.StringIO(newline="")
     writer = csv.writer(output, lineterminator="\n")
     writer.writerow(
@@ -364,6 +415,22 @@ def dictionary_csv() -> str:
 
 
 def main() -> int:
+    """Write or check the metric dictionary and the specification's family summary.
+
+    ``--check`` compares existing text without writing. Normal mode updates the
+    requested CSV and changes the specification only when its summary differs.
+
+    Returns
+    -------
+    int
+        Zero when the requested write or comparison succeeds.
+
+    Raises
+    ------
+    SystemExit
+        If arguments are invalid, help is requested, or checked text
+        is stale.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     parser.add_argument(

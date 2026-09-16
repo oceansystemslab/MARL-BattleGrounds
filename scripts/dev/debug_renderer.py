@@ -1,4 +1,11 @@
-"""CLI entry point for the MARL-BattleGrounds DevClient."""
+"""Launch the local DevClient for live combat, map editing, and scenario editing.
+
+Run ``scripts/dev/run_dev_client.sh --help`` for supported options. Browser
+mode serves the manual combat arena on loopback; static mode displays its reset
+frame. ``--record-replay PATH`` enables recording and saved replay review. Replay
+files and scripted demonstrations have their own ``run_replay_viewer.sh`` launcher.
+Argument discovery avoids importing JAX until a live session is requested.
+"""
 
 from __future__ import annotations
 
@@ -100,7 +107,18 @@ def _parse_compatibility_preset(value: str) -> Literal["analysis"]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the live-only debugger CLI without importing runtime backends."""
+    """Build the live DevClient argument parser without starting a backend.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Parser for live/static display, recording, seed, actor, view and loopback
+        server options. Hidden compatibility options give focused migration errors.
+
+    Notes
+    -----
+    This creates parser objects only. It does not parse arguments or start a server.
+    """
     parser = argparse.ArgumentParser(
         description=(
             "Open the MARL-BattleGrounds DevClient for combat debugging and "
@@ -115,10 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         type=Path,
         default=argparse.SUPPRESS,
-        help=(
-            "record one manual arena episode to a canonical replay and metric "
-            "sidecar, then review it"
-        ),
+        help=("record one live episode to a self-contained replay, then review it"),
     )
     parser.add_argument(
         "--seed",
@@ -224,6 +239,7 @@ def _reject_moved_options(
     parser: argparse.ArgumentParser,
     namespace: argparse.Namespace,
 ) -> None:
+    """Report a CLI error for replay-only options before loading live components."""
     supplied = vars(namespace)
     for destination, label in _MOVED_OPTION_LABELS:
         if destination in supplied:
@@ -231,6 +247,7 @@ def _reject_moved_options(
 
 
 def _resolve_launch_options(namespace: argparse.Namespace) -> _LaunchOptions:
+    """Fill live-launch defaults while remembering which options the caller supplied."""
     supplied = frozenset(vars(namespace)) - {"preset", "verbose"}
     return _LaunchOptions(
         record_replay=cast(
@@ -259,6 +276,7 @@ def _validate_option_matrix(
     parser: argparse.ArgumentParser,
     options: _LaunchOptions,
 ) -> None:
+    """Reject replay recording in static mode through the command-line parser."""
     if options.record_replay is not None and options.static:
         parser.error("--record-replay is available only in live browser mode.")
 
@@ -268,6 +286,7 @@ def _validate_launch(
     *,
     controlled_global_slot: int | None,
 ) -> None:
+    """Require the manual arena and an active controlled slot when one is selected."""
     if scenario.name != "arena_5v5" or scenario.mode != "interactive":
         raise ValueError("the Combat Debugger requires the manual arena_5v5 scenario")
     if controlled_global_slot is None:
@@ -313,7 +332,30 @@ def _recording_policy_execution_included(session: object) -> bool:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Launch only the manual live arena or its recording workflow."""
+    """Validate launch options and open the manual combat arena.
+
+    Parameters
+    ----------
+    argv : sequence of str or None, optional
+        Argument tokens without the executable name. None reads the process arguments.
+
+    Returns
+    -------
+    int
+        Exit status from the selected renderer/server, or one after a handled launch
+        or persistence failure. Argument errors are reported by the parser.
+
+    Raises
+    ------
+    SystemExit
+        If the parser displays help or rejects unsupported options.
+
+    Notes
+    -----
+    Live mode initializes the simulator and serves a loopback browser application.
+    Static mode opens a Matplotlib window. Recording mode may save replay evidence and
+    switch the same server to review. The launcher reports handled errors on stderr.
+    """
     parser = build_parser()
     namespace = parser.parse_args(argv)
     _reject_moved_options(parser, namespace)
@@ -403,9 +445,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
         def authoring_http_for(service: DebuggerService) -> HttpAuthoringBinding:
+            """Bind this live service to the local draft store and authoring command
+            model.
+            """
             store = DevAssetStore(_REPOSITORY_ROOT)
 
             def install(snapshot: LoadedDevScenarioSnapshotV1) -> None:
+                """Replace the service scenario with the compiled, fixed draft
+                snapshot.
+                """
                 service.load_scenario(debugger_scenario_from_snapshot(snapshot))
 
             authoring_service = DevClientAuthoringBinding(
@@ -417,6 +465,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
             def apply(request: object) -> DevAuthoringCommandResponseV1:
+                """Reject an unexpected request model before dispatching an authoring
+                command.
+                """
                 if type(request) is not DevAuthoringCommandRequestV1:
                     raise TypeError("unexpected DevClient authoring request type")
                 return authoring_service.apply_command(request)

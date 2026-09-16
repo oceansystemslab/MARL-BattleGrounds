@@ -1,107 +1,100 @@
 # Dependency Policy
 
-MARL-BattleGrounds separates researcher runtime dependencies from optional
-features and contributor-only tools. Add a dependency only when the standard
-library or an existing package cannot satisfy a concrete requirement.
+Add a dependency only to meet a concrete requirement that the standard library
+or an existing dependency cannot satisfy. Keep researcher runtime, optional
+features and contributor tools separate. GPU JAX is the performance target;
+installing extra libraries does not establish a performance result.
 
 ## Python
 
-`pyproject.toml` records dependency intent and `uv.lock` records the resolved
-environment.
+`pyproject.toml` declares the supported groups. `uv.lock` fixes the resolved
+versions used by reproducible installs and qualification.
 
 | Group | Purpose |
 | --- | --- |
-| Base | JAX environment, arrays, validation, and the two native browser products: the live DevClient and read-only Replay Viewer. |
-| `cuda13` | CUDA 13 JAX execution. |
-| `training` | Learner, optimizer, and checkpoint tooling. |
-| `interop` | Gymnasium and PettingZoo adapters. |
-| `viz` | Optional Matplotlib adapters for static/headless Combat Debugger snapshots and Replay Viewer frames. |
-| `dev` | Pytest, Ruff, Pyright, and pre-commit. |
+| Base | JAX/NumPy arrays, numerical analysis, configuration and schema validation; base Python also serves the native browser clients |
+| `cuda13` | CUDA 13 JAX execution |
+| `training` | Optional optimizer, model and checkpoint libraries; not a complete implemented learning workflow |
+| `interop` | Optional Gymnasium/PettingZoo libraries; not a promise that all adapters exist |
+| `viz` | Matplotlib for static/headless snapshots |
+| `dev` | Pytest, Ruff, Pyright and pre-commit |
 
-The [DevClient](combat_debugger.md) and
-[Replay Viewer](replay_viewer.md) share base Python dependencies and the
-tracked native browser renderer. The replay launcher remains import-light for
-listing and existing-artifact validation; scripted scenario materialization
-runs separately on CPU before the immutable bundle enters the viewer.
+Change dependency intent and the lockfile together. Use locked installation in
+CI and qualification; the check scripts assume dependencies are already prepared.
+Do not move optional tool behavior into Core to avoid a dependency boundary.
 
-Both shell launchers activate `viz` only when `--static` is present. Python CI
-installs `dev+viz` so supported static-painter behavior is exercised rather
-than skipped.
+DevClient and Replay Viewer use the base environment for their browser mode.
+Their shell launchers select `viz` only with `--static`. Contributor CI includes
+`dev` and `viz` so the static route is tested. Replay listing and existing-file
+validation remain import-light. Scripted demos materialize separately on CPU
+before the immutable replay enters the Viewer; that is preparation, not a CPU
+simulation performance claim.
 
-Change `pyproject.toml` and `uv.lock` together. Use locked syncs in CI and
-closeout gates. Do not move debugger, viewer, or visualization behavior into
-the simulator core to avoid an optional dependency.
+## Native Browser Runtime
 
-## Native browser runtime
+Python's standard-library server serves tracked HTML, CSS, SVG, WOFF2 and
+JavaScript. There is no runtime package manager, framework or application build
+bundle. Researchers do not need Node.js. Bundled assets work without a remote
+asset service.
 
-Both products serve the same tracked HTML, CSS, SVG, WOFF2, and JavaScript
-modules through Python's standard-library HTTP server. Product identity and
-route authority remain separate: the DevClient receives live Combat Debugger
-commands and local map/scenario authoring commands, while the Replay Viewer
-receives read-only artifact navigation and authorized export/metric operations.
+DevClient owns live debugger commands and local asset authoring. Replay Viewer
+owns read-only artifact navigation plus explicitly requested export/analysis.
+They share rendering code, but keep route and data authority separate. Python
+owns simulator facts, validation, audience projection and metric access. The
+browser formats authorized data and uses native DOM/SVG, pointer coordinates,
+tooltips and Web Animations. It does not reconstruct hidden simulation truth.
+See [A17](../design/specification_amendments.md#a17-sharedobs-recorded-visual-union-presentation)
+for the rendering-only SharedObs visual-union boundary.
 
-There is:
+## Frontend Contributor Tools
 
-- no transpilation or generated application bundle;
-- no runtime package manager;
-- no framework, state store, WebSocket, or animation library;
-- no external network asset; and
-- no Node.js requirement for researchers.
+`.node-version` records the required Node line. The independent
+`web/visual_debugger/package-lock.json` fixes contributor tools:
 
-The browser uses native DOM/SVG rendering, pointer coordinate projection,
-presentation hover, and the Web Animations API. Python owns authorized hit
-testing, command/frame validation, simulator authority, replay validation,
-audience projection, and metric authorization. The SharedObs recorded visual
-union remains a rendering-only contract under
-[specification amendment A17](../design/specification_amendments.md#a17-sharedobs-recorded-visual-union-presentation),
-not a browser-reconstructed or materialized learner input.
+| Tool | Use | Product Runtime Dependency |
+| --- | --- | --- |
+| TypeScript | Strict no-emit checking of JavaScript/JSDoc | No |
+| Biome | Source formatting and lint | No |
+| Playwright Test | Real Chromium and visual checks | No |
+| `@types/node` | Development type declarations | No |
 
-## Frontend contributor tooling
-
-`.node-version` pins Node 24 for contributors and CI.
-`web/visual_debugger/package-lock.json` independently pins:
-
-| Tool | Role | Runtime impact | License family |
-| --- | --- | --- | --- |
-| TypeScript | Strict no-emit checking of JavaScript/JSDoc | None | Apache-2.0 |
-| Biome | JavaScript/CSS/HTML/JSON formatting and lint | None | MIT or Apache-2.0 |
-| Playwright Test | Real-browser behavior and visual regression | None | Apache-2.0 |
-| `@types/node` | Contributor type declarations | None | MIT |
-
-Install contributor tooling with:
+Install the locked tools and pinned test browser:
 
 ```bash
 npm ci --prefix web/visual_debugger
 npm run install:browser --prefix web/visual_debugger
 ```
 
-Commit `package.json` and `package-lock.json` together when the frontend
-toolchain changes. Do not hand-edit the lockfile. Node dependencies must remain
-development-only unless a separately approved architecture revision
-establishes a browser build/runtime need.
+Update `package.json` and its lockfile together; do not hand-edit resolved lock
+entries. Adding a runtime build/framework requires a concrete reviewed benefit,
+not merely a contributor-tool dependency. Follow the shared
+[documentation standard](documentation_standard.md) when changing commands or
+public setup requirements.
 
-## Bundled font
+## Bundled Fonts and Assets
 
-The native browser tracks Atkinson Hyperlegible Regular and Bold WOFF2 files
-for readability, deterministic screenshots, and self-contained Replay Viewer
-PNG export. Exact license and provenance files live beside them:
+Atkinson Hyperlegible Regular/Bold WOFF2 files support readable local rendering,
+repeatable screenshots and self-contained PNG export. Their license and source
+record live beside the files:
 
 ```text
 web/visual_debugger/assets/fonts/OFL.txt
 web/visual_debugger/assets/fonts/PROVENANCE.md
 ```
 
-Do not replace or add font/media assets without recording provenance, license,
-file size, and runtime use. Runtime assets must stay inside the server's
-explicit allowlist and contain no remote fetch.
+Record source, license, size and runtime purpose before adding/replacing an
+asset. Keep runtime assets in the server's explicit allowlist. Do not add a
+hidden network fetch. Preserve third-party legal notices rather than rewriting
+them as project prose.
 
-## Update discipline
+## Updates and Checks
 
-- Pin contributor tools and browser versions deliberately.
-- Review licenses and transitive changes before updating either lockfile.
-- Keep generated reports, downloaded browsers, caches, and failure artifacts
-  ignored.
-- Keep individual tracked visual baselines below the repository's file-size
-  policy.
-- Run impact-selected checks after a dependency change, followed by the
-  complete closeout gate once the assembled change stops moving.
+Review direct/transitive changes and licenses. Prepare both locked environments
+before running affected correctness, import-isolation and public-command checks.
+At qualification, run the [complete gates](quality_gates.md) for the frozen
+candidate, then the separately required clean GPU gate before publication.
+
+Keep downloaded browsers, caches, generated reports and failure artifacts
+ignored. Track only intentional source/assets and approved small visual
+baselines. A dependency update does not authorize regenerating expectations or
+weakening tests to make the gate pass.

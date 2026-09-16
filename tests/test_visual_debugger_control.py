@@ -1,4 +1,4 @@
-"""Exhaustive pure and integration tests for debugger session control."""
+"""Check debugger session control in isolated and integrated cases."""
 
 from dataclasses import fields, replace
 from typing import cast

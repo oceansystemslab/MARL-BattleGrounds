@@ -1,4 +1,10 @@
-"""Truthful replay context from one recorded execution, without trainer guesses."""
+"""Build truthful replay metadata from the run that actually executed.
+
+This host-only boundary restores config types after transfers and joins
+recorded source/runtime facts, policy assignments, random-stream identities
+and map metadata. Missing training history stays unknown. Supplied scenario
+metadata may add details but cannot contradict executed seeds or controllers.
+"""
 
 import json
 import re
@@ -48,7 +54,36 @@ def capture_recording_provenance(
     num_envs: int = 1,
     policy_execution_included: bool = True,
 ) -> dict[str, object]:
-    """Discover source/runtime facts once; callers reuse them for selected replays."""
+    """Capture reusable source and runtime metadata at recording setup.
+
+    Parameters
+    ----------
+    num_envs : int
+        Positive environment count to record, default 1.
+    policy_execution_included : bool
+        Whether policy work belongs to the declared
+        runtime record, default True.
+
+    Returns
+    -------
+    dict[str, object]
+        Dict containing JSON-ready code_revision and runtime_provenance models.
+
+    Raises
+    ------
+    ValueError
+        Source discovery or metadata validation fails.
+    OSError
+        Source/package files cannot be read.
+    RuntimeError
+        The selected numerical backend cannot provide runtime data.
+
+    Notes
+    -----
+        Host-only; may query Git, read package files and initialize JAX devices.
+        Reuse the returned facts across a pass rather than repeating discovery
+        for each replay. This function writes no artifacts.
+    """
     code = discover_code_revision_v2()
     runtime = capture_runtime_provenance(
         code.package_version,
@@ -62,11 +97,15 @@ def capture_recording_provenance(
 
 
 def _identifier(value: object) -> str:
+    """Make a nonempty path-free identifier from recorded text without inventing
+    meaning.
+    """
     identifier = re.sub(r"[^A-Za-z0-9._:/+\-]", "-", str(value))
     return re.sub(r"^[^A-Za-z0-9]+", "", identifier).rstrip("-") or "unknown"
 
 
 def _content(name: str, value: object) -> ContentAddressedIdentityV1:
+    """Build a version-1 identity whose digest covers the supplied canonical content."""
     return ContentAddressedIdentityV1(
         identifier=name,
         version=1,
@@ -75,9 +114,36 @@ def _content(name: str, value: object) -> ContentAddressedIdentityV1:
 
 
 def restore_recording_config(config: EnvConfig) -> EnvConfig:
-    """Restore host scalar/JAX array types after a captured device or spool transfer."""
+    """Restore scalar config types after packet or spool transfer.
+
+    Parameters
+    ----------
+    config : EnvConfig
+        One scalar EnvConfig tree with host-readable numerical leaves.
+        Batched configs are not scalarized into separate episode configs.
+
+    Returns
+    -------
+    EnvConfig
+        The same tree structure with zero-dimensional leaves converted to Python
+        scalars and non-scalar leaves converted to JAX arrays. Inputs are unchanged.
+
+    Raises
+    ------
+    TypeError
+        A leaf cannot be represented as a numerical array.
+
+    Notes
+    -----
+        Host-only. Reading a device leaf may synchronize; returning vector leaves
+        may transfer them to JAX's current device. This is type restoration, not
+        physical config validation or a change to spawn-bank order.
+    """
 
     def restore(value: object) -> object:
+        """Return Python scalars for rank-zero leaves and JAX arrays for vector
+        leaves.
+        """
         array = np.asarray(value)
         return array.item() if array.ndim == 0 else jnp.asarray(array)
 
@@ -89,6 +155,7 @@ def _metadata_identity(
     name: str,
     fallback: ContentAddressedIdentityV1 | None,
 ) -> ContentAddressedIdentityV1 | None:
+    """Validate an explicit content identity, or use the caller's known fallback."""
     value = metadata.get(name)
     return (
         fallback if value is None else ContentAddressedIdentityV1.model_validate(value)
@@ -96,6 +163,12 @@ def _metadata_identity(
 
 
 def _scenario_roles(metadata: dict[str, object], active: np.ndarray) -> tuple[str, ...]:
+    """Return ten roles consistent with the configured active slots.
+
+    Without overrides, slot zero is focal, its active teammates are cooperative
+    partners, and active opposing slots are adversaries. Inactive slots always
+    use not_applicable. Reject incomplete or contradictory explicit role lists.
+    """
     supplied = metadata.get("evaluation_role_by_global_slot")
     if supplied is None:
         return tuple(
@@ -134,7 +207,60 @@ def build_recording_context(
     policies: dict[str, object],
     details: dict[str, object],
 ) -> tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]:
-    """Build context from known facts; custom trainer seeds/history stay unknown."""
+    """Build replay context using only known execution and source facts.
+
+    Parameters
+    ----------
+    config : EnvConfig
+        Exact scalar episode EnvConfig, possibly transferred to host arrays.
+    run_id : str
+        Run identity used to form stable recording identifiers.
+    phase : str
+        Recorded phase label; "training" permits evolving policy metadata
+        when no frozen variable descriptor was supplied.
+    pass_id : str
+        Recorded pass identity within that phase.
+    episode : dict[str, object]
+        Episode metadata. Requires episode_id; may include seed_id,
+        expected_horizon, map_id, authored layout/start identities, ten actor
+        IDs/roles and paired-comparison metadata.
+    policies : dict[str, object]
+        Team names or labels under team_a and team_b, used when detailed
+        policy descriptors are absent.
+    details : dict[str, object]
+        Pass metadata, including policy descriptors, seed/RNG protocol
+        and optional captured code_revision/runtime_provenance. Missing source
+        or runtime data triggers one discovery call for this context.
+
+    Returns
+    -------
+    tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]
+        (EvaluationEpisodeContextV3, RuntimeProvenanceV1). The context records exact
+        resolved conditions, actor assignments, information contract, known seed
+        coordinates and verified map keys. Unknown training/checkpoint facts remain
+        absent rather than being guessed.
+
+    Raises
+    ------
+    KeyError
+        episode lacks its required episode_id.
+    ValueError
+        Roles, seeds, controller identity, actor IDs, map geometry or
+        supplied metadata contradict the executed conditions.
+    TypeError
+        Config or metadata types violate their validated model.
+    OSError
+        Required source metadata cannot be read.
+
+    Notes
+    -----
+        Host-only: restores config types and may read runtime/source provenance.
+        Input dictionaries are not edited. The default execution information mode
+        is shared_obs; an explicit no_shared_obs mode selects that declared actor
+        projection. Seed overrides may add facts but must retain the actual root,
+        episode identity and RNG protocol. This function does not execute a policy,
+        generate a trajectory or write a replay.
+    """
 
     config = restore_recording_config(config)
     if "code_revision" not in details or "runtime_provenance" not in details:

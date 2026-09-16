@@ -1,4 +1,4 @@
-"""Focused CP2.0 Oracle presentation-model and pure-builder proofs."""
+"""Check Oracle presentation records and the functions that build them."""
 
 from __future__ import annotations
 

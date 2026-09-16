@@ -1,8 +1,7 @@
-"""Observation, visibility, and action-mask contract tests.
+"""Check observations, visibility and action masks together.
 
-This file owns environment-level integration proof across the accepted Milestone
-4 geometry/LOS semantics and Milestone 5 combat-mask contracts. Low-level
-segment/obstacle geometry remains covered in ``test_geometry.py``.
+These are environment-level checks. Detailed segment and obstacle geometry
+checks live in test_geometry.py.
 """
 # pyright: reportPrivateUsage=false
 
@@ -77,8 +76,6 @@ from marl_battlegrounds.core.types import (
 
 
 class _CombatStateFields(TypedDict):
-    """Keyword fields for inert combat and action-history test state."""
-
     current_health: Array
     ultimate_cooldowns: Array
     slow_durations: Array
@@ -95,7 +92,6 @@ class _CombatStateFields(TypedDict):
 
 
 def _inert_combat_state_fields(current_health: Array) -> _CombatStateFields:
-    """Return neutral combat fields with caller-owned coherent health."""
     return {
         "current_health": current_health,
         "ultimate_cooldowns": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
@@ -130,13 +126,11 @@ def _inert_combat_state_fields(current_health: Array) -> _CombatStateFields:
 
 
 def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
-    """Return the action mask paired with an explicitly built test state."""
     _, action_mask = _build_observation_and_action_mask(state, config)
     return action_mask
 
 
 def _empty_obstacles() -> Array:
-    """Create a padded all-inactive obstacle table."""
     return jnp.zeros(
         (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
         dtype=jnp.float32,
@@ -144,7 +138,6 @@ def _empty_obstacles() -> Array:
 
 
 def _obstacle_array_with_rows(*rows: tuple[int, Array]) -> Array:
-    """Create a padded obstacle array with selected slots populated."""
     obstacles = jnp.zeros(
         (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
         dtype=jnp.float32,
@@ -164,7 +157,6 @@ def _pillar_obstacle(
     radius: float,
     active: bool = True,
 ) -> Array:
-    """Create one pillar obstacle row."""
     obstacle = jnp.zeros((OBSTACLE_FEATURES,), dtype=jnp.float32)
     obstacle = obstacle.at[OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_PILLAR)
     obstacle = obstacle.at[OBSTACLE_FEATURE_X].set(x)
@@ -183,7 +175,6 @@ def _wall_obstacle(
     theta: float = 0.0,
     active: bool = True,
 ) -> Array:
-    """Create one wall obstacle row."""
     obstacle = jnp.zeros((OBSTACLE_FEATURES,), dtype=jnp.float32)
     obstacle = obstacle.at[OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_WALL)
     obstacle = obstacle.at[OBSTACLE_FEATURE_X].set(x)
@@ -200,7 +191,6 @@ def _relation_visibility_masks_with_rows(
     ally_rows: tuple[tuple[int, Array], ...] = (),
     enemy_rows: tuple[tuple[int, Array], ...] = (),
 ) -> tuple[Array, Array]:
-    """Create expected relation-local visibility masks from sparse rows."""
     ally_mask = jnp.zeros((MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool)
     enemy_mask = jnp.zeros((MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM), dtype=bool)
 
@@ -222,7 +212,6 @@ def _assert_visibility_masks_match(
     expected_ally: Array,
     expected_enemy: Array,
 ) -> None:
-    """Assert visibility masks keep their fixed contract and exact values."""
     assert observation.ally_visibility_mask.shape == (
         MAX_AGENT_SLOTS,
         MAX_AGENTS_PER_TEAM,
@@ -246,7 +235,6 @@ def _deterministic_config(
     map_height: float = 12.0,
     obstacles: Array | None = None,
 ) -> EnvConfig:
-    """Create a deterministic config for observation-mask tests."""
     profile = resolve_agent_profile(
         jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
         jnp.asarray((team_size, team_size), dtype=jnp.int32),
@@ -285,7 +273,6 @@ def _deterministic_config(
 
 
 def _joint_action_with_moves(*rows: tuple[int, int]) -> Action:
-    """Create a slot-aligned joint action with selected movement overrides."""
     joint_action_moves = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
     joint_action_targets = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
     joint_action_ults = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
@@ -302,7 +289,6 @@ def _joint_action_with_moves(*rows: tuple[int, int]) -> Action:
 
 
 def _agent_positions_array_with_rows(*rows: tuple[int, Array]) -> Array:
-    """Create a padded agent-position array with selected slots populated."""
     agent_positions = jnp.zeros(
         (MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS),
         dtype=jnp.float32,
@@ -316,7 +302,6 @@ def _agent_positions_array_with_rows(*rows: tuple[int, Array]) -> Array:
 
 
 def _agent_radii_array_with_rows(*rows: tuple[int, float]) -> Array:
-    """Create a padded agent-radius vector with selected slots populated."""
     radii = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32)
 
     for slot, radius in rows:
@@ -330,7 +315,6 @@ def _slot_float_vector(
     default_value: float,
     *rows: tuple[int, Array | float],
 ) -> Array:
-    """Create a float32 slot vector with selected overrides."""
     values = jnp.full((MAX_AGENT_SLOTS,), default_value, dtype=jnp.float32)
 
     for slot, value in rows:
@@ -341,7 +325,6 @@ def _slot_float_vector(
 
 
 def _neutral_class_ids() -> Array:
-    """Create a fixed neutral class-ID vector."""
     return jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32)
 
 
@@ -371,14 +354,6 @@ def _state_two_versus_two_game(
     effective_ultimate_interaction_radius: float = 9.0,
     step_count: int = 0,
 ) -> tuple[EnvConfig, EnvState]:
-    """Create an exact fixed two-versus-two config/state pair.
-
-    Team A occupies global slots 0 and 1 in these scenarios. Team B occupies
-    global slots 5 and 6, which become relation-local enemy slots 0 and 1 for
-    Team A observers. Individual tests may deliberately place payload in
-    inactive rows or override catalog fields to prove redaction itself; those
-    adversarial fixtures are not official host-validated state evidence.
-    """
     agent_a_index = 0
     agent_b_index = 1
     agent_c_index = MAX_AGENTS_PER_TEAM
@@ -499,7 +474,6 @@ def _assert_targetability_masks_match(
     expected_ally: Array,
     expected_enemy: Array,
 ) -> None:
-    """Assert relation-local basic legality in the joint mask's lane zero."""
     basic_lane = action_mask.select_target_use_ultimate_joint_mask[..., 0]
     ally_basic = basic_lane[:, 1 : 1 + MAX_AGENTS_PER_TEAM]
     enemy_basic = basic_lane[:, 1 + MAX_AGENTS_PER_TEAM :]
@@ -520,7 +494,6 @@ def _assert_targetability_never_exceeds_visibility(
     observation: Observation,
     action_mask: ActionMask,
 ) -> None:
-    """Assert unit-target legality is always a subset of visibility."""
     joint_mask = action_mask.select_target_use_ultimate_joint_mask
     ally_targetability = jnp.any(joint_mask[:, 1 : 1 + MAX_AGENTS_PER_TEAM, :], axis=-1)
     enemy_targetability = jnp.any(joint_mask[:, 1 + MAX_AGENTS_PER_TEAM :, :], axis=-1)
@@ -545,7 +518,6 @@ def _assert_basic_lane_matches_relation_targetability(
     expected_ally: Array,
     expected_enemy: Array,
 ) -> None:
-    """Assert lane zero combines unit legality with canonical target-none."""
     active_and_alive_mask_bc = jnp.logical_and(
         config.agent_profile.active_mask, state.alive_mask
     )[:, None]
@@ -584,7 +556,6 @@ def _assert_self_features_match_state_base_fields(
     state: EnvState,
     config: EnvConfig,
 ) -> None:
-    """Assert that self features expose the shared agent spatial/state fields."""
     assert observation.self_features.shape == (MAX_AGENT_SLOTS, SELF_FEATURES)
     assert observation.self_features.dtype == jnp.float32
 
@@ -637,7 +608,6 @@ def _assert_unit_feature_row_matches_self_row(
     result_row: Array,
     is_enemy: bool = False,
 ) -> None:
-    """Match candidate state, with the relation flag set for its observer."""
     assert result_row.shape == (UNIT_FEATURES,)
     assert observation.self_features[expected_global_slot].shape == (SELF_FEATURES,)
     assert bool(
@@ -653,7 +623,6 @@ def _assert_unit_feature_row_matches_self_row(
 
 
 def _assert_unit_feature_row_is_zero(row: Array) -> None:
-    """Assert a hidden relation-local candidate row leaks no feature values."""
     assert row.shape == (UNIT_FEATURES,)
     assert bool(
         jnp.allclose(
@@ -666,7 +635,6 @@ def _assert_unit_feature_row_is_zero(row: Array) -> None:
 
 
 def _assert_only_first_action_is_valid(row: Array) -> None:
-    """Assert one categorical mask exposes only its canonical first entry."""
     flattened_row = row.reshape(-1)
 
     assert flattened_row.dtype == bool
@@ -679,7 +647,6 @@ def _assert_self_features_match_state_effective_fields(
     observation: Observation,
     config: EnvConfig,
 ) -> None:
-    """Assert that self features expose the shared agent class/stat fields."""
     assert bool(
         jnp.allclose(
             observation.self_features[:, AGENT_FEATURE_CLASS_ID],
@@ -843,7 +810,6 @@ def test_active_dead_self_rows_retain_state_and_expose_canonical_no_op() -> None
 
 
 def test_visibility_uses_state_observation_radii_not_config_default() -> None:
-    """Visibility must consume effective per-slot state radii."""
     config = _deterministic_config()
     key = jax.random.key(42)
     joint_action = _joint_action_with_moves()
@@ -873,7 +839,6 @@ def test_visibility_uses_state_observation_radii_not_config_default() -> None:
 
 
 def test_visibility_is_directed_by_each_observer_radius() -> None:
-    """A can see B does not imply B can see A when radii differ."""
     config = _deterministic_config()
     key = jax.random.key(42)
     joint_action = _joint_action_with_moves()
@@ -912,7 +877,6 @@ def test_visibility_is_directed_by_each_observer_radius() -> None:
 
 
 def test_visibility_ignores_basic_and_ultimate_interaction_radii() -> None:
-    """Visibility radius must stay independent from interaction radii."""
     config = _deterministic_config()
     key = jax.random.key(42)
     joint_action = _joint_action_with_moves()
@@ -1245,7 +1209,6 @@ def test_visibility_masks(
     expected_ally: Array,
     expected_enemy: Array,
 ) -> None:
-    """Assert env-level LOS-gated visibility across representative scenarios."""
     config, state = scenario
     config = config._replace(obstacles=obstacles)
     key = jax.random.key(42)
@@ -1261,7 +1224,6 @@ def test_visibility_masks(
 def test_spawn_shield_conceals_only_opponents_and_preserves_self_and_ally_rows() -> (
     None
 ):
-    """Shielded actors retain normal self/ally truth while opponents see no row."""
     config = _deterministic_config(obstacles=_empty_obstacles())
     config, state = _state_two_versus_two_game(
         config,
@@ -1331,7 +1293,6 @@ def test_spawn_shield_does_not_override_ordinary_ally_visibility(
     obstacles: Array,
     observation_radius: float,
 ) -> None:
-    """Spawn shield must not grant ally visibility through range or LOS limits."""
     config = _deterministic_config(obstacles=obstacles)
     config, state = _state_two_versus_two_game(
         config,
@@ -1360,7 +1321,6 @@ def test_spawn_shield_does_not_override_ordinary_ally_visibility(
 
 
 def test_spawn_shield_expiry_lifts_concealment_only_in_next_observation() -> None:
-    """A 1-to-0 countdown remains hidden now and becomes visible next step."""
     config = _deterministic_config(obstacles=_empty_obstacles())
     config, state = _state_two_versus_two_game(
         config,
@@ -1399,7 +1359,6 @@ def test_spawn_shield_expiry_lifts_concealment_only_in_next_observation() -> Non
 
 
 def test_visible_candidate_rows_match_shared_self_feature_schema() -> None:
-    """Visible relation-local rows expose the candidate's shared agent schema."""
     config = _deterministic_config(obstacles=_empty_obstacles())
     key = jax.random.key(42)
     config, state = _state_two_versus_two_game(
@@ -1514,7 +1473,6 @@ def test_visible_candidate_rows_match_shared_self_feature_schema() -> None:
 
 
 def test_visible_candidate_rows_preserve_non_boolean_numeric_values() -> None:
-    """Feature masking must preserve float values rather than booleanizing rows."""
     config = _deterministic_config(obstacles=_empty_obstacles())
     key = jax.random.key(42)
     config, state = _state_two_versus_two_game(
@@ -1579,7 +1537,6 @@ def test_visible_candidate_rows_preserve_non_boolean_numeric_values() -> None:
 
 
 def test_los_blocked_candidate_rows_are_fully_zero() -> None:
-    """LOS-blocked candidates must not leak any dynamic unit feature values."""
     obstacles = _obstacle_array_with_rows(
         (
             0,
@@ -1631,7 +1588,6 @@ def test_los_blocked_candidate_rows_are_fully_zero() -> None:
 
 
 def test_out_of_radius_candidate_rows_are_fully_zero() -> None:
-    """Out-of-radius candidates must not leak any dynamic unit feature values."""
     config = _deterministic_config(obstacles=_empty_obstacles())
     key = jax.random.key(42)
     config, state = _state_two_versus_two_game(
@@ -1658,7 +1614,6 @@ def test_out_of_radius_candidate_rows_are_fully_zero() -> None:
 
 
 def test_inactive_dead_and_padded_candidate_rows_are_fully_zero() -> None:
-    """Inactive, dead, and padded candidates must have zero candidate rows."""
     config = _deterministic_config(obstacles=_empty_obstacles())
     key = jax.random.key(42)
     config, state = _state_two_versus_two_game(
@@ -1694,7 +1649,6 @@ def test_inactive_dead_and_padded_candidate_rows_are_fully_zero() -> None:
 
 
 def test_candidate_visibility_masking_does_not_alter_self_features() -> None:
-    """Candidate visibility masking must not mutate canonical self rows."""
     obstacles = _obstacle_array_with_rows(
         (
             0,
@@ -1734,7 +1688,6 @@ def test_candidate_visibility_masking_does_not_alter_self_features() -> None:
 
 
 def test_active_dead_rows_keep_state_and_remain_invalid_as_candidates() -> None:
-    """Dead slots expose a no-op row but remain unavailable to other actors."""
     config = _deterministic_config(obstacles=_empty_obstacles())
     key = jax.random.key(42)
     config, state = _state_two_versus_two_game(
@@ -1773,7 +1726,6 @@ def test_active_dead_rows_keep_state_and_remain_invalid_as_candidates() -> None:
 
 
 def test_expanded_unit_feature_columns_obey_full_row_visibility_masking() -> None:
-    """Expanded combat columns remain present when visible and zero when hidden."""
     config = _deterministic_config(obstacles=_empty_obstacles())
     key = jax.random.key(42)
     config, state = _state_two_versus_two_game(
@@ -1812,7 +1764,6 @@ def test_expanded_unit_feature_columns_obey_full_row_visibility_masking() -> Non
 def test_map_obstacle_features_remain_globally_observed_after_candidate_masking() -> (
     None
 ):
-    """Static map geometry remains globally observed despite dynamic-unit masking."""
     obstacles = _obstacle_array_with_rows(
         (0, _pillar_obstacle(x=2.0, y=2.0, radius=0.5, active=True)),
         (
@@ -1860,7 +1811,6 @@ def test_map_obstacle_features_remain_globally_observed_after_candidate_masking(
 
 
 def test_legacy_obstacle_prefix_gains_only_canonical_zero_tail() -> None:
-    """A pre-expansion 16-row layout keeps its prefix and gains zero padding."""
     legacy_last_slot = 15
     obstacles = _obstacle_array_with_rows(
         (
@@ -2006,7 +1956,6 @@ def test_basic_targetability_masks(
     expected_ally: Array,
     expected_enemy: Array,
 ) -> None:
-    """Assert class-aware basic targetability across spatial scenarios."""
     scenario_config, state = scenario
     config = scenario_config._replace(obstacles=config.obstacles)
     next_state, observation, _, _, action_mask, _ = step(
@@ -2029,7 +1978,6 @@ def test_basic_targetability_masks(
 
 
 def test_basic_targetability_uses_observer_specific_basic_interaction_radius() -> None:
-    """Assert each observer uses its own current basic interaction radius."""
     config = _deterministic_config()
     config, state = _state_two_versus_two_game(
         config,
@@ -2081,7 +2029,6 @@ def test_basic_targetability_uses_observer_specific_basic_interaction_radius() -
 
 
 def test_observation_radius_does_not_substitute_for_basic_interaction_radius() -> None:
-    """Assert visible units outside basic interaction radius are not targetable."""
     config = _deterministic_config()
     config, state = _state_two_versus_two_game(
         config,
@@ -2113,7 +2060,6 @@ def test_observation_radius_does_not_substitute_for_basic_interaction_radius() -
 
 
 def test_ultimate_interaction_radius_does_not_affect_basic_targetability() -> None:
-    """Assert M4 basic targetability ignores ultimate interaction radius."""
     config = _deterministic_config()
     config, state = _state_two_versus_two_game(
         config,
@@ -2145,7 +2091,6 @@ def test_ultimate_interaction_radius_does_not_affect_basic_targetability() -> No
 
 
 def test_inactive_and_dead_observers_expose_only_canonical_combat_pair() -> None:
-    """Assert nonacting observers expose no unit target or ultimate choice."""
     config = _deterministic_config()
     config, state = _state_two_versus_two_game(
         config,
@@ -2179,7 +2124,6 @@ def test_inactive_and_dead_observers_expose_only_canonical_combat_pair() -> None
 
 
 def test_none_target_selection_is_valid_for_every_fixed_slot() -> None:
-    """Assert every actor row has a protocol-valid target-none submission."""
     config = _deterministic_config()
     config, state = _state_two_versus_two_game(
         config,
@@ -2205,7 +2149,6 @@ def test_none_target_selection_is_valid_for_every_fixed_slot() -> None:
 
 
 def test_ultimate_marginal_combines_class_availability_and_nonacting_no_op() -> None:
-    """Assert ultimate use remains class-gated while no-ultimate is universal."""
     config = _deterministic_config()
     config, state = _state_two_versus_two_game(
         config,
@@ -2245,7 +2188,6 @@ def test_ultimate_marginal_combines_class_availability_and_nonacting_no_op() -> 
 
 
 def test_jitted_nonstay_step_preserves_observation_mask_contracts() -> None:
-    """Assert compiled non-stay step matches eager observation-mask behavior."""
     config = _deterministic_config(
         obstacles=_obstacle_array_with_rows(
             (
@@ -2355,7 +2297,6 @@ def test_jitted_nonstay_step_preserves_observation_mask_contracts() -> None:
 
 
 def test_scanned_rollout_emits_stable_observation_mask_history() -> None:
-    """Assert scan keeps observation and action-mask structures stable."""
     horizon = 4
     config = _deterministic_config(max_steps=1000)
     config, state = _state_two_versus_two_game(
@@ -2411,7 +2352,6 @@ def test_scanned_rollout_emits_stable_observation_mask_history() -> None:
         tuple[EnvState, ActionMask],
         tuple[Array, Array, Array, Array, Array, Array],
     ]:
-        """Run a compiled fixed-horizon rollout with mask history."""
         return jax.lax.scan(
             _rollout_step,
             (initial_state, initial_mask),

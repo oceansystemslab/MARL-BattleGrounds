@@ -1,15 +1,16 @@
-"""Recipient-safe incoming presentation summaries for Agent POV.
+"""Build incoming presentation summaries within one recipient's information rights.
 
-NoSharedObs summaries preserve the canonical recipient-local cue inventory and
-enrich it only with facts independently authorized at the adjacent endpoints.
-SharedObs summaries are deliberately weaker: they report deterministic
-observation deltas and observation provenance, never scientific event causes.
+NoSharedObs builders preserve the recorded local cue inventory from a validated
+replay prefix or live adjacent-transition carrier. They add only facts already
+authorized at the two endpoints. The SharedObs builder instead compares two
+independently authorized visual unions and reports observation/source changes;
+those changes are not causal scientific events.
 
-This module owns no replay transport, HTTP, simulator, JAX, NumPy, Oracle
-event, or raw-frame dependency.  Its public NoSharedObs entry points accept
-either a validated replay projection index or the exact live adjacent carrier,
-so arbitrary standalone transitions/endpoints can never be presented as a
-complete cue inventory.
+Public entry points are build_replay_no_shared_obs_incoming_summary_v1,
+build_live_no_shared_obs_incoming_summary_v1 and
+build_shared_obs_incoming_summary_v1. Frozen host records define their wire
+contracts. This module neither reads Oracle frames nor runs the simulator,
+JAX, persistence or HTTP handlers.
 """
 
 from __future__ import annotations
@@ -117,16 +118,30 @@ _CLASS_NAME_BY_ID = {
 
 
 def _require_text(value: str, *, name: str) -> None:
+    """Require value to be an exact nonblank Python string.
+
+    name labels ValueError. Return None without stripping or coercing text.
+    """
     if type(value) is not str or not value.strip():
         raise ValueError(f"{name} must be a non-empty Python string.")
 
 
 def _require_int(value: int, *, name: str, minimum: int = 0) -> None:
+    """Require value to be an exact Python int at least minimum.
+
+    minimum defaults to zero. name labels ValueError; bool and array scalars
+    are rejected. Return None without changing the value.
+    """
     if type(value) is not int or value < minimum:
         raise ValueError(f"{name} must be a Python int >= {minimum}.")
 
 
 def _require_float(value: float, *, name: str, minimum: float | None = None) -> None:
+    """Require an exact finite Python float with an optional lower bound.
+
+    value must be at least minimum when supplied; None adds no lower bound.
+    name labels ValueError. Return None without coercion.
+    """
     if type(value) is not float or not isfinite(value):
         raise ValueError(f"{name} must be a finite Python float.")
     if minimum is not None and value < minimum:
@@ -134,6 +149,11 @@ def _require_float(value: float, *, name: str, minimum: float | None = None) -> 
 
 
 def _require_point(value: tuple[float, float], *, name: str) -> None:
+    """Require value to be a two-item tuple of finite Python floats.
+
+    Coordinates are world (x, y). name labels ValueError; return None without
+    checking map bounds or collision rules.
+    """
     if type(value) is not tuple or len(value) != 2:
         raise ValueError(f"{name} must be an exact two-coordinate tuple.")
     for coordinate in value:
@@ -141,11 +161,20 @@ def _require_point(value: tuple[float, float], *, name: str) -> None:
 
 
 def _require_bool(value: bool, *, name: str) -> None:
+    """Require value to be an exact Python bool.
+
+    name labels ValueError for another type. Return None without conversion.
+    """
     if type(value) is not bool:
         raise ValueError(f"{name} must be a Python bool.")
 
 
 def _require_opaque_pov_key(value: str, *, name: str) -> None:
+    """Check a recipient/session body key has its fixed opaque wire form.
+
+    value must be pov_ followed by 64 lowercase hexadecimal characters.
+    name labels ValueError; return None. Format alone grants no authority.
+    """
     _require_text(value, name=name)
     digest = value.removeprefix("pov_")
     if (
@@ -162,6 +191,12 @@ def _require_exact_tuple(
     name: str,
     item_types: type[object] | tuple[type[object], ...],
 ) -> None:
+    """Require an exact tuple whose items have the allowed exact types.
+
+    value may be empty. item_types is one class or a tuple of allowed classes;
+    subclasses do not qualify. name labels ValueError. Return None without
+    copying or recursively revalidating each item.
+    """
     if type(value) is not tuple:
         raise ValueError(f"{name} must be a Python tuple.")
     if any(type(item) not in _as_type_tuple(item_types) for item in value):
@@ -171,6 +206,11 @@ def _require_exact_tuple(
 def _as_type_tuple(
     item_types: type[object] | tuple[type[object], ...],
 ) -> tuple[type[object], ...]:
+    """Normalize an allowed type or type tuple for exact-type checks.
+
+    Return value unchanged when it is a tuple, otherwise wrap it in a tuple.
+    The caller supplies only type objects; this helper does not validate them.
+    """
     if isinstance(item_types, tuple):
         return item_types
     return (item_types,)
@@ -178,21 +218,77 @@ def _as_type_tuple(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AgentIncomingObservedStatusV1:
-    """One endpoint-authorized status without emitter/source evidence."""
+    """Describe an observed status without identifying its emitter.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    status_channel : int
+        Python int on the nine-channel axis, in 0..8.
+    status_id : str
+        Canonical public status ID matching status_channel.
+    family : AgentIncomingStatusFamilyV1
+        slow, stun, anti_heal, damage_amplification or movement_floor.
+    configured_duration_steps : int
+        Positive Python int giving the configured duration in ticks.
+    remaining_duration : int
+        Positive Python int no greater than configured_duration_steps.
+    mechanic_action_component : AgentIncomingActionComponentV1
+        basic or ultimate: the mechanic family, without naming an actor.
+    magnitude_kind : AgentIncomingMagnitudeKindV1
+        movement_multiplier, none, healing_multiplier, damage_multiplier or
+        movement_floor.
+    magnitude : float | None
+        Finite Python float, or None exactly when magnitude_kind is none. This
+        record does not add a sign bound.
+    breaks_on_positive_damage : bool
+        Exact Python bool saying whether positive damage breaks this status.
+
+    Raises
+    ------
+    ValueError
+        Channel/ID, enum values, duration bounds, magnitude presence/type or
+        boolean type is invalid.
+
+    Notes
+    -----
+    The record contains no emitting agent, location or causal source evidence.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     status_channel: int
+    """Python int on the nine-channel axis, in 0..8."""
     status_id: str
+    """Canonical public status ID matching status_channel."""
     family: AgentIncomingStatusFamilyV1
+    """slow, stun, anti_heal, damage_amplification or movement_floor."""
     configured_duration_steps: int
+    """Positive Python int giving the configured duration in ticks."""
     remaining_duration: int
+    """Positive Python int no greater than configured_duration_steps."""
     mechanic_action_component: AgentIncomingActionComponentV1
+    """basic or ultimate: the mechanic family, without naming an actor."""
     magnitude_kind: AgentIncomingMagnitudeKindV1
+    """movement_multiplier, none, healing_multiplier, damage_multiplier or
+    movement_floor.
+    """
     magnitude: float | None
+    """Finite Python float, or None exactly when magnitude_kind is none. This
+    record does not add a sign bound.
+    """
     breaks_on_positive_damage: bool
+    """Exact Python bool saying whether positive damage breaks this status."""
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if channel/ID, enum values, duration bounds, magnitude
+        presence/type or boolean type is invalid.
+        Return None without changing valid fields.
+        """
         _require_int(self.status_channel, name="status_channel")
         if self.status_channel >= 9:
             raise ValueError("status_channel must remain on the V1 status axis.")
@@ -243,6 +339,11 @@ def _require_canonical_status_order(
     *,
     name: str,
 ) -> None:
+    """Check unique status channels in the public status display order.
+
+    statuses already contains observed status records. name labels ValueError
+    for repeated channels or out-of-order rows. Return None without sorting.
+    """
     channels = tuple(status.status_channel for status in statuses)
     presentation_keys = tuple(
         status_sort_key(status_token_id_from_catalog_status_id(status.status_id))
@@ -256,35 +357,141 @@ def _require_canonical_status_order(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AgentIncomingObservationV1:
-    """One generic endpoint observation stripped of causal source claims."""
+    """Keep one authorized endpoint observation without causal claims.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    presentation_key : str
+        Opaque recipient/session body key: pov_ followed by 64 lowercase
+        hexadecimal characters.
+    public_agent_id : str
+        Nonblank public identity of the observed body.
+    relation : AgentIncomingRelationV1
+        self, ally or opponent relative to the recipient. Oracle rows are excluded.
+    team_id : int
+        Exact Python int 1 for Team A or 2 for Team B.
+    class_id : int
+        Exact Python int in 1..5.
+    class_name : str
+        Canonical class name matching class_id.
+    position : tuple[float, float]
+        Finite Python float tuple (x, y) in world coordinates.
+    radius : float
+        Positive finite body radius in world units.
+    life_state : AgentIncomingLifeStateV1
+        alive or corpse at this endpoint.
+    current_health : float
+        Finite Python float from zero through maximum_health.
+    maximum_health : float
+        Positive finite Python float giving the configured health limit.
+    base_movement_speed : float
+        Nonnegative finite configured movement distance per tick.
+    effective_movement_speed : float
+        Nonnegative finite observed movement distance per tick at this endpoint.
+    observation_radius : float
+        Nonnegative finite sensor radius in world units.
+    basic_interaction_radius : float
+        Nonnegative finite Basic reach in world units.
+    ultimate_interaction_radius : float
+        Nonnegative finite Ultimate reach in world units.
+    ultimate_cooldown_remaining : int
+        Nonnegative Python int giving the observed Ultimate cooldown in ticks.
+    spawn_shield_remaining : int
+        Nonnegative Python int giving the observed shield duration in ticks.
+    steps_until_out_of_combat : int
+        Nonnegative Python int no greater than out_of_combat_delay_steps.
+    out_of_combat_delay_steps : int
+        Nonnegative Python int giving the configured combat timeout in ticks.
+    out_of_combat_health_regeneration_fraction_per_step : float
+        Finite Python float in [0, 1] giving the configured fraction of maximum
+        health restored per eligible tick.
+    statuses : tuple[AgentIncomingObservedStatusV1, ...]
+        Exact tuple of observed status records in canonical display order, with
+        unique channels. Empty means no active statuses in this observation.
+    aura_modifiers : tuple[AuthorizedAuraModifierV1, ...]
+        Exact tuple of AuthorizedAuraModifierV1 rows sorted by unique aura ID.
+        Neutral multipliers of 1.0 are omitted.
+
+    Raises
+    ------
+    ValueError
+        Identity, relation/class mapping, finite values, bounds, counter limits
+        or status/aura ordering is invalid.
+
+    Notes
+    -----
+    Values describe one endpoint, not a path or an explanation of how that
+    endpoint arose. The producer owns the information boundary; this record has
+    no simulator access.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     presentation_key: str
+    """Opaque recipient/session body key: pov_ followed by 64 lowercase hexadecimal
+    characters.
+    """
     public_agent_id: str
+    """Nonblank public identity of the observed body."""
     relation: AgentIncomingRelationV1
+    """self, ally or opponent relative to the recipient. Oracle rows are excluded."""
     team_id: int
+    """Exact Python int 1 for Team A or 2 for Team B."""
     class_id: int
+    """Exact Python int in 1..5."""
     class_name: str
+    """Canonical class name matching class_id."""
     position: tuple[float, float]
+    """Finite Python float tuple (x, y) in world coordinates."""
     radius: float
+    """Positive finite body radius in world units."""
     life_state: AgentIncomingLifeStateV1
+    """alive or corpse at this endpoint."""
     current_health: float
+    """Finite Python float from zero through maximum_health."""
     maximum_health: float
+    """Positive finite Python float giving the configured health limit."""
     base_movement_speed: float
+    """Nonnegative finite configured movement distance per tick."""
     effective_movement_speed: float
+    """Nonnegative finite observed movement distance per tick at this endpoint."""
     observation_radius: float
+    """Nonnegative finite sensor radius in world units."""
     basic_interaction_radius: float
+    """Nonnegative finite Basic reach in world units."""
     ultimate_interaction_radius: float
+    """Nonnegative finite Ultimate reach in world units."""
     ultimate_cooldown_remaining: int
+    """Nonnegative Python int giving the observed Ultimate cooldown in ticks."""
     spawn_shield_remaining: int
+    """Nonnegative Python int giving the observed shield duration in ticks."""
     steps_until_out_of_combat: int
+    """Nonnegative Python int no greater than out_of_combat_delay_steps."""
     out_of_combat_delay_steps: int
+    """Nonnegative Python int giving the configured combat timeout in ticks."""
     out_of_combat_health_regeneration_fraction_per_step: float
+    """Finite Python float in [0, 1] giving the configured fraction of maximum
+    health restored per eligible tick.
+    """
     statuses: tuple[AgentIncomingObservedStatusV1, ...]
+    """Exact tuple of observed status records in canonical display order, with
+    unique channels. Empty means no active statuses in this observation.
+    """
     aura_modifiers: tuple[AuthorizedAuraModifierV1, ...]
+    """Exact tuple of AuthorizedAuraModifierV1 rows sorted by unique aura ID.
+    Neutral multipliers of 1.0 are omitted.
+    """
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if identity, relation/class mapping, finite values,
+        bounds, counter limits or status/aura ordering is invalid.
+        Return None without changing valid fields.
+        """
         _require_opaque_pov_key(self.presentation_key, name="presentation_key")
         _require_text(self.public_agent_id, name="public_agent_id")
         if self.relation not in ("self", "ally", "opponent"):
@@ -355,6 +562,13 @@ def _validate_local_cue_identity(
     pov_transition_id: str,
     ordinal: int,
 ) -> None:
+    """Check the local identity shared by all NoSharedObs incoming cues.
+
+    cue_type, cue_id and pov_transition_id must be nonblank strings; ordinal
+    is a nonnegative Python int. Require cue_id to append :cue:ordinal to the
+    transition ID. Return None or raise ValueError. Each caller separately
+    checks its exact cue_type discriminator.
+    """
     _require_text(cue_type, name="cue_type")
     _require_text(cue_id, name="cue_id")
     _require_text(pov_transition_id, name="pov_transition_id")
@@ -365,15 +579,53 @@ def _validate_local_cue_identity(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NoSharedObsOwnActionOutcomeIncomingCueV1:
+    """Keep the recorded outcome of the recipient's submitted action.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    cue_type : Literal['own_action_outcome']
+        The literal own_action_outcome.
+    cue_id : str
+        Canonical recipient transition ID followed by :cue: and the unpadded ordinal.
+    pov_transition_id : str
+        Nonblank ID of the recorded recipient-local incoming transition.
+    ordinal : int
+        Nonnegative Python int giving this cue's position in the recorded inventory.
+    outcome : Literal['accepted', 'rejected']
+        accepted or rejected, copied from the recipient cue.
+
+    Raises
+    ------
+    ValueError
+        Cue identity, discriminator or outcome is invalid.
+
+    Notes
+    -----
+    This is the first and only action-outcome cue in a complete incoming summary.
+    """
+
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     cue_type: Literal["own_action_outcome"]
+    """The literal own_action_outcome."""
     cue_id: str
+    """Canonical recipient transition ID followed by :cue: and the unpadded ordinal."""
     pov_transition_id: str
+    """Nonblank ID of the recorded recipient-local incoming transition."""
     ordinal: int
+    """Nonnegative Python int giving this cue's position in the recorded inventory."""
     outcome: Literal["accepted", "rejected"]
+    """accepted or rejected, copied from the recipient cue."""
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if cue identity, discriminator or outcome is invalid.
+        Return None without changing valid fields.
+        """
         _validate_local_cue_identity(
             cue_type=self.cue_type,
             cue_id=self.cue_id,
@@ -389,16 +641,62 @@ class NoSharedObsOwnActionOutcomeIncomingCueV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NoSharedObsOwnPositionChangedIncomingCueV1:
+    """Show the recipient's observed position at both transition endpoints.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    cue_type : Literal['own_position_changed']
+        The literal own_position_changed.
+    cue_id : str
+        Canonical recipient transition ID followed by :cue: and the unpadded ordinal.
+    pov_transition_id : str
+        Nonblank ID of the recorded recipient-local incoming transition.
+    ordinal : int
+        Nonnegative Python int giving this cue's position in the recorded inventory.
+    start_position : tuple[float, float]
+        Finite Python world (x, y) tuple before the transition.
+    successor_position : tuple[float, float]
+        Finite Python world (x, y) tuple after the transition; must differ from
+        start_position.
+
+    Raises
+    ------
+    ValueError
+        Cue identity, discriminator, point type/shape or required position
+        change is invalid.
+
+    Notes
+    -----
+    Endpoint positions do not establish the route taken or the cause of movement.
+    """
+
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     cue_type: Literal["own_position_changed"]
+    """The literal own_position_changed."""
     cue_id: str
+    """Canonical recipient transition ID followed by :cue: and the unpadded ordinal."""
     pov_transition_id: str
+    """Nonblank ID of the recorded recipient-local incoming transition."""
     ordinal: int
+    """Nonnegative Python int giving this cue's position in the recorded inventory."""
     start_position: tuple[float, float]
+    """Finite Python world (x, y) tuple before the transition."""
     successor_position: tuple[float, float]
+    """Finite Python world (x, y) tuple after the transition; must differ from
+    start_position.
+    """
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if cue identity, discriminator, point type/shape or
+        required position change is invalid.
+        Return None without changing valid fields.
+        """
         _validate_local_cue_identity(
             cue_type=self.cue_type,
             cue_id=self.cue_id,
@@ -415,16 +713,61 @@ class NoSharedObsOwnPositionChangedIncomingCueV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NoSharedObsOwnHealthChangedIncomingCueV1:
+    """Show a change in the recipient's observed health.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    cue_type : Literal['own_health_changed']
+        The literal own_health_changed.
+    cue_id : str
+        Canonical recipient transition ID followed by :cue: and the unpadded ordinal.
+    pov_transition_id : str
+        Nonblank ID of the recorded recipient-local incoming transition.
+    ordinal : int
+        Nonnegative Python int giving this cue's position in the recorded inventory.
+    start_health : float
+        Nonnegative finite Python float before the transition.
+    successor_health : float
+        Nonnegative finite Python float after the transition; must differ from
+        start_health.
+
+    Raises
+    ------
+    ValueError
+        Cue identity, discriminator, health type/bounds or required change is invalid.
+
+    Notes
+    -----
+    This cue does not identify an attacker, healer or event order.
+    """
+
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     cue_type: Literal["own_health_changed"]
+    """The literal own_health_changed."""
     cue_id: str
+    """Canonical recipient transition ID followed by :cue: and the unpadded ordinal."""
     pov_transition_id: str
+    """Nonblank ID of the recorded recipient-local incoming transition."""
     ordinal: int
+    """Nonnegative Python int giving this cue's position in the recorded inventory."""
     start_health: float
+    """Nonnegative finite Python float before the transition."""
     successor_health: float
+    """Nonnegative finite Python float after the transition; must differ from
+    start_health.
+    """
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if cue identity, discriminator, health type/bounds or
+        required change is invalid.
+        Return None without changing valid fields.
+        """
         _validate_local_cue_identity(
             cue_type=self.cue_type,
             cue_id=self.cue_id,
@@ -441,16 +784,66 @@ class NoSharedObsOwnHealthChangedIncomingCueV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NoSharedObsOwnStatusChangedIncomingCueV1:
+    """Show the recipient's observed status sets before and after a transition.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    cue_type : Literal['own_status_changed']
+        The literal own_status_changed.
+    cue_id : str
+        Canonical recipient transition ID followed by :cue: and the unpadded ordinal.
+    pov_transition_id : str
+        Nonblank ID of the recorded recipient-local incoming transition.
+    ordinal : int
+        Nonnegative Python int giving this cue's position in the recorded inventory.
+    start_statuses : tuple[AgentIncomingObservedStatusV1, ...]
+        Exact tuple of observed statuses before the transition, with unique
+        channels in canonical display order.
+    successor_statuses : tuple[AgentIncomingObservedStatusV1, ...]
+        Exact tuple of observed statuses afterward. It must differ from
+        start_statuses; retained channels keep their static mechanic profile.
+
+    Raises
+    ------
+    ValueError
+        Cue identity, discriminator, status roots/order, required change or
+        retained status profile is invalid.
+
+    Notes
+    -----
+    Empty tuples mean no active observed statuses at that endpoint. No emitter
+    is inferred.
+    """
+
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     cue_type: Literal["own_status_changed"]
+    """The literal own_status_changed."""
     cue_id: str
+    """Canonical recipient transition ID followed by :cue: and the unpadded ordinal."""
     pov_transition_id: str
+    """Nonblank ID of the recorded recipient-local incoming transition."""
     ordinal: int
+    """Nonnegative Python int giving this cue's position in the recorded inventory."""
     start_statuses: tuple[AgentIncomingObservedStatusV1, ...]
+    """Exact tuple of observed statuses before the transition, with unique channels
+    in canonical display order.
+    """
     successor_statuses: tuple[AgentIncomingObservedStatusV1, ...]
+    """Exact tuple of observed statuses afterward. It must differ from
+    start_statuses; retained channels keep their static mechanic profile.
+    """
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if cue identity, discriminator, status roots/order,
+        required change or retained status profile is invalid.
+        Return None without changing valid fields.
+        """
         _validate_local_cue_identity(
             cue_type=self.cue_type,
             cue_id=self.cue_id,
@@ -488,16 +881,55 @@ class NoSharedObsOwnStatusChangedIncomingCueV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NoSharedObsOwnCooldownChangedIncomingCueV1:
+    """Show a change in the recipient's observed Ultimate cooldown.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    cue_type : Literal['own_cooldown_changed']
+        The literal own_cooldown_changed.
+    cue_id : str
+        Canonical recipient transition ID followed by :cue: and the unpadded ordinal.
+    pov_transition_id : str
+        Nonblank ID of the recorded recipient-local incoming transition.
+    ordinal : int
+        Nonnegative Python int giving this cue's position in the recorded inventory.
+    start_remaining_ticks : int
+        Nonnegative Python cooldown count before the transition.
+    successor_remaining_ticks : int
+        Nonnegative Python cooldown count afterward; must differ from the start count.
+
+    Raises
+    ------
+    ValueError
+        Cue identity, discriminator, exact integer type/bounds or required
+        change is invalid.
+    """
+
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     cue_type: Literal["own_cooldown_changed"]
+    """The literal own_cooldown_changed."""
     cue_id: str
+    """Canonical recipient transition ID followed by :cue: and the unpadded ordinal."""
     pov_transition_id: str
+    """Nonblank ID of the recorded recipient-local incoming transition."""
     ordinal: int
+    """Nonnegative Python int giving this cue's position in the recorded inventory."""
     start_remaining_ticks: int
+    """Nonnegative Python cooldown count before the transition."""
     successor_remaining_ticks: int
+    """Nonnegative Python cooldown count afterward; must differ from the start count."""
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if cue identity, discriminator, exact integer
+        type/bounds or required change is invalid.
+        Return None without changing valid fields.
+        """
         _validate_local_cue_identity(
             cue_type=self.cue_type,
             cue_id=self.cue_id,
@@ -517,20 +949,76 @@ class NoSharedObsOwnCooldownChangedIncomingCueV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NoSharedObsOwnLifecycleChangedIncomingCueV1:
+    """Show the recipient's observed life state and spawn shield change.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    cue_type : Literal['own_lifecycle_changed']
+        The literal own_lifecycle_changed.
+    cue_id : str
+        Canonical recipient transition ID followed by :cue: and the unpadded ordinal.
+    pov_transition_id : str
+        Nonblank ID of the recorded recipient-local incoming transition.
+    ordinal : int
+        Nonnegative Python int giving this cue's position in the recorded inventory.
+    start_active : bool
+        Exact Python True: this recipient is a configured active slot.
+    successor_active : bool
+        Exact Python True; configured activity remains fixed.
+    start_life_state : AgentIncomingLifeStateV1
+        alive or corpse before the transition.
+    successor_life_state : AgentIncomingLifeStateV1
+        alive or corpse after the transition.
+    start_spawn_shield_remaining_ticks : int
+        Nonnegative Python int before the transition.
+    successor_spawn_shield_remaining_ticks : int
+        Nonnegative Python int after the transition.
+
+    Raises
+    ------
+    ValueError
+        Cue identity, discriminator, active flags, life states, shield counts or
+        required endpoint change is invalid.
+
+    Notes
+    -----
+    Life state or shield duration must change. The active flags cannot turn an
+    inactive slot into a recipient.
+    """
+
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     cue_type: Literal["own_lifecycle_changed"]
+    """The literal own_lifecycle_changed."""
     cue_id: str
+    """Canonical recipient transition ID followed by :cue: and the unpadded ordinal."""
     pov_transition_id: str
+    """Nonblank ID of the recorded recipient-local incoming transition."""
     ordinal: int
+    """Nonnegative Python int giving this cue's position in the recorded inventory."""
     start_active: bool
+    """Exact Python True: this recipient is a configured active slot."""
     successor_active: bool
+    """Exact Python True; configured activity remains fixed."""
     start_life_state: AgentIncomingLifeStateV1
+    """alive or corpse before the transition."""
     successor_life_state: AgentIncomingLifeStateV1
+    """alive or corpse after the transition."""
     start_spawn_shield_remaining_ticks: int
+    """Nonnegative Python int before the transition."""
     successor_spawn_shield_remaining_ticks: int
+    """Nonnegative Python int after the transition."""
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if cue identity, discriminator, active flags, life
+        states, shield counts or required endpoint change is invalid.
+        Return None without changing valid fields.
+        """
         _validate_local_cue_identity(
             cue_type=self.cue_type,
             cue_id=self.cue_id,
@@ -569,24 +1057,88 @@ class NoSharedObsOwnLifecycleChangedIncomingCueV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NoSharedObsVisibleBodyChangedIncomingCueV1:
+    """Join a recorded body cue to independently authorized endpoint views.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    cue_type : Literal['visible_body_observation_changed']
+        The literal visible_body_observation_changed.
+    cue_id : str
+        Canonical recipient transition ID followed by :cue: and the unpadded ordinal.
+    pov_transition_id : str
+        Nonblank ID of the recorded recipient-local incoming transition.
+    ordinal : int
+        Nonnegative Python int giving this cue's position in the recorded inventory.
+    observation_change_kind : Literal['appearance', 'disappearance',
+    'observed_values_change']
+        appearance, disappearance or observed_values_change.
+    agent_presentation_key : str
+        Opaque recipient/session body key: pov_ followed by 64 lowercase
+        hexadecimal characters.
+    agent_public_agent_id : str
+        Nonblank public identity of the observed body.
+    observed_payload_changed : bool
+        Exact Python bool copied from the cue; retained observations require True.
+    start_observation : AgentIncomingObservationV1 | None
+        Exact AgentIncomingObservationV1 before the transition, or None only for
+        appearance.
+    successor_observation : AgentIncomingObservationV1 | None
+        Exact AgentIncomingObservationV1 afterward, or None only for disappearance.
+
+    Raises
+    ------
+    ValueError
+        Cue/body identity, discriminator, presence pattern, retained endpoint
+        difference or static profile is invalid.
+
+    Notes
+    -----
+    Appearance and disappearance concern visibility, not creation or death. A
+    recipient self-body cue always keeps both self observations, even if a
+    relation-axis self row is masked.
+    """
+
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     cue_type: Literal["visible_body_observation_changed"]
+    """The literal visible_body_observation_changed."""
     cue_id: str
+    """Canonical recipient transition ID followed by :cue: and the unpadded ordinal."""
     pov_transition_id: str
+    """Nonblank ID of the recorded recipient-local incoming transition."""
     ordinal: int
+    """Nonnegative Python int giving this cue's position in the recorded inventory."""
     observation_change_kind: Literal[
         "appearance",
         "disappearance",
         "observed_values_change",
     ]
+    """appearance, disappearance or observed_values_change."""
     agent_presentation_key: str
+    """Opaque recipient/session body key: pov_ followed by 64 lowercase hexadecimal
+    characters.
+    """
     agent_public_agent_id: str
+    """Nonblank public identity of the observed body."""
     observed_payload_changed: bool
+    """Exact Python bool copied from the cue; retained observations require True."""
     start_observation: AgentIncomingObservationV1 | None
+    """Exact AgentIncomingObservationV1 before the transition, or None only for
+    appearance.
+    """
     successor_observation: AgentIncomingObservationV1 | None
+    """Exact AgentIncomingObservationV1 afterward, or None only for disappearance."""
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if cue/body identity, discriminator, presence pattern,
+        retained endpoint difference or static profile is invalid.
+        Return None without changing valid fields.
+        """
         _validate_local_cue_identity(
             cue_type=self.cue_type,
             cue_id=self.cue_id,
@@ -646,17 +1198,62 @@ class NoSharedObsVisibleBodyChangedIncomingCueV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NoSharedObsEpisodeEndedIncomingCueV1:
+    """Keep the recipient-visible ending flags from the incoming transition.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    cue_type : Literal['episode_ended']
+        The literal episode_ended.
+    cue_id : str
+        Canonical recipient transition ID followed by :cue: and the unpadded ordinal.
+    pov_transition_id : str
+        Nonblank ID of the recorded recipient-local incoming transition.
+    ordinal : int
+        Nonnegative Python int giving this cue's position in the recorded inventory.
+    terminated : bool
+        Exact Python bool for termination.
+    truncated : bool
+        Exact Python bool for truncation; at least one ending flag must be True.
+    public_end_reason : str | None
+        Optional nonblank public reason; None means no reason was supplied.
+
+    Raises
+    ------
+    ValueError
+        Cue identity, discriminator, ending flags or optional reason is invalid.
+
+    Notes
+    -----
+    If present, this cue is last in the complete incoming inventory.
+    """
+
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     cue_type: Literal["episode_ended"]
+    """The literal episode_ended."""
     cue_id: str
+    """Canonical recipient transition ID followed by :cue: and the unpadded ordinal."""
     pov_transition_id: str
+    """Nonblank ID of the recorded recipient-local incoming transition."""
     ordinal: int
+    """Nonnegative Python int giving this cue's position in the recorded inventory."""
     terminated: bool
+    """Exact Python bool for termination."""
     truncated: bool
+    """Exact Python bool for truncation; at least one ending flag must be True."""
     public_end_reason: str | None
+    """Optional nonblank public reason; None means no reason was supplied."""
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if cue identity, discriminator, ending flags or
+        optional reason is invalid.
+        Return None without changing valid fields.
+        """
         _validate_local_cue_identity(
             cue_type=self.cue_type,
             cue_id=self.cue_id,
@@ -699,25 +1296,95 @@ _NO_SHARED_CUE_TYPES: tuple[type[object], ...] = (
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NoSharedObsIncomingSummaryV1:
-    """Exact recipient-local cues entering one NoSharedObs replay frame."""
+    """Preserve the ordered recipient cues entering a NoSharedObs frame.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    schema_version : Literal[1]
+        Wire version 1.
+    summary_kind : Literal['no_shared_obs_recipient_cues']
+        The literal no_shared_obs_recipient_cues.
+    source_episode_id : str
+        Nonblank source episode identity.
+    recipient_public_agent_id : str
+        Nonblank public ID of the single authorized recipient.
+    recipient_presentation_key : str
+        Opaque pov_ key identifying that same recipient.
+    incoming_transition_index : int
+        Nonnegative Python int naming the start frame of this transition.
+    incoming_recipient_transition_id : str
+        Canonical transition ID in this recipient's authority namespace.
+    incoming_start_recipient_frame_id : str
+        Canonical frame ID at incoming_transition_index.
+    incoming_successor_recipient_frame_id : str
+        Canonical frame ID at incoming_transition_index + 1.
+    incoming_start_simulator_step_count : int
+        Nonnegative Python simulator count before the transition.
+    incoming_successor_simulator_step_count : int
+        Python simulator count exactly one greater than the start count.
+    cues : tuple[NoSharedObsIncomingCueV1, ...]
+        Nonempty exact tuple of supported cue records in recorded family order,
+        with contiguous ordinals and unique body identities.
+    cue_count : int
+        Nonnegative Python int equal to len(cues).
+
+    Raises
+    ------
+    ValueError
+        Version/tags, canonical recipient IDs, adjacent counters, cue
+        count/order, per-family uniqueness or recipient/body identity joins
+        fail.
+
+    Notes
+    -----
+    The namespace is episode:actor-pov:recipient. One action-outcome cue comes
+    first; position, health, status, cooldown, lifecycle, body and ending cues
+    follow in that order when present. This record contains recipient
+    observations, not privileged scientific events.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     schema_version: Literal[1]
+    """Wire version 1."""
     summary_kind: Literal["no_shared_obs_recipient_cues"]
+    """The literal no_shared_obs_recipient_cues."""
     source_episode_id: str
+    """Nonblank source episode identity."""
     recipient_public_agent_id: str
+    """Nonblank public ID of the single authorized recipient."""
     recipient_presentation_key: str
+    """Opaque pov_ key identifying that same recipient."""
     incoming_transition_index: int
+    """Nonnegative Python int naming the start frame of this transition."""
     incoming_recipient_transition_id: str
+    """Canonical transition ID in this recipient's authority namespace."""
     incoming_start_recipient_frame_id: str
+    """Canonical frame ID at incoming_transition_index."""
     incoming_successor_recipient_frame_id: str
+    """Canonical frame ID at incoming_transition_index + 1."""
     incoming_start_simulator_step_count: int
+    """Nonnegative Python simulator count before the transition."""
     incoming_successor_simulator_step_count: int
+    """Python simulator count exactly one greater than the start count."""
     cues: tuple[NoSharedObsIncomingCueV1, ...]
+    """Nonempty exact tuple of supported cue records in recorded family order, with
+    contiguous ordinals and unique body identities.
+    """
     cue_count: int
+    """Nonnegative Python int equal to len(cues)."""
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if version/tags, canonical recipient IDs, adjacent
+        counters, cue count/order, per-family uniqueness or recipient/body
+        identity joins fail.
+        Return None without changing valid fields.
+        """
         if self.schema_version != AUTHORIZED_PRESENTATION_SCHEMA_VERSION:
             raise ValueError("unknown Agent incoming schema version.")
         if self.summary_kind != "no_shared_obs_recipient_cues":
@@ -871,6 +1538,13 @@ def _validate_shared_delta_identity(
     agent_presentation_key: str,
     agent_public_agent_id: str,
 ) -> None:
+    """Check a SharedObs delta ID and its disclosed body identity.
+
+    delta_kind, cue_id, recipient_transition_id and agent_public_agent_id must
+    be nonblank. ordinal is a nonnegative Python int; cue_id appends :cue:ordinal
+    to recipient_transition_id. agent_presentation_key has the opaque POV form.
+    Return None or raise ValueError; callers check their own discriminator.
+    """
     _require_text(delta_kind, name="delta_kind")
     _require_text(cue_id, name="cue_id")
     _require_text(recipient_transition_id, name="recipient_transition_id")
@@ -889,6 +1563,12 @@ def _validate_sources(
     *,
     name: str,
 ) -> None:
+    """Check a nonempty canonical list of admitted observation sources.
+
+    sources contains exact SharedObsAuthorizedSensorSourceV1 rows, ordered
+    recipient_base first then public ID, without repeated public IDs or keys.
+    name labels ValueError. Return None without sorting or inferring sources.
+    """
     _require_exact_tuple(
         cast(tuple[object, ...], sources),
         name=name,
@@ -915,18 +1595,74 @@ def _validate_sources(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsAppearanceIncomingDeltaV1:
+    """Show a body newly present in the authorized SharedObs union.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    delta_kind : Literal['appearance']
+        The literal appearance.
+    cue_id : str
+        Recipient transition ID followed by :cue: and the unpadded ordinal.
+    recipient_transition_id : str
+        Nonblank SharedObs recipient-local transition ID.
+    ordinal : int
+        Nonnegative Python int giving this delta's position in the output.
+    agent_presentation_key : str
+        Opaque recipient/session body key: pov_ followed by 64 lowercase
+        hexadecimal characters.
+    agent_public_agent_id : str
+        Nonblank public identity of the observed body.
+    successor_observation : AgentIncomingObservationV1
+        Exact endpoint observation joining this body's public ID and key.
+    successor_observation_sources : tuple[SharedObsAuthorizedSensorSourceV1, ...]
+        Nonempty exact tuple of authorized sensor sources, recipient_base first
+        and then public ID order; public IDs and opaque keys are unique.
+
+    Raises
+    ------
+    ValueError
+        Delta identity, discriminator, successor observation identity or source
+        inventory is invalid.
+
+    Notes
+    -----
+    Appearance says the body entered the authorized view. It does not claim a
+    spawn or movement path.
+    """
+
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     delta_kind: Literal["appearance"]
+    """The literal appearance."""
     cue_id: str
+    """Recipient transition ID followed by :cue: and the unpadded ordinal."""
     recipient_transition_id: str
+    """Nonblank SharedObs recipient-local transition ID."""
     ordinal: int
+    """Nonnegative Python int giving this delta's position in the output."""
     agent_presentation_key: str
+    """Opaque recipient/session body key: pov_ followed by 64 lowercase hexadecimal
+    characters.
+    """
     agent_public_agent_id: str
+    """Nonblank public identity of the observed body."""
     successor_observation: AgentIncomingObservationV1
+    """Exact endpoint observation joining this body's public ID and key."""
     successor_observation_sources: tuple[SharedObsAuthorizedSensorSourceV1, ...]
+    """Nonempty exact tuple of authorized sensor sources, recipient_base first and
+    then public ID order; public IDs and opaque keys are unique.
+    """
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if delta identity, discriminator, successor observation
+        identity or source inventory is invalid.
+        Return None without changing valid fields.
+        """
         _validate_shared_delta_identity(
             delta_kind=self.delta_kind,
             cue_id=self.cue_id,
@@ -952,18 +1688,74 @@ class SharedObsAppearanceIncomingDeltaV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsDisappearanceIncomingDeltaV1:
+    """Show a body no longer present in the authorized SharedObs union.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    delta_kind : Literal['disappearance']
+        The literal disappearance.
+    cue_id : str
+        Recipient transition ID followed by :cue: and the unpadded ordinal.
+    recipient_transition_id : str
+        Nonblank SharedObs recipient-local transition ID.
+    ordinal : int
+        Nonnegative Python int giving this delta's position in the output.
+    agent_presentation_key : str
+        Opaque recipient/session body key: pov_ followed by 64 lowercase
+        hexadecimal characters.
+    agent_public_agent_id : str
+        Nonblank public identity of the observed body.
+    start_observation : AgentIncomingObservationV1
+        Exact prior endpoint observation joining this body's public ID and key.
+    start_observation_sources : tuple[SharedObsAuthorizedSensorSourceV1, ...]
+        Nonempty exact tuple of authorized sensor sources, recipient_base first
+        and then public ID order; public IDs and opaque keys are unique.
+
+    Raises
+    ------
+    ValueError
+        Delta identity, discriminator, prior observation identity or source
+        inventory is invalid.
+
+    Notes
+    -----
+    Disappearance says the body left the authorized view. It does not claim
+    death or a new hidden position.
+    """
+
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     delta_kind: Literal["disappearance"]
+    """The literal disappearance."""
     cue_id: str
+    """Recipient transition ID followed by :cue: and the unpadded ordinal."""
     recipient_transition_id: str
+    """Nonblank SharedObs recipient-local transition ID."""
     ordinal: int
+    """Nonnegative Python int giving this delta's position in the output."""
     agent_presentation_key: str
+    """Opaque recipient/session body key: pov_ followed by 64 lowercase hexadecimal
+    characters.
+    """
     agent_public_agent_id: str
+    """Nonblank public identity of the observed body."""
     start_observation: AgentIncomingObservationV1
+    """Exact prior endpoint observation joining this body's public ID and key."""
     start_observation_sources: tuple[SharedObsAuthorizedSensorSourceV1, ...]
+    """Nonempty exact tuple of authorized sensor sources, recipient_base first and
+    then public ID order; public IDs and opaque keys are unique.
+    """
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if delta identity, discriminator, prior observation
+        identity or source inventory is invalid.
+        Return None without changing valid fields.
+        """
         _validate_shared_delta_identity(
             delta_kind=self.delta_kind,
             cue_id=self.cue_id,
@@ -989,19 +1781,84 @@ class SharedObsDisappearanceIncomingDeltaV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsObservedValuesIncomingDeltaV1:
+    """Describe changed observed values for a body present at both endpoints.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    delta_kind : Literal['observed_values_change']
+        The literal observed_values_change.
+    cue_id : str
+        Recipient transition ID followed by :cue: and the unpadded ordinal.
+    recipient_transition_id : str
+        Nonblank SharedObs recipient-local transition ID.
+    ordinal : int
+        Nonnegative Python int giving this delta's position in the output.
+    agent_presentation_key : str
+        Opaque recipient/session body key: pov_ followed by 64 lowercase
+        hexadecimal characters.
+    agent_public_agent_id : str
+        Nonblank public identity of the observed body.
+    changed_dynamic_fields : tuple[SharedObsDynamicFieldV1, ...]
+        Nonempty exact tuple naming every changed dynamic field, once, in the
+        module's fixed order.
+    start_observation : AgentIncomingObservationV1
+        Exact authorized observation before the transition.
+    successor_observation : AgentIncomingObservationV1
+        Exact authorized observation afterward, with the same body and static
+        profile but different dynamic values.
+
+    Raises
+    ------
+    ValueError
+        Delta identity, discriminator, observation joins/static profiles,
+        required difference or exact changed-field inventory fails.
+
+    Notes
+    -----
+    The dynamic order is position, life_state, current_health,
+    effective_movement_speed, ultimate_cooldown_remaining,
+    spawn_shield_remaining, steps_until_out_of_combat, statuses and
+    aura_modifiers.
+    """
+
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     delta_kind: Literal["observed_values_change"]
+    """The literal observed_values_change."""
     cue_id: str
+    """Recipient transition ID followed by :cue: and the unpadded ordinal."""
     recipient_transition_id: str
+    """Nonblank SharedObs recipient-local transition ID."""
     ordinal: int
+    """Nonnegative Python int giving this delta's position in the output."""
     agent_presentation_key: str
+    """Opaque recipient/session body key: pov_ followed by 64 lowercase hexadecimal
+    characters.
+    """
     agent_public_agent_id: str
+    """Nonblank public identity of the observed body."""
     changed_dynamic_fields: tuple[SharedObsDynamicFieldV1, ...]
+    """Nonempty exact tuple naming every changed dynamic field, once, in the
+    module's fixed order.
+    """
     start_observation: AgentIncomingObservationV1
+    """Exact authorized observation before the transition."""
     successor_observation: AgentIncomingObservationV1
+    """Exact authorized observation afterward, with the same body and static
+    profile but different dynamic values.
+    """
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if delta identity, discriminator, observation
+        joins/static profiles, required difference or exact changed-field
+        inventory fails.
+        Return None without changing valid fields.
+        """
         _validate_shared_delta_identity(
             delta_kind=self.delta_kind,
             cue_id=self.cue_id,
@@ -1044,18 +1901,79 @@ class SharedObsObservedValuesIncomingDeltaV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsObservationProvenanceIncomingDeltaV1:
+    """Show a change in which authorized sensors supplied a body observation.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    delta_kind : Literal['observation_provenance_change']
+        The literal observation_provenance_change.
+    cue_id : str
+        Recipient transition ID followed by :cue: and the unpadded ordinal.
+    recipient_transition_id : str
+        Nonblank SharedObs recipient-local transition ID.
+    ordinal : int
+        Nonnegative Python int giving this delta's position in the output.
+    agent_presentation_key : str
+        Opaque recipient/session body key: pov_ followed by 64 lowercase
+        hexadecimal characters.
+    agent_public_agent_id : str
+        Nonblank public identity of the observed body.
+    start_observation_sources : tuple[SharedObsAuthorizedSensorSourceV1, ...]
+        Nonempty exact tuple of authorized sensor sources, recipient_base first
+        and then public ID order; public IDs and opaque keys are unique.
+    successor_observation_sources : tuple[SharedObsAuthorizedSensorSourceV1, ...]
+        Nonempty exact tuple of authorized sensor sources, recipient_base first
+        and then public ID order; public IDs and opaque keys are unique. This
+        tuple must differ from the start tuple.
+
+    Raises
+    ------
+    ValueError
+        Delta identity, discriminator, source ordering/uniqueness or required
+        source change is invalid.
+
+    Notes
+    -----
+    This can accompany a value change or occur alone. It identifies permitted
+    observation sources, not causes of game events.
+    """
+
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     delta_kind: Literal["observation_provenance_change"]
+    """The literal observation_provenance_change."""
     cue_id: str
+    """Recipient transition ID followed by :cue: and the unpadded ordinal."""
     recipient_transition_id: str
+    """Nonblank SharedObs recipient-local transition ID."""
     ordinal: int
+    """Nonnegative Python int giving this delta's position in the output."""
     agent_presentation_key: str
+    """Opaque recipient/session body key: pov_ followed by 64 lowercase hexadecimal
+    characters.
+    """
     agent_public_agent_id: str
+    """Nonblank public identity of the observed body."""
     start_observation_sources: tuple[SharedObsAuthorizedSensorSourceV1, ...]
+    """Nonempty exact tuple of authorized sensor sources, recipient_base first and
+    then public ID order; public IDs and opaque keys are unique.
+    """
     successor_observation_sources: tuple[SharedObsAuthorizedSensorSourceV1, ...]
+    """Nonempty exact tuple of authorized sensor sources, recipient_base first and
+    then public ID order; public IDs and opaque keys are unique. This tuple must
+    differ from the start tuple.
+    """
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if delta identity, discriminator, source
+        ordering/uniqueness or required source change is invalid.
+        Return None without changing valid fields.
+        """
         _validate_shared_delta_identity(
             delta_kind=self.delta_kind,
             cue_id=self.cue_id,
@@ -1096,25 +2014,96 @@ _SHARED_DELTA_TYPES: tuple[type[object], ...] = (
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsIncomingSummaryV1:
-    """Generic recipient-local observation deltas entering one SharedObs frame."""
+    """Keep recipient-local observation changes between two SharedObs frames.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    schema_version : Literal[1]
+        Wire version 1.
+    summary_kind : Literal['shared_obs_recipient_observation_deltas']
+        The literal shared_obs_recipient_observation_deltas.
+    source_episode_id : str
+        Nonblank source episode identity.
+    recipient_public_agent_id : str
+        Nonblank public ID of the single authorized recipient.
+    recipient_presentation_key : str
+        Opaque pov_ key identifying that same recipient.
+    incoming_transition_index : int
+        Nonnegative Python int naming the start frame of this transition.
+    incoming_recipient_transition_id : str
+        Canonical transition ID in this recipient's authority namespace.
+    incoming_start_recipient_frame_id : str
+        Canonical frame ID at incoming_transition_index.
+    incoming_successor_recipient_frame_id : str
+        Canonical frame ID at incoming_transition_index + 1.
+    incoming_start_simulator_step_count : int
+        Nonnegative Python simulator count before the transition.
+    incoming_successor_simulator_step_count : int
+        Python simulator count exactly one greater than the start count.
+    deltas : tuple[SharedObsIncomingDeltaV1, ...]
+        Exact tuple of supported deltas with contiguous ordinals. Empty means
+        the authorized body values and observation sources did not change.
+    delta_count : int
+        Nonnegative Python int equal to len(deltas).
+
+    Raises
+    ------
+    ValueError
+        Version/tags, canonical adjacent IDs/counts, delta ordering,
+        identity/source joins, recipient relation or per-body group shape fails.
+
+    Notes
+    -----
+    The namespace is episode:shared-obs-visual-union:recipient. Each body has
+    appearance, disappearance, a value change, a source change, or value then
+    source changes. Body groups are contiguous. The builder orders them by
+    physical team ID then public ID. The recipient never appears or disappears;
+    its body remains self. These deltas do not explain causes and are not the
+    scientific event stream.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     schema_version: Literal[1]
+    """Wire version 1."""
     summary_kind: Literal["shared_obs_recipient_observation_deltas"]
+    """The literal shared_obs_recipient_observation_deltas."""
     source_episode_id: str
+    """Nonblank source episode identity."""
     recipient_public_agent_id: str
+    """Nonblank public ID of the single authorized recipient."""
     recipient_presentation_key: str
+    """Opaque pov_ key identifying that same recipient."""
     incoming_transition_index: int
+    """Nonnegative Python int naming the start frame of this transition."""
     incoming_recipient_transition_id: str
+    """Canonical transition ID in this recipient's authority namespace."""
     incoming_start_recipient_frame_id: str
+    """Canonical frame ID at incoming_transition_index."""
     incoming_successor_recipient_frame_id: str
+    """Canonical frame ID at incoming_transition_index + 1."""
     incoming_start_simulator_step_count: int
+    """Nonnegative Python simulator count before the transition."""
     incoming_successor_simulator_step_count: int
+    """Python simulator count exactly one greater than the start count."""
     deltas: tuple[SharedObsIncomingDeltaV1, ...]
+    """Exact tuple of supported deltas with contiguous ordinals. Empty means the
+    authorized body values and observation sources did not change.
+    """
     delta_count: int
+    """Nonnegative Python int equal to len(deltas)."""
 
     def __post_init__(self) -> None:
+        """Validate this incoming record during host construction.
+
+        Raise ValueError if version/tags, canonical adjacent IDs/counts, delta
+        ordering, identity/source joins, recipient relation or per-body group
+        shape fails.
+        Return None without changing valid fields.
+        """
         if self.schema_version != AUTHORIZED_PRESENTATION_SCHEMA_VERSION:
             raise ValueError("unknown Agent incoming schema version.")
         if self.summary_kind != "shared_obs_recipient_observation_deltas":
@@ -1318,6 +2307,12 @@ class SharedObsIncomingSummaryV1:
 
 
 def _status_snapshot(status: AuthorizedStatusV1) -> AgentIncomingObservedStatusV1:
+    """Copy an authorized status without its emitter/source evidence.
+
+    status must be exact AuthorizedStatusV1. Return AgentIncomingObservedStatusV1
+    with observed duration and mechanic properties; invalid roots or copied
+    values raise ValueError. The input is unchanged.
+    """
     if type(status) is not AuthorizedStatusV1:
         raise ValueError("incoming status source must be an authorized status row.")
     return AgentIncomingObservedStatusV1(
@@ -1334,6 +2329,13 @@ def _status_snapshot(status: AuthorizedStatusV1) -> AgentIncomingObservedStatusV
 
 
 def _observation(agent: AuthorizedAgentV1) -> AgentIncomingObservationV1:
+    """Copy one authorized body into a source-free incoming observation.
+
+    agent must be exact AuthorizedAgentV1 with self, ally or opponent relation.
+    Return AgentIncomingObservationV1, copying dynamic and static observed
+    values and dropping causal status sources. Oracle roots and invalid copied
+    values raise ValueError. No hidden state is accessed.
+    """
     if type(agent) is not AuthorizedAgentV1:
         raise ValueError("incoming observation requires an authorized agent row.")
     if agent.relation == "oracle":
@@ -1368,6 +2370,12 @@ def _observation(agent: AuthorizedAgentV1) -> AgentIncomingObservationV1:
 
 
 def _static_profile(agent: AuthorizedAgentV1) -> tuple[object, ...]:
+    """Extract identity and fixed mechanic values from an authorized body.
+
+    agent is already validated. Return a tuple used for exact endpoint equality;
+    position, life state, counters, health, active statuses and aura modifiers
+    are excluded because they can change during a transition.
+    """
     return (
         agent.presentation_key,
         agent.public_agent_id,
@@ -1389,6 +2397,11 @@ def _static_profile(agent: AuthorizedAgentV1) -> tuple[object, ...]:
 def _status_static_profile(
     status: AgentIncomingObservedStatusV1,
 ) -> tuple[object, ...]:
+    """Extract the fixed mechanic values of one observed status.
+
+    status is already validated. Return a comparison tuple excluding remaining
+    duration, which may change between adjacent endpoints.
+    """
     return (
         status.status_channel,
         status.status_id,
@@ -1404,6 +2417,11 @@ def _status_static_profile(
 def _incoming_observation_static_profile(
     observation: AgentIncomingObservationV1,
 ) -> tuple[object, ...]:
+    """Extract fixed identity and mechanic values from an incoming body view.
+
+    observation is already validated. Return a comparison tuple excluding all
+    fields in the dynamic-change inventory; inputs are not modified.
+    """
     return (
         observation.presentation_key,
         observation.public_agent_id,
@@ -1426,6 +2444,12 @@ def _validate_incoming_observation_static_profile(
     start: AgentIncomingObservationV1,
     successor: AgentIncomingObservationV1,
 ) -> None:
+    """Reject changed fixed body or retained-status facts across endpoints.
+
+    start and successor describe the same retained incoming body. Require equal
+    fixed body profiles and equal mechanic profiles for status channels present
+    in both. New or removed statuses are allowed. Return None or raise ValueError.
+    """
     if _incoming_observation_static_profile(
         start
     ) != _incoming_observation_static_profile(successor):
@@ -1446,6 +2470,12 @@ def _validate_retained_static_profile(
     start: AuthorizedAgentV1,
     successor: AuthorizedAgentV1,
 ) -> None:
+    """Check stable authorized body and retained-status profiles across a tick.
+
+    start and successor are authorized views of one retained body. Dynamic
+    values may differ; common status channels retain their mechanic parameters.
+    Return None or raise ValueError for contradictory fixed facts.
+    """
     if _static_profile(start) != _static_profile(successor):
         raise ValueError("retained Agent observation changed static profile.")
     start_statuses = {
@@ -1464,6 +2494,12 @@ def _validate_retained_static_profile(
 def _agent_maps(
     agents: tuple[AuthorizedAgentV1, ...],
 ) -> tuple[dict[str, AuthorizedAgentV1], dict[str, AuthorizedAgentV1]]:
+    """Index an authorized endpoint by both public ID and opaque key.
+
+    agents supplies already validated rows. Return (by_public_id, by_key) as
+    new dictionaries pointing to existing rows. Raise ValueError if either
+    identity repeats; an empty tuple produces two empty dictionaries.
+    """
     by_public = {agent.public_agent_id: agent for agent in agents}
     by_key = {agent.presentation_key: agent for agent in agents}
     if len(by_public) != len(agents) or len(by_key) != len(agents):
@@ -1475,6 +2511,13 @@ def _validate_cross_epoch_agent_identity(
     start_agents: tuple[AuthorizedAgentV1, ...],
     successor_agents: tuple[AuthorizedAgentV1, ...],
 ) -> tuple[dict[str, AuthorizedAgentV1], dict[str, AuthorizedAgentV1]]:
+    """Join retained body identities and fixed profiles across two endpoints.
+
+    start_agents and successor_agents may contain different visible bodies.
+    Return their two public-ID dictionaries. Raise ValueError for duplicate
+    IDs/keys, a retained body profile change, or a reused key with another ID.
+    Bodies visible in only one endpoint are allowed.
+    """
     start_by_public, start_by_key = _agent_maps(start_agents)
     successor_by_public, successor_by_key = _agent_maps(successor_agents)
     for public_id in start_by_public.keys() & successor_by_public.keys():
@@ -1491,6 +2534,12 @@ def _validate_cross_epoch_agent_identity(
 def _recipient_agent(
     parts: NoSharedObsAuthorizedScenePartsV1,
 ) -> AuthorizedAgentV1:
+    """Find the single self body belonging to a NoSharedObs endpoint.
+
+    parts supplies recipient identity and its authorized scene. Return the
+    existing body row or raise ValueError for missing, repeated or non-self
+    matches. No relation-axis visibility assumption is needed.
+    """
     matches = tuple(
         agent
         for agent in parts.scene.agents
@@ -1507,6 +2556,14 @@ def _validate_no_shared_endpoints(
     transition: ActorPovTransitionV1,
     successor: NoSharedObsAuthorizedScenePartsV1,
 ) -> None:
+    """Check one recorded recipient transition joins adjacent authorized views.
+
+    start and successor must be exact NoSharedObsAuthorizedScenePartsV1;
+    transition must be exact ActorPovTransitionV1. Require matching episode,
+    recipient, local frame IDs, adjacent frame/tick counts and stable fixed
+    scene/body facts. Return None; wrong roots raise TypeError and contradictory
+    joins raise ValueError. The public source boundary validates cue contents.
+    """
     if (
         type(start) is not NoSharedObsAuthorizedScenePartsV1
         or type(successor) is not NoSharedObsAuthorizedScenePartsV1
@@ -1540,12 +2597,36 @@ def _validate_no_shared_endpoints(
 
 
 class _CueIdentityV1(TypedDict):
+    """Type the three identity fields copied from a validated POV cue.
+
+    This mutable TypedDict describes Python keys for internal packaging; it does
+    not validate values at runtime. The containing frozen record validates the
+    finished result.
+
+    Attributes
+    ----------
+    cue_id : str
+        Canonical recipient transition ID followed by :cue: and the unpadded ordinal.
+    pov_transition_id : str
+        Nonblank ID of the recorded recipient-local incoming transition.
+    ordinal : int
+        Nonnegative Python int giving this cue's position in the recorded inventory.
+    """
+
     cue_id: str
+    """Canonical recipient transition ID followed by :cue: and the unpadded ordinal."""
     pov_transition_id: str
+    """Nonblank ID of the recorded recipient-local incoming transition."""
     ordinal: int
+    """Nonnegative Python int giving this cue's position in the recorded inventory."""
 
 
 def _cue_identity(cue: ActorPovPresentationCueV1) -> _CueIdentityV1:
+    """Copy a validated POV cue's identity for enriched result packaging.
+
+    cue supplies cue_id, pov_transition_id and ordinal. Return a new TypedDict;
+    the cue is not modified and this helper adds no validation.
+    """
     return {
         "cue_id": cue.cue_id,
         "pov_transition_id": cue.pov_transition_id,
@@ -1557,6 +2638,12 @@ def _body_public_id(
     cue: ActorPovVisibleBodyObservationChangedCueV1,
     axis_mapping: ActorPovAxisMapping,
 ) -> str:
+    """Resolve a body cue's relation row through its recorded actor axis.
+
+    cue supplies ally/enemy relation and a valid row. axis_mapping is the
+    validated V1 or V2 actor mapping. Return the public ID on that row; the
+    caller owns row bounds and relation validation.
+    """
     if cue.relation == "ally":
         return axis_mapping.ally_observation_row_public_agent_id_by_id[
             cue.observation_row
@@ -1571,6 +2658,14 @@ def _visible_observation(
     agents: dict[str, AuthorizedAgentV1],
     recipient_public_id: str,
 ) -> AgentIncomingObservationV1 | None:
+    """Join a visibility claim to an independently authorized endpoint body.
+
+    public_id names the row, visible is its recorded visibility, and agents is
+    the authorized public-ID map. recipient_public_id identifies the always
+    available self body. Return an incoming observation when visible, or None
+    when masked. Raise ValueError if a visible body is absent or a masked
+    nonrecipient body leaked into the scene.
+    """
     agent = agents.get(public_id)
     if visible:
         if agent is None:
@@ -1587,7 +2682,16 @@ def _compose_no_shared_obs_incoming_summary_v1(
     successor: NoSharedObsAuthorizedScenePartsV1,
     axis_mapping: ActorPovAxisMapping,
 ) -> NoSharedObsIncomingSummaryV1:
-    """Compose from a coherent index-owned transition; intentionally private."""
+    """Enrich an index-owned cue inventory using authorized adjacent endpoints.
+
+    start, transition and successor must already come from the same validated
+    POV source; axis_mapping is its exact V1 or V2 actor mapping. Check joins,
+    then preserve cue order/IDs while attaching only authorized endpoint facts.
+    Return NoSharedObsIncomingSummaryV1. Wrong roots raise TypeError; inconsistent
+    identities, epochs or cue/endpoint values raise ValueError. The recipient's
+    self body remains available even when a relation-axis self row is masked.
+    This private helper does not replace complete source/cue validation.
+    """
     _validate_no_shared_endpoints(start, transition, successor)
     if (
         type(axis_mapping) is not ActorPovAxisMappingV1
@@ -1785,7 +2889,45 @@ def build_replay_no_shared_obs_incoming_summary_v1(
     public_catalog: StaticMechanicsCatalogV1,
     authority_session_id: str,
 ) -> NoSharedObsIncomingSummaryV1 | None:
-    """Build one replay incoming summary from a complete validated POV prefix."""
+    """Build the recipient cues entering one captured replay frame.
+
+    Parameters
+    ----------
+    source : ActorPovProjectionIndexV1
+        Exact replay index containing the complete captured POV prefix. Its
+        content and cue inventory are revalidated at this boundary.
+    successor_frame_index : int
+        Exact Python frame index in 0..len(source.content.frames)-1. The incoming
+        transition, when present, starts at the previous frame.
+    public_catalog : StaticMechanicsCatalogV1
+        Public mechanic catalog used to decode authorized endpoint values.
+    authority_session_id : str
+        Nonblank host-owned session identity used for stable opaque body keys.
+
+    Returns
+    -------
+    NoSharedObsIncomingSummaryV1 or None
+        Ordered recorded cues enriched with authorized endpoint facts. Frame zero
+        returns None after source and initial-scene validation because it has no
+        incoming transition.
+
+    Raises
+    ------
+    TypeError
+        The index or another required source root has the wrong exact type.
+    IndexError
+        successor_frame_index is not an exact Python int in the captured prefix.
+    ValueError
+        Source content, catalog decoding, identities, epochs or endpoint facts
+        fail validation.
+
+    Notes
+    -----
+    This is host-only presentation work. It revalidates the complete replay
+    prefix and builds the needed scenes; it is not a constant-cost lookup or a
+    JAX rollout helper. Inputs are unchanged. No simulator events, hidden state,
+    files or network services are consulted.
+    """
     if type(source) is not ActorPovProjectionIndexV1:
         raise TypeError("NoSharedObs replay incoming requires an exact POV index.")
     if type(successor_frame_index) is not int or not (
@@ -1823,7 +2965,38 @@ def build_live_no_shared_obs_incoming_summary_v1(
     public_catalog: StaticMechanicsCatalogV1,
     authority_session_id: str,
 ) -> NoSharedObsIncomingSummaryV1:
-    """Build one live incoming summary from the exact adjacent POV carrier."""
+    """Build recipient cues from one recorded live transition and its endpoints.
+
+    Parameters
+    ----------
+    source : ActorPovAdjacentTransitionSliceV1 or ActorPovAdjacentTransitionSliceV2
+        Exact carrier with a coherent start frame, recipient transition and
+        successor frame. Its full Python payload is revalidated.
+    public_catalog : StaticMechanicsCatalogV1
+        Public mechanic catalog for endpoint decoding.
+    authority_session_id : str
+        Nonblank host-owned session identity used for opaque body keys.
+
+    Returns
+    -------
+    NoSharedObsIncomingSummaryV1
+        The same ordered local cue inventory, enriched only with independently
+        authorized values at its two endpoints.
+
+    Raises
+    ------
+    TypeError
+        source or a required authority has an unsupported exact root.
+    ValueError
+        Carrier validation, endpoint decoding, identity/epoch joins or cue facts
+        are inconsistent.
+
+    Notes
+    -----
+    This host-only function leaves the source unchanged. It does not accept
+    arbitrary loose frame pairs, read privileged events, run the simulator or
+    perform file/network I/O.
+    """
     if (
         type(source) is not ActorPovAdjacentTransitionSliceV1
         and type(source) is not ActorPovAdjacentTransitionSliceV2
@@ -1857,6 +3030,13 @@ def _validated_shared_parts(
     *,
     name: str,
 ) -> SharedObsAuthorizedScenePartsV1:
+    """Strictly revalidate one complete SharedObs endpoint without changing it.
+
+    value must be exact SharedObsAuthorizedScenePartsV1. Serialize to in-memory
+    JSON and validate recursively; require the result to equal value. name
+    labels errors. Return the validated copy. Wrong roots raise TypeError and
+    invalid or changed values raise ValueError; no disk/network I/O occurs.
+    """
     if type(value) is not SharedObsAuthorizedScenePartsV1:
         raise TypeError(f"{name} must be exact SharedObs authorized scene parts.")
     adapter = TypeAdapter(SharedObsAuthorizedScenePartsV1)
@@ -1869,6 +3049,11 @@ def _validated_shared_parts(
 def _provenance_by_public_id(
     parts: SharedObsAuthorizedScenePartsV1,
 ) -> dict[str, SharedObsAgentObservationProvenanceV1]:
+    """Index the authorized observation-source rows by observed body ID.
+
+    parts is already validated. Return a new dictionary pointing to its
+    provenance records; raise ValueError when an observed public ID repeats.
+    """
     rows = {
         row.agent_public_agent_id: row for row in parts.agent_observation_provenance
     }
@@ -1881,6 +3066,12 @@ def _changed_dynamic_fields(
     start: AgentIncomingObservationV1,
     successor: AgentIncomingObservationV1,
 ) -> tuple[SharedObsDynamicFieldV1, ...]:
+    """List changed incoming-body fields in the fixed public display order.
+
+    start and successor have matching fixed profiles. Return a tuple of dynamic
+    field names whose values differ, or an empty tuple when none differ. This
+    comparison reports observations and does not infer causes.
+    """
     return tuple(
         field_name
         for field_name in _DYNAMIC_FIELD_ORDER
@@ -1892,6 +3083,12 @@ def _validate_shared_endpoints(
     start: SharedObsAuthorizedScenePartsV1,
     successor: SharedObsAuthorizedScenePartsV1,
 ) -> None:
+    """Check two SharedObs endpoint records share authority and adjacent epochs.
+
+    start and successor are already recursively validated. Require the same
+    episode/recipient/key, adjacent frame and simulator counts, stable retained
+    body profiles and static scene facts. Return None or raise ValueError.
+    """
     if (
         start.source_episode_id != successor.source_episode_id
         or start.recipient_public_agent_id != successor.recipient_public_agent_id
@@ -1910,7 +3107,13 @@ def _validate_static_scene_continuity(
     start: AuthorizedBattlefieldSceneV1,
     successor: AuthorizedBattlefieldSceneV1,
 ) -> None:
-    """Reject contradictory static facts while allowing lifecycle dynamics."""
+    """Reject contradictory fixed scene facts across adjacent authorized views.
+
+    start and successor may differ in visible bodies, aura emitters, lifecycle
+    state and wave countdowns. Require identical map/shield rules, pad identity
+    and configuration, wave periods, and profiles of common class/aura rows.
+    Return None or raise ValueError. This check does not reconstruct dynamics.
+    """
     if start.map != successor.map:
         raise ValueError("Agent adjacent endpoints changed static map facts.")
     if start.spawn_shield_mechanics != successor.spawn_shield_mechanics:
@@ -1953,6 +3156,11 @@ def _validate_static_scene_continuity(
         raise ValueError("Agent adjacent endpoints changed common class mechanics.")
 
     def aura_static_profile(field: AuthorizedAuraFieldV1) -> tuple[object, ...]:
+        """Extract fixed emitter/aura properties for an endpoint comparison.
+
+        field is an authorized aura row. Return a tuple excluding its current center,
+        so permitted movement does not look like a changed mechanic profile.
+        """
         return (
             field.aura_id,
             field.source_presentation_key,
@@ -1987,7 +3195,42 @@ def build_shared_obs_incoming_summary_v1(
     start: SharedObsAuthorizedScenePartsV1 | None,
     successor: SharedObsAuthorizedScenePartsV1,
 ) -> SharedObsIncomingSummaryV1 | None:
-    """Build generic deltas solely from two independently authorized endpoints."""
+    """Compare adjacent authorized SharedObs views without inventing causes.
+
+    Parameters
+    ----------
+    start : SharedObsAuthorizedScenePartsV1 or None
+        Independently authorized prior endpoint for the same recipient. Must be
+        None exactly when successor is frame zero; otherwise it is required.
+    successor : SharedObsAuthorizedScenePartsV1
+        Independently authorized current endpoint. Both supplied records are
+        strictly and recursively revalidated through an in-memory JSON round trip.
+
+    Returns
+    -------
+    SharedObsIncomingSummaryV1 or None
+        None for frame zero. Otherwise return body appearance, disappearance,
+        observed-value and observation-source changes, ordered by physical team
+        then public ID. A retained body's value change precedes its source change.
+        An empty deltas tuple means neither observed body values nor their sources
+        changed; it does not mean nothing happened in the simulator.
+
+    Raises
+    ------
+    TypeError
+        An endpoint has the wrong exact root.
+    ValueError
+        Initial/prior endpoint presence is wrong, recursive validation changes a
+        value, or authority, adjacency, stable identity or fixed facts disagree.
+
+    Notes
+    -----
+    The caller owns endpoint authorization. This host-only comparator consumes
+    those views; it cannot grant access to hidden state. Appearance does not prove
+    spawn, disappearance does not prove death, and health changes do not identify
+    an attacker or healer. Inputs are unchanged. No scientific event stream,
+    simulator state, disk or network access is used.
+    """
     successor = _validated_shared_parts(successor, name="successor")
     if successor.source_frame_index == 0:
         if start is not None:
@@ -2022,13 +3265,47 @@ def build_shared_obs_incoming_summary_v1(
     deltas: list[SharedObsIncomingDeltaV1] = []
 
     class _SharedDeltaIdentityV1(TypedDict):
+        """Type one SharedObs delta identity in the current output inventory.
+
+        This mutable TypedDict describes Python keys for internal packaging; it
+        does not validate values at runtime. The containing frozen record
+        validates the finished result.
+
+        Attributes
+        ----------
+        cue_id : str
+            Recipient transition ID followed by :cue: and the unpadded ordinal.
+        recipient_transition_id : str
+            Nonblank SharedObs recipient-local transition ID.
+        ordinal : int
+            Nonnegative Python int giving this delta's position in the output.
+        agent_presentation_key : str
+            Opaque recipient/session body key: pov_ followed by 64 lowercase
+            hexadecimal characters.
+        agent_public_agent_id : str
+            Nonblank public identity of the observed body.
+        """
+
         cue_id: str
+        """Recipient transition ID followed by :cue: and the unpadded ordinal."""
         recipient_transition_id: str
+        """Nonblank SharedObs recipient-local transition ID."""
         ordinal: int
+        """Nonnegative Python int giving this delta's position in the output."""
         agent_presentation_key: str
+        """Opaque recipient/session body key: pov_ followed by 64 lowercase
+        hexadecimal characters.
+        """
         agent_public_agent_id: str
+        """Nonblank public identity of the observed body."""
 
     def identity(agent: AuthorizedAgentV1) -> _SharedDeltaIdentityV1:
+        """Create the next SharedObs cue identity for one authorized body.
+
+        agent supplies public ID and opaque key. Return a new TypedDict using the
+        current transition ID and len(deltas) as its ordinal. This helper reads the
+        output length but does not append to or modify deltas.
+        """
         ordinal = len(deltas)
         return {
             "cue_id": f"{transition_id}:cue:{ordinal}",

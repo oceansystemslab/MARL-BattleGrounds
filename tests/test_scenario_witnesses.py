@@ -1,7 +1,7 @@
-"""Saved per-turn results for every packaged solution beyond Scenario 3.
+"""Compare saved per-turn results for packaged solutions other than Scenario 3.
 
-Scenario 3 has its own eight-turn and missed-move tests using the same comparison.
-Older authoring-revision witness and ablation tests remain separate.
+Scenario 3 uses its own solution and missed-move tests. Older authoring revisions
+and their ablation cases remain separate.
 """
 
 import json
@@ -71,7 +71,6 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 def test_packaged_solution_preserves_every_turn(
     scenario_id: int, case_name: str
 ) -> None:
-    """Replay only Team A's chosen commands; Team B must still choose for itself."""
     expected = json.loads((_FIXTURES / f"{case_name}_witness.json").read_text())
     scenario = load_tdm_scenario(scenario_id)
     assert expected["scenario_id"] == scenario_id

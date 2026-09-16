@@ -1,3 +1,7 @@
+/**
+ * @file Check that browser-test launch helpers use the intended live or replay entry
+ * point and fixed scenario route.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 

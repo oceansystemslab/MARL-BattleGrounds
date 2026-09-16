@@ -1,4 +1,4 @@
-"""Run one registered scripted DebuggerService for browser-only causal testing."""
+"""Run a registered scripted debugger service for browser behavior tests."""
 
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Serve a registered script without adding public launcher hooks."""
     options = _parser().parse_args(argv)
 
     from scripts.dev.visual_debugger.control import create_session

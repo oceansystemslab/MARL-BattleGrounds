@@ -60,6 +60,11 @@ def _planned_episode(
     scenario_id: int,
     coordinate: int,
 ) -> tuple[ResolvedScenarioSpecificationV3, EpisodeSpec]:
+    """Resolve one approved scenario and qualification seed into an explicit episode.
+
+    The coordinate must index the fixed seed schedule. Carry scenario, layout,
+    controller, and pairing identities into the evaluator metadata.
+    """
     scenario = load_tdm_scenario(scenario_id)
     schedule = build_tdm_qualification_seed_schedule()
     if type(coordinate) is not int or not 0 <= coordinate < len(
@@ -89,7 +94,7 @@ def _planned_episode(
     return specification, EpisodeSpec(
         episode_id=(scenario_id - 1) * 2 + coordinate + 1,
         seed_id=coordinate,
-        config=scenario.config,
+        env_config=scenario.config,
         initial_state=scenario.initial_state,
         metadata=metadata,
     )
@@ -145,7 +150,35 @@ def capture_tdm_qualification_episode(
 
 
 def qualify_tdm_scenarios(destination: Path) -> dict[str, object]:
-    """Write one run with sixteen scalar rows and replay-backed scenario records."""
+    """Run the packaged-scenario pipeline checks into a new evidence directory.
+
+    Parameters
+    ----------
+    destination : pathlib.Path
+        New output directory. Existing paths are rejected.
+
+    Returns
+    -------
+    dict of str to object
+        Suite index with source identity, schedule, output paths, per-episode
+        records, failures, and complete status. Sixteen checked scalar rows are
+        required for complete=True.
+
+    Raises
+    ------
+    FileExistsError
+        The destination already exists.
+    OSError
+        Directory creation or final index writing fails.
+
+    Notes
+    -----
+    This runs ALPHA as Team A against the declared ALPHA/BETA controls, records
+    full metrics and selected replays, and checks semantic record round trips.
+    Most execution/validation failures are retained in the result rather than
+    raised. Source changes invalidate completion. Files can remain after failure.
+    This is pipeline qualification, not winning or manuscript evidence.
+    """
     destination.mkdir(parents=True, exist_ok=False)
     revision = discover_code_revision_v2()
     schedule = build_tdm_qualification_seed_schedule()
@@ -264,6 +297,16 @@ def qualify_tdm_scenarios(destination: Path) -> dict[str, object]:
 
 
 def main() -> None:
+    """Run the scenario qualification suite into a new evidence directory.
+
+    The command prints whether every case completed and lists failures.
+
+    Raises
+    ------
+    SystemExit
+        With status one if qualification is incomplete, or when the
+        parser rejects arguments or displays help.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination", type=Path, help="new evidence directory")
     args = parser.parse_args()

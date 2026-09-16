@@ -1,4 +1,4 @@
-"""Public trajectory proofs for authoritative Team Deathmatch semantics."""
+"""Check scoring, rewards and episode endings through public TDM trajectories."""
 
 from collections.abc import Iterable
 from typing import cast
@@ -59,7 +59,6 @@ def _task_config(
     max_steps: int = 20,
     respawn_periods: tuple[int, int] = (5, 5),
 ) -> EnvConfig:
-    """Build a catalog-valid deterministic task configuration."""
     class_ids = jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32)
     class_ids = class_ids.at[: team_sizes[0]].set(HUNTER_CLASS_ID)
     class_ids = class_ids.at[
@@ -101,7 +100,6 @@ def _task_config(
 
 
 def _combat_positions(team_sizes: tuple[int, int]) -> Array:
-    """Place opposing active rows within Hunter Basic range without overlap."""
     positions = jnp.zeros((MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32)
     for local_slot in range(team_sizes[0]):
         positions = positions.at[local_slot].set((4.0, 2.0 + 2.0 * local_slot))
@@ -121,7 +119,6 @@ def _scenario(
     dead_slots: Iterable[int] = (),
     due_respawn_teams: Iterable[int] = (),
 ) -> tuple[EnvState, Observation, ActionMask, Info]:
-    """Author one valid preterminal TDM state and expose its paired mask."""
     state, _, _, _ = reset(config, jax.random.key(0))
     team_sizes = (
         int(jnp.sum(config.agent_profile.active_mask[:MAX_AGENTS_PER_TEAM])),
@@ -149,7 +146,6 @@ def _scenario(
 
 
 def _joint_action(*target_rows: tuple[int, int]) -> Action:
-    """Build a canonical joint action with selected Basic targets."""
     target_actions = jnp.full((MAX_AGENT_SLOTS,), _TARGET_NONE, dtype=jnp.int32)
     for actor_slot, target_action in target_rows:
         target_actions = target_actions.at[actor_slot].set(target_action)
@@ -168,7 +164,6 @@ def _take_step(
     *,
     key_index: int = 1,
 ) -> tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]:
-    """Advance one deterministic transition from a paired state and mask."""
     return step(config, state, action_mask, action, jax.random.key(key_index))
 
 
@@ -181,7 +176,6 @@ def _assert_task_result(
     terminated: bool,
     truncated: bool,
 ) -> None:
-    """Assert the three public result surfaces agree on one transition."""
     assert int(info.transition_facts.team_deathmatch_facts.outcome) == outcome
     assert bool(done_flags.terminated) is terminated
     assert bool(done_flags.truncated) is truncated
@@ -190,7 +184,6 @@ def _assert_task_result(
 
 
 def test_reset_exposes_zero_score_task_context_and_neutral_outcome() -> None:
-    """Reset publishes task configuration and canonical zero dynamic truth."""
     config = _task_config(team_sizes=(2, 1), score_threshold=7)
     state, observation, action_mask, info = reset(config, jax.random.key(2))
 
@@ -242,7 +235,6 @@ def test_one_new_recipient_death_scores_once_for_the_opposing_team(
     actor_slot: int,
     expected_scores: tuple[int, int],
 ) -> None:
-    """Score authority follows recipient death rather than contributor identity."""
     config = _task_config(score_threshold=5)
     state, _, action_mask, _ = _scenario(
         config,
@@ -295,7 +287,6 @@ def test_one_new_recipient_death_scores_once_for_the_opposing_team(
 
 
 def test_bilateral_multi_death_updates_both_scores_before_outcome() -> None:
-    """Several simultaneous recipient deaths reduce into one order-free score."""
     config = _task_config(team_sizes=(2, 2), score_threshold=5)
     state, _, action_mask, _ = _scenario(
         config,
@@ -347,7 +338,6 @@ def test_bilateral_multi_death_updates_both_scores_before_outcome() -> None:
 
 
 def test_dead_body_does_not_score_again_on_a_later_transition() -> None:
-    """Only the alive-to-dead edge can change Team Deathmatch score."""
     config = _task_config(score_threshold=5)
     state, _, action_mask, _ = _scenario(
         config,
@@ -388,7 +378,6 @@ def test_dead_body_does_not_score_again_on_a_later_transition() -> None:
 
 
 def test_due_respawn_wave_does_not_erase_a_different_new_death_score() -> None:
-    """Retained death facts score even when lifecycle also respawns a teammate."""
     config = _task_config(team_sizes=(2, 2), score_threshold=5)
     state, _, action_mask, _ = _scenario(
         config,
@@ -433,7 +422,6 @@ def test_threshold_win_emits_one_shared_reward_pulse_for_configured_team(
     winning_team: str,
     expected_outcome: int,
 ) -> None:
-    """Threshold completion rewards configured membership, not alive state."""
     config = _task_config(team_sizes=(2, 1), score_threshold=1)
     victim_slot = _TEAM_B_FIRST_SLOT if winning_team == "team-a" else _TEAM_A_FIRST_SLOT
     actor_slot = _TEAM_A_FIRST_SLOT if winning_team == "team-a" else _TEAM_B_FIRST_SLOT
@@ -493,7 +481,6 @@ def test_threshold_win_emits_one_shared_reward_pulse_for_configured_team(
 
 
 def test_equal_simultaneous_threshold_crossing_is_a_draw() -> None:
-    """A mutual first-to-K trade compares complete successor scores."""
     config = _task_config(score_threshold=1)
     state, _, action_mask, _ = _scenario(
         config,
@@ -528,7 +515,6 @@ def test_equal_simultaneous_threshold_crossing_is_a_draw() -> None:
 
 
 def test_unequal_bilateral_threshold_overshoot_selects_higher_successor_score() -> None:
-    """Both teams may reach K, but simultaneous overshoot remains unclamped."""
     config = _task_config(team_sizes=(2, 2), score_threshold=2)
     state, _, action_mask, _ = _scenario(
         config,
@@ -580,7 +566,6 @@ def test_unequal_bilateral_threshold_overshoot_selects_higher_successor_score() 
 def test_horizon_without_threshold_is_always_a_draw(
     scores: tuple[int, int],
 ) -> None:
-    """First-to-K semantics do not convert a horizon lead into victory."""
     config = _task_config(score_threshold=5, max_steps=3)
     state, _, action_mask, _ = _scenario(
         config,
@@ -607,7 +592,6 @@ def test_horizon_without_threshold_is_always_a_draw(
 
 
 def test_threshold_on_final_allowed_action_retains_both_completion_bases() -> None:
-    """Termination and truncation independently describe one final transition."""
     config = _task_config(score_threshold=1, max_steps=1)
     state, _, action_mask, _ = _scenario(
         config,
@@ -632,7 +616,6 @@ def test_threshold_on_final_allowed_action_retains_both_completion_bases() -> No
 
 
 def test_neutral_mode_retains_zero_task_truth_and_horizon_only_truncation() -> None:
-    """Team Deathmatch additions do not alter the task-neutral simulator path."""
     config = _task_config(
         task_mode=TASK_MODE_NEUTRAL,
         score_threshold=0,
@@ -668,7 +651,6 @@ def test_neutral_mode_retains_zero_task_truth_and_horizon_only_truncation() -> N
 
 
 def test_tdm_public_trajectory_is_stable_under_jit_vmap_and_real_scan() -> None:
-    """Compiled and batched execution preserve score, fact, and done semantics."""
     config = _task_config(score_threshold=5, max_steps=10)
     state, _, action_mask, _ = _scenario(
         config,

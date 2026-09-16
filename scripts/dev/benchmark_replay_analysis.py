@@ -27,6 +27,12 @@ from marl_battlegrounds.evaluation.replay_io import load_replay
 
 
 def _measure[T](call: Callable[[], T], repeats: int) -> tuple[T, dict[str, object]]:
+    """Call a synchronous operation repeatedly and return its last result and timings.
+
+    No warm-up is hidden: every requested call contributes a sample in milliseconds.
+    The operation must finish its own asynchronous work before returning.
+    Reject a repeat count below one.
+    """
     if repeats < 1:
         raise ValueError("measurement requires a positive repetition count")
     started = time.perf_counter()
@@ -45,6 +51,24 @@ def _measure[T](call: Callable[[], T], repeats: int) -> tuple[T, dict[str, objec
 
 
 def main() -> int:
+    """Measure replay loading, full analysis, and final text formatting separately.
+
+    Command-line arguments choose replay files, output directory, and repeats.
+    Writes JSON timing records and compressed scalar-prefix arrays. Repeated
+    analyses must produce equal values and validity masks.
+
+    Returns
+    -------
+    int
+        Zero after every requested replay is checked and recorded.
+
+    Raises
+    ------
+    SystemExit
+        If arguments are invalid or help was requested.
+    AssertionError
+        If repeated analysis changes the saved prefix data.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--replays", type=Path, nargs="+", required=True)
     parser.add_argument("--output", type=Path, required=True)

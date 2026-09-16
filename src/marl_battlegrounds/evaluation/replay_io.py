@@ -1,9 +1,15 @@
-"""Canonical, bounded local persistence for semantic evaluation artifacts.
+"""Load and publish canonical local replay, scenario, and actor-view artifacts.
 
-This module owns bytes and paths, not rollout semantics. V2 and V3 replays are single
-files with structural and content-integrity checks. Explicit V1 APIs retain
-their strict replay/report bundle contract and publish the metric sidecar first.
-There is no simulator, policy, JAX, device, network, archive or plugin work here.
+Readers require bounded regular files, strict UTF-8 without a BOM, finite JSON
+with unique keys, exact schema versions, and canonical bytes. Paths are opened
+through POSIX directory descriptors without following symlinks. Parent
+directories must already exist; this module does not create them.
+
+Replay V2/V3 are single files. Legacy V1 bundles publish a separate metric
+sidecar before the replay that references it. Publication never overwrites an
+existing target; retries can explicitly verify previously published cached
+bytes. Host validation and filesystem durability live here. No simulator rollout,
+policy execution, device initialization, network, or archive extraction occurs.
 """
 
 from __future__ import annotations
@@ -109,7 +115,22 @@ type ReplayIOErrorCodeV1 = Literal[
 
 
 class ReplayIOError(Exception):
-    """Base error with a stable machine-readable code and affected path."""
+    """Expose a stable error code, affected path, and readable I/O explanation.
+
+    Attributes
+    ----------
+    code : ReplayIOErrorCodeV1
+        Machine-readable ReplayIOErrorCodeV1 identifying the failure category.
+    path : Path | None
+        Affected local Path, or None when argument validation had no usable path.
+    detail : str
+        Human-readable explanation.
+
+    Notes
+    -----
+    The exception message combines code, optional path, and detail. Callers can
+    branch on code without parsing prose.
+    """
 
     code: ReplayIOErrorCodeV1
     path: Path | None
@@ -122,6 +143,26 @@ class ReplayIOError(Exception):
         path: Path | None,
         detail: str,
     ) -> None:
+        """Create a structured artifact I/O error.
+
+        Parameters
+        ----------
+        code : ReplayIOErrorCodeV1
+            Stable failure category.
+        path : Path | None
+            Affected local path, or None.
+        detail : str
+            Explanation included in the exception message.
+
+        Returns
+        -------
+        None
+            None.
+
+        Notes
+        -----
+        Stores supplied values and initializes Exception; it performs no file access.
+        """
         self.code = code
         self.path = path
         self.detail = detail
@@ -130,23 +171,69 @@ class ReplayIOError(Exception):
 
 
 class ReplayLoadError(ReplayIOError):
-    """A replay or metric sidecar could not be loaded safely."""
+    """Report an unsafe, missing, malformed, or inconsistent artifact load.
+
+    Inherits code, path, and detail from ReplayIOError. A missing optional legacy
+    sidecar is represented in the load result instead when permitted.
+    """
 
 
 class ReplaySaveError(ReplayIOError):
-    """A replay bundle could not be published safely."""
+    """Report failed artifact preparation, destination admission, or publication.
+
+    Inherits code, path, and detail from ReplayIOError. A verification failure can
+    mean bytes were published but final durability could not be confirmed; retry
+    with the prepared object and explicit verification when appropriate.
+    """
 
 
 @dataclass(frozen=True, slots=True)
 class LoadedReplayBundleV1:
-    """One loaded replay and optional resolved metric-report sidecar."""
+    """Keep a loaded historical replay and its optional metric sidecar.
+
+    Attributes
+    ----------
+    replay : ReplayArtifactV1
+        Validated ReplayArtifactV1.
+    metric_report_artifact : EvaluationMetricReportArtifactV1 | None
+        Matching V1 metric artifact, or None when absent.
+    status : ReplayBundleLoadStatusV1
+        complete when sidecar is loaded; metric_report_missing when absent.
+
+    Notes
+    -----
+    Availability status describes the sidecar, not whether the simulated episode is
+    complete.
+    """
 
     replay: ReplayArtifactV1
     metric_report_artifact: EvaluationMetricReportArtifactV1 | None
     status: ReplayBundleLoadStatusV1
 
     def frame_at(self, frame_index: int) -> EvaluationFrameV1:
-        """Return one canonical frame by O(1) artifact index lookup."""
+        """Return one captured frame by artifact index.
+
+        Parameters
+        ----------
+        frame_index : int
+            Exact Python int from zero through the final recorded frame.
+
+        Returns
+        -------
+        EvaluationFrameV1
+            The stored immutable frame, without a copy or simulator work.
+
+        Raises
+        ------
+        TypeError
+            The index is not an exact int, including bool.
+        IndexError
+            The index is negative or beyond the captured prefix.
+
+        Notes
+        -----
+        Tuple lookup takes constant time; artifact index is not simulator tick.
+        """
         if type(frame_index) is not int:
             raise TypeError("frame index must be an integer")
         if frame_index < 0 or frame_index >= len(self.replay.frames):
@@ -157,7 +244,29 @@ class LoadedReplayBundleV1:
         self,
         frame_index: int,
     ) -> EvaluationTransitionV1 | None:
-        """Return the incoming transition for a frame, or ``None`` at frame zero."""
+        """Return the transition that produced one captured frame.
+
+        Parameters
+        ----------
+        frame_index : int
+            Exact Python int within the recorded frame range.
+
+        Returns
+        -------
+        EvaluationTransitionV1 | None
+            None at frame zero; otherwise the transition at frame_index minus one.
+
+        Raises
+        ------
+        TypeError
+            The index is not an exact int.
+        IndexError
+            The index is outside the captured prefix.
+
+        Notes
+        -----
+        Reuses stored records without copying or simulation.
+        """
         self.frame_at(frame_index)
         if frame_index == 0:
             return None
@@ -166,7 +275,22 @@ class LoadedReplayBundleV1:
 
 @dataclass(frozen=True, slots=True)
 class LoadedReplay:
-    """An actual supported replay with explicitly optional legacy metrics."""
+    """Keep an exact supported replay and honest legacy metric availability.
+
+    Attributes
+    ----------
+    replay : ReplayArtifactV1 | ReplayArtifactV2 | ReplayArtifactV3
+        ReplayArtifactV1, V2, or V3.
+    metric_report_artifact : EvaluationMetricReportArtifactV1 | None
+        Optional V1 sidecar; defaults to None and is forbidden for V2/V3.
+    status : Literal['complete', 'metric_report_missing', 'not_recorded']
+        not_recorded for V2/V3 (default); complete or metric_report_missing for V1.
+
+    Notes
+    -----
+    The loader validates content. Direct dataclass construction checks version/status
+    pairing only.
+    """
 
     replay: ReplayArtifactV1 | ReplayArtifactV2 | ReplayArtifactV3
     metric_report_artifact: EvaluationMetricReportArtifactV1 | None = None
@@ -175,6 +299,13 @@ class LoadedReplay:
     )
 
     def __post_init__(self) -> None:
+        """Require exact replay roots and a sidecar status consistent with that version.
+
+        V2/V3 forbid legacy sidecars and require not_recorded. V1 uses complete only
+        when
+        a sidecar is present. Raise TypeError or ValueError; do not load or validate
+        files.
+        """
         if type(self.replay) not in (
             ReplayArtifactV1,
             ReplayArtifactV2,
@@ -194,6 +325,29 @@ class LoadedReplay:
             raise ValueError("legacy replay availability must match its loaded sidecar")
 
     def frame_at(self, frame_index: int) -> EvaluationFrame:
+        """Return one captured frame by artifact index.
+
+        Parameters
+        ----------
+        frame_index : int
+            Exact Python int from zero through the final recorded frame.
+
+        Returns
+        -------
+        EvaluationFrame
+            The stored immutable frame, without a copy or simulator work.
+
+        Raises
+        ------
+        TypeError
+            The index is not an exact int, including bool.
+        IndexError
+            The index is negative or beyond the captured prefix.
+
+        Notes
+        -----
+        Tuple lookup takes constant time; artifact index is not simulator tick.
+        """
         if type(frame_index) is not int:
             raise TypeError("frame index must be an integer")
         if not 0 <= frame_index < len(self.replay.frames):
@@ -201,6 +355,29 @@ class LoadedReplay:
         return self.replay.frames[frame_index]
 
     def incoming_transition_at(self, frame_index: int) -> EvaluationTransitionV1 | None:
+        """Return the transition that produced one captured frame.
+
+        Parameters
+        ----------
+        frame_index : int
+            Exact Python int within the recorded frame range.
+
+        Returns
+        -------
+        EvaluationTransitionV1 | None
+            None at frame zero; otherwise the transition at frame_index minus one.
+
+        Raises
+        ------
+        TypeError
+            The index is not an exact int.
+        IndexError
+            The index is outside the captured prefix.
+
+        Notes
+        -----
+        Reuses stored records without copying or simulation.
+        """
         self.frame_at(frame_index)
         return None if frame_index == 0 else self.replay.transitions[frame_index - 1]
 
@@ -210,7 +387,19 @@ type LoadedReplayBundle = LoadedReplayBundleV1 | LoadedReplay
 
 @dataclass(frozen=True, slots=True)
 class SavedReplay:
-    """Publication facts for one self-contained replay file."""
+    """Report successful publication of one self-contained replay.
+
+    Attributes
+    ----------
+    replay_path : Path
+        Selected local output Path.
+    replay_byte_length : int
+        Canonical bytes written or verified.
+
+    Notes
+    -----
+    These local paths never enter scientific artifact content.
+    """
 
     replay_path: Path
     replay_byte_length: int
@@ -218,11 +407,27 @@ class SavedReplay:
 
 @dataclass(frozen=True, slots=True)
 class ReplayDestination:
-    """An absent single-file destination, resolved before recording starts."""
+    """Keep the selected single-file replay destination for later publication.
+
+    Attributes
+    ----------
+    replay_path : Path
+        Path ending in a nonempty .marlbg-replay.json stem.
+
+    Notes
+    -----
+    Use preflight_replay_destination to check the filesystem. This value reserves
+    nothing; publication must still handle a racing writer.
+    """
 
     replay_path: Path
 
     def __post_init__(self) -> None:
+        """Require a Path and a nonempty .marlbg-replay.json filename stem.
+
+        Direct construction checks structure only. Filesystem absence and parent safety
+        are checked by preflight_replay_destination and again during publication.
+        """
         if not isinstance(self.replay_path, Path):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise TypeError("replay destination must use pathlib.Path")
         _metric_report_path_for_replay(self.replay_path)
@@ -230,7 +435,24 @@ class ReplayDestination:
 
 @dataclass(frozen=True, slots=True)
 class PreparedReplay:
-    """A validated replay and immutable bytes reused by save retries."""
+    """Cache validated self-contained replay bytes for publication and retries.
+
+    Attributes
+    ----------
+    replay : ReplayArtifactV2 | ReplayArtifactV3
+        Exact ReplayArtifactV2 or V3.
+    max_file_size_bytes : int
+        Positive per-file cap, default 1 GiB (1024**3 bytes).
+    replay_json_bytes : bytes
+        Derived immutable canonical UTF-8 bytes, not a constructor argument.
+    replay_payload_sha256 : str
+        Derived SHA-256 of those full bytes, not a constructor argument.
+
+    Notes
+    -----
+    Preparation validates and serializes on the host without writing files. The payload
+    hash differs in purpose from the artifact's digest field, which excludes itself.
+    """
 
     replay: ReplayArtifactV2 | ReplayArtifactV3
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1
@@ -238,6 +460,12 @@ class PreparedReplay:
     replay_payload_sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
+        """Validate exact V2/V3 replay content and cache canonical bytes within the
+        limit.
+
+        Reject invalid limits/types/models before publishing anything. Oversized bytes
+        raise ReplaySaveError with file_too_large.
+        """
         size = _require_positive_limit(
             self.max_file_size_bytes, name="max_file_size_bytes"
         )
@@ -252,10 +480,12 @@ class PreparedReplay:
     def _from_capture(
         cls, replay: ReplayArtifactV2 | ReplayArtifactV3
     ) -> PreparedReplay:
-        """Prepare the collector's freshly validated immutable artifact once.
+        """Prepare freshly validated collector output without a duplicate model-tree
+        pass.
 
-        Only the immediate capture-to-publication boundary uses this path.
-        Arbitrary supplied models still enter through the strict constructor.
+        Only immediate capture-to-publication uses this trusted path. Require exact
+        replay V2/V3, use the default 1 GiB limit, and cache canonical bytes. Arbitrary
+        external models must use the normal strict constructor.
         """
         if type(replay) not in (ReplayArtifactV2, ReplayArtifactV3):
             raise TypeError(
@@ -270,6 +500,11 @@ class PreparedReplay:
         return prepared
 
     def _set_payload(self, canonical: EvaluationModel, size: int) -> None:
+        """Cache canonical bytes and their payload SHA-256 after enforcing the byte cap.
+
+        The canonical model is already validated by the caller. Mutate only frozen
+        derived fields through object.__setattr__; oversize raises ReplaySaveError.
+        """
         payload = canonical_json_bytes(canonical)
         if len(payload) > size:
             raise ReplaySaveError(
@@ -281,7 +516,26 @@ class PreparedReplay:
 
 @dataclass(frozen=True, slots=True)
 class SavedReplayBundleV1:
-    """Local publication result; paths never enter serialized artifacts."""
+    """Report publication facts for a legacy replay/report file pair.
+
+    Attributes
+    ----------
+    replay_path : Path
+        Local replay Path.
+    metric_report_path : Path
+        Derived adjacent metric sidecar Path.
+    replay_byte_length : int
+        Canonical replay byte count.
+    metric_report_byte_length : int
+        Canonical sidecar byte count.
+    metric_report_reused : bool
+        True when an identical existing sidecar was reused or verified.
+
+    Notes
+    -----
+    The two-file operation publishes the sidecar first; these paths remain outside
+    artifact content.
+    """
 
     replay_path: Path
     metric_report_path: Path
@@ -292,12 +546,29 @@ class SavedReplayBundleV1:
 
 @dataclass(frozen=True, slots=True)
 class ReplayBundleDestinationV1:
-    """One structurally preflighted local replay/report filename pair."""
+    """Keep a legacy replay filename and its derived adjacent sidecar path.
+
+    Attributes
+    ----------
+    replay_path : Path
+        Nonempty .marlbg-replay.json Path.
+    metric_report_path : Path
+        Same stem with .marlbg-metrics.json.
+
+    Notes
+    -----
+    Preflight checks existing parent and replay absence without reserving either name.
+    """
 
     replay_path: Path
     metric_report_path: Path
 
     def __post_init__(self) -> None:
+        """Require Path objects and a metric filename derived from the replay stem.
+
+        Raise TypeError or ValueError on structural mismatch. Direct construction does
+        not establish that either filesystem entry is safe or absent.
+        """
         if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
             self.replay_path, Path
         ) or not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
@@ -309,12 +580,43 @@ class ReplayBundleDestinationV1:
 
 
 class _PreparedReplayBundleTooLargeError(ValueError):
+    """Mark a prepared legacy bundle member exceeding its per-file byte limit.
+
+    The public preparation helper translates this internal ValueError into a
+    ReplaySaveError with file_too_large.
+    """
+
     pass
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedReplayBundleV1:
-    """Validated replay/report models and their immutable canonical bytes."""
+    """Cache a validated historical bundle's two canonical byte strings.
+
+    Attributes
+    ----------
+    bundle : ReplayBundleV1
+        Exact ReplayBundleV1 with matching report sidecar.
+    max_file_size_bytes : int
+        Positive cap applied separately to each member; default 1 GiB.
+    replay_json_bytes : bytes
+        Derived immutable replay bytes.
+    metric_report_json_bytes : bytes
+        Derived immutable sidecar bytes.
+    replay_byte_length : int
+        Derived replay byte count.
+    metric_report_byte_length : int
+        Derived sidecar byte count.
+    replay_payload_sha256 : str
+        Derived SHA-256 of the full replay bytes.
+    metric_report_payload_sha256 : str
+        Derived SHA-256 of the full sidecar bytes.
+
+    Notes
+    -----
+    Only bundle and limit are constructor arguments. Public prepare_replay_bundle_v1
+    translates validation/size failures into stable save errors.
+    """
 
     bundle: ReplayBundleV1
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1
@@ -326,6 +628,13 @@ class PreparedReplayBundleV1:
     metric_report_payload_sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
+        """Validate a V1 replay/report pair and cache both canonical byte strings once.
+
+        Require exact bundle type, positive per-member size limit, full replay
+        semantics,
+        and matching report joins. Retain lengths and payload hashes for retry checks.
+        Oversize raises the internal size-limit ValueError; no files are written.
+        """
         if type(self.bundle) is not ReplayBundleV1:
             raise TypeError("prepared replay bundle requires exact ReplayBundleV1")
         size_limit = _require_positive_limit(
@@ -371,27 +680,48 @@ class PreparedReplayBundleV1:
 
 @dataclass(frozen=True, slots=True)
 class SavedCompanionArtifactV1:
-    """Publication result for one independently addressed companion artifact."""
+    """Report publication of one actor-view or scenario companion.
+
+    Attributes
+    ----------
+    path : Path
+        Selected local output Path.
+    byte_length : int
+        Canonical payload byte count.
+    """
 
     path: Path
     byte_length: int
 
 
 class _DuplicateKeyError(ValueError):
+    """Signal a repeated JSON object key before model validation can hide it."""
+
     pass
 
 
 class _NonFiniteNumberError(ValueError):
+    """Signal NaN, infinity, or numeric overflow in a JSON number."""
+
     pass
 
 
 def _require_positive_limit(value: int, *, name: str) -> int:
+    """Return an exact positive Python int or raise ValueError naming the limit.
+
+    Boolean and coercible numeric values are not accepted.
+    """
     if type(value) is not int or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return value
 
 
 def _coerce_path(path: str | os.PathLike[str]) -> Path:
+    """Convert a nonempty string or supported path-like object to Path.
+
+    Do not resolve symlinks or create directories. Raise ValueError for empty strings
+    and TypeError for unsupported path inputs.
+    """
     if isinstance(path, str):
         if not path:
             raise ValueError("path must not be empty")
@@ -403,6 +733,11 @@ def _coerce_path(path: str | os.PathLike[str]) -> Path:
 
 
 def _metric_report_path_for_replay(replay_path: Path) -> Path:
+    """Derive a sibling .marlbg-metrics.json path from a valid replay filename.
+
+    Require a nonempty stem before .marlbg-replay.json or raise ValueError.
+    This naming helper does not inspect either filesystem entry.
+    """
     name = replay_path.name
     if not name.endswith(REPLAY_FILE_SUFFIX_V1):
         raise ValueError(f"replay filename must end with {REPLAY_FILE_SUFFIX_V1}")
@@ -413,6 +748,10 @@ def _metric_report_path_for_replay(replay_path: Path) -> Path:
 
 
 def _require_artifact_suffix(path: Path, *, suffix: str, label: str) -> None:
+    """Require a named artifact's exact suffix and nonempty stem.
+
+    Raise ValueError using the label when the basename is invalid.
+    """
     if not path.name.endswith(suffix) or path.name == suffix:
         raise ValueError(f"{label} filename must end with {suffix}")
 
@@ -422,6 +761,11 @@ def _require_secure_directory_fd_support(
     path: Path,
     error_type: type[ReplayLoadError] | type[ReplaySaveError],
 ) -> None:
+    """Require POSIX no-follow and directory-descriptor filesystem operations.
+
+    Raise the supplied load/save error type with unsupported_platform when the
+    required open/stat/link/unlink support is missing.
+    """
     required_dir_fd_functions = (os.open, os.stat, os.link, os.unlink)
     if (
         os.name != "posix"
@@ -447,7 +791,13 @@ def _open_parent_directory(
     *,
     error_type: type[ReplayLoadError] | type[ReplaySaveError],
 ) -> int:
-    """Open every parent component without following links and return its fd."""
+    """Open each existing parent directory without following symlinks.
+
+    Return an owned descriptor for the final parent; the caller must close it.
+    Close intermediate descriptors and all owned descriptors on failure. Raise the
+    supplied load/save error type for unsafe or missing path components. No parent
+    directory is created or retained by path resolution alone.
+    """
     _require_secure_directory_fd_support(path=path, error_type=error_type)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     start = path.anchor if path.is_absolute() else "."
@@ -519,6 +869,13 @@ def _read_bounded_regular_file_at(
     error_type: type[ReplayLoadError] | type[ReplaySaveError] = ReplayLoadError,
     fsync_before_close: bool = False,
 ) -> bytes:
+    """Read at most the limit plus one byte through an owned parent descriptor.
+
+    Reject symlinks, nonregular files, and files exceeding the cap, including growth
+    after stat. Close the file but leave parent_descriptor owned by the caller.
+    fsync_before_close optionally makes existing bytes durable for save retries;
+    it defaults to false. Translate failures to the selected load/save error type.
+    """
     flags = (
         os.O_RDONLY
         | os.O_NOFOLLOW
@@ -605,6 +962,11 @@ def _read_bounded_regular_file(
     max_file_size_bytes: int,
     error_type: type[ReplayLoadError] | type[ReplaySaveError] = ReplayLoadError,
 ) -> bytes:
+    """Open a secure parent, read one bounded regular file, and close the parent.
+
+    Delegate entry validation and byte limits to the descriptor-based reader.
+    No path component or final file is followed through a symlink.
+    """
     parent_descriptor = _open_parent_directory(path, error_type=error_type)
     try:
         return _read_bounded_regular_file_at(
@@ -624,6 +986,11 @@ def _require_json_depth(
     path: Path,
     max_json_depth: int,
 ) -> None:
+    """Reject object/array nesting beyond the declared depth before JSON parsing.
+
+    Ignore brackets inside quoted strings and account for escapes. This scanner is
+    only a depth guard; json.loads later checks syntax and balanced delimiters.
+    """
     depth = 0
     in_string = False
     escaped = False
@@ -651,6 +1018,10 @@ def _require_json_depth(
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Build a JSON object while rejecting duplicate keys before they can overwrite.
+
+    Raise _DuplicateKeyError on the first duplicate and preserve each accepted value.
+    """
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
@@ -660,10 +1031,15 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def _reject_nonfinite_constant(value: str) -> object:
+    """Reject JSON's nonstandard NaN/Infinity token through an internal typed error."""
     raise _NonFiniteNumberError(value)
 
 
 def _parse_finite_float(value: str) -> float:
+    """Parse a JSON floating literal and reject overflow to infinity.
+
+    Return a finite Python float or raise _NonFiniteNumberError.
+    """
     parsed = float(value)
     if not isfinite(parsed):
         raise _NonFiniteNumberError(value)
@@ -678,6 +1054,12 @@ def _preflight_json(
     expected_schema_version: int | tuple[int, ...],
     max_json_depth: int,
 ) -> dict[str, object]:
+    """Check UTF-8, depth, unique keys, finite numbers, and exact root schema/version.
+
+    Return the parsed root dictionary. Reject BOMs, trailing malformed content,
+    wrong root type, and bool/coerced schema versions with stable ReplayLoadError
+    codes. This precedes strict model parsing and canonical-byte comparison.
+    """
     if payload.startswith(b"\xef\xbb\xbf"):
         raise ReplayLoadError(
             "utf8_bom_forbidden",
@@ -760,6 +1142,11 @@ def _load_replay_bytes(
     path: Path,
     max_json_depth: int,
 ) -> ReplayArtifactV1:
+    """Admit canonical V1 replay bytes with full trajectory semantic validation.
+
+    Check JSON limits/schema, strict model fields, O(T) replay joins, and exact
+    canonical re-encoding. Raise ReplayLoadError with the owning failure stage.
+    """
     _preflight_json(
         payload,
         path=path,
@@ -799,6 +1186,11 @@ def _load_metric_report_bytes(
     path: Path,
     max_json_depth: int,
 ) -> EvaluationMetricReportArtifactV1:
+    """Admit canonical V1 metric-artifact bytes without loading their replay.
+
+    Check JSON/schema, exact model-tree validity, and byte equality. Actual trajectory
+    and report-reference joins are checked after both artifacts are available.
+    """
     _preflight_json(
         payload,
         path=path,
@@ -838,6 +1230,11 @@ def _load_actor_pov_bytes(
     max_json_depth: int,
     current: bool,
 ) -> ActorPovReplayArtifactV1 | ActorPovReplayArtifactV2:
+    """Admit exact POV V1 bytes, or V2 when current is true.
+
+    Check JSON/schema, complete standalone POV validity, and canonical byte equality.
+    The separate source-replay join is optional at the public load boundary.
+    """
     model = ActorPovReplayArtifactV2 if current else ActorPovReplayArtifactV1
     _preflight_json(
         payload,
@@ -875,6 +1272,10 @@ def _load_scenario_record_bytes(
     path: Path,
     max_json_depth: int,
 ) -> ScenarioEvaluationRecordV1:
+    """Admit canonical scenario V1 bytes and strict local record structure.
+
+    Do not infer endpoint truth or load referenced replay/report files.
+    """
     _preflight_json(
         payload,
         path=path,
@@ -913,6 +1314,10 @@ def _load_scenario_record_bytes_v2(
     path: Path,
     max_json_depth: int,
 ) -> ScenarioEvaluationRecordV2:
+    """Admit canonical scenario V2 bytes and strict local record structure.
+
+    Actual replay/report evidence joins are checked by the outer loader.
+    """
     _preflight_json(
         payload,
         path=path,
@@ -946,7 +1351,27 @@ def _load_scenario_record_bytes_v2(
 
 
 def canonical_replay_json_bytes_v1(artifact: ReplayArtifactV1) -> bytes:
-    """Return canonical replay bytes after full semantic validation."""
+    """Validate and canonically encode one exact ReplayArtifactV1.
+
+    Parameters
+    ----------
+    artifact : ReplayArtifactV1
+        exact ReplayArtifactV1, including its complete trajectory.
+
+    Returns
+    -------
+    bytes
+        Compact sorted-key finite UTF-8 JSON bytes with normalized floating zeros.
+
+    Raises
+    ------
+    ValueError
+        Exact model revalidation or full replay semantics fails.
+
+    Notes
+    -----
+    No file is written and no size cap is applied here. Replay validation is O(T).
+    """
     validate_replay_artifact_v1(artifact)
     return canonical_json_bytes(artifact)
 
@@ -954,7 +1379,28 @@ def canonical_replay_json_bytes_v1(artifact: ReplayArtifactV1) -> bytes:
 def canonical_metric_report_artifact_json_bytes_v1(
     artifact: EvaluationMetricReportArtifactV1,
 ) -> bytes:
-    """Return canonical bytes for one strict local metric-report artifact."""
+    """Validate and canonically encode one exact EvaluationMetricReportArtifactV1.
+
+    Parameters
+    ----------
+    artifact : EvaluationMetricReportArtifactV1
+        exact EvaluationMetricReportArtifactV1.
+
+    Returns
+    -------
+    bytes
+        Compact sorted-key finite UTF-8 JSON bytes with normalized floating zeros.
+
+    Raises
+    ------
+    ValueError
+        Exact model revalidation fails.
+
+    Notes
+    -----
+    No file is written and no size cap is applied here. Actual referenced evidence is
+    not loaded or joined by this local encoder.
+    """
     canonical_artifact = cast(
         EvaluationMetricReportArtifactV1,
         validate_declared_model_tree(
@@ -969,7 +1415,28 @@ def canonical_metric_report_artifact_json_bytes_v1(
 def canonical_scenario_evaluation_record_json_bytes_v1(
     record: ScenarioEvaluationRecordV1,
 ) -> bytes:
-    """Return canonical bytes for one structurally valid scenario record."""
+    """Validate and canonically encode one exact ScenarioEvaluationRecordV1.
+
+    Parameters
+    ----------
+    record : ScenarioEvaluationRecordV1
+        exact ScenarioEvaluationRecordV1.
+
+    Returns
+    -------
+    bytes
+        Compact sorted-key finite UTF-8 JSON bytes with normalized floating zeros.
+
+    Raises
+    ------
+    ValueError
+        Exact model revalidation fails.
+
+    Notes
+    -----
+    No file is written and no size cap is applied here. Actual referenced evidence is
+    not loaded or joined by this local encoder.
+    """
     canonical_record = cast(
         ScenarioEvaluationRecordV1,
         validate_declared_model_tree(
@@ -984,7 +1451,28 @@ def canonical_scenario_evaluation_record_json_bytes_v1(
 def canonical_scenario_evaluation_record_json_bytes_v2(
     record: ScenarioEvaluationRecordV2,
 ) -> bytes:
-    """Return canonical bytes for one structurally valid V2 scenario record."""
+    """Validate and canonically encode one exact ScenarioEvaluationRecordV2.
+
+    Parameters
+    ----------
+    record : ScenarioEvaluationRecordV2
+        exact ScenarioEvaluationRecordV2.
+
+    Returns
+    -------
+    bytes
+        Compact sorted-key finite UTF-8 JSON bytes with normalized floating zeros.
+
+    Raises
+    ------
+    ValueError
+        Exact model revalidation fails.
+
+    Notes
+    -----
+    No file is written and no size cap is applied here. Actual referenced evidence is
+    not loaded or joined by this local encoder.
+    """
     canonical_record = cast(
         ScenarioEvaluationRecordV2,
         validate_declared_model_tree(
@@ -1002,7 +1490,33 @@ def load_replay_artifact_v1(
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
     max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
 ) -> ReplayArtifactV1:
-    """Load one canonical replay after byte, model, and semantic validation."""
+    """Load and fully validate one canonical historical replay file.
+
+    Parameters
+    ----------
+    path : str | os.PathLike[str]
+        Existing regular file with a nonempty .marlbg-replay.json stem.
+    max_file_size_bytes : int
+        Exact positive per-file byte cap; defaults to 1 GiB (1024**3).
+    max_json_depth : int
+        Exact positive nesting cap; defaults to 128.
+
+    Returns
+    -------
+    ReplayArtifactV1
+        ReplayArtifactV1 after strict bytes, model, and O(T) semantic validation.
+
+    Raises
+    ------
+    ReplayLoadError
+        Invalid arguments/path, unsupported platform, exceeded limits,
+        malformed/noncanonical JSON, wrong version, or invalid replay semantics.
+
+    Notes
+    -----
+    Rejects symlinks in parents and final entry. Does not load the adjacent metric
+    sidecar; use load_replay_bundle_v1 when its evidence is also needed.
+    """
     try:
         replay_path = _coerce_path(path)
         size_limit = _require_positive_limit(
@@ -1042,7 +1556,38 @@ def load_replay_bundle_v1(
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
     max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
 ) -> LoadedReplayBundleV1:
-    """Load a replay and resolve its adjacent metric sidecar when available."""
+    """Load a historical replay and its adjacent metric report when available.
+
+    Parameters
+    ----------
+    path : str | os.PathLike[str]
+        Existing regular .marlbg-replay.json file.
+    require_metric_report : bool
+        Exact bool; if true, missing sidecar is an error.
+        Defaults to false.
+    max_file_size_bytes : int
+        Exact positive per-file byte cap; defaults to 1 GiB (1024**3).
+    max_json_depth : int
+        Exact positive nesting cap; defaults to 128.
+
+    Returns
+    -------
+    LoadedReplayBundleV1
+        LoadedReplayBundleV1 with status complete or metric_report_missing.
+
+    Raises
+    ------
+    ReplayLoadError
+        Replay/sidecar bytes, paths, limits, schemas, or joins are
+        invalid, or a required metric report is missing.
+
+    Notes
+    -----
+    Derives the sibling .marlbg-metrics.json path. Only absence is optional;
+    an existing corrupt or mismatched sidecar always fails. Status describes
+    sidecar availability, not episode termination. Reads both through one
+    securely opened parent directory.
+    """
     if type(require_metric_report) is not bool:
         raise ReplayLoadError(
             "invalid_argument",
@@ -1138,7 +1683,35 @@ def load_replay(
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
     max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
 ) -> LoadedReplay:
-    """Dispatch exact replay versions; V2 is independent of every metrics file."""
+    """Load a replay using its exact recorded schema version.
+
+    Parameters
+    ----------
+    path : str | os.PathLike[str]
+        Existing regular file with a nonempty .marlbg-replay.json stem.
+    max_file_size_bytes : int
+        Exact positive per-file byte cap; defaults to 1 GiB (1024**3).
+    max_json_depth : int
+        Exact positive nesting cap; defaults to 128.
+
+    Returns
+    -------
+    LoadedReplay
+        LoadedReplay containing replay V1, V2, or V3. V2/V3 use status not_recorded
+        and no legacy sidecar. V1 resolves its sibling report or reports its absence.
+
+    Raises
+    ------
+    ReplayLoadError
+        Unsafe path, invalid limits, unsupported schema, malformed
+        or noncanonical bytes, invalid content, or mismatched legacy sidecar.
+
+    Notes
+    -----
+    Host-only reader does not initialize JAX or rerun simulation. V2/V3 ignore
+    nearby metric files because they are not part of those replay contracts.
+    Existing invalid V1 sidecars fail rather than being treated as absent.
+    """
     try:
         replay_path = _coerce_path(path)
         metric_path = _metric_report_path_for_replay(replay_path)
@@ -1207,7 +1780,33 @@ def load_replay(
 def generated_replay_filename(
     context: EvaluationEpisodeContext, digest: str, *, episode_id: int
 ) -> str:
-    """Name generated files without changing explicit paths or scientific identity."""
+    """Build a readable, bounded filename without changing scientific identity.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Valid recorded context with map, policy, and seed identities.
+    digest : str
+        Full lowercase 64-character SHA-256 to include without truncation.
+    episode_id : int
+        Exact positive Python episode integer for the display label.
+
+    Returns
+    -------
+    str
+        ASCII basename at most 255 bytes, ending in .marlbg-replay.json, with map,
+        episode, root/stream seeds, Team A/B policy labels, and full digest.
+
+    Raises
+    ------
+    ValueError
+        Digest/episode ID is invalid or fixed identity text cannot fit.
+
+    Notes
+    -----
+    Sanitizes and shortens display policy labels only. Unknown seeds remain
+    unknown. This helper neither reserves a path nor alters explicit caller paths.
+    """
     from marl_battlegrounds.evaluation.map_identity import recorded_map
 
     if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
@@ -1216,6 +1815,11 @@ def generated_replay_filename(
         raise ValueError("replay filename requires a positive episode ID")
 
     def label(value: str, limit: int) -> str:
+        """Make a bounded ASCII display label using letters, digits, and hyphens.
+
+        Collapse nonalphanumeric runs, trim edge hyphens, fall back to unknown, then
+        truncate. This affects filenames only, never scientific identities.
+        """
         text = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-") or "unknown"
         return text[:limit]
 
@@ -1255,7 +1859,29 @@ def generated_replay_filename(
 
 
 def preflight_replay_destination(path: str | os.PathLike[str]) -> ReplayDestination:
-    """Check only the selected replay destination; no metric sidecar exists in V2."""
+    """Check a replay destination before recording without writing or reserving it.
+
+    Parameters
+    ----------
+    path : str | os.PathLike[str]
+        Desired nonempty .marlbg-replay.json path whose parent already exists.
+
+    Returns
+    -------
+    ReplayDestination
+        ReplayDestination for one V2/V3 replay file.
+
+    Raises
+    ------
+    ReplaySaveError
+        Invalid filename/path, unsupported secure filesystem support,
+        missing/unsafe parent, existing replay target.
+
+    Notes
+    -----
+    Rejects symlinks. No adjacent metric file is inspected.
+    This preflight is advisory; exclusive publication still handles races.
+    """
     try:
         replay_path = _coerce_path(path)
     except (TypeError, ValueError) as error:
@@ -1287,7 +1913,37 @@ def publish_prepared_replay(
     *,
     verify_existing_replay: bool = False,
 ) -> SavedReplay:
-    """Atomically publish cached bytes, or verify an uncertain previous publication."""
+    """Publish cached replay bytes or verify an uncertain earlier publication.
+
+    Parameters
+    ----------
+    prepared : PreparedReplay
+        Exact PreparedReplay with validated immutable bytes.
+    destination : ReplayDestination
+        Exact ReplayDestination naming the selected local output.
+    verify_existing_replay : bool
+        Exact bool, default false. If true, write nothing
+        and require existing replay to equal the cached bytes.
+
+    Returns
+    -------
+    SavedReplay
+        SavedReplay with selected path and verified byte length.
+
+    Raises
+    ------
+    ReplaySaveError
+        Argument types, path safety, existing-target conflicts,
+        temporary writes, exclusive publication, or final byte/durability verification
+        fails.
+
+    Notes
+    -----
+    Publish through a temporary file and exclusive hard link.
+    Existing replay bytes are never overwritten. Files and parent metadata are
+    fsynced and compared with cached bytes. Verification failure may leave a
+    published file; explicit verification supports recovery without reserialization.
+    """
     if (
         type(prepared) is not PreparedReplay
         or type(destination) is not ReplayDestination
@@ -1337,7 +1993,34 @@ def save_replay(
     *,
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
 ) -> SavedReplay:
-    """Publish one complete replay file without overwriting existing artifacts."""
+    """Validate and publish one self-contained replay file.
+
+    Parameters
+    ----------
+    replay : ReplayArtifactV2 | ReplayArtifactV3
+        Exact ReplayArtifactV2 or V3, including valid partial prefixes.
+    path : str | os.PathLike[str]
+        Absent nonempty .marlbg-replay.json destination in an existing parent.
+    max_file_size_bytes : int
+        Exact positive byte cap, default 1 GiB (1024**3).
+
+    Returns
+    -------
+    SavedReplay
+        SavedReplay with local path and canonical byte length.
+
+    Raises
+    ------
+    ReplaySaveError
+        Invalid model/arguments, unsafe destination, size limit,
+        existing target, or publication/durability verification failure.
+
+    Notes
+    -----
+    Prepares bytes once, checks the destination, then publishes without overwrite.
+    No metric sidecar is required or written. Use PreparedReplay with explicit
+    publication for retries after an uncertain save.
+    """
     try:
         prepared = PreparedReplay(replay, max_file_size_bytes=max_file_size_bytes)
     except (TypeError, ValueError) as error:
@@ -1355,7 +2038,12 @@ def _load_actor_pov_replay_artifact(
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
     max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
 ) -> ActorPovReplayArtifactV1 | ActorPovReplayArtifactV2:
-    """Load one independently shareable POV artifact, optionally source-joined."""
+    """Read a bounded canonical POV file and optionally join supplied source evidence.
+
+    current selects POV V2 versus V1. Validate suffix and positive limits, then wrap
+    byte/model/source-join errors as ReplayLoadError. No source replay is discovered
+    from paths or downloaded.
+    """
     try:
         pov_path = _coerce_path(path)
         size_limit = _require_positive_limit(
@@ -1411,7 +2099,38 @@ def load_scenario_evaluation_record_v1(
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
     max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
 ) -> ScenarioEvaluationRecordV1:
-    """Load one canonical scenario record and verify both evidence joins."""
+    """Load canonical scenario record V1 and check its supplied evidence.
+
+    Parameters
+    ----------
+    path : str | os.PathLike[str]
+        Existing regular file with a nonempty .marlbg-scenario.json stem.
+    source_replay : ReplayArtifactV1
+        Exact ReplayArtifactV1 referenced by the record.
+    metric_report_artifact : EvaluationMetricReportArtifactV1
+        Matching V1 report sidecar.
+    max_file_size_bytes : int
+        Exact positive per-file byte cap; defaults to 1 GiB (1024**3).
+    max_json_depth : int
+        Exact positive nesting cap; defaults to 128.
+
+    Returns
+    -------
+    ScenarioEvaluationRecordV1
+        Exact ScenarioEvaluationRecordV1 with validated local fields and evidence joins.
+
+    Raises
+    ------
+    ReplayLoadError
+        Unsafe path, byte/depth limit, wrong schema, noncanonical
+        content, invalid model, or evidence mismatch.
+
+    Notes
+    -----
+    Supplied replay/report objects are checked, not discovered from adjacent
+    paths. This uses generic scenario validation without live official Core
+    admission and does not recompute endpoint values or predicate truth.
+    """
     try:
         scenario_path = _coerce_path(path)
         size_limit = _require_positive_limit(
@@ -1469,7 +2188,38 @@ def load_scenario_evaluation_record_v2(
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
     max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
 ) -> ScenarioEvaluationRecordV2:
-    """Load one canonical V2 scenario record and verify both evidence joins."""
+    """Load canonical scenario record V2 and check its supplied evidence.
+
+    Parameters
+    ----------
+    path : str | os.PathLike[str]
+        Existing regular file with a nonempty .marlbg-scenario.json stem.
+    source_replay : ReplayArtifactV1
+        Exact ReplayArtifactV1 referenced by the record.
+    metric_report_artifact : EvaluationMetricReportArtifactV1
+        Matching V1 report sidecar.
+    max_file_size_bytes : int
+        Exact positive per-file byte cap; defaults to 1 GiB (1024**3).
+    max_json_depth : int
+        Exact positive nesting cap; defaults to 128.
+
+    Returns
+    -------
+    ScenarioEvaluationRecordV2
+        Exact ScenarioEvaluationRecordV2 with validated local fields and evidence joins.
+
+    Raises
+    ------
+    ReplayLoadError
+        Unsafe path, byte/depth limit, wrong schema, noncanonical
+        content, invalid model, or evidence mismatch.
+
+    Notes
+    -----
+    Supplied replay/report objects are checked, not discovered from adjacent
+    paths. This uses generic scenario validation without live official Core
+    admission and does not recompute endpoint values or predicate truth.
+    """
     try:
         scenario_path = _coerce_path(path)
         size_limit = _require_positive_limit(
@@ -1524,7 +2274,30 @@ def prepare_replay_bundle_v1(
     *,
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
 ) -> PreparedReplayBundleV1:
-    """Validate one bundle and cache its exact canonical publication bytes."""
+    """Validate a historical bundle and cache both canonical publication payloads.
+
+    Parameters
+    ----------
+    bundle : ReplayBundleV1
+        Exact ReplayBundleV1 with matching replay/report content.
+    max_file_size_bytes : int
+        Exact positive cap for each member, default 1 GiB.
+
+    Returns
+    -------
+    PreparedReplayBundleV1
+        PreparedReplayBundleV1 containing immutable bytes, lengths, and payload hashes.
+
+    Raises
+    ------
+    ReplaySaveError
+        Invalid arguments/content or either member exceeds its cap.
+
+    Notes
+    -----
+    Runs full V1 replay and sidecar joins on the host. It writes no files;
+    reuse this result for publication attempts without repeating serialization.
+    """
     try:
         return PreparedReplayBundleV1(
             bundle=bundle,
@@ -1545,6 +2318,10 @@ def prepare_replay_bundle_v1(
 
 
 def _validate_save_destination(replay_path: Path) -> Path:
+    """Return the derived sidecar path or raise an invalid_filename save error.
+
+    Only filename structure is checked here; directory and target checks are separate.
+    """
     try:
         metric_report_path = _metric_report_path_for_replay(replay_path)
     except ValueError as error:
@@ -1563,6 +2340,11 @@ def _entry_status_at(
     path: Path,
     error_type: type[ReplayLoadError] | type[ReplaySaveError],
 ) -> os.stat_result | None:
+    """Inspect one entry without following links, returning None only when absent.
+
+    Reject symlinks and translate stat failures to the supplied I/O error type.
+    Leave the caller's parent descriptor open.
+    """
     try:
         entry_status = os.stat(
             name,
@@ -1589,7 +2371,30 @@ def _entry_status_at(
 def preflight_replay_bundle_destination_v1(
     path: str | os.PathLike[str],
 ) -> ReplayBundleDestinationV1:
-    """Validate an absent replay target and existing local parent without writes."""
+    """Check a replay destination before recording without writing or reserving it.
+
+    Parameters
+    ----------
+    path : str | os.PathLike[str]
+        Desired nonempty .marlbg-replay.json path whose parent already exists.
+
+    Returns
+    -------
+    ReplayBundleDestinationV1
+        ReplayBundleDestinationV1 with the derived adjacent metric path.
+
+    Raises
+    ------
+    ReplaySaveError
+        Invalid filename/path, unsupported secure filesystem support,
+        missing/unsafe parent, existing replay target, or nonregular sidecar.
+
+    Notes
+    -----
+    Rejects symlinks. An existing regular sidecar is allowed here; publication later
+    requires identical bytes.
+    This preflight is advisory; exclusive publication still handles races.
+    """
     try:
         replay_path = _coerce_path(path)
     except (TypeError, ValueError) as error:
@@ -1639,6 +2444,10 @@ def preflight_replay_bundle_destination_v1(
 
 
 def _fsync_directory(parent_descriptor: int) -> None:
+    """Flush directory metadata to durable storage using the caller-owned descriptor.
+
+    OSError propagates to the publication boundary that assigns its error code.
+    """
     os.fsync(parent_descriptor)
 
 
@@ -1647,7 +2456,11 @@ def _rollback_published_link(
     target_name: str,
     temporary_name: str,
 ) -> None:
-    """Remove only the target hard link created from this temporary inode."""
+    """Best-effort remove only a target still sharing this temporary file's inode.
+
+    Compare device and inode without following links. Never remove a replacement
+    entry owned by another writer. Suppress cleanup/fsync errors during rollback.
+    """
     try:
         target_stat = os.stat(
             target_name,
@@ -1675,6 +2488,12 @@ def _rollback_published_link(
 
 
 def _create_temporary_file_at(parent_descriptor: int) -> tuple[int, str]:
+    """Create a private 0600 temporary file in the already opened parent directory.
+
+    Use exclusive no-follow creation and up to 128 random names. Return owned file
+    descriptor and relative basename; the caller writes, closes, and removes it.
+    Raise OSError if no unique name can be allocated.
+    """
     flags = (
         os.O_WRONLY
         | os.O_CREAT
@@ -1704,6 +2523,13 @@ def _publish_bytes_no_clobber(
     existing_code: ReplayIOErrorCodeV1,
     parent_descriptor: int | None = None,
 ) -> None:
+    """Write/fsync temporary bytes, then publish with an exclusive hard link.
+
+    Never replace an existing target. Use an optional caller-owned parent descriptor
+    or open/close one locally. Flush directory metadata after linking; on failure
+    remove only the link created from this temporary inode when possible. Always
+    attempt temporary cleanup. Raise stable ReplaySaveError codes.
+    """
     owned_parent_descriptor = parent_descriptor is None
     if parent_descriptor is None:
         parent_descriptor = _open_parent_directory(
@@ -1775,6 +2601,12 @@ def _publish_metric_report(
     max_file_size_bytes: int,
     parent_descriptor: int | None = None,
 ) -> bool:
+    """Publish a V1 sidecar or reuse an existing regular file with identical bytes.
+
+    Return true for reuse and false for new publication. Compare a racing existing
+    file too, enforce the byte cap, and fsync file/directory before success.
+    Differing bytes raise metric_report_conflict; no sidecar is overwritten.
+    """
     owned_parent_descriptor = parent_descriptor is None
     if parent_descriptor is None:
         parent_descriptor = _open_parent_directory(
@@ -1871,7 +2703,12 @@ def _verify_prepared_replay_bundle_at(
     *,
     parent_descriptor: int,
 ) -> None:
-    """Require both published files to equal the cached canonical bytes."""
+    """Require both published members to equal cached bytes and flush their durability.
+
+    Use bounded no-follow reads through the supplied parent descriptor. Any missing,
+    different, unreadable, or unflushable member becomes
+    replay_publication_verification_failed. Leave the parent descriptor open.
+    """
     try:
         replay_payload = _read_bounded_regular_file_at(
             parent_descriptor,
@@ -1924,7 +2761,38 @@ def publish_prepared_replay_bundle_v1(
     *,
     verify_existing_replay: bool = False,
 ) -> SavedReplayBundleV1:
-    """Publish cached bytes, or explicitly verify one prior uncertain publish."""
+    """Publish cached replay/report bytes or verify an uncertain earlier publication.
+
+    Parameters
+    ----------
+    prepared : PreparedReplayBundleV1
+        Exact PreparedReplayBundleV1 with validated immutable bytes.
+    destination : ReplayBundleDestinationV1
+        Exact ReplayBundleDestinationV1 naming the selected local output.
+    verify_existing_replay : bool
+        Exact bool, default false. If true, write nothing
+        and require existing members to equal the cached bytes.
+
+    Returns
+    -------
+    SavedReplayBundleV1
+        SavedReplayBundleV1 with both paths, lengths, and sidecar reuse flag.
+
+    Raises
+    ------
+    ReplaySaveError
+        Argument types, path safety, existing-target conflicts,
+        temporary writes, exclusive publication, or final byte/durability verification
+        fails.
+
+    Notes
+    -----
+    Publish or reuse an identical sidecar first, then publish the replay. A later replay
+    failure may leave the valid sidecar for retry.
+    Existing replay bytes are never overwritten. Files and parent metadata are
+    fsynced and compared with cached bytes. Verification failure may leave a
+    published file; explicit verification supports recovery without reserialization.
+    """
     if type(prepared) is not PreparedReplayBundleV1:
         raise ReplaySaveError(
             "invalid_argument",
@@ -2006,7 +2874,33 @@ def save_replay_bundle_v1(
     *,
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
 ) -> SavedReplayBundleV1:
-    """Publish metric bytes first and the referencing replay last, without overwrite."""
+    """Publish a historical metric sidecar followed by its referencing replay.
+
+    Parameters
+    ----------
+    bundle : ReplayBundleV1
+        Exact valid ReplayBundleV1.
+    path : str | os.PathLike[str]
+        Absent .marlbg-replay.json path in an existing secure parent.
+    max_file_size_bytes : int
+        Exact positive per-member byte cap; default 1 GiB.
+
+    Returns
+    -------
+    SavedReplayBundleV1
+        SavedReplayBundleV1 with paths, lengths, and sidecar reuse status.
+
+    Raises
+    ------
+    ReplaySaveError
+        Preparation, filename/path, conflict, size, write, or verification fails.
+
+    Notes
+    -----
+    Reuses an existing sidecar only when bytes are identical. The replay is never
+    overwritten. Failure after sidecar publication may leave that valid sidecar.
+    Use separate prepare/preflight/publish calls for explicit retry verification.
+    """
     prepared = prepare_replay_bundle_v1(
         bundle,
         max_file_size_bytes=max_file_size_bytes,
@@ -2024,6 +2918,12 @@ def _save_companion_payload(
     *,
     max_file_size_bytes: int,
 ) -> SavedCompanionArtifactV1:
+    """Publish one bounded companion byte string without replacing any existing entry.
+
+    Require an existing secure parent, enforce size, and use atomic no-clobber
+    publication. Return path and written byte length; the caller already validated
+    suffix, model, and source joins.
+    """
     if len(payload) > max_file_size_bytes:
         raise ReplaySaveError(
             "file_too_large",
@@ -2068,7 +2968,12 @@ def _save_actor_pov_replay_artifact(
     current: bool,
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
 ) -> SavedCompanionArtifactV1:
-    """Validate, source-join, and publish one canonical actor-POV artifact."""
+    """Validate the selected POV version and its source, then publish canonical bytes.
+
+    current selects POV V2/replay V3 or historical POV V1/replay V1. Require a valid
+    .pov suffix, positive byte cap, and absent destination. Wrap source mismatch as
+    invalid_argument and leave source artifacts unchanged.
+    """
     try:
         pov_path = _coerce_path(path)
         size_limit = _require_positive_limit(
@@ -2116,7 +3021,38 @@ def save_scenario_evaluation_record_v1(
     *,
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
 ) -> SavedCompanionArtifactV1:
-    """Validate both evidence joins and publish one canonical scenario record."""
+    """Validate evidence and publish scenario record V1 without overwrite.
+
+    Parameters
+    ----------
+    record : ScenarioEvaluationRecordV1
+        Exact ScenarioEvaluationRecordV1 to publish.
+    source_replay : ReplayArtifactV1
+        Exact referenced ReplayArtifactV1.
+    metric_report_artifact : EvaluationMetricReportArtifactV1
+        Matching V1 metric sidecar.
+    path : str | os.PathLike[str]
+        Absent .marlbg-scenario.json path in an existing secure parent.
+    max_file_size_bytes : int
+        Exact positive byte cap; defaults to 1 GiB.
+
+    Returns
+    -------
+    SavedCompanionArtifactV1
+        SavedCompanionArtifactV1 with output path and canonical byte length.
+
+    Raises
+    ------
+    ReplaySaveError
+        Invalid arguments/evidence, unsafe path, size limit,
+        existing target, or atomic publication failure.
+
+    Notes
+    -----
+    Checks generic evidence joins without live official Core admission. Writes
+    only the companion; source replay/report files are not published or changed.
+    Caller-computed measurements and predicate values are not recomputed.
+    """
     try:
         scenario_path = _coerce_path(path)
         size_limit = _require_positive_limit(
@@ -2168,7 +3104,38 @@ def save_scenario_evaluation_record_v2(
     *,
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
 ) -> SavedCompanionArtifactV1:
-    """Validate both evidence joins and publish one canonical V2 scenario record."""
+    """Validate evidence and publish scenario record V2 without overwrite.
+
+    Parameters
+    ----------
+    record : ScenarioEvaluationRecordV2
+        Exact ScenarioEvaluationRecordV2 to publish.
+    source_replay : ReplayArtifactV1
+        Exact referenced ReplayArtifactV1.
+    metric_report_artifact : EvaluationMetricReportArtifactV1
+        Matching V1 metric sidecar.
+    path : str | os.PathLike[str]
+        Absent .marlbg-scenario.json path in an existing secure parent.
+    max_file_size_bytes : int
+        Exact positive byte cap; defaults to 1 GiB.
+
+    Returns
+    -------
+    SavedCompanionArtifactV1
+        SavedCompanionArtifactV1 with output path and canonical byte length.
+
+    Raises
+    ------
+    ReplaySaveError
+        Invalid arguments/evidence, unsafe path, size limit,
+        existing target, or atomic publication failure.
+
+    Notes
+    -----
+    Checks generic evidence joins without live official Core admission. Writes
+    only the companion; source replay/report files are not published or changed.
+    Caller-computed measurements and predicate values are not recomputed.
+    """
     try:
         scenario_path = _coerce_path(path)
         size_limit = _require_positive_limit(
@@ -2216,6 +3183,11 @@ def _validate_current_scenario_record(
     record: ScenarioEvaluationRecordV3 | ScenarioEvaluationRecordV4,
     replay: ReplayArtifactV2 | ReplayArtifactV3,
 ) -> None:
+    """Dispatch exact scenario V3/replay V2 or scenario V4/replay V3 joins.
+
+    Raise TypeError for other pairings. Use generic evidence checks, without live
+    official Core admission or recomputing measurements.
+    """
     if type(record) is ScenarioEvaluationRecordV4 and type(replay) is ReplayArtifactV3:
         validate_scenario_evaluation_record_v4(record, replay)
     elif (
@@ -2233,6 +3205,11 @@ def _load_current_scenario_record_bytes(
     max_json_depth: int,
     current: bool,
 ) -> ScenarioEvaluationRecordV3 | ScenarioEvaluationRecordV4:
+    """Admit canonical scenario V4 bytes when current, otherwise V3 bytes.
+
+    Check strict JSON/schema/model structure and exact re-encoding before returning
+    the record. Actual replay joins are checked by the outer loader.
+    """
     model = ScenarioEvaluationRecordV4 if current else ScenarioEvaluationRecordV3
     _preflight_json(
         payload,
@@ -2274,7 +3251,12 @@ def _load_current_scenario_evaluation_record(
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
     max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
 ) -> ScenarioEvaluationRecordV3 | ScenarioEvaluationRecordV4:
-    """Load a versioned scenario record and verify its replay evidence join."""
+    """Load a bounded V3/V4 scenario file and check its supplied replay evidence.
+
+    current selects the exact record version. Require the scenario suffix and positive
+    limits. Wrap structural/path/evidence failures in ReplayLoadError; no metric
+    sidecar or live official Core validation is performed.
+    """
     try:
         scenario_path = _coerce_path(path)
         size_limit = _require_positive_limit(
@@ -2332,7 +3314,12 @@ def _save_current_scenario_evaluation_record(
     *,
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
 ) -> SavedCompanionArtifactV1:
-    """Validate the replay join and publish one canonical Versioned scenario record."""
+    """Validate an exact V3/V4 record/replay pair and publish canonical scenario bytes.
+
+    current fixes the allowed record version. Require safe suffix/parent/size and
+    an absent destination. Generic evidence validation does not recompute endpoint
+    values or rerun official simulator admission.
+    """
     try:
         scenario_path = _coerce_path(path)
         size_limit = _require_positive_limit(
@@ -2385,7 +3372,36 @@ def load_scenario_evaluation_record_v3(
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
     max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
 ) -> ScenarioEvaluationRecordV3:
-    """Load exact V3 scenario evidence and verify its replay join."""
+    """Load canonical scenario record V3 and check its supplied evidence.
+
+    Parameters
+    ----------
+    path : str | os.PathLike[str]
+        Existing regular file with a nonempty .marlbg-scenario.json stem.
+    source_replay : ReplayArtifactV2
+        Exact ReplayArtifactV2 referenced by the record.
+    max_file_size_bytes : int
+        Exact positive per-file byte cap; defaults to 1 GiB (1024**3).
+    max_json_depth : int
+        Exact positive nesting cap; defaults to 128.
+
+    Returns
+    -------
+    ScenarioEvaluationRecordV3
+        Exact ScenarioEvaluationRecordV3 with validated local fields and evidence joins.
+
+    Raises
+    ------
+    ReplayLoadError
+        Unsafe path, byte/depth limit, wrong schema, noncanonical
+        content, invalid model, or evidence mismatch.
+
+    Notes
+    -----
+    Supplied replay/report objects are checked, not discovered from adjacent
+    paths. This uses generic scenario validation without live official Core
+    admission and does not recompute endpoint values or predicate truth.
+    """
     return cast(
         ScenarioEvaluationRecordV3,
         _load_current_scenario_evaluation_record(
@@ -2405,7 +3421,36 @@ def save_scenario_evaluation_record_v3(
     *,
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
 ) -> SavedCompanionArtifactV1:
-    """Publish exact V3 scenario evidence after checking its replay join."""
+    """Validate evidence and publish scenario record V3 without overwrite.
+
+    Parameters
+    ----------
+    record : ScenarioEvaluationRecordV3
+        Exact ScenarioEvaluationRecordV3 to publish.
+    source_replay : ReplayArtifactV2
+        Exact referenced ReplayArtifactV2.
+    path : str | os.PathLike[str]
+        Absent .marlbg-scenario.json path in an existing secure parent.
+    max_file_size_bytes : int
+        Exact positive byte cap; defaults to 1 GiB.
+
+    Returns
+    -------
+    SavedCompanionArtifactV1
+        SavedCompanionArtifactV1 with output path and canonical byte length.
+
+    Raises
+    ------
+    ReplaySaveError
+        Invalid arguments/evidence, unsafe path, size limit,
+        existing target, or atomic publication failure.
+
+    Notes
+    -----
+    Checks generic evidence joins without live official Core admission. Writes
+    only the companion; source replay/report files are not published or changed.
+    Caller-computed measurements and predicate values are not recomputed.
+    """
     return _save_current_scenario_evaluation_record(
         record,
         source_replay,
@@ -2422,7 +3467,36 @@ def load_scenario_evaluation_record_v4(
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
     max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
 ) -> ScenarioEvaluationRecordV4:
-    """Load exact V4 scenario evidence and verify its replay join."""
+    """Load canonical scenario record V4 and check its supplied evidence.
+
+    Parameters
+    ----------
+    path : str | os.PathLike[str]
+        Existing regular file with a nonempty .marlbg-scenario.json stem.
+    source_replay : ReplayArtifactV3
+        Exact ReplayArtifactV3 referenced by the record.
+    max_file_size_bytes : int
+        Exact positive per-file byte cap; defaults to 1 GiB (1024**3).
+    max_json_depth : int
+        Exact positive nesting cap; defaults to 128.
+
+    Returns
+    -------
+    ScenarioEvaluationRecordV4
+        Exact ScenarioEvaluationRecordV4 with validated local fields and evidence joins.
+
+    Raises
+    ------
+    ReplayLoadError
+        Unsafe path, byte/depth limit, wrong schema, noncanonical
+        content, invalid model, or evidence mismatch.
+
+    Notes
+    -----
+    Supplied replay/report objects are checked, not discovered from adjacent
+    paths. This uses generic scenario validation without live official Core
+    admission and does not recompute endpoint values or predicate truth.
+    """
     return cast(
         ScenarioEvaluationRecordV4,
         _load_current_scenario_evaluation_record(
@@ -2442,7 +3516,36 @@ def save_scenario_evaluation_record_v4(
     *,
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
 ) -> SavedCompanionArtifactV1:
-    """Publish exact V4 scenario evidence after checking its replay join."""
+    """Validate evidence and publish scenario record V4 without overwrite.
+
+    Parameters
+    ----------
+    record : ScenarioEvaluationRecordV4
+        Exact ScenarioEvaluationRecordV4 to publish.
+    source_replay : ReplayArtifactV3
+        Exact referenced ReplayArtifactV3.
+    path : str | os.PathLike[str]
+        Absent .marlbg-scenario.json path in an existing secure parent.
+    max_file_size_bytes : int
+        Exact positive byte cap; defaults to 1 GiB.
+
+    Returns
+    -------
+    SavedCompanionArtifactV1
+        SavedCompanionArtifactV1 with output path and canonical byte length.
+
+    Raises
+    ------
+    ReplaySaveError
+        Invalid arguments/evidence, unsafe path, size limit,
+        existing target, or atomic publication failure.
+
+    Notes
+    -----
+    Checks generic evidence joins without live official Core admission. Writes
+    only the companion; source replay/report files are not published or changed.
+    Caller-computed measurements and predicate values are not recomputed.
+    """
     return _save_current_scenario_evaluation_record(
         record,
         source_replay,
@@ -2458,6 +3561,11 @@ def _validate_actor_pov_source_join(
     *,
     current: bool,
 ) -> None:
+    """Require the supported POV/source version pair and validate every source join.
+
+    current means exact POV V2 with replay V3; false means exact POV V1 with replay V1.
+    Raise ValueError for other pairings or projection/content disagreement.
+    """
     if current:
         if (
             type(artifact) is not ActorPovReplayArtifactV2
@@ -2481,7 +3589,36 @@ def load_actor_pov_replay_artifact_v1(
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
     max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
 ) -> ActorPovReplayArtifactV1:
-    """Load exact POV V1 bytes and optionally verify their source replay."""
+    """Load canonical actor-view artifact V1 with an optional source check.
+
+    Parameters
+    ----------
+    path : str | os.PathLike[str]
+        Existing regular file with a nonempty .marlbg-pov.json stem.
+    source_replay : ReplayArtifactV1 | None
+        Optional exact ReplayArtifactV1; defaults to None. If supplied,
+        every projected source join is checked.
+    max_file_size_bytes : int
+        Exact positive per-file byte cap; defaults to 1 GiB (1024**3).
+    max_json_depth : int
+        Exact positive nesting cap; defaults to 128.
+
+    Returns
+    -------
+    ActorPovReplayArtifactV1
+        Exact ActorPovReplayArtifactV1 after standalone structure/content validation.
+
+    Raises
+    ------
+    ReplayLoadError
+        Unsafe path, size/depth limit, invalid/noncanonical content,
+        wrong version, or mismatched optional source.
+
+    Notes
+    -----
+    Standalone loading supports sharing only the actor view. Without source_replay
+    it cannot prove equality to unavailable source evidence. No file is written.
+    """
     return cast(
         ActorPovReplayArtifactV1,
         _load_actor_pov_replay_artifact(
@@ -2501,7 +3638,35 @@ def save_actor_pov_replay_artifact_v1(
     *,
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
 ) -> SavedCompanionArtifactV1:
-    """Save exact POV V1 evidence after verifying its source replay."""
+    """Check an actor-view artifact against its source and publish it without overwrite.
+
+    Parameters
+    ----------
+    artifact : ActorPovReplayArtifactV1
+        Exact ActorPovReplayArtifactV1.
+    source_replay : ReplayArtifactV1
+        Exact ReplayArtifactV1 from which this view was projected.
+    path : str | os.PathLike[str]
+        Absent .marlbg-pov.json path in an existing secure parent.
+    max_file_size_bytes : int
+        Exact positive byte cap; defaults to 1 GiB.
+
+    Returns
+    -------
+    SavedCompanionArtifactV1
+        SavedCompanionArtifactV1 with path and canonical byte length.
+
+    Raises
+    ------
+    ReplaySaveError
+        Invalid arguments/source join, unsafe path, size limit,
+        existing target, or atomic publication failure.
+
+    Notes
+    -----
+    Publishes only the actor-view bytes after checking their source. The full
+    privileged replay is not embedded or copied to the destination.
+    """
     return _save_actor_pov_replay_artifact(
         artifact,
         source_replay,
@@ -2518,7 +3683,36 @@ def load_actor_pov_replay_artifact_v2(
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
     max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
 ) -> ActorPovReplayArtifactV2:
-    """Load exact POV V2 bytes and optionally verify their source replay."""
+    """Load canonical actor-view artifact V2 with an optional source check.
+
+    Parameters
+    ----------
+    path : str | os.PathLike[str]
+        Existing regular file with a nonempty .marlbg-pov.json stem.
+    source_replay : ReplayArtifactV3 | None
+        Optional exact ReplayArtifactV3; defaults to None. If supplied,
+        every projected source join is checked.
+    max_file_size_bytes : int
+        Exact positive per-file byte cap; defaults to 1 GiB (1024**3).
+    max_json_depth : int
+        Exact positive nesting cap; defaults to 128.
+
+    Returns
+    -------
+    ActorPovReplayArtifactV2
+        Exact ActorPovReplayArtifactV2 after standalone structure/content validation.
+
+    Raises
+    ------
+    ReplayLoadError
+        Unsafe path, size/depth limit, invalid/noncanonical content,
+        wrong version, or mismatched optional source.
+
+    Notes
+    -----
+    Standalone loading supports sharing only the actor view. Without source_replay
+    it cannot prove equality to unavailable source evidence. No file is written.
+    """
     return cast(
         ActorPovReplayArtifactV2,
         _load_actor_pov_replay_artifact(
@@ -2538,7 +3732,35 @@ def save_actor_pov_replay_artifact_v2(
     *,
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
 ) -> SavedCompanionArtifactV1:
-    """Save exact POV V2 evidence after verifying its source replay."""
+    """Check an actor-view artifact against its source and publish it without overwrite.
+
+    Parameters
+    ----------
+    artifact : ActorPovReplayArtifactV2
+        Exact ActorPovReplayArtifactV2.
+    source_replay : ReplayArtifactV3
+        Exact ReplayArtifactV3 from which this view was projected.
+    path : str | os.PathLike[str]
+        Absent .marlbg-pov.json path in an existing secure parent.
+    max_file_size_bytes : int
+        Exact positive byte cap; defaults to 1 GiB.
+
+    Returns
+    -------
+    SavedCompanionArtifactV1
+        SavedCompanionArtifactV1 with path and canonical byte length.
+
+    Raises
+    ------
+    ReplaySaveError
+        Invalid arguments/source join, unsafe path, size limit,
+        existing target, or atomic publication failure.
+
+    Notes
+    -----
+    Publishes only the actor-view bytes after checking their source. The full
+    privileged replay is not embedded or copied to the destination.
+    """
     return _save_actor_pov_replay_artifact(
         artifact,
         source_replay,

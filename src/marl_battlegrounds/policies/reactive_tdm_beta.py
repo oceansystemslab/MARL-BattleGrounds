@@ -1,4 +1,11 @@
-"""Reactive TDM BETA: Rogue shoulder pursuit prioritizes Priest, Mage, then Hunter."""
+"""Run ALPHA with specialized Rogue pursuit and observed-body bypass choices.
+
+BETA's Rogues pursue a visible living Priest first, otherwise a Mage, otherwise
+a Hunter. The movement helper checks observed stationary bodies and wall ends.
+Combat chooses legal enemies within Basic radius independently of that pursuit.
+Other classes retain ALPHA behavior. These are diagnostic controller rules,
+not trained behavior or a general path-planning guarantee.
+"""
 
 import jax.numpy as jnp
 from jax import Array
@@ -36,7 +43,19 @@ from marl_battlegrounds.policies.shared_obs import (
 
 
 def reactive_tdm_beta_controller_descriptor() -> dict[str, object]:
-    """Return fresh rule data, including the inherited general controller rules."""
+    """Return fresh versioned rule data describing BETA and its inherited rules.
+
+    Returns
+    -------
+    dict[str, object]
+        BETA's identity, version, Rogue rules and movement assumptions, together
+        with a fresh ALPHA descriptor for inherited behavior.
+
+    Notes
+    -----
+    The data identifies controller behavior in recordings. Returning it does not
+    change policy settings, download models or qualify an official entrant.
+    """
     return {
         "policy_id": "scenario-5-pressure-controller",
         "version": 4,
@@ -108,7 +127,36 @@ def reactive_tdm_beta_policy(
     source_bank: SharedObsSensorSourceBankV2,
     recipient_source_availability: Array,
 ) -> ActorAction:
-    """Inherit TDM, replacing only Rogue pursuit and radius-bounded combat."""
+    """Choose ALPHA actions with BETA's specialized Rogue decisions.
+
+    Parameters
+    ----------
+    recipient_observation : Observation
+        One actor's current permitted observation.
+    recipient_action_mask : ActionMask
+        Its exact mask for the same decision.
+    actor_key : Array
+        JAX key accepted for the common interface. ALPHA and BETA ignore it.
+    source_bank : SharedObsSensorSourceBankV2
+        Own-team bank with five sources, cleared for this recipient before delivery.
+    recipient_source_availability : Array
+        Boolean (5,) source-permission row in the bank's order.
+
+    Returns
+    -------
+    ActorAction
+        Three scalar int32 choices. Non-Rogues keep ALPHA's action. A participating
+        Rogue uses BETA combat and, when a preferred prey class is visible, BETA
+        pursuit. Dead or inactive actors keep ALPHA's no-op.
+
+    Notes
+    -----
+    Preferred prey order is Priest, Mage, then Hunter; lowest current health and
+    then row order resolve ties within that class. Rogue combat independently
+    chooses legal enemies within Basic radius, preferring Ultimate when available.
+    Without preferred prey, movement falls back to ALPHA. The policy does not
+    predict other actors' actions, keep memory or consume random draws.
+    """
     baseline = reactive_tdm_alpha_policy(
         recipient_observation,
         recipient_action_mask,

@@ -1,3 +1,9 @@
+/**
+ * @file Translate battlefield UI input into commands and recording notices.
+ * Python remains the authority for command legality and recording lifecycle.
+ * These browser helpers build requests and decide local focus/confirmation
+ * behavior; they do not execute a simulator transition or persist a replay.
+ */
 const GAME_KEYS = new Set([
   "Tab",
   "Escape",
@@ -47,6 +53,10 @@ const RECORDING_SAVE_AS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\.marlbg-replay\.j
  */
 
 /**
+ * Copy source's optional keyboard modifiers into snake-case boolean fields.
+ * Missing values become false. Return a new mutable record without changing
+ * source; this helper does not decide whether a shortcut belongs to the game.
+ *
  * @param {ModifierSource} source
  * @returns {{
  *   shift_key: boolean,
@@ -65,6 +75,11 @@ function modifierFields(source) {
 }
 
 /**
+ * Build a keyboard request from key and optional modifier/repeat flags.
+ * All flags default to false and are converted to booleans; key is retained
+ * exactly. Return a new mutable command record without interpreting the key
+ * or checking action legality. Python handles the command's meaning.
+ *
  * @param {string} key
  * @param {ModifierSource & {repeat?: boolean}} options
  */
@@ -90,10 +105,10 @@ export function keyboardCommand(
 }
 
 /**
- * Decide whether Submit must synchronously settle local presentation before
- * entering the normal request fence. The readable submission gate may already
- * be open while animations are still active, and paused animations remain
- * active regardless of that gate.
+ * Return whether rawPresentation says local animation must settle before
+ * submission: submissionBlocked or paused is true, or animationCount is a
+ * positive integer. Nonobject input returns false. This checks the supplied
+ * local state only; it does not stop animation or send a command.
  *
  * @param {unknown} rawPresentation
  */
@@ -115,8 +130,10 @@ export function presentationRequiresSubmissionSettle(rawPresentation) {
 }
 
 /**
- * Convert the researcher-space target select's validated command-slot value
- * into the one target-selection command shared by both live audiences.
+ * Translate a validated selector string into a target command. Empty value
+ * returns an Escape keyboard command; one digit 0–9 returns a roster_selection
+ * request with that global slot. Other strings return null. No targetability
+ * or permission is granted by this conversion.
  *
  * @param {string} value
  * @returns {Record<string, unknown> | null}
@@ -135,15 +152,25 @@ export function targetSelectionCommand(value) {
   };
 }
 
-/** @param {unknown} value */
+/**
+ * Return whether value is manual, reactive_tdm or random_valid. This exact
+ * name check excludes Team B's separately handled scenario_5 controller.
+ *
+ * @param {unknown} value
+ */
 function isTeamController(value) {
   return value === "manual" || value === "reactive_tdm" || value === "random_valid";
 }
 
 /**
- * Resolve only effective episode replacements to the exact non-keyboard
- * command accepted by ConfirmDiscardAndReplaceCommandV1. This is advisory UX;
- * Python repeats the same classification against authoritative session state.
+ * Project an effective episode replacement from frame and command, or null.
+ *
+ * Recognize reset, a changed valid combat configuration, an available changed
+ * scenario, or an unmodified R keyboard reset. Reactive controllers require
+ * SharedObs; scenario_5 is accepted only for Team B. Return a frozen exact
+ * replacement request. This is an advisory browser check against the current
+ * frame; Python repeats validation against the actual session. Inputs stay
+ * unchanged and no reset or recording discard occurs here.
  *
  * @param {Record<string, any>} frame
  * @param {Record<string, unknown>} command
@@ -216,6 +243,15 @@ export function recordingReplacementCommand(frame, command) {
 }
 
 /**
+ * Return a frozen allow, block or confirm decision for command in frame.
+ *
+ * Missing recording state and recording-lifecycle commands are allowed. An
+ * episode replacement asks for confirmation when discard_available is true,
+ * or blocks when restart_fenced is true. Outside active recording, block
+ * other scientific commands while allowing the declared display-only ones.
+ * An allow result retains the command reference; notices explain other
+ * results. This does not send commands or replace Python lifecycle checks.
+ *
  * @param {Record<string, any>} frame
  * @param {Record<string, unknown>} command
  * @returns {Readonly<{
@@ -270,6 +306,11 @@ export function recordingCommandDecision(frame, command) {
 }
 
 /**
+ * Return a frozen save_as request for a valid replay file name, or null.
+ * value must be 20–160 characters, begin with an ASCII letter/digit, contain
+ * only letters/digits/dot/underscore/hyphen and end in .marlbg-replay.json.
+ * Paths and surrounding whitespace are rejected. No file is written here.
+ *
  * @param {unknown} value
  * @returns {Readonly<{command_type: "save_as", file_name: string}> | null}
  */
@@ -286,6 +327,10 @@ export function recordingSaveAsCommand(value) {
 }
 
 /**
+ * Return true only when command is exit and object payload reports
+ * result=shutdown_scheduled. Other payload shapes return false. This checks
+ * the response marker; it does not close the browser or stop the service.
+ *
  * @param {Record<string, unknown>} command
  * @param {unknown} payload
  */
@@ -297,7 +342,13 @@ export function commandResponseSchedulesShutdown(command, payload) {
   return command.command_type === "exit" && response.result === "shutdown_scheduled";
 }
 
-/** @param {unknown} frame */
+/**
+ * Return whether frame is still a live view whose recording lifecycle says
+ * reviewing. Nonobjects, replay views and missing/other recording states return
+ * false. The caller performs the handoff; this check changes no state.
+ *
+ * @param {unknown} frame
+ */
 export function recordingReviewHandoffRequired(frame) {
   if (typeof frame !== "object" || frame === null || Array.isArray(frame)) {
     return false;
@@ -313,6 +364,9 @@ export function recordingReviewHandoffRequired(frame) {
 }
 
 /**
+ * Build a new keyboard request from event.key, modifiers and repeat.
+ * Keep the raw key meaning for Python. Do not cancel the event or change focus.
+ *
  * @param {KeyboardEvent} event
  */
 function keyboardCommandFromEvent(event) {
@@ -325,6 +379,10 @@ function keyboardCommandFromEvent(event) {
 }
 
 /**
+ * Return whether event.key belongs to the battlefield key set. Ctrl, Alt
+ * or Meta combinations always return false; Shift is allowed. One-character
+ * keys are lowercased for lookup. No event is cancelled by this check.
+ *
  * @param {{
  *   key: string,
  *   shiftKey?: boolean,
@@ -342,6 +400,11 @@ export function isDebuggerKey(event) {
 }
 
 /**
+ * Convert event client-pixel coordinates into svg's local coordinates.
+ * Use the inverse screen transform; return null when no transform exists.
+ * Return a new x/y record without moving the pointer or DOM. The caller
+ * checks world conversion and finiteness; matrix errors may propagate.
+ *
  * @param {SVGSVGElement} svg
  * @param {PointerEvent} event
  * @returns {{x: number, y: number} | null}
@@ -358,8 +421,22 @@ function pointInSvg(svg, event) {
 }
 
 /**
- * Bind only to the focusable battlefield. No document-level key listener is
- * installed, so native controls and panel inputs retain ordinary Tab behavior.
+ * Attach keyboard and primary-pointer listeners to one focusable battlefield.
+ *
+ * bindings.battlefield receives the listeners. toWorldPoint maps SVG points
+ * to world_x/world_y or null. onCommand handles built requests; onHelp shows
+ * help and onReleaseFocus follows Escape, even if its awaited command fails.
+ * onPointerCommand defaults to a no-op and observes the pointer target/request
+ * before submission. isInteractive defaults to true; onFencedCommand defaults
+ * to false and may consume blocked keys; ownsFencedSpaceDefault defaults to
+ * true to suppress page scrolling for a blocked Space key.
+ *
+ * Only events targeted at the battlefield are captured. Pointer input focuses
+ * it and rejects missing/nonfinite world coordinates. Ordinary command
+ * promises are not awaited here; callers own their error handling. Return
+ * undefined. No disposer is returned, so bind once per battlefield element
+ * and release its owning DOM when finished. No document-level listener or
+ * Python action logic is added.
  *
  * @param {{
  *   battlefield: SVGSVGElement,

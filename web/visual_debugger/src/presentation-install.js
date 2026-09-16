@@ -1,10 +1,27 @@
 /**
- * Coordinate browser-owned presentation installation freshness without owning
- * transport decoding or raw/presentation identity joins. Callers supply those
- * authority boundaries and retain ownership of all DOM/state changes.
+ * @file Keep asynchronous presentation installs tied to the latest browser request.
+ * The coordinator numbers attempts, drops stale results and permits one
+ * GET-only recovery after a classified join race. Callers own network calls,
+ * authorization joins, DOM updates and pending-view behavior.
+ */
+/**
+ * Coordinate freshness for one browser page's presentation installation.
+ *
+ * The instance owns a mutable generation counter and three caller callbacks.
+ * It never decodes transport or decides information rights. A newer begin call
+ * supersedes older asynchronous work; work is not cancelled, but stale results
+ * and failures cannot install a view. Reuse the instance for that page.
  */
 export class PresentationInstallCoordinator {
   /**
+   * Create a coordinator with three required callbacks.
+   *
+   * options.onAttemptBegin(reason, pendingPolicy) updates the caller's pending
+   * state; options.install(joined) installs an already authorized pair;
+   * options.isJoinRace(error) decides whether one GET-only recovery is allowed.
+   * Each must be a function or construction throws TypeError. No callback is
+   * called during construction. generation starts at zero; callbacks are retained.
+   *
    * @param {{
    *   onAttemptBegin: (
    *     reason: string,
@@ -29,6 +46,13 @@ export class PresentationInstallCoordinator {
   }
 
   /**
+   * Start a new attempt and return its generation number.
+   *
+   * reason is passed through to onAttemptBegin. pendingPolicy must be
+   * retain_last_authorized or clear, otherwise throw TypeError before advancing.
+   * Increment the counter, call onAttemptBegin synchronously and return the new
+   * number. An exception from that callback propagates after the increment.
+   *
    * @param {string} reason
    * @param {"retain_last_authorized" | "clear"} pendingPolicy
    */
@@ -42,14 +66,27 @@ export class PresentationInstallCoordinator {
     return generation;
   }
 
-  /** @param {number} generation */
+  /**
+   * Return whether generation exactly equals this instance's latest counter.
+   * No validation or state change occurs; a stale attempt receives false.
+   *
+   * @param {number} generation
+   */
   isCurrent(generation) {
     return generation === this.generation;
   }
 
   /**
-   * Install one GET pair, allowing exactly one fresh GET-only resynchronization
-   * when the supplied identity join classifies the first attempt as a race.
+   * Fetch and install a joined view if this attempt is still current.
+   *
+   * options supplies reason, pendingPolicy and getJoined(), which resolves an
+   * already checked transport/presentation pair. A missing getJoined function
+   * rejects with TypeError. begin applies the pending policy. A first error
+   * classified by isJoinRace permits exactly one new getJoined call. Other
+   * errors, including a failed retry, reject while current. Superseded work
+   * resolves a frozen {status: superseded} record instead. Success calls install
+   * once and returns a frozen {status: installed, joined, resynchronized}
+   * record. The coordinator performs no network call except through callbacks.
    *
    * @param {{
    *   reason: string,
@@ -95,9 +132,16 @@ export class PresentationInstallCoordinator {
   }
 
   /**
-   * Send a command once, join its returned raw candidate to a separately
-   * fetched presentation, and fall back to one fresh GET pair only when that
-   * join races. The command callback is deliberately outside the retry branch.
+   * Send a command once, then install its joined result if still current.
+   *
+   * options supplies reason, pendingPolicy, sendCommand(),
+   * joinCommandResult(commandResult) and getJoined(). All three work callbacks
+   * must be functions or the promise rejects with TypeError. After begin, call
+   * sendCommand exactly once. A classified race from joinCommandResult permits
+   * one fresh getJoined call; the command is never repeated. Current failures
+   * reject. Superseded work resolves {status: superseded}. Success calls install
+   * and resolves a frozen {status: installed, commandResult, joined,
+   * resynchronized} record. Fetching and authorization remain caller-owned.
    *
    * @param {{
    *   reason: string,

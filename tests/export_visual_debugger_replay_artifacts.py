@@ -1,8 +1,7 @@
-"""Export deterministic canonical replay artifacts for browser integration tests.
+"""Write deterministic replay files for browser integration tests.
 
-This module is test infrastructure rather than a production launcher.  The
-Playwright suite invokes it in a fresh temporary directory, then launches the
-real replay viewer against the emitted canonical artifact files.
+Playwright runs this module in a fresh temporary directory, then opens the real
+Replay Viewer with those files. It does not use the user's saved recordings.
 """
 
 from __future__ import annotations
@@ -53,7 +52,6 @@ type _InformationMode = Literal["no_shared_obs", "shared_obs"]
 
 
 def _runtime_provenance() -> RuntimeProvenanceV1:
-    """Return stable provenance for the deterministic browser-test artifacts."""
     return RuntimeProvenanceV1(
         python_version="3.14.0",
         package_version="0.0.0",
@@ -80,7 +78,6 @@ def _build_bundle(
     completion_state: _CompletionState,
     execution_information_mode: _InformationMode = "no_shared_obs",
 ) -> ReplayBundleV1:
-    """Build one artifact only through public capture, observer, and replay APIs."""
     trajectory = captured_evaluation_trajectory(
         transition_count=transition_count,
         expected_horizon=expected_horizon,
@@ -119,7 +116,6 @@ def _build_bundle(
 def build_corpse_overlay_bundle(
     *, execution_information_mode: _InformationMode
 ) -> ReplayBundleV1:
-    """Build one partial replay with local and out-of-range corpse candidates."""
     episode_id = f"browser-corpse-overlay-{execution_information_mode}"
     trajectory = captured_evaluation_trajectory(
         transition_count=0,
@@ -206,7 +202,6 @@ def build_corpse_overlay_bundle(
 
 
 def export_artifacts(output_directory: Path) -> dict[str, str]:
-    """Write complete, partial, and missing-sidecar variants and return paths."""
     output_directory.mkdir(parents=True, exist_ok=True)
     complete = _build_bundle(
         episode_id="browser-replay-complete",
@@ -280,7 +275,6 @@ def export_artifacts(output_directory: Path) -> dict[str, str]:
 
 
 def export_acceptance_artifacts(output_directory: Path) -> dict[str, object]:
-    """Capture the approved scenarios and a Core-resolved dense HUD witness."""
     from scripts.dev.qualify_tdm_scenarios import (
         _planned_episode,  # pyright: ignore[reportPrivateUsage]
     )
@@ -415,7 +409,6 @@ def export_acceptance_artifacts(output_directory: Path) -> dict[str, object]:
 
 
 def main() -> int:
-    """CLI used by Playwright support to create isolated test inputs."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-directory", type=Path, required=True)
     parser.add_argument("--c7-acceptance", action="store_true")

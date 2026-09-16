@@ -1,4 +1,4 @@
-"""Focused same-process recording-to-replay coordinator proofs."""
+"""Check the in-process handoff from live recording to replay."""
 
 import csv
 import io
@@ -484,7 +484,6 @@ def test_registered_capture_round_trip_preserves_exact_researcher_presentation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Prove one real capture survives persistence and same-process review."""
     append_units: list[tuple[str, str]] = []
     actual_append = DebuggerReplayRecorder.append
 

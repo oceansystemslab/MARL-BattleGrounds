@@ -1,4 +1,8 @@
-"""Resolve-then-die lifecycle and public death-fact proofs for Milestone 6."""
+"""Check when agents die and which death facts Core reports.
+
+Combat resolution and the following death-state changes must describe the same
+transition.
+"""
 
 # pyright: reportPrivateUsage=false
 
@@ -75,12 +79,10 @@ _SECOND_ENEMY_TARGET = _FIRST_ENEMY_TARGET + 1
 
 
 def _empty_obstacles() -> Array:
-    """Return an inactive fixed-size obstacle table."""
     return jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32)
 
 
 def _clear_pillar_obstacles() -> Array:
-    """Return one active pillar clear of the default combat trajectories."""
     obstacles = _empty_obstacles()
     obstacles = obstacles.at[0, OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_PILLAR)
     obstacles = obstacles.at[0, OBSTACLE_FEATURE_X].set(15.0)
@@ -93,7 +95,6 @@ def _requested_roster(
     team_sizes: tuple[int, int],
     *class_rows: tuple[int, int],
 ) -> Array:
-    """Return a padded active roster with selected class assignments."""
     roster = jnp.full((MAX_AGENT_SLOTS,), NEUTRAL_CLASS_ID, dtype=jnp.int32)
     roster = roster.at[: team_sizes[0]].set(HUNTER_CLASS_ID)
     roster = roster.at[MAX_AGENTS_PER_TEAM : MAX_AGENTS_PER_TEAM + team_sizes[1]].set(
@@ -105,7 +106,6 @@ def _requested_roster(
 
 
 def _default_positions(team_sizes: tuple[int, int]) -> Array:
-    """Place both active team blocks on clear, non-overlapping vertical lines."""
     positions = jnp.zeros((MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32)
     for local_slot in range(team_sizes[0]):
         positions = positions.at[local_slot].set(
@@ -126,7 +126,6 @@ def _scenario(
     obstacles: Array | None = None,
     ordinary_movement_distance_scale: float = 0.25,
 ) -> tuple[EnvConfig, EnvState, ActionMask, Info]:
-    """Build a deterministic, fully observable public combat snapshot."""
     profile = resolve_agent_profile(
         _requested_roster(team_sizes, *class_rows),
         jnp.asarray(team_sizes, dtype=jnp.int32),
@@ -164,10 +163,6 @@ def _scenario(
 
 
 def _joint_action(*rows: tuple[int, int, int, int]) -> Action:
-    """Return a canonical joint action with selected actor overrides.
-
-    Each row is ``(actor_slot, move, target, use_ultimate)``.
-    """
     move = jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32)
     select_target = jnp.full((MAX_AGENT_SLOTS,), _TARGET_NONE, dtype=jnp.int32)
     use_ultimate = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
@@ -186,7 +181,6 @@ def _choose_desired_action_from_mask(
     action_mask: ActionMask,
     desired_action: Action,
 ) -> Action:
-    """Choose each desired action when legal and a deterministic fallback otherwise."""
     actor_slots = jnp.arange(MAX_AGENT_SLOTS)
     desired_move_is_legal = action_mask.move_mask[actor_slots, desired_action.move]
     fallback_move = jnp.argmax(action_mask.move_mask, axis=-1)
@@ -225,7 +219,6 @@ def _choose_desired_action_from_mask(
 
 
 def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
-    """Return the authoritative action mask paired with a direct test state."""
     return _build_observation_and_action_mask(state, config)[1]
 
 
@@ -237,7 +230,6 @@ def _take_step(
     action_mask: ActionMask | None = None,
     key: Array | None = None,
 ) -> tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]:
-    """Advance one deterministic public transition."""
     choosing_mask = (
         _current_action_mask(config, state) if action_mask is None else action_mask
     )
@@ -251,7 +243,6 @@ def _take_step(
 
 
 def _assert_tree_equal(left: object, right: object) -> None:
-    """Assert exact equality for two identically structured JAX PyTrees."""
     assert jax.tree_util.tree_structure(left) == jax.tree_util.tree_structure(right)
     for left_leaf, right_leaf in zip(
         jax.tree_util.tree_leaves(left),
@@ -262,7 +253,6 @@ def _assert_tree_equal(left: object, right: object) -> None:
 
 
 def _slot_mask(*slots: int) -> Array:
-    """Return a fixed-slot boolean mask selecting exactly ``slots``."""
     mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
     for slot in slots:
         mask = mask.at[slot].set(True)
@@ -270,7 +260,6 @@ def _slot_mask(*slots: int) -> Array:
 
 
 def _assert_statuses_are_clear(state: EnvState, slot: int) -> None:
-    """Assert every transient status family is zero for one successor slot."""
     assert bool(jnp.all(state.slow_durations[slot] == 0))
     assert bool(jnp.all(state.stun_durations[slot] == 0))
     assert int(state.rogue_poison_anti_heal_durations[slot]) == 0
@@ -279,7 +268,6 @@ def _assert_statuses_are_clear(state: EnvState, slot: int) -> None:
 
 
 def _assert_canonical_dead_action_mask(mask: ActionMask, slot: int) -> None:
-    """Assert a dead slot exposes exactly the sampleable neutral action."""
     expected_move = jnp.arange(NUM_MOVE_ACTIONS) == MOVE_STAY
     expected_target = jnp.arange(NUM_TARGET_ACTIONS) == _TARGET_NONE
     expected_ultimate = jnp.arange(NUM_ULTIMATE_ACTIONS) == 0
@@ -299,7 +287,6 @@ def _assert_canonical_dead_action_mask(mask: ActionMask, slot: int) -> None:
 
 
 def test_reset_and_neutral_step_publish_canonical_death_fact_schema() -> None:
-    """Prove reset and real steps share one fixed death-fact PyTree."""
     config, state, action_mask, reset_info = _scenario()
     reset_facts = reset_info.transition_facts
     death_facts = reset_facts.death_facts
@@ -350,7 +337,6 @@ def test_reset_and_neutral_step_publish_canonical_death_fact_schema() -> None:
 def test_every_damage_basic_produces_one_exact_successor_death(
     source_class_id: int,
 ) -> None:
-    """Prove all damaging Basic lanes use the same death and attribution rule."""
     config, state, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, source_class_id),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -402,7 +388,6 @@ def test_every_damage_basic_produces_one_exact_successor_death(
 
 
 def test_exact_zero_health_boundary_is_a_death_not_a_surviving_zero() -> None:
-    """Prove clamped exact zero cannot remain officially alive."""
     config, state, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, ROGUE_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -443,7 +428,6 @@ def test_exact_zero_health_boundary_is_a_death_not_a_surviving_zero() -> None:
 def test_every_damage_ultimate_produces_gross_attributed_death_damage(
     source_class_id: int,
 ) -> None:
-    """Prove all damaging Ultimates retain gross contribution and cooldown."""
     config, state, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, source_class_id),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -488,7 +472,6 @@ def test_every_damage_ultimate_produces_gross_attributed_death_damage(
 
 
 def test_mutual_lethal_actions_resolve_before_both_successor_deaths() -> None:
-    """Prove simultaneous actors can trade without actor-order cancellation."""
     config, state, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, ROGUE_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, ROGUE_CLASS_ID),
@@ -543,7 +526,6 @@ def test_mutual_lethal_actions_resolve_before_both_successor_deaths() -> None:
 def test_focus_fire_preserves_every_gross_contributor_through_overkill(
     source_count: int,
 ) -> None:
-    """Prove focus fire records all sources without killer or HP-loss apportionment."""
     all_source_slots = (
         _TEAM_A_FIRST_SLOT,
         _TEAM_A_SECOND_SLOT,
@@ -604,7 +586,6 @@ def test_focus_fire_preserves_every_gross_contributor_through_overkill(
 
 
 def test_status_applying_damage_source_contributes_to_its_dead_recipient() -> None:
-    """Prove Hunter Trap's status and damage share one accepted activation."""
     config, state, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_A_SECOND_SLOT, ROGUE_CLASS_ID),
@@ -658,7 +639,6 @@ def test_simultaneous_healing_and_anti_heal_decide_death_from_final_health(
     anti_heal_duration: int,
     expected_death: bool,
 ) -> None:
-    """Prove death follows post-net health rather than damage receipt."""
     config, state, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -808,7 +788,6 @@ def test_dying_source_completes_each_class_defining_action(
     move_action: int,
     effect_kind: str,
 ) -> None:
-    """Prove a source's accepted action is never cancelled by its own death."""
     config, state, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, source_class_id),
         (_TEAM_A_SECOND_SLOT, HUNTER_CLASS_ID),
@@ -998,7 +977,6 @@ def test_dying_source_completes_each_class_defining_action(
 
 
 def test_lethally_hit_mover_remains_a_physical_body_through_collision() -> None:
-    """Prove choosing-state liveness governs collision before successor death."""
     positions = (
         jnp.zeros((MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32)
         .at[_TEAM_A_FIRST_SLOT]
@@ -1067,7 +1045,6 @@ def test_lethally_hit_mover_remains_a_physical_body_through_collision() -> None:
 
 
 def test_dying_mage_aura_still_amplifies_an_ally_this_transition() -> None:
-    """Prove successor death cannot erase a pre-state outgoing aura."""
     config, state, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, MAGE_CLASS_ID),
         (_TEAM_A_SECOND_SLOT, HUNTER_CLASS_ID),
@@ -1111,7 +1088,6 @@ def test_dying_mage_aura_still_amplifies_an_ally_this_transition() -> None:
 
 
 def test_dying_warrior_aura_still_mitigates_damage_to_an_ally() -> None:
-    """Prove successor death cannot erase a pre-state incoming aura."""
     config, state, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, WARRIOR_CLASS_ID),
         (_TEAM_A_SECOND_SLOT, HUNTER_CLASS_ID),
@@ -1164,7 +1140,6 @@ def test_dying_warrior_aura_still_mitigates_damage_to_an_ally() -> None:
 
 
 def test_new_death_clears_every_existing_and_fresh_transient_status() -> None:
-    """Prove status application facts survive while corpse durations are cleared."""
     config, state, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, ROGUE_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, MAGE_CLASS_ID),
@@ -1246,7 +1221,6 @@ def test_new_death_clears_every_existing_and_fresh_transient_status() -> None:
 
 
 def test_dead_successor_exposes_coherent_observation_mask_reward_and_done() -> None:
-    """Prove every public successor output agrees on immediate dead semantics."""
     config, state, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, ROGUE_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -1334,7 +1308,6 @@ def test_dead_successor_exposes_coherent_observation_mask_reward_and_done() -> N
 def test_corpse_transition_ticks_cooldown_replaces_history_and_never_dies_again() -> (
     None
 ):
-    """Prove one death event is followed by canonical inert corpse transitions."""
     config, state, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, ROGUE_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -1437,7 +1410,6 @@ def test_corpse_transition_ticks_cooldown_replaces_history_and_never_dies_again(
 
 
 def test_compiled_mutual_death_matches_the_complete_eager_public_transition() -> None:
-    """Prove eager and compiled mutual kills agree on every public leaf."""
     config, state, action_mask, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, ROGUE_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, ROGUE_CLASS_ID),
@@ -1481,7 +1453,6 @@ def test_compiled_mutual_death_matches_the_complete_eager_public_transition() ->
 
 
 def test_shared_config_vmap_chooses_from_each_successor_mask() -> None:
-    """Prove a batched policy consumes living, new-corpse, and corpse masks."""
     config, base_state, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, ROGUE_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -1547,7 +1518,6 @@ def test_shared_config_vmap_chooses_from_each_successor_mask() -> None:
         tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
         tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
     ]:
-        """Choose the second action only after observing the first successor mask."""
         first_outputs = step(
             config,
             state,
@@ -1635,7 +1605,6 @@ def test_shared_config_vmap_chooses_from_each_successor_mask() -> None:
 
 
 def test_compiled_scan_applies_observes_then_chooses_from_corpse_semantics() -> None:
-    """Prove one masked policy spans nonlethal, lethal, and corpse epochs."""
     config, state, action_mask, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, ROGUE_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -1672,7 +1641,6 @@ def test_compiled_scan_applies_observes_then_chooses_from_corpse_semantics() -> 
         tuple[EnvState, ActionMask],
         tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info],
     ]:
-        """Run the public step API while carrying each successor action mask."""
 
         def scan_body(
             carry: tuple[EnvState, ActionMask],

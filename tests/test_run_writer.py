@@ -1,4 +1,7 @@
-"""Durable CSV runs from real episode completions, including interrupted writes."""
+"""Check durable CSV output from completed games.
+
+Cases include interrupted writes and recovery through the existing writer.
+"""
 
 import csv
 import json
@@ -413,7 +416,6 @@ def test_resume_rejects_missing_or_corrupt_durable_artifacts(
 def test_old_scalar_schema_resume_preserves_unfinished_files(
     tmp_path: Path, episodes: _Episodes, old_version: int
 ) -> None:
-    """Schema incompatibility is rejected before interrupted-tail recovery."""
     with RunWriter(tmp_path, buffer_size=1) as writer:
         writer.write(episodes.full[0])
     details = _details(writer.run_dir)

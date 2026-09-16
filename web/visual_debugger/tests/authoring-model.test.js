@@ -1,3 +1,7 @@
+/**
+ * @file Check saved-draft editing, stable object order, field focus and source/clone
+ * ownership.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 import {

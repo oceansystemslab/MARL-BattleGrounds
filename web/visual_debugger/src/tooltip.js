@@ -1,3 +1,11 @@
+/**
+ * @file Own semantic help records, tooltip registration, rendering and placement.
+ * Use one delegated controller per tooltip surface. Registered owners hold
+ * frozen descriptions in weak maps; prose is rendered as text, never HTML.
+ * This module validates display structure, not scientific authorization.
+ * Callers supply facts permitted for their audience and destroy controllers
+ * when their view is removed.
+ */
 const TOOLTIP_OWNER_ATTRIBUTE = "data-tooltip-owner";
 const TOOLTIP_KIND_ATTRIBUTE = "data-tooltip-kind";
 const TOOLTIP_TONE_ATTRIBUTE = "data-tooltip-tone";
@@ -171,6 +179,15 @@ const KIND_PRIORITY = Object.freeze({
  * @returns {TooltipDescriptor}
  */
 /**
+ * Validate and freeze a semantic help record, or reuse an existing branded
+ * record unchanged. Require exactly kind, id, title, tone, accent, summary,
+ * rows, sections, metadata and anchor. Text fields are trimmed; unknown tone/
+ * accent become neutral/none, and anchor must be element or pointer. A null
+ * summary requires at least one row visible on compact or full surfaces.
+ * Normalize/freeze nested rows, sections and visibility metadata. Invalid
+ * structure throws TypeError. This is a display contract: accessors may be
+ * read, and the brand does not certify scientific information rights.
+ *
  * @param {unknown} rawDescriptor
  * @returns {AnyTooltipDescriptor}
  */
@@ -256,7 +273,11 @@ export function createSemanticDescriptor(rawDescriptor) {
 }
 
 /**
- * Produce an immutable compact or full projection without changing fact order.
+ * Return a frozen compact/full projection with rows and sections filtered
+ * by their visibility metadata, preserving order. Normalize rawDescriptor
+ * first; an existing branded descriptor is reused. Reject another surface
+ * or a null-summary result with no visible row using TypeError. Share
+ * already frozen row values and leave the original descriptor unchanged.
  *
  * @param {unknown} rawDescriptor
  * @param {SemanticSurface} surface
@@ -298,8 +319,12 @@ export function projectSemanticDescriptor(rawDescriptor, surface) {
 }
 
 /**
- * Render a compact tooltip or persistent full inspector using created nodes and
- * textContent only. The container structure and classes are fixed here.
+ * Render options.descriptor into title and details and return its
+ * projection. surface defaults to compact and also accepts full. Require
+ * compatible text elements or throw TypeError. Replace details with fixed
+ * DOM structure and textContent only; minimal DOM stand-ins receive flattened
+ * text instead. This changes supplied nodes but not the descriptor, and
+ * performs no visibility, focus or tooltip-registration work.
  *
  * @param {{
  *   descriptor: unknown,
@@ -363,8 +388,10 @@ export function renderSemanticDescriptor(options) {
 }
 
 /**
- * Flatten a semantic projection for announcements and test diagnostics without
- * losing the deterministic row/section order.
+ * Flatten an existing projection into ordered text strings for accessible
+ * help or diagnostics. Start with summary, or title when summary is null;
+ * then emit rows and sections in order. Return a new array without mutation
+ * or another validation pass. It does not include title when summary exists.
  *
  * @param {ReturnType<typeof projectSemanticDescriptor>} projection
  * @returns {string[]}
@@ -387,12 +414,13 @@ export function semanticDescriptorText(projection) {
 }
 
 /**
- * Register one rendered element as a tooltip owner.
- *
- * Descriptors stay in a WeakMap rather than in data attributes, so explanatory
- * prose is never interpreted as HTML. Interactive owners mirror the compact
- * summary in a plain-text `aria-description`, so disabled native controls and
- * SVG composites retain durable help even when they cannot receive focus.
+ * Associate element with a normalized descriptor in the shared weak map.
+ * options defaults to {}; surface may override placement bounds and
+ * inspectable=false disables full-card inspection (default true). Add the
+ * owner attribute and accessible description for interactive owners. No
+ * per-owner event listener is installed. Invalid inputs throw TypeError;
+ * validation is not transactional, so call with valid options before showing
+ * the view. Re-registering replaces its descriptor and placement settings.
  *
  * @param {Element} element
  * @param {unknown} descriptor
@@ -438,11 +466,11 @@ export function registerTooltipOwner(element, descriptor, options = {}) {
 }
 
 /**
- * Choose the highest-priority candidate without mutating the input.
- *
- * Semantic kind wins first. Within one semantic tier, the lowest paint order
- * wins because `elementsFromPoint` reports the topmost element first. Stable
- * descriptor ID is the final deterministic tie-break.
+ * Return the best candidate reference, or null for an empty array. Rank
+ * by semantic kind, smaller paintOrder, descriptor ID and input index.
+ * Omitted paintOrder uses that index. Invalid candidates/kind/ID throw
+ * TypeError; negative paintOrder throws RangeError. Input is not sorted or
+ * mutated. This checks ranking fields only, not the complete descriptor.
  *
  * @template {TooltipCandidate} Candidate
  * @param {ReadonlyArray<Candidate>} candidates
@@ -482,13 +510,17 @@ export function chooseTooltipCandidate(candidates) {
 }
 
 /**
- * Place one fixed-position tooltip against an inspected object or pointer.
+ * Choose fixed-position coordinates in CSS pixels for one measured card.
+ * input supplies anchorRect, pointer, tooltipSize and viewport; optional
+ * protectedRects defaults to [] (non-arrays also become []). Validate finite
+ * ordered rectangles and nonnegative sizes; a viewport must have positive
+ * area. Type/range failures throw TypeError/RangeError.
  *
- * Candidate order intentionally resolves a perfect tie toward right/below.
- * Owner avoidance is absolute: a clamped placement that covers the inspected
- * cue never wins merely because its unclamped origin fit the viewport better.
- * Remaining choices favor less overflow and the card edge nearest the pointer;
- * viewport-edge proximity never pulls a legal card away from the inspected cue.
+ * Try four corners with an 8px viewport gutter and 12px gap. Minimize
+ * protected-area overlap first, then owner overlap, overflow, pointer
+ * distance and clamping movement. Ties favor right-below. Return frozen
+ * left/top/placement; oversized cards can still overflow or overlap when
+ * no clear placement exists. No DOM reads or writes occur here.
  *
  * @param {TooltipPlacementInput} input
  * @returns {TooltipPlacement}
@@ -611,11 +643,11 @@ export function placeTooltip(input) {
 }
 
 /**
- * Measure one compact card against both its owning surface and the free space
- * around the inspected cue. Ordinary cards keep the full surface cap. When a
- * tall or wide card would make every candidate overlap the owner/protected
- * envelope, constrain the single axis that preserves the larger visible card;
- * the tooltip's existing overflow scrolling keeps the remaining facts usable.
+ * Set tooltip's maximum CSS width/height from the owning viewport and
+ * measure it. If neither free axis fits, constrain the axis retaining the
+ * larger card area, then measure again. Inputs are validated CSS-pixel
+ * rectangles/point; return the resulting DOMRect. This mutates tooltip
+ * styles and causes layout reads, but does not choose its final position.
  *
  * @param {{
  *   tooltip: HTMLElement,
@@ -687,10 +719,18 @@ function measureTooltipForPlacement(input) {
 }
 
 /**
- * Create the one delegated controller for a tooltip surface.
+ * Create the sole delegated controller for options.tooltip. Supply root,
+ * tooltip with a nonempty ID, title and details; optional onInspect receives
+ * a descriptor plus owner/trigger context. Validate compatible DOM surfaces
+ * and reject a second active controller with Error. Other invalid options
+ * throw TypeError. Install pointer/focus/click/keyboard/scroll/resize handlers
+ * and a removal observer when available, then hide the tooltip.
  *
- * Pointer and focus listeners live on the supplied root. Rendered cue elements
- * only register immutable descriptors; they do not install per-node listeners.
+ * Return frozen refresh, hide, inspect and destroy methods. hide only clears
+ * the current card; later interaction/refresh may show it again. inspect
+ * returns whether onInspect was called. destroy removes listeners, observer
+ * and controller ownership and is safe to repeat. Owner registrations remain
+ * weakly held. The caller owns persistent inspector rendering and disposal.
  *
  * @param {TooltipControllerOptions} options
  * @returns {TooltipController}
@@ -735,6 +775,11 @@ export function createTooltipController(options) {
   tooltip.style.pointerEvents = "none";
 
   /**
+   * Attach this tooltip ID to trigger's aria-describedby token list.
+   * First remove only the token previously added by this controller. null
+   * clears the current link; an unchanged trigger is a no-op. Preserve other
+   * ARIA tokens and remember whether this controller added the ID.
+   *
    * @param {Element | null} trigger
    */
   function setDescribedByTrigger(trigger) {
@@ -754,6 +799,11 @@ export function createTooltipController(options) {
     describedByTrigger = trigger;
   }
 
+  /**
+   * Remove this controller's added aria-describedby token and clear its
+   * link state. Preserve a preexisting identical token and every unrelated
+   * token. Return nothing; repeat calls are harmless.
+   */
   function clearDescribedByTrigger() {
     if (describedByTrigger !== null && describedByAdded) {
       const remaining = attributeTokens(describedByTrigger, "aria-describedby").filter(
@@ -769,6 +819,12 @@ export function createTooltipController(options) {
     describedByAdded = false;
   }
 
+  /**
+   * Clear active-owner state, owned ARIA link, tooltip content and visual
+   * attributes/size limits. Hide the card without dropping remembered pointer
+   * or focused-owner state, so refresh can show it again. Does not destroy
+   * listeners or unregister owners.
+   */
   function hide() {
     activeOwner = null;
     clearDescribedByTrigger();
@@ -789,6 +845,12 @@ export function createTooltipController(options) {
   }
 
   /**
+   * Render candidate's compact descriptor and place its card near pointer
+   * or the owner center. Hide instead if owner left root. fromFocus controls
+   * ARIA linkage; pointer anchoring uses a point rectangle. Read DOM geometry,
+   * measure with protected regions and update tooltip styles/attributes.
+   * Candidate must be registered and its descriptor valid; errors propagate.
+   *
    * @param {{element: Element, descriptor: AnyTooltipDescriptor, trigger?: Element}} candidate
    * @param {TooltipPoint | null} pointer
    * @param {boolean} fromFocus
@@ -854,6 +916,11 @@ export function createTooltipController(options) {
   }
 
   /**
+   * Return the highest-ranked registered owner under pointer, or null.
+   * Use elementsFromPoint paint order, ignore duplicate/disconnected/outside
+   * owners and reuse stored descriptors. pointer uses viewport CSS pixels.
+   * This reads DOM hit testing without changing registration or focus.
+   *
    * @param {TooltipPoint} pointer
    * @returns {{element: Element, descriptor: AnyTooltipDescriptor} | null}
    */
@@ -880,6 +947,10 @@ export function createTooltipController(options) {
   }
 
   /**
+   * Resolve target or its registered ancestor inside root. Return owner,
+   * stored descriptor and original element trigger, or null for invalid,
+   * unregistered or disconnected targets. No nearest-by-distance fallback occurs.
+   *
    * @param {unknown} target
    * @returns {{element: Element, descriptor: AnyTooltipDescriptor, trigger: Element} | null}
    */
@@ -897,6 +968,12 @@ export function createTooltipController(options) {
       : { element: owner, descriptor, trigger: target };
   }
 
+  /**
+   * Recompute the visible card after data, layout or owner changes.
+   * Do nothing after destroy. Respect Escape dismissal until interaction;
+   * otherwise prefer the last pointer, then a still-connected focused owner.
+   * Hide if no candidate remains. May render, measure and reposition DOM.
+   */
   function refresh() {
     if (destroyed) {
       return;
@@ -933,7 +1010,14 @@ export function createTooltipController(options) {
     hide();
   }
 
-  /** @param {Event} event */
+  /**
+   * Handle a delegated pointer event using finite client coordinates.
+   * Clear Escape dismissal, remember the pointer and show its best owner or
+   * hide when none exists. Invalid coordinates hide the card. No event default
+   * is prevented and no inspection callback runs.
+   *
+   * @param {Event} event
+   */
   function onPointerMove(event) {
     const point = eventPoint(event);
     if (point === null) {
@@ -950,12 +1034,22 @@ export function createTooltipController(options) {
     }
   }
 
+  /**
+   * Forget the last pointer and refresh from any remaining focused owner.
+   * This can hide or reposition the card; it does not clear focus state.
+   */
   function onPointerLeave() {
     lastPointer = null;
     refresh();
   }
 
-  /** @param {Event} event */
+  /**
+   * Resolve the focused target, clear Escape dismissal and show its card
+   * with an ARIA link. Forget pointer state for a valid candidate. Invalid
+   * targets clear remembered focus and hide. No native focus change is made.
+   *
+   * @param {Event} event
+   */
   function onFocusIn(event) {
     const candidate = candidateForTarget(event.target);
     if (candidate === null) {
@@ -971,7 +1065,13 @@ export function createTooltipController(options) {
     show(candidate, null, true);
   }
 
-  /** @param {Event} event */
+  /**
+   * Use relatedTarget to follow focus to another registered owner.
+   * Show that card with focus linkage, or clear focus and hide when no
+   * candidate remains. This does not call focus() or submit an action.
+   *
+   * @param {Event} event
+   */
   function onFocusOut(event) {
     const nextTarget = "relatedTarget" in event ? event.relatedTarget : null;
     const candidate = candidateForTarget(nextTarget);
@@ -986,7 +1086,14 @@ export function createTooltipController(options) {
     show(candidate, null, true);
   }
 
-  /** @param {Event} event */
+  /**
+   * Hide a visible tooltip on Escape until a new interaction. On Enter
+   * or Space, request inspection and prevent the native default only when
+   * inspection succeeds. Leave native interactive controls to their own
+   * actions; do not stop event propagation.
+   *
+   * @param {Event} event
+   */
   function onKeyDown(event) {
     if ("key" in event && event.key === "Escape" && !tooltip.hidden) {
       dismissedUntilInteraction = true;
@@ -1002,14 +1109,22 @@ export function createTooltipController(options) {
     }
   }
 
-  /** @param {Event} event */
+  /**
+   * Try to inspect the event target through the shared inspect method.
+   * Ignore its boolean result and leave event propagation/defaults unchanged.
+   *
+   * @param {Event} event
+   */
   function onClick(event) {
     inspect(event.target);
   }
 
   /**
-   * Request the persistent full-card projection for one registered owner.
-   * Native controls nested inside a registered card retain their own action.
+   * Request full-card inspection for target, defaulting to activeOwner.
+   * Return false after destroy, without onInspect, for invalid/unregistered
+   * owners, explicitly noninspectable owners or native interactive targets.
+   * Otherwise call onInspect once with frozen owner/trigger context and return
+   * true. The callback owns rendering; callback exceptions propagate.
    *
    * @param {unknown} [target]
    * @returns {boolean}
@@ -1033,6 +1148,10 @@ export function createTooltipController(options) {
     return true;
   }
 
+  /**
+   * Refresh card content/placement after a delegated scroll or window
+   * resize. This uses current owner geometry; no event object is required.
+   */
   function onViewportChange() {
     refresh();
   }
@@ -1067,6 +1186,11 @@ export function createTooltipController(options) {
     }
   });
 
+  /**
+   * Remove all controller listeners, disconnect the removal observer,
+   * hide the card and release tooltip ownership. Repeat calls do nothing.
+   * This does not delete registered owner descriptions or remove supplied DOM.
+   */
   function destroy() {
     if (destroyed) {
       return;
@@ -1093,6 +1217,10 @@ export function createTooltipController(options) {
 }
 
 /**
+ * Return a known frozen descriptor unchanged, otherwise validate/create
+ * one through createSemanticDescriptor. Nonobjects throw TypeError. This
+ * normalizes a display record, not its scientific provenance.
+ *
  * @param {unknown} descriptor
  * @returns {AnyTooltipDescriptor}
  */
@@ -1107,8 +1235,9 @@ function normalizeDescriptor(descriptor) {
 }
 
 /**
- * A nullable-summary card stays meaningful only when the requested surface
- * retains at least one label/value fact after metadata filtering.
+ * Return whether rows or a visible section contain a row enabled for
+ * surface. Call with normalized metadata and compact/full. Section headings
+ * or summaries alone do not satisfy this row-presence check.
  *
  * @param {ReadonlyArray<SemanticRow>} rows
  * @param {ReadonlyArray<SemanticSection>} sections
@@ -1125,6 +1254,10 @@ function hasVisibleSemanticRow(rows, sections, surface) {
 }
 
 /**
+ * Require exactly compact/full boolean fields and return a frozen copy.
+ * Invalid fields throw TypeError naming name. This uses ordinary property
+ * reads and enumerable-key checks, not an accessor/prototype security check.
+ *
  * @param {unknown} raw
  * @param {string} name
  * @returns {Readonly<SemanticMetadata>}
@@ -1142,6 +1275,10 @@ function normalizeMetadata(raw, name) {
 }
 
 /**
+ * Require exactly nonempty label/value strings plus valid metadata and
+ * return a frozen normalized row. Trim strings; invalid input throws
+ * TypeError naming name. No DOM creation or scientific validation occurs.
+ *
  * @param {unknown} raw
  * @param {string} name
  * @returns {SemanticRow}
@@ -1159,6 +1296,11 @@ function normalizeSemanticRow(raw, name) {
 }
 
 /**
+ * Require exactly title, summary, rows and metadata, then return a frozen
+ * section with normalized/frozen rows. title must be nonempty; summary may
+ * be null or undefined, otherwise must be nonempty text. Invalid fields
+ * throw TypeError naming name. Preserve row order and do not mutate raw.
+ *
  * @param {unknown} raw
  * @param {string} name
  * @returns {SemanticSection}
@@ -1185,6 +1327,9 @@ function normalizeSemanticSection(raw, name) {
 }
 
 /**
+ * Return value as-is when it is an array; otherwise throw TypeError
+ * naming name. This checks neither dense indices nor element validity.
+ *
  * @param {unknown} value
  * @param {string} name
  * @returns {unknown[]}
@@ -1197,6 +1342,10 @@ function normalizeArray(value, name) {
 }
 
 /**
+ * Require enumerable string keys to match expected, ignoring order.
+ * Throw TypeError naming name for extra/missing keys. Do not mutate either
+ * input. Symbols, inherited fields and accessors are not rejected here.
+ *
  * @param {Record<string, unknown>} value
  * @param {ReadonlyArray<string>} expected
  * @param {string} name
@@ -1213,6 +1362,10 @@ function assertExactKeys(value, expected, name) {
 }
 
 /**
+ * Create an unattached definition list for normalized rows in order.
+ * Use fixed class names and textContent for label/value pairs. Return the
+ * list; no markup is interpreted and inputs are unchanged.
+ *
  * @param {Document} ownerDocument
  * @param {ReadonlyArray<SemanticRow>} rows
  */
@@ -1232,6 +1385,10 @@ function renderRows(ownerDocument, rows) {
 }
 
 /**
+ * Return the declared numeric priority for a known semantic kind.
+ * Unknown and inherited-property names receive Number.MAX_SAFE_INTEGER.
+ * Smaller numbers win; no descriptor validation occurs.
+ *
  * @param {string} kind
  * @returns {number}
  */
@@ -1242,6 +1399,10 @@ function kindPriority(kind) {
 }
 
 /**
+ * Compare [kind priority, paint order, stable ID, input index] tuples.
+ * Return negative/zero/positive for first before/equal/after second. IDs use
+ * JavaScript lexical order; no locale sorting or mutation occurs.
+ *
  * @param {[number, number, string, number]} first
  * @param {[number, number, string, number]} second
  * @returns {number}
@@ -1260,6 +1421,10 @@ function compareRanks(first, second) {
 }
 
 /**
+ * Compare numeric arrays lexicographically, with shorter length winning
+ * when their common prefix matches. Return a signed difference without
+ * mutation. Caller supplies finite scores; this does not handle NaN specially.
+ *
  * @param {number[]} first
  * @param {number[]} second
  * @returns {number}
@@ -1275,6 +1440,10 @@ function compareNumericRanks(first, second) {
 }
 
 /**
+ * Sum how far rectangle extends past each bounds edge in CSS pixels.
+ * Return zero when contained. This is edge-distance cost, not overflow area;
+ * inputs must already have finite ordered edges.
+ *
  * @param {TooltipRectangle} rectangle
  * @param {TooltipRectangle} bounds
  * @returns {number}
@@ -1289,6 +1458,10 @@ function rectangleOverflow(rectangle, bounds) {
 }
 
 /**
+ * Return intersection area of two ordered rectangles in square CSS
+ * pixels. Disjoint or edge-touching rectangles return zero. No validation
+ * or mutation occurs.
+ *
  * @param {TooltipRectangle} first
  * @param {TooltipRectangle} second
  * @returns {number}
@@ -1301,6 +1474,10 @@ function rectangleOverlapArea(first, second) {
 }
 
 /**
+ * Return the shortest Euclidean CSS-pixel distance from point to an
+ * ordered rectangle. Points inside or on the edge return zero. Caller
+ * supplies finite validated geometry.
+ *
  * @param {TooltipPoint} point
  * @param {TooltipRectangle} rectangle
  * @returns {number}
@@ -1322,6 +1499,10 @@ function pointToRectangleDistance(point, rectangle) {
 }
 
 /**
+ * Return a new rectangle with left/top and right/bottom derived from
+ * size.width/height. Values are CSS pixels; caller validates finite
+ * coordinates and nonnegative size. Inputs remain unchanged.
+ *
  * @param {number} left
  * @param {number} top
  * @param {TooltipSize} size
@@ -1337,6 +1518,10 @@ function rectangleFromPosition(left, top, size) {
 }
 
 /**
+ * Return left/top clamped so size fits viewport where possible. When a
+ * card is larger than an axis, anchor it at that viewport's starting edge.
+ * Inputs are validated CSS pixels; no resizing or DOM mutation occurs.
+ *
  * @param {number} left
  * @param {number} top
  * @param {TooltipSize} size
@@ -1353,6 +1538,9 @@ function clampPosition(left, top, size, viewport) {
 }
 
 /**
+ * Clamp numeric value to inclusive lower/upper. Caller provides ordered
+ * finite bounds; this helper performs no validation or rounding.
+ *
  * @param {number} value
  * @param {number} lower
  * @param {number} upper
@@ -1363,6 +1551,10 @@ function clamp(value, lower, upper) {
 }
 
 /**
+ * Require finite numeric left/top/right/bottom and return a frozen copy.
+ * Zero width/height is allowed; reversed edges throw RangeError and invalid
+ * fields throw TypeError naming name. Extra fields are ignored.
+ *
  * @param {unknown} value
  * @param {string} name
  * @returns {TooltipRectangle}
@@ -1382,6 +1574,10 @@ function normalizeRectangle(value, name) {
 }
 
 /**
+ * Require finite numeric x/y and return a frozen copy. Invalid input
+ * throws TypeError naming name; extra fields are ignored. Units remain
+ * those supplied by the caller, normally viewport CSS pixels.
+ *
  * @param {unknown} value
  * @param {string} name
  * @returns {TooltipPoint}
@@ -1397,6 +1593,10 @@ function normalizePoint(value, name) {
 }
 
 /**
+ * Require nonnegative finite width/height and return a frozen copy.
+ * Zero dimensions are allowed. Invalid types throw TypeError and negative
+ * values RangeError naming name. Extra fields are ignored.
+ *
  * @param {unknown} value
  * @param {string} name
  * @returns {TooltipSize}
@@ -1411,6 +1611,11 @@ function normalizeSize(value, name) {
 }
 
 /**
+ * Return the document's viewport bounds at origin in CSS pixels.
+ * Prefer window innerWidth/innerHeight, falling back to documentElement
+ * client sizes. Nonpositive dimensions throw RangeError. This reads layout
+ * without changing the document.
+ *
  * @param {Document} ownerDocument
  * @returns {TooltipRectangle}
  */
@@ -1425,9 +1630,10 @@ function viewportRectangle(ownerDocument) {
 }
 
 /**
- * Keep a compact card inside the visual surface that owns its cue. Battlefield
- * SVGs therefore use battlefield-local corners, while panel facts continue to
- * use the document viewport.
+ * Return the visible intersection of the owner's registered surface
+ * (or closest SVG) with the document viewport. If no surface or no positive
+ * intersection exists, use the viewport. Read/validate DOM rectangles;
+ * malformed bounds can throw. No registration or layout mutation occurs.
  *
  * @param {Element} owner
  * @param {Document} ownerDocument
@@ -1458,6 +1664,10 @@ function ownerSurfaceRectangle(owner, ownerDocument) {
 }
 
 /**
+ * Hit-test viewport CSS coordinates through root when supported, otherwise
+ * its ownerDocument. Return elements in the browser's paint order, or []
+ * when neither supplies hit testing. No containment filtering occurs here.
+ *
  * @param {Document | ShadowRoot | HTMLElement} root
  * @param {number} x
  * @param {number} y
@@ -1473,6 +1683,11 @@ function elementsFromPoint(root, x, y) {
 }
 
 /**
+ * Walk element and its parentElement chain to the first owner carrying
+ * both the marker attribute and a registered descriptor. Return that element
+ * or null. A forged marker alone is insufficient; Shadow DOM host traversal
+ * is not added by this helper.
+ *
  * @param {Element} element
  * @returns {Element | null}
  */
@@ -1492,6 +1707,11 @@ function closestRegisteredOwner(element) {
 }
 
 /**
+ * Return whether trigger-to-owner ancestor traversal encounters a native
+ * interactive tag or contenteditable=true. Include owner itself. This
+ * preserves native actions during inspection. Caller ensures owner is the
+ * relevant ancestor; no event or DOM change occurs.
+ *
  * @param {Element} trigger
  * @param {Element} owner
  * @returns {boolean}
@@ -1516,9 +1736,11 @@ function isNativeInteractiveTarget(trigger, owner) {
 }
 
 /**
- * Collect the inspected agent and its durable local cue envelope. This keeps a
- * compact explanation from hiding the very tactical cluster it describes.
- * Non-battlefield owners intentionally return no additional protected region.
+ * Collect positive-area rectangles for an inspected battlefield agent
+ * and its durable docks sharing data-slot. Return [] outside a usable SVG
+ * context. Only the declared agent/dock classes are included. This reads
+ * layout for tooltip avoidance; it does not interpret global slot identity
+ * or reveal additional scientific information.
  *
  * @param {Element} owner
  * @returns {TooltipRectangle[]}
@@ -1562,6 +1784,11 @@ function localProtectedRects(owner) {
 }
 
 /**
+ * Return whether owner is connected inside root. Document roots check
+ * documentElement containment when available; other roots use contains.
+ * Minimal document stand-ins without contains are accepted. This is a DOM
+ * ownership check, not a scientific authorization check.
+ *
  * @param {Document | ShadowRoot | HTMLElement} root
  * @param {Element} owner
  * @returns {boolean}
@@ -1580,6 +1807,10 @@ function ownerWithinRoot(root, owner) {
 }
 
 /**
+ * Return a frozen x/y point from finite numeric clientX/clientY, or null
+ * when unavailable. Coordinates remain viewport CSS pixels; no page-offset
+ * or device-pixel conversion is applied.
+ *
  * @param {Event} event
  * @returns {TooltipPoint | null}
  */
@@ -1598,6 +1829,10 @@ function eventPoint(event) {
 }
 
 /**
+ * Split element's named attribute on whitespace and remove empty tokens.
+ * Return a new string array; a missing attribute yields []. Preserve token
+ * order and duplicates and leave the attribute unchanged.
+ *
  * @param {Element} element
  * @param {string} name
  * @returns {string[]}
@@ -1607,6 +1842,12 @@ function attributeTokens(element, name) {
 }
 
 /**
+ * Observe child-list changes throughout root and call onRemoval.
+ * Document roots observe documentElement; other roots observe themselves.
+ * Return the MutationObserver, or null when the owning window lacks it.
+ * The callback runs for all child-list mutations, not removals alone; the
+ * caller checks ownership and disconnects the observer on disposal.
+ *
  * @param {Document | ShadowRoot | HTMLElement} root
  * @param {() => void} onRemoval
  * @returns {MutationObserver | null}
@@ -1630,6 +1871,9 @@ function createRemovalObserver(root, onRemoval) {
 }
 
 /**
+ * Return whether value is any non-null object, including arrays. This
+ * shallow guard does not establish a plain-data record or validate fields.
+ *
  * @param {unknown} value
  * @returns {value is Record<string, unknown>}
  */
@@ -1638,6 +1882,10 @@ function isRecord(value) {
 }
 
 /**
+ * Check for the attribute/geometry methods and parentElement field used
+ * by tooltip owners. Accept compatible DOM stand-ins. This structural check
+ * is not an instanceof check or proof of a connected element.
+ *
  * @param {unknown} value
  * @returns {value is Element}
  */
@@ -1654,6 +1902,9 @@ function isElementNode(value) {
 }
 
 /**
+ * Apply the shared element-shape check for tooltip ownership. This does
+ * not mean the element has a registered descriptor or belongs to a root.
+ *
  * @param {unknown} value
  * @returns {value is Element}
  */
@@ -1662,6 +1913,10 @@ function isTooltipOwner(value) {
 }
 
 /**
+ * Check that value supports event listener add/remove and exposes an
+ * ownerDocument or documentElement. Accept compatible stand-ins; membership
+ * and connectedness are checked separately.
+ *
  * @param {unknown} value
  * @returns {value is Document | ShadowRoot | HTMLElement}
  */
@@ -1675,6 +1930,10 @@ function isEventRoot(value) {
 }
 
 /**
+ * Check the element-like shape plus id, hidden, style.setProperty and
+ * ownerDocument needed by a tooltip. This does not validate a nonempty ID
+ * or whether another controller owns the surface.
+ *
  * @param {unknown} value
  * @returns {value is HTMLElement}
  */
@@ -1691,6 +1950,9 @@ function isTooltipSurface(value) {
 }
 
 /**
+ * Check element-like shape and a textContent property. Minimal compatible
+ * DOM stand-ins are allowed; this does not check a particular HTML tag.
+ *
  * @param {unknown} value
  * @returns {value is HTMLElement}
  */
@@ -1699,6 +1961,9 @@ function isTextSurface(value) {
 }
 
 /**
+ * Return whether value exposes an elementsFromPoint function. This does
+ * not call it, validate its results or establish a DOM root type.
+ *
  * @param {unknown} value
  * @returns {value is {elementsFromPoint: (x: number, y: number) => Element[]}}
  */
@@ -1707,6 +1972,9 @@ function isPointSource(value) {
 }
 
 /**
+ * Return trimmed string value when nonempty; otherwise throw TypeError
+ * naming name. No markup parsing, maximum length or identity check occurs.
+ *
  * @param {unknown} value
  * @param {string} name
  * @returns {string}
@@ -1719,6 +1987,9 @@ function nonEmptyString(value, name) {
 }
 
 /**
+ * Return a finite numeric value unchanged, or throw TypeError naming
+ * name. Do not coerce strings/booleans or round values.
+ *
  * @param {unknown} value
  * @param {string} name
  * @returns {number}
@@ -1731,6 +2002,10 @@ function finiteNumber(value, name) {
 }
 
 /**
+ * Return a finite numeric value at least zero. Invalid types/nonfinite
+ * values throw TypeError; negative numbers throw RangeError naming name.
+ * Zero and fractions are accepted without rounding.
+ *
  * @param {unknown} value
  * @param {string} name
  * @returns {number}

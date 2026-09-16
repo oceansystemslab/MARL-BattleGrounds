@@ -1,4 +1,10 @@
-"""Frozen paired cross-play through the same evaluator and durable run writer."""
+"""Execute current paired all-pairs tournaments through the shared evaluator.
+
+run_tournament freezes entrants, builds a balanced map/side schedule, executes
+each directed matchup and qualifies the complete result population. Optional
+RunWriter output owns match/full/replay files. The same in-memory statistics
+serve both routes; this module does not define a second rating implementation.
+"""
 
 import csv
 from collections import defaultdict
@@ -46,16 +52,43 @@ from marl_battlegrounds.evaluation.tournament_statistics import (
 )
 from marl_battlegrounds.tasks import (
     CANONICAL_TDM_EVALUATION_MAP_IDS,
-    AgentClassName,
     TDMMapInfo,
+    canonical_tournament_rosters,
 )
 
-_ROSTER: tuple[AgentClassName, ...] = ("mage", "warrior", "hunter", "rogue", "priest")
+_ROSTER_A, _ROSTER_B = canonical_tournament_rosters()
 
 
 @dataclass(frozen=True)
 class TournamentResult:
-    """Complete match evidence, qualified summaries and optional diagnostics."""
+    """Completed tournament evidence, summaries and optional recorded outputs.
+
+    Attributes
+    ----------
+    matches : tuple[ResultRow, ...]
+        Every completed match row in global episode-ID order.
+    tournament_results : tuple[ResultRow, ...]
+        One aggregate rating/rate row per policy.
+    matchup_results : tuple[ResultRow, ...]
+        Directed policy/opponent summary rows.
+    map_results : tuple[ResultRow, ...]
+        Policy/map summary rows.
+    full_metrics : Columns
+        Selected in-memory full metric columns, or {} with file output.
+    replays : tuple[ReplayArtifactV3, ...]
+        Selected in-memory replay artifacts, or () with file output.
+    metadata : dict[str, object]
+        Settings, source/config/pass facts and statistical-method details.
+    paths : dict[str, Path] | None
+        Produced output paths, or None for a fully in-memory run.
+
+    Notes
+    -----
+    Summary interval bounds may be None when evidence is insufficient; their
+    status fields explain why. Ratings summarize these fixed entrants/maps,
+    not learning speed or variation across separately trained seeds. The record
+    is frozen, but contained tables/dicts are not deeply immutable.
+    """
 
     matches: tuple[ResultRow, ...]
     tournament_results: tuple[ResultRow, ...]
@@ -70,6 +103,11 @@ class TournamentResult:
 def _memory_matches(
     result: EvaluationResult, schedule: Sequence[TournamentMatch]
 ) -> list[ResultRow]:
+    """Join each scheduled completion to its available scalar and identity columns.
+
+    When optional metrics were disabled, use compact episode/config evidence for
+    the required match identity and outcome. Missing metric cells remain None.
+    """
     indices = {
         int(value): index
         for index, value in enumerate(result.priority_metrics.get("episode_id", ()))
@@ -118,6 +156,9 @@ def _memory_matches(
 
 
 def _read_matches(path: Path) -> list[ResultRow]:
+    """Read the exact match CSV schema, preserving blanks and restoring numeric
+    types.
+    """
     integer_columns = {
         "episode_id",
         "seed_id",
@@ -150,6 +191,7 @@ def _read_matches(path: Path) -> list[ResultRow]:
 
 
 def _merge_columns(tables: Sequence[Columns]) -> Columns:
+    """Join nonempty metric tables and sort every column by global episode ID."""
     selected = [table for table in tables if table]
     if not selected:
         return {}
@@ -178,14 +220,91 @@ def run_tournament(
     max_steps: int = 300,
     chunk_size: int = 16,
 ) -> TournamentResult:
-    """Run paired, equally weighted maps for every distinct frozen policy pair.
+    """Evaluate every distinct fixed-policy pair with equal maps and both sides.
 
-    ``episodes_per_pair`` is the total across maps and both side assignments.
-    Full metrics and replay selections use global one-based schedule IDs. Outcome
-    evidence is always retained for the requested ratings; ``metrics='none'``
-    disables optional episode measurements. No files are created without an
-    explicit destination. Persisted tournaments use one match table in place of
-    a repeated priority table, plus self-contained selected full rows and replays.
+    Parameters
+    ----------
+    policies : Sequence[Policy | str]
+        At least two Policy objects or built-in names. Resolved policy
+        names must be distinct; variables and initial memory are snapshotted.
+    maps : Sequence[int | TDMMapInfo] | None
+        Optional distinct integer map IDs or TDMMapInfo entries. None uses
+        canonical evaluation maps 47..51. Exact EnvConfig inputs are not accepted.
+    episodes_per_pair : int
+        Positive total game budget across maps and both policy
+        side assignments, default 100. Divisible by twice the map count.
+    seed : int
+        Root uint32 integer, default 0; also seeds summary resampling.
+    num_envs : int
+        Positive maximum simultaneous games per directed matchup,
+        default 128. Smaller pending schedules use smaller batches.
+    metrics : MetricMode
+        "priority" by default, "full" for all full measurements, or "none"
+        to skip optional episode measurements. Match outcomes are always kept.
+    full_metrics_episodes : Iterable[int]
+        Global schedule IDs selected for full metrics;
+        empty by default. Explicit selections still work with metrics="none".
+    replay_episodes : Iterable[int]
+        Global schedule IDs selected for replay; empty by default.
+    output_dir : str | Path | None
+        Optional parent folder for a new run with a unique child folder.
+    resume_from : str | Path | None
+        Optional existing run folder with matching tournament identity.
+        Use this or output_dir, not both. Durable matches are not re-executed.
+    opponent_weights : Mapping[str, float] | None
+        Optional finite positive weight for every entrant name.
+        None gives equal opponent weights. Rates/tail scores use these weights;
+        the rating fit uses the observed match counts.
+    score_threshold : int
+        Positive TDM score target for every map, default 20.
+    max_steps : int
+        Positive horizon in ticks for each game, default 300.
+    chunk_size : int
+        Positive scheduling chunk length in ticks, default 16.
+
+    Returns
+    -------
+    TournamentResult
+        TournamentResult with complete match evidence, policy/matchup/map summaries
+        and method metadata. Without file output, selected full columns and replays
+        remain in memory. With output, those fields are empty and paths identifies
+        produced files. Persisted priority values share match_results.csv rather
+        than a duplicate priority table.
+
+    Raises
+    ------
+    ValueError
+        Names, map choices, budgets, selections, weights, saved identity
+        or the complete match population are invalid.
+    TypeError
+        A config or policy input/output violates its type contract.
+    RuntimeError
+        A policy, writer or required statistical fit fails.
+    OSError
+        Run files cannot be accessed or written.
+
+    Notes
+    -----
+    Host-only orchestration; do not wrap this function in jax.jit. JAX policies
+    use the shared compiled evaluator; external policies add their host-boundary
+    costs. Ratings and 5,000 paired-block bootstrap replicates run on the host.
+    The function owns and closes any writer it creates. A failed run remains
+    available for explicit resume. Default ordered rosters are mage, warrior,
+    hunter, rogue, priest for both teams. Policy sides swap on fixed map banks;
+    no additional bank shuffle occurs. This executes the current all-pairs
+    protocol and does not claim future D11 enrollment behavior.
+
+    Examples
+    --------
+    A small complete in-memory tournament (20 games across two maps):
+
+    >>> import marl_battlegrounds as marl_bgs
+    >>> result = marl_bgs.run_tournament(
+    ...     ["random", "tdm-alpha"], maps=[47, 48],
+    ...     episodes_per_pair=20, num_envs=4, max_steps=16, seed=7,
+    ... )
+    >>> len(result.matches)
+    20
     """
     entrants = tuple(
         policy(item) if isinstance(item, str) else item for item in policies
@@ -223,9 +342,14 @@ def run_tournament(
         if any(episode_id > len(schedule) for episode_id in ids):
             raise ValueError(f"{name} contains an episode outside the schedule")
     configs = {
-        spec.map_id: spec.config
+        spec.map_id: spec.env_config
         for spec in normalize_episode_specs(
-            sorted(map_ids), len(map_ids), _ROSTER, _ROSTER, score_threshold, max_steps
+            sorted(map_ids),
+            len(map_ids),
+            _ROSTER_A,
+            _ROSTER_B,
+            score_threshold,
+            max_steps,
         )
     }
     frozen = {

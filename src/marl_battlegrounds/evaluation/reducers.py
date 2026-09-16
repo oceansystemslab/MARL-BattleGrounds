@@ -1,7 +1,10 @@
-"""Basic V1 outcome reports retained for archived replay generation.
+"""Preserve the five basic V1 outcome reports used by archived replay tools.
 
-Current metric computation uses the public JAX evaluation workflow. This small
-legacy producer preserves the five historical outcome statistics and their bytes.
+build_tdm_metric_reducers returns the legacy outcome reducer only. It consumes
+validated host replay views and keeps immutable summary state. Current live
+metric computation belongs to the public JAX evaluation workflow; this module
+does not recreate the retired full-metric reducer or rewrite historical status
+wording and report values.
 """
 
 from dataclasses import dataclass
@@ -35,6 +38,8 @@ type _Dimensions = tuple[tuple[str, str], ...]
 
 @dataclass(frozen=True, slots=True)
 class _Definition:
+    """A legacy metric's count/sum kind, units and complete-episode requirement."""
+
     kind: Literal["count", "sum"]
     units: str
     complete_only: bool = False
@@ -53,10 +58,14 @@ TDM_BASIC_METRIC_IDS = tuple(sorted(f"marlbg.{key}.v1" for key in _DEFINITIONS))
 
 
 class _Agent(EvaluationModel):
+    """One active global slot whose archived per-agent return is accumulated."""
+
     slot: int
 
 
 class _Cell(EvaluationModel):
+    """One immutable subject/dimension statistic with value and exposure totals."""
+
     metric: str
     subject: StatisticSubjectV1
     dimensions: _Dimensions = ()
@@ -65,6 +74,10 @@ class _Cell(EvaluationModel):
 
 
 class _State(EvaluationMetricReducerStateV1):
+    """Immutable legacy reducer state: active slots, accumulated cells and observed
+    outcome.
+    """
+
     agents: tuple[_Agent, ...]
     cells: tuple[_Cell, ...] = ()
     task_mode: int
@@ -74,13 +87,21 @@ class _State(EvaluationMetricReducerStateV1):
 
 
 def _cell_key(cell: _Cell) -> tuple[str, str, _Dimensions]:
+    """Order cells by metric, serialized subject and sorted dimension identity."""
     return cell.metric, cell.subject.model_dump_json(), cell.dimensions
 
 
 class _Rows:
-    """Build one replacement locally; committed reducer state stays immutable."""
+    """Build replacement legacy statistic rows without editing committed state.
+
+    The mutable dict is local to one initialize/advance/finalize call. freeze
+    returns a stable sorted tuple for the next immutable reducer state.
+    """
 
     def __init__(self, cells: tuple[_Cell, ...] = ()) -> None:
+        """Index existing immutable cells by their complete metric/subject/dimension
+        key.
+        """
         self.cells = {_cell_key(cell): cell for cell in cells}
 
     def add(
@@ -92,6 +113,12 @@ class _Rows:
         *,
         dimensions: _Dimensions = (),
     ) -> None:
+        """Add value and exposure to one local metric cell.
+
+        Sort dimensions before keying. Create a zero cell when needed, but avoid
+        replacing an existing cell for a zero update. Committed reducer state is
+        unchanged.
+        """
         dimensions = tuple(sorted(dimensions))
         key = metric, subject.model_dump_json(), dimensions
         previous = self.cells.get(key)
@@ -107,16 +134,21 @@ class _Rows:
         )
 
     def freeze(self) -> tuple[_Cell, ...]:
+        """Return all local replacement cells in deterministic key order."""
         return tuple(self.cells[key] for key in sorted(self.cells))
 
 
 def _team(team: int) -> TeamStatisticSubjectV1:
+    """Construct a validated legacy team subject using configured team ID 1 or 2."""
     return TeamStatisticSubjectV1(team_id=team)
 
 
 def _state(
     context: EvaluationEpisodeContextV1, frame: EvaluationFrameV1, reducer_id: str
 ) -> _State:
+    """Initialize active-slot identities and starting scores from validated V1
+    context/frame.
+    """
     return _State(
         reducer_id=reducer_id,
         reducer_version=1,
@@ -131,13 +163,23 @@ def _state(
 
 
 def _model[T: EvaluationModel](model: type[T], **values: object) -> T:
-    """Package trusted values; external ingestion validates wire records."""
+    """Package already trusted internal values without repeating model validation.
+
+    External ingestion remains the validation authority. Callers must supply every
+    required invariant; this shortcut is not suitable for untrusted wire data.
+    """
     return model.model_construct(_fields_set=set(values), **values)
 
 
 def _drafts(
     state: _State, cells: tuple[_Cell, ...]
 ) -> tuple[SufficientStatisticDraftV1, ...]:
+    """Convert legacy cells to report drafts with original status semantics.
+
+    Preserve undefined outcomes, absent team reward and non-TDM applicability
+    reasons exactly. Count/sum components keep their declared units and exposure;
+    this is historical report packaging, not current scalar metric calculation.
+    """
     result: list[SufficientStatisticDraftV1] = []
     for cell in cells:
         definition = _DEFINITIONS[cell.metric]
@@ -213,12 +255,19 @@ def _drafts(
 
 @dataclass(frozen=True, slots=True)
 class _OutcomeReducer:
+    """V1 outcome/return reducer with fixed identity and no trajectory history."""
+
     reducer_id: str = "marlbg.episode.outcome"
     reducer_version: int = 1
 
     def initialize(
         self, context: EvaluationEpisodeContextV1, initial_frame: EvaluationFrameV1
     ) -> _State:
+        """Start legacy returns for configured active agents and both teams.
+
+        context and initial_frame are already validated V1 models from one episode.
+        Return immutable _State with zero return cells and the authored starting scores.
+        """
         state = _state(context, initial_frame, self.reducer_id)
         rows = _Rows()
         for agent in state.agents:
@@ -235,6 +284,12 @@ class _OutcomeReducer:
         previous_state: EvaluationMetricReducerStateV1,
         view: EvaluationTransitionViewV1,
     ) -> _State:
+        """Consume one admitted V1 transition and return new immutable totals.
+
+        previous_state must be this reducer's _State. Add recorded canonical agent/team
+        rewards, read authoritative completion events, and keep the successor scores.
+        The calling reducer pipeline owns ordering and transition admission.
+        """
         state = cast(_State, previous_state)
         rows = _Rows(state.cells)
         for agent in state.agents:
@@ -267,6 +322,12 @@ class _OutcomeReducer:
         completion: EvaluationEpisodeCompletionV1,
         processing_status: EvaluationProcessingStatusV1,
     ) -> tuple[SufficientStatisticDraftV1, ...]:
+        """Package legacy outcome, score, return, length and completion drafts.
+
+        Read immutable state plus rollout completion and processing status. Pending
+        outcomes remain unavailable rather than being guessed. This does not change
+        state, write files or convert a partial replay into a completed game.
+        """
         current = cast(_State, state)
         rows = _Rows(current.cells)
         for team in (1, 2):
@@ -312,10 +373,20 @@ class _OutcomeReducer:
 
 
 def build_tdm_metric_reducers() -> tuple[EvaluationMetricReducerV1, ...]:
-    """Build only the basic V1 reports used by archived sample generation.
+    """Return the basic V1 reducer needed by archived report generation.
 
-    New computation uses ``evaluate(..., metrics="full")`` or the corresponding
-    public environment mode. The former ``full`` factory option is retired.
+    Returns
+    -------
+    tuple[EvaluationMetricReducerV1, ...]
+        One-element tuple implementing EvaluationMetricReducerV1 for the five
+        historical outcome/return/length/completion statistics.
+
+    Notes
+    -----
+    Takes no arguments and creates no game or file. The retired full option is
+    not accepted. For new measurements use evaluate(..., metrics="full") or
+    the public environment's metric mode. Historical report bytes and status
+    semantics remain the responsibility of this compatibility producer.
     """
     return cast(tuple[EvaluationMetricReducerV1, ...], (_OutcomeReducer(),))
 

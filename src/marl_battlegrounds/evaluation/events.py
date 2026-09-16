@@ -1,4 +1,10 @@
-"""Deterministic host decoding of authoritative transition facts into events."""
+"""Decode recorded transition facts into stable, ordered host events.
+
+The decoder joins adjacent frames with Core-authored facts and recorded class
+rules. It does not step the simulator or use fresh physics calculations. Event
+order is a serialization convention: ranks group related events and stable slot
+coordinates break ties. The order does not create extra policy decision epochs.
+"""
 
 from __future__ import annotations
 
@@ -48,7 +54,26 @@ _OUTCOME_DRAW = 3
 
 @dataclass(frozen=True, slots=True)
 class _TeamDeathmatchAuthorityV1:
-    """Validated task authority joined across one adjacent transition."""
+    """Hold checked task results for one adjacent pair of frames.
+
+    Attributes
+    ----------
+    score_increments : tuple[int, int]
+        Team A and Team B point gains during this transition.
+    outcome : int
+        0 ongoing, 1 Team A win, 2 Team B win, or 3 draw.
+    threshold_reached : bool
+        Whether a successor score reaches the configured threshold.
+    horizon_reached : bool
+        Whether the successor tick reaches the configured horizon.
+    completion_basis : str | None
+        score_threshold, horizon, score_threshold_at_horizon, or None.
+
+    Notes
+    -----
+    Frozen internal record. Non-TDM transitions have zero gains, ongoing outcome,
+    and no completion basis, but still report horizon_reached.
+    """
 
     score_increments: tuple[int, int]
     outcome: int
@@ -59,7 +84,29 @@ class _TeamDeathmatchAuthorityV1:
 
 @dataclass(frozen=True, slots=True)
 class _EventCandidate:
-    """One event payload plus its stable pre-ordinal ordering coordinates."""
+    """Keep an event payload with coordinates used before assigning its final ID.
+
+    Attributes
+    ----------
+    phase_rank : int
+        Primary event-family ordering rank.
+    primary_slot_or_team_index : int
+        First slot/team ordering coordinate within the rank.
+    secondary_slot_or_status_channel : int
+        Second coordinate, such as recipient or status.
+    subtype_rank : int
+        Tie-breaker among related event kinds.
+    source_slot : int
+        Final source-slot tie-breaker.
+    model_type : type[EvaluationEventBaseV1]
+        Strict event model used after sorting.
+    payload : dict[str, object]
+        Event-specific fields; identity, ordinal, and rank are added later.
+
+    Notes
+    -----
+    The dataclass is frozen, but payload is still a dictionary owned by the decoder.
+    """
 
     phase_rank: int
     primary_slot_or_team_index: int
@@ -71,7 +118,11 @@ class _EventCandidate:
 
     @property
     def sort_key(self) -> tuple[int, int, int, int, int]:
-        """Return the complete canonical candidate ordering key."""
+        """Return the five ordering coordinates from phase rank through source slot.
+
+        The key excludes payload and model type, so canonical event order depends only
+        on the declared numeric coordinates.
+        """
         return (
             self.phase_rank,
             self.primary_slot_or_team_index,
@@ -92,7 +143,11 @@ def _append_candidate(
     model_type: type[EvaluationEventBaseV1],
     payload: dict[str, object],
 ) -> None:
-    """Append one fully keyed event candidate without assigning identity yet."""
+    """Append one event candidate to the caller-owned list without assigning an ID.
+
+    The optional secondary coordinate, subtype, and source slot default to zero.
+    Payload is retained by reference until decoding builds the strict event model.
+    """
     candidates.append(
         _EventCandidate(
             phase_rank=phase_rank,
@@ -107,7 +162,10 @@ def _append_candidate(
 
 
 def _recipient_sort_index(recipient_global_slot: int | None) -> int:
-    """Place a nullable recipient after every concrete fixed global slot."""
+    """Return a recipient slot, or 10 for None so missing recipients sort last.
+
+    Concrete global slots are expected to be validated integers 0 through 9.
+    """
     if recipient_global_slot is None:
         return _NULL_RECIPIENT_SORT_INDEX
     return recipient_global_slot
@@ -118,7 +176,10 @@ def _require_routed_recipient(
     *,
     relation: str,
 ) -> int:
-    """Return a required authoritative route or reject a broken direct join."""
+    """Return a concrete recipient slot or raise ValueError using the relation label.
+
+    This only checks that the route is present; typed fact models own slot bounds.
+    """
     if recipient_global_slot is None:
         raise ValueError(f"{relation} requires an authoritative recipient route")
     return recipient_global_slot
@@ -129,7 +190,12 @@ def _ultimate_activation_recipient(
     source_global_slot: int,
     recipient_global_slot: int | None,
 ) -> int | None:
-    """Validate an Ultimate route against its serialized class target mode."""
+    """Check route presence against the source class's recorded Ultimate target mode.
+
+    Target-none activation requires None; targeted activation requires a concrete
+    route. Unavailable abilities and contradictory routes raise ValueError. This
+    does not independently test distance, team relation, or action-mask legality.
+    """
     class_id = context.roster[source_global_slot].class_id
     target_mode = context.static_mechanics_catalog.class_mechanics[
         class_id
@@ -153,7 +219,11 @@ def _basic_activation_recipient(
     source_global_slot: int,
     recipient_global_slot: int | None,
 ) -> int:
-    """Validate a Basic route against its serialized class target mode."""
+    """Require an available Basic and concrete route using the recorded class catalog.
+
+    Raise ValueError for an unavailable Basic or absent route. Distance, team
+    relation, and action-mask legality are supplied by Core facts, not recomputed.
+    """
     class_id = context.roster[source_global_slot].class_id
     target_mode = context.static_mechanics_catalog.class_mechanics[
         class_id
@@ -172,7 +242,11 @@ def _validate_decoder_inputs(
     facts: TransitionFactsV1,
     successor_frame: EvaluationFrame,
 ) -> None:
-    """Reject records that cannot represent one directly adjacent transition."""
+    """Check episode joins, adjacent indices/ticks, and real transition-start facts.
+
+    Raise ValueError when the frames do not describe one direct transition. This
+    is a narrow join check; full strict-tree validation belongs to validation.py.
+    """
     episode_id = context.identity.episode_id
     if start_frame.episode_id != episode_id or successor_frame.episode_id != episode_id:
         raise ValueError("event decoder frames must join the context episode")
@@ -193,7 +267,12 @@ def _append_action_candidates(
     context: EvaluationEpisodeContext,
     facts: TransitionFactsV1,
 ) -> None:
-    """Copy every independently rejected component and accepted activation."""
+    """Append every flagged rejection and activated Basic/Ultimate to the event list.
+
+    Keep domain, movement, and combat-pair rejection causes distinct, including the
+    submitted three-head action. Activation routes must fit recorded class modes.
+    Mutate candidates only; input frames and facts remain unchanged.
+    """
     acceptance = facts.action_acceptance_facts
     submitted = acceptance.submitted_joint_action
     rejection_families = (
@@ -281,7 +360,11 @@ def _covering_emitters(
     emitter_by_beneficiary: tuple[tuple[bool, ...], ...],
     beneficiary_global_slot: int,
 ) -> tuple[int, ...]:
-    """Join one beneficiary to every direct covering emitter in slot order."""
+    """Return source slots whose recorded aura row covers one beneficiary.
+
+    Read the fixed emitter-by-beneficiary boolean matrix in ascending emitter order.
+    The caller supplies a validated beneficiary slot; no distance is recomputed.
+    """
     return tuple(
         emitter_global_slot
         for emitter_global_slot, beneficiary_row in enumerate(emitter_by_beneficiary)
@@ -293,7 +376,12 @@ def _append_health_output_candidates(
     candidates: list[_EventCandidate],
     facts: TransitionFactsV1,
 ) -> None:
-    """Emit positive raw source outputs and affected recipient resolutions."""
+    """Append positive raw damage/healing outputs and their recorded modifiers.
+
+    Require a recipient for each positive source output. Damage also records direct
+    Mage emitters covering the source and Warrior emitters covering the recipient.
+    These are gross output stages, not effective recipient health changes.
+    """
     combat = facts.combat_transition_facts
     aura = facts.aura_facts
     for source_global_slot, recipient_global_slot in enumerate(
@@ -379,7 +467,12 @@ def _append_health_resolution_candidates(
     start_frame: EvaluationFrame,
     facts: TransitionFactsV1,
 ) -> None:
-    """Join affected recipient totals to transition-start health once."""
+    """Append one health-resolution event per recipient with damage or healing.
+
+    Join pre-transition health with recorded combat totals and post-combat health.
+    The net change stops at combat resolution; later regeneration is separate.
+    Recipients with neither positive damage nor positive healing produce no event.
+    """
     combat = facts.combat_transition_facts
     for recipient_global_slot, (
         total_effective_damage,
@@ -421,7 +514,12 @@ def _append_regeneration_candidates(
     facts: TransitionFactsV1,
     successor_frame: EvaluationFrame,
 ) -> None:
-    """Emit direct countdown lifecycle and realized regeneration facts."""
+    """Append combat-countdown reset, exit, and positive regeneration events.
+
+    An exit requires a living agent at both frames, no reset, and a countdown change
+    from one to zero. Regeneration reports the recorded actual health restored, not
+    a class maximum or an inferred source of healing.
+    """
     regeneration = facts.regeneration_facts
     for agent_global_slot, (
         combat_countdown_was_reset,
@@ -485,7 +583,12 @@ def _append_cooldown_candidates(
     facts: TransitionFactsV1,
     successor_frame: EvaluationFrame,
 ) -> None:
-    """Emit accepted starts and direct adjacent positive-to-zero readiness."""
+    """Append accepted Ultimate starts and positive-to-zero readiness changes.
+
+    Require accepted Ultimate use to agree with the activation fact or raise
+    ValueError. Start and readiness checks are independent; the decoder retains
+    whatever valid adjacent facts report without recomputing cooldown rules.
+    """
     accepted_use_ultimate = (
         facts.action_acceptance_facts.accepted_joint_action.use_ultimate
     )
@@ -533,7 +636,11 @@ def _append_displacement_candidates(
     candidates: list[_EventCandidate],
     facts: TransitionFactsV1,
 ) -> None:
-    """Emit each nonzero phase-authored displacement without reprojection."""
+    """Append nonzero Charge and ordinary-movement displacement vectors separately.
+
+    Use each phase's recorded world-unit vector in global-slot order. Do not infer
+    the path from final positions or repeat collision projection.
+    """
     displacement_families = (
         (
             facts.physical_facts.charge_phase_displacement_by_agent,
@@ -568,7 +675,12 @@ def _append_death_candidates(
     candidates: list[_EventCandidate],
     facts: TransitionFactsV1,
 ) -> None:
-    """Emit recipient death before one atomic event per direct contributor."""
+    """Append new deaths and one event for each direct positive damage contributor.
+
+    Check that contributor flags match positive attributed damage and route to a
+    newly dead recipient. Raise ValueError on a broken join. For each recipient,
+    death sorts before its contributors; this is event order, not a new action phase.
+    """
     death = facts.death_facts
     combat = facts.combat_transition_facts
     for recipient_global_slot, is_newly_dead in enumerate(
@@ -629,7 +741,11 @@ def _status_application_flags_by_source(
     facts: TransitionFactsV1,
     source_global_slot: int,
 ) -> tuple[bool, ...]:
-    """Project distinct core application leaves into their catalog channel axis."""
+    """Pack one source's application flags into the catalog's nine-channel order.
+
+    Combine three slow channels, three stun channels, Poison anti-heal, Burst
+    amplification, and Freedom movement floor. The source slot is already validated.
+    """
     combat = facts.combat_transition_facts
     return (
         *combat.slow_is_applied_by_source_and_channel[source_global_slot],
@@ -646,7 +762,11 @@ def _validate_status_application_source(
     source_global_slot: int,
     status_channel: int,
 ) -> None:
-    """Require one application fact to join its catalog class and activation."""
+    """Require a status application to match its catalog class and Basic/Ultimate.
+
+    Raise ValueError when source class or the required activation flag disagrees.
+    This checks recorded attribution, without applying the status again.
+    """
     status_mechanic = context.static_mechanics_catalog.status_channels[status_channel]
     roster_class_id = context.roster[source_global_slot].class_id
     if roster_class_id != status_mechanic.source_class_id:
@@ -668,7 +788,13 @@ def _append_status_candidates(
     context: EvaluationEpisodeContext,
     facts: TransitionFactsV1,
 ) -> None:
-    """Emit independent lifecycle causes and direct source applications."""
+    """Append independent status lifecycle causes and attributed applications.
+
+    Sort by recipient/channel, then aging, damage break, application, refresh, and
+    death clearing. Multiple causes can be present in one transition. Burst applies
+    to its source; other applications require a routed recipient. Do not invent a
+    caster for source-free lifecycle events.
+    """
     lifecycle = facts.status_lifecycle_facts
     lifecycle_families = (
         (
@@ -762,7 +888,12 @@ def _append_respawn_candidates(
     facts: TransitionFactsV1,
     successor_frame: EvaluationFrame,
 ) -> None:
-    """Emit shield expiry, due waves, and realized successor respawns."""
+    """Append shield expiry, team-wave events, and realized agent respawns.
+
+    A respawn must join Team A or B, its team's wave, and a living successor slot;
+    otherwise raise ValueError. Record the successor position in world units.
+    A wave event can exist even when no agent respawns.
+    """
     for agent_global_slot, expired in enumerate(
         facts.spawn_shield_facts.expired_at_transition_end_by_agent
     ):
@@ -826,7 +957,14 @@ def _derive_team_deathmatch_authority_v1(
     facts: TransitionFactsV1,
     successor_frame: EvaluationFrame,
 ) -> _TeamDeathmatchAuthorityV1:
-    """Join TDM score, death, outcome, topology, and horizon authority."""
+    """Check recorded scores and outcome against deaths, roster, and horizon.
+
+    Count each newly dead active opponent toward the other team's score. At a
+    threshold, higher score wins and equal scores draw; a horizon-only finish draws.
+    Both completion conditions may hold. Reject post-terminal starts or inconsistent
+    scores/outcomes with ValueError. Task-neutral records keep zero TDM scores and
+    ongoing outcome while still tracking horizon completion.
+    """
     task_mode = context.resolved_env_config.task_mode
     start_scores = start_frame.snapshot.team_deathmatch_scores
     successor_scores = successor_frame.snapshot.team_deathmatch_scores
@@ -933,7 +1071,11 @@ def _append_team_deathmatch_candidates(
     facts: TransitionFactsV1,
     successor_frame: EvaluationFrame,
 ) -> None:
-    """Emit authoritative score edges followed by the sole completion event."""
+    """Append positive team-score changes and at most one TDM completion event.
+
+    Use the shared joined authority so score and outcome validation stay in one
+    place. Task-neutral transitions emit neither kind of TDM event.
+    """
     authority = _derive_team_deathmatch_authority_v1(
         context,
         start_frame,
@@ -988,7 +1130,40 @@ def decode_evaluation_events_v1(
     facts: TransitionFactsV1,
     successor_frame: EvaluationFrame,
 ) -> tuple[EvaluationEventV1, ...]:
-    """Decode one fact record into a deterministic tuple of atomic V1 events."""
+    """Decode one captured transition into deterministic atomic events.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Supported episode context with roster and recorded mechanics catalog.
+    start_frame : EvaluationFrame
+        Frame immediately before the transition.
+    facts : TransitionFactsV1
+        Real V1 transition facts whose start tick matches start_frame.
+    successor_frame : EvaluationFrame
+        Frame from the same episode, exactly one artifact index
+        and simulator tick after start_frame.
+
+    Returns
+    -------
+    tuple[EvaluationEventV1, ...]
+        Tuple of strict V1 events sorted by family rank and stable slot coordinates.
+        Ordinals start at zero; IDs use the episode, start-frame index, and a
+        zero-padded event ordinal. No-event transitions return an empty tuple.
+
+    Raises
+    ------
+    ValueError
+        Episode/epoch joins, ability routes, status sources, cooldowns,
+        deaths, respawns, task authority, or constructed event fields are inconsistent.
+
+    Notes
+    -----
+    Runs entirely on the host and leaves inputs unchanged. Inputs are expected
+    to be structurally validated wire models. Use validate_evaluation_transition_unit
+    for complete strict-tree and frame/context checks. Event order organizes
+    recorded facts; it does not allow actions between events or rerun physics.
+    """
     _validate_decoder_inputs(context, start_frame, facts, successor_frame)
     candidates: list[_EventCandidate] = []
     _append_action_candidates(candidates, context, facts)

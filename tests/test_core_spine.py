@@ -1,4 +1,4 @@
-"""Core simulator spine contract tests."""
+"""Check the shared Core reset, state and step interfaces."""
 # pyright: reportPrivateUsage=false
 
 from typing import TypedDict, cast
@@ -114,8 +114,6 @@ _CANONICAL_INITIAL_CLASS_IDS: Array = jnp.asarray(
 
 
 class _CombatStateFields(TypedDict):
-    """Keyword fields for inert combat and action-history test state."""
-
     current_health: Array
     ultimate_cooldowns: Array
     slow_durations: Array
@@ -132,7 +130,6 @@ class _CombatStateFields(TypedDict):
 
 
 def _inert_combat_state_fields() -> _CombatStateFields:
-    """Return neutral combat state fields for direct EnvState constructors."""
     return {
         "current_health": jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.float32),
         "ultimate_cooldowns": jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
@@ -169,7 +166,6 @@ def _inert_combat_state_fields() -> _CombatStateFields:
 
 
 def _non_inert_combat_state_fields(state: EnvState) -> _CombatStateFields:
-    """Return non-default combat fields for lifecycle and preservation tests."""
     return {
         "current_health": state.current_health.at[0].set(12.5),
         "ultimate_cooldowns": state.ultimate_cooldowns.at[0].set(7).at[5].set(3),
@@ -203,22 +199,18 @@ def _non_inert_combat_state_fields(state: EnvState) -> _CombatStateFields:
 
 
 def _bool_vector(values: tuple[int, ...]) -> Array:
-    """Return a boolean JAX vector from integer test literals."""
     return jnp.array(values, dtype=bool)
 
 
 def _int_vector(values: tuple[int, ...]) -> Array:
-    """Return an int32 JAX vector from integer test literals."""
     return jnp.array(values, dtype=jnp.int32)
 
 
 def _empty_obstacles() -> Array:
-    """Return a zero-filled obstacle feature table."""
     return jnp.zeros(shape=(MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32)
 
 
 def _sample_obstacles() -> Array:
-    """Return an obstacle table with slot 0 set to a deterministic pillar."""
     obstacles = _empty_obstacles()
     obstacles = obstacles.at[0, OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_PILLAR)
     obstacles = obstacles.at[0, OBSTACLE_FEATURE_X].set(5.0)
@@ -233,7 +225,6 @@ def _config(
     max_steps: int = 1000,
     obstacles: Array | None = None,
 ) -> EnvConfig:
-    """Return a deterministic test config."""
     profile = resolve_agent_profile(
         _CANONICAL_INITIAL_CLASS_IDS,
         jnp.asarray((team_size, team_size), dtype=jnp.int32),
@@ -272,12 +263,10 @@ def _config(
 
 
 def _expected_resolved_class_ids(config: EnvConfig) -> Array:
-    """Return reset class IDs after inactive slots are neutralized."""
     return config.agent_profile.class_ids
 
 
 def _zero_action() -> Action:
-    """Return a no-op action for every agent slot."""
     return Action(
         move=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
         select_target=jnp.zeros(shape=(MAX_AGENT_SLOTS,), dtype=jnp.int32),
@@ -286,13 +275,11 @@ def _zero_action() -> Action:
 
 
 def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
-    """Return the action mask paired with an explicitly built test state."""
     _, action_mask = _build_observation_and_action_mask(state, config)
     return action_mask
 
 
 def _zero_observation() -> Observation:
-    """Return a zero-filled observation."""
     previous_timestep_actions = PreviousTimestepActionObservation(
         ally_previous_timestep_move_actions_one_hot=jnp.zeros(
             shape=(MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, NUM_MOVE_ACTIONS),
@@ -397,7 +384,6 @@ def _zero_observation() -> Observation:
 
 
 def _assert_state_contract(state: EnvState) -> None:
-    """Assert the EnvState shape and dtype contract."""
     assert state.team_deathmatch_scores.shape == (NUM_TEAMS,)
     assert state.team_deathmatch_scores.dtype == jnp.int32
 
@@ -456,7 +442,6 @@ def _assert_state_contract(state: EnvState) -> None:
 
 
 def _assert_effect_state_is_inert(state: EnvState) -> None:
-    """Assert reset starts cooldown and status effect state inert."""
     assert jnp.all(state.ultimate_cooldowns == 0)
     assert jnp.all(state.slow_durations == 0)
     assert jnp.all(state.stun_durations == 0)
@@ -468,7 +453,6 @@ def _assert_effect_state_is_inert(state: EnvState) -> None:
 
 
 def _assert_observation_contract(observation: Observation) -> None:
-    """Assert the Observation shape and dtype contract."""
     assert observation.self_features.shape == (MAX_AGENT_SLOTS, SELF_FEATURES)
     assert observation.self_features.dtype == jnp.float32
 
@@ -573,7 +557,6 @@ def _assert_observation_contract(observation: Observation) -> None:
 
 
 def _assert_action_mask_contract(action_mask: ActionMask) -> None:
-    """Assert the ActionMask shape and dtype contract."""
     assert action_mask.move_mask.shape == (MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS)
     assert action_mask.move_mask.dtype == bool
 
@@ -619,7 +602,6 @@ def _assert_fixed_slot_action_mask_values(
     active_indices: Array,
     inactive_indices: Array,
 ) -> None:
-    """Assert active choices and canonical padded-slot submissions."""
     assert jnp.all(action_mask.move_mask[active_indices, :])
     assert jnp.all(action_mask.select_target_mask[active_indices, 0])
 
@@ -644,7 +626,6 @@ def _assert_common_observation_values(
     observation: Observation,
     config: EnvConfig,
 ) -> None:
-    """Assert observation values shared by reset and step."""
     expected_map_features = jnp.broadcast_to(
         config.obstacles[None, :, :],
         (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
@@ -1247,7 +1228,6 @@ def test_step_can_run_in_scanned_rollout() -> None:
         config: EnvConfig = config,
         joint_action: Action = joint_action,
     ) -> tuple[tuple[EnvState, ActionMask], Array]:
-        """Run one rollout step for scan."""
         current_state, current_action_mask = carry
         new_state, _, _, _, next_action_mask, _ = step(
             config,

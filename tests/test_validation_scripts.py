@@ -1,4 +1,4 @@
-"""Black-box contracts for the local contributor and GPU validation scripts."""
+"""Check contributor and GPU validation commands from outside their implementation."""
 
 import os
 import re

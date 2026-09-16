@@ -1,4 +1,10 @@
-"""Versioned host-side evaluation contracts and explicit lazy exports."""
+"""Expose versioned evaluation APIs without importing their runtimes eagerly.
+
+Readers, capture tools and analysis use this namespace to find explicit schema
+versions and their helpers. Each exported symbol loads its owning module only
+when requested; successful lookups are cached. Importing this package alone
+does not select a numerical backend or start a replay writer.
+"""
 
 from importlib import import_module
 from typing import TYPE_CHECKING
@@ -306,6 +312,9 @@ _LAZY_EXPORT_MODULE_BY_NAME: dict[str, str] = {}
 
 
 def _register_lazy_exports(module_name: str, names: tuple[str, ...]) -> None:
+    """Register one owning module per public name, rejecting duplicate export
+    ownership.
+    """
     for name in names:
         if name in _LAZY_EXPORT_MODULE_BY_NAME:
             raise RuntimeError(f"duplicate lazy evaluation export: {name}")
@@ -947,7 +956,28 @@ if len(__all__) != len(set(__all__)) or set(__all__) != set(
 
 
 def __getattr__(name: str) -> object:
-    """Load one public evaluation export only when it is first requested."""
+    """Load and cache a declared public evaluation symbol.
+
+    Parameters
+    ----------
+    name : str
+        Attribute name requested from this module.
+
+    Returns
+    -------
+    object
+        The exact object from its registered owning module, cached in globals.
+
+    Raises
+    ------
+    AttributeError
+        name is not a declared evaluation export.
+
+    Notes
+    -----
+    Import errors from the owning module propagate. Its normal import effects
+    occur only at first lookup. This does not create a second API implementation.
+    """
     module_name = _LAZY_EXPORT_MODULE_BY_NAME.get(name)
     if module_name is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -957,5 +987,11 @@ def __getattr__(name: str) -> object:
 
 
 def __dir__() -> list[str]:
-    """Include unresolved lazy exports in interactive discovery."""
+    """List ordinary attributes and unresolved public exports for discovery.
+
+    Returns
+    -------
+    list[str]
+        Sorted unique attribute names. No lazy module is imported by listing them.
+    """
     return sorted(set(globals()) | set(__all__))

@@ -1,4 +1,4 @@
-"""Renderer-independent input dispatch and authorization tests."""
+"""Check input handling and authorization independently of drawing."""
 
 from dataclasses import replace
 from unittest.mock import Mock

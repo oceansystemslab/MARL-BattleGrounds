@@ -163,6 +163,7 @@ def _require_cpu_backend() -> None:
 
 
 def _sha256(payload: bytes) -> str:
+    """Return the hexadecimal SHA-256 identity of the exact supplied bytes."""
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -171,6 +172,7 @@ def _artifact_member(
     file_name: str,
     payload: bytes,
 ) -> dict[str, object]:
+    """Describe one replay file using its name, exact byte length, and digest."""
     return {
         "file": file_name,
         "byte_length": len(payload),
@@ -179,6 +181,7 @@ def _artifact_member(
 
 
 def _scenario_name_from_replay(loaded: LoadedReplay | LoadedReplayBundleV1) -> str:
+    """Require exactly one scenario identity in the replay aggregation keys."""
     replay = loaded.replay
     rows = tuple(
         row.value
@@ -199,6 +202,11 @@ def _record_one_sample(
     code_revision: CodeRevisionV1,
     runtime_provenance: RuntimeProvenanceV1,
 ) -> dict[str, object]:
+    """Record and verify one scripted researcher demo through the normal live path.
+
+    Save into the private output directory with the supplied code and runtime
+    identities. Return its manifest row only after replay data has been checked.
+    """
     scenario = get_scenario(sample.source_scenario)
     if scenario.mode != "scripted" or scenario.audience != "researcher":
         raise ValueError("sample replay sources must be scripted researcher scenarios")
@@ -318,6 +326,7 @@ def _manifest_payload(
     runtime_provenance: RuntimeProvenanceV1,
     samples: list[dict[str, object]],
 ) -> dict[str, object]:
+    """Describe the sample set and preserve its explicit non-benchmark provenance."""
     return {
         "schema_id": SAMPLE_REPLAY_MANIFEST_SCHEMA_ID,
         "schema_version": CURRENT_SAMPLE_REPLAY_MANIFEST_SCHEMA_VERSION,
@@ -341,7 +350,38 @@ def _manifest_payload(
 def generate_sample_replays(
     output_directory: Path,
 ) -> dict[str, object]:
-    """Atomically publish one new sample set, refusing every existing target."""
+    """Generate and verify a new demonstration replay directory before publishing it.
+
+    Parameters
+    ----------
+    output_directory : pathlib.Path
+        New target directory. Every existing target, including a symlink, is refused.
+
+    Returns
+    -------
+    dict of str to object
+        Manifest for the complete newly published sample set.
+
+    Raises
+    ------
+    TypeError
+        The destination is not a pathlib.Path.
+    FileExistsError
+        The target already exists or appears before publication.
+    RuntimeError
+        The backend is not CPU or runtime provenance is inconsistent.
+    ValueError
+        Capture or sample verification fails.
+    OSError
+        Temporary creation, writes, or atomic no-replace publication fails.
+
+    Notes
+    -----
+    This runs fixed scripted scenarios, writes version-3 replay files and a
+    manifest in a temporary sibling, then verifies them. Failure removes the
+    unpublished staging directory. Demo provenance is not a benchmark or current
+    source-tree attestation.
+    """
     if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
         output_directory,
         Path,
@@ -402,7 +442,31 @@ def generate_sample_replays(
 def verify_sample_replays(
     directory: Path = SAMPLE_REPLAY_DIRECTORY,
 ) -> dict[str, object]:
-    """Verify manifest hashes, canonical bytes, semantic joins, and provenance."""
+    """Check a complete registered sample directory without regenerating its scenarios.
+
+    Parameters
+    ----------
+    directory : pathlib.Path, optional
+        Directory to verify. Defaults to historical examples/replays/v1.
+
+    Returns
+    -------
+    dict of str to object
+        Checked manifest content.
+
+    Raises
+    ------
+    TypeError
+        The directory is not a pathlib.Path.
+    SampleReplayVerificationError
+        Files, hashes, canonical bytes, semantic facts, provenance, or the exact
+        directory membership differ from the registered manifest contract.
+
+    Notes
+    -----
+    Verification uses bounded reads and temporary private copies through the
+    public loader. It does not change source samples or run their simulator steps.
+    """
     if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
         directory,
         Path,
@@ -478,7 +542,29 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run generation or verification with concise command-line diagnostics."""
+    """Run sample generation or verification from command-line arguments.
+
+    Parameters
+    ----------
+    argv : Sequence of str or None, optional
+        Arguments excluding the program name. None reads the process arguments.
+
+    Returns
+    -------
+    int
+        Zero on success or one after a handled filesystem, runtime, or validation
+        failure. Prints a short status or error message.
+
+    Raises
+    ------
+    SystemExit
+        Argument parsing requests help or rejects invalid arguments.
+
+    Notes
+    -----
+    Generation runs CPU scenarios and publishes a new directory. Check mode
+    validates existing files. The parsed command chooses which side effects occur.
+    """
     options = build_parser().parse_args(argv)
     try:
         if options.generate:

@@ -1,4 +1,7 @@
-"""The current five-turn healing solution and the separate historical fixture."""
+"""Check the current five-turn healing solution for Scenario 5.
+
+Historical reference cases remain separate from the current scenario.
+"""
 
 import json
 from collections.abc import Callable

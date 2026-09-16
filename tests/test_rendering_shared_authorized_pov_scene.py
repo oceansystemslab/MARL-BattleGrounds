@@ -1,4 +1,4 @@
-"""Focused CP2.2 SharedObs visual-union authority and privacy proofs."""
+"""Check SharedObs scene composition and private-information limits."""
 
 from __future__ import annotations
 

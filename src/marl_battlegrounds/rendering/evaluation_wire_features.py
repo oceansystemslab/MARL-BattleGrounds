@@ -1,14 +1,14 @@
-"""Version-bound feature columns consumed by offline evaluation rendering.
+"""Decode versioned evaluation feature rows for offline presentation.
 
-These values name columns in the already-published V1 evaluation observation
-wire record.  They intentionally do not import the live simulator module.  A
-future observation layout change must add a new evaluation/scene version rather
-than silently changing loaded-replay presentation.
+The column constants describe the published 58-column wire schema independently
+of live Core imports. decode_agent_feature_row_v1 reads historical physical-team
+identity; decode_agent_feature_row also handles V2 relation flags with separately
+authorized display ownership. A new wire meaning needs an explicit version change.
 
-The decoder in this module is deliberately lossless with respect to the facts
-needed by authorized presentation.  It validates exact wire booleans and
-integer-valued counters, but it does not infer identities, visibility, status
-sources, or simulator configuration.
+Decoders preserve the fields needed for authorized presentation and check exact
+Python wire values. They do not infer visibility, hidden state, status sources
+or configuration. Results are frozen scalar/tuple records; no renderer, device
+execution or file I/O is started by this module.
 """
 
 from __future__ import annotations
@@ -143,12 +143,25 @@ OBSTACLE_FEATURE_ACTIVE_V1: Final = 7
 
 
 def _wire_bool(value: float, *, name: str) -> bool:
+    """Decode an exact floating-point Boolean from a recorded feature row.
+
+    value must be the Python float 0.0 or 1.0. Return False or True respectively;
+    every other type/value raises ValueError labelled with name. No coercion is
+    performed, so an integer zero is not accepted as a wire float.
+    """
     if type(value) is not float or value not in (0.0, 1.0):
         raise ValueError(f"{name} must be the exact wire float 0.0 or 1.0.")
     return value == 1.0
 
 
 def _wire_int(value: float, *, name: str, minimum: int = 0) -> int:
+    """Decode a finite integer-valued wire float with a lower bound.
+
+    value must be a Python float with no fractional part. Return its Python int
+    value when at least minimum, which defaults to zero. ValueError uses name
+    for wrong storage, nonfinite/fractional values or a failed lower bound.
+    There is no upper-bound or int32-range check here.
+    """
     if type(value) is not float or not isfinite(value) or not value.is_integer():
         raise ValueError(f"{name} must be an integer-valued finite wire float.")
     decoded = int(value)
@@ -158,6 +171,12 @@ def _wire_int(value: float, *, name: str, minimum: int = 0) -> int:
 
 
 def _finite(value: float, *, name: str, minimum: float | None = None) -> float:
+    """Return an unchanged finite Python float after an optional lower-bound check.
+
+    name labels ValueError. minimum defaults to None, meaning no lower bound;
+    when supplied it is inclusive. This does not cast other numeric types or
+    enforce an upper limit.
+    """
     if type(value) is not float or not isfinite(value):
         raise ValueError(f"{name} must be a finite Python float.")
     if minimum is not None and value < minimum:
@@ -167,51 +186,169 @@ def _finite(value: float, *, name: str, minimum: float | None = None) -> float:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DecodedAgentFeatureRowV1:
-    """Typed scalar projection of one exact 58-column V1 agent row."""
+    """Hold the presentation fields decoded from one recorded 58-column agent row.
+
+    All fields are required keyword arguments. Values are Python scalars and
+    tuples, not JAX arrays. The frozen, slotted record uses the same field names
+    for V1 physical-team rows and V2 relation rows with supplied display ownership.
+    Duration and magnitude tuples follow the module's nine-channel wire mapping.
+
+    Notes
+    -----
+    This constructor only stores values and performs no validation. The decode
+    functions check wire types and the bounds described by their contract.
+    None in a magnitude tuple means the wire schema has no magnitude column
+    for that status; it is different from a stored numeric zero.
+    """
 
     position: tuple[float, float]
+    """World [x, y] center as two finite Python floats."""
     radius: float
+    """Nonnegative finite body radius in world units."""
     team_id: int
+    """Recorded V1 team ID or separately authorized V2 display team.
+
+    The V1 decoder accepts nonnegative integer IDs without checking a live team
+    catalog; the V2 caller requires 1 or 2.
+    """
     configured_active: bool
+    """Whether the recorded row describes a configured participant."""
     alive: bool
+    """The recorded current alive flag, decoded from exact zero or one."""
     class_id: int
+    """Nonnegative recorded integer class ID, without a live catalog lookup."""
     base_movement_speed: float
+    """Nonnegative recorded class speed before current status effects."""
     effective_movement_speed: float
+    """Nonnegative recorded movement distance per step in world units."""
     observation_radius: float
+    """Nonnegative recorded observation radius in world units."""
     basic_interaction_radius: float
+    """Nonnegative recorded Basic interaction radius in world units."""
     ultimate_interaction_radius: float
+    """Nonnegative recorded Ultimate interaction radius in world units."""
     current_health: float
+    """Recorded nonnegative health, at most maximum_health."""
     maximum_health: float
+    """Recorded nonnegative maximum health in health units."""
     ultimate_cooldown_remaining: int
+    """Recorded nonnegative integer steps before Ultimate is ready."""
     status_remaining_duration_by_channel: tuple[int, ...]
+    """Nine nonnegative remaining duration counts in wire channel order."""
     status_active_magnitude_by_channel: tuple[float | None, ...]
+    """Nine finite current magnitudes or None for absent schema columns.
+
+    None does not mean an inactive status; it means the wire has no separate
+    magnitude field for that channel.
+    """
     steps_until_out_of_combat: int
+    """Recorded nonnegative integer recovery countdown in steps."""
     mage_aura_damage_multiplier: float
+    """Recorded nonnegative combined Mage outgoing-damage factor."""
     warrior_aura_damage_multiplier: float
+    """Recorded nonnegative combined Warrior incoming-damage factor."""
     basic_raw_damage: float
+    """Recorded nonnegative Basic damage capability in health units."""
     basic_raw_healing: float
+    """Recorded nonnegative Basic healing capability in health units."""
     ultimate_cooldown_steps: int
+    """Recorded nonnegative integer Ultimate cooldown capability."""
     status_capability_duration_by_channel: tuple[int, ...]
+    """Nine nonnegative catalog-duration counts in wire channel order."""
     status_capability_magnitude_by_channel: tuple[float | None, ...]
+    """Nine finite catalog magnitudes or None for absent schema columns."""
     mage_aura_radius: float
+    """Recorded nonnegative Mage aura radius in world units."""
     mage_aura_per_emitter_multiplier: float
+    """Recorded nonnegative outgoing-damage factor per Mage emitter."""
     warrior_aura_radius: float
+    """Recorded nonnegative Warrior aura radius in world units."""
     warrior_aura_per_emitter_multiplier: float
+    """Recorded nonnegative incoming-damage factor per Warrior emitter."""
     ultimate_raw_healing: float
+    """Recorded nonnegative Ultimate healing capability in health units."""
     ultimate_raw_damage: float
+    """Recorded nonnegative Ultimate damage capability in health units."""
     out_of_combat_delay_steps: int
+    """Recorded nonnegative integer delay used for combat recovery."""
     out_of_combat_health_regeneration_fraction_per_step: float
+    """Recorded nonnegative maximum-health fraction recovered per step.
+
+    The wire decoder checks finiteness and the lower bound, not an upper
+    fraction bound or agreement with the live catalog.
+    """
 
 
 def decode_agent_feature_row_v1(row: tuple[float, ...]) -> DecodedAgentFeatureRowV1:
-    """Decode the historical physical-team feature without changing its meaning."""
+    """Decode one historical row whose team ID is stored in feature column three.
+
+    Parameters
+    ----------
+    row : tuple of float
+        Exact tuple of 58 finite Python floats in the published V1 order.
+        Boolean fields must be 0.0/1.0; counters and IDs must be integer-valued.
+
+    Returns
+    -------
+    DecodedAgentFeatureRowV1
+        Immutable scalar/tuple presentation fields. The physical team ID comes
+        from the row, with no live Core lookup or inferred identity.
+
+    Raises
+    ------
+    ValueError
+        Tuple/type/length, finite-value, Boolean, integer or nonnegative-field
+        checks fail, or current health exceeds maximum health.
+
+    Notes
+    -----
+    This is a host decoder. It does not check visibility, permissions, class
+    catalog agreement, duration maxima or whether the row is a valid Core state.
+    It does not mutate data or write a file.
+    """
     return _decode_agent_feature_row(row, team_id=None)
 
 
 def decode_agent_feature_row(
     row: tuple[float, ...], *, schema_version: int, team_id: int, is_enemy: bool
 ) -> DecodedAgentFeatureRowV1:
-    """Decode current relation rows using authorized display ownership."""
+    """Decode a recorded agent row using its version and authorized display team.
+
+    Parameters
+    ----------
+    row : tuple of float
+        Exact 58-value tuple of finite Python floats. In V1 column three stores
+        team ID; in V2 it stores the exact zero/one enemy-relation flag.
+    schema_version : int
+        Version 1 or 2. Version 1 delegates to the historical decoder.
+    team_id : int
+        Authorized display owner, 1 Team A or 2 Team B, required for V2.
+        V1 ignores this argument and uses the recorded physical team ID.
+    is_enemy : bool
+        Expected V2 observation relation. Column three must equal float(is_enemy).
+        V1 ignores this argument.
+
+    Returns
+    -------
+    DecodedAgentFeatureRowV1
+        Common immutable presentation fields. For V2, team ownership comes from
+        team_id rather than treating the enemy flag as a physical identity.
+
+    Raises
+    ------
+    ValueError
+        The version/display team is unsupported, the V2 relation flag differs,
+        or an underlying row type, value, length or health check fails.
+    TypeError
+        Malformed V2 input cannot support the preliminary length/index check or
+        conversion of is_enemy to float.
+
+    Notes
+    -----
+    The caller owns authorization for the supplied display identity. This host
+    decoder does not read Oracle state, derive visibility or reconstruct hidden
+    simulator facts. No input is changed.
+    """
     if schema_version == 1:
         return decode_agent_feature_row_v1(row)
     if schema_version != 2 or type(team_id) is not int or team_id not in (1, 2):
@@ -224,7 +361,17 @@ def decode_agent_feature_row(
 def _decode_agent_feature_row(
     row: tuple[float, ...], *, team_id: int | None
 ) -> DecodedAgentFeatureRowV1:
-    """Decode one frozen V1 row without consulting simulator or Oracle state."""
+    """Decode common scalar fields without consulting simulator or Oracle state.
+
+    row must be an exact tuple of 58 finite Python floats. team_id=None reads
+    the historical nonnegative integer team column; a supplied team_id replaces
+    it and is validated by the versioned caller. Return DecodedAgentFeatureRowV1.
+    Check exact wire booleans, nonnegative integer counters/IDs, nonnegative
+    radii/health/capabilities and current health at most maximum health.
+    Status magnitude columns need only be finite. Catalog maxima, magnitude
+    ranges and identity/visibility consistency are not checked. ValueError names
+    a failed wire check. Inputs are read only and no arrays are allocated on GPU.
+    """
     if type(row) is not tuple or len(row) != SELF_FEATURES_V1:
         raise ValueError(
             f"agent feature row must be an exact {SELF_FEATURES_V1}-value tuple."

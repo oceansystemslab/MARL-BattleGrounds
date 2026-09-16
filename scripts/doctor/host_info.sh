@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+
+# Print host, Python, uv, NVIDIA and JAX backend information for diagnosis.
+# Usage from the repository root: scripts/doctor/host_info.sh. Requires uv; its
+# Python commands may prepare the project environment. Missing nvidia-smi is
+# reported without failing this check, but a failed JAX initialization is fatal.
+# The script prints machine/device details to stdout and writes no report file.
+# Review that output before sharing it outside the project.
 set -euo pipefail
 
 echo "== Host =="
@@ -23,6 +30,8 @@ fi
 echo
 echo "== JAX =="
 uv run python - <<'PY'
+"""Print the installed JAX version and initialize its selected device backend."""
+
 import jax
 
 print("jax", jax.__version__)

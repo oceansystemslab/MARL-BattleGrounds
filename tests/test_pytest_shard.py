@@ -1,4 +1,8 @@
-"""Focused tests for deterministic weighted CI test-work-unit sharding."""
+"""Check deterministic assignment of Python tests to CI shards.
+
+The checks cover weighted groups, exact coverage and keeping related test cases
+and fixtures together.
+"""
 
 from collections import Counter
 from types import SimpleNamespace
@@ -632,8 +636,13 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
     )
     assert set(CI_SHARD_COST_PROFILE.relocations_by_shard_count) == {12}
     assert CI_SHARD_COST_PROFILE.relocations_by_shard_count[12] == (
-        ("residual:tests/test_visual_debugger_service.py", 6, 10),
+        ("residual:tests/test_visual_debugger_service.py", 6, 4),
         ("file:tests/test_shared_obs_runtime.py", 12, 3),
+        ("file:tests/test_combat_ultimate_effects.py", 7, 5),
+        ("file:tests/test_combat_effects.py", 8, 11),
+        ("file:tests/test_tdm_scenarios.py", 11, 8),
+        ("file:tests/test_combat_ultimate_masks.py", 9, 2),
+        ("file:tests/test_policy_identity_recording.py", 7, 12),
     )
     assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset()
 

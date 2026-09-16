@@ -1,4 +1,4 @@
-"""Real shoulder contact and matched strict-steering comparisons."""
+"""Check real shoulder-contact routes and matched stricter-steering comparisons."""
 
 from collections.abc import Callable
 from typing import cast

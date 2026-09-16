@@ -1,4 +1,12 @@
-"""Core-free authenticated HTTP coordinator for debugger browser modes."""
+"""Serve the local DevClient and Replay Viewer through checked HTTP routes.
+
+``create_server`` binds to 127.0.0.1 after loading an explicit browser asset
+list. ``serve_browser_debugger`` also prints the launch URL, optionally opens
+a browser, and handles shutdown. API calls require the launch token and the
+expected local origin. The coordinator owns service calls; this module does
+not import or advance the simulator. Responses disable caching, request logs
+are suppressed, and command bodies are limited to 64 KiB.
+"""
 
 from __future__ import annotations
 
@@ -134,38 +142,58 @@ class HttpPayloadResult(Protocol):
     """Structural payload result shared by read and command operations."""
 
     @property
-    def outcome(self) -> str: ...
+    def outcome(self) -> str:
+        """Return the service outcome used to choose an HTTP status."""
+        ...
 
     @property
-    def payload(self) -> object: ...
+    def payload(self) -> object:
+        """Return the response model to serialize as JSON."""
+        ...
 
 
 class HttpCommandResult(HttpPayloadResult, Protocol):
     """Payload result whose command may request host shutdown."""
 
     @property
-    def shutdown_requested(self) -> bool: ...
+    def shutdown_requested(self) -> bool:
+        """Return whether the server should stop after writing this response."""
+        ...
 
 
 class HttpMetricReportResult(Protocol):
     """Structural result for one canonical replay metric artifact."""
 
     @property
-    def outcome(self) -> str: ...
+    def outcome(self) -> str:
+        """Return available, missing, or forbidden for the metric attachment."""
+        ...
 
     @property
-    def payload(self) -> bytes | None: ...
+    def payload(self) -> bytes | None:
+        """Return immutable metric JSON bytes, or None when unavailable."""
+        ...
 
     @property
-    def filename(self) -> str | None: ...
+    def filename(self) -> str | None:
+        """Return a safe attachment basename, or None when unavailable."""
+        ...
 
 
 class _LegacyServiceOperations(Protocol):
-    def current_frame(self) -> object: ...
+    """Describe the three operations needed to adapt an existing live service."""
 
-    def current_presentation(self) -> HttpPayloadResult: ...
+    def current_frame(self) -> object:
+        """Return the service's current validated transport frame."""
+        ...
 
-    def apply_command(self, request: BaseModel) -> HttpCommandResult: ...
+    def current_presentation(self) -> HttpPayloadResult:
+        """Return the current authorized presentation result."""
+        ...
+
+    def apply_command(self, request: BaseModel) -> HttpCommandResult:
+        """Apply one validated request and report its outcome and shutdown flag."""
+        ...
 
 
 def _default_result_status(result: HttpPayloadResult) -> HTTPStatus:
@@ -192,18 +220,21 @@ def _presentation_result_status(result: HttpPayloadResult) -> HTTPStatus:
 
 
 def _require_string(value: object, *, name: str) -> str:
+    """Return a string service value or raise TypeError naming the bad field."""
     if not isinstance(value, str):
         raise TypeError(f"Debugger service results require a string {name}.")
     return value
 
 
 def _require_boolean(value: object, *, name: str) -> bool:
+    """Return a boolean service value or raise TypeError naming the bad field."""
     if not isinstance(value, bool):
         raise TypeError(f"Debugger service results require a boolean {name}.")
     return value
 
 
 def _require_http_status(value: object) -> HTTPStatus:
+    """Require the status resolver to return an HTTPStatus enum member."""
     if not isinstance(value, HTTPStatus):
         raise TypeError("Result status resolver must return HTTPStatus.")
     return value
@@ -217,6 +248,7 @@ class HttpAuthoringBinding:
     apply_command: Callable[[BaseModel], BaseModel]
 
     def __post_init__(self) -> None:
+        """Require a Pydantic request class and a callable authoring command handler."""
         request_model = cast(object, self.request_model)
         if not isinstance(request_model, type) or not issubclass(
             request_model, BaseModel
@@ -318,6 +350,9 @@ class HttpCoordinatorBinding:
         return _PRODUCT_KIND_BY_MODE[self.mode]
 
     def __post_init__(self) -> None:
+        """Check exact mode routes and require the matching callable service
+        operations.
+        """
         if (
             self.initial_show_ranges is not None
             and type(self.initial_show_ranges) is not bool
@@ -382,6 +417,7 @@ class HttpCoordinatorReplacement:
     binding: HttpCoordinatorBinding
 
     def __post_init__(self) -> None:
+        """Reject a replacement whose binding is not an HttpCoordinatorBinding."""
         binding = cast(object, self.binding)
         if not isinstance(binding, HttpCoordinatorBinding):
             raise TypeError("coordinator replacement requires an exact binding.")
@@ -396,6 +432,7 @@ class HttpCoordinatorSnapshot:
     binding: HttpCoordinatorBinding
 
     def __post_init__(self) -> None:
+        """Require a nonnegative integer generation and a supported binding."""
         generation = cast(object, self.generation)
         if (
             isinstance(generation, bool)
@@ -412,6 +449,20 @@ class HttpCoordinatorRouter:
     """Serialize requests and one monotonic live-to-replay binding replacement."""
 
     def __init__(self, *, service: object, binding: HttpCoordinatorBinding) -> None:
+        """Start a lock-protected coordinator at generation zero.
+
+        Parameters
+        ----------
+        service : object
+            Service instance owned by the binding.
+        binding : HttpCoordinatorBinding
+            Checked live or replay operations.
+
+        Raises
+        ------
+        TypeError
+            The binding has an unsupported type.
+        """
         raw_binding = cast(object, binding)
         if not isinstance(raw_binding, HttpCoordinatorBinding):
             raise TypeError("coordinator router requires an exact binding.")
@@ -423,13 +474,27 @@ class HttpCoordinatorRouter:
         )
 
     def snapshot(self) -> HttpCoordinatorSnapshot:
-        """Return one coherent active service/binding identity."""
+        """Read the current service and binding together under the router lock.
+
+        Returns
+        -------
+        HttpCoordinatorSnapshot
+            Immutable generation and object identities. The lock is released before
+            this method returns; use pinned_snapshot to hold it across a request.
+        """
         with self._lock:
             return self._active
 
     @contextmanager
     def pinned_snapshot(self) -> Generator[HttpCoordinatorSnapshot]:
-        """Pin one generation while a request is routed and answered."""
+        """Hold one coordinator generation while the caller handles a request.
+
+        Yields
+        ------
+        HttpCoordinatorSnapshot
+            Active service and binding. The reentrant lock remains held until the
+            context manager exits, including when the caller raises an exception.
+        """
         with self._lock:
             yield self._active
 
@@ -439,7 +504,33 @@ class HttpCoordinatorRouter:
         expected: HttpCoordinatorSnapshot,
         replacement: HttpCoordinatorReplacement,
     ) -> bool:
-        """Install one complete replay pair iff the expected live pair is active."""
+        """Replace a still-current live coordinator with a complete replay coordinator.
+
+        Parameters
+        ----------
+        expected : HttpCoordinatorSnapshot
+            Previously read generation plus exact service and binding objects.
+        replacement : HttpCoordinatorReplacement
+            Fully built service and binding whose mode is replay.
+
+        Returns
+        -------
+        bool
+            True if installed with the next generation. False if the expected
+            snapshot is stale or the current mode is already replay.
+
+        Raises
+        ------
+        TypeError
+            Snapshot or replacement has an unsupported type.
+        ValueError
+            The replacement mode is not replay.
+
+        Notes
+        -----
+        Comparison and installation share one lock. A failed comparison changes
+        nothing; the router never changes replay back into live mode.
+        """
         raw_expected = cast(object, expected)
         if not isinstance(raw_expected, HttpCoordinatorSnapshot):
             raise TypeError("expected coordinator state must be an exact snapshot.")
@@ -478,6 +569,7 @@ class GracefulCloseResult:
     message: str | None = None
 
     def __post_init__(self) -> None:
+        """Require an exit code from 0 to 255 and an optional nonempty message."""
         exit_code = cast(object, self.exit_code)
         if (
             isinstance(exit_code, bool)
@@ -519,6 +611,7 @@ def _legacy_live_binding(service: object) -> HttpCoordinatorBinding:
     typed_service = cast(_LegacyServiceOperations, service)
 
     def create_error(*, error_code: str, message: str) -> object:
+        """Build the service's error model without exposing a latest frame."""
         return error_model(
             error_code=error_code,
             message=message,
@@ -526,12 +619,15 @@ def _legacy_live_binding(service: object) -> HttpCoordinatorBinding:
         )
 
     def call_current_frame() -> object:
+        """Forward a frame read to the bound live service."""
         return typed_service.current_frame()
 
     def call_current_presentation() -> HttpPayloadResult:
+        """Forward an authorized presentation read to the bound live service."""
         return typed_service.current_presentation()
 
     def call_apply_command(request: BaseModel) -> HttpCommandResult:
+        """Forward one validated model to the bound live service."""
         return typed_service.apply_command(request)
 
     return HttpCoordinatorBinding(
@@ -550,6 +646,7 @@ def _legacy_live_binding(service: object) -> HttpCoordinatorBinding:
 
 
 def _request_model_from_signature(apply_signature: Signature) -> type[BaseModel]:
+    """Require one annotated positional request parameter on the live command method."""
     parameters = tuple(apply_signature.parameters.values())
     request_parameters = tuple(
         parameter
@@ -566,6 +663,7 @@ def _request_model_from_signature(apply_signature: Signature) -> type[BaseModel]
 
 
 def _error_model_from_signature(apply_signature: Signature) -> type[BaseModel]:
+    """Find the API error model declared in the live command result payload union."""
     result_type = apply_signature.return_annotation
     payload_type = getattr(result_type, "__annotations__", {}).get("payload")
     for candidate in get_args(payload_type):
@@ -587,7 +685,32 @@ class StaticAsset:
 
 
 def build_static_manifest(asset_root: Path) -> dict[str, StaticAsset]:
-    """Validate and return the exact browser-runtime static asset allowlist."""
+    """Read the allowed browser files before starting the server.
+
+    Parameters
+    ----------
+    asset_root : pathlib.Path
+        Existing browser root containing required runtime files. JavaScript in
+        src and supported assets beneath assets are also included.
+
+    Returns
+    -------
+    dict of str to StaticAsset
+        Exact URL paths mapped to immutable bytes and MIME types. The root URL
+        uses index.html. Later requests do not read arbitrary filesystem paths.
+
+    Raises
+    ------
+    OSError
+        The root cannot be resolved.
+    ValueError
+        An asset is missing, unreadable, unsupported, a symlink, or outside the root.
+
+    Notes
+    -----
+    All selected files are read into host memory once. Asset contents are not
+    executed by this function.
+    """
     root = asset_root.resolve(strict=True)
     required = tuple(root / relative for relative in _REQUIRED_RUNTIME_ASSET_PATHS)
     candidates = [*required]
@@ -646,6 +769,37 @@ class DebuggerHTTPServer(ThreadingHTTPServer):
         static_manifest: dict[str, StaticAsset],
         port: int,
     ) -> None:
+        """Bind a threaded server to the local loopback interface.
+
+        Parameters
+        ----------
+        service : object
+            Initial service instance.
+        coordinator : HttpCoordinatorBinding
+            Initial checked route and operation binding.
+        coordinator_router : HttpCoordinatorRouter or None, optional
+            Existing router owning those exact objects. None creates a new router.
+        capability_token : str
+            Token required by authenticated API requests.
+        static_manifest : dict of str to StaticAsset
+            Preloaded exact routes and response bytes.
+        port : int
+            Local TCP port; zero asks the operating system to select one.
+
+        Raises
+        ------
+        TypeError
+            A supplied router has the wrong exact type.
+        ValueError
+            Router identities do not match the supplied service and binding.
+        OSError
+            The local socket cannot be bound.
+
+        Notes
+        -----
+        Construction opens a listening socket. Use create_server for asset and port
+        validation, and close the server when finished.
+        """
         if coordinator_router is None:
             self._coordinator_router = HttpCoordinatorRouter(
                 service=service,
@@ -688,7 +842,9 @@ class DebuggerHTTPServer(ThreadingHTTPServer):
         return cast(Any, self._coordinator_router.snapshot().service)
 
     def coordinator_snapshot(self) -> HttpCoordinatorSnapshot:
-        """Return one coherent service/binding generation for a future CAS."""
+        """Return the active generation and exact service/binding pair under one
+        lock.
+        """
         return self._coordinator_router.snapshot()
 
     def install_replay_coordinator(
@@ -697,7 +853,28 @@ class DebuggerHTTPServer(ThreadingHTTPServer):
         expected: HttpCoordinatorSnapshot,
         replacement: HttpCoordinatorReplacement,
     ) -> bool:
-        """Atomically replace the expected live coordinator with replay."""
+        """Install a replay coordinator only if the expected live snapshot still
+        matches.
+
+        Parameters
+        ----------
+        expected : HttpCoordinatorSnapshot
+            Generation and exact objects previously read from this server.
+        replacement : HttpCoordinatorReplacement
+            Complete replay service and its checked binding.
+
+        Returns
+        -------
+        bool
+            Whether the router installed the replacement.
+
+        Raises
+        ------
+        TypeError
+            A supplied record has an unsupported type.
+        ValueError
+            The replacement mode is not replay.
+        """
         return self._coordinator_router.compare_and_swap(
             expected=expected,
             replacement=replacement,
@@ -707,7 +884,27 @@ class DebuggerHTTPServer(ThreadingHTTPServer):
         self,
         callback: GracefulCloseCallback,
     ) -> GracefulCloseResult:
-        """Invoke one close callback while excluding HTTP requests and swaps."""
+        """Run one close callback while service requests and swaps are excluded.
+
+        Parameters
+        ----------
+        callback : callable
+            No-argument close operation returning GracefulCloseResult.
+
+        Returns
+        -------
+        GracefulCloseResult
+            Exit code and optional message produced by the callback.
+
+        Raises
+        ------
+        TypeError
+            The callback is not callable or returns the wrong result type.
+
+        Notes
+        -----
+        Callback exceptions propagate. The router lock is released on every exit.
+        """
         if not callable(callback):
             raise TypeError("graceful-close callback must be callable.")
         with self._coordinator_router.pinned_snapshot():
@@ -732,7 +929,19 @@ class DebuggerHTTPServer(ThreadingHTTPServer):
         ).start()
 
     def get_request(self) -> tuple[socket, tuple[str, int]]:
-        """Bound incomplete local requests without timing simulator execution."""
+        """Accept a client socket and set its I/O timeout to 2 seconds.
+
+        Returns
+        -------
+        tuple
+            Accepted socket and client address. This timeout bounds incomplete socket
+            traffic; it does not time or interrupt simulator execution.
+
+        Raises
+        ------
+        OSError
+            Socket accept or timeout configuration fails.
+        """
         request, client_address = super().get_request()
         request.settimeout(_CLIENT_SOCKET_TIMEOUT_SECONDS)
         return request, cast(tuple[str, int], client_address)
@@ -751,6 +960,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
 
     @property
     def debugger_server(self) -> DebuggerHTTPServer:
+        """Return this handler's server with its coordinator and security settings."""
         return cast(DebuggerHTTPServer, self.server)
 
     def log_message(self, format: str, *args: object) -> None:
@@ -760,6 +970,9 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         # Replay is the final coordinator generation. A long immutable analysis
         # read releases the router lock so cursor and POV commands stay usable.
+        """Handle one GET while holding the coordinator generation through the
+        response.
+        """
         snapshot = self.debugger_server.coordinator_router.snapshot()
         if snapshot.binding.mode == "replay" and (
             _METRIC_ANALYSIS_ROUTE.fullmatch(self.path) is not None
@@ -771,6 +984,9 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
             self._handle_get(snapshot.binding)
 
     def _handle_get(self, coordinator: HttpCoordinatorBinding) -> None:
+        """Route a checked GET to bootstrap, static bytes, or authenticated service
+        reads.
+        """
         route = self._route(coordinator)
         if route is None or not self._valid_request_origin(coordinator):
             return
@@ -1002,10 +1218,16 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         self._send_bytes(HTTPStatus.OK, asset.body, content_type=asset.content_type)
 
     def do_POST(self) -> None:
+        """Handle one POST while holding the coordinator generation through the
+        response.
+        """
         with self.debugger_server.coordinator_router.pinned_snapshot() as snapshot:
             self._handle_post(snapshot.binding)
 
     def _handle_post(self, coordinator: HttpCoordinatorBinding) -> None:
+        """Validate and authenticate a command, write its result, then request
+        shutdown.
+        """
         route = self._route(coordinator)
         if route is None or not self._valid_request_origin(coordinator):
             return
@@ -1131,21 +1353,29 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
             self._send_internal_error(coordinator)
 
     def do_OPTIONS(self) -> None:
+        """Reject OPTIONS with a typed 405 response; dispatch no service operation."""
         self._method_not_allowed()
 
     def do_HEAD(self) -> None:
+        """Reject HEAD with a typed 405 response; dispatch no service operation."""
         self._method_not_allowed()
 
     def do_PUT(self) -> None:
+        """Reject PUT with a typed 405 response; dispatch no service operation."""
         self._method_not_allowed()
 
     def do_PATCH(self) -> None:
+        """Reject PATCH with a typed 405 response; dispatch no service operation."""
         self._method_not_allowed()
 
     def do_DELETE(self) -> None:
+        """Reject DELETE with a typed 405 response; dispatch no service operation."""
         self._method_not_allowed()
 
     def _method_not_allowed(self) -> None:
+        """Return the current mode's typed 405 error without dispatching service
+        work.
+        """
         with self.debugger_server.coordinator_router.pinned_snapshot() as snapshot:
             self._send_api_error(
                 snapshot.binding,
@@ -1155,6 +1385,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
             )
 
     def _route(self, coordinator: HttpCoordinatorBinding) -> str | None:
+        """Reject nonlocal or query-bearing targets; return the exact route or None."""
         raw_target = self.path
         if (
             not raw_target.startswith("/")
@@ -1172,6 +1403,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         return raw_target
 
     def _valid_request_origin(self, coordinator: HttpCoordinatorBinding) -> bool:
+        """Check Host, optional Origin, and fetch-site headers; send 403 on mismatch."""
         hosts = self.headers.get_all("Host", [])
         origins = self.headers.get_all("Origin", [])
         fetch_sites = self.headers.get_all("Sec-Fetch-Site", [])
@@ -1204,6 +1436,9 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         return True
 
     def _authenticated(self, coordinator: HttpCoordinatorBinding) -> bool:
+        """Require exactly one matching token header; send 401 and return False
+        otherwise.
+        """
         supplied = self.headers.get_all(_TOKEN_HEADER, [])
         if len(supplied) != 1 or not secrets.compare_digest(
             supplied[0],
@@ -1222,6 +1457,12 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         self,
         coordinator: HttpCoordinatorBinding,
     ) -> bytes | None:
+        """Read one JSON command body of at most 64 KiB.
+
+        Reject transfer encoding, missing or duplicate length/type headers, invalid
+        lengths, incomplete data, and socket timeouts. Return bytes on success, or
+        send the typed HTTP error and return None.
+        """
         if self.headers.get_all("Transfer-Encoding", []):
             self._send_api_error(
                 coordinator,
@@ -1290,6 +1531,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         return body
 
     def _send_internal_error(self, coordinator: HttpCoordinatorBinding) -> None:
+        """Send a fixed 500 response without exposing exception details."""
         self._send_api_error(
             coordinator,
             HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -1305,6 +1547,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         error_code: str,
         message: str,
     ) -> None:
+        """Build this mode's error model from the status, code, and public message."""
         error = coordinator.error_factory(
             error_code=error_code,
             message=message,
@@ -1312,6 +1555,7 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         self._send_model(status, error)
 
     def _send_model(self, status: HTTPStatus, model: object) -> None:
+        """Serialize a model to UTF-8 JSON; reject objects without model_dump_json."""
         model_dump_json = getattr(model, "model_dump_json", None)
         if not callable(model_dump_json):
             raise TypeError("HTTP JSON payloads must be Pydantic protocol models.")
@@ -1330,6 +1574,12 @@ class DebuggerRequestHandler(BaseHTTPRequestHandler):
         content_type: str,
         response_headers: tuple[tuple[str, str], ...] = (),
     ) -> None:
+        """Write one response with checked optional headers and fixed security headers.
+
+        ``body`` is already encoded; Content-Length counts its bytes. Only a safe
+        Content-Disposition extra header is accepted. The connection closes after
+        the response. Header validation happens before any status bytes are sent.
+        """
         validated_headers = _validate_response_headers(response_headers)
         self.close_connection = True
         self.send_response(status)
@@ -1353,7 +1603,43 @@ def create_server(
     coordinator: HttpCoordinatorBinding | None = None,
     coordinator_router: HttpCoordinatorRouter | None = None,
 ) -> DebuggerHTTPServer:
-    """Validate assets, then bind one debugger server to loopback."""
+    """Validate browser assets and bind a local debugger server.
+
+    Parameters
+    ----------
+    service : object or None, optional
+        Service to bind. Required without coordinator_router. Defaults to None.
+    asset_root : pathlib.Path
+        Browser runtime directory passed to build_static_manifest.
+    port : int
+        TCP port from 0 to 65535; zero selects an available port.
+    capability_token : str or None, optional
+        API token. A missing or empty token creates a fresh random token.
+    coordinator : HttpCoordinatorBinding or None, optional
+        Explicit operations. None adapts a live service, or uses the router binding.
+    coordinator_router : HttpCoordinatorRouter or None, optional
+        Existing exact router. Any supplied service or binding must be its current
+        objects. Defaults to None.
+
+    Returns
+    -------
+    DebuggerHTTPServer
+        Bound server; its caller must serve requests and close the socket.
+
+    Raises
+    ------
+    TypeError
+        A required service or supported router/service contract is missing.
+    ValueError
+        Port, router identities, or browser assets are invalid.
+    OSError
+        Assets cannot be resolved or the socket cannot be bound.
+
+    Notes
+    -----
+    This reads assets and opens a socket. It does not start a browser or a request
+    loop. The bind address is always 127.0.0.1.
+    """
     if not 0 <= port <= 65535:
         raise ValueError(f"port must be in [0, 65535]; got {port}.")
     if coordinator_router is None:
@@ -1402,7 +1688,49 @@ def serve_browser_debugger(
     authoring: HttpAuthoringBinding | None = None,
     graceful_close: GracefulCloseCallback | None = None,
 ) -> int:
-    """Bind, announce, optionally open, serve, and always close cleanly."""
+    """Launch the local browser service and close its socket on exit.
+
+    Parameters
+    ----------
+    service : object or None, optional
+        Service instance, required unless a router supplies it. Defaults to None.
+    asset_root : pathlib.Path
+        Browser runtime directory whose files are loaded before serving.
+    port : int
+        Local TCP port from 0 to 65535; zero selects an available port.
+    open_browser : bool
+        Whether to open the printed launch URL in the system browser.
+    coordinator : HttpCoordinatorBinding or None, optional
+        Explicit operations; None uses the router or adapts a live service.
+    coordinator_router : HttpCoordinatorRouter or None, optional
+        Existing router for live-to-replay replacement. Defaults to None.
+    authoring : HttpAuthoringBinding or None, optional
+        Extra live authoring operations. Router-backed callers install these on
+        the binding beforehand. Defaults to None.
+    graceful_close : callable or None, optional
+        No-argument callback used on KeyboardInterrupt. Defaults to None.
+
+    Returns
+    -------
+    int
+        Zero after ordinary shutdown, the callback's exit code after Ctrl-C, or
+        one if that callback fails.
+
+    Raises
+    ------
+    TypeError
+        Service, callback setup, or router contracts are invalid.
+    ValueError
+        Authoring setup, port, identities, or assets are inconsistent.
+    OSError
+        Assets cannot be read or the local socket cannot be bound.
+
+    Notes
+    -----
+    This blocks in the request loop, prints a URL containing the launch token,
+    may open a browser, and invokes the optional close callback under the router
+    lock. Browser-open failure only prints a warning.
+    """
     if authoring is not None:
         if coordinator_router is not None:
             raise ValueError(

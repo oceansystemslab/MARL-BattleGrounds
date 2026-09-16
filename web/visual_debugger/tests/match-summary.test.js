@@ -1,3 +1,7 @@
+/**
+ * @file Check captured team names, scores and outcomes, including missing summaries
+ * and wrong-episode facts.
+ */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";

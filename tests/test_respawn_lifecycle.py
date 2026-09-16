@@ -1,4 +1,4 @@
-"""Public respawn-wave lifecycle proofs for Milestone 6 CP1."""
+"""Check respawn timing, placement and the state restored for returning agents."""
 
 # pyright: reportPrivateUsage=false
 
@@ -63,12 +63,10 @@ _StepResult = tuple[
 
 
 def _empty_obstacles() -> Array:
-    """Return an inactive fixed-size obstacle table."""
     return jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32)
 
 
 def _spawn_pad_positions() -> Array:
-    """Return clear immutable pads for every global slot."""
     team_a = jnp.asarray(
         ((3.0, 3.0), (5.0, 3.0), (7.0, 3.0), (9.0, 3.0), (11.0, 3.0)),
         dtype=jnp.float32,
@@ -84,7 +82,6 @@ def _requested_roster(
     team_sizes: tuple[int, int],
     *class_rows: tuple[int, int],
 ) -> Array:
-    """Return a padded Hunter roster with selected active class overrides."""
     roster = jnp.full((MAX_AGENT_SLOTS,), NEUTRAL_CLASS_ID, dtype=jnp.int32)
     roster = roster.at[: team_sizes[0]].set(HUNTER_CLASS_ID)
     roster = roster.at[MAX_AGENTS_PER_TEAM : MAX_AGENTS_PER_TEAM + team_sizes[1]].set(
@@ -101,7 +98,6 @@ def _scenario(
     periods: tuple[int, int] = (3, 5),
     shield_duration: int = 3,
 ) -> tuple[EnvConfig, EnvState, Observation, ActionMask, Info]:
-    """Build a deterministic fully observable respawn scenario."""
     profile = resolve_agent_profile(
         _requested_roster(team_sizes, *class_rows),
         jnp.asarray(team_sizes, dtype=jnp.int32),
@@ -134,7 +130,6 @@ def _scenario(
 
 
 def _joint_action(*rows: tuple[int, int, int, int]) -> Action:
-    """Return a canonical joint action with selected actor overrides."""
     move = jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32)
     target = jnp.full((MAX_AGENT_SLOTS,), _TARGET_NONE, dtype=jnp.int32)
     ultimate = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
@@ -146,7 +141,6 @@ def _joint_action(*rows: tuple[int, int, int, int]) -> Action:
 
 
 def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
-    """Return the authoritative mask paired with one directly authored state."""
     return _build_observation_and_action_mask(state, config)[1]
 
 
@@ -158,7 +152,6 @@ def _take_step(
     action_mask: ActionMask | None = None,
     key: Array | None = None,
 ) -> _StepResult:
-    """Advance one deterministic public transition."""
     return step(
         config,
         state,
@@ -169,7 +162,6 @@ def _take_step(
 
 
 def _with_dead_slots(state: EnvState, *slots: int) -> EnvState:
-    """Author active corpses with canonical dead health and transient status."""
     alive_mask = state.alive_mask
     health = state.current_health
     slow = state.slow_durations
@@ -200,7 +192,6 @@ def _with_dead_slots(state: EnvState, *slots: int) -> EnvState:
 
 
 def _slot_mask(*slots: int) -> Array:
-    """Return a fixed-slot boolean mask selecting exactly ``slots``."""
     mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
     for slot in slots:
         mask = mask.at[slot].set(True)
@@ -208,7 +199,6 @@ def _slot_mask(*slots: int) -> Array:
 
 
 def _assert_tree_equal(left: object, right: object) -> None:
-    """Assert exact equality for two identically structured JAX PyTrees."""
     assert jax.tree_util.tree_structure(left) == jax.tree_util.tree_structure(right)
     for left_leaf, right_leaf in zip(
         jax.tree_util.tree_leaves(left),
@@ -219,12 +209,10 @@ def _assert_tree_equal(left: object, right: object) -> None:
 
 
 def _stack_trees(*trees: object) -> object:
-    """Stack identically structured PyTrees along a leading batch axis."""
     return jax.tree_util.tree_map(lambda *leaves: jnp.stack(leaves), *trees)
 
 
 def _assert_statuses_are_clear(state: EnvState, slot: int) -> None:
-    """Assert every transient status family is zero for one slot."""
     assert bool(jnp.all(state.slow_durations[slot] == 0))
     assert bool(jnp.all(state.stun_durations[slot] == 0))
     assert int(state.rogue_poison_anti_heal_durations[slot]) == 0
@@ -236,7 +224,6 @@ def _assert_inactive_observer_rows_are_zero(
     lifecycle: SpawnLifecycleObservation,
     active_mask: Array,
 ) -> None:
-    """Assert every lifecycle leaf masks inactive observer rows to zero."""
     inactive_observer_mask = jnp.logical_not(active_mask)
     for leaf in jax.tree_util.tree_leaves(lifecycle):
         assert leaf.shape[0] == MAX_AGENT_SLOTS
@@ -244,7 +231,6 @@ def _assert_inactive_observer_rows_are_zero(
 
 
 def test_reset_exposes_canonical_clock_observation_and_respawn_facts() -> None:
-    """Reset publishes actor-relative clocks and canonical no-transition facts."""
     config, state, observation, _, info = _scenario(
         team_sizes=(2, 1),
         periods=(2, 5),
@@ -376,7 +362,6 @@ def test_team_clock_advances_through_zero_one_and_n_on_empty_waves(
     expected_successor: int,
     wave_due: bool,
 ) -> None:
-    """A team clock advances independently even when no corpse can respawn."""
     config, state, _, _, _ = _scenario(periods=(period, 5))
     state = state._replace(
         team_respawn_wave_countdowns=jnp.asarray((countdown, 4), dtype=jnp.int32)
@@ -407,7 +392,6 @@ def test_team_clock_advances_through_zero_one_and_n_on_empty_waves(
 
 
 def test_period_one_populated_then_empty_wave_is_due_every_transition() -> None:
-    """Period one respawns a corpse and stays due when no corpse remains."""
     config, state, _, _, _ = _scenario(
         team_sizes=(1, 1),
         periods=(1, 4),
@@ -450,7 +434,6 @@ def test_period_one_populated_then_empty_wave_is_due_every_transition() -> None:
 
 
 def test_simultaneous_empty_waves_publish_real_transition_facts() -> None:
-    """Both clocks may be due without manufacturing a realized respawn."""
     config, state, _, _, _ = _scenario(periods=(1, 3))
     state = state._replace(
         team_respawn_wave_countdowns=jnp.zeros((NUM_TEAMS,), dtype=jnp.int32)
@@ -488,7 +471,6 @@ def test_independent_wave_respawns_only_transition_start_corpses_for_due_team(
     due_team: int,
     expected_countdowns: tuple[int, int],
 ) -> None:
-    """Eligibility is transition-start death intersected with the due team."""
     config, state, initial_observation, _, _ = _scenario(
         team_sizes=(2, 2),
         periods=(3, 5),
@@ -553,7 +535,6 @@ def test_independent_wave_respawns_only_transition_start_corpses_for_due_team(
 
 
 def test_simultaneous_populated_waves_respawn_full_rosters_at_assigned_pads() -> None:
-    """A full 5v5 wave preserves fixed slots and team-local pad identity."""
     config, state, _, _, _ = _scenario(
         team_sizes=(MAX_AGENTS_PER_TEAM, MAX_AGENTS_PER_TEAM),
         periods=(3, 4),
@@ -584,7 +565,6 @@ def test_simultaneous_populated_waves_respawn_full_rosters_at_assigned_pads() ->
 
 
 def test_same_transition_death_waits_for_a_later_wave() -> None:
-    """A recipient alive at phase start is excluded from that transition's wave."""
     config, state, _, _, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, MAGE_CLASS_ID),
         team_sizes=(1, 1),
@@ -725,7 +705,6 @@ def test_same_transition_death_waits_for_a_later_wave() -> None:
 
 
 def test_assigned_pad_wins_over_live_enemy_occupancy() -> None:
-    """Respawn placement is slot identity, not a nearest-free-pad search."""
     config, state, _, _, _ = _scenario(
         team_sizes=(1, 1),
         periods=(3, 4),
@@ -754,7 +733,6 @@ def test_assigned_pad_wins_over_live_enemy_occupancy() -> None:
 
 
 def test_duration_zero_coincidence_separates_after_distinct_movement_intent() -> None:
-    """A directionless spawn tie stays neutral until movement supplies a direction."""
     config, state, _, _, _ = _scenario(
         team_sizes=(1, 1),
         periods=(3, 4),
@@ -883,7 +861,6 @@ def test_duration_zero_coincidence_separates_after_distinct_movement_intent() ->
 def test_respawned_shield_is_not_decremented_on_creation_transition(
     shield_duration: int,
 ) -> None:
-    """The end-of-transition shield override starts at its full duration."""
     config, state, _, _, _ = _scenario(
         team_sizes=(1, 1),
         periods=(3, 4),
@@ -911,7 +888,6 @@ def test_respawned_shield_is_not_decremented_on_creation_transition(
 
 
 def test_respawn_restores_health_and_retains_canonical_dead_phase_state() -> None:
-    """A genuine death clears statuses while later respawns retain dead-phase state."""
     config, state, _, _, _ = _scenario(
         (_TEAM_B_FIRST_SLOT, MAGE_CLASS_ID),
         team_sizes=(1, 1),
@@ -1062,7 +1038,6 @@ def test_respawn_restores_health_and_retains_canonical_dead_phase_state() -> Non
 
 
 def test_representative_respawn_transition_is_exact_under_jit() -> None:
-    """Eager and compiled execution return identical full public PyTrees."""
     config, state, _, _, _ = _scenario(
         team_sizes=(2, 2),
         periods=(3, 4),
@@ -1087,7 +1062,6 @@ def test_representative_respawn_transition_is_exact_under_jit() -> None:
 
 
 def test_shared_config_vmap_preserves_fixed_shapes_and_scalar_semantics() -> None:
-    """One config vmaps over quiet, empty-wave, and populated-wave states."""
     config, base_state, _, _, _ = _scenario(
         team_sizes=(1, 1),
         periods=(3, 2),
@@ -1165,7 +1139,6 @@ def test_shared_config_vmap_preserves_fixed_shapes_and_scalar_semantics() -> Non
 
 
 def test_lax_scan_crosses_empty_and_populated_waves() -> None:
-    """A real scan carries the paired mask across independent public clocks."""
     horizon = 4
     config, state, _, _, _ = _scenario(
         team_sizes=(1, 1),

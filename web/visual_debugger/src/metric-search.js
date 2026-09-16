@@ -1,6 +1,16 @@
-/** Find recorded measurements without confusing the giver and receiver. */
-
-/** @param {string} value */
+/**
+ * @file Search recorded metric definitions while preserving source/recipient meaning.
+ * Build a reusable index from Python's catalog, parse supported phrases and
+ * rank matching rows. Searches never compute a new measurement or infer
+ * unrecorded attribution. Exact CSV-name lookup is the most direct route.
+ */
+/**
+ * Normalize string value for lookup: lowercase it, replace runs of nonletter/
+ * nondigit characters with a space, then trim. Unicode letters/digits remain.
+ * Return a new string; no stemming or metric interpretation occurs.
+ *
+ * @param {string} value
+ */
 function words(value) {
   return value
     .toLowerCase()
@@ -52,7 +62,13 @@ const SINGULARS = new Map(
   ]),
 );
 
-/** @param {string} value */
+/**
+ * Split normalized value into nonempty words and replace the explicitly
+ * listed plurals with singular forms. Return a new string array. This is a
+ * small fixed vocabulary, not general language stemming.
+ *
+ * @param {string} value
+ */
 function tokens(value) {
   return words(value)
     .split(" ")
@@ -60,7 +76,12 @@ function tokens(value) {
     .map((word) => SINGULARS.get(word) ?? word);
 }
 
-/** Only word beginnings match. Agent IDs and short words must match exactly.
+/**
+ * Return whether query word part matches catalog word exactly or at its
+ * beginning. Prefix matching needs at least three characters and excludes
+ * filler, relation and orientation words. Short words/agent IDs must match
+ * exactly. Both strings must already be normalized.
+ *
  * @param {string} part @param {string} word
  */
 function prefix(part, word) {
@@ -89,7 +110,13 @@ const EQUIVALENTS = [
   ["not accepted", "rejected"],
 ];
 
-/** @param {string[]} input */
+/**
+ * Copy input tokens and replace the declared synonymous phrases in order.
+ * Match words with prefix and splice replacements into the copy. Return its
+ * mutable token array without changing input; unrecognized words are retained.
+ *
+ * @param {string[]} input
+ */
 function equivalents(input) {
   const output = [...input];
   for (const [phrase, replacement] of EQUIVALENTS) {
@@ -243,7 +270,13 @@ const MEASURES = [
   { phrases: ["episode length", "episode duration"], kinds: ["episode"] },
 ];
 
-/** @param {string[]} input @param {string} phrase */
+/**
+ * Return the first token offset in input matching tokenized phrase, or -1.
+ * Words use prefix matching. Neither argument is changed. The caller uses
+ * nonempty catalog phrases and an already normalized token array.
+ *
+ * @param {string[]} input @param {string} phrase
+ */
 function phraseAt(input, phrase) {
   const match = tokens(phrase);
   return input.findIndex(
@@ -253,7 +286,15 @@ function phraseAt(input, phrase) {
   );
 }
 
-/** @param {string[]} input @param {string[]} phrases @param {boolean} [boundary] */
+/**
+ * Remove the first listed matching phrase from input in place. phrases are
+ * tried in supplied order. boundary defaults to false; true inserts the
+ * measure-boundary marker where the phrase was removed. Return true when a
+ * phrase was consumed, false otherwise. This helper deliberately mutates
+ * its parser-owned token array, not the original query string.
+ *
+ * @param {string[]} input @param {string[]} phrases @param {boolean} [boundary]
+ */
 function takePhrase(input, phrases, boundary = false) {
   for (const phrase of phrases) {
     const start = phraseAt(input, phrase);
@@ -302,7 +343,21 @@ const EFFECTS = [
 
 /** @typedef {{slot?:number, class_id?:number, team_id?:number, role?:string}} Person */
 
-/** Read common researcher questions; unsupported conditions stay explicit.
+/**
+ * Parse a supported measurement request without searching the catalog yet.
+ *
+ * query is plain text; classNames is indexed by positive class ID, with index
+ * zero unused. Recognize registered measurement/effect phrases, Basic/Ultimate,
+ * Team A/B, global agent IDs 0–9, classes and From/To roles. Unsupported
+ * negation/time-order conditions and ambiguous identities return {error}.
+ * Unknown ordinary words remain search terms rather than invented conditions.
+ *
+ * Success returns kinds (measurement families); status/topic/ability filters;
+ * qualifiers; people with optional slot/class/team/role; and remaining words.
+ * The giving/receiving flags retain direction, pair marks unordered formation
+ * queries, hadCondition marks While/During/Under, and abilityCount/countOnly
+ * control count searches. Parsing changes no caller input or measurement.
+ *
  * @param {string} query @param {string[]} classNames
  */
 export function readMetricQuery(query, classNames) {
@@ -604,7 +659,18 @@ export function readMetricQuery(query, classNames) {
   };
 }
 
-/** @param {Record<string, any>[]} measurements @param {Record<string, any>[]} [topics]
+/**
+ * Build a reusable search index from measurements and optional catalog context.
+ *
+ * measurements supplies named, ordered rows and search_facts. Duplicate names
+ * keep the last row, then rows sort by order. topics, agents and classNames
+ * default to []; an empty classNames list is derived from agents by class ID.
+ * Precompute normalized names, keyword/description tokens and an exact-name
+ * Map. Return a mutable index that retains row/agent references; treat the
+ * source catalog as stable while using it. No source rows are changed or
+ * validated, and no metric values are calculated.
+ *
+ * @param {Record<string, any>[]} measurements @param {Record<string, any>[]} [topics]
  * @param {Record<string, any>[]} [agents] @param {string[]} [classNames]
  */
 export function buildMetricSearchIndex(
@@ -653,7 +719,13 @@ export function buildMetricSearchIndex(
   };
 }
 
-/** @param {Person} person @param {Record<string, any>} identity */
+/**
+ * Return whether identity matches every supplied slot, class_id and team_id
+ * in person. Missing person fields are wildcards. role is ignored here.
+ * The caller provides valid records; no actor identity is inferred or changed.
+ *
+ * @param {Person} person @param {Record<string, any>} identity
+ */
 function samePerson(person, identity) {
   return (
     (person.slot === undefined || person.slot === identity.slot) &&
@@ -662,10 +734,25 @@ function samePerson(person, identity) {
   );
 }
 
-/** @param {Record<string, any>} row @param {Record<string, any>} facts
+/**
+ * Check a query person against row's recorded subject/source/recipient role.
+ *
+ * facts supplies catalog attribution metadata and agents maps global slots
+ * to class/team identities. role selects subject, source or recipient. Use
+ * exact recorded rows where present; otherwise permit only catalog-supported
+ * class/team relations. Combined, opportunity or unknown sources cannot
+ * create an individual source match. Return a truthy match/false result and
+ * leave inputs unchanged; callers use it as a filter predicate.
+ *
+ * @param {Record<string, any>} row @param {Record<string, any>} facts
  * @param {Record<string, any>[]} agents @param {Person} person @param {string} role
  */
 function matchesPerson(row, facts, agents, person, role) {
+  /**
+   * Find the original agents entry for global slot, or return undefined.
+   * This closure uses the current query's supplied roster; it does not search
+   * scene state or infer a missing identity.
+   */
   const at = (/** @type {number} */ slot) =>
     agents.find((agent) => agent.slot === slot);
   if (role === "subject")
@@ -714,7 +801,20 @@ function matchesPerson(row, facts, agents, person, role) {
   return person.team_id === undefined || team === person.team_id;
 }
 
-/** @param {ReturnType<typeof buildMetricSearchIndex>} index @param {string} query */
+/**
+ * Find ranked catalog rows for query using a previously built index.
+ *
+ * A normalized exact CSV-name match wins immediately. Empty queries return
+ * an empty list with message=null. Parser errors return no matches and the
+ * error message. Otherwise filter by recorded facts, roles and qualifiers;
+ * prefer keyword matches, falling back to description matches only when no
+ * keyword candidate remains. Rank by applicability and query relevance, then
+ * catalog order. Return {matches, message}; successful rows retain original
+ * references. No matches produces explanatory text, not fabricated values.
+ * The index and its source rows are never changed.
+ *
+ * @param {ReturnType<typeof buildMetricSearchIndex>} index @param {string} query
+ */
 export function searchMeasurements(index, query) {
   const exact = index.exact.get(words(query));
   if (exact) return { matches: [exact], message: null };
@@ -792,6 +892,11 @@ export function searchMeasurements(index, query) {
       matchesPerson(row, facts, index.agents, person, person.role ?? "subject"),
     );
   });
+  /**
+   * Return whether every remaining query term matches some token in field.
+   * Use prefix matching and allow a token to satisfy more than one term. Empty
+   * remaining terms match any field. This closure changes no arrays.
+   */
   const covers = (/** @type {string[]} */ field) =>
     remaining.every((term) => field.some((word) => prefix(term, word)));
   const direct = candidates.filter((item) => covers(item.keywords));
@@ -843,7 +948,13 @@ export function searchMeasurements(index, query) {
   };
 }
 
-/** @param {ReturnType<typeof buildMetricSearchIndex>} index @param {string} query */
+/**
+ * Return only searchMeasurements(index, query).matches. The caller supplies
+ * a built index and string query. Parser/no-match explanations are discarded,
+ * so both cases become an empty array. Matching rows retain catalog references.
+ *
+ * @param {ReturnType<typeof buildMetricSearchIndex>} index @param {string} query
+ */
 export function findMeasurements(index, query) {
   return searchMeasurements(index, query).matches;
 }

@@ -1,3 +1,7 @@
+/**
+ * @file Check browser authoring, saved revision selectors, persistence through
+ * restart and exact-start comparisons.
+ */
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,11 +24,9 @@ function isAuthoringResponse(response, commandType) {
   }
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} commandType
- * @param {() => Promise<unknown>} activate
- */
+ * @param {() => Promise<unknown>} activate */
 async function applyAuthoringCommand(page, commandType, activate) {
   /** @type {import("@playwright/test").Response | null} */
   let replacementPresentation = null;
@@ -66,10 +68,8 @@ async function applyAuthoringCommand(page, commandType, activate) {
   }
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {() => Promise<unknown>} activate
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {() => Promise<unknown>} activate */
 async function applyLiveCommand(page, activate) {
   const responsePromise = page.waitForResponse(
     (response) =>
@@ -83,10 +83,8 @@ async function applyLiveCommand(page, activate) {
   await expect(page.locator("#connection-status")).toHaveText("Online");
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {{ teamA: string, teamB: string, information: string }} configuration
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {{ teamA: string, teamB: string, information: string }} configuration */
 async function exercisePolicyControllers(page, configuration) {
   const requested = [
     ["#devclient-team-a-controller", configuration.teamA],
@@ -107,11 +105,9 @@ async function exercisePolicyControllers(page, configuration) {
   await expect(page.locator("#step-value")).toHaveText("7");
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {readonly string[]} answers
- * @param {() => Promise<unknown>} activate
- */
+ * @param {() => Promise<unknown>} activate */
 async function answerPrompts(page, answers, activate) {
   let index = 0;
   /** @type {string[]} */
@@ -137,12 +133,10 @@ async function answerPrompts(page, answers, activate) {
   }
 }
 
-/**
- * @template T
+/** @template T
  * @param {import("@playwright/test").Page} page
  * @param {() => Promise<T>} activate
- * @returns {Promise<T>}
- */
+ * @returns {Promise<T>} */
 async function expectNoPrompts(page, activate) {
   /** @type {string[]} */
   const messages = [];
@@ -162,10 +156,8 @@ async function expectNoPrompts(page, activate) {
   return result;
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {() => Promise<unknown>} activate
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {() => Promise<unknown>} activate */
 async function dismissOnePrompt(page, activate) {
   /** @type {string[]} */
   const messages = [];
@@ -183,10 +175,8 @@ async function dismissOnePrompt(page, activate) {
   }
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {() => Promise<unknown>} activate
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {() => Promise<unknown>} activate */
 async function expectNoAuthoringCommands(page, activate) {
   /** @type {string[]} */
   const commandTypes = [];
@@ -220,11 +210,9 @@ async function authoringViewBox(page) {
   return page.locator("#authoring-canvas").getAttribute("viewBox");
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} label
- * @param {string | number} value
- */
+ * @param {string | number} value */
 async function editField(page, label, value) {
   return applyAuthoringCommand(page, "validate", async () => {
     const input = page.getByLabel(label, { exact: true });
@@ -234,11 +222,9 @@ async function editField(page, label, value) {
   });
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} selector
- * @param {string} assetId
- */
+ * @param {string} assetId */
 async function selectPersistedAsset(page, selector, assetId) {
   await expectAuthoringIdle(page);
   const value = await page.locator(selector).evaluate((select, requestedAssetId) => {
@@ -260,10 +246,8 @@ async function selectPersistedAsset(page, selector, assetId) {
   await page.locator(selector).selectOption(value);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} selector
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} selector */
 async function persistedAssetIds(page, selector) {
   return page.locator(`${selector} option`).evaluateAll((options) =>
     options.flatMap((option) => {

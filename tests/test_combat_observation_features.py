@@ -1,4 +1,4 @@
-"""Combat observation contracts through Milestone 5 Step 6 Checkpoint 1."""
+"""Check the combat state that each actor can read in its observation."""
 # pyright: reportPrivateUsage=false
 
 from collections.abc import Sequence
@@ -210,7 +210,6 @@ def _config(
 def _action(
     *, east_slots: Sequence[int] = (), west_slots: Sequence[int] = ()
 ) -> Action:
-    """Return a no-combat joint action with selected horizontal movement."""
     move = jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32)
     for slot in east_slots:
         move = move.at[slot].set(MOVE_EAST)
@@ -244,7 +243,6 @@ def _observation_after_step(
 
 
 def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
-    """Return the action mask paired with an explicitly built test state."""
     _, action_mask = _build_observation_and_action_mask(state, config)
     return action_mask
 
@@ -329,7 +327,6 @@ def test_reset_rows_expose_profile_state_and_neutral_attached_values() -> None:
 
 
 def test_movement_calibration_is_public_without_changing_catalog_base_speed() -> None:
-    """Prove reset exposes calibrated authority through effective speed only."""
     movement_scale = 0.1
     config = _config(
         (2, 1),
@@ -366,7 +363,6 @@ def test_movement_calibration_is_public_without_changing_catalog_base_speed() ->
 
 
 def test_attached_aura_features_follow_slot_aligned_team_geometry() -> None:
-    """Prove self rows expose the modifiers attached to each produced slot."""
     config = _config((2, 2))
     state, *_ = reset(config, jax.random.key(11))
     positions = state.agent_positions
@@ -430,7 +426,6 @@ def test_aura_facts_use_start_positions_while_features_use_successor_positions(
     expected_transition_start_coverage: bool,
     expected_multiplier: float,
 ) -> None:
-    """Separate transition-start aura facts from successor observation truth."""
     config = _config((2, 1))
     state, *_ = reset(config, jax.random.key(12))
     positions = state.agent_positions
@@ -776,7 +771,6 @@ def test_attached_statuses_and_effective_speed_follow_duration_state() -> None:
 
 
 def test_stun_zeroes_effective_speed_in_self_and_visible_unit_rows() -> None:
-    """Prove public effective speed agrees with current stun and visibility."""
     config = _config((1, 2))
     state, *_ = reset(config, jax.random.key(14))
     visible_enemy_slot = MAX_AGENTS_PER_TEAM
@@ -870,7 +864,6 @@ def test_visible_candidates_match_shared_rows_and_hidden_rows_are_fully_zero() -
 def test_capabilities_remain_zero_for_inactive_non_neutral_padding(
     inactive_class_id: int,
 ) -> None:
-    """Prove every capability column honors activity, even for malformed padding."""
     config = _config((1, 1))
     padded_slot = 1
     profile = config.agent_profile._replace(

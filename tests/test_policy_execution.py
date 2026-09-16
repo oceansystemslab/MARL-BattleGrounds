@@ -1,4 +1,4 @@
-"""Public actor adapters, dynamic variables and the single redaction barrier."""
+"""Check policy adapters, changing numerical inputs and source-data filtering."""
 
 from collections.abc import Callable
 from typing import cast
@@ -55,7 +55,6 @@ from marl_battlegrounds.policies.shared_obs import (
 def test_every_source_subset_is_redacted_at_the_actual_policy_boundary(
     execution: PolicyExecution,
 ) -> None:
-    """Every allowed subset reaches both teams in the same five-source layout."""
     config = evaluation_env_config(team_sizes=(5, 5))
     _, observation, mask, _ = core.reset(config, jax.random.key(0))
     # Nonzero synthetic objective rows make omitted objective redaction visible.
@@ -312,7 +311,6 @@ def test_dynamic_variables_and_recurrent_memory_do_not_retrace_or_share_actors()
 
 
 def test_recurrent_mixture_scan_and_partial_reset_reuse_compilation() -> None:
-    """Dynamic weights and rosters share one program through real episode resets."""
     env = make("tdm", num_envs=2, metrics="none")
 
     def stack(first: Array, second: Array) -> Array:

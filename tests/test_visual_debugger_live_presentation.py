@@ -1,4 +1,4 @@
-"""Focused live packaging and locked-service presentation proofs."""
+"""Check live display packaging and access through the locked service."""
 
 from __future__ import annotations
 

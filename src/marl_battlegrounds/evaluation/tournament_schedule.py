@@ -1,4 +1,10 @@
-"""Deterministic map-balanced schedules with both sides in each seed block."""
+"""Build deterministic all-pairs schedules with equal map and team-side exposure.
+
+The current executor uses one block for two games that swap the policy sides
+while sharing a map and seed identity. Schedule creation performs no simulation
+or random draw. Statistics later treat each block, or an explicitly larger
+coupled group, as one resampling unit.
+"""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -7,16 +13,48 @@ from numbers import Integral
 
 
 def valid_policy_name(value: object) -> bool:
+    """Return whether a value is a nonblank policy-name string.
+
+    Parameters
+    ----------
+    value : object
+        Candidate label. Leading/trailing whitespace is allowed but not removed.
+
+    Returns
+    -------
+    bool
+        True only for a string containing at least one non-whitespace character.
+    """
     return isinstance(value, str) and bool(value.strip())
 
 
 @dataclass(frozen=True)
 class TournamentMatch:
-    """One episode and its independent resampling/random-stream coordinate.
+    """One scheduled game and its paired random-stream identity.
 
-    The executor folds ``seed_id`` into its root seed. Both side assignments
-    share that coordinate. ``bootstrap_group`` declares additional dependence
-    across blocks, when the experimental design deliberately introduces it.
+    Attributes
+    ----------
+    episode_id : int
+        Unique positive int32 row identity.
+    block_id : int
+        Positive identity joining the two opposite side assignments.
+    seed_id : int
+        uint32 stream coordinate folded into the tournament root seed.
+    map_id : int
+        Nonnegative integer map ID used by both games in the block.
+    team_a : str
+        Policy name assigned to Team A for this game.
+    team_b : str
+        Different policy name assigned to Team B.
+    bootstrap_group : str | None
+        Optional nonempty name declaring dependence across several
+        blocks. None treats this block as its own independent unit.
+
+    Notes
+    -----
+    This frozen description stores values; the schedule/statistics helpers
+    validate them. Sharing a seed does not guarantee equal actions under
+    different policy inputs. Sides refer to policy assignment, not a bank shuffle.
     """
 
     episode_id: int
@@ -34,11 +72,36 @@ def build_tournament_schedule(
     *,
     episodes_per_pair: int = 100,
 ) -> tuple[TournamentMatch, ...]:
-    """Allocate equal maps and opposite sides for every unordered policy pair.
+    """Give every unordered policy pair equal maps and both team assignments.
 
-    Names and maps are sorted before assigning identities, so input ordering,
-    execution batch size and resume order cannot alter an episode's seed.
-    ``episodes_per_pair`` must be divisible by twice the number of maps.
+    Parameters
+    ----------
+    policies : Sequence[str]
+        At least two distinct nonblank policy-name strings.
+    maps : Sequence[int]
+        Nonempty distinct nonnegative int32-compatible map IDs. This helper
+        checks ID form, not whether packaged geometry exists.
+    episodes_per_pair : int
+        Positive total across maps and both sides, default 100.
+        Must be divisible by twice the number of maps.
+
+    Returns
+    -------
+    tuple[TournamentMatch, ...]
+        Tuple of TournamentMatch in sorted pair, sorted map, block and side order.
+        IDs are sequential from 1. Each block contains opposite policy assignments
+        with the same seed_id equal to block_id. bootstrap_group defaults to None.
+
+    Raises
+    ------
+    ValueError
+        Names/maps/budget are invalid, or total episode IDs exceed int32.
+
+    Notes
+    -----
+    Host-only and deterministic. Sorting removes dependence on input ordering;
+    no RNG or files are used. This is the current all-pairs schedule, not a
+    future one-entrant canonical tournament protocol.
     """
     if isinstance(policies, str) or not all(map(valid_policy_name, policies)):
         raise ValueError("Policies must have nonempty string identities")

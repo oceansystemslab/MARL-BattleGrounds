@@ -1,4 +1,4 @@
-"""Host-only reconstruction proofs for the NoSharedObs actor projection."""
+"""Check reconstruction of each NoSharedObs actor's allowed input."""
 
 import jax.numpy as jnp
 import pytest
@@ -34,7 +34,6 @@ def _projection_context(
     execution_information_mode: ExecutionInformationMode = "no_shared_obs",
     config: EnvConfig | None = None,
 ) -> EvaluationEpisodeContextV1:
-    """Return one context carrying the exact NoSharedObs V2 projection identity."""
     context = evaluation_context(
         execution_information_mode=execution_information_mode,
         config=evaluation_env_config() if config is None else config,
@@ -45,7 +44,6 @@ def _projection_context(
 
 
 def test_no_shared_obs_actor_projection_v2_has_exact_identity() -> None:
-    """Freeze the source identity consumed by capture and provenance."""
     assert NO_SHARED_OBS_ACTOR_PROJECTION_ID == "base-observation-no-shared-obs"
     assert NO_SHARED_OBS_ACTOR_PROJECTION_VERSION == 3
     assert (
@@ -58,7 +56,6 @@ def test_no_shared_obs_actor_projection_v2_has_exact_identity() -> None:
 
 
 def test_full_and_scalar_projection_reconstruct_team_relative_public_classes() -> None:
-    """Reconstruct exact rows, reversal, padding, and inactive observers."""
     context = _projection_context()
     full = reconstruct_class_ids_by_agent_by_team_v2(context)
     team_a = (MAGE_CLASS_ID, WARRIOR_CLASS_ID, PRIEST_CLASS_ID, 0, 0)
@@ -90,7 +87,6 @@ def test_full_and_scalar_projection_reconstruct_team_relative_public_classes() -
 
 
 def test_projection_preserves_arbitrary_class_to_slot_permutations() -> None:
-    """Roster order, rather than a canonical class order, owns every slot."""
     team_a = (
         PRIEST_CLASS_ID,
         ROGUE_CLASS_ID,
@@ -140,7 +136,6 @@ def test_projection_rejects_unsupported_mode_or_identity(
     mode: ExecutionInformationMode,
     identity: VersionedIdentityV1,
 ) -> None:
-    """Projection V2 fails before reconstructing an unsupported composite."""
     context = evaluation_context(execution_information_mode=mode).model_copy(
         update={"actor_projection": identity}
     )
@@ -151,7 +146,6 @@ def test_projection_rejects_unsupported_mode_or_identity(
 
 @pytest.mark.parametrize("global_slot", (-1, MAX_AGENT_SLOTS, True, 1.0))
 def test_scalar_projection_rejects_invalid_global_slots(global_slot: object) -> None:
-    """Scalar reconstruction accepts only exact in-range integer slot IDs."""
     with pytest.raises(ValueError, match="global_slot"):
         reconstruct_actor_class_ids_by_team_v2(
             _projection_context(),
@@ -160,7 +154,6 @@ def test_scalar_projection_rejects_invalid_global_slots(global_slot: object) -> 
 
 
 def test_context_validation_rejects_a_different_live_class_map() -> None:
-    """The reconstructible V1 omission cannot conceal live/context drift."""
     context = _projection_context()
     full = reconstruct_class_ids_by_agent_by_team_v2(context)
     changed_first_team = (ROGUE_CLASS_ID, *full[0][0][1:])

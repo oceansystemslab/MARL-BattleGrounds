@@ -3,19 +3,29 @@
 > **NORMATIVE CONTRACT — ACTIVATED 2026-08-10.** This document records the
 > accepted amendments to the historical design PDF.
 
-This document changes `MARL_BGs_Design_Document.pdf`. The PDF remains the
-unaltered historical architectural blueprint; this file is the controlling
-public source where the two disagree. An amendment changes only the clauses it
-names. Unmentioned PDF requirements remain in force.
+This is the dated decision record for changes to the historical design PDF.
+Each amendment changes only the clauses it names. Later explicit decisions
+supersede conflicting earlier clauses; an old future-tense sentence does not
+mean that feature is still unimplemented. Keep historical wording, numbers,
+source identities and evidence intact when reading later decisions.
 
-The amendments below were drafted before Milestone 6 Step 5 implementation.
-They deliberately favor the four project North Stars: researcher-centricity,
-low sample complexity, meaningful tactical and strategic team behavior, and
-professional MARL/software engineering.
+Use the [workflow guide](../evaluation/workflows.md) for current executable API
+examples and the [protocol](../evaluation/protocol.md) for current scientific
+rules. These distinguish implemented behavior, accepted future design and
+historical evidence. The current monthly Big 12 snapshot direction supersedes
+A27's weekly schedule and fixed numerical example; the final official budget
+and remaining admission gates are still unresolved.
 
-**Current roadmap numbering:** A36 records the 2026-09-07 executive override.
-Earlier amendments and historical filenames retain their original milestone
-numbers; use A36's mapping when following the current delivery order.
+The four North Stars remain researcher usability, low sample complexity,
+meaningful tactical/strategic team behavior and professional engineering.
+Design acceptance is separate from correctness, GPU efficiency and learning
+proof. The [documentation standard](../dev/documentation_standard.md) governs
+new explanatory prose; it does not authorize changing historical evidence.
+
+**Roadmap numbering:** A36 records the executive mapping. Older titles and file
+names keep their original milestone numbers. **Current actor inputs:** A37 owns
+the later relative-identity/version changes. A38 records the separate geometry
+work and its evidence limits. Neither is silently requalified by a docs edit.
 
 ## A1. Actor execution-information regimes
 
@@ -2459,14 +2469,80 @@ existing paired side assignments. Geometric symmetry supports equal starting
 geometry; it does not by itself prove every numerical or policy behavior is
 side-invariant.
 
-The permitted audit now passes all 52 maps: exact authored obstacle reflection
-and exact opposing same-slot spawn pads. The user corrected Darkspear in r4,
-moving only `obstacle_6` from x=14.5 to x=13.5 to reflect `obstacle_1` at x=6.5.
-All other audited map bytes are unchanged. Compiled geometry agrees within
-1e-5 world units after float32 conversion (largest discrepancy approximately
-3.09e-8). Scenario 3 r25 is a prose-only successor to the accepted r24; its
+At the earlier M7 closeout, the permitted audit passed all 52 maps: exact
+authored obstacle reflection and exact opposing same-slot spawn pads. The user
+corrected Darkspear in r4, moving only `obstacle_6` from x=14.5 to x=13.5 to
+reflect `obstacle_1` at x=6.5.
+All other audited map bytes were unchanged at that checkpoint. Compiled geometry
+agreed within 1e-5 world units after float32 conversion (largest discrepancy
+approximately 3.09e-8). Scenario 3 r25 is a prose-only successor to the accepted r24; its
 physical semantic digest is unchanged. These provenance updates implement the
-existing approvals and do not reopen them.
+existing approvals and do not reopen them. This is historical evidence; the map
+revision selection below supersedes it for new games.
+
+### Approved map publication on 2026-09-16
+
+**Status:** published locally and verified on 2026-09-16; uncommitted. All 137
+focused GPU tests passed, including the nine winning scenario lines. A separate
+GPU batch checked reset and movement on all 52 maps. Two exports produced
+identical bytes. Installed-wheel checks passed outside the repository, including
+current map loading, retained history and rejection of stale catalog entries.
+
+Publish the exact audited set: 39 maps have physical changes, Map 3 changes only
+obstacle IDs, and 12 maps are unchanged. Keep the 52 map IDs, names, splits,
+aliases and scenario content. The packaged
+[manifest](../../src/marl_battlegrounds/data/tdm/manifest.json) records the selected
+saved revision, source hash and compiled resource hash for each map. New games
+must use that selection, not a moving latest-draft lookup.
+
+The repeated source audit passed exact vertical reflection and consecutive
+obstacle IDs `0` through `N - 1` on all 52 maps. The clearance check measures
+the shortest distance between shape edges in map units, including rotated
+rectangles. It uses these approved limits:
+
+- A rectangle's open gap to a boundary wall must be at least 1.095.
+- A circle's open gap to a boundary wall must be at least 1.05. The user accepts
+  1.04999 when it rounds to 1.05.
+- A gap of at most 0.01 to a boundary wall counts as contact with that wall.
+  Check each wall separately; touching one wall does not excuse another gap.
+- A positive gap between two obstacles must be at least 1.05. Touching or
+  overlapping obstacles and the exact exceptions below are allowed.
+
+The following exceptions apply only to the named map, obstacle and wall or
+pair. Numbers refer to the audited obstacle IDs, not arbitrary later row order.
+An exception does not approve a wider set of gaps.
+
+| Map ID | Boundary-wall exceptions | Obstacle-pair exceptions |
+| --- | --- | --- |
+| 11 | 23 and 24: bottom; 25 and 26: top | None |
+| 12 | None | (6, 8), (9, 11), (17, 20), (18, 19) |
+| 13 | 10 and 17: bottom | None |
+| 31 | 4 and 7: bottom | None |
+| 39 | None | (11, 14), (11, 15) |
+| 40 | 22: bottom; 23: top | None |
+| 42 | 15, 16, 17 and 18: top | None |
+| 47 | 26: bottom; 27: top | (1, 31), (3, 30) |
+| 49 | 17 and 18: top; 19 and 20: bottom | None |
+
+GPU clearance checks of the repaired Maps 21, 36 and 48 reported minimum
+non-exempt gaps of approximately 1.142892647, 1.099999905 and 1.216316939,
+respectively. These measurements and the source audit support the declared
+geometry checks. They do not prove every crowded route is traversable or
+requalify solver performance on the changed maps.
+
+Retain prior packaged map identities in one immutable bundled
+[history resource](../../src/marl_battlegrounds/data/tdm/map_history.json).
+Old replays must keep their recorded layout, revision and identity; a new map
+selection must not relabel them as the new geometry. History supports reading
+old records and does not change the current map catalog used for new games.
+Restart running DevClient, Replay Viewer and Python processes after updating
+the package so their cached catalog is refreshed. Restarting does not change
+an already recorded game.
+
+Earlier replays, solver tests and speed measurements remain evidence for their
+recorded map versions. Do not present them as measurements of these revised
+maps. This publication does not change the approved eight scenarios, their
+embedded geometry or their winning-command witnesses.
 
 ### Final M7 DevClient and Replay Viewer work
 

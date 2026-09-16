@@ -1,4 +1,14 @@
-"""Shared JAX geometry for movement, Charge endpoints and line of sight."""
+"""Own physical projection, body-obstacle overlap and static line of sight.
+
+Ordinary movement guards the full travelled segment. Charge may cross geometry
+and instead recovers its arrival before endpoint contact correction. Both use
+the same fixed-slot geometry solver. Line of sight checks static pillars and
+walls; agents block movement but not sight.
+
+Public helpers consume already validated world coordinates, radii, masks and
+obstacle rows. Numerical queries use JAX and draw no randomness. Projection
+loop counts are static controls; data values stay dynamic. Host configuration
+validation, action meanings and episode timing remain outside this module."""
 
 from typing import cast
 
@@ -50,7 +60,11 @@ for _actor in range(MAX_AGENT_SLOTS):
 
 
 def _create_2d_rotation_matrix(theta: Array | float) -> Array:
-    """Create the 2D rotation used to move between world and wall frames."""
+    """Return the float32 (2, 2) rotation for a scalar angle in radians.
+
+    Positive angles rotate local vectors into the world frame. Passing the
+    negative wall angle performs the inverse transform used by shape tests.
+    """
     cos_theta = jnp.cos(theta)
     sin_theta = jnp.sin(theta)
 
@@ -68,7 +82,11 @@ def _disc_overlaps_active_pillar(
     radius: Array | float,
     obstacle: Array,
 ) -> Array:
-    """Return whether one disc strictly overlaps an active circular pillar."""
+    """Test strict overlap against one known active pillar.
+
+    The float32 center (2,), scalar radius and obstacle row (8,) are already
+    validated. Return a bool scalar; exact tangency is not an overlap.
+    """
     pillar_center = jnp.stack(
         (
             obstacle[OBSTACLE_FEATURE_X],
@@ -86,7 +104,13 @@ def _disc_overlaps_active_wall(
     radius: Array | float,
     obstacle: Array,
 ) -> Array:
-    """Return whether one disc strictly overlaps an active rotated wall."""
+    """Test overlap against one known active rotated wall.
+
+    Transform the center (2,) into the wall frame and measure distance to the
+    nearest rectangle point. A center inside or on the rectangle overlaps.
+    Outside centers use GEOMETRY_EPSILON so float32 rotation noise does not
+    turn legal tangency into penetration. Return a bool scalar.
+    """
     wall_center = jnp.stack(
         (
             obstacle[OBSTACLE_FEATURE_X],
@@ -118,7 +142,11 @@ def _disc_does_not_overlap_obstacle(
     radius: Array | float,
     obstacle: Array,
 ) -> Array:
-    """Return false for inactive, none, or padded obstacle rows."""
+    """Return a false bool scalar for the inactive or empty obstacle branch.
+
+    The three unused operands keep this branch compatible with lax.cond and
+    lax.switch. No body or obstacle values are inspected.
+    """
     del center, radius, obstacle
     return jnp.array(False)
 
@@ -128,7 +156,11 @@ def _active_disc_obstacle_overlap(
     radius: Array | float,
     obstacle: Array,
 ) -> Array:
-    """Dispatch one active obstacle row to its authoritative overlap predicate."""
+    """Select the overlap test for one validated active obstacle row.
+
+    Type zero is empty, one is a pillar and two is a wall. The type is dynamic
+    JAX data; host validation must reject unsupported categories beforehand.
+    """
     obstacle_type = obstacle[OBSTACLE_FEATURE_TYPE].astype(jnp.int32)
     branches = (
         _disc_does_not_overlap_obstacle,
@@ -146,10 +178,29 @@ def disc_overlaps_obstacle(
     radius: Array | float,
     obstacle: Array,
 ) -> Array:
-    """Return whether one disc strictly overlaps one active obstacle row.
+    """Test whether one disc overlaps one active obstacle.
 
-    Tangency is legal. Inactive obstacle rows never overlap. Callers must honor
-    the fixed obstacle schema and validate obstacle type categories beforehand.
+    Parameters
+    ----------
+    center : jax.Array
+        Float32 (2,) world coordinates [x, y].
+    radius : float or jax.Array
+        Nonnegative scalar body radius in world units.
+    obstacle : jax.Array
+        One validated float32 row (8,) using EnvConfig.obstacles columns.
+
+    Returns
+    -------
+    jax.Array
+        Bool scalar. False for an inactive row or legal tangency. Pillars use
+        strict distance overlap; wall tests allow GEOMETRY_EPSILON for small
+        rotation errors and treat a center inside the wall as overlapping.
+
+    Notes
+    -----
+    This pure JAX predicate checks one row. Use vmap for multiple bodies or
+    obstacles. It does not validate categories or test map bounds. Core config
+    validation owns those checks before compiled execution.
     """
     return cast(
         Array,
@@ -169,7 +220,11 @@ def _obstacle_blocks_line_of_sight(
     agent_center_b: Array,
     obstacle: Array,
 ) -> Array:
-    """Return whether one padded obstacle row blocks a LOS segment."""
+    """Test one obstacle row only when its active flag is exactly one.
+
+    Endpoints are float32 (2,) and the validated row is float32 (8,).
+    Return a bool scalar; inactive padding cannot block the segment.
+    """
     is_active = jnp.equal(obstacle[OBSTACLE_FEATURE_ACTIVE], 1.0)
 
     return cast(
@@ -190,7 +245,11 @@ def _active_obstacle_blocks_line_of_sight(
     agent_center_b: Array,
     obstacle: Array,
 ) -> Array:
-    """Dispatch active obstacle LOS blocking by obstacle type."""
+    """Select the segment test for one validated active obstacle type.
+
+    The dynamic type selects empty, pillar or wall behavior with lax.switch.
+    Type validation belongs to the host configuration boundary.
+    """
     idx = obstacle[OBSTACLE_FEATURE_TYPE].astype(jnp.int32)
     branches = [_inactive_or_none_obstacle, _pillar_dispatcher, _wall_dispatcher]
 
@@ -211,7 +270,11 @@ def _pillar_dispatcher(
     agent_center_b: Array,
     obstacle: Array,
 ) -> Array:
-    """Evaluate LOS blocking for one active circular pillar row."""
+    """Read one pillar row and test its circle against the finite sight segment.
+
+    Extract the world center and radius from the validated obstacle schema.
+    Both endpoints are float32 (2,); the result is a bool scalar.
+    """
     pillar_center = jnp.stack(
         (obstacle[OBSTACLE_FEATURE_X], obstacle[OBSTACLE_FEATURE_Y]),
         dtype=jnp.float32,
@@ -231,7 +294,11 @@ def _wall_dispatcher(
     agent_center_b: Array,
     obstacle: Array,
 ) -> Array:
-    """Evaluate LOS blocking for one active rotated wall row."""
+    """Read one wall row and test its rotated rectangle against the sight segment.
+
+    Width and height use world units; theta uses radians. Both endpoints are
+    float32 (2,); the result is a bool scalar.
+    """
     wall_center = jnp.stack(
         (obstacle[OBSTACLE_FEATURE_X], obstacle[OBSTACLE_FEATURE_Y]),
         dtype=jnp.float32,
@@ -255,7 +322,11 @@ def _inactive_or_none_obstacle(
     agent_center_b: Array,
     obstacle: Array,
 ) -> Array:
-    """Return no LOS blocking for inactive, none, or padding obstacle rows."""
+    """Return a false bool scalar for an empty line-of-sight branch.
+
+    Matching unused operands let lax.cond and lax.switch share the same call
+    shape as active obstacle tests without special handling for padded rows.
+    """
     del agent_center_a, agent_center_b, obstacle
 
     return jnp.array(False)
@@ -267,7 +338,12 @@ def _segment_intersects_circle(
     circle_center: Array,
     circle_radius: Array | float,
 ) -> Array:
-    """Return whether a finite segment intersects a circle."""
+    """Test a finite segment against a circle, including tangent contact.
+
+    Endpoints and circle center are float32 (2,); radius is scalar. The nearest
+    point is clamped to the segment. GEOMETRY_TOLERANCE expands the circle;
+    the guarded projection also handles a zero-length segment. Return bool ().
+    """
     v = segment_end - segment_start
     u = circle_center - segment_start
 
@@ -292,7 +368,13 @@ def _segment_intersects_rotated_rect(
     height: Array | float,
     theta: Array | float,
 ) -> Array:
-    """Return whether a finite segment intersects a rotated rectangle."""
+    """Test a finite segment against a rotated rectangle, including its boundary.
+
+    Endpoints and center have shape (2,). Width and height are positive world
+    lengths; theta is a scalar angle in radians. Work in the rectangle frame
+    and intersect the allowed intervals on both axes. Parallel axes use guarded
+    divisors and infinite intervals so the JAX path needs no Python branch.
+    """
     # Rotate the query segment into rectangle-local space, then use a slab test
     # against the axis-aligned local bounds.
     world_to_local = _create_2d_rotation_matrix(-theta)
@@ -366,23 +448,30 @@ def has_clear_line_of_sight(
     agent_center_b: Array,
     obstacles: Array,
 ) -> Array:
-    """Return whether static map geometry leaves a clear line of sight.
+    """Return whether static obstacles leave a clear center-to-center segment.
 
-    Active pillars and active walls block LOS. Agents are deliberately not inputs
-    because MARL-BattleGrounds v1 agents block movement but not line of sight.
-    Observation construction and targetability should consume this shared helper
-    so visibility, masks, and future debug tooling cannot drift apart.
+    Parameters
+    ----------
+    agent_center_a : jax.Array
+        Float32 (2,) world coordinates of the segment start.
+    agent_center_b : jax.Array
+        Float32 (2,) world coordinates of the segment end.
+    obstacles : jax.Array
+        Validated float32 (32, 8) table in the EnvConfig.obstacles schema.
 
-    Args:
-        agent_center_a: LOS segment start point with shape ``(2,)``.
-        agent_center_b: LOS segment end point with shape ``(2,)``.
-        obstacles: Fixed obstacle table with shape
-            ``(MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES)``.
+    Returns
+    -------
+    jax.Array
+        Bool scalar: True if no active pillar or wall blocks the finite segment.
+        Circle contact includes GEOMETRY_TOLERANCE; wall boundaries also block.
+        Inactive rows never block.
 
-    Returns:
-        Scalar boolean JAX array. ``True`` means no active static obstacle blocks
-        the segment; ``False`` means at least one active pillar or wall blocks it.
-
+    Notes
+    -----
+    Agents block movement but do not block sight, so bodies are not inputs.
+    Observations and target masks share this pure JAX helper. It maps over
+    obstacle rows internally; use an outer vmap for more segments or games.
+    It does not enforce observation radius, participation or shield rules.
     """
     obstacle_blocks_line_of_sight_vmap = jax.vmap(
         _obstacle_blocks_line_of_sight,
@@ -400,7 +489,12 @@ def has_clear_line_of_sight(
 
 
 def _wall_frame(positions: Array, obstacles: Array) -> tuple[Array, Array, Array]:
-    """Express every body centre in every obstacle's local coordinates."""
+    """Express each body center in each obstacle's rotated local frame.
+
+    Float32 positions (10, 2) and obstacle rows (32, 8) produce local centers
+    (10, 32, 2), then cosine and sine arrays (32,). The transform also runs for
+    padded rows; downstream shape masks decide which rows contribute.
+    """
     delta = (
         positions[:, None, :]
         - obstacles[None, :, OBSTACLE_FEATURE_X : OBSTACLE_FEATURE_Y + 1]
@@ -425,7 +519,13 @@ def _static_positions_are_valid(
     obstacles: Array,
     origin: float = 0.0,
 ) -> Array:
-    """Check actual shape distances independently of a chosen contact normal."""
+    """Check body endpoints against map bounds and actual obstacle shapes.
+
+    Positions (10, 2) and radii (10,) produce a bool (10,) validity mask.
+    Scalar width and height extend from origin, which defaults to 0.0.
+    GEOMETRY_EPSILON allows rounding-sized contact error. This independent
+    check does not trust the correction direction and does not test other bodies.
+    """
     local, _, _ = _wall_frame(positions, obstacles)
     half = (
         obstacles[None, :, OBSTACLE_FEATURE_WIDTH : OBSTACLE_FEATURE_HEIGHT + 1] * 0.5
@@ -464,7 +564,12 @@ def _static_positions_are_valid(
 
 
 def _box_entry(start: Array, delta: Array, half: Array) -> Array:
-    """Find the first segment entry into the expanded rectangle."""
+    """Find each segment's first entry into an expanded axis-aligned rectangle.
+
+    Start, delta and half extents broadcast with a final coordinate axis of
+    length two. Return fractions with that axis removed; one means no guarded
+    crossing. Parallel motion and motion leaving a near face remain admissible.
+    """
     moving = delta != 0
     divisor = jnp.where(moving, delta, 1)
     first = (-half - start) / divisor
@@ -488,7 +593,13 @@ def _box_entry(start: Array, delta: Array, half: Array) -> Array:
 
 
 def _circle_entry(start: Array, delta: Array, radius: Array) -> Array:
-    """Find the first segment entry deeper than the allowed circle tolerance."""
+    """Find each segment's first circle entry beyond the allowed contact error.
+
+    Start and delta end in coordinate axis two; radius broadcasts over the
+    remaining axes. Return fractions in [0, 1], using one for no guarded entry.
+    Zero movement, tangent contact and travel away from the circle do not count
+    as a crossing. GEOMETRY_EPSILON defines the tolerated inner boundary.
+    """
     a = delta[..., 0] ** 2 + delta[..., 1] ** 2
     b = start[..., 0] * delta[..., 0] + start[..., 1] * delta[..., 1]
     divisor = jnp.where(a > 0, a, 1)
@@ -516,7 +627,13 @@ def _circle_entry(start: Array, delta: Array, radius: Array) -> Array:
 def _obstacle_entry_fractions(
     start: Array, intended: Array, radii: Array, obstacles: Array
 ) -> Array:
-    """Use the same full-disc shape components as the current travel guard."""
+    """Find first full-disc entry for every body and obstacle pair.
+
+    Start and intended endpoints are (10, 2), radii are (10,), and obstacles
+    are (32, 8). Return fractions (10, 32). Walls combine expanded face strips
+    and rounded corners; pillars expand by body radius. Outward travel from a
+    small existing overlap may escape. Callers mask inactive obstacle rows.
+    """
     local, cosine, sine = _wall_frame(start, obstacles)
     world_delta = intended - start
     delta = jnp.stack(
@@ -585,7 +702,13 @@ def _swept_fraction(
     obstacles: Array,
     origin: float = 0.0,
 ) -> Array:
-    """Find the earliest whole-disc obstacle or map-bound contact."""
+    """Find the earliest guarded obstacle or map-bound contact for each body.
+
+    Start and proposed endpoints (10, 2) produce fractions (10,) in [0, 1].
+    One permits the whole segment. Radii expand obstacles and inset the map
+    bounds; unknown or inactive obstacle rows do not constrain this query.
+    Width and height extend from the scalar origin, default 0.0.
+    """
     world_delta = proposed - start
     fraction = _obstacle_entry_fractions(start, proposed, radii, obstacles)
     active = (obstacles[None, :, OBSTACLE_FEATURE_ACTIVE] == 1) & (
@@ -605,7 +728,12 @@ def _swept_fraction(
 
 
 def _balanced_sum(values: Array, axis: int) -> Array:
-    """Reuse a fixed tree instead of a backend-selected reduction tree."""
+    """Sum one fixed-size axis using an explicit pairwise reduction tree.
+
+    Pad the chosen axis to a power of two with zeros, then add pairs in a fixed
+    order. Axis and its nonempty size are static at tracing time. This avoids
+    a backend choosing a different reduction order for the contact sums.
+    """
     values = jnp.moveaxis(values, axis, -1)
     size = values.shape[-1]
     padded = 1 << (size - 1).bit_length()
@@ -617,7 +745,12 @@ def _balanced_sum(values: Array, axis: int) -> Array:
 
 
 def _sum_contact_corrections(values: Array, axis: int) -> Array:
-    """Add the same scalar contributions in the same order after row changes."""
+    """Sum signed contact values in a repeatable order after rows are permuted.
+
+    Sort along the static axis, reduce positive and negative magnitudes in
+    separate fixed trees, then subtract. Exact zero is normalized to positive
+    zero. The result removes the summed axis and retains the other dimensions.
+    """
     ordered = jnp.sort(values, axis=axis, stable=False)
     positive = jnp.maximum(ordered, 0)
     negative = jnp.maximum(-jnp.flip(ordered, axis=axis), 0)
@@ -626,7 +759,11 @@ def _sum_contact_corrections(values: Array, axis: int) -> Array:
 
 
 def _unit(vector: Array) -> tuple[Array, Array]:
-    """Return a unit direction and its length; zero remains zero."""
+    """Return unit directions and lengths for vectors with final axis two.
+
+    The direction keeps the input shape; lengths drop the coordinate axis.
+    A zero vector stays zero because its divisor is replaced by one.
+    """
     length = jnp.hypot(vector[..., 0], vector[..., 1])
     return (vector / jnp.where(length > 0, length, 1)[..., None], length)
 
@@ -640,7 +777,14 @@ def _body_corrections(
     tie_direction: Array | None = None,
     recovering_pairs: Array | None = None,
 ) -> Array:
-    """Share each pair's incoming-side correction equally between its bodies."""
+    """Share each participating pair's overlap correction between both bodies.
+
+    Positions, start and intended are float32 (10, 2); radii and participation
+    are (10,). The optional tie directions have shape (45, 2); optional recovery
+    flags have shape (45,), matching the fixed unordered-pair table. Return
+    corrections (10, 2). Prefer the incoming contact side unless a newly
+    blocking overlap needs recovery; previous positions and intent break ties.
+    """
     first, second = (jnp.asarray(_FIRST), jnp.asarray(_SECOND))
     difference = positions[first] - positions[second]
     previous = start[first] - start[second]
@@ -688,7 +832,13 @@ def _body_corrections(
 def _obstacle_corrections(
     positions: Array, radii: Array, obstacles: Array, start: Array
 ) -> Array:
-    """Reuse local rectangle projection and radial pillar projection together."""
+    """Add wall and pillar separation corrections for each body endpoint.
+
+    Positions and previous start positions are (10, 2), radii are (10,), and
+    obstacles are (32, 8). Previous approach breaks equal wall-face or central
+    pillar ties. Only known active obstacles contribute to the returned (10, 2)
+    sum. Map bounds and path safety are checked by the surrounding projection.
+    """
     local, cosine, sine = _wall_frame(positions, obstacles)
     previous, _, _ = _wall_frame(start, obstacles)
     half = (
@@ -774,7 +924,14 @@ def _commit_static_safe_positions(
     obstacles: Array,
     origin: float = 0.0,
 ) -> Array:
-    """Reuse the existing actual-shape segment shortening and endpoint check."""
+    """Commit a guarded segment endpoint or keep that body's starting point.
+
+    Start and proposed positions are (10, 2); radii and enabled masks are (10,).
+    Clamp to radius-aware map bounds, shorten travel before first static contact,
+    then independently check the endpoint. Disabled or invalid rows keep start.
+    Width and height extend from origin, default 0.0. This checks static geometry,
+    not whether the finite body-contact solver removed every body overlap.
+    """
     proposed = jnp.clip(
         proposed,
         origin + radii[:, None],
@@ -797,7 +954,13 @@ def _commit_static_safe_positions(
 def _slide_corrections(
     start: Array, proposed: Array, radii: Array, obstacles: Array
 ) -> Array:
-    """Turn an unsafe proposal along the actual shape at its first contact."""
+    """Turn a blocked proposal along the shape at its first obstacle contact.
+
+    Start and proposed positions (10, 2), radii (10,) and obstacle rows (32, 8)
+    produce corrections (10, 2). Use the contact normal of the actual wall or
+    pillar, then sum active contributions. The caller still guards the resulting
+    segment; this correction alone does not commit a position.
+    """
     fraction = _obstacle_entry_fractions(start, proposed, radii, obstacles)
     delta = proposed - start
     local, cosine, sine = _wall_frame(start, obstacles)
@@ -863,7 +1026,15 @@ def _project_geometry(
     movement_substeps: int,
     endpoint_mode: bool,
 ) -> Array:
-    """Run the shared ordinary or Charge geometry path with literal round counts."""
+    """Run the shared movement or Charge solver with fixed loop controls.
+
+    Array contracts match the two public projection helpers. Positive substeps
+    and nonnegative pass counts are static Python integers; invalid counts raise
+    ValueError before numerical execution. Endpoint mode is also static.
+    Charge recovers its arrival before resolving contacts. Ordinary movement
+    splits travel into substeps and uses each substep's fixed start for guards.
+    The result is positions (10, 2); the input arrays are not mutated.
+    """
     if (
         movement_substeps < 1
         or min(agent_agent_overlap_projection_passes, collision_projection_passes) < 0
@@ -879,7 +1050,11 @@ def _project_geometry(
     budget = collision_projection_passes
 
     def static_project(position: Array, start: Array) -> Array:
-        """Correct map bounds and actual obstacle shapes from one snapshot."""
+        """Correct bounds and obstacle penetration using one fixed starting snapshot.
+
+        Return positions (10, 2), retaining start for disabled rows. This closure
+        shares the parent geometry inputs; segment safety is checked separately.
+        """
         bounded = jnp.clip(
             position, origin + agent_radii[:, None], size - agent_radii[:, None]
         )
@@ -889,7 +1064,13 @@ def _project_geometry(
         return jnp.where(enabled[:, None], corrected, start)
 
     def substep(index: Array, current: Array) -> Array:
-        """Commit one movement increment from its fixed starting positions."""
+        """Commit one movement increment from fixed starting positions.
+
+        The scalar index selects the earlier or final contact mask. The final
+        mask replaces the earlier mask, including in a one-substep call.
+        Endpoint mode first recovers Charge arrivals. Both paths return (10, 2)
+        positions after bounded contact rounds and guarded static correction.
+        """
         intended = current + deltas
         start = current
         tie_direction = None
@@ -903,6 +1084,12 @@ def _project_geometry(
             )
 
             def recover_static(_: int, position: Array) -> Array:
+                """Recover one Charge arrival using its original approach.
+
+                The loop index is unused. Positions (10, 2) are the loop
+                carry. This endpoint phase does not require a safe travel
+                segment from the pre-Charge location.
+                """
                 return static_project(position, current)
 
             recovered = cast(
@@ -915,7 +1102,11 @@ def _project_geometry(
             start = intended
 
         def correct_static(position: Array) -> Array:
-            """Correct the proposed endpoint before checking its whole static path."""
+            """Correct a candidate endpoint and add its first-contact sliding response.
+
+            This closure reads the substep's fixed start. It returns a proposal with
+            shape (10, 2); the caller then guards the entire correction segment.
+            """
             corrected = static_project(position, start)
             return corrected + _slide_corrections(
                 start, corrected, agent_radii, obstacles
@@ -946,11 +1137,21 @@ def _project_geometry(
         )
 
         def round_step(position: Array, _: None) -> tuple[Array, None]:
-            """Apply shared body correction, then safe static correction."""
+            """Run one body-contact round followed by guarded static correction.
+
+            Positions (10, 2) are the scan carry. The second argument and output are
+            None so intermediate positions are not collected as a scan history.
+            """
             body = position
             if agent_agent_overlap_projection_passes > 0:
 
                 def separate_bodies(_: int, current_position: Array) -> Array:
+                    """Apply one body-separation sweep to positions (10, 2).
+
+                    The loop index is unused. All pair corrections read
+                    the same current positions. Their sum then updates
+                    the loop carry.
+                    """
                     return current_position + _body_corrections(
                         current_position,
                         agent_radii,
@@ -988,7 +1189,11 @@ def _project_geometry(
         return result
 
     def advance(current: Array, index: Array) -> tuple[Array, None]:
-        """Advance one physical movement substep."""
+        """Carry positions through one physical substep without collecting history.
+
+        Current positions are (10, 2); index selects the substep. Return the next
+        positions and None for the outer scan's unused output.
+        """
         return (substep(index, current), None)
 
     result, _ = jax.lax.scan(advance, agent_positions, jnp.arange(movement_substeps))
@@ -1012,19 +1217,61 @@ def project_movement_with_geometry(
 ) -> Array:
     """Move bodies through bounds, obstacles and other participating bodies.
 
-    Positions and intended deltas have shape (MAX_AGENT_SLOTS, 2). Radii and
-    masks have shape (MAX_AGENT_SLOTS,). Obstacles keep their fixed table shape.
-    Inactive and dead rows keep their original positions. Active/alive masks
-    are combined with the caller's traversal and final-contact masks.
+    Each physical substep keeps one starting point. Numerical rounds correct the
+    proposed endpoint, and only the guarded straight segment is committed. Static
+    travel must remain safe; crowded bodies may retain some overlap after the
+    finite contact budget.
 
-    Each ordinary movement substep keeps one starting point. Numerical rounds
-    correct proposed endpoints; only the checked straight segment is committed.
-    The static path must stay safe. Crowded bodies may keep a small residual.
+    Parameters
+    ----------
+    agent_positions : jax.Array
+        Float32 (10, 2) starting world [x, y] coordinates.
+    agent_radii : jax.Array
+        Float32 (10,) nonnegative body radii in world units.
+    intended_movement_deltas : jax.Array
+        Float32 (10, 2) requested world displacements for this call.
+    active_mask : jax.Array
+        Bool (10,) configured membership.
+    alive_mask : jax.Array
+        Bool (10,) current alive status. Dead and unused rows retain their input
+        positions and do not move or participate in body contacts.
+    map_width, map_height : float or jax.Array
+        Positive finite scalar map dimensions in world units, with origin (0, 0).
+    obstacles : jax.Array
+        Validated float32 (32, 8) EnvConfig.obstacles table.
+    always_participates_in_agent_agent_collision : jax.Array
+        Bool (10,) body-contact participation before the final substep. The
+        final-position mask replaces this mask on the final substep. Charge
+        has only one substep, so this mask does not select Charge contacts.
+    participates_in_agent_agent_collision_at_final_position : jax.Array
+        Bool (10,) body-contact participation on the final substep. This mask
+        replaces the earlier mask; the two are not ORed together. Every
+        selected participant must also be active and alive.
+    agent_agent_overlap_projection_passes : int, default 1
+        Static nonnegative number of body-separation sweeps per collision round.
+        Zero skips body correction.
+    collision_projection_passes : int, default 28
+        Static nonnegative number of collision rounds, used as a literal count.
 
-    The three loop controls are static Python integers. Collision rounds are
-    literal counts; zero body sweeps skips body correction. The default is four
-    physical substeps and 28 collision rounds per substep. Action meanings and
-    shield timing belong to the caller, not this helper.
+    movement_substeps : int, default 4
+        Static positive number of physical increments sharing the requested travel.
+
+    Returns
+    -------
+    jax.Array
+        Float32 (10, 2) final world positions. Inputs are not mutated.
+
+    Raises
+    ------
+    ValueError
+        movement_substeps is below one, or either pass count is negative.
+
+    Notes
+    -----
+    This pure JAX helper handles one game. Use vmap for separate games and keep
+    loop controls static under jit. Configuration validation owns dtype, shape and
+    geometry validity. The caller owns action meanings, status and shield timing;
+    this helper neither advances those values nor draws randomness.
     """
     return _project_geometry(
         agent_positions,
@@ -1058,18 +1305,63 @@ def project_charge_endpoints_with_geometry(
     agent_agent_overlap_projection_passes: int = 1,
     collision_projection_passes: int = DEFAULT_AGENT_PROJECTION_PASSES,
 ) -> Array:
-    """Place simultaneous Charge arrivals, then resolve their endpoint contacts.
+    """Place simultaneous Charge arrivals and resolve their endpoint contacts.
 
-    The ten array operands have the same shapes and mask meanings as ordinary
-    movement. The requested relocation may pass intervening bodies or obstacles.
-    Recover a statically valid arrival first, then use that arrival for body
-    contact direction and for the checked static correction path. Older physical
-    separation only breaks a direction tie. Ordinary movement runs afterward.
+    Requested relocation may pass intervening bodies or obstacles. Recover a
+    statically valid arrival first, then use that scene for body contacts and the
+    guarded correction path. Older physical separation only breaks a direction
+    tie. Ordinary movement later starts from these positions with its already
+    chosen voluntary action.
 
-    The static integer controls default to one body sweep and 28 literal
-    collision rounds. Arrival recovery also uses 28 rounds by default. This
-    helper always performs one endpoint step. Ordinary movement then starts
-    from its returned positions with the already chosen voluntary movement.
+    Parameters
+    ----------
+    agent_positions : jax.Array
+        Float32 (10, 2) starting world [x, y] coordinates.
+    agent_radii : jax.Array
+        Float32 (10,) nonnegative body radii in world units.
+    intended_movement_deltas : jax.Array
+        Float32 (10, 2) requested world displacements for this call.
+    active_mask : jax.Array
+        Bool (10,) configured membership.
+    alive_mask : jax.Array
+        Bool (10,) current alive status. Dead and unused rows retain their input
+        positions and do not move or participate in body contacts.
+    map_width, map_height : float or jax.Array
+        Positive finite scalar map dimensions in world units, with origin (0, 0).
+    obstacles : jax.Array
+        Validated float32 (32, 8) EnvConfig.obstacles table.
+    always_participates_in_agent_agent_collision : jax.Array
+        Bool (10,) body-contact participation before the final substep. The
+        final-position mask replaces this mask on the final substep. Charge
+        has only one substep, so this mask does not select Charge contacts.
+    participates_in_agent_agent_collision_at_final_position : jax.Array
+        Bool (10,) body-contact participation on the final substep. This mask
+        replaces the earlier mask; the two are not ORed together. Every
+        selected participant must also be active and alive.
+    agent_agent_overlap_projection_passes : int, default 1
+        Static nonnegative number of body-separation sweeps per collision round.
+        Zero skips body correction.
+    collision_projection_passes : int, default 28
+        Static nonnegative number of collision rounds, used as a literal count.
+
+    Returns
+    -------
+    jax.Array
+        Float32 (10, 2) final world positions after one endpoint step. Arrival
+        recovery uses collision_projection_passes rounds as well as the later
+        contact solver. A finite budget may leave some body overlap.
+
+    Raises
+    ------
+    ValueError
+        Either pass count is negative.
+
+    Notes
+    -----
+    This pure JAX helper handles one game and draws no randomness. Use vmap for
+    games and keep pass counts static under jit. The caller decides which actors
+    Charge, their intended displacement and contact masks. No action, health,
+    status or cooldown state is changed here.
     """
     return _project_geometry(
         agent_positions,

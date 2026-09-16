@@ -1,4 +1,9 @@
-/** Show the catalog's words and numbers. Python decides which rows apply. */
+/**
+ * @file Display the metric catalog and values supplied by Python. This module
+ * orders rows using catalog keys, builds navigation/search displays and
+ * registers metric tooltips. It does not compute measurements, change missing
+ * values to zero or decide which scientific measurements apply.
+ */
 import { registerTooltipOwner } from "./tooltip.js";
 
 const TOOLTIP_UNITS = Object.freeze({
@@ -13,12 +18,24 @@ const TOOLTIP_UNITS = Object.freeze({
   score: "Points",
 });
 
-/** @param {string} value */
+/**
+ * Turn string value into a title by replacing underscores with spaces and
+ * capitalizing word initials. Return text only; exact CSV names stay unchanged
+ * in records and exports. The caller supplies a string.
+ *
+ * @param {string} value
+ */
 export function metricLabel(value) {
   return value.replaceAll("_", " ").replace(/\b\w/gu, (letter) => letter.toUpperCase());
 }
 
-/** @param {Record<string, any>} row */
+/**
+ * Return row's display section index: 0 for episode/team, 2 for recipient,
+ * 3 for source-to-recipient, 4 for ally pairs, and 1 otherwise. Scope/role
+ * fields come from the catalog; no record is changed or revalidated.
+ *
+ * @param {Record<string, any>} row
+ */
 function metricSection(row) {
   if (row.scope === "team" || row.scope === "episode") return 0;
   if (row.scope === "team_recipient" || row.subject_role === "recipient") return 2;
@@ -27,7 +44,15 @@ function metricSection(row) {
   return 1;
 }
 
-/** @param {Record<string, any>} row @param {string} topic */
+/**
+ * Apply row.topic_text[topic] to a shallow row copy when present. All topics
+ * may override description/subtitle; only the five named Ultimate topics may
+ * also override label, numerator/denominator, guidance and missing_when.
+ * Without topic text, return the original row. Inputs and metric values are
+ * unchanged; nested data remains shared.
+ *
+ * @param {Record<string, any>} row @param {string} topic
+ */
 function metricText(row, topic) {
   const text = row.topic_text?.[topic];
   if (!text) return row;
@@ -51,7 +76,15 @@ function metricText(row, topic) {
   return result;
 }
 
-/** @param {Record<string, any>} summary @param {string} topic @param {string} view */
+/**
+ * Select summary.statistics for the exact topic/view location. Omit rows
+ * whose applicable field is false, keep missing values, and sort by Python's
+ * topic_order tuple then row.order. Return a new array with topic wording
+ * applied. The caller supplies a valid catalog summary; no independent
+ * metric calculation, shape validation or mutation occurs.
+ *
+ * @param {Record<string, any>} summary @param {string} topic @param {string} view
+ */
 export function selectedMetricRows(summary, topic, view) {
   const rows = summary.statistics.filter(
     (/** @type {Record<string, any>} */ row) =>
@@ -81,6 +114,15 @@ export function selectedMetricRows(summary, topic, view) {
 }
 
 /**
+ * Update topic selection and view selects from the supplied topics catalog.
+ *
+ * selection groups topics by section; view shows the selected topic's views.
+ * Retain existing valid choices, otherwise select each list's first choice.
+ * Cache JSON inventories in element datasets to avoid rebuilding equal lists.
+ * Hide viewField for a single view. topics and each views list must be
+ * nonempty/valid; an unresolved topic throws TypeError. Return undefined and
+ * change only the DOM, not the catalog.
+ *
  * @param {HTMLSelectElement} selection
  * @param {HTMLSelectElement} view
  * @param {HTMLElement} viewField
@@ -134,7 +176,14 @@ export {
   searchMeasurements,
 } from "./metric-search.js";
 
-/** @param {Record<string, any>} row @param {Record<string, any>[]} topics */
+/**
+ * Return row's primary topic label, adding its view label when needed.
+ * topics must contain primary_topic and primary_view. An unknown topic
+ * throws TypeError; a missing required view may also fail. No lookup fallback
+ * or input mutation occurs.
+ *
+ * @param {Record<string, any>} row @param {Record<string, any>[]} topics
+ */
 function primaryLocationLabel(row, topics) {
   const topic = topics.find((item) => item.name === row.primary_topic);
   if (!topic) throw new TypeError("Unknown primary measurement topic.");
@@ -145,6 +194,13 @@ function primaryLocationLabel(row, topics) {
 }
 
 /**
+ * Replace container with the first limit matches as accessible result buttons.
+ *
+ * matches is already ranked; topics resolves each primary location. limit is
+ * a caller-supplied nonnegative slice bound. Clicking a button calls select
+ * with the original row. Show applicability notices without dropping results.
+ * Return undefined; create DOM/listeners but do not compute or alter values.
+ *
  * @param {HTMLElement} container
  * @param {Record<string, any>[]} matches
  * @param {Record<string, any>[]} topics
@@ -180,7 +236,15 @@ export function renderMetricSearchResults(container, matches, topics, limit, sel
   container.replaceChildren(list);
 }
 
-/** @param {HTMLElement} container @param {Record<string, any>} row @param {Record<string, any>[]} topics */
+/**
+ * Show and focus a metric definition in container. row uses primary-topic
+ * wording; topics supplies its location label. Include guidance, units and
+ * not-applicable explanation. Return undefined and replace DOM children.
+ * The owning search flow decides when this definition view is appropriate;
+ * invalid catalog references may throw.
+ *
+ * @param {HTMLElement} container @param {Record<string, any>} row @param {Record<string, any>[]} topics
+ */
 export function renderMetricDefinition(container, row, topics) {
   row = metricText(row, row.primary_topic);
   const title = element("strong", row.label);
@@ -200,7 +264,15 @@ export function renderMetricDefinition(container, row, topics) {
   container.focus();
 }
 
-/** @param {Record<string, any>} row */
+/**
+ * Build new label/value/metadata records for row's metric tooltip. Include
+ * exact CSV name, units, directed From/To identities, a fraction's numerator
+ * and denominator, guidance and missing-value rule. Team IDs and global
+ * agent IDs come from the catalog subjects; no identities or values are
+ * inferred from the current scene. Return a mutable array without editing row.
+ *
+ * @param {Record<string, any>} row
+ */
 export function metricTooltipRows(row) {
   const directed = row.scope === "source_recipient" || row.scope === "team_recipient";
   const rows = [
@@ -233,7 +305,13 @@ export function metricTooltipRows(row) {
   }));
 }
 
-/** @param {string} tag @param {string} text */
+/**
+ * Create a detached page-document element with tag and literal textContent.
+ * Return the node; no HTML parsing or attachment occurs. Callers supply the
+ * trusted local tag and display text.
+ *
+ * @param {string} tag @param {string} text
+ */
 function element(tag, text) {
   const node = document.createElement(tag);
   node.textContent = text;
@@ -241,6 +319,15 @@ function element(tag, text) {
 }
 
 /**
+ * Replace container with the selected metric table and update description.
+ *
+ * topicName/view select rows from summary; the catalog controls row order and
+ * section placement. Format valid values in en-GB with up to four decimals
+ * for fractions/ratios, two otherwise. Preserve exact values in data attributes.
+ * Invalid measurements show an em dash and missing-value help, never zero.
+ * Register tooltips on new measure labels. Return undefined; mutate only DOM.
+ * The caller supplies a valid summary/topic and owns fetching/exporting data.
+ *
  * @param {HTMLElement} container
  * @param {string} topicName
  * @param {string} view

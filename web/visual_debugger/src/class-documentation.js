@@ -1,12 +1,32 @@
+/**
+ * @file Provide class guides for the exact supported documentation profile.
+ * Qualitative text is authored here; numerical values arrive as named,
+ * already formatted strings from an authorized presentation. Unknown profiles,
+ * classes or missing/extra interpolation values return no guide.
+ */
 const CANONICAL_PROFILE_ID = "marl_battlegrounds.class_documentation.canonical_v1";
 const TEMPLATE_TOKEN = /\{\{([A-Za-z][A-Za-z0-9]*)\}\}/gu;
 
-/** @param {string} label @param {string} value */
+/**
+ * Return a frozen guide row containing label and value exactly as supplied.
+ * Both arguments are strings owned by this module. No validation or formatting
+ * is performed; the returned row can be shared by class definitions.
+ *
+ * @param {string} label @param {string} value
+ */
 function tacticalRow(label, value) {
   return Object.freeze({ label, value });
 }
 
 /**
+ * Freeze one authored class definition and discover its interpolation keys.
+ *
+ * value supplies overview, tacticalGuideRows, Ultimate/passive names and their
+ * templates. Scan the two templates for named double-brace tokens, preserving
+ * first occurrence and removing duplicate names. Return a frozen outer record
+ * with copied/frozen row and key arrays. Row objects are reused; their creator
+ * owns freezing. Inputs are not validated or changed.
+ *
  * @param {{
  *   overview: string,
  *   tacticalGuideRows: readonly Readonly<{label: string, value: string}>[],
@@ -122,7 +142,13 @@ const CLASS_DOCUMENTATION = Object.freeze({
 });
 
 /**
- * Snapshot an exact plain record without invoking accessors or coercions.
+ * Copy an exact plain record of display strings, or return null.
+ *
+ * value must have exactly expectedKeys as own enumerable data properties,
+ * with no symbol keys or getters. Each value must be a nonempty string with no
+ * outer whitespace, line breaks or whole-word unavailable text. Read property
+ * descriptors, not getters. Return a new null-prototype record (not frozen);
+ * invalid input and inspection errors return null. No numeric parsing occurs.
  *
  * @param {unknown} value
  * @param {readonly string[]} expectedKeys
@@ -169,12 +195,26 @@ function exactStringRecord(value, expectedKeys) {
   }
 }
 
-/** @param {string} template @param {Readonly<Record<string, string>>} values */
+/**
+ * Replace every named double-brace token in template with values[name].
+ * The caller must already have checked that every required string exists.
+ * Return a new string without changing either argument; this helper does not
+ * validate, format numerical values or escape HTML.
+ *
+ * @param {string} template @param {Readonly<Record<string, string>>} values
+ */
 function interpolate(template, values) {
   return template.replace(TEMPLATE_TOKEN, (_token, name) => values[name]);
 }
 
 /**
+ * Select the shared definition for a recognized profile and class ID.
+ *
+ * documentationProfile must contain exactly availability_kind=available and
+ * the supported profile_id. classId must be a safe integer from 1 to 5. Return
+ * the frozen definition or null; no fallback by class name or global slot is
+ * allowed. This checks profile fields, not a separate cryptographic proof.
+ *
  * @param {unknown} documentationProfile
  * @param {unknown} classId
  */
@@ -196,7 +236,11 @@ function certifiedDefinition(documentationProfile, classId) {
 }
 
 /**
- * Return the exact ordered interpolation keys for one certified class guide.
+ * Return the ordered string names needed to render one class guide.
+ *
+ * documentationProfile and classId use certifiedDefinition's exact checks.
+ * Success returns the shared frozen key array; an unknown profile/class
+ * returns null. No quantities are looked up and no argument is changed.
  *
  * @param {unknown} documentationProfile
  * @param {unknown} classId
@@ -207,8 +251,14 @@ export function requiredClassDocumentationValueNamesV1(documentationProfile, cla
 }
 
 /**
- * Resolve exact authored documentation only for Python's certified profile.
- * All quantities must arrive as named, already-formatted authorized strings.
+ * Render the supported class guide using exact authorized display strings.
+ *
+ * documentationProfile and classId select the definition. authorizedValues
+ * must contain exactly that definition's named interpolation strings; missing,
+ * extra, empty or unavailable values return null, as does an unknown profile.
+ * Success returns a frozen guide with overview, shared frozen tactical rows
+ * and newly frozen Ultimate/passive sections. It never invents numerical
+ * values or alters inputs. The caller owns the authorization of supplied facts.
  *
  * @param {unknown} documentationProfile
  * @param {unknown} classId

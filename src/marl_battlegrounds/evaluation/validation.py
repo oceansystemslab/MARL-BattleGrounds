@@ -1,4 +1,10 @@
-"""Cross-record semantic validation for one captured evaluation transition."""
+"""Validate the joins between captured episode, frame, and transition records.
+
+These host-only checks compare declared wire types, stable identifiers, decision
+epochs, inactive padding, information sharing, task completion, and canonical
+events. They read Core-authored facts; they do not replay simulator physics.
+Historical frame versions remain paired with their declared context version.
+"""
 
 from typing import cast
 
@@ -29,7 +35,11 @@ _CONTEXT_FEATURE_TDM_SCORE_THRESHOLD_V1 = 16
 
 
 def _is_canonical_neutral(value: object) -> bool:
-    """Return whether one fixed-axis payload contains only padding values."""
+    """Recognize nested tuple padding made only of None, false, or numeric zero.
+
+    Lists, dictionaries, strings, and other objects are not canonical padding.
+    Boolean and numeric types are checked exactly so coercible objects do not pass.
+    """
     if value is None:
         return True
     if isinstance(value, tuple):
@@ -48,6 +58,10 @@ def _require_inactive_slot_neutral(
     global_slot: int,
     field_name: str,
 ) -> None:
+    """Raise ValueError when a named inactive-slot value is not canonical padding.
+
+    The slot index and field name are used only to make the error actionable.
+    """
     if not _is_canonical_neutral(value):
         raise ValueError(f"inactive slot {global_slot} must be neutral in {field_name}")
 
@@ -56,7 +70,11 @@ def _validate_inactive_frame_padding(
     context: EvaluationEpisodeContext,
     frame: EvaluationFrame,
 ) -> None:
-    """Validate dynamic snapshot padding without reconstructing actor inputs."""
+    """Check zero padding in every dynamic snapshot row for inactive roster slots.
+
+    This checks recorded snapshot values only. It neither reconstructs actor inputs
+    nor changes the frame. A nonneutral row raises ValueError.
+    """
     snapshot = frame.snapshot
     slot_fields = (
         "alive_mask",
@@ -89,7 +107,13 @@ def _validate_inactive_fact_padding(
     context: EvaluationEpisodeContext,
     transition: EvaluationTransitionV1,
 ) -> None:
-    """Validate core-authored inactive fact rows while retaining submitted intent."""
+    """Check inactive rows and source/recipient routes in Core-authored facts.
+
+    Accepted actions, combat, death, shield, regeneration, movement, status, respawn,
+    and aura facts must be neutral for inactive slots. Combat routes cannot name an
+    inactive recipient. Submitted intent is deliberately retained without this
+    neutrality rule. Violations raise ValueError; records are not changed.
+    """
     facts = transition.facts
     acceptance = facts.action_acceptance_facts
     combat = facts.combat_transition_facts
@@ -222,7 +246,12 @@ def _validate_inactive_fact_padding(
 
 
 def _matches_declared_model_tree(candidate: object, canonical: object) -> bool:
-    """Compare exact nested schema types and primitive values without model equality."""
+    """Compare a validated model tree with an input tree using exact Python types.
+
+    Reject model subclasses, extra/private model state, changed fields, and primitive
+    coercions. Recursively compare tuples and dictionaries without relying on
+    Pydantic model equality. Return a boolean and leave both trees unchanged.
+    """
     if isinstance(canonical, EvaluationModel):
         if type(candidate) is not type(canonical):
             return False
@@ -272,7 +301,33 @@ def validate_declared_model_tree(
     record_name: str,
     expected_type: type[EvaluationModel],
 ) -> EvaluationModel:
-    """Reject undeclared root subtypes and unchecked Pydantic escape hatches."""
+    """Revalidate one record without accepting hidden types or coercions.
+
+    Parameters
+    ----------
+    model : EvaluationModel
+        Existing evaluation model to check, including all nested values.
+    record_name : str
+        Human-readable record label used in errors.
+    expected_type : type[EvaluationModel]
+        Exact permitted root model class; subclasses are rejected.
+
+    Returns
+    -------
+    EvaluationModel
+        Newly validated model reconstructed from the input's Python-mode field dump.
+
+    Raises
+    ------
+    ValueError
+        The root type differs, structural validation fails, or nested
+        types, private/extra state, or values change during revalidation.
+
+    Notes
+    -----
+    This host boundary also rejects invalid objects made with unchecked Pydantic
+    construction. It does not mutate the input or accept merely equal subclasses.
+    """
     if type(model) is not expected_type:
         raise ValueError(
             f"{record_name} must use exact declared root type {expected_type.__name__}"
@@ -298,6 +353,12 @@ def _validate_frame_information_regime(
     context: EvaluationEpisodeContext,
     frame: EvaluationFrame,
 ) -> None:
+    """Require the context's frame version and allowed SharedObs source cells.
+
+    Context V3 requires frame V2; older contexts require frame V1. NoSharedObs omits
+    availability. SharedObs supplies it and forbids self, inactive, and cross-team
+    cells. Other same-team cells may be false. Mismatches raise ValueError.
+    """
     expected_frame_type = (
         EvaluationFrameV2
         if type(context) is EvaluationEpisodeContextV3
@@ -334,7 +395,12 @@ def _validate_task_context_projection(
     context: EvaluationEpisodeContext,
     frame: EvaluationFrame,
 ) -> None:
-    """Reconcile every policy-visible task fact with snapshot/config authority."""
+    """Check policy-visible task fields against recorded snapshot/configuration facts.
+
+    For each active slot, verify tick, horizon, mode, team-relative scores, threshold,
+    and unused task padding. Inactive context rows must be neutral. Raise ValueError
+    on disagreement; these frozen wire coordinates keep this reader free of JAX.
+    """
     config = context.resolved_env_config
     scores = frame.snapshot.team_deathmatch_scores
     is_team_deathmatch = config.task_mode == 1
@@ -392,7 +458,14 @@ def _derive_and_validate_team_deathmatch_authority_v1(
     terminated: bool,
     truncated: bool,
 ) -> tuple[tuple[float, float] | None, str | None]:
-    """Derive TDM reward and done metadata from joined core authority."""
+    """Check rewards and completion flags against joined task facts.
+
+    Return per-team reward and owning end reason for TDM, or (None, None) for
+    task-neutral transitions. Active slots receive their configured team's reward;
+    inactive slots receive zero. Threshold and horizon flags can both be true.
+    Raise ValueError on inconsistent flags or rewards. This uses recorded Core facts
+    and the shared event authority rather than rerunning a transition.
+    """
     authority = _derive_team_deathmatch_authority_v1(
         context,
         start_frame,
@@ -454,7 +527,12 @@ def _validate_context_joined_frame(
     *,
     record_name: str,
 ) -> EvaluationFrame:
-    """Revalidate one frame and its context-owned semantic constraints."""
+    """Return a revalidated frame after checking episode, task, and information joins.
+
+    Require its context-owned frame version, canonical ID, inactive padding, and
+    policy-visible task fields. Non-TDM frames keep TDM scores zero. Raise ValueError
+    with the supplied record label on a mismatch; do not mutate the original frame.
+    """
     frame = cast(
         EvaluationFrame,
         validate_declared_model_tree(
@@ -490,7 +568,31 @@ def validate_context_joined_evaluation_frame_v1(
     context: EvaluationEpisodeContext,
     frame: EvaluationFrame,
 ) -> None:
-    """Deeply validate one exact frame against its context-owned authority."""
+    """Check one captured frame against its episode context.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact supported episode context with resolved configuration and roster.
+    frame : EvaluationFrame
+        Matching frame type: V2 for context V3, otherwise V1.
+
+    Returns
+    -------
+    None
+        None.
+
+    Raises
+    ------
+    ValueError
+        Structural types, IDs, padding, task fields, or information
+        availability disagree with the context.
+
+    Notes
+    -----
+    Any valid frame index is allowed. This host-only validator does not require
+    frame zero, a preceding transition, or simulator execution.
+    """
     validate_declared_model_tree(
         context,
         record_name="context",
@@ -507,13 +609,33 @@ def validate_initial_evaluation_frame_v1(
     context: EvaluationEpisodeContext,
     initial_frame: EvaluationFrame,
 ) -> None:
-    """Validate the context-joined artifact frame at capture index zero.
+    """Check frame zero and the episode's remaining capture horizon.
 
-    The artifact index and ID are canonicalized independently of the simulator
-    epoch. Scenario and resumed-state capture may begin at a nonnegative
-    ``simulator_step_count`` accepted by ``EvaluationFrameV1``. Team Deathmatch
-    additionally joins the declared artifact-transition count to the remaining
-    simulator horizon.
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact supported episode context with declared transition count.
+    initial_frame : EvaluationFrame
+        Matching captured frame at artifact index zero. Its simulator
+        tick may be nonzero, as in scenario or resumed-state capture.
+
+    Returns
+    -------
+    None
+        None.
+
+    Raises
+    ------
+    ValueError
+        The context/frame join is invalid, the artifact index is not zero,
+        or TDM starts terminal or declares a horizon inconsistent with the
+        remaining simulator ticks.
+
+    Notes
+    -----
+    Artifact indices and simulator ticks are different coordinates. For TDM,
+    initial simulator tick plus expected_horizon must equal maximum_episode_steps.
+    The frame must precede both score-threshold and horizon completion.
     """
     validate_declared_model_tree(
         context,
@@ -553,12 +675,37 @@ def validate_evaluation_transition_unit_v1(
     transition: EvaluationTransitionV1,
     successor_frame: EvaluationFrame,
 ) -> None:
-    """Validate one context/start/transition/successor semantic unit.
+    """Check one complete start/action/result unit from a captured episode.
 
-    Validation reconstructs identifiers from trusted fields, checks both
-    simulator and artifact adjacency, revalidates each strict record, re-decodes
-    the complete canonical event sequence, and reconciles task-owned score,
-    result, reward, completion flags, and end-reason authority.
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact supported episode context owning configuration and roster.
+    start_frame : EvaluationFrame
+        Captured decision frame before the transition.
+    transition : EvaluationTransitionV1
+        Exact V1 transition with submitted/accepted action facts, rewards,
+        completion flags, and decoded events.
+    successor_frame : EvaluationFrame
+        Context-compatible frame exactly one artifact index and one
+        simulator tick after start_frame.
+
+    Returns
+    -------
+    None
+        None.
+
+    Raises
+    ------
+    ValueError
+        Any type, episode/ID join, adjacency, inactive fact, task result,
+        reward, end reason, or canonical event sequence is inconsistent.
+
+    Notes
+    -----
+    Initialization facts cannot serve as a transition. Validation reconstructs
+    declared models and decodes events from recorded facts on the host. It checks
+    record consistency, not whether a fresh simulation would reproduce the facts.
     """
     _canonicalize_evaluation_transition_unit_v1(
         context, start_frame, transition, successor_frame
@@ -576,7 +723,14 @@ def _canonicalize_evaluation_transition_unit_v1(
     EvaluationTransitionV1,
     EvaluationFrame,
 ]:
-    """Validate once and retain the detached copies for an internal consumer."""
+    """Validate a joined transition and return detached context/frame/transition copies.
+
+    The returned order matches the four arguments. Check exact model types, canonical
+    IDs, consecutive artifact indices and simulator ticks, real transition facts,
+    inactive padding, task-owned rewards/completion, and the entire decoded event
+    sequence. Raise ValueError on a mismatch. Internal consumers reuse these copies
+    to avoid validating and reconstructing the same unit twice.
+    """
     context = cast(
         EvaluationEpisodeContext,
         validate_declared_model_tree(

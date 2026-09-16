@@ -1,4 +1,4 @@
-"""Movement integration tests across the simulator's movement contracts."""
+"""Check movement through the simulator's complete movement path."""
 # pyright: reportPrivateUsage=false
 
 from typing import TypedDict, cast
@@ -67,8 +67,6 @@ from marl_battlegrounds.core.types import (
 
 
 class _CombatStateFields(TypedDict):
-    """Keyword fields for inert combat and action-history test state."""
-
     current_health: Array
     ultimate_cooldowns: Array
     slow_durations: Array
@@ -84,7 +82,6 @@ class _CombatStateFields(TypedDict):
 
 
 def _inert_combat_state_fields(living_mask: Array) -> _CombatStateFields:
-    """Return neutral fields with coherent positive health for living slots."""
     return {
         "current_health": living_mask.astype(jnp.float32),
         "ultimate_cooldowns": jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
@@ -118,13 +115,11 @@ def _inert_combat_state_fields(living_mask: Array) -> _CombatStateFields:
 
 
 def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
-    """Return the action mask paired with an explicitly built test state."""
     _, action_mask = _build_observation_and_action_mask(state, config)
     return action_mask
 
 
 def _obstacle_array_with_rows(*rows: tuple[int, Array]) -> Array:
-    """Create a padded obstacle array with selected slots populated."""
     obstacles = jnp.zeros(
         (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
         dtype=jnp.float32,
@@ -138,7 +133,6 @@ def _obstacle_array_with_rows(*rows: tuple[int, Array]) -> Array:
 
 
 def _empty_obstacles() -> Array:
-    """Create a padded all-inactive obstacle table."""
     return jnp.zeros(
         (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
         dtype=jnp.float32,
@@ -146,7 +140,6 @@ def _empty_obstacles() -> Array:
 
 
 def _empty_obstacle() -> Array:
-    """Create an inactive padding obstacle row."""
     return jnp.zeros((OBSTACLE_FEATURES,), dtype=jnp.float32)
 
 
@@ -156,7 +149,6 @@ def _pillar_obstacle(
     *,
     active: bool = True,
 ) -> Array:
-    """Create a pillar obstacle row."""
     pillar = _empty_obstacle()
 
     pillar = pillar.at[OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_PILLAR)
@@ -178,7 +170,6 @@ def _wall_obstacle(
     *,
     active: bool = True,
 ) -> Array:
-    """Create a wall obstacle row parameterized by center, size, and rotation."""
     wall = _empty_obstacle()
 
     wall = wall.at[OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_WALL)
@@ -205,7 +196,6 @@ def _deterministic_config(
     spawn_shield_duration_steps: int = 3,
     spawn_shield_movement_speed: float = 2.0,
 ) -> EnvConfig:
-    """Create a deterministic config for movement integration tests."""
     profile = resolve_agent_profile(
         jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
         jnp.asarray((team_size, team_size), dtype=jnp.int32),
@@ -244,7 +234,6 @@ def _deterministic_config(
 
 
 def _agent_positions_array_with_rows(*rows: tuple[int, Array]) -> Array:
-    """Create a padded agent-position array with selected slots populated."""
     agent_positions = jnp.zeros(
         (MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS),
         dtype=jnp.float32,
@@ -258,7 +247,6 @@ def _agent_positions_array_with_rows(*rows: tuple[int, Array]) -> Array:
 
 
 def _agent_radii_array_with_rows(*rows: tuple[int, Array | float]) -> Array:
-    """Create a padded agent-radius vector with selected slots populated."""
     radii = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32)
 
     for slot, radius in rows:
@@ -272,7 +260,6 @@ def _slot_float_vector(
     default_value: float,
     *rows: tuple[int, Array | float],
 ) -> Array:
-    """Create a float32 slot vector with selected overrides."""
     values = jnp.full((MAX_AGENT_SLOTS,), default_value, dtype=jnp.float32)
 
     for slot, value in rows:
@@ -286,7 +273,6 @@ def _slot_int_vector(
     default_value: int,
     *rows: tuple[int, Array | int],
 ) -> Array:
-    """Create an int32 slot vector with selected overrides."""
     values = jnp.full((MAX_AGENT_SLOTS,), default_value, dtype=jnp.int32)
 
     for slot, value in rows:
@@ -297,7 +283,6 @@ def _slot_int_vector(
 
 
 def _mask_with_true_slots(*slots: int) -> Array:
-    """Create a slot mask with only selected slots marked true."""
     mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
 
     for slot in slots:
@@ -319,7 +304,6 @@ def _state_with_single_active_alive_agent(
     spawn_shield_duration: int = 0,
     step_count: int = 0,
 ) -> tuple[EnvConfig, EnvState]:
-    """Create an exact config/state pair with only slot 0 participating."""
     active_mask = _mask_with_true_slots(0)
     profile = config.agent_profile._replace(
         active_mask=active_mask,
@@ -370,12 +354,6 @@ def _state_with_two_agents(
     agent_b_spawn_shield_duration: int = 0,
     step_count: int = 0,
 ) -> tuple[EnvConfig, EnvState]:
-    """Create an exact low-level pair for movement-kernel boundary tests.
-
-    The helper intentionally permits catalog overrides and noncanonical payload
-    in inactive rows so masking is tested rather than assumed. Such cases are
-    adversarial kernel inputs, not official host-validated state evidence.
-    """
     assert 0 < agent_b_slot < MAX_AGENT_SLOTS
 
     active_mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
@@ -436,7 +414,6 @@ def _state_with_two_agents(
 
 
 def _joint_action_with_moves(*rows: tuple[int, int]) -> Action:
-    """Create a slot-aligned joint action with selected movement overrides."""
     joint_action_moves = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
     joint_action_targets = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
     joint_action_ults = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
@@ -453,7 +430,6 @@ def _joint_action_with_moves(*rows: tuple[int, int]) -> Action:
 
 
 def _assert_center_close(result: Array, expected: Array) -> None:
-    """Assert that a position row matches the expected float32 center."""
     assert result.shape == (ENVIRONMENT_DIMENSIONS,)
     assert result.dtype == jnp.float32
     assert bool(
@@ -474,7 +450,6 @@ def _assert_agents_do_not_overlap(
     radius_a: float,
     radius_b: float,
 ) -> None:
-    """Assert that two agent discs are separated."""
     center_a = agent_positions[slot_a]
     center_b = agent_positions[slot_b]
 
@@ -485,12 +460,10 @@ def _assert_agents_do_not_overlap(
 
 
 def _assert_agent_positions_are_finite(agent_positions: Array) -> None:
-    """Assert that all slot-aligned positions are finite."""
     assert bool(jnp.all(jnp.isfinite(agent_positions)))
 
 
 def _assert_position_history_contract(position_history: Array, *, horizon: int) -> None:
-    """Assert the scan-emitted position history shape and dtype."""
     assert position_history.shape == (
         horizon,
         MAX_AGENT_SLOTS,
@@ -500,7 +473,6 @@ def _assert_position_history_contract(position_history: Array, *, horizon: int) 
 
 
 def _assert_state_contract(state: EnvState) -> None:
-    """Assert the EnvState shape and dtype contract."""
     assert state.step_count.shape == ()
     assert state.step_count.dtype == jnp.int32
 
@@ -518,7 +490,6 @@ def _assert_state_contract(state: EnvState) -> None:
 
 
 def _assert_observation_contract(observation: Observation) -> None:
-    """Assert the Observation shape and dtype contract."""
     assert observation.self_features.shape == (MAX_AGENT_SLOTS, SELF_FEATURES)
     assert observation.self_features.dtype == jnp.float32
 
@@ -570,7 +541,6 @@ def _assert_observation_contract(observation: Observation) -> None:
 
 
 def _assert_action_mask_contract(action_mask: ActionMask) -> None:
-    """Assert the ActionMask shape and dtype contract."""
     assert action_mask.move_mask.shape == (MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS)
     assert action_mask.move_mask.dtype == bool
 
@@ -612,7 +582,6 @@ def _assert_action_mask_contract(action_mask: ActionMask) -> None:
 
 
 def _assert_reward_contract(reward: Reward) -> None:
-    """Assert the placeholder reward contract."""
     assert reward.rewards.shape == (MAX_AGENT_SLOTS,)
     assert reward.rewards.dtype == jnp.float32
     assert bool(jnp.all(reward.rewards == 0.0))
@@ -623,7 +592,6 @@ def _assert_done_flags_contract(
     *,
     expected_truncated: bool,
 ) -> None:
-    """Assert the placeholder done-flag contract."""
     assert done_flags.terminated.shape == ()
     assert done_flags.terminated.dtype == bool
     assert bool(done_flags.terminated) is False
@@ -634,7 +602,6 @@ def _assert_done_flags_contract(
 
 
 def _assert_single_agent_action_mask_semantics(action_mask: ActionMask) -> None:
-    """Assert one living actor plus canonical no-op rows for padded slots."""
     assert bool(jnp.all(action_mask.move_mask[0]))
     assert bool(jnp.all(action_mask.move_mask[1:, MOVE_STAY]))
     assert bool(jnp.all(jnp.sum(action_mask.move_mask[1:], axis=-1) == 1))
@@ -660,7 +627,6 @@ def _assert_center_inside_bounds(
     radius: float,
     config: EnvConfig,
 ) -> None:
-    """Assert that an agent center satisfies the map-boundary invariant."""
     assert float(center[0]) >= radius - GEOMETRY_TOLERANCE
     assert float(center[0]) <= config.map_width - radius + GEOMETRY_TOLERANCE
     assert float(center[1]) >= radius - GEOMETRY_TOLERANCE
@@ -674,7 +640,6 @@ def _assert_center_outside_pillar(
     pillar_center: Array,
     pillar_radius: float,
 ) -> None:
-    """Assert that an agent disc does not overlap a circular pillar."""
     distance = cast(Array, jnp.linalg.norm(center - pillar_center))
     minimum_valid_distance = agent_radius + pillar_radius
 
@@ -689,7 +654,6 @@ def _assert_center_outside_axis_aligned_wall(
     wall_width: float,
     wall_height: float,
 ) -> None:
-    """Assert that an agent disc does not overlap an axis-aligned wall."""
     half_width = wall_width / 2.0
     half_height = wall_height / 2.0
 
@@ -711,7 +675,6 @@ def _assert_center_outside_rotated_wall(
     wall_height: float,
     theta: float,
 ) -> None:
-    """Assert that an agent disc does not overlap a rotated rectangular wall."""
     relative = center - wall_center
 
     cos_theta = jnp.cos(-theta)
@@ -843,7 +806,6 @@ def test_movement_calibration_scales_every_nonstay_direction(
     move_action: int,
     expected_direction: tuple[float, float],
 ) -> None:
-    """Prove calibrated displacement preserves direction and unit normalization."""
     movement_scale = 0.1
     config = _deterministic_config(ordinary_movement_distance_scale=movement_scale)
     start = jnp.asarray((10.0, 6.0), dtype=jnp.float32)
@@ -877,7 +839,6 @@ def test_movement_calibration_scales_every_nonstay_direction(
 
 
 def test_movement_calibration_matches_representative_lane_budget_under_scan() -> None:
-    """Prove exact float32 engagement and seven-unit traversal cadence."""
     movement_scale = 0.1
     horizon = 70
     config = _deterministic_config(ordinary_movement_distance_scale=movement_scale)
@@ -1344,7 +1305,6 @@ def test_step_projects_active_alive_agent_outside_rotated_wall() -> None:
 
 
 def test_inactive_slots_with_nonstay_action_preserve_original_positions() -> None:
-    """Prove malformed inactive payload remains physically inert at kernel level."""
     config = _deterministic_config()
     key = jax.random.key(42)
 
@@ -1529,7 +1489,6 @@ def test_spawn_shield_counter_decrements_once_without_underflow(
     current_duration: int,
     expected_next_duration: int,
 ) -> None:
-    """Prove one current-state counter controls one transition of protection."""
     config = _deterministic_config(
         team_size=1,
         spawn_shield_duration_steps=configured_duration,
@@ -1556,7 +1515,6 @@ def test_spawn_shield_counter_decrements_once_without_underflow(
 
 
 def test_spawn_shield_counter_clears_dead_and_inactive_rows() -> None:
-    """Prove nonparticipating slots cannot retain malformed shield counters."""
     config = _deterministic_config(
         team_size=1,
         spawn_shield_duration_steps=3,
@@ -1610,7 +1568,6 @@ def test_spawn_shield_uses_absolute_speed_for_every_nonstay_heading(
     expected_direction: tuple[float, float],
     spawn_shield_movement_speed: float,
 ) -> None:
-    """Prove shield movement bypasses profile, status, and ordinary scaling."""
     config = _deterministic_config(
         team_size=1,
         ordinary_movement_distance_scale=0.125,
@@ -1663,7 +1620,6 @@ def test_spawn_shield_uses_absolute_speed_for_every_nonstay_heading(
 
 
 def test_spawn_shield_stay_is_zero_movement_and_consumes_one_step() -> None:
-    """Prove the speed override never turns Stay into forced movement."""
     config = _deterministic_config(
         team_size=1,
         spawn_shield_movement_speed=2.0,
@@ -1698,7 +1654,6 @@ def test_spawn_shielded_body_neither_pushes_nor_receives_displacement(
     agent_a_duration: int,
     agent_b_duration: int,
 ) -> None:
-    """Prove one exempt endpoint makes the entire agent pair noncolliding."""
     config = _deterministic_config(
         team_size=5,
         spawn_shield_movement_speed=2.0,
@@ -1736,7 +1691,6 @@ def test_spawn_shield_expiry_controls_only_final_endpoint_collision(
     spawn_shield_duration: int,
     collision_is_expected: bool,
 ) -> None:
-    """Prove counter one rejoins collision after collision-exempt traversal."""
     config = _deterministic_config(
         team_size=5,
         spawn_shield_movement_speed=2.0,
@@ -1777,7 +1731,6 @@ def test_spawn_shield_expiry_controls_only_final_endpoint_collision(
 
 
 def test_expiring_spawn_shield_rejects_charge_but_preserves_movement() -> None:
-    """Keep an expiring shield movement-only for the complete transition."""
     config = _deterministic_config(
         team_size=5,
         ordinary_movement_distance_scale=0.1,
@@ -1896,7 +1849,6 @@ def test_spawn_shield_stay_rejoins_collision_only_on_expiry(
     spawn_shield_duration: int,
     collision_is_expected: bool,
 ) -> None:
-    """Prove zero movement still reaches the existing final collision pass."""
     config = _deterministic_config(team_size=5)
     first_start = jnp.asarray((5.0, 5.0), dtype=jnp.float32)
     second_start = jnp.asarray((5.5, 5.0), dtype=jnp.float32)
@@ -1929,7 +1881,6 @@ def test_spawn_shield_stay_rejoins_collision_only_on_expiry(
 
 
 def test_simultaneous_spawn_shield_expiry_is_team_and_slot_independent() -> None:
-    """Prove equivalent same-team and opposing-team pairs resolve identically."""
     pair_results: list[Array] = []
 
     for second_slot in (1, MAX_AGENTS_PER_TEAM):
@@ -1963,7 +1914,6 @@ def test_simultaneous_spawn_shield_expiry_is_team_and_slot_independent() -> None
 
 
 def test_spawn_shield_movement_keeps_bounds_and_obstacles_authoritative() -> None:
-    """Prove collision exemption does not bypass static world geometry."""
     pillar_center = jnp.asarray((10.0, 6.0), dtype=jnp.float32)
     pillar_radius = 0.5
     obstacles = _obstacle_array_with_rows(
@@ -2005,7 +1955,6 @@ def test_spawn_shield_movement_keeps_bounds_and_obstacles_authoritative() -> Non
 
 
 def test_spawn_shield_duration_paths_match_eager_jit_and_vmap() -> None:
-    """Prove mixed counters batch through one fixed-shape transition program."""
     durations = (0, 1, 3, 7)
     config = _deterministic_config(
         team_size=1,
@@ -2122,7 +2071,6 @@ def test_spawn_shield_duration_paths_match_eager_jit_and_vmap() -> None:
 
 
 def test_spawn_shield_trajectory_matches_eager_jit_and_scan() -> None:
-    """Prove three protected moves then ordinary movement in a compiled rollout."""
     horizon = 4
     config = _deterministic_config(
         team_size=1,
@@ -2225,7 +2173,6 @@ def test_spawn_shield_trajectory_matches_eager_jit_and_scan() -> None:
 def test_current_stun_exposes_stay_only_and_suppresses_voluntary_movement(
     active_stun_channels: tuple[int, ...],
 ) -> None:
-    """Prove every current stun source aligns speed, mask, and movement intent."""
     config = _deterministic_config(team_size=1)
     start = jnp.asarray((10.0, 6.0), dtype=jnp.float32)
     config, state = _state_with_single_active_alive_agent(config, start)
@@ -2258,7 +2205,6 @@ def test_current_stun_exposes_stay_only_and_suppresses_voluntary_movement(
 
 
 def test_forged_movement_mask_cannot_restore_stunned_voluntary_movement() -> None:
-    """Prove direct transition enforcement survives a stale or forged mask."""
     config = _deterministic_config(team_size=1)
     start = jnp.asarray((10.0, 6.0), dtype=jnp.float32)
     config, state = _state_with_single_active_alive_agent(config, start)
@@ -2288,7 +2234,6 @@ def test_forged_movement_mask_cannot_restore_stunned_voluntary_movement() -> Non
 
 
 def test_collision_projection_may_displace_a_stunned_zero_intent_body() -> None:
-    """Prove stun removes voluntary agency without freezing physical geometry."""
     config = _deterministic_config(team_size=1)
     stunned_start = jnp.asarray((5.0, 5.0), dtype=jnp.float32)
     neighbor_start = jnp.asarray((5.5, 5.0), dtype=jnp.float32)
@@ -2332,7 +2277,6 @@ def test_collision_projection_may_displace_a_stunned_zero_intent_body() -> None:
 
 
 def test_stun_control_trajectory_matches_jit_and_scan() -> None:
-    """Prove paired masks preserve D=2 stun control across compiled rollout."""
     horizon = 3
     config = _deterministic_config(team_size=1)
     start = jnp.asarray((5.0, 5.0), dtype=jnp.float32)
@@ -2474,7 +2418,6 @@ def test_step_can_run_non_stay_movement_in_jitted_scanned_rollout() -> None:
         initial_mask: ActionMask,
         step_keys: Array,
     ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array]]:
-        """Run a compiled fixed-horizon rollout with stable scan outputs."""
 
         def _step_wrapper(
             carry: tuple[EnvState, ActionMask],

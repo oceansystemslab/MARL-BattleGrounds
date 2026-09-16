@@ -1,3 +1,7 @@
+/**
+ * @file Check live recording finish/discard/exit, saved interrupted prefixes and
+ * multi-tab handoff to replay.
+ */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -70,10 +74,8 @@ function collectBrowserErrors(page) {
   });
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} url
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} url */
 async function openRecording(page, url) {
   collectBrowserErrors(page);
   await page.goto(url);
@@ -117,10 +119,8 @@ async function expectReplaySaving(page) {
   );
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} path
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} path */
 async function authenticatedGet(page, path) {
   return page.evaluate(async (requestPath) => {
     const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
@@ -150,13 +150,8 @@ function currentTimeline(page) {
   return authenticatedGet(page, "/api/replay/timeline");
 }
 
-/**
- * Prove the real wire status uses the exact path-free root shared by both live
- * audiences, not merely the subset rendered by the page.
- *
- * @param {Record<string, any>} frame
- * @param {number} count
- */
+/** @param {Record<string, any>} frame
+ * @param {number} count */
 function expectExactWireRecording(frame, count) {
   expect(frame.recording).not.toBeNull();
   expect(Object.keys(frame.recording).sort()).toEqual(RECORDING_STATUS_KEYS);
@@ -180,10 +175,8 @@ function expectExactWireRecording(frame, count) {
   }
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {number} count
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {number} count */
 async function expectRecordingCount(page, count) {
   await expect(page.locator("#recording-progress")).toHaveText(
     new RegExp(`^${count} / [1-9]\\d* transitions$`),
@@ -195,13 +188,8 @@ async function expectRecordingCount(page, count) {
   return frame;
 }
 
-/**
- * Submit one live joint turn and settle its local presentation without adding
- * a second simulator command.
- *
- * @param {import("@playwright/test").Page} page
- * @param {number} expectedCount
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {number} expectedCount */
 async function captureNextTransition(page, expectedCount) {
   const responsePromise = page.waitForResponse(
     (response) =>
@@ -228,11 +216,9 @@ function captureOneTransition(page) {
   return captureNextTransition(page, 1);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {"researcher" | "pov"} audience
- * @param {"shared_obs" | "no_shared_obs"} informationMode
- */
+ * @param {"shared_obs" | "no_shared_obs"} informationMode */
 async function expectSettledReplayHandoff(
   page,
   audience = "researcher",
@@ -367,13 +353,9 @@ async function expectSettledReplayHandoff(
   return { frame, timeline };
 }
 
-/**
- * Assert one self-contained replay and the absence of a legacy metrics sidecar.
- *
- * @param {string} replayPath
+/** @param {string} replayPath
  * @param {string} metricPath
- * @param {number} transitionCount
- */
+ * @param {number} transitionCount */
 async function expectSavedArtifacts(replayPath, metricPath, transitionCount) {
   const replay = await readJsonArtifact(replayPath);
   await expect(readFile(metricPath)).rejects.toMatchObject({ code: "ENOENT" });

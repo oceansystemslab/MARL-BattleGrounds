@@ -1,4 +1,11 @@
-"""Current-frame match facts for researcher UI, separate from spatial views."""
+"""Build current-frame match facts for researcher panels.
+
+Use ``build_match_summary_v1`` with the recorded context, frame, and incoming
+events. It returns an immutable summary of teams, scores, deaths, and available
+run metadata. Scores and outcomes stay owned by recorded task evidence. Complete
+kill credit uses the shared metric calculation on CPU; sparse evidence leaves
+credit unknown. The module does not write files or advance the simulator.
+"""
 
 from __future__ import annotations
 
@@ -45,10 +52,14 @@ type _Name = Annotated[str, Field(min_length=1)]
 
 
 class _MatchModel(BaseModel):
+    """Strict immutable base that rejects fields outside the match-summary contract."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
 class MatchTeamV1(_MatchModel):
+    """One team's display name and distinct recorded policy/checkpoint identities."""
+
     team_id: Literal[1, 2]
     display_name: _Name
     policy_ids: tuple[_Name, ...]
@@ -56,12 +67,20 @@ class MatchTeamV1(_MatchModel):
 
 
 class MatchAgentV1(_MatchModel):
+    """A public agent identity with its fixed recorded team and class."""
+
     public_agent_id: _Name
     team_id: Literal[1, 2]
     class_id: Literal[1, 2, 3, 4, 5]
 
 
 class MatchDeathV1(MatchAgentV1):
+    """An incoming death with complete opposing-team credit when evidence permits.
+
+    Killing team and contributors are both None when attribution is unavailable;
+    missing evidence must not be shown as a known empty contributor list.
+    """
+
     killing_team_id: Literal[1, 2] | None = Field(default_factory=lambda: None)
     contributors: tuple[MatchAgentV1, ...] | None = Field(
         default_factory=lambda: None, min_length=1, max_length=5
@@ -69,6 +88,9 @@ class MatchDeathV1(MatchAgentV1):
 
     @model_validator(mode="after")
     def _validate_credit(self) -> Self:
+        """Require complete credit, unique contributors, and an opposing killing
+        team.
+        """
         if (self.killing_team_id is None) != (self.contributors is None):
             raise ValueError(
                 "death attribution must be complete or explicitly unavailable"
@@ -88,6 +110,12 @@ class MatchDeathV1(MatchAgentV1):
 
 
 class MatchSummaryV1(_MatchModel):
+    """Recorded match facts for one frame, with Team A before Team B.
+
+    Scores and outcomes come from task evidence. Death rows describe only the
+    incoming transition. Optional metadata remains absent when not recorded.
+    """
+
     schema_version: Literal[1]
     episode_id: _Name
     source_frame_index: _Count
@@ -114,6 +142,9 @@ class MatchSummaryV1(_MatchModel):
 
     @model_validator(mode="after")
     def _validate_task(self) -> Self:
+        """Keep team order, unique incoming deaths, and task-specific score/result
+        scope.
+        """
         if tuple(team.team_id for team in self.teams) != (1, 2):
             raise ValueError("match teams must retain Team A then Team B order")
         if len({death.public_agent_id for death in self.deaths}) != len(self.deaths):
@@ -340,7 +371,35 @@ def build_match_summary_v1(
     frame: EvaluationFrame,
     incoming_events: tuple[object, ...] = (),
 ) -> MatchSummaryV1:
-    """Package recorded scores and task-authored outcomes without new game rules."""
+    """Package recorded match facts without adding new score or victory rules.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Recorded roster, task settings, identities, and static mechanics.
+    frame : EvaluationFrame
+        Current frame from the same episode.
+    incoming_events : tuple of object, optional
+        Recorded events entering the current frame, default empty. Death credit is
+        available only when the event evidence is complete enough to establish it.
+
+    Returns
+    -------
+    MatchSummaryV1
+        Team A then Team B, current scores/outcome, incoming deaths, and available
+        map/seed/episode metadata. Missing attribution is None, not a claimed zero.
+
+    Raises
+    ------
+    ValueError
+        If the frame and context disagree, completion events conflict, or incoming
+        events refer to another transition or contain inconsistent attribution.
+
+    Notes
+    -----
+    Reads recorded evidence. When deaths require complete credit calculation, the
+    shared numerical helper runs on CPU. This does not compute a full metric table.
+    """
     if frame.episode_id != context.identity.episode_id:
         raise ValueError("match summary frame must join its episode context")
     task_mode = context.resolved_env_config.task_mode

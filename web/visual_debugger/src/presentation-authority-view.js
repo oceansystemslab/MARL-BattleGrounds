@@ -1,3 +1,9 @@
+/**
+ * @file Choose which installed facts the browser may display while requests change.
+ * resolveInstalledPresentationAuthorityV1 checks exact joined object ownership.
+ * pendingPresentationSurfaceView returns safe unavailable labels and a stopped
+ * timeline. Neither helper fetches data, installs authority or changes the DOM.
+ */
 import {
   isJoinedTransportAndAuthorizedPresentationV1,
   isNormalizedAuthorizedPresentationFrameV1,
@@ -6,16 +12,25 @@ import { REPLAY_PLAYBACK_RATES } from "./replay-controls.js";
 
 export const PENDING_PRESENTATION_COPY = "Unavailable while authority is pending";
 
-/** @param {unknown} value @returns {value is Readonly<Record<string, any>>} */
+/**
+ * Return whether value is a non-null object that is not an array.
+ * This shape check does not validate fields, prototypes or authority.
+ *
+ * @param {unknown} value @returns {value is Readonly<Record<string, any>>}
+ */
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
- * Resolve the only transport/presentation pair eligible to populate browser
- * scientific or operational surfaces. Retaining an old transport during a
- * request is useful for protocol accounting, but never makes it display
- * authority after the joined root has been cleared.
+ * Return the exact installed transport/presentation pair, or null.
+ *
+ * authority must be a registered joined result; transport and presentation
+ * must be the very objects held by that result. Equal-looking copies do not
+ * qualify. presentation must also be a registered normalized presentation.
+ * Any mismatch returns null. Success returns a new frozen pair referencing
+ * the original objects. This does not install data or grant new information
+ * rights, and a retained old transport alone is never display authority.
  *
  * @param {unknown} authority
  * @param {unknown} transport
@@ -43,11 +58,13 @@ export function resolveInstalledPresentationAuthorityV1(
 }
 
 /**
- * Produce the exact fail-closed chrome contract used both at synchronous clear
- * time and during every pending render. No authority, cursor, continuation, or
- * preview field from the previous transport snapshot is copied into the
- * pending timeline. The validated playback rate is a page-local presentation
- * preference and remains inert while transport is offline.
+ * Build an unavailable display state while no presentation is installed.
+ *
+ * replaySnapshot is a playback-controller snapshot. Only its playbackRate is
+ * retained, if supported; otherwise the rate becomes 1. All cursor, artifact,
+ * authority, recording and continuation facts are cleared or replaced with
+ * unavailable labels. The timeline is hidden, disconnected and stopped.
+ * Returns frozen display records without mutating the snapshot or DOM.
  *
  * @param {ReturnType<import("./replay-controls.js").ReplayPlaybackController["snapshot"]>} replaySnapshot
  */

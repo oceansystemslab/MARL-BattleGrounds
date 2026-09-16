@@ -1,4 +1,4 @@
-"""Scenario 6's authored bait-and-punish witness and two matched interventions."""
+"""Check Scenario 6's saved solution and its two matched interventions."""
 
 from collections.abc import Callable
 from operator import itemgetter

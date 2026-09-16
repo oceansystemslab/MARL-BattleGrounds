@@ -1,4 +1,4 @@
-"""Tests for shared simulator geometry helpers."""
+"""Check the shared geometry helpers used by the simulator."""
 
 # pyright: reportPrivateUsage=false
 
@@ -40,7 +40,6 @@ from marl_battlegrounds.core.types import (
 
 
 def _obstacle_array_with_rows(*rows: tuple[int, Array]) -> Array:
-    """Create a padded obstacle array with selected slots populated."""
     obstacles = jnp.zeros(
         (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
         dtype=jnp.float32,
@@ -54,7 +53,6 @@ def _obstacle_array_with_rows(*rows: tuple[int, Array]) -> Array:
 
 
 def _active_none_obstacle_with_geometry() -> Array:
-    """Create an active none row with geometry fields that should be ignored."""
     obstacle = _empty_obstacle()
 
     obstacle = obstacle.at[OBSTACLE_FEATURE_ACTIVE].set(1.0)
@@ -69,7 +67,6 @@ def _active_none_obstacle_with_geometry() -> Array:
 
 
 def _empty_obstacle() -> Array:
-    """Create an inactive padding obstacle row."""
     return jnp.zeros((OBSTACLE_FEATURES,), dtype=jnp.float32)
 
 
@@ -79,7 +76,6 @@ def _pillar_obstacle(
     *,
     active: bool = True,
 ) -> Array:
-    """Create a pillar obstacle row."""
     pillar = _empty_obstacle()
 
     pillar = pillar.at[OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_PILLAR)
@@ -101,7 +97,6 @@ def _wall_obstacle(
     *,
     active: bool = True,
 ) -> Array:
-    """Create a wall obstacle row parameterized by center, size, and rotation."""
     wall = _empty_obstacle()
 
     wall = wall.at[OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_WALL)
@@ -118,7 +113,6 @@ def _wall_obstacle(
 
 
 def _agent_positions_array_with_rows(*rows: tuple[int, Array]) -> Array:
-    """Create a padded agent-position array with selected slots populated."""
     agent_positions = jnp.zeros(
         (MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS),
         dtype=jnp.float32,
@@ -132,7 +126,6 @@ def _agent_positions_array_with_rows(*rows: tuple[int, Array]) -> Array:
 
 
 def _agent_radii_array_with_rows(*rows: tuple[int, Array | float]) -> Array:
-    """Create a padded agent-radius vector with selected slots populated."""
     radii = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32)
 
     for slot, radius in rows:
@@ -143,7 +136,6 @@ def _agent_radii_array_with_rows(*rows: tuple[int, Array | float]) -> Array:
 
 
 def _mask_with_true_slots(*slots: int) -> Array:
-    """Create a slot mask with only the provided slots marked true."""
     mask = jnp.zeros((MAX_AGENT_SLOTS,), dtype=bool)
 
     for slot in slots:
@@ -154,7 +146,6 @@ def _mask_with_true_slots(*slots: int) -> Array:
 
 
 def _movement_deltas_array_with_rows(*rows: tuple[int, Array]) -> Array:
-    """Create a padded movement-delta array with selected slots populated."""
     intended_movement_deltas = jnp.zeros(
         (MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS),
         dtype=jnp.float32,
@@ -168,14 +159,12 @@ def _movement_deltas_array_with_rows(*rows: tuple[int, Array]) -> Array:
 
 
 def _assert_scalar_bool(result: Array, expected: bool) -> None:
-    """Assert that a geometry predicate returned the expected scalar bool."""
     assert result.shape == ()
     assert result.dtype == bool
     assert bool(result) is expected
 
 
 def _assert_agent_positions_close(result: Array, expected: Array) -> None:
-    """Assert that slot-aligned agent positions match the expected values."""
     assert result.shape == (MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS)
     assert result.dtype == jnp.float32
     assert bool(
@@ -189,7 +178,6 @@ def _assert_agent_positions_close(result: Array, expected: Array) -> None:
 
 
 def _assert_agent_positions_are_finite(agent_positions: Array) -> None:
-    """Assert that projected positions contain no NaNs or infinities."""
     assert bool(jnp.all(jnp.isfinite(agent_positions)))
 
 
@@ -201,7 +189,6 @@ def _assert_active_alive_agents_inside_bounds(
     map_width: Array | float,
     map_height: Array | float,
 ) -> None:
-    """Assert the hard map-boundary invariant for active alive agents."""
     width = float(map_width)
     height = float(map_height)
 
@@ -226,7 +213,6 @@ def _max_active_alive_agent_overlap_residual(
     active_mask: Array,
     alive_mask: Array,
 ) -> float:
-    """Return the largest fixed-pass residual overlap among active alive agents."""
     max_residual = 0.0
 
     for first_slot in range(MAX_AGENT_SLOTS):
@@ -1023,7 +1009,6 @@ def test_collision_exempt_agents_neither_push_nor_receive_displacement(
     collision_participant_mask_during_movement: Array,
     collision_participant_mask_at_final_position: Array,
 ) -> None:
-    """Prove collision participation requires both members of an agent pair."""
     agent_positions = _agent_positions_array_with_rows(
         (0, jnp.asarray((5.0, 5.0), dtype=jnp.float32)),
         (1, jnp.asarray((7.0, 5.0), dtype=jnp.float32)),
@@ -1058,7 +1043,6 @@ def test_collision_exempt_agents_neither_push_nor_receive_displacement(
 
 
 def test_final_position_collision_mask_does_not_apply_during_traversal() -> None:
-    """Prove an expiring actor can pass through a blocker before its endpoint."""
     agent_positions = _agent_positions_array_with_rows(
         (0, jnp.asarray((4.0, 5.0), dtype=jnp.float32)),
         (1, jnp.asarray((6.0, 5.0), dtype=jnp.float32)),
@@ -1093,7 +1077,6 @@ def test_final_position_collision_mask_does_not_apply_during_traversal() -> None
 
 
 def test_final_position_collision_mask_resolves_only_the_realized_endpoint() -> None:
-    """Prove an expiring actor rejoins the existing endpoint collision pass."""
     agent_positions = _agent_positions_array_with_rows(
         (0, jnp.asarray((4.0, 5.0), dtype=jnp.float32)),
         (1, jnp.asarray((6.0, 5.0), dtype=jnp.float32)),
@@ -1133,7 +1116,6 @@ def test_final_position_collision_mask_resolves_only_the_realized_endpoint() -> 
 
 
 def test_collision_masks_are_dynamic_under_jit_and_fixed_shape_vmap() -> None:
-    """Prove batched expiry masks preserve one compiled geometry structure."""
     agent_positions = _agent_positions_array_with_rows(
         (0, jnp.asarray((4.0, 5.0), dtype=jnp.float32)),
         (1, jnp.asarray((6.0, 5.0), dtype=jnp.float32)),

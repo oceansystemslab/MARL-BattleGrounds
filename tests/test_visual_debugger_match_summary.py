@@ -1,4 +1,7 @@
-"""Match UI packages captured facts at the installed frame, outside spatial POV."""
+"""Check match summaries against the installed frame's recorded facts.
+
+These match-level values are separate from spatial POV visibility.
+"""
 
 from __future__ import annotations
 

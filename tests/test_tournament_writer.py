@@ -1,4 +1,4 @@
-"""Tournament outcomes and summary publication share RunWriter's durable boundary."""
+"""Check tournament outcomes and summaries at the writer's durable boundary."""
 
 import csv
 import json

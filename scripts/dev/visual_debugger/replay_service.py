@@ -1,4 +1,11 @@
-"""Locked read-only service for one validated semantic replay bundle."""
+"""Serve a loaded replay without changing its captured trajectory.
+
+``ReplayViewerService`` owns the current cursor and display choices. It
+serializes commands with a lock, rejects stale revisions, and caches recent
+command identities. Researcher analysis and actor-specific projections are
+built lazily and reused. The HTTP layer owns authentication and file responses;
+this service returns checked models or encoded bytes and runs no simulator.
+"""
 
 from __future__ import annotations
 
@@ -154,6 +161,9 @@ class ReplayMetricReportResultV1:
     filename: str | None
 
     def __post_init__(self) -> None:
+        """Require attachment bytes and a name only when the metric report is
+        available.
+        """
         if self.outcome not in ("available", "missing", "forbidden"):
             raise ValueError("unknown replay metric-report outcome")
         if self.outcome == "available":
@@ -170,12 +180,18 @@ class ReplayMetricReportResultV1:
 
 @dataclass(frozen=True, slots=True)
 class _CommandRecord:
+    """Retain a request fingerprint and shutdown result for duplicate detection."""
+
     fingerprint: str
     shutdown_requested: bool
 
 
 @dataclass(frozen=True, slots=True)
 class _PovCacheEntry:
+    """Keep one actor's projected capture, timeline, index, and exact-export
+    capability.
+    """
+
     content: ActorPovReplayContent
     completion: ActorPovReplayCompletionBadgeV1
     projection_index: ActorPovProjectionIndexV1
@@ -196,6 +212,7 @@ def _safe_metric_report_filename(episode_id: str) -> str:
 def _replay_reference(
     bundle: LoadedReplayBundle,
 ) -> ReplayArtifactReferenceV1 | ReplayArtifactReferenceV2 | ReplayArtifactReferenceV3:
+    """Build the version-appropriate immutable replay identity and byte-length facts."""
     replay = bundle.replay
     if type(replay) is ReplayArtifactV3:
         return replay_reference_v3(replay)
@@ -212,6 +229,7 @@ def _replay_reference(
 
 
 def _completion_badge(bundle: LoadedReplayBundle) -> ReplayCompletionBadgeV1:
+    """Copy recorded completion and failure facts into the researcher badge."""
     completion = bundle.replay.completion
     return ReplayCompletionBadgeV1(
         episode_id=completion.episode_id,
@@ -229,6 +247,9 @@ def _completion_badge(bundle: LoadedReplayBundle) -> ReplayCompletionBadgeV1:
 
 
 def _processing_badge(bundle: LoadedReplayBundle) -> ReplayProcessingBadgeV1:
+    """Report legacy metric processing; newer capture-only formats report not
+    requested.
+    """
     if type(bundle.replay) in (ReplayArtifactV2, ReplayArtifactV3):
         return ReplayProcessingBadgeV1(
             status="not_requested", processed_transition_count=0
@@ -249,6 +270,7 @@ def _processing_badge(bundle: LoadedReplayBundle) -> ReplayProcessingBadgeV1:
 def _pov_completion_badge(
     content: ActorPovReplayContent,
 ) -> ActorPovReplayCompletionBadgeV1:
+    """Copy only the actor-export completion facts into a POV badge."""
     completion = content.completion
     return ActorPovReplayCompletionBadgeV1(
         episode_id=content.episode_id,
@@ -284,6 +306,9 @@ def _shared_completion_badge(
 def _endpoint_kind(
     completion: ReplayCompletionBadgeV1 | ActorPovReplayCompletionBadgeV1,
 ) -> ReplayTimelineEndpointKindV1:
+    """Map complete endpoint bases or an incomplete prefix to the timeline end
+    marker.
+    """
     if completion.completion_state != "complete":
         return "captured_prefix"
     if completion.completion_bases == ("task_terminal", "declared_horizon"):
@@ -317,6 +342,51 @@ class ReplayViewerService:
         verbose: bool = False,
         viewer_session_id: str | None = None,
     ) -> None:
+        """Open a viewer state around a validated in-memory replay.
+
+        Parameters
+        ----------
+        bundle : LoadedReplayBundle
+            Exact LoadedReplay or LoadedReplayBundleV1 root from the public loader.
+        initial_frame_index : int, optional
+            Captured frame index, from zero through the last retained frame. Defaults
+            to zero; the final frame index equals the number of captured transitions.
+        view_mode : {'researcher', 'pov'}, optional
+            Initial display authority. Defaults to researcher.
+        reference_global_slot : int or None, optional
+            Configured-active researcher reference. None uses the first focal slot,
+            if one exists. This is viewer state, not a recorded historical selection.
+        selected_global_slot : int or None, optional
+            Initial active inspection target. Requires a reference when supplied.
+            Defaults to None.
+        armed_lane : {0, 1} or None, optional
+            Viewer inspection lane. Requires a selected target. Defaults to None.
+        pov_global_slot : int or None, optional
+            Active actor whose POV is displayed. None uses the first focal slot.
+            POV mode requires a resolved actor.
+        preset : ReplayPresetV1 or {'technical', 'debug'}, optional
+            Accepted compatibility preset. All accepted values use analysis mode.
+            Defaults to analysis.
+        show_ranges : bool, optional
+            Initial range-overlay preference. Defaults to False.
+        verbose : bool, optional
+            Accepted compatibility flag; current viewer verbosity remains False.
+        viewer_session_id : str or None, optional
+            Nonblank viewer identity. None creates a random identity.
+
+        Raises
+        ------
+        TypeError
+            The loaded root or boolean flags have unsupported exact types.
+        ValueError
+            Status, cursor, view, slot selection, lane, or viewer identity is invalid.
+
+        Notes
+        -----
+        Construction builds the researcher timeline and status-evidence index. Actor
+        projections are cached as needed. It performs no replay write or simulation.
+        Initial viewer choices are not reconstructed from each historical frame.
+        """
         if type(bundle) not in (LoadedReplayBundleV1, LoadedReplay):
             raise TypeError("bundle must be an exact loaded replay root")
         if bundle.status not in (
@@ -464,40 +534,66 @@ class ReplayViewerService:
 
     @property
     def revision(self) -> int:
+        """Return the committed viewer revision under the service lock."""
         with self._lock:
             return self._revision
 
     @property
     def command_cache_size(self) -> int:
+        """Return how many recent command identities are cached, at most 256."""
         with self._lock:
             return len(self._command_records)
 
     @property
     def pov_index_build_count(self) -> int:
+        """Return the number of cached actor projection indexes."""
         with self._lock:
             return len(self._pov_cache)
 
     @property
     def shared_timeline_build_count(self) -> int:
+        """Return the number of cached SharedObs recipient timelines."""
         with self._lock:
             return len(self._shared_timeline_cache)
 
     @property
     def shutting_down(self) -> bool:
+        """Return whether an accepted exit command fenced new commands."""
         with self._lock:
             return self._shutting_down
 
     @property
     def faulted(self) -> bool:
+        """Return whether an internal failure fenced new commands."""
         with self._lock:
             return self._faulted
 
     def current_frame(self) -> ReplayViewerFrameV1:
+        """Read the current immutable viewer frame under the service lock.
+
+        Returns
+        -------
+        ReplayViewerFrameV1
+            The already built frame for the committed cursor and display choices.
+        """
         with self._lock:
             return self._frame
 
     def current_metric_report(self) -> ReplayMetricReportResultV1:
-        """Return the replay's canonical metric artifact in every visual POV."""
+        """Read the recorded metric attachment independently of battlefield view.
+
+        Returns
+        -------
+        ReplayMetricReportResultV1
+            Canonical JSON bytes and a safe basename when a metric artifact exists;
+            otherwise a missing result with no bytes or filename.
+
+        Notes
+        -----
+        This serializes the recorded artifact under the service lock. It does not
+        compute a new analysis or write a file. Actor battlefield view does not hide
+        researcher analysis resources from the researcher using the viewer.
+        """
         with self._lock:
             artifact = self._bundle.metric_report_artifact
             if artifact is None:
@@ -515,7 +611,18 @@ class ReplayViewerService:
             )
 
     def episode_details(self) -> tuple[bytes, str]:
-        """Export recorded identity and configuration without trajectory arrays."""
+        """Encode recorded identity and configuration without trajectory arrays.
+
+        Returns
+        -------
+        tuple of bytes and str
+            Canonical JSON content and the filename episode-details.json. Content
+            includes context, completion, runtime, wrappers, and captured count.
+
+        Notes
+        -----
+        This creates an in-memory attachment; the HTTP caller handles delivery.
+        """
         replay = self._replay
         return canonical_json_bytes(
             {
@@ -533,7 +640,36 @@ class ReplayViewerService:
     def metric_analysis(
         self, frame_index: int, scope: str, format_: str
     ) -> tuple[bytes, str | None]:
-        """Read immutable researcher analysis independently of battlefield POV."""
+        """Encode researcher metrics at a cursor or at the final captured frame.
+
+        Parameters
+        ----------
+        frame_index : int
+            Valid captured frame index, checked even for final scope.
+        scope : {'cursor', 'final'}
+            Whether to summarize the selected frame or all captured transitions.
+        format_ : {'json', 'csv'}
+            Output encoding. JSON includes applicable statistics; CSV keeps its
+            complete fixed column schema.
+
+        Returns
+        -------
+        tuple of bytes and str or None
+            Encoded content and an attachment filename for CSV; JSON returns None
+            as the filename.
+
+        Raises
+        ------
+        ValueError
+            Scope or format is unsupported.
+        IndexError
+            The requested frame is outside the captured replay.
+
+        Notes
+        -----
+        The first request computes and caches full analysis. Subsequent requests
+        reuse it. This creates no file and changes no replay or cursor state.
+        """
         if scope not in ("cursor", "final") or format_ not in ("json", "csv"):
             raise ValueError("unsupported metric scope or format")
         self._bundle.frame_at(frame_index)
@@ -565,7 +701,18 @@ class ReplayViewerService:
             return self._metric_analysis
 
     def metric_catalog(self) -> bytes:
-        """Serialize all measurement descriptions once for this replay."""
+        """Encode and cache measurement descriptions for this replay.
+
+        Returns
+        -------
+        bytes
+            Canonical JSON catalog shared across later requests.
+
+        Notes
+        -----
+        The first call may build full replay analysis; later calls reuse both the
+        analysis and encoded catalog under a separate analysis lock.
+        """
         with self._metric_analysis_lock:
             if self._metric_catalog_bytes is None:
                 self._metric_catalog_bytes = canonical_json_bytes(
@@ -574,7 +721,25 @@ class ReplayViewerService:
             return self._metric_catalog_bytes
 
     def current_presentation(self) -> PresentationResourceResultV1:
-        """Build the authorized resource from one committed replay snapshot."""
+        """Build a checked display resource from the locked viewer snapshot.
+
+        Returns
+        -------
+        PresentationResourceResultV1
+            Researcher, NoSharedObs, or SharedObs presentation for the current cursor.
+
+        Raises
+        ------
+        RuntimeError
+            The committed frame, selected actor, or source authority is inconsistent.
+        ValueError
+            An epoch, model, or authorized display contract fails validation.
+
+        Notes
+        -----
+        This may populate actor projection caches. It does not advance a simulator,
+        change the cursor, or expand an actor's allowed information.
+        """
         with self._lock:
             if self._view_mode != "researcher":
                 if self._context.execution_information_mode == "no_shared_obs":
@@ -875,6 +1040,23 @@ class ReplayViewerService:
                 )
 
     def current_timeline(self) -> ReplayTimelineV1:
+        """Read the timeline allowed for the current view and actor.
+
+        Returns
+        -------
+        ReplayTimelineV1
+            Researcher timeline or the selected actor's cached timeline. SharedObs
+            timelines use recipient-local identities and completion facts.
+
+        Raises
+        ------
+        RuntimeError
+            POV mode has no selected actor.
+
+        Notes
+        -----
+        The service lock covers any first-time actor timeline construction.
+        """
         with self._lock:
             if self._view_mode == "researcher":
                 return self._researcher_timeline
@@ -894,7 +1076,33 @@ class ReplayViewerService:
         self,
         request: ReplayCommandRequestV1,
     ) -> ReplayServiceCommandResultV1:
-        """Apply at most one replay command under revision/idempotency guards."""
+        """Apply a checked viewer command without changing recorded replay data.
+
+        Parameters
+        ----------
+        request : ReplayCommandRequestV1
+            Exact validated root with client ID, command ID, base revision, and a
+            supported cursor or display command.
+
+        Returns
+        -------
+        ReplayServiceCommandResultV1
+            New frame, duplicate response, or typed rejection. Exit requests are
+            returned for the HTTP host to act on after writing the response.
+
+        Raises
+        ------
+        TypeError
+            The request is not the exact supported model.
+
+        Notes
+        -----
+        The lock covers validation and installation. The latest 256 command IDs are
+        remembered; exact repeats while cached do not apply twice. Stale revisions
+        and reused IDs with different contents are rejected. Projection caches may
+        be built, but no simulator step or replay write occurs. Unexpected internal
+        failures can fence further commands and propagate.
+        """
         if type(request) is not ReplayCommandRequestV1:
             raise TypeError("request must be the exact ReplayCommandRequestV1 root")
         command_key = (request.client_id, request.command_id)
@@ -1211,6 +1419,9 @@ class ReplayViewerService:
         pov_cache: dict[int, _PovCacheEntry],
         shared_timeline_cache: dict[int, SharedObsAgentPovReplayTimelineV1],
     ) -> ReplayViewerFrameV1:
+        """Build and validate one proposed cursor/view frame using caller-owned
+        caches.
+        """
         cursor = ReplayCursorV1(
             frame_index=frame_index,
             final_frame_index=self._artifact_summary.recorded_transition_count,
@@ -1317,6 +1528,9 @@ class ReplayViewerService:
         )
 
     def _build_researcher_timeline(self) -> ResearcherReplayTimelineV1:
+        """Build ordered frame and incoming-event rows with one final endpoint
+        marker.
+        """
         endpoint = _endpoint_kind(self._completion)
         final = len(self._replay.frames) - 1
         rows = tuple(
@@ -1350,6 +1564,11 @@ class ReplayViewerService:
         *,
         cache: dict[int, _PovCacheEntry],
     ) -> _PovCacheEntry:
+        """Get or build one actor's immutable visual projection and timeline.
+
+        Populate the supplied cache only after construction. Preserve whether the
+        replay version supports exact actor-input export or only a visual projection.
+        """
         cached = cache.get(global_slot)
         if cached is not None:
             return cached
@@ -1441,6 +1660,9 @@ class ReplayViewerService:
         frame = self._replay.frames[frame_index]
 
         def build(global_slot: int) -> SharedObsSourceMaterialProjection:
+            """Project one active slot's source material at the already selected
+            frame.
+            """
             return build_shared_obs_authority_source_material_projection_v1(
                 self._context,
                 frame,
@@ -1461,6 +1683,9 @@ class ReplayViewerService:
         *,
         cache: dict[int, SharedObsAgentPovReplayTimelineV1],
     ) -> SharedObsAgentPovReplayTimelineV1:
+        """Get or cache a recipient-local SharedObs timeline with no global event
+        counts.
+        """
         cached = cache.get(global_slot)
         if cached is not None:
             return cached
@@ -1500,6 +1725,9 @@ class ReplayViewerService:
         self,
         public_agent_id: str,
     ) -> SharedObsAgentPovReplayArtifactSummaryV1:
+        """Build recipient-local replay identity and capture counts without global
+        hashes.
+        """
         episode_id = self._context.identity.episode_id
         return SharedObsAgentPovReplayArtifactSummaryV1(
             schema_version=1,
@@ -1514,6 +1742,9 @@ class ReplayViewerService:
         )
 
     def _transition_view(self, frame_index: int) -> EvaluationTransitionViewV1 | None:
+        """Join the selected frame to its incoming transition; frame zero returns
+        None.
+        """
         if frame_index == 0:
             return None
         return EvaluationTransitionViewV1(
@@ -1529,6 +1760,9 @@ class ReplayViewerService:
         frame_index: int,
         selected_global_slot: int,
     ) -> ReplayResearcherSpaceV1:
+        """Build geometry-free global researcher facts for one selected frame and
+        agent.
+        """
         incoming_view = self._transition_view(frame_index)
         projection = build_researcher_analyzer_projection_v2(
             self._context,
@@ -1561,6 +1795,7 @@ class ReplayViewerService:
         )
 
     def _require_active_or_none(self, value: int | None, *, name: str) -> None:
+        """Allow None or an exact integer naming a configured-active roster slot."""
         if value is None:
             return
         if type(value) is not int or value not in self._active_slots:
@@ -1610,6 +1845,7 @@ class ReplayViewerService:
         ],
         message: str,
     ) -> ReplayServiceCommandResultV1:
+        """Build a typed rejection carrying the latest committed viewer frame."""
         return ReplayServiceCommandResultV1(
             outcome=outcome,
             payload=ReplayApiErrorV1(
@@ -1634,6 +1870,7 @@ class ReplayViewerService:
         ],
         message: str,
     ) -> ReplayServiceCommandResultV1:
+        """Build a rejection and retain its request identity in the bounded cache."""
         result = self._error_result(outcome, error_code, message)
         records = self._command_records.copy()
         self._remember_in(
@@ -1652,6 +1889,7 @@ class ReplayViewerService:
         fingerprint: str,
         shutdown_requested: bool,
     ) -> None:
+        """Add a request record and evict oldest entries beyond the 256-record limit."""
         records[key] = _CommandRecord(
             fingerprint=fingerprint,
             shutdown_requested=shutdown_requested,

@@ -1,4 +1,10 @@
-"""Buffered scalar episode tables with explicit, durable run resumption."""
+"""Write buffered episode tables and selected replays with explicit resume.
+
+RunWriter owns one locked run directory. A flush records table byte lengths,
+replay files and completed IDs together; resume restores that durable boundary
+and discards an uncommitted table suffix. All work is on the host. Numerical
+game code calls no writer; callers supply completed payloads at their boundary.
+"""
 
 from __future__ import annotations
 
@@ -69,6 +75,7 @@ _INPUT_PROJECTIONS = {
 
 
 def _json_value(value: object) -> object:
+    """Convert named tuples and NumPy containers to stable JSON-compatible values."""
     named_fields = getattr(value, "_fields", None)
     if isinstance(value, tuple) and named_fields is not None:
         fields = cast(tuple[str, ...], named_fields)
@@ -93,6 +100,7 @@ def _json_value(value: object) -> object:
 
 
 def _json_bytes(value: object) -> bytes:
+    """Encode sorted compact UTF-8 JSON with a trailing newline; reject NaN/Infinity."""
     return (
         json.dumps(
             value, allow_nan=False, sort_keys=True, separators=(",", ":")
@@ -102,6 +110,7 @@ def _json_bytes(value: object) -> bytes:
 
 
 def _atomic_json(path: Path, value: object) -> None:
+    """Write and fsync temporary JSON, then replace the destination in one rename."""
     temporary = path.with_name(f".{path.name}.tmp")
     with temporary.open("wb") as stream:
         stream.write(_json_bytes(value))
@@ -111,7 +120,32 @@ def _atomic_json(path: Path, value: object) -> None:
 
 
 def configuration_identity(config: EnvConfig) -> tuple[str, dict[str, object]]:
-    """Identify one environment-normalized configuration by its canonical content."""
+    """Identify one numerical episode config by its recorded content.
+
+    Parameters
+    ----------
+    config : EnvConfig
+        One environment-normalized scalar EnvConfig tree. Callers should
+        normalize scalar/array dtypes before comparing configuration identity.
+
+    Returns
+    -------
+    tuple[str, dict[str, object]]
+        (sha256_hex, content_dict). The digest covers sorted compact JSON plus a
+        newline; content contains host values suitable for run_details.json.
+
+    Raises
+    ------
+    ValueError
+        JSON would contain NaN or Infinity.
+    TypeError
+        A leaf cannot be serialized.
+
+    Notes
+    -----
+        Host-only: device_get may synchronize and copy numerical leaves. This
+        function does not validate physical rules, infer a map or edit the config.
+    """
     import jax
 
     content = cast(dict[str, object], _json_value(jax.device_get(config)))
@@ -119,11 +153,54 @@ def configuration_identity(config: EnvConfig) -> tuple[str, dict[str, object]]:
 
 
 class RunWriter:
-    """Write every completed episode from a step or complete collected chunk.
+    """Own one durable run directory for episode tables and selected replays.
 
-    New runs get unique child directories. Resume is explicit and restores the
-    last durable boundary; it never treats a partial CSV suffix as completed work.
-    Call ``start_pass`` when appending another validation pass to the same writer.
+    Parameters
+    ----------
+    output_dir : str or pathlib.Path, optional
+        Parent directory for a new uniquely named run. Supply this or resume_from.
+    resume_from : str or pathlib.Path, optional
+        Existing run directory to recover. Its metric/input schema must match.
+    phase : str, default "evaluation"
+        Nonempty pass label. "tournament" writes match rows and requires registered
+        pairing metadata; it does not change simulator rules.
+    pass_id : str, default "1"
+        Nonempty identifier within phase. Reopening it must preserve saved identity.
+    policies : dict, optional
+        Team policy descriptions for the pass. Defaults to an empty description.
+    checkpoint_id : str, optional
+        Caller-supplied checkpoint identity; absent when unknown.
+    details : dict, optional
+        JSON-compatible pass metadata. Source discovery is added only when capture
+        needs it. Resume allows runtime_provenance, num_envs and chunk_size to vary.
+    buffer_size : int, default 128
+        Positive completed-row count that triggers automatic flush; bool is invalid.
+
+    Attributes
+    ----------
+    run_id : str
+        Generated new-run identity or the identity read from the resumed directory.
+    run_dir : pathlib.Path
+        Directory owned and locked by this writer until close.
+    completed_episode_ids : frozenset of int
+        Durable completions for the current pass.
+    paths : dict of str to pathlib.Path
+        Only output files/directories already produced by this run.
+
+    Raises
+    ------
+    ValueError
+        Output/resume choice, labels, schema, pass identity or durable files are
+        invalid. An existing run must be resumed explicitly.
+    OSError
+        The run cannot be created, accessed or exclusively locked.
+
+    Notes
+    -----
+    Host-only; opening may create files or truncate uncommitted table suffixes.
+    Use as a context manager or call close. A healthy close flushes; a failed writer
+    must be closed and resumed before more writes. Call start_pass to append a
+    distinct pass. This class does not allocate episode IDs or execute games.
     """
 
     def __init__(
@@ -138,6 +215,9 @@ class RunWriter:
         buffer_size: int = 128,
         details: dict[str, object] | None = None,
     ) -> None:
+        """Open and lock a new or resumed run, validate its schema and start the first
+        pass.
+        """
         if (output_dir is None) == (resume_from is None):
             raise ValueError(
                 "supply output_dir for a new run or resume_from for an existing run"
@@ -241,6 +321,9 @@ class RunWriter:
             raise
 
     def _check_open(self) -> None:
+        """Reject operations after close or a recorded failure; recovery needs a new
+        writer.
+        """
         if self._closed:
             raise RuntimeError("writer is closed")
         if self._failed is not None:
@@ -249,6 +332,11 @@ class RunWriter:
             ) from self._failed
 
     def _recover_tables(self) -> None:
+        """Restore recorded durable table lengths and verify durable replay files.
+
+        The run lock must already be held. Missing/truncated committed content or
+        unsafe replay paths fail recovery; extra table suffix bytes are truncated.
+        """
         for filename in self._rows:
             path = self._table_path(filename)
             expected = self._details["tables"].get(filename, {}).get("durable_bytes", 0)
@@ -280,6 +368,7 @@ class RunWriter:
                     )
 
     def _table_path(self, filename: str) -> Path:
+        """Resolve a run table path and reject a symbolic-link destination."""
         path = self.run_dir / filename
         if path.is_symlink():
             raise ValueError(f"run table must not be a symbolic link: {filename}")
@@ -294,7 +383,41 @@ class RunWriter:
         checkpoint_id: str | None = None,
         details: dict[str, object] | None = None,
     ) -> None:
-        """Append a clearly named pass, preserving its policy/configuration identity."""
+        """Start or resume a named pass within this writer.
+
+        Parameters
+        ----------
+        phase : str
+            Nonempty phase label; the writer uses "tournament" for match rows.
+        pass_id : str
+            Nonempty identity within phase.
+        policies : dict[str, object] | None
+            Optional JSON-compatible team descriptions, default empty.
+        checkpoint_id : str | None
+            Optional caller-known checkpoint label, default None.
+        details : dict[str, object] | None
+            Optional pass metadata, default empty. Runtime provenance, batch
+            size and chunk size may change when resuming; stable details must match.
+
+        Returns
+        -------
+        None
+            None. Pending rows are flushed and this writer selects the requested pass.
+
+        Raises
+        ------
+        RuntimeError
+            The writer is closed or failed.
+        ValueError
+            Labels are empty, selected replays are incomplete, or an
+            existing pass's policy/checkpoint/stable metadata identity differs.
+
+        Notes
+        -----
+            Host-only and mutating. A training pass without a checkpoint is labeled
+            evolving; other pass identities are labeled frozen. This describes the
+            caller's declared run and does not perform training or freeze model values.
+        """
         self._check_open()
         if not phase or not pass_id:
             raise ValueError("phase and pass_id must be nonempty")
@@ -322,6 +445,9 @@ class RunWriter:
         execution_fields = {"runtime_provenance", "num_envs", "chunk_size"}
 
         def stable_details(value: object) -> dict[str, object]:
+            """Exclude only execution placement/chunk details when comparing pass
+            identity.
+            """
             return {
                 name: item
                 for name, item in cast(dict[str, object], value).items()
@@ -347,7 +473,33 @@ class RunWriter:
         self._pass_key = key
 
     def register_episodes(self, schedule: Iterable[dict[str, object]]) -> None:
-        """Record planned episode, map and random-stream identities before execution."""
+        """Record the schedule metadata needed to interpret upcoming completions.
+
+        Parameters
+        ----------
+        schedule : Iterable[dict[str, object]]
+            Iterable of JSON-compatible dicts, each with a positive integer
+            episode_id. Optional seeds, map identity and pairing metadata are kept.
+
+        Returns
+        -------
+        None
+            None. Records are merged into the active pass and flushed durably.
+
+        Raises
+        ------
+        ValueError
+            An ID is invalid or an existing ID's metadata differs.
+        RuntimeError
+            The writer is closed or failed.
+        OSError
+            Schedule publication fails.
+
+        Notes
+        -----
+            Repeating identical records is allowed. This does not execute episodes,
+            mark them complete or validate a promised map against future game state.
+        """
         self._check_open()
         episodes = self._details["passes"][self._pass_key].setdefault("episodes", {})
         for specification in schedule:
@@ -369,14 +521,18 @@ class RunWriter:
 
     @property
     def completed_episode_ids(self) -> frozenset[int]:
-        """Episode IDs committed by flush for the currently selected pass."""
+        """Return the current pass's durable episode IDs, excluding buffered
+        completions.
+        """
         return frozenset(
             self._details["passes"][self._pass_key]["completed_episode_ids"]
         )
 
     @property
     def paths(self) -> dict[str, Path]:
-        """Only files actually produced by the run, with direct descriptive names."""
+        """Return fresh paths for run_details and only tables/replays already
+        produced.
+        """
         return {
             "run_details": self.run_dir / "run_details.json",
             **{
@@ -394,6 +550,9 @@ class RunWriter:
     def _replay_context(
         self, packet: ReplayPackets
     ) -> tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]:
+        """Join a first packet to registered episode/pass facts and cached
+        provenance.
+        """
         from marl_battlegrounds.evaluation.recording_context import (
             build_recording_context,
             capture_recording_provenance,
@@ -428,7 +587,37 @@ class RunWriter:
         return context, runtime
 
     def write_replay(self, packets: ReplayPackets) -> None:
-        """Spool all selected transitions and publish complete single-file replays."""
+        """Collect selected transitions and publish complete replay files.
+
+        Parameters
+        ----------
+        packets : ReplayPackets
+            ReplayPackets for a step or chunk. Leading validity axes select
+            real packet rows; transition indices must be contiguous per episode.
+
+        Returns
+        -------
+        None
+            None. Incomplete episodes remain in owned temporary spools. Complete
+            artifacts are published below replays and queued for the next durable flush.
+
+        Raises
+        ------
+        RuntimeError
+            The writer or collector is closed/failed.
+        ValueError
+            Packet order/identity is invalid, the episode was completed,
+            or an existing destination conflicts with the replay's content.
+        OSError
+            Temporary or replay files cannot be written.
+
+        Notes
+        -----
+            Host-only: may transfer packets, discover recording provenance and create
+            files. It does not mark the episode complete by itself. Supply matching
+            completed EpisodeInfo through write after all selected packets arrive.
+            Any collection/publication failure marks this writer failed.
+        """
         self._check_open()
         from marl_battlegrounds.evaluation.replay_io import (
             PreparedReplay,
@@ -482,7 +671,40 @@ class RunWriter:
             raise
 
     def write(self, infos: EpisodeInfo) -> None:
-        """Collect all completed records from arbitrary leading rollout dimensions."""
+        """Buffer all completed episodes in one step or collected chunk.
+
+        Parameters
+        ----------
+        infos : EpisodeInfo
+            EpisodeInfo with scalar, batch or time/batch leading dimensions.
+            completed admits rows. Config and selected metric leaves must share
+            those dimensions; optional replay packets are collected first.
+
+        Returns
+        -------
+        None
+            None. Selected valid metric rows are buffered; reaching buffer_size
+            flushes automatically. Explicit flush or healthy close makes the remainder
+            durable, including completions that have no metric row.
+
+        Raises
+        ------
+        RuntimeError
+            The writer is closed or failed.
+        ValueError
+            A completion ID is invalid/repeated, its replay is incomplete,
+            metric columns are malformed/nonfinite, or tournament metadata is invalid.
+        OSError
+            A triggered flush or replay write fails.
+
+        Notes
+        -----
+            Transfers numerical data to the host. False completion rows are ignored.
+            Unavailable metric cells are blank, not measured zeros. The writer records
+            actual supplied config/slot identity; it does not reset games or generate
+            IDs.
+            Call once for each completion; no implicit duplicate suppression occurs.
+        """
         self._check_open()
         import jax
 
@@ -493,6 +715,9 @@ class RunWriter:
         leading = completion.ndim
 
         def flatten(value: object) -> np.ndarray[Any, Any]:
+            """Flatten completion-leading axes while retaining each field's payload
+            shape.
+            """
             array = np.asarray(value)
             return array.reshape((-1, *array.shape[leading:]))
 
@@ -507,6 +732,9 @@ class RunWriter:
             raise
 
     def _write_record(self, records: EpisodeInfo, index: int) -> None:
+        """Validate one completion and append its selected rows to the active pass
+        buffers.
+        """
         import jax
 
         episode_id = int(records.episode_id[index])
@@ -524,6 +752,7 @@ class RunWriter:
             )
 
         def select(value: object) -> object:
+            """Read one host record's scalar configuration leaf."""
             return np.asarray(value)[index]
 
         config_id, config = configuration_identity(jax.tree.map(select, records.config))
@@ -533,6 +762,9 @@ class RunWriter:
         episode = entry["episodes"].get(str(episode_id), {})
 
         def policy_name(team: str) -> object:
+            """Use per-episode team metadata when present, otherwise the pass
+            description.
+            """
             definition: object = episode.get("policies", policies).get(team, "")
             return (
                 cast(dict[str, object], definition).get("name", "")
@@ -611,6 +843,9 @@ class RunWriter:
     def _metric_cells(
         values: object, index: int, names: tuple[str, ...]
     ) -> list[object]:
+        """Validate metric width/finiteness and replace unavailable values with empty
+        cells.
+        """
         from marl_battlegrounds.evaluation.episode_metrics import MetricValues
 
         metric = cast(MetricValues, values)
@@ -625,7 +860,35 @@ class RunWriter:
         return cast(list[object], cells.tolist())
 
     def write_tournament_results(self, statistics: TournamentStatistics) -> None:
-        """Publish one qualified population idempotently with normal durability."""
+        """Publish a qualified tournament's summary tables exactly once by content.
+
+        Parameters
+        ----------
+        statistics : TournamentStatistics
+            TournamentStatistics from the statistical qualification helper,
+            containing nonempty population, matchup and map result tables.
+
+        Returns
+        -------
+        None
+            None. Flushes preceding match data, writes all three summaries and records
+            their common content digest. Repeating identical statistics is a no-op.
+
+        Raises
+        ------
+        ValueError
+            Tables are empty/inconsistent or differ from a saved summary.
+        RuntimeError
+            The writer is closed or failed.
+        OSError
+            Summary publication fails.
+
+        Notes
+        -----
+            Host-only. The caller must qualify the complete match population first;
+            this writer checks table structure and content identity, not the rating
+            model. Once published, additional tournament match rows are rejected.
+        """
         self._check_open()
         payload = {
             "tournament_results": statistics.tournament_results,
@@ -661,7 +924,27 @@ class RunWriter:
         self.flush()
 
     def flush(self) -> None:
-        """Durably commit buffered rows and their completion boundary together."""
+        """Make buffered rows, replay references and completion IDs durable together.
+
+        Returns
+        -------
+        None
+            None. Appends/fsyncs tables, atomically replaces run_details.json, fsyncs
+            the directory, then clears successful buffers.
+
+        Raises
+        ------
+        RuntimeError
+            The writer is closed or failed.
+        OSError
+            A table, metadata or directory operation fails.
+
+        Notes
+        -----
+            Host-only and synchronous. Publication failures mark the writer failed.
+            The previous metadata boundary remains the recovery authority; resume
+            removes table suffixes not covered by that boundary.
+        """
         self._check_open()
         # Flush mutates only publication boundaries; frozen schedules/configs can
         # stay shared during this synchronous operation.
@@ -714,11 +997,24 @@ class RunWriter:
             rows.clear()
 
     def record_failure(self, error: BaseException) -> None:
-        """Preserve completed rows and record an escaping execution failure.
+        """Try to preserve completed rows and record an escaping execution failure.
 
-        Recording is best effort: a storage error must not replace the original
-        provider, cancellation or fitting exception. Close and resume this run
-        before continuing after failure.
+        Parameters
+        ----------
+        error : BaseException
+            Original provider, execution, cancellation or storage exception.
+
+        Returns
+        -------
+        None
+            None. Marks the writer failed and adds run/recovery context to error.
+            Repeating the same recorded error does not duplicate this work.
+
+        Notes
+        -----
+            Best effort: a storage error is added as a note rather than replacing the
+            original exception. A still-healthy writer first attempts to flush buffered
+            completions. Close and explicitly resume before continuing after failure.
         """
         if self._failed is error:
             return
@@ -733,6 +1029,7 @@ class RunWriter:
         self._record_failure(error)
 
     def _record_failure(self, error: BaseException) -> None:
+        """Mark failure and append diagnostics without hiding the original error."""
         if self._failed is not error:
             self._failed = error
             error.add_note(f"Run directory: {self.run_dir}")
@@ -753,12 +1050,33 @@ class RunWriter:
                 pass  # The original failure is raised even if recording also fails.
 
     def _release(self) -> None:
+        """Close the owned directory descriptor and release its advisory lock."""
         if self._lock >= 0:
             os.close(self._lock)
             self._lock = -1
 
     def close(self) -> None:
-        """Flush a healthy writer and always release its run lock."""
+        """Flush a healthy writer and release every owned spool and run lock.
+
+        Returns
+        -------
+        None
+            None. Repeated calls are safe. The writer remains closed even if cleanup
+            fails; already durable artifacts stay on disk.
+
+        Raises
+        ------
+        OSError
+            A flush or resource release fails.
+        RuntimeError
+            A required writer operation fails during cleanup.
+
+        Notes
+        -----
+            A writer already marked failed skips normal flush. Cleanup attempts all
+            resources, preserving the first error and noting later errors. Incomplete
+            replay spools do not become completed replay evidence.
+        """
         if self._closed:
             return
         failure: BaseException | None = None
@@ -787,6 +1105,7 @@ class RunWriter:
             raise failure
 
     def __enter__(self) -> RunWriter:
+        """Return this owned writer for a with block."""
         return self
 
     def __exit__(
@@ -795,6 +1114,9 @@ class RunWriter:
         exception: BaseException | None,
         traceback: object,
     ) -> None:
+        """Record any body failure, close resources and preserve the original
+        exception.
+        """
         if exception is not None:
             self.record_failure(exception)
         try:

@@ -1,7 +1,10 @@
-"""Current exact NoSharedObs views and the historical V2 visual adapter.
+"""Build actor-safe live views and adapt historical NoSharedObs replays.
 
-Current Context V3 keeps its relative flags and self index. Historical V2
-records retain the older visual-only route without claiming exact input export.
+Current Context V3 keeps its exact relative flags and self index. Older Context V2
+uses a visual-only compatibility route; its output must not be advertised as an
+exact policy input export. The presentation builders call these helpers with
+validated frames. They return in-memory projections without writing artifacts or
+advancing the simulator.
 """
 
 from marl_battlegrounds.evaluation.actor_projection import (
@@ -42,6 +45,11 @@ _VISUAL_PROJECTION_V1 = VersionedIdentityV1(
 def _visual_context_v1(
     context: EvaluationEpisodeContext,
 ) -> EvaluationEpisodeContext:
+    """Keep current actor inputs exact and adapt only historical V2 visual identity.
+
+    Reject other execution modes or unknown actor projections. This compatibility
+    view does not change saved context bytes or claim exact historical input export.
+    """
     evaluation_context_type(context)
     if context.execution_information_mode != "no_shared_obs":
         raise ValueError("NoSharedObs visual slices require no_shared_obs execution")
@@ -62,7 +70,35 @@ def build_live_no_shared_obs_visual_current_slice_v1(
     global_slot: int,
     incoming_transition_view: EvaluationTransitionViewV1 | None = None,
 ) -> ActorPovCurrentSlice:
-    """Build the established visual slice without changing capture authority."""
+    """Build the selected actor's authorized view of one recorded live endpoint.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Matching episode context using NoSharedObs execution.
+    frame : EvaluationFrame
+        Current recorded endpoint belonging to that episode.
+    global_slot : int
+        Selected actor on the fixed zero-based global slot axis.
+    incoming_transition_view : EvaluationTransitionViewV1 or None, optional
+        Transition entering this frame. None describes a reset endpoint.
+
+    Returns
+    -------
+    ActorPovCurrentSlice
+        Current actor-safe frame and any authorized incoming transition. Context V3
+        uses the exact current projection; older contexts use visual compatibility.
+
+    Raises
+    ------
+    ValueError
+        If the context mode, projection identity, or frame/actor join is invalid.
+
+    Notes
+    -----
+    No replay or simulator data is modified. This helper delegates actor authorization
+    to the shared POV projection authority.
+    """
     if context.schema_version == 3:
         return build_actor_pov_current_slice_v1(
             context,
@@ -94,7 +130,28 @@ def build_live_no_shared_obs_visual_adjacent_slice_v1(
     *,
     global_slot: int,
 ) -> ActorPovAdjacentTransitionSlice:
-    """Build one visual incoming carrier over an unchanged transition unit."""
+    """Build the selected actor's authorized view of one adjacent transition.
+
+    Parameters
+    ----------
+    view : EvaluationTransitionViewV1
+        Exact coherent transition view with start and successor frames.
+    global_slot : int
+        Actor to project on the zero-based global slot axis.
+
+    Returns
+    -------
+    ActorPovAdjacentTransitionSlice
+        Actor-safe start, action/effect evidence, and successor. Context V3 preserves
+        its current projection; historical contexts use the visual compatibility route.
+
+    Raises
+    ------
+    TypeError
+        If ``view`` is not the exact supported transition-view type.
+    ValueError
+        If the execution mode, projection identity, or actor join is invalid.
+    """
     if type(view) is not EvaluationTransitionViewV1:
         raise TypeError("visual transition requires exact EvaluationTransitionViewV1")
     if view.context.schema_version == 3:
@@ -118,12 +175,35 @@ def build_replay_no_shared_obs_visual_content_v1(
     *,
     global_slot: int,
 ) -> ActorPovReplayContent:
-    """Build an ephemeral V1 renderer view over one canonical V2 replay.
+    """Build a temporary actor-safe renderer view of a historical replay.
 
-    The returned content is the established recipient-safe visual subset.  It
-    is not an actor-POV artifact, must not be persisted, and must not be
-    advertised as an exact V2 policy input: the canonical replay retains the
-    V2 projection identity and its separately reconstructable class-ID leaf.
+    Parameters
+    ----------
+    replay : ReplayArtifactV1 or ReplayArtifactV2
+        Exact supported canonical replay with NoSharedObs execution and a recognized
+        actor-projection identity.
+    global_slot : int
+        Selected actor on the fixed zero-based global slot axis.
+
+    Returns
+    -------
+    ActorPovReplayContent
+        Visual frames, transitions, and truthful completion metadata for this actor.
+
+    Raises
+    ------
+    TypeError
+        If the replay root is not an exact supported model.
+    ValueError
+        If the execution/projection contract or actor selection is invalid.
+    RuntimeError
+        If projection loses an incoming transition.
+
+    Notes
+    -----
+    This is an in-memory rendering view, not a saved actor-POV artifact. Do not persist
+    it or claim it is the exact V2 policy input: the canonical replay retains its own
+    projection identity and separately reconstructable class-ID leaf.
     """
     if type(replay) not in (ReplayArtifactV1, ReplayArtifactV2):
         raise TypeError("NoSharedObs visual replay requires an exact supported replay")

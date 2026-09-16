@@ -1,4 +1,7 @@
-"""Canonical POV/scenario companion persistence and path-security proofs."""
+"""Check saving and loading POV and scenario companion files.
+
+The tests include invalid paths and records that disagree with their parent data.
+"""
 
 from __future__ import annotations
 

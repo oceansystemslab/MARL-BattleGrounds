@@ -1,4 +1,4 @@
-"""Fixed scalar metrics against public Core trajectories and lifecycle facts."""
+"""Check scalar full metrics against Core trajectories and transition facts."""
 
 from typing import cast
 

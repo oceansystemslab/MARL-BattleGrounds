@@ -1,4 +1,4 @@
-"""Exhaustive debugger parity tests for the canonical target mapping."""
+"""Check debugger target selection against Core's target mapping."""
 
 import pytest
 from scripts.dev.visual_debugger.control import (

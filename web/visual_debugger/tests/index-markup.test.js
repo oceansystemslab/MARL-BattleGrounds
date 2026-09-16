@@ -1,3 +1,7 @@
+/**
+ * @file Check unique page IDs, supported control choices and required keyboard/help
+ * text in static markup.
+ */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -12,11 +16,9 @@ const productionSourceUrls = [
   new URL("../src/panels.js", import.meta.url),
 ];
 
-/**
- * @param {string} markup
+/** @param {string} markup
  * @param {string} id
- * @param {string} tagName
- */
+ * @param {string} tagName */
 function elementBody(markup, id, tagName) {
   const match = markup.match(
     new RegExp(`<${tagName}\\b[^>]*\\bid="${id}"[^>]*>([\\s\\S]*?)</${tagName}>`, "u"),
@@ -25,13 +27,8 @@ function elementBody(markup, id, tagName) {
   return match[1];
 }
 
-/**
- * Return a direct stable disclosure body and prove it follows the native
- * summary without interposing another container.
- *
- * @param {string} markup
- * @param {string} panelId
- */
+/** @param {string} markup
+ * @param {string} panelId */
 function disclosureBody(markup, panelId) {
   const details = elementBody(markup, panelId, "details");
   const bodyId = `${panelId}-body`;

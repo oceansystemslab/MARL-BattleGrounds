@@ -1,3 +1,10 @@
+/**
+ * @file Control presentation time for already-authorized combat frames.
+ * CombatChoreographer installs painter-owned SVG, controls Web Animations and
+ * suppresses repeated live transitions with a bounded optional storage ledger.
+ * Replay can animate or show settled explanations. This module never chooses
+ * actions, advances the simulator or calls the debugger command API.
+ */
 import { buildChoreographyPlan } from "./choreography-plan.js";
 
 const DEFAULT_LEDGER_KEY = "marl-battlegrounds.visual-debugger.consumed-transitions.v1";
@@ -58,11 +65,21 @@ const SUPPORTED_PLAYBACK_RATES = Object.freeze([
  */
 
 /**
- * Small bounded tab-local record of already-presented transition epochs.
- * Storage failures degrade to in-memory replay suppression.
+ * Remember a bounded list of presented live transition epochs.
+ *
+ * Entries pair an epoch key with its disclosed-content fingerprint. This mutable
+ * presentation cache suppresses repeated animation; it grants no information rights.
+ * Optional storage failures fall back to the current in-memory entries.
  */
 export class ConsumedTransitionLedger {
   /**
+   * Load the optional presentation cache and keep its newest bounded entries.
+   *
+   * options defaults to an empty object. storage defaults to null (memory only),
+   * storageKey to the module's versioned ledger key, and limit to 256. A nonpositive
+   * or noninteger limit throws RangeError. Storage/JSON errors are ignored; invalid
+   * stored rows are removed. The supplied storage object remains caller-owned.
+   *
    * @param {{
    *   storage?: PresentationStorage | null,
    *   storageKey?: string,
@@ -78,6 +95,10 @@ export class ConsumedTransitionLedger {
   }
 
   /**
+   * Return whether epochKey has an entry, regardless of its fingerprint.
+   *
+   * This exact string lookup neither updates recency nor reads storage again.
+   *
    * @param {string} epochKey
    */
   has(epochKey) {
@@ -85,6 +106,11 @@ export class ConsumedTransitionLedger {
   }
 
   /**
+   * Return the stored fingerprint for epochKey, or null if it is absent.
+   *
+   * An empty stored string remains an empty string. This lookup does not mutate the
+   * ledger or reread optional storage.
+   *
    * @param {string} epochKey
    * @returns {string | null}
    */
@@ -95,6 +121,12 @@ export class ConsumedTransitionLedger {
   }
 
   /**
+   * Remember epochKey with fingerprint as the newest consumed transition.
+   *
+   * Replace any older entry for the same key, retain at most limit entries, then
+   * attempt persistence. Inputs are caller-supplied strings; this method adds no
+   * validation. Storage failure is ignored. Returns undefined.
+   *
    * @param {string} epochKey
    * @param {string} fingerprint
    */
@@ -105,6 +137,13 @@ export class ConsumedTransitionLedger {
     this.#save();
   }
 
+  /**
+   * Read and sanitize optional storage once during construction.
+   *
+   * Return a new array of the newest limit records having string epochKey and
+   * fingerprint fields. Missing storage, invalid JSON/root or storage errors yield
+   * an empty array. Stored identities are not treated as authorization.
+   */
   #load() {
     if (!this.storage) {
       return [];
@@ -133,6 +172,12 @@ export class ConsumedTransitionLedger {
     }
   }
 
+  /**
+   * Attempt to persist the current entries under this ledger's storage key.
+   *
+   * Return undefined; absent storage does nothing and write/serialization failures
+   * are ignored because animation suppression must not control authority.
+   */
   #save() {
     if (!this.storage) {
       return;
@@ -146,11 +191,18 @@ export class ConsumedTransitionLedger {
 }
 
 /**
- * Browser Web Animations adapter. The controller also accepts a fake adapter
- * with the same methods for deterministic unit tests.
+ * Adapt the browser Web Animations API to the choreographer's clock interface.
+ *
+ * Methods create live browser animations. Tests may supply another adapter with
+ * the same methods; the controller owns cancellation and settlement.
  */
 export class BrowserAnimationFactory {
   /**
+   * Start one browser animation from the supplied spec and assign its ID.
+   *
+   * spec provides the target Element, keyframes, timing options and id. Return the
+   * browser Animation; Element.animate errors propagate. The element is not removed.
+   *
    * @param {AnimationSpec} spec
    */
   create(spec) {
@@ -160,6 +212,12 @@ export class BrowserAnimationFactory {
   }
 
   /**
+   * Create a timer animation whose two opacity values are both one.
+   *
+   * element hosts the clock, duration is browser animation time in milliseconds,
+   * and id names it for inspection. Return the live Animation with fill both.
+   * Browser animation errors propagate; the caller owns its lifetime.
+   *
    * @param {Element} element
    * @param {number} duration
    * @param {string} id
@@ -175,11 +233,23 @@ export class BrowserAnimationFactory {
 }
 
 /**
- * Own presentation time and only the controller's child beneath the transient
- * SVG layer. It never calls the debugger command API.
+ * Own one authorized combat explanation and its presentation clocks.
+ *
+ * The controller mutates only its painter installation under the supplied surface,
+ * tracks pause/rate/settlement, and reports immutable state snapshots. New authority
+ * clears old nodes before installing replacements. It never submits an action.
+ * Call dispose when the owner no longer needs the controller.
  */
 export class CombatChoreographer {
   /**
+   * Create an idle controller with a required painter and optional adapters.
+   *
+   * options.painter supplies install, clear, settle and reproject. planBuilder defaults
+   * to buildChoreographyPlan, animationFactory to BrowserAnimationFactory, ledger to
+   * a memory-only ConsumedTransitionLedger, and onStateChange to a no-op. motionMode
+   * defaults to normal and playbackRate to 1. Missing painter throws TypeError;
+   * unknown modes or unsupported rates throw RangeError. No frame is installed yet.
+   *
    * @param {{
    *   painter: {
    *     install: (
@@ -247,6 +317,13 @@ export class CombatChoreographer {
     this.settleWaiters = new Set();
   }
 
+  /**
+   * Return a frozen view of the controller's current presentation state.
+   *
+   * The result includes active installation, animation count, nullable plan identity,
+   * render policy, logical milliseconds, motion mode, pause/rate and submission gate.
+   * It reports the last captured logical time; it does not sample the clock itself.
+   */
   snapshot() {
     return Object.freeze({
       active: this.installation !== null,
@@ -265,9 +342,12 @@ export class CombatChoreographer {
   }
 
   /**
-   * Resolve after the current authorized presentation has reached its durable
-   * settled state. Replay autoplay uses this boundary so it cannot outrun the
-   * explanation clock or overlap requests.
+   * Return a promise resolved when this controller next reports settlement.
+   *
+   * Resolve immediately when there are no owned animations and submission is not
+   * blocked. Otherwise register a waiter until publish observes that state, including
+   * a clear or skip. Replay autoplay uses this boundary to avoid overlapping requests.
+   * The promise carries no frame data and never advances the simulator.
    */
   whenSettled() {
     if (this.#isSettled()) {
@@ -279,7 +359,19 @@ export class CombatChoreographer {
   }
 
   /**
-   * Install or reconcile one already-authorized frame after durable rendering.
+   * Install or reconcile an already-authorized frame after durable rendering.
+   *
+   * frame is passed to the plan builder; surface supplies the transient SVG layer and
+   * projection, or null to clear. presentationControl defaults to live_once with
+   * builder-default visualFilters. restartAnimated=false normally preserves settled
+   * replay state; true permits an explicit same-plan static-to-animated restart.
+   *
+   * Return the frozen controller snapshot. Identical plans preserve time; a viewport
+   * change reprojects. Filter changes rebuild live plans without replaying consumed
+   * motion and make replay explanations static. Changed authority/disclosure clears
+   * old nodes first. Absent scene/plan clears the installation. Live epochs use the
+   * ledger; replay does not consume it. Invalid policy, plans, painter bounds or
+   * browser animations may throw; a policy-induced identity change throws Error.
    *
    * @param {unknown} frame
    * @param {ChoreographySurface | null} surface
@@ -410,7 +502,12 @@ export class CombatChoreographer {
   }
 
   /**
-   * Recompute active geometry after a durable resize without replaying time.
+   * Update installed geometry after a durable resize without replaying time.
+   *
+   * frame and surface have the presentFrame contract. presentationControl defaults
+   * to live_once and builder-default filters. Return a frozen snapshot. If the plan,
+   * authority, paint choice or installation no longer matches, delegate to presentFrame.
+   * A settled replay remains static. Plan/painter errors propagate.
    *
    * @param {unknown} frame
    * @param {ChoreographySurface | null} surface
@@ -469,6 +566,12 @@ export class CombatChoreographer {
     return this.snapshot();
   }
 
+  /**
+   * Toggle all owned animation clocks and return the resulting snapshot.
+   *
+   * Motion off or no animations is a no-op. Otherwise pause/play every handle, capture
+   * logical time and publish. This pauses presentation only; it sends no game command.
+   */
   togglePaused() {
     if (this.motionMode === "off" || this.#allAnimations().length === 0) {
       return this.snapshot();
@@ -487,6 +590,12 @@ export class CombatChoreographer {
   }
 
   /**
+   * Apply a supported presentation speed while retaining current clock progress.
+   *
+   * rate must be 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75 or 2; otherwise throw RangeError.
+   * An unchanged rate is a no-op. Update every owned animation and publish, then return
+   * a snapshot. Simulation timing and recorded transition values are unchanged.
+   *
    * @param {number} rate
    */
   setPlaybackRate(rate) {
@@ -504,6 +613,13 @@ export class CombatChoreographer {
   }
 
   /**
+   * Set normal, reduced or off motion and reconcile the active explanation.
+   *
+   * mode outside that set throws RangeError. An unchanged mode is a no-op. Off can
+   * reinstall an active explanation statically; reduced settles current motion through
+   * skip. Returning to normal does not replay an already settled transition. Return a
+   * snapshot; painter/browser failures propagate.
+   *
    * @param {MotionMode} mode
    */
   setMotionMode(mode) {
@@ -539,6 +655,13 @@ export class CombatChoreographer {
     return this.snapshot();
   }
 
+  /**
+   * Settle the current explanation immediately and release submission gating.
+   *
+   * Finish owned handles where possible, settle the painter, cancel remaining clocks
+   * and publish the final logical time. With no installation, simply release the gate.
+   * Return a snapshot; this does not request or skip a simulator transition.
+   */
   skip() {
     const installation = this.installation;
     if (!installation) {
@@ -558,6 +681,12 @@ export class CombatChoreographer {
   }
 
   /**
+   * Remove this controller's installation and clear its active frame identity.
+   *
+   * reason defaults to explicit_clear and is passed to the painter. Cancel clocks,
+   * reset logical time, release the gate and publish, resolving settlement waiters.
+   * Return a snapshot. The consumed-transition ledger is retained.
+   *
    * @param {string} reason
    */
   clear(reason = "explicit_clear") {
@@ -570,11 +699,24 @@ export class CombatChoreographer {
     return this.snapshot();
   }
 
+  /**
+   * Release owned SVG and clocks using the dispose clear reason.
+   *
+   * Return the cleared snapshot and resolve settlement waiters. The ledger survives;
+   * this method does not destroy caller-owned storage or prevent later reuse.
+   */
   dispose() {
     return this.clear("dispose");
   }
 
   /**
+   * Choose settled/static or animated installation for a validated plan.
+   *
+   * plan and surface are ready for the painter; renderPolicy selects live/replay.
+   * options.liveSafeRebuild defaults to false and suppresses repeated live transients
+   * when true. replay_static keeps settled explanatory transients and marks paused.
+   * Mutate controller installation state; return undefined. Installation errors propagate.
+   *
    * @param {Record<string, any>} plan
    * @param {ChoreographySurface} surface
    * @param {RenderPolicy} renderPolicy
@@ -602,6 +744,19 @@ export class CombatChoreographer {
   }
 
   /**
+   * Install bounded painter nodes and create the required animation clocks.
+   *
+   * plan supplies phases in milliseconds and resource bounds; surface owns projection
+   * and the transient layer. options gives renderPolicy, settled and persistentOnly;
+   * retainTransientOnSettle is forwarded only when true. Validate node, persistent-node
+   * and animation counts; excess bounds clear the new installation and throw RangeError.
+   *
+   * Settled or persistent-only output needs no clocks. Animated replay adds a 600 ms
+   * terminal hold, including eventless transitions. Normal motion can gate submission
+   * until its release phase. Creation failures cancel newly created handles, clear the
+   * installation and rethrow. Completion handlers use generation checks so stale clocks
+   * cannot settle a later authority. Return undefined.
+   *
    * @param {Record<string, any>} plan
    * @param {ChoreographySurface} surface
    * @param {{
@@ -781,6 +936,12 @@ export class CombatChoreographer {
   }
 
   /**
+   * Cancel this installation before an authority or presentation replacement.
+   *
+   * reason is passed to painter.clear. Increment generation to invalidate old promise
+   * handlers, capture logical time, cancel handles and release the gate. Keep the plan,
+   * surface and render policy for the caller to replace. Return undefined.
+   *
    * @param {string} reason
    */
   #clearOwned(reason) {
@@ -794,6 +955,12 @@ export class CombatChoreographer {
     this.submissionBlocked = false;
   }
 
+  /**
+   * Capture finite cleanup-clock time, falling back to gate or saved time.
+   *
+   * Clamp a numeric clock to zero through the authored total when that total is finite.
+   * Non-numeric clock values leave saved time unchanged. Mutate logicalTime only.
+   */
   #captureLogicalTime() {
     const candidate =
       this.cleanupClock?.currentTime ?? this.gateClock?.currentTime ?? this.logicalTime;
@@ -805,6 +972,12 @@ export class CombatChoreographer {
     }
   }
 
+  /**
+   * Return a new array of owned visual handles followed by gate and cleanup clocks.
+   *
+   * Absent clocks are omitted. Handles remain the controller's mutable browser objects;
+   * this helper does not advance, cancel or copy them.
+   */
   #allAnimations() {
     return [
       ...this.animations,
@@ -813,6 +986,12 @@ export class CombatChoreographer {
     ];
   }
 
+  /**
+   * Best-effort cancel every owned handle and clear all handle references.
+   *
+   * Cancellation errors are ignored. Painter nodes, plan identity, logical time and
+   * submission gating are left to the caller. Return undefined.
+   */
   #cancelAnimations() {
     for (const animation of this.#allAnimations()) {
       safeCancel(animation);
@@ -822,6 +1001,12 @@ export class CombatChoreographer {
     this.cleanupClock = null;
   }
 
+  /**
+   * Notify the owner with a snapshot and release waiters when settled.
+   *
+   * Call onStateChange synchronously, then resolve and clear all queued settlement
+   * waiters if no animations or submission gate remain. Callback errors propagate.
+   */
   #publish() {
     const snapshot = this.snapshot();
     this.onStateChange(snapshot);
@@ -834,12 +1019,22 @@ export class CombatChoreographer {
     }
   }
 
+  /**
+   * Return true exactly when there are no owned animations and no submission gate.
+   *
+   * A persistent or static installation may still be visible; settlement concerns its
+   * presentation clock, not removal of durable explanatory nodes.
+   */
   #isSettled() {
     return this.#allAnimations().length === 0 && !this.submissionBlocked;
   }
 }
 
 /**
+ * Return whether value is a non-null object other than an array.
+ *
+ * This broad shape guard does not validate a plan or its authority.
+ *
  * @param {unknown} value
  * @returns {value is Record<string, any>}
  */
@@ -848,6 +1043,10 @@ function isRecord(value) {
 }
 
 /**
+ * Return a recognized live_once, replay_animated or replay_static value.
+ *
+ * Any other value throws RangeError; no coercion or fallback is applied.
+ *
  * @param {unknown} value
  * @returns {RenderPolicy}
  */
@@ -862,12 +1061,24 @@ function normalizeRenderPolicy(value) {
   throw new RangeError(`unknown render policy ${String(value)}.`);
 }
 
-/** @param {RenderPolicy} policy */
+/**
+ * Return whether policy selects either replay presentation mode.
+ *
+ * The caller supplies a validated render policy; live_once returns false.
+ *
+ * @param {RenderPolicy} policy
+ */
 function isReplayPolicy(policy) {
   return policy === "replay_animated" || policy === "replay_static";
 }
 
 /**
+ * Compare the four stable identity fields without changing either plan.
+ *
+ * first is a plan; second may be unknown. Return false unless second is a record
+ * with equal epochKey, authorizationKey, fingerprint and paintKey. This is an
+ * identity comparison, not full plan or information-rights validation.
+ *
  * @param {Record<string, any>} first
  * @param {unknown} second
  * @returns {second is Record<string, any>}
@@ -883,6 +1094,11 @@ function samePlanIdentity(first, second) {
 }
 
 /**
+ * Attach a no-op rejection handler to a presentation promise.
+ *
+ * promise is normally animation.finished. All rejections are swallowed, not only
+ * cancellation; return undefined. This avoids unhandled cleanup rejections.
+ *
  * @param {Promise<unknown>} promise
  */
 function ignoreCancellation(promise) {
@@ -890,6 +1106,10 @@ function ignoreCancellation(promise) {
 }
 
 /**
+ * Best-effort cancel animation and ignore cancellation errors.
+ *
+ * Return undefined; this helper does not remove the animation from owner arrays.
+ *
  * @param {AnimationHandle} animation
  */
 function safeCancel(animation) {
@@ -901,6 +1121,10 @@ function safeCancel(animation) {
 }
 
 /**
+ * Best-effort finish animation and ignore finish errors.
+ *
+ * Idle or already cancelled browser handles may reject finish; return undefined.
+ *
  * @param {AnimationHandle} animation
  */
 function safeFinish(animation) {
@@ -912,6 +1136,10 @@ function safeFinish(animation) {
 }
 
 /**
+ * Return normal, reduced or off unchanged, otherwise throw RangeError.
+ *
+ * value is checked exactly; there is no string coercion or default here.
+ *
  * @param {unknown} value
  * @returns {MotionMode}
  */
@@ -922,7 +1150,13 @@ function normalizeMotionMode(value) {
   throw new RangeError(`unknown motion mode ${String(value)}.`);
 }
 
-/** @param {unknown} value */
+/**
+ * Return a finite supported quarter-step rate from 0.25 through 2.
+ *
+ * value must be a number in the fixed rate list; otherwise throw RangeError.
+ *
+ * @param {unknown} value
+ */
 function normalizePlaybackRate(value) {
   if (
     typeof value !== "number" ||
@@ -936,7 +1170,14 @@ function normalizePlaybackRate(value) {
   return value;
 }
 
-/** @param {AnimationHandle} animation @param {number} rate */
+/**
+ * Update animation to rate using its browser rate method when available.
+ *
+ * rate is already validated. Fall back to assigning playbackRate for compatible
+ * adapters. Return undefined; adapter errors propagate.
+ *
+ * @param {AnimationHandle} animation @param {number} rate
+ */
 function applyPlaybackRate(animation, rate) {
   if (typeof animation.updatePlaybackRate === "function") {
     animation.updatePlaybackRate(rate);
@@ -946,6 +1187,11 @@ function applyPlaybackRate(animation, rate) {
 }
 
 /**
+ * Return value as a number when it is an integer greater than zero.
+ *
+ * name labels RangeError otherwise. This checks Number.isInteger, not safe-integer
+ * precision, and does not accept numeric strings.
+ *
  * @param {unknown} value
  * @param {string} name
  */
@@ -957,6 +1203,11 @@ function positiveInteger(value, name) {
 }
 
 /**
+ * Return value as a number when it is an integer at least zero.
+ *
+ * name labels RangeError otherwise. No numeric strings or safe-integer guarantee
+ * are accepted/implied by this check.
+ *
  * @param {unknown} value
  * @param {string} name
  */

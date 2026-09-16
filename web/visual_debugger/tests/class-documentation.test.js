@@ -1,3 +1,7 @@
+/**
+ * @file Check the five class guides, required profile identity and exact named value
+ * substitution.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 

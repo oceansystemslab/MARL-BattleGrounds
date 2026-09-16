@@ -1,4 +1,4 @@
-"""Self-contained replay V2 preserves captured facts and truthful provenance."""
+"""Check that V2 replays retain captured facts and their recorded source identity."""
 
 import json
 from pathlib import Path

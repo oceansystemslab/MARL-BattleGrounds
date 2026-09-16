@@ -1,4 +1,4 @@
-"""Synthetic Scenario 5 pursuit, inheritance, and same-epoch information proof."""
+"""Check Scenario 5 pursuit, inherited behavior and current-input restrictions."""
 
 from collections.abc import Callable
 from math import cos, radians, sin

@@ -30,6 +30,18 @@ type BenchmarkResult = tuple[FloatArray, FloatArray, dict[str, Any]]
 
 
 def timed[T](function: Callable[[], T]) -> tuple[T, float]:
+    """Measure one synchronous call with a monotonic clock.
+
+    Parameters
+    ----------
+    function : Callable[[], T]
+        Operation with no arguments; it must wait for any device work.
+
+    Returns
+    -------
+    tuple[T, float]
+        The operation's result and elapsed wall time in seconds.
+    """
     start = perf_counter()
     value = function()
     return value, perf_counter() - start
@@ -38,6 +50,20 @@ def timed[T](function: Callable[[], T]) -> tuple[T, float]:
 def prepare(
     replicates: int,
 ) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray, IntArray, float]:
+    """Build identical synthetic paired outcomes and bootstrap inputs.
+
+    Parameters
+    ----------
+    replicates : int
+        Number of bootstrap samples to draw with fixed seed 113.
+
+    Returns
+    -------
+    tuple[FloatArray, FloatArray, FloatArray, FloatArray, IntArray, float]
+        Pair counts [66, 3], sampled counts [replicates, 66, 3], sample scores
+        [replicates, 12], contrasts [12, 11], pair indices [66, 2], and setup seconds.
+        Seed 112 fixes the synthetic outcomes; no simulator episodes are run.
+    """
     schedule = build_tournament_schedule(
         tuple(f"method-{i:02}" for i in range(12)), CANONICAL_TDM_EVALUATION_MAP_IDS
     )
@@ -65,6 +91,25 @@ def prepare(
 def scipy_run(
     counts: FloatArray, samples: FloatArray, contrasts: FloatArray, pairs: IntArray
 ) -> BenchmarkResult:
+    """Fit the production SciPy estimator on the point data and each resample.
+
+    Parameters
+    ----------
+    counts : FloatArray
+        Point outcome counts, shaped [66, 3].
+    samples : FloatArray
+        Bootstrap counts, shaped [replicates, 66, 3].
+    contrasts : FloatArray
+        Zero-sum strength basis, shaped [12, 11].
+    pairs : IntArray
+        Entrant index pairs, shaped [66, 2].
+
+    Returns
+    -------
+    BenchmarkResult
+        Point parameters, bootstrap parameters, and CPU fit timings with a
+        tighter-tolerance sensitivity check. Production fit errors propagate.
+    """
     point, point_time = timed(
         lambda: stats._fit(
             counts, contrasts, pairs, np.zeros(12), context="comparison point"
@@ -136,6 +181,28 @@ def jax_run(
     pairs: IntArray,
     backend: str,
 ) -> BenchmarkResult:
+    """Measure the JAX estimator on the exact inputs used by the SciPy reference.
+
+    Parameters
+    ----------
+    counts : FloatArray
+        Point outcome counts, shaped [66, 3].
+    samples : FloatArray
+        Bootstrap counts, shaped [replicates, 66, 3].
+    contrasts : FloatArray
+        Zero-sum strength basis, shaped [12, 11].
+    pairs : IntArray
+        Entrant index pairs, shaped [66, 2].
+    backend : str
+        ``jax-gpu`` selects GPU; the other supported choice is ``jax-cpu``.
+
+    Returns
+    -------
+    BenchmarkResult
+        Host point and bootstrap parameters plus separate compilation, upload,
+        download, and fit timings. Failed fits remain visible in the record;
+        they do not qualify confidence intervals.
+    """
     import jax
     import jax.numpy as jnp
     from jax import Array, enable_x64
@@ -148,6 +215,7 @@ def jax_run(
     def objective(
         parameters: Array, observations: Array, contrasts: Array, pairs: Array
     ) -> Array:
+        """Evaluate the regularized paired-outcome objective in float64."""
         strengths = contrasts @ parameters[:-1]
         difference = (strengths[pairs[:, 0]] - strengths[pairs[:, 1]]) / 2
         logits = jnp.stack(
@@ -168,6 +236,9 @@ def jax_run(
     def fit(
         observations: Array, initial: Array, contrasts: Array, pairs: Array
     ) -> tuple[Array, bool | Array, int | Array, Array, Array, int | Array]:
+        """Run one BFGS fit and retain parameters, convergence flags, and
+        diagnostics.
+        """
         result = optimize.minimize(
             objective,
             initial,
@@ -307,6 +378,16 @@ def jax_run(
 
 
 def main() -> None:
+    """Run the requested estimator comparison and save its numerical evidence.
+
+    Reads backend, replicate count, and output path from command-line arguments.
+    Only converged runs with 5,000 resamples qualify interval output.
+
+    Raises
+    ------
+    SystemExit
+        If command-line arguments are invalid or help was requested.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--backend", choices=("scipy", "jax-cpu", "jax-gpu"), required=True

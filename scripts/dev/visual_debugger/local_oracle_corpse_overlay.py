@@ -194,6 +194,9 @@ def _host_has_clear_line_of_sight_v1(
 
 
 def _status_durations(frame: EvaluationFrame, global_slot: int) -> tuple[int, ...]:
+    """Read this frame's remaining status durations in the static catalog channel
+    order.
+    """
     snapshot = frame.snapshot
     return (
         *snapshot.slow_durations[global_slot],
@@ -210,6 +213,9 @@ def _corpse_statuses(
     *,
     global_slot: int,
 ) -> tuple[AuthorizedStatusV1, ...]:
+    """Describe recorded nonzero corpse statuses without inventing source
+    attribution.
+    """
     rows: list[AuthorizedStatusV1] = []
     for channel, (remaining, mechanic) in enumerate(
         zip(
@@ -258,6 +264,11 @@ def _corpse_agent(
     recipient_public_agent_id: str,
     recipient_team_id: int,
 ) -> AuthorizedAgentV1:
+    """Package one already-authorized visible corpse for this recipient and epoch.
+
+    The caller owns local visibility checks. The result uses recorded facts and a
+    recipient-bound display key; it must not be added to policy inputs.
+    """
     roster = context.roster[global_slot]
     mechanics = context.resolved_env_config.slot_mechanics[global_slot]
     class_mechanics = context.static_mechanics_catalog.class_mechanics[roster.class_id]
@@ -333,7 +344,45 @@ def build_local_oracle_corpse_overlay_v1(
     recipient_public_agent_id: str,
     living_sensor_public_agent_ids: tuple[str, ...],
 ) -> LocalOracleCorpseOverlayV1:
-    """Authorize dead bodies visible to one or more living local sensors."""
+    """Build paint-only corpse facts visible to the declared living local sensors.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact supported episode context declaring roster, rules, and information mode.
+    frame : EvaluationFrame
+        Exact trusted captured frame for the context's episode.
+    base_scene : AuthorizedBattlefieldSceneV1
+        Exact already authorized recipient scene. Bodies already present are not added
+        again.
+    authority_session_id : str
+        Nonempty session identity used to scope presentation keys.
+    source_authority_epoch : int
+        Nonnegative service revision authorizing the source frame.
+    recipient_public_agent_id : str
+        Configured-active recipient public ID.
+    living_sensor_public_agent_ids : tuple[str, ...]
+        Unique ordered tuple of configured-active living teammates whose sensors may
+        authorize corpse visibility.
+
+    Returns
+    -------
+    LocalOracleCorpseOverlayV1
+        Sealed corpse rows and observing-sensor provenance in recipient-relative order.
+
+    Raises
+    ------
+    TypeError
+        A source or overlay uses an unsupported exact model type.
+    ValueError
+        Recipient, source facts, sensor membership, or required class records disagree.
+
+    Notes
+    -----
+    Use the host float32 radius and static line-of-sight checks for each candidate
+    corpse. This does not change actor observations, masks, or simulator state.
+    No files are written.
+    """
     evaluation_context_type(context)
     if type(frame) is not EvaluationFrameV1 and type(frame) is not EvaluationFrameV2:
         raise TypeError("frame must use the exact EvaluationFrameV1 root.")
@@ -482,12 +531,43 @@ def validate_local_oracle_corpse_overlay_against_source_v1(
     recipient_public_agent_id: str,
     living_sensor_public_agent_ids: tuple[str, ...],
 ) -> None:
-    """Bind serialized corpse facts to the trusted same-epoch source frame.
+    """Rebuild corpse visibility from trusted source state and require an exact
+    match.
 
-    The browser can verify structural joins and content digests, but only this
-    same-origin Python producer owns the hidden global snapshot needed to prove
-    position and visibility. Rebuilding here makes a coordinated, re-sealed
-    corpse/public-facts mutation fail before any presentation is emitted.
+    Parameters
+    ----------
+    overlay : LocalOracleCorpseOverlayV1
+        Exact sealed corpse overlay to verify or compose.
+    context : EvaluationEpisodeContext
+        Exact supported episode context declaring roster, rules, and information mode.
+    frame : EvaluationFrame
+        Exact trusted captured frame for the context's episode.
+    base_scene : AuthorizedBattlefieldSceneV1
+        Exact already authorized recipient scene. Bodies already present are not added
+        again.
+    authority_session_id : str
+        Nonempty session identity used to scope presentation keys.
+    source_authority_epoch : int
+        Nonnegative service revision authorizing the source frame.
+    recipient_public_agent_id : str
+        Configured-active recipient public ID.
+    living_sensor_public_agent_ids : tuple[str, ...]
+        Unique ordered tuple of configured-active living teammates whose sensors may
+        authorize corpse visibility.
+
+    Raises
+    ------
+    TypeError
+        A source or overlay uses an unsupported exact model type.
+    ValueError
+        Recipient, source facts, sensor membership, or required class records disagree.
+
+    Notes
+    -----
+    A browser can check structure and hashes but cannot independently prove
+    hidden source positions. This service-side comparison rejects a coordinated
+    change to corpse facts even if someone recomputes the content digest.
+    No files are written.
     """
     if type(overlay) is not LocalOracleCorpseOverlayV1:
         raise TypeError("overlay must use the exact local-Oracle root.")
@@ -513,7 +593,37 @@ def compose_local_oracle_corpse_scene_v1(
     *,
     researcher_class_mechanics: tuple[AuthorizedClassMechanics, ...],
 ) -> AuthorizedBattlefieldSceneV1:
-    """Compose authorized corpse bodies into a paint-only scene."""
+    """Add verified corpse bodies to a paint-only scene.
+
+    Parameters
+    ----------
+    base_scene : AuthorizedBattlefieldSceneV1
+        Exact already authorized recipient scene. Bodies already present are not added
+        again.
+    overlay : LocalOracleCorpseOverlayV1
+        Exact sealed corpse overlay to verify or compose.
+    researcher_class_mechanics : tuple[AuthorizedClassMechanics, ...]
+        Public class records covering every class represented after adding the corpses.
+
+    Returns
+    -------
+    AuthorizedBattlefieldSceneV1
+        New scene containing base agents followed by overlay corpses, with class
+        mechanics for exactly the represented classes.
+
+    Raises
+    ------
+    TypeError
+        A source or overlay uses an unsupported exact model type.
+    ValueError
+        Recipient, source facts, sensor membership, or required class records disagree.
+
+    Notes
+    -----
+    The caller verifies the overlay against trusted source state first. This
+    composition does not repeat visibility checks or modify the base scene.
+    No files are written.
+    """
     if type(base_scene) is not AuthorizedBattlefieldSceneV1:
         raise TypeError("base_scene must use the exact authorized scene root.")
     if type(overlay) is not LocalOracleCorpseOverlayV1:

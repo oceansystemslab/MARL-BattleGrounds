@@ -1,4 +1,8 @@
-"""Scalar replay analysis shares numerical authority and immutable boundaries."""
+"""Check replay metric analysis and its read-only result boundaries.
+
+Analysis must use the shared numerical metric definitions and preserve missing
+values instead of inventing measurements.
+"""
 
 import csv
 import io

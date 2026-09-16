@@ -1,4 +1,4 @@
-"""Deterministic authorized-presentation browser-contract regeneration proofs."""
+"""Check repeatable generation of the browser's authorized presentation schema."""
 
 # pyright: reportPrivateUsage=false
 
@@ -37,7 +37,6 @@ _FIXTURE_ASSET = (
 
 
 def test_generated_browser_schema_and_fixture_are_exact() -> None:
-    """Checked assets must equal fresh Python output byte for byte."""
     assert _SCHEMA_ASSET.read_text(encoding="utf-8") == render_browser_schema_module()
     rendered_fixture = render_fixture()
     assert _FIXTURE_ASSET.read_text(encoding="utf-8") == rendered_fixture
@@ -76,7 +75,6 @@ def test_generated_browser_schema_and_fixture_are_exact() -> None:
 
 
 def test_schema_compaction_and_keyword_universe_are_fail_closed() -> None:
-    """Metadata stripping must preserve field names and reject new keywords."""
     source_schema = _AUTHORIZED_PRESENTATION_FRAME_ADAPTER.json_schema()
     _validate_schema_keywords(source_schema)
     assert {

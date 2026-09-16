@@ -1,4 +1,4 @@
-"""Core-free replay-mode HTTP coordinator tests with an injected fake service."""
+"""Check read-only replay HTTP handling with an injected test service."""
 
 from __future__ import annotations
 
@@ -198,8 +198,6 @@ class _FakeMetricReportResult:
 
 
 class _FakeReplayService:
-    """Small transport fake; no production replay or simulator imports."""
-
     def __init__(self) -> None:
         self.revision = 0
         self.frame_index = 0
@@ -370,8 +368,6 @@ class _FakeReplayService:
 
 
 class _BlockingLiveService:
-    """Transport fake whose selected operation remains inside one request."""
-
     def __init__(
         self,
         *,

@@ -1,3 +1,7 @@
+/**
+ * @file Check exact Python presentation shapes, immutable normalization, authority
+ * joins and rejection of forged or inconsistent data.
+ */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -33,19 +37,15 @@ const kinds = [
   "replay_shared_obs_agent_pov",
 ];
 
-/**
- * @template T
+/** @template T
  * @param {T} value
- * @returns {T}
- */
+ * @returns {T} */
 function clone(value) {
   return structuredClone(value);
 }
 
-/**
- * @param {Record<string, any>} source
- * @param {"none" | "basic" | "ultimate"} lane
- */
+/** @param {Record<string, any>} source
+ * @param {"none" | "basic" | "ultimate"} lane */
 function withCoherentLiveAgentDraftLane(source, lane) {
   const candidate = clone(source);
   const targetAction = 2;
@@ -83,11 +83,9 @@ function presentationScene(presentation) {
   );
 }
 
-/**
- * @param {Record<string, any>} source
+/** @param {Record<string, any>} source
  * @param {Record<string, number>} submittedAction
- * @param {string[]} rejectionComponents
- */
+ * @param {string[]} rejectionComponents */
 function withAgentRejectionComponents(source, submittedAction, rejectionComponents) {
   const candidate = clone(source);
   const actionRow = candidate.latest_transition.action_rows[0];
@@ -148,11 +146,9 @@ function assertRecursivelyFrozen(value) {
   for (const child of Object.values(value)) assertRecursivelyFrozen(child);
 }
 
-/**
- * @param {any} value
+/** @param {any} value
  * @param {(text: string) => string} transform
- * @returns {any}
- */
+ * @returns {any} */
 function transformStrings(value, transform) {
   if (typeof value === "string") return transform(value);
   if (Array.isArray(value)) {
@@ -167,18 +163,14 @@ function transformStrings(value, transform) {
   );
 }
 
-/**
- * @typedef {{
+/** @typedef {{
  *   label: string,
  *   makeTransport: (transport: Record<string, any>) => Record<string, any>,
- * }} JoinIdentityMutation
- */
+ * }} JoinIdentityMutation */
 
-/**
- * @param {string} label
+/** @param {string} label
  * @param {(transport: Record<string, any>) => void} mutate
- * @returns {JoinIdentityMutation}
- */
+ * @returns {JoinIdentityMutation} */
 function identityMutation(label, mutate) {
   return {
     label,
@@ -190,12 +182,7 @@ function identityMutation(label, mutate) {
   };
 }
 
-/**
- * Clone a Python-produced presentation and tripwire its first nested endpoint
- * branch. Identity preflight must reject without touching this property.
- *
- * @param {Record<string, any>} source
- */
+/** @param {Record<string, any>} source */
 function withEndpointReadTripwire(source) {
   const presentation = clone(source);
   const endpoint = presentation.current_endpoint;
@@ -212,11 +199,9 @@ function withEndpointReadTripwire(source) {
   return { presentation, readCount: () => reads };
 }
 
-/**
- * @param {Record<string, any>} pair
+/** @param {Record<string, any>} pair
  * @param {Record<string, any>} transport
- * @param {string} label
- */
+ * @param {string} label */
 async function assertJoinRaceBeforeEndpoint(pair, transport, label) {
   const { presentation, readCount } = withEndpointReadTripwire(pair.presentation);
   await assert.rejects(
@@ -229,11 +214,9 @@ async function assertJoinRaceBeforeEndpoint(pair, transport, label) {
   assert.equal(readCount(), 0, label);
 }
 
-/**
- * @param {Record<string, any>} pair
+/** @param {Record<string, any>} pair
  * @param {Record<string, any>} transport
- * @param {string} label
- */
+ * @param {string} label */
 async function assertProtocolPoisonBeforeEndpoint(pair, transport, label) {
   const { presentation, readCount } = withEndpointReadTripwire(pair.presentation);
   await assert.rejects(
@@ -2441,11 +2424,9 @@ test("replay continuity spans branded legacy, private, and audience-switch pairs
     privateShared,
   );
 
-  /**
-   * @param {Record<string, any>} pair
+  /** @param {Record<string, any>} pair
    * @param {number} revision
-   * @param {{cursor?: number, choreography?: number}} generations
-   */
+   * @param {{cursor?: number, choreography?: number}} generations */
   async function withRevision(pair, revision, generations = {}) {
     const transport = clone(pair.transport);
     const presentation = clone(pair.presentation);

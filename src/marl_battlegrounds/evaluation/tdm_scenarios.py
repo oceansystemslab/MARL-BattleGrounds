@@ -1,7 +1,10 @@
-"""Approved eight-scenario definitions joined to current replay evidence.
+"""Bind the eight packaged TDM scenarios to reproducible evaluation records.
 
-The endpoint is observed terminal Team A reward, not an inferred tactical skill.
-The small qualification schedule is plumbing evidence, not manuscript sampling.
+These host helpers record the approved layout, exact initial state, fixed opposing
+controller, and seed schedule. The measured endpoint is terminal Team A reward.
+A win supports that endpoint; it does not by itself prove the proposed tactical
+skill was learned. The two-coordinate qualification schedule checks recording
+plumbing and is not a manuscript sampling plan.
 """
 
 from __future__ import annotations
@@ -52,7 +55,29 @@ _HYPOTHESES = (
 
 
 def tdm_scenario_pressure_identity(scenario_id: int) -> ContentAddressedIdentityV1:
-    """Freeze the current ALPHA/BETA rule descriptor selected by approved Notes."""
+    """Identify the fixed opposing controller for one packaged scenario.
+
+    Parameters
+    ----------
+    scenario_id : int
+        Packaged scenario number, 1 through 8.
+
+    Returns
+    -------
+    ContentAddressedIdentityV1
+        Controller identifier, version, and SHA-256 digest of its complete current
+        rule descriptor. Scenarios 3, 5, and 8 use BETA; the others use ALPHA.
+
+    Raises
+    ------
+    ValueError
+        The scenario number is not supported or its packaged content is invalid.
+
+    Notes
+    -----
+    Loads and validates scenario content on the host. The identity describes
+    controller rules, not learned weights or a claim about their performance.
+    """
     load_tdm_scenario(scenario_id)
     descriptor = (
         reactive_tdm_beta_controller_descriptor()
@@ -69,11 +94,21 @@ def tdm_scenario_pressure_identity(scenario_id: int) -> ContentAddressedIdentity
 
 
 def build_tdm_qualification_seed_schedule() -> ScenarioSeedScheduleV3:
-    """Two coordinates in the shared executor's actual fold-in RNG protocol.
+    """Build the small seed schedule used to check scenario recording.
 
-    Named substream keys are derived by the executor, not independent seeds.
-    Their scalar seed fields therefore remain unrecorded. No cooperative role
-    exists in these scenario definitions; Team A is the focal policy team.
+    Returns
+    -------
+    ScenarioSeedScheduleV3
+        Version 3 schedule named tdm-closeout-plumbing, schedule version 2,
+        with root seed 0 and episode coordinates 0 and 1. Its digest includes the
+        complete schedule payload.
+
+    Notes
+    -----
+    The executor derives named substream keys through episode-fold-in-v1.
+    These keys are not separate scalar seeds, so those seed fields remain
+    unrecorded. Team A is focal; there is no cooperative-partner role.
+    The two coordinates test execution and artifact joins, not statistical power.
     """
     rows = tuple(
         EvaluationSeedProtocolV2(
@@ -104,7 +139,38 @@ def build_tdm_scenario_specification(
     *,
     initial_frame: EvaluationFrame | None = None,
 ) -> ResolvedScenarioSpecificationV3:
-    """Bind approved content to an explicit matched schedule and exact frame zero."""
+    """Describe one approved scenario and the exact experiment to record.
+
+    Parameters
+    ----------
+    scenario_id : int
+        Packaged scenario number, 1 through 8.
+    seed_schedule : ScenarioSeedScheduleV3
+        Explicit version 3 matched schedule, including its content digest.
+    initial_frame : EvaluationFrame | None
+        Optional captured frame zero. If supplied, its simulator tick
+        and snapshot must exactly equal the packaged initial state. Defaults to None.
+
+    Returns
+    -------
+    ResolvedScenarioSpecificationV3
+        Version 3 official specification with ten global roster slots, Team A focal
+        roles, Team B opposing roles, approved source/configuration identities,
+        initial-state digest, horizon, controller identity, and terminal-reward
+        endpoint.
+
+    Raises
+    ------
+    ValueError
+        The scenario is invalid or the supplied initial frame disagrees
+        with its packaged state; model validation can also reject malformed metadata.
+
+    Notes
+    -----
+    Inactive slots have no scenario role. Partial episodes leave the endpoint
+    unavailable. The success predicate means terminal Team A reward equals 1;
+    it does not infer a tactical explanation. This host helper performs no rollout.
+    """
     scenario = load_tdm_scenario(scenario_id)
     content = scenario_content(scenario.info)
     if initial_frame is not None and (
@@ -184,7 +250,39 @@ def build_tdm_scenario_evaluation_record(
     *,
     schedule_coordinate: int,
 ) -> ScenarioEvaluationRecordV4:
-    """Record the frozen reward endpoint and check its official replay joins."""
+    """Join one scenario replay to its declared terminal-reward endpoint.
+
+    Parameters
+    ----------
+    scenario_id : int
+        Packaged scenario number, 1 through 8.
+    specification : ResolvedScenarioSpecificationV3
+        Exact current official specification for this scenario.
+    replay : ReplayArtifactV3
+        Version 3 replay with the approved frame zero and recorded Team B
+        controller identity.
+    schedule_coordinate : int
+        Zero-based index into the specification's matched schedule.
+
+    Returns
+    -------
+    ScenarioEvaluationRecordV4
+        Version 4 record joining specification, replay, and schedule coordinate.
+        A complete replay ending with terminated or truncated reports Team A reward
+        and whether it equals 1. Other replays report an unavailable endpoint.
+
+    Raises
+    ------
+    ValueError
+        The specification, initial frame, opposing controller, schedule
+        join, or terminal reward is inconsistent. Active Team A rewards must
+        agree on one value from -1, 0, and 1.
+
+    Notes
+    -----
+    Uses recorded rewards and the shared scenario-record validator. It does not
+    rerun physics, infer success from visual behavior, or write a file.
+    """
     expected = build_tdm_scenario_specification(
         scenario_id, specification.seed_schedule, initial_frame=replay.frames[0]
     )

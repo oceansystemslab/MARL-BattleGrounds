@@ -1,4 +1,10 @@
-"""Launch-scoped, path-free source revision discovery for debugger capture."""
+"""Record source identity from a checkout or an installed package.
+
+These host-only helpers read Git metadata and source bytes once at recording
+setup. They return digests and versions, without embedding local paths. Dirty
+checkout identity includes non-ignored untracked content as well as tracked
+changes. They do not modify the repository or invent a Git commit for a wheel.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +22,7 @@ _PACKAGE_DISTRIBUTION = "marl-battlegrounds"
 
 
 def _git(repository_root: Path, *arguments: str) -> bytes:
+    """Run a read-only Git query and raise ValueError with stderr on failure."""
     completed = subprocess.run(
         ("git", "-C", os.fspath(repository_root), *arguments),
         check=False,
@@ -30,6 +37,7 @@ def _git(repository_root: Path, *arguments: str) -> bytes:
 
 
 def _framed_update(digest: hashlib._Hash, label: bytes, payload: bytes) -> None:  # type: ignore[name-defined]
+    """Hash a label and payload with lengths so adjacent fields cannot collide."""
     digest.update(len(label).to_bytes(4, "big"))
     digest.update(label)
     digest.update(len(payload).to_bytes(8, "big"))
@@ -37,6 +45,12 @@ def _framed_update(digest: hashlib._Hash, label: bytes, payload: bytes) -> None:
 
 
 def _untracked_content_digest(repository_root: Path) -> bytes:
+    """Hash sorted, non-ignored untracked paths, file kinds and contents.
+
+    Read symlink targets rather than following them. Reject other special file
+    kinds. Chunk regular files to bound temporary host memory; filesystem errors
+    propagate instead of producing an incomplete source identity.
+    """
     paths = tuple(
         path
         for path in _git(
@@ -79,13 +93,39 @@ def discover_code_revision_v1(
     *,
     package_version: str | None = None,
 ) -> CodeRevisionV1:
-    """Resolve one truthful Git/source identity without storing a local path.
+    """Describe one Git checkout without placing its local path in the record.
 
-    The clean source-tree digest covers Git's ordered tree listing.  When the
-    worktree differs from ``HEAD``, the dirty digest additionally covers the
-    porcelain status, the binary tracked diff, and content hashes for every
-    non-ignored untracked file.  The absolute repository path is used only as
-    an input capability and never enters the returned scientific identity.
+    Parameters
+    ----------
+    repository_root : Path
+        Existing pathlib.Path directory inside the intended Git
+        checkout. The path is resolved before any query.
+    package_version : str | None
+        Optional explicit distribution version. None reads the
+        installed marl-battlegrounds version.
+
+    Returns
+    -------
+    CodeRevisionV1
+        CodeRevisionV1 with the actual HEAD commit, a digest of Git's ordered tree
+        listing, and dirty status. A dirty record also hashes porcelain status,
+        the tracked binary diff against HEAD, and non-ignored untracked content.
+
+    Raises
+    ------
+    TypeError
+        repository_root is not a pathlib.Path.
+    ValueError
+        The root is not a directory, Git fails, the installed version
+        is missing, or an untracked item is neither a regular file nor symlink.
+    OSError
+        The root or source content cannot be accessed.
+
+    Notes
+    -----
+        Host-only and read-only. All Git queries refer to the supplied checkout.
+        Source files must remain stable during discovery for a coherent snapshot.
+        Only digests and package/commit identifiers enter the returned model.
     """
     if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
         repository_root, Path
@@ -140,7 +180,29 @@ def discover_code_revision_v1(
 
 
 def discover_code_revision_v2() -> CodeRevisionV1 | CodeRevisionV2:
-    """Record the actual checkout, or installed package content without invented Git."""
+    """Describe this imported package using its real source identity.
+
+    Returns
+    -------
+    CodeRevisionV1 | CodeRevisionV2
+        CodeRevisionV1 when this module is inside a detectable source checkout.
+        Otherwise CodeRevisionV2 hashes installed package files in sorted relative
+        path order, excluding __pycache__, and records the installed version.
+
+    Raises
+    ------
+    ValueError
+        Checkout revision discovery fails.
+    OSError
+        Package content cannot be read.
+
+    Notes
+    -----
+        Takes no arguments. This host-only read may invoke Git or read package
+        files. A missing distribution version propagates its lookup error.
+        Installed content has no invented commit SHA. Keep files stable while
+        capturing provenance; this function does not lock or edit them.
+    """
     package = Path(__file__).resolve().parents[1]
     for parent in package.parents:
         if (parent / "src" / "marl_battlegrounds") == package and (

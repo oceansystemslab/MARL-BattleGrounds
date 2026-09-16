@@ -1,4 +1,10 @@
-"""Join selected capture chunks into completed replays, in memory or on a spool."""
+"""Join selected transition packets into complete replay artifacts on the host.
+
+ReplayCollector checks episode IDs and transition order across chunks. It keeps
+packets in memory by default or writes numeric temporary spools when requested.
+Only a real terminal packet completes a replay. Callers consume each write
+iterator and close the collector to release unfinished temporary files.
+"""
 
 from __future__ import annotations
 
@@ -25,6 +31,8 @@ type ContextFactory = Callable[
 
 @dataclass
 class _Episode:
+    """Ordered host packets and an optional owned spool for one episode."""
+
     context: EvaluationEpisodeContextV3
     runtime: RuntimeProvenanceV1
     tree: Any  # JAX exposes PyTreeDef as a runtime alias, without a public type stub.
@@ -33,6 +41,7 @@ class _Episode:
     packets: list[ReplayPackets] = field(default_factory=lambda: list[ReplayPackets]())
 
     def append(self, packet: ReplayPackets) -> None:
+        """Keep one packet in memory or write a pickle-free numeric spool row."""
         if self.stream is None:
             self.packets.append(packet)
         else:
@@ -51,6 +60,7 @@ class _Episode:
         self.count += 1
 
     def records(self) -> Iterator[ReplayPackets]:
+        """Yield packets in order, rewinding any spool before reading."""
         if self.stream is None:
             yield from self.packets
         else:
@@ -67,6 +77,7 @@ class _Episode:
                 )
 
     def close(self) -> None:
+        """Close the owned spool, if present."""
         if self.stream is not None:
             self.stream.close()
 
@@ -78,11 +89,25 @@ class ReplayCollector:
     episode-length Python list. Final artifact construction still needs memory
     for that one replay. Consume ``write`` fully; it yields each finished replay
     before building the next, allowing a writer to persist it immediately.
+
+    Parameters
+    ----------
+    context_factory : object
+        Called with an episode's first valid scalar packet;
+        returns its validated context and runtime provenance.
+    spool_dir : object
+        Optional temporary-file folder. None keeps packet lists in
+        memory. A supplied directory is created if necessary.
+
+    The collector owns any temporary files and must be closed after use. It
+    tracks IDs for this recording scope; an already completed ID cannot restart.
+    Host calls may transfer packet arrays from the device; no method is jittable.
     """
 
     def __init__(
         self, context_factory: ContextFactory, *, spool_dir: Path | None = None
     ) -> None:
+        """Create an empty host collector and its optional spool directory."""
         self._factory = context_factory
         self._spool_dir = spool_dir
         self._episodes: dict[int, _Episode] = {}
@@ -93,10 +118,39 @@ class ReplayCollector:
 
     @property
     def pending_episode_ids(self) -> frozenset[int]:
+        """Return the immutable set of episode IDs whose replay is still incomplete."""
         return frozenset(self._episodes)
 
     def write(self, packets: ReplayPackets) -> Iterator[ReplayArtifactV3]:
-        """Consume every valid packet, including steps without episode completions."""
+        """Consume selected packets and yield each replay as soon as it completes.
+
+        Parameters
+        ----------
+        packets : ReplayPackets
+            ReplayPackets with capacity axes, optionally preceded by chunk
+            axes. valid gives the leading axes; rows are consumed in flat order.
+
+        Yields
+        ------
+        ReplayArtifactV3
+            One ReplayArtifactV3 per completed selected episode. Consume the iterator
+            fully: transfers, validation and collection occur during iteration.
+
+        Raises
+        ------
+        RuntimeError
+            The collector was closed.
+        ValueError
+            A packet has an invalid/reused ID, a missing or repeated
+            transition index, a wrong initial flag or no real transition.
+        OSError
+            A temporary spool cannot be read or written. Context/artifact
+            validation errors propagate before that replay is yielded.
+
+        The call transfers packets to the host and mutates this collector. It keeps
+        unfinished episodes for later chunks. Completion closes that episode's spool;
+        the returned artifact owns its materialized replay data.
+        """
         from marl_battlegrounds.evaluation.replay_v3 import replay_from_packets
 
         if self._closed:
@@ -106,6 +160,7 @@ class ReplayCollector:
         leading = valid.ndim
 
         def flatten(value: object) -> np.ndarray[Any, Any]:
+            """Flatten packet-leading axes while retaining each payload shape."""
             array = np.asarray(value)
             return array.reshape((-1, *array.shape[leading:]))
 
@@ -113,6 +168,7 @@ class ReplayCollector:
         for row in np.flatnonzero(valid):
 
             def select(value: object, index: int = int(row)) -> np.ndarray[Any, Any]:
+                """Read one valid scalar packet from the flattened host batch."""
                 return np.asarray(value)[index]
 
             packet = cast(ReplayPackets, jax.tree.map(select, rows))
@@ -156,7 +212,17 @@ class ReplayCollector:
                 yield artifact
 
     def close(self) -> None:
-        """Release incomplete spools; they never represent completed replay evidence."""
+        """Release every incomplete spool and mark the collector closed.
+
+        Returns
+        -------
+        None
+            None. Repeated calls are safe; later write iteration raises RuntimeError.
+
+        Incomplete packets are discarded rather than published as completed replay
+        evidence. Already returned artifacts remain usable. No final game step or
+        automatic completion is invented.
+        """
         for episode in self._episodes.values():
             episode.close()
         self._episodes.clear()

@@ -1,4 +1,4 @@
-"""Archived basic reports retain task authority and strict historical schemas."""
+"""Check historical basic reports and their recorded task and schema rules."""
 
 import jax
 import jax.numpy as jnp

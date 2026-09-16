@@ -1,4 +1,8 @@
-"""Public transitions for effective output, Ultimate credit and respawn waves."""
+"""Check effective output, Ultimate credit and respawn-wave measurements.
+
+The tests use real transitions, including small floating-point values that
+must remain distinct from zero and missing measurements.
+"""
 
 import jax
 import jax.numpy as jnp

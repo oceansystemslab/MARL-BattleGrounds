@@ -1,4 +1,4 @@
-"""Focused proof for the one-shot scene-native debugger snapshot adapter."""
+"""Check one-shot debugger images built from scene records."""
 
 from pathlib import Path
 

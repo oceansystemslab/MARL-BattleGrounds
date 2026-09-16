@@ -24,18 +24,22 @@ type TestWorkUnitRelocation = tuple[str, int, int]
 
 
 def _empty_string_costs() -> dict[str, int]:
+    """Create an independent empty cost map for a new shard profile."""
     return {}
 
 
 def _empty_reserved_costs() -> dict[int, tuple[int, ...]]:
+    """Create an empty map of reserved costs keyed by shard count."""
     return {}
 
 
 def _empty_relocations() -> dict[int, tuple[TestWorkUnitRelocation, ...]]:
+    """Create an empty map of explicitly requested test-unit relocations."""
     return {}
 
 
 def _empty_module_fixture_keys() -> frozenset[ModuleFixtureKey]:
+    """Start with no declared module-fixture dependencies."""
     return frozenset()
 
 
@@ -107,18 +111,18 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
         "tests/test_visual_debugger_sample_replays.py": 500,
     },
     reserved_costs_by_shard_count={12: (0,) * 11 + (50,)},
+    # The 2026-09-15 twelve-worker run measured six intact units to move.
+    # Source IDs below are their owners after weighted packing, before moves.
+    # Keep the existing split/fixture rules and each unit's collection order.
     relocations_by_shard_count={
         12: (
-            (
-                "residual:tests/test_visual_debugger_service.py",
-                6,
-                10,
-            ),
-            (
-                "file:tests/test_shared_obs_runtime.py",
-                12,
-                3,
-            ),
+            ("residual:tests/test_visual_debugger_service.py", 6, 4),
+            ("file:tests/test_shared_obs_runtime.py", 12, 3),
+            ("file:tests/test_combat_ultimate_effects.py", 7, 5),
+            ("file:tests/test_combat_effects.py", 8, 11),
+            ("file:tests/test_tdm_scenarios.py", 11, 8),
+            ("file:tests/test_combat_ultimate_masks.py", 9, 2),
+            ("file:tests/test_policy_identity_recording.py", 7, 12),
         )
     },
     strict=True,
@@ -126,7 +130,23 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
 
 
 def parse_shard_spec(value: str) -> tuple[int, int]:
-    """Return a zero-based shard index and positive shard count."""
+    """Parse a one-based CLI selector into a zero-based shard index and count.
+
+    Parameters
+    ----------
+    value : str
+        One-based shard selector in N/M form, such as 3/12.
+
+    Returns
+    -------
+    tuple of int
+        Zero-based selected index and positive shard count.
+
+    Raises
+    ------
+    pytest.UsageError
+        The selector is malformed or does not satisfy 1 <= N <= M.
+    """
     try:
         raw_index, raw_count = value.split("/", maxsplit=1)
         index = int(raw_index)
@@ -145,7 +165,25 @@ def family_key_from_metadata(
     item_name: str,
     original_name: str | None,
 ) -> TestFamilyKey:
-    """Return one family key from pytest's unparameterized item metadata."""
+    """Build a stable family identity without parsing parameter labels.
+
+    Parameters
+    ----------
+    path : str
+        Pytest item file path used as the family's physical file identity.
+    parent_nodeid : str
+        Node ID of the item's collector, before the function name.
+    item_name : str
+        Collected item name, used when original_name is unavailable.
+    original_name : str | None
+        Unparameterized function name, or None. A nonempty value keeps all parameter
+        cases in one family.
+
+    Returns
+    -------
+    TestFamilyKey
+        Physical path and collector-qualified unparameterized function name.
+    """
     family_name = (
         original_name if isinstance(original_name, str) and original_name else item_name
     )
@@ -153,7 +191,24 @@ def family_key_from_metadata(
 
 
 def family_key_from_item(item: Item) -> TestFamilyKey:
-    """Return one family key without parsing arbitrary parameter-ID text."""
+    """Find an item's unparameterized scheduling family.
+
+    Parameters
+    ----------
+    item : Item
+        Collected pytest item whose collector and resolved fixture metadata are
+        inspected.
+
+    Returns
+    -------
+    TestFamilyKey
+        Family key shared by every parameter case of this function.
+
+    Raises
+    ------
+    pytest.UsageError
+        The item has no parent collector.
+    """
     parent = item.parent
     if parent is None:
         raise pytest.UsageError("CI sharding requires every item to have a collector.")
@@ -166,7 +221,23 @@ def family_key_from_item(item: Item) -> TestFamilyKey:
 
 
 def logical_path_from_family(family: TestFamilyKey) -> str:
-    """Return the repository-relative pytest path encoded in a family node ID."""
+    """Read the repository-relative path from a family node ID.
+
+    Parameters
+    ----------
+    family : TestFamilyKey
+        Pair of physical path and unparameterized family node ID.
+
+    Returns
+    -------
+    str
+        Node ID prefix before the first double colon.
+
+    Raises
+    ------
+    ValueError
+        The node ID contains no logical path.
+    """
     logical_path = family[1].split("::", maxsplit=1)[0]
     if not logical_path:
         raise ValueError("test family node ID must contain a logical test path")
@@ -174,7 +245,23 @@ def logical_path_from_family(family: TestFamilyKey) -> str:
 
 
 def module_fixture_keys_from_item(item: Item) -> frozenset[ModuleFixtureKey]:
-    """Return resolved module-scoped fixtures in an item's transitive closure."""
+    """Find module-scoped fixtures in the item's resolved dependency closure.
+
+    Parameters
+    ----------
+    item : Item
+        Collected pytest item whose collector and resolved fixture metadata are
+        inspected.
+
+    Returns
+    -------
+    frozenset of ModuleFixtureKey
+        Fixture owner node IDs paired with fixture names.
+
+    Notes
+    -----
+    This reads pytest collection metadata; it does not execute fixtures.
+    """
     fixture_info = getattr(item, "_fixtureinfo", None)
     fixture_defs_by_name = getattr(fixture_info, "name2fixturedefs", {})
     fixture_keys: set[ModuleFixtureKey] = set()
@@ -186,7 +273,23 @@ def module_fixture_keys_from_item(item: Item) -> frozenset[ModuleFixtureKey]:
 
 
 def dynamic_fixture_request_sites_from_item(item: Item) -> frozenset[str]:
-    """Return non-pytest call sites that can select fixtures dynamically."""
+    """Find non-pytest code that can request fixtures dynamically.
+
+    Parameters
+    ----------
+    item : Item
+        Collected pytest item whose collector and resolved fixture metadata are
+        inspected.
+
+    Returns
+    -------
+    frozenset of str
+        Item or fixture call-site identities using the request fixture.
+
+    Notes
+    -----
+    This conservative inspection reads metadata and does not run fixture code.
+    """
     fixture_info = getattr(item, "_fixtureinfo", None)
     request_sites: set[str] = set()
     if "request" in getattr(fixture_info, "argnames", ()):
@@ -207,7 +310,26 @@ def validate_split_fixture_affinity(
     module_fixtures_by_family: Mapping[TestFamilyKey, frozenset[ModuleFixtureKey]],
     cost_profile: ShardCostProfile,
 ) -> None:
-    """Reject shared module fixtures unless an exact fixture is repeatable."""
+    """Reject unsafe module-fixture sharing across split scheduling units.
+
+    Parameters
+    ----------
+    module_fixtures_by_family : Mapping[TestFamilyKey, frozenset[ModuleFixtureKey]]
+        Exact module-scoped fixture identities used by each collected family.
+    cost_profile : ShardCostProfile
+        Measured scheduling overrides and split rules. Where optional, None uses item
+        counts and ordinary file grouping.
+
+    Raises
+    ------
+    ValueError
+        A split shares a fixture not declared repeatable, or a strict repeatable
+        fixture entry is stale.
+
+    Notes
+    -----
+    This validates the proposed split and changes no assignments.
+    """
     extracted_nodeids = set(cost_profile.extracted_family_costs)
     split_files = set(cost_profile.split_file_family_cost_floors)
     extracted_paths = {
@@ -260,7 +382,25 @@ def validate_split_dynamic_fixture_requests(
     request_sites_by_family: Mapping[TestFamilyKey, frozenset[str]],
     cost_profile: ShardCostProfile,
 ) -> None:
-    """Reject dynamic fixture selection inside any profiled split test file."""
+    """Reject dynamic fixture selection in files selected for splitting.
+
+    Parameters
+    ----------
+    request_sites_by_family : Mapping[TestFamilyKey, frozenset[str]]
+        Known direct or fixture-mediated dynamic request sites for each family.
+    cost_profile : ShardCostProfile
+        Measured scheduling overrides and split rules. Where optional, None uses item
+        counts and ordinary file grouping.
+
+    Raises
+    ------
+    ValueError
+        A selected split file contains a known dynamic request site.
+
+    Notes
+    -----
+    Dynamic fixture selection cannot prove the static fixture-sharing boundary.
+    """
     split_paths = set(cost_profile.split_file_family_cost_floors) | {
         nodeid.split("::", maxsplit=1)[0]
         for nodeid in cost_profile.extracted_family_costs
@@ -281,11 +421,13 @@ def validate_split_dynamic_fixture_requests(
 
 
 def _positive_costs(values: Mapping[str, int], label: str) -> None:
+    """Reject Boolean, non-integer, or nonpositive measured costs."""
     if any(type(value) is not int or value < 1 for value in values.values()):
         raise ValueError(f"{label} must contain positive integer costs")
 
 
 def _reserved_costs(profile: ShardCostProfile, shard_count: int) -> tuple[int, ...]:
+    """Return one nonnegative reserved cost per shard, defaulting each to zero."""
     reserved = profile.reserved_costs_by_shard_count.get(shard_count)
     if reserved is None:
         return (0,) * shard_count
@@ -300,7 +442,32 @@ def build_test_work_units(
     item_counts: Mapping[TestFamilyKey, int],
     cost_profile: ShardCostProfile | None = None,
 ) -> tuple[TestWorkUnit, ...]:
-    """Build ordinary file units plus explicitly extracted slow families."""
+    """Group test families into indivisible units with declared scheduling costs.
+
+    Parameters
+    ----------
+    item_counts : Mapping[TestFamilyKey, int]
+        Positive collected-item count for every unparameterized test family.
+    cost_profile : ShardCostProfile | None
+        Measured scheduling overrides and split rules. Where optional, None uses item
+        counts and ordinary file grouping.
+
+    Returns
+    -------
+    tuple of TestWorkUnit
+        Stable file, extracted-family, or split-family units.
+
+    Raises
+    ------
+    ValueError
+        Counts, costs, logical IDs, or strict profile entries are invalid.
+
+    Notes
+    -----
+    Ordinary files remain whole. Declared split/extraction rules never separate
+    parameter cases of one family. Cost units are relative scheduling weights,
+    not a promise of measured seconds on the current machine.
+    """
     if any(count < 1 for count in item_counts.values()):
         raise ValueError("every test family must contain at least one item")
     profile = cost_profile or ShardCostProfile()
@@ -415,7 +582,34 @@ def assign_test_families(
     *,
     cost_profile: ShardCostProfile | None = None,
 ) -> tuple[tuple[TestFamilyKey, ...], ...]:
-    """LPT-pack deterministic, indivisible test work units by measured cost."""
+    """Assign whole work units to shards using largest-cost-first packing.
+
+    Parameters
+    ----------
+    item_counts : Mapping[TestFamilyKey, int]
+        Positive collected-item count for every unparameterized test family.
+    shard_count : int
+        Positive worker count no larger than the number of indivisible work units.
+    cost_profile : ShardCostProfile | None
+        Measured scheduling overrides and split rules. Where optional, None uses item
+        counts and ordinary file grouping.
+
+    Returns
+    -------
+    tuple of tuple of TestFamilyKey
+        Deterministic nonempty shard memberships, sorted within each shard.
+
+    Raises
+    ------
+    ValueError
+        Counts, costs, shard count, reserved work, or declared relocations are invalid.
+
+    Notes
+    -----
+    Each unit goes to the current least-loaded shard with stable tie breaking.
+    Checked explicit relocations run afterward. This computes membership only;
+    it does not execute tests or change their assertion logic.
+    """
     if shard_count < 1:
         raise ValueError("shard_count must be positive")
     profile = cost_profile or ShardCostProfile()
@@ -467,7 +661,17 @@ def assign_test_families(
 
 
 def pytest_addoption(parser: Parser) -> None:
-    """Register the opt-in CI shard selector."""
+    """Register the optional --ci-shard=N/M pytest command-line argument.
+
+    Parameters
+    ----------
+    parser : Parser
+        Pytest option parser modified to register --ci-shard.
+
+    Notes
+    -----
+    Called by pytest during plugin setup. No selector means no collection filtering.
+    """
     group = parser.getgroup("CI sharding")
     group.addoption(
         "--ci-shard",
@@ -477,7 +681,26 @@ def pytest_addoption(parser: Parser) -> None:
 
 
 def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
-    """Deselect test families owned by other CI shards after collection."""
+    """Keep only the selected shard after checking the complete collection.
+
+    Parameters
+    ----------
+    config : Config
+        Pytest configuration containing the optional shard selector.
+    items : list[Item]
+        Complete collected item list, replaced in place with this shard's items.
+
+    Raises
+    ------
+    pytest.UsageError
+        The selector, fixture split, cost profile, or assignment is invalid.
+
+    Notes
+    -----
+    With no selector this leaves items unchanged. Otherwise it reports the
+    removed items through pytest_deselected and replaces the list in place.
+    Relative collection order of retained items is preserved.
+    """
     raw_spec = config.getoption("ci_shard")
     if raw_spec is None:
         return
@@ -536,7 +759,29 @@ def shard_loads(
     assignments: Sequence[Sequence[TestFamilyKey]],
     item_counts: Mapping[TestFamilyKey, int],
 ) -> tuple[int, ...]:
-    """Return item totals for diagnostics and focused unit tests."""
+    """Count collected items assigned to each shard.
+
+    Parameters
+    ----------
+    assignments : Sequence[Sequence[TestFamilyKey]]
+        Ordered shard memberships whose entries are whole test-family keys.
+    item_counts : Mapping[TestFamilyKey, int]
+        Positive collected-item count for every unparameterized test family.
+
+    Returns
+    -------
+    tuple of int
+        Item totals in shard order.
+
+    Raises
+    ------
+    KeyError
+        An assigned family is absent from item_counts.
+
+    Notes
+    -----
+    This is a diagnostic sum, not an exact-cover validator or timing estimate.
+    """
     return tuple(sum(item_counts[path] for path in paths) for paths in assignments)
 
 
@@ -546,7 +791,33 @@ def shard_costs(
     *,
     cost_profile: ShardCostProfile | None = None,
 ) -> tuple[int, ...]:
-    """Return scheduling costs, including any reserved non-pytest work."""
+    """Compute assigned scheduling cost after proving whole-unit exact coverage.
+
+    Parameters
+    ----------
+    assignments : Sequence[Sequence[TestFamilyKey]]
+        Ordered shard memberships whose entries are whole test-family keys.
+    item_counts : Mapping[TestFamilyKey, int]
+        Positive collected-item count for every unparameterized test family.
+    cost_profile : ShardCostProfile | None
+        Measured scheduling overrides and split rules. Where optional, None uses item
+        counts and ordinary file grouping.
+
+    Returns
+    -------
+    tuple of int
+        Work-unit costs plus reserved non-pytest costs, in shard order.
+
+    Raises
+    ------
+    ValueError
+        Membership misses or repeats a family, splits a work unit, or uses an
+        invalid cost profile.
+
+    Notes
+    -----
+    The numbers are scheduling weights. They do not measure elapsed time.
+    """
     profile = cost_profile or ShardCostProfile()
     units = build_test_work_units(item_counts, profile)
     ownership_counts = Counter(

@@ -1,4 +1,4 @@
-"""Focused public-contract proofs for the interactive Combat Debugger arena."""
+"""Check the public arena data and actions used by the Combat Debugger."""
 
 from dataclasses import replace
 
@@ -37,7 +37,6 @@ def _arena_session(*, controlled_global_slot: int = 0) -> DebuggerSession:
 
 
 def _public_lifecycle_session() -> DebuggerSession:
-    """Install distinct public lifecycle states without changing body visibility."""
     registered = get_scenario("arena_5v5")
     config, state = registered.build_scenario()
     authored_state = state._replace(
@@ -63,7 +62,6 @@ def _public_lifecycle_session() -> DebuggerSession:
 
 
 def test_live_oracle_and_agent_publish_the_same_public_arena_configuration() -> None:
-    """Fog may filter bodies, but it cannot change public map mechanics."""
     session = _arena_session()
     oracle_result = DebuggerService(
         session,
@@ -134,7 +132,6 @@ def test_live_oracle_and_agent_publish_the_same_public_arena_configuration() -> 
 
 
 def test_agent_fog_preserves_public_lifecycle_without_hidden_body_geometry() -> None:
-    """Lifecycle is public policy input; fog removes identities and bodies only."""
     session = _public_lifecycle_session()
     oracle_result = DebuggerService(
         session,
@@ -300,7 +297,6 @@ def _boundary_session(*, map_width: float) -> DebuggerSession:
 
 
 def test_public_map_width_precedes_and_explains_boundary_limited_movement() -> None:
-    """The decision input exposes the bound before that bound affects transition."""
     arena = _boundary_session(map_width=20.0)
     wider_counterfactual = _boundary_session(map_width=21.0)
 

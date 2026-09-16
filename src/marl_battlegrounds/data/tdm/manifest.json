@@ -51,9 +51,9 @@
       "curriculum": true,
       "source": {
         "asset_id": "tdm_map_id_3_curriculum_map_3_training",
-        "revision": 1,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_3_curriculum_map_3_training/r1.json",
-        "source_sha256": "149eedc7f2140f22073d3686faf994715e4ce2d0b493d638ba5b91992726c37f",
+        "revision": 2,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_3_curriculum_map_3_training/r2.json",
+        "source_sha256": "ad8f3f217a0dcc1ae08ec8ac5b5e860fb3ad66fa666c189ecaf3981ba4a64be0",
         "semantic_digest": "5b4535d6a435efabc8e42b0f8caed1b2585d19f35b7a753ac1539262741ebf86"
       },
       "resource_sha256": "8034cb9260c5d4e5b50e257507feac7c7592a813af030aa1ee5d44bafd6b6763"
@@ -107,12 +107,12 @@
       "curriculum": true,
       "source": {
         "asset_id": "tdm_map_id_7_curriculum_map_7_training",
-        "revision": 1,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_7_curriculum_map_7_training/r1.json",
-        "source_sha256": "1a4d443e96942ce8d512f1a11865999e9ba01c6488adaa106cc6a253d54fceb2",
-        "semantic_digest": "9e1d3404321539536b931021ba2df9d749a15bd7c4cc9f261b977f2378fdd98c"
+        "revision": 3,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_7_curriculum_map_7_training/r3.json",
+        "source_sha256": "3a3cc0619079e87b0b787773aa117079a1842aca5a99d7f40e5c966df4a57d43",
+        "semantic_digest": "7db01e035351684c9bc2cb7660f08a8b4d69e4036a39b9a8cc4e398922688acd"
       },
-      "resource_sha256": "e616ebf344930873a2bfb1512b7ba720f6b85fb2e796ec97e6291f6dda889ca7"
+      "resource_sha256": "7bdadf1ed0642d871cb771bcd03fe55e18652bdc55124301fc8d3741d67e3e77"
     },
     {
       "map_id": 8,
@@ -121,12 +121,12 @@
       "curriculum": true,
       "source": {
         "asset_id": "tdm_map_id_8_curriculum_map_8_training",
-        "revision": 1,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_8_curriculum_map_8_training/r1.json",
-        "source_sha256": "a9ac88ad1e94cccaa81923d2f6141ff844e0998adc178669a2c0a0438458b1e1",
-        "semantic_digest": "c6979e4c7efc9bee4f3585c35f5226d99028860f149c4823622a79488250e8cc"
+        "revision": 3,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_8_curriculum_map_8_training/r3.json",
+        "source_sha256": "b8792081715f84bcee177281de26191f1002cc4bb233561edc7a28db4b8a2100",
+        "semantic_digest": "6907e1d24cad329be0d56679525392973bed85d06eea783fa93f087066e815de"
       },
-      "resource_sha256": "968376fe1e7080d81b4c815e04a407cf3f40b94dd3d5566e815c84c10e7fd3bd"
+      "resource_sha256": "e242c269289a5dfacb3f28357519b39b1e0143b62f03105724c88a56bf85f1af"
     },
     {
       "map_id": 9,
@@ -163,12 +163,12 @@
       "curriculum": true,
       "source": {
         "asset_id": "tdm_map_id_11_curriculum_map_11_training",
-        "revision": 1,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_11_curriculum_map_11_training/r1.json",
-        "source_sha256": "c102e6b50e6bd038673472756525a3595eff89709d56883e997253c97bf0f9f6",
-        "semantic_digest": "06cfe37e72855ec0cfbb65f3542d8b2b6e30666ec18038ff6f3f01f8cfe36431"
+        "revision": 2,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_11_curriculum_map_11_training/r2.json",
+        "source_sha256": "7d47964fb75259756ee4539a2730467c8c572a5de3f2a5734b01a3bddfcd1598",
+        "semantic_digest": "80d334845e132df2c49b23ba1b3a6fd82b8a5a999f8de0a9f250f7fb132c4122"
       },
-      "resource_sha256": "4e7e06b89cfe19a48bd8eb3641bff15d2a4a4919fbc0a3dd6c081fe297ee303d"
+      "resource_sha256": "049599acbba40bac3b98f51d87b687b2568cb0dc748871bae1523542956b409b"
     },
     {
       "map_id": 12,
@@ -177,12 +177,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_12_foxhole_training",
-        "revision": 7,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_12_foxhole_training/r7.json",
-        "source_sha256": "c2cff9e1c352e32e8a7bd4909389d27b929921c17fe172270c89e046c9f29353",
-        "semantic_digest": "41a2db347837a5b9815050b14c5c6004b7792cc792347e32e43ffb8ac935dc72"
+        "revision": 9,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_12_foxhole_training/r9.json",
+        "source_sha256": "394c6fd825f72de451a3e09586065e359186ea05ace7ad9916e267cb66b74bf9",
+        "semantic_digest": "66efd815903e6e6cff586e77410bae4e133291a9df6b601c99126e81b8cde32d"
       },
-      "resource_sha256": "8a4c37f113f91eef0df90c8bd66d040c48249819c79d6a17c3d919427ae82531"
+      "resource_sha256": "4e313688a08142ffcea36b9cc49f52bb93983ccadae5774a14ffd3f446fa1e3c"
     },
     {
       "map_id": 13,
@@ -191,12 +191,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_13_pyramids_of_giza_training",
-        "revision": 5,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_13_pyramids_of_giza_training/r5.json",
-        "source_sha256": "e8bcf56856d750401a40a7998b5f675728226c8b3fb13ffe89fbb9a04206c995",
-        "semantic_digest": "50e80ae09cceb7cf8b58b8cf75a6ba7ead7f3fa9aff83bceaa51f6baa774e163"
+        "revision": 7,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_13_pyramids_of_giza_training/r7.json",
+        "source_sha256": "214a87c26be9fdd8d863e077231c25e609b41ba672ddd68a486733cac4570650",
+        "semantic_digest": "29ac0a8e3ca8fde607563a3d650b44b058ef3e4b80df90b57d701ab6e1f40687"
       },
-      "resource_sha256": "70edea7a9b645c04f3b6532b3623098d2746809882cd66f345a517a484da6fca"
+      "resource_sha256": "0c7c4e742c819e9c21fe6cbc24da4410a69bdb828328cc92a32c5ff1811b2332"
     },
     {
       "map_id": 14,
@@ -205,12 +205,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_14_crossroads_training",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_14_crossroads_training/r2.json",
-        "source_sha256": "9356e34f6d30b46f24a1d80e986da7e29f3c3099f245ca2f4f5b68843e738f64",
-        "semantic_digest": "1710a44d62bfc1aac53fb1de274d56516f4088ae085044457f301a52334046f7"
+        "revision": 4,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_14_crossroads_training/r4.json",
+        "source_sha256": "d37c6eb67b21e1f97092424b46dbd7474cdac46a9ad289eb05912ee2f3589f23",
+        "semantic_digest": "6c17e8c48cf90b6cd2e284326978b6af1c6f9f000704d7ae2f096e394bb8be56"
       },
-      "resource_sha256": "1ce59056a1539b3e398d0d7d88830695ab3cfba317d19ffc6f5a76539d176b9c"
+      "resource_sha256": "fa082baf86492659781da7e25cc9c2dda1a11c2d932705e8c03612c70c9cbb93"
     },
     {
       "map_id": 15,
@@ -219,12 +219,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_15_esmeralda_training",
-        "revision": 3,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_15_esmeralda_training/r3.json",
-        "source_sha256": "aeb776e1a6131bd147b62630e57792e7e7b1afe12e139c6f2eee342874e11b6a",
-        "semantic_digest": "41c2b7ada8cee1854e4af4e0a50ebd3d95edca55a2a218588ea1728be49fcdc7"
+        "revision": 4,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_15_esmeralda_training/r4.json",
+        "source_sha256": "a6669bef3422ed7d8c7ba220559e0bc3055060062755563f646a33e93c686fe1",
+        "semantic_digest": "4c8f2e6617627d88915c75b3c0b02a4d1a16cefacdb85fc95c28eb5b3a72bd0f"
       },
-      "resource_sha256": "027c3dd0251a7abb336310787c1655f05ea0438fb3742596b8c5b68f34c73c95"
+      "resource_sha256": "4a3647177a0c9c8d25194a6697a41a197dfae88110efb2d978747e5de825b9ec"
     },
     {
       "map_id": 16,
@@ -233,12 +233,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_16_nimbus_class_v_wing_training",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_16_nimbus_class_v_wing_training/r2.json",
-        "source_sha256": "b5678960f1d0e6b34e16e40fcce9d62ecb053e95f21291bedc35c36bd967b0d6",
-        "semantic_digest": "2bb91516eb5174b6873bf4c166600cfffbce4b43ea4b54b9197ef3e8ea9ee7a7"
+        "revision": 4,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_16_nimbus_class_v_wing_training/r4.json",
+        "source_sha256": "038ff373d1dccbd0231eb257f03cf37c7bdd89deb4e21487d8b09eea0f617d5e",
+        "semantic_digest": "d1650acc9bda689ebfb59333cc761b5f1ea6eaf75e663b6da43967718110b6af"
       },
-      "resource_sha256": "07276fe5db5e3ab31925d11d3acb547d6c1ce7b0cc1d8b15e6da1ca230c7025a"
+      "resource_sha256": "d2c98ba677487c74b2754454b07f543538756066423d761c882f67f17702ae34"
     },
     {
       "map_id": 17,
@@ -247,12 +247,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_17_x_wing_starfighter_training",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_17_x_wing_starfighter_training/r2.json",
-        "source_sha256": "24a15955327a114b365b10f290ae74d96db3cd19260bf8369a604ad5826f4033",
-        "semantic_digest": "be3be04888f660da692706cf787d32c44fa9b05d6693d6ccae580c214b1a089f"
+        "revision": 4,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_17_x_wing_starfighter_training/r4.json",
+        "source_sha256": "f326f781f687164b4e385b7ebc823ebe11f5bbf8a84f311849838cbcfee8dd5d",
+        "semantic_digest": "2ea8a471e820def717a05095b8de26d0501c61d5c0c2767e8ee2cd0d676044bf"
       },
-      "resource_sha256": "d62480074932271a743a02946e089d37b461c3c64663660181e8c884ba8e07a9"
+      "resource_sha256": "53ebd3b2f3333a386149c0cd116203992cb3dc4814177a81014a4aff071ee05e"
     },
     {
       "map_id": 18,
@@ -303,12 +303,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_21_krabby_patty_training",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_21_krabby_patty_training/r2.json",
-        "source_sha256": "c053064a912bbfa4b438144c6e56b491a8e65a5cbd61b235ca7731e67c929699",
-        "semantic_digest": "363a2a3b08ba889616880ef239ca1b2db656f0732f2309787db84a0e7a152f19"
+        "revision": 6,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_21_krabby_patty_training/r6.json",
+        "source_sha256": "013512a051d8aa155ad4e58320231d01f5ba966601588c57f8a753e5d8eed87c",
+        "semantic_digest": "ddeadd1c0bccb865fd3f0e0008cad6cad505cc5d700be4b5a4a3c2345c6d6077"
       },
-      "resource_sha256": "40a87ab89a1a5dc7c88b7ed9f6a910ee7abb2bf618f984efd7972053550c9f66"
+      "resource_sha256": "4697bd2a722f1ff800c761d5956b7717cb693bfb29c666a5057fc4d97ac3a76b"
     },
     {
       "map_id": 22,
@@ -317,12 +317,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_22_kawaii_training",
-        "revision": 4,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_22_kawaii_training/r4.json",
-        "source_sha256": "d627eaabe92c1432dc7a27f9b70c9ff968551562ca761b21e8550a0b06cfc521",
-        "semantic_digest": "18a4ad37be215802ba59372c535722bee88ce0e9387358f92cb699e47de115e6"
+        "revision": 6,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_22_kawaii_training/r6.json",
+        "source_sha256": "2f430869152c5d293d27d887d45d8361aabed22b47a0ad3d0887703ec9fe430c",
+        "semantic_digest": "2e2aeea8d1f62acecd942451b398eae389fb27ddc6128975cc029c16de08a6c4"
       },
-      "resource_sha256": "dd201ae83d6eafb1850dca510ae673ad7189930477c6fbde10fc4f8574d69c08"
+      "resource_sha256": "821550b12e7280793bdaf307680a764125719a22e3df939fa8490ca8acc677bb"
     },
     {
       "map_id": 23,
@@ -331,12 +331,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_23_sea_turtle_training",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_23_sea_turtle_training/r2.json",
-        "source_sha256": "a67ce876bc38d1415efe0e88a8fc0e499d621a9b675cfb63b7c3bea8bf74a757",
-        "semantic_digest": "983454a929c9f000a9291cbcd895d9036a82b33d862df3a6921f87c05ad34f9a"
+        "revision": 3,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_23_sea_turtle_training/r3.json",
+        "source_sha256": "0d03b971c017b653ac0ae6c4d0928613e39f0d2e84102858c7cf1b7306fb03ad",
+        "semantic_digest": "48fc6643eba717268728ebac9155fda41bcc235821c1e0dd25a264fb49b32625"
       },
-      "resource_sha256": "af56a10627a087a4f8aa430d1094d42777f551162f93183d5b927d6bfba9367a"
+      "resource_sha256": "e5e3276083c440ce040e7a1efbb0a33527a2fdb437436c95644c14fbc4d5834d"
     },
     {
       "map_id": 24,
@@ -345,12 +345,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_24_greyhound_training",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_24_greyhound_training/r2.json",
-        "source_sha256": "36a6940327dea96e5f244e253b92b2330ca30f0b8d94fc7fbd6858d2b2d7efcb",
-        "semantic_digest": "78e604d3bfd5c44c09abf2a49e7a5fce6c27456feb4447eb868ea429b99760ad"
+        "revision": 4,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_24_greyhound_training/r4.json",
+        "source_sha256": "8e8dff0b48af23fb431b98d2530eddef2f6f1fad66d5859c6cf6e9e085f6dfb8",
+        "semantic_digest": "8d3c220c81c82392985a335d2db335c9178538b84b6596ad962f6ac5833e7f42"
       },
-      "resource_sha256": "6d4a84d56e10b4fb115ec6c4397cbe8822fbf09ab0a5e1b8e232431b12f294ba"
+      "resource_sha256": "0ce2bff6bed1d012e56c951938724df97b1fc5846b4576c04d605d8d4f65e4ad"
     },
     {
       "map_id": 25,
@@ -359,12 +359,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_25_crows_nest_training",
-        "revision": 3,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_25_crows_nest_training/r3.json",
-        "source_sha256": "f2dbc7f587b255205288e8584ad60688f158a459dce44ccd62e85624f226a69f",
-        "semantic_digest": "2a4e49f7dd08cb796db9d57010d08f0402768dc29c311b161ea5e9b358f3f30d"
+        "revision": 5,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_25_crows_nest_training/r5.json",
+        "source_sha256": "39b2b7b75e012dc8c76ac9ec625bd9a779fdad0e1acc2951fa7df8065c58d163",
+        "semantic_digest": "b0ed736ec033891cbe13ae1f183c6017b8e68e7237fc92fe9c67a3a275ac2e5e"
       },
-      "resource_sha256": "f0d963be53e8843b7ff73c7ee659af54ddd947ba3318b185441ce4eb0f3d8768"
+      "resource_sha256": "02dbe0c331b49e11b93594177f51f88abd77ef7ec7fddd0419a60d6dc772f8a3"
     },
     {
       "map_id": 26,
@@ -373,12 +373,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_26_candlesticks_training",
-        "revision": 1,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_26_candlesticks_training/r1.json",
-        "source_sha256": "3b68412fb49c644525adb7b23baaa139d5859353851dc0a6559175181e582440",
-        "semantic_digest": "7515598f7ad95557818feab292104e3e08729d4f7766d0e6cbb6d1f7d53c773a"
+        "revision": 2,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_26_candlesticks_training/r2.json",
+        "source_sha256": "c867bae3abd012b009777612000182bdbfcb91a8e187c45ee7c1de6e87ae4f5a",
+        "semantic_digest": "bccbc8b59ddc1323c70b9139eec2790cf35f3ed822330e84763e28f819b46344"
       },
-      "resource_sha256": "5b659c9b23e88263fe966e9fe3208ef682690cca6e189ce7cdc5c9f4c02b59bd"
+      "resource_sha256": "a264c9d6873fa9f30eba2541d3d7360e70ce4be398837835027f7b5b31700796"
     },
     {
       "map_id": 27,
@@ -387,12 +387,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_27_stairway_to_heaven_training",
-        "revision": 3,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_27_stairway_to_heaven_training/r3.json",
-        "source_sha256": "fb8bdeaa935d9aa0a46a83de138fdd361b430b28d1ebb1ac6ad1db129d0d4d72",
-        "semantic_digest": "e521c0e98ce651e83b79105a393c06ccb11cfcc13fcee685c60d89496c69c1f4"
+        "revision": 5,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_27_stairway_to_heaven_training/r5.json",
+        "source_sha256": "3cffdf5c7184535c42eaf15d6d352996e173e3842ff52456e93dcfd91a520c99",
+        "semantic_digest": "cdffe2f58cbdb827d5e9ce3879bc9035dd6b5eec1dfcd274dcbd1c747a11d374"
       },
-      "resource_sha256": "6e59c8cb035d83abc09244d0d734a519c64dcdb12b1f6dfcb5fb04ad915a9fed"
+      "resource_sha256": "5c913cf2e8ad2648092096397891bc502baf98f2075191fa9fca04b7badd1f07"
     },
     {
       "map_id": 28,
@@ -401,12 +401,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_28_red_dot_sight_training",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_28_red_dot_sight_training/r2.json",
-        "source_sha256": "5b2813ed6c703e76af55d0520cd592d5dc2dc7db523804f4f2d2b5e2507d3183",
-        "semantic_digest": "4a331ddce3c85a833c1c2b44e85c7d44b484e4aea5480a807f37d7fa1d7207c1"
+        "revision": 6,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_28_red_dot_sight_training/r6.json",
+        "source_sha256": "bb6f7e2fbbd331da857d31c68f4f523d301da587937d44430cc4bdbd21c22eff",
+        "semantic_digest": "8cdec838bb88825289cea5803257e9b83e617c88559efe165741dc960e9e844c"
       },
-      "resource_sha256": "463910ed34d2bec1ba7977f4c25d34f45649e265a66bb006d5bc6bd269a7602f"
+      "resource_sha256": "b829831e85fce3ecf82d2e040fe42d245fd321329b144a0f1a54fe6817ff9ea0"
     },
     {
       "map_id": 29,
@@ -415,12 +415,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_29_portal_room_training",
-        "revision": 3,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_29_portal_room_training/r3.json",
-        "source_sha256": "f3a1b70df74b1b503508707e374f99f182d52b6e3183dfd01eff6827c19f06af",
-        "semantic_digest": "a847275557fc7ecdf7b6a9d0b5e1721964a9732c5befe45ee58b2c959ae2fab6"
+        "revision": 5,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_29_portal_room_training/r5.json",
+        "source_sha256": "b981ecbf086a84104abff41b42f708618d1dbe619538f7cbf111fe9980cb2778",
+        "semantic_digest": "6e1a09c4c6b16914a9a27f91fc40c9b3c103dabfbafac252bcf1c9447c04f853"
       },
-      "resource_sha256": "4ac10b40bfc9752ed558181b2f2cdc16b1ed23e6b1c19cbf0fe173174219ef19"
+      "resource_sha256": "9758d3bc9fa2cd9e1d2f92f5bcad68c0f62310760042c3b9291fd7798d1f3b04"
     },
     {
       "map_id": 30,
@@ -429,12 +429,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_30_mars_training",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_30_mars_training/r2.json",
-        "source_sha256": "5f8dd1df8762c7215a4c9b6b7a806f4c17b9b1c51bcc6dee2b998d1fee4cfe53",
-        "semantic_digest": "f924faaa34cb1742081f669c729e0a497cd64df749aaf24f3f709355721bd72b"
+        "revision": 5,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_30_mars_training/r5.json",
+        "source_sha256": "69c7c3b178e9cddc2ae868aa563260cdee4b595cd7618c05fd51b640b14a1b26",
+        "semantic_digest": "4f5ccab374137e7d3fe012b5094fdda9889f61d7845b9b674853ad1b01529e53"
       },
-      "resource_sha256": "8bdd5591761689c31dcd0a59f4b118f2897e15e4e30048a2b29917c4f31aa7f4"
+      "resource_sha256": "2bf6223f5936cbbdfa64957bb580dfe3143357bee3536499dca0695b8661cdb7"
     },
     {
       "map_id": 31,
@@ -443,12 +443,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_31_chinese_dragon_training",
-        "revision": 1,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_31_chinese_dragon_training/r1.json",
-        "source_sha256": "6ed1b731ce5654f1d349618aa719988ccc42ea8cd817e8b7f7237efc493ff7bb",
-        "semantic_digest": "8007877a03d223abc08db71322359c72351c044df6643660af80c3db085fda1e"
+        "revision": 6,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_31_chinese_dragon_training/r6.json",
+        "source_sha256": "69016252ac7fb1de66ad453723fe445f007f95ac6d04f274f9ab0191a959027a",
+        "semantic_digest": "59e7823b84362fbde281d219f2f1a0273bebd9d6e6aa00af033ea0015150992e"
       },
-      "resource_sha256": "2909dfa408d2f396972ae64a6e4ee534f9bbddc2e229f8f7d1bbeff800f280b1"
+      "resource_sha256": "073ffb6f3ef91d692bff5a0200a395e1bd9e6c944eddda7a3feb3b884f61f3a0"
     },
     {
       "map_id": 32,
@@ -457,12 +457,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_32_predator_training",
-        "revision": 3,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_32_predator_training/r3.json",
-        "source_sha256": "65923cdcc2862ebd8a98a4450cc72450359f175465020ecfd7730694f107c099",
-        "semantic_digest": "3d370ece245e4ae3464d14bfa036c3ee00d46966944105d1f254712abd19c61d"
+        "revision": 6,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_32_predator_training/r6.json",
+        "source_sha256": "713f8082129b6b6bf5ee15b5c416d4fe4e32b68cae5d2d93f09089a063ccf32c",
+        "semantic_digest": "36cff444cf409cdc3cdece012260bf836889150d2327c1b2dabc5737f0d916dc"
       },
-      "resource_sha256": "de2071407b1af2a0ece91a0b5270b84e5341d507eadc5bbe25dfdb28ddde417a"
+      "resource_sha256": "4d81e360d61a3b29c94926dffd4d8ccc1ca7656d9e7719ea0d2bc21f9ce4b5bb"
     },
     {
       "map_id": 33,
@@ -471,12 +471,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_33_darkspear_training",
-        "revision": 4,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_33_darkspear_training/r4.json",
-        "source_sha256": "9e353cd152e56f857293905d0fb89b64dda784d9c00c5f53faaa528a0cb1d531",
-        "semantic_digest": "8cf2fc8fbfd8c436e539e97d777428a404606c0d73d701b2fc65087fabad2473"
+        "revision": 8,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_33_darkspear_training/r8.json",
+        "source_sha256": "af16fb0471fdb0b9d483522cbbfec6c42e709a9c8a90e48f14d1aaf4f423c947",
+        "semantic_digest": "8fe51cd7cc91b9743114a38c8d8c03a4a3333007c06fbb1b2706fabd9b08a239"
       },
-      "resource_sha256": "76d73282ef9273cc8518fdaec4b34d7bb062adbef21db4ab840c2a9877e1b906"
+      "resource_sha256": "0cdf120d5a042fccd9ad0fb236d666edcf757626049bf56ef12eba5ac1515a30"
     },
     {
       "map_id": 34,
@@ -485,12 +485,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_34_infinity_training",
-        "revision": 3,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_34_infinity_training/r3.json",
-        "source_sha256": "4134062fe5a0da2ca55048325ccb236c5fcbf8113f41f08fd1534ae4e328bfd1",
-        "semantic_digest": "14fb6ae68e73f1e540726e40b5323716cfb8a6571246f638256f76815793e2c0"
+        "revision": 5,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_34_infinity_training/r5.json",
+        "source_sha256": "fb0aa3ada03bd3a325fe3d575696ab3c997422d598e6a3a2402fe69c60d6e26f",
+        "semantic_digest": "89239dbe55f8fc1079c25528e4d31b8b0f1fe096d6b4695d6e31adefedf66d1d"
       },
-      "resource_sha256": "f5ba2a95afa7d7f964dd4701561da3fc2ccbab3d7f76a7a84455d09e87a7a6b3"
+      "resource_sha256": "7e6ea5eda1b4bfb2e2fd567034b97c654e6c23eedcd0b11a88dcd1a0e8f4ad79"
     },
     {
       "map_id": 35,
@@ -499,12 +499,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_35_binary_training",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_35_binary_training/r2.json",
-        "source_sha256": "34712b21d4d1a85b34024bda478d4cce24235b3d1b3d9a84e1f3bf93f7decd7c",
-        "semantic_digest": "02a029a279d4cb72a5db3dbd04d9e5bca357b035c4f58eca277f2f89b46566b8"
+        "revision": 3,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_35_binary_training/r3.json",
+        "source_sha256": "1c040cda16cc0f407de23539f44a74241e40c5ef46f97100fbea94bf199ef67a",
+        "semantic_digest": "8fa4c2be6ac5f0659f346dbddba8ef1c57ad38966a34be2eb172309054f41a17"
       },
-      "resource_sha256": "480d4f4975001f76e8db676d4915f0277cb064cdc32eb51f1505a5f59ee9e29b"
+      "resource_sha256": "aa6744eb0f7605041a46958744a81132855a485dce0fb04921b4af3a6558d99b"
     },
     {
       "map_id": 36,
@@ -513,12 +513,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_36_chokepoint_training",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_36_chokepoint_training/r2.json",
-        "source_sha256": "b277d5a238e9027af679be2c42994e8bfa4f9da03f8b2d9ca4860b9a83d7b219",
-        "semantic_digest": "271a832ada6121b0ba7d08adc0473d75030294f29c77c8c687d7eed0a3c7207b"
+        "revision": 4,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_36_chokepoint_training/r4.json",
+        "source_sha256": "a5f6a76a0a078e396f886a5eefe7dcef174e9ddd2324ec54b783550e0053f475",
+        "semantic_digest": "017390ae1f92ffb3a4e7ebfe09412cfe5de944778ed2684eef83deb341c8ffb2"
       },
-      "resource_sha256": "8ab9af7c0910ce6e1bb10de067dc8bd8c45104192470dbaf155b969d42a9aa46"
+      "resource_sha256": "2dff85d908a15225da85cfdd8adcb9d9c3891f467d2ebba9899d0ad012509279"
     },
     {
       "map_id": 37,
@@ -541,12 +541,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_38_blades_edge_training",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_38_blades_edge_training/r2.json",
-        "source_sha256": "6134d13af6d64c5eae9a575a612a6978a7348962ce70c66233bb5aba3fd5eb48",
-        "semantic_digest": "b7d0fdfaad56fa7f677b9bb7315cbd384531c60cc52b621207a18ee378c156f9"
+        "revision": 4,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_38_blades_edge_training/r4.json",
+        "source_sha256": "ed94438b6da810edf422851021036248c11167067250bfec4757f4e3d23f33b6",
+        "semantic_digest": "6b12a7adeabc7701ad8478d287543ac68ad245c4ed4d3bf8dbc49ee3f616c262"
       },
-      "resource_sha256": "866f6176d02799f9ae4d8ba75067b42d92af64f954fc537e70868d88a0cddfbe"
+      "resource_sha256": "5ba1dff03095fa6b027d4a80ae8497ddd975e2a9260fb57a323db9764d9e4440"
     },
     {
       "map_id": 39,
@@ -555,12 +555,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_39_ufo_training",
-        "revision": 3,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_39_ufo_training/r3.json",
-        "source_sha256": "b983fc7d2509072bb5ade483aa6fb24d19428ba7f72c25cb8a0fcf1a473b4a15",
-        "semantic_digest": "8137910a6c47de2ba0fab073c37baae8ca60cfa7955e6147330f42606b89bb21"
+        "revision": 6,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_39_ufo_training/r6.json",
+        "source_sha256": "4519944680a3810cb5985bb07f6a8692d23eb454f37d63905aa89fc58b4c5a37",
+        "semantic_digest": "8755f18410e55ab70df5cab8f99ac1de358609868882042b76796c7115dd22db"
       },
-      "resource_sha256": "f1ced9d52dac2bfa193203a775ed3006cb80cf1306be3c92801bdd412cb16c1d"
+      "resource_sha256": "8acdae3c42235af3b1a60a8442959ff3f511089d8e3aaeba835ba89ce9eaed36"
     },
     {
       "map_id": 40,
@@ -569,12 +569,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_40_warhall_training",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_40_warhall_training/r2.json",
-        "source_sha256": "0bb98de3ab150a544c0a649b7d715c0f20391bf29b59529b4d2a9ec74ff4530f",
-        "semantic_digest": "0c46cb6a9c80b4d9197a1063c900a32205063968e4bde4f92f06c1060ef287e4"
+        "revision": 4,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_40_warhall_training/r4.json",
+        "source_sha256": "065036e4fbce170d824b5bb64a0c6225b401eb9672ba3ce984578aaadb500247",
+        "semantic_digest": "77cc5401c219f5c669c86c6761fe07359eb00d53899849efcd7a5c230f386719"
       },
-      "resource_sha256": "99bb8910fb57a65466aac3f5a7d0567393d8ced7fd1f44f1f158359ee839cb3e"
+      "resource_sha256": "391c31e3bb9cfe5e14a89d050dde15602511e6156fdbcc44dd9651641ee876ab"
     },
     {
       "map_id": 41,
@@ -583,12 +583,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_41_sai_training",
-        "revision": 1,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_41_sai_training/r1.json",
-        "source_sha256": "49a396b6fb336b17f655ffd63e43c4744a59551ebb362c08a3b6dacd41964435",
-        "semantic_digest": "6811c0b3dbceeff0469de8ee5d1e9250f0955313f7492c612fafed340a7ca37a"
+        "revision": 2,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_41_sai_training/r2.json",
+        "source_sha256": "aa8b22239d66401c4d8fe8afb7d4cbc4dbb96c74c2173df143cb2053a49fe87b",
+        "semantic_digest": "f3ae76ca01ea6b577dfed4f0b6b546dff499e24ca1a9e47dbc45738d37417d4e"
       },
-      "resource_sha256": "35ff21309d6a8d588f06aa0dab4699b068e9268b3d535bb0c9551e11818b294f"
+      "resource_sha256": "8b25bad87b55d64670222760ffb1795b7aec2b40f6aa752539092d49381b3e24"
     },
     {
       "map_id": 42,
@@ -597,12 +597,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_42_cheshire_cat_validation",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_42_cheshire_cat_validation/r2.json",
-        "source_sha256": "04a030c690dfd064cc00082955a1e01a99d594e2b65aeb8ab532fd00833c40a0",
-        "semantic_digest": "5d8f2e729708716d3a17012db10a9eb6cd3309d2ee9d45eab6aa436d281e185c"
+        "revision": 9,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_42_cheshire_cat_validation/r9.json",
+        "source_sha256": "cd9c1fe8f565e664dee5f63838d141329035ab2b480099bb2bc9fcba3f7cac86",
+        "semantic_digest": "31e1f371d5d9e79ffb97a9220b60327fd60686e4a1ee5b0a3079174426cf4909"
       },
-      "resource_sha256": "56e4b59cfe412fdab0ff95b4e85cf84a8d70edfa3b0379cb89fd356d45d22a8c"
+      "resource_sha256": "d578e2a3315cb57c5ce33eb3b9e3dd4489cd495f66173c5f00860c089cd7de96"
     },
     {
       "map_id": 43,
@@ -611,12 +611,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_43_twin_stars_validation",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_43_twin_stars_validation/r2.json",
-        "source_sha256": "d0327dcc0cee496dd10125d56f636f36eee66b0a7eac4fc33fb13503530abbfe",
-        "semantic_digest": "b6280269e07009e272d88ff8657a682eb4af9b139465e029b93ef8f69c4a79bf"
+        "revision": 4,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_43_twin_stars_validation/r4.json",
+        "source_sha256": "0076bf0af2be4f667940fa79d22a70eb33791474c969ab5a834d9fb4b06fd2ab",
+        "semantic_digest": "f6a12f247f5bb32f9bf653c4db2d46ff298ea28c0b6c96c7fc9e085ef7f16d89"
       },
-      "resource_sha256": "3ca8384ace5454fe817270f161ce4cbec3e5d3707ae59be6f61fb047cbf0750d"
+      "resource_sha256": "c3c9f57cb48dd8d969d236525f25db71bc33de1053c43b8777d77671707a95d3"
     },
     {
       "map_id": 44,
@@ -625,12 +625,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_44_mosh_pit_validation",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_44_mosh_pit_validation/r2.json",
-        "source_sha256": "9f615b5e7c8e74dc36a62f8c743f6e8d6b3bc3f6609c0a1006aa1b99e89dce3b",
-        "semantic_digest": "2a14b8cf75fd0c5ebd28e47e4f98c4b901a034831efd738fa7b16012c0ca6e34"
+        "revision": 3,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_44_mosh_pit_validation/r3.json",
+        "source_sha256": "209af7c27f3601ead892357769d177b43f83a3e66f3a85e402a7f494532a94a8",
+        "semantic_digest": "b24d30bb5b1593c17f4f275267e06892100edf2495e6dfa5bbe5055858eb6b5e"
       },
-      "resource_sha256": "7f5d25c99daaa62a64ac34315227726370894966978d06cf035a707d4e4b978f"
+      "resource_sha256": "c46cacb069bd2ac26113454052ff787e7b467bd3b315b33443c481ccba0213f2"
     },
     {
       "map_id": 45,
@@ -639,12 +639,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_45_split_push_validation",
-        "revision": 3,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_45_split_push_validation/r3.json",
-        "source_sha256": "0295df729463ff7b0c351b4cebe27d19ea145efae67934765a8936fdc7df3603",
-        "semantic_digest": "5b61036ad6237db8d5f2d31aacac825cb3c3ac262c6b785a93e6f1676169c03e"
+        "revision": 8,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_45_split_push_validation/r8.json",
+        "source_sha256": "b4ffe1b45c1447637ec0c7b77e5a4ff8c8e0cd2cca614ea51f472735944a61d1",
+        "semantic_digest": "4041d58d99acae5c3088cda8309007b273e0cda2ea7a4dc476feddbcec6302ea"
       },
-      "resource_sha256": "a7835650c7b966e0de19b0c09f343042910aa48dd122b1421c6c5ade5bb7c8a6"
+      "resource_sha256": "b0e4ca8f8e344e6f93b472572e2cafc362034481ccc973dde011806495b2b3be"
     },
     {
       "map_id": 46,
@@ -653,12 +653,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_46_wall_e_validation",
-        "revision": 3,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_46_wall_e_validation/r3.json",
-        "source_sha256": "428106993eee45f05d8fb729d69549c27dc773a13d36b122db69b7105c7574e3",
-        "semantic_digest": "ea0746bd3d3440568a1f79e528e494679e298232b358ee08882a922b45e100f0"
+        "revision": 4,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_46_wall_e_validation/r4.json",
+        "source_sha256": "51faa5173e8c05c868be1a274edfaa72d93ffb957119720071301a86ff0c0d8f",
+        "semantic_digest": "13ff0f87eb272166160f6699ce89520132525493f14fe411ade32599001a12f4"
       },
-      "resource_sha256": "760060d0002468a5d5199c779289fb6c9e72d949b7bbb8e6bf4e912c6f2c9f94"
+      "resource_sha256": "e6d7b5fa94bdb080f059e9855d1539c1f12a052de3aaddceb87c9e7a1a9ccdfa"
     },
     {
       "map_id": 47,
@@ -667,12 +667,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_47_teutoburg_forest_test",
-        "revision": 3,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_47_teutoburg_forest_test/r3.json",
-        "source_sha256": "125d3fafbc1d014b461eed0760f26fdfb7654f95771f987a4c3e1c7e9c0164f0",
-        "semantic_digest": "d1f23693d555e4e4408c96d6cc892c07eb548ba97d4933c1a73a3911a487b702"
+        "revision": 6,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_47_teutoburg_forest_test/r6.json",
+        "source_sha256": "eaf7ac664c63b6d826f9c15ccb1a0827afb09cb0ad1d1efe6ff69984b1c985a9",
+        "semantic_digest": "77a40b78edd2d371b19ffc57fb13b6be37ef8d592d595d6856a0bd6a2c124f2b"
       },
-      "resource_sha256": "0dec571e4a6bc3538927b2346f8f4654274aa132096dfa55d9cc13aeca16d4e3"
+      "resource_sha256": "2c7b0a4fa813cf17ca469a418e2e1200f993fe451ca2f6757bf5506255174458"
     },
     {
       "map_id": 48,
@@ -681,12 +681,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_48_three_body_problem_test",
-        "revision": 3,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_48_three_body_problem_test/r3.json",
-        "source_sha256": "6ec44f61036429a085098d183c8fc036f1b44ea3baf0bc898881101d5f9530a0",
-        "semantic_digest": "902b2a7dee57667381639dbb78c90d7bf8c2ebf73bdc612b7937c365b93e8824"
+        "revision": 6,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_48_three_body_problem_test/r6.json",
+        "source_sha256": "909b3f24d585fef385bf7977b8362aa054dd694a1763618661ac7c4c9ebf20b6",
+        "semantic_digest": "3420bdefde0b90a3760e6b6c474ce75dc8b0514852253f03a0f76d1d067694d4"
       },
-      "resource_sha256": "33f74cd97d5d9dcfc03f21c373a1c9c1b719e8caa7ce2e4522bfe4d8f86e0e5a"
+      "resource_sha256": "24005c141da6244e2dbca7f55eebab8487430745da8f8b8f4c2980d8e0b24760"
     },
     {
       "map_id": 49,
@@ -695,12 +695,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_49_space_invader_test",
-        "revision": 3,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_49_space_invader_test/r3.json",
-        "source_sha256": "11bfbe57b4a33fc2ae4f81b047ba3fa1c302d2f14213094d7ffa7d8daaed40ea",
-        "semantic_digest": "372d05df94fae2e6282ee2f26d7430335f822ae2155f657f474cbd2d14f92b72"
+        "revision": 4,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_49_space_invader_test/r4.json",
+        "source_sha256": "f467f020c238369488582effc24bbd4c229fcc0550666dc79678e5e52f3794e9",
+        "semantic_digest": "d227bee33b2f41e9b425d5a13265e654a9abaa22ba34563969c52be94d3ad261"
       },
-      "resource_sha256": "e43168ffce6c4d8b6929a28e2c322455f0930f79e2a8bf97a8ab1ac942477654"
+      "resource_sha256": "a1e9553e13dc59184d54ac571e7b82051540ad58c32fc1b9a8f29a82c608980c"
     },
     {
       "map_id": 50,
@@ -709,12 +709,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_50_jamylas_grove_test",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_50_jamylas_grove_test/r2.json",
-        "source_sha256": "95120196ec2efb732cf79d22a4a4cbf3309ade4374efff9286e3b79686cba4a3",
-        "semantic_digest": "009b7b4b3a6aac352392ea1daf21e7255a19d9c4b7efe0e5cffcdfad91e7e1b3"
+        "revision": 4,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_50_jamylas_grove_test/r4.json",
+        "source_sha256": "87f698fdf24d7ba2811870ff722cf62deb4de726b39d7547524e3ad1237761a4",
+        "semantic_digest": "ff926e384f29f5f446285e7b9485cd599c8f1b3e7c439842f018d01624586607"
       },
-      "resource_sha256": "72c321e4ea0030227307436571f0231cda6dcff20731e9472b6d4aff1715eac8"
+      "resource_sha256": "017830c3be2e734f3a924ae4fb6ab9dcc67206d3a91b16e5b6ad1d30aa1ecae0"
     },
     {
       "map_id": 51,
@@ -723,12 +723,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_51_king_crab_test",
-        "revision": 2,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_51_king_crab_test/r2.json",
-        "source_sha256": "e9b60889e1e95198272389a1d73a46016e5205fac497ef8f82d893774f342265",
-        "semantic_digest": "6cdd5d71bafc63519e12cd297cd6b1406ee4db38f97ca90fd862c6b3e561fd22"
+        "revision": 4,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_51_king_crab_test/r4.json",
+        "source_sha256": "7fee9676eabc47d2968943e6efb444a04d3f8295d941895c75ceee1f6677bd34",
+        "semantic_digest": "31565260ea46e1f1e65b0d75c536f30f3cef1b8b2921d768a34155c11b601bbd"
       },
-      "resource_sha256": "9cfc6c7ab6cda3a4ccea412b7447c9c2c14a8552d76bb8a3b90a08a953ed61bd"
+      "resource_sha256": "b41c0f2cacacfa4d55d75e53393ab855c5dbe1ff8147b908bc577d2d0f2a3a64"
     }
   ],
   "scenarios": [

@@ -1,4 +1,7 @@
-"""Round-robin budgets and paired random-stream identity, without playing matches."""
+"""Check tournament budgets, spawn pairs and random-stream identities.
+
+These schedule tests do not need to play the scheduled games.
+"""
 
 from collections import Counter, defaultdict
 from collections.abc import Sequence

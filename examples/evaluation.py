@@ -10,6 +10,17 @@ from pathlib import Path
 
 
 def main() -> None:
+    """Read command-line options and run the selected public workflow.
+
+    Evaluation returns results in memory unless an output directory is given.
+    Validation shares one writer across two named passes and requires a directory.
+    Tournament mode prints each ranking row and any written file paths.
+
+    Raises
+    ------
+    SystemExit
+        If arguments are invalid or help was requested.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("workflow", choices=("evaluate", "validation", "tournament"))
     parser.add_argument("--episodes", type=int, default=10)

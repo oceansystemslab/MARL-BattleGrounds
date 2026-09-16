@@ -1,3 +1,12 @@
+/**
+ * @file Render durable, already-authorized battlefield facts into retained SVG layers.
+ * BattlefieldRenderer projects disclosed maps/bodies, draws current selection,
+ * status/cooldown/modifier/legality cues and exposes a narrow choreographySurface.
+ * The transient controller owns animation children in its two designated layers.
+ * Researcher reference data can enrich joined tooltip facts, but cannot add hidden
+ * body positions to the scene. The browser renders supplied masks and events; it
+ * does not decide simulator legality, advance games or fetch data.
+ */
 import { canonicalAgentIdentity } from "./agent-identity.js";
 import {
   authorizedPresentationResearcherSceneView,
@@ -181,6 +190,10 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  */
 
 /**
+ * Return whether value is a non-null object other than an array.
+ *
+ * This shape check does not validate the complete scene or information rights.
+ *
  * @param {unknown} value
  * @returns {value is JsonRecord}
  */
@@ -189,9 +202,14 @@ function isRecord(value) {
 }
 
 /**
- * Publish one durable obstacle with a stable semantic identity. Top-level
- * coordinates remain available to older surface consumers during migration;
- * the cross-phase allocator consumes the explicit nested bounds.
+ * Package a durable drawing region with an explicit semantic owner.
+ *
+ * protectedKind names body/status/cooldown/modifier/legality; ownerIdentity gives
+ * its stable local key; bounds is a pixel rectangle; ownerPresentationKey may be
+ * null for legacy slot ownership. placementIdentity defaults to ownerIdentity and
+ * separates multiple docks belonging to one body. Return a frozen region with a
+ * copied frozen bounds record and compatibility top-level coordinates. No geometry
+ * or ownership is inferred from proximity.
  *
  * @param {"body" | "status" | "cooldown" | "modifier" | "legality"} protectedKind
  * @param {string} ownerIdentity
@@ -223,6 +241,10 @@ function choreographyProtectedRegion(
 }
 
 /**
+ * Return value unchanged when it is an array, otherwise a new empty array.
+ *
+ * No element validation, copying or mutation occurs.
+ *
  * @param {unknown} value
  * @returns {any[]}
  */
@@ -230,21 +252,42 @@ function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
-/** @param {unknown} value */
+/**
+ * Read token_id, falling back to status_id when nullish.
+ *
+ * value may be unknown. Return a nonempty string or null; whitespace is not trimmed
+ * and token vocabulary is checked by its later authority.
+ *
+ * @param {unknown} value
+ */
 function statusTokenId(value) {
   const status = isRecord(value) ? value : {};
   const candidate = status.token_id ?? status.status_id;
   return typeof candidate === "string" && candidate.length > 0 ? candidate : null;
 }
 
-/** @param {unknown} value */
+/**
+ * Read remaining_duration, falling back to duration when nullish.
+ *
+ * value may be unknown. Return an integer number or null; this helper adds no
+ * positivity or configured-duration bound.
+ *
+ * @param {unknown} value
+ */
 function statusRemainingDuration(value) {
   const status = isRecord(value) ? value : {};
   const candidate = status.remaining_duration ?? status.duration;
   return Number.isInteger(candidate) ? Number(candidate) : null;
 }
 
-/** @param {unknown} local @param {unknown} researcher */
+/**
+ * Compare exact facts while allowing one float32 representation step.
+ *
+ * local/researcher match through Object.is or when finite numbers equal one
+ * another's float32 rounding. Return a Boolean without a general epsilon tolerance.
+ *
+ * @param {unknown} local @param {unknown} researcher
+ */
 function sameRecordedPublicValue(local, researcher) {
   if (Object.is(local, researcher)) return true;
   return (
@@ -257,8 +300,12 @@ function sameRecordedPublicValue(local, researcher) {
 }
 
 /**
- * Require every locally disclosed public status fact to agree before using the
- * geometry-free researcher copy for source attribution.
+ * Check disclosed local status facts before joining researcher attribution.
+ *
+ * rawLocal/rawResearcher must be records with matching token and remaining duration.
+ * Compare every optional field present locally against its researcher name, including
+ * the mechanic_action_component alias. Return a Boolean. Missing local optional
+ * fields impose no new requirement; this is a join check, not full schema validation.
  *
  * @param {unknown} rawLocal
  * @param {unknown} rawResearcher
@@ -293,9 +340,11 @@ function samePublicStatusFacts(rawLocal, rawResearcher) {
 }
 
 /**
- * Resolve browser-local paint policy without copying or changing the accepted
- * presentation. The visual-filter module owns validation and exact registry
- * classification.
+ * Resolve local filter state into the eight durable paint switches.
+ *
+ * state is validated/classified by the visual-filter authority. Return a frozen
+ * policy for aura, badges, shield, selection and pair-legality rendering. No accepted
+ * scene facts or input filter object are changed.
  *
  * @param {unknown} state
  * @returns {Readonly<DurableVisualPolicy>}
@@ -338,6 +387,10 @@ function durableVisualPolicy(state) {
 }
 
 /**
+ * Return finite numeric value, otherwise fallback (default zero).
+ *
+ * Numeric strings are not converted. The fallback is used as supplied.
+ *
  * @param {unknown} value
  * @param {number} fallback
  */
@@ -346,8 +399,12 @@ function finiteNumber(value, fallback = 0) {
 }
 
 /**
- * Read one normalized own data property without invoking an accessor or
- * surfacing a hostile Proxy trap.
+ * Read an own enumerable data property without invoking an accessor.
+ *
+ * value may be unknown and key names the property. Return its stored value, or
+ * undefined for missing/nonenumerable/accessor properties, nonobjects or a thrown
+ * property-descriptor trap. Proxy traps may run while obtaining the descriptor;
+ * errors are caught. This helper performs no mutation.
  *
  * @param {unknown} value
  * @param {string} key
@@ -371,8 +428,10 @@ function ownEnumerableDataValue(value, key) {
 }
 
 /**
- * Format only an already-authorized public identity. Global slots remain
- * internal join keys and are never promoted to a display fallback.
+ * Format the public identity already carried by agent.
+ *
+ * Return canonicalAgentIdentity(agent).publicIdentity. Internal layout/global slots
+ * are never promoted to public display IDs by this helper.
  *
  * @param {unknown} agent
  */
@@ -381,6 +440,12 @@ function agentIdentity(agent) {
 }
 
 /**
+ * Read the authorized display scene from a recognized presentation frame.
+ *
+ * frame may be unknown; localInspectedPresentationKey defaults to undefined and is
+ * forwarded for local inspection selection. Return the adapter view or null for an
+ * unrecognized frame. The adapter owns allowed inspection and disclosure rules.
+ *
  * @param {unknown} frame
  * @param {string | null | undefined} [localInspectedPresentationKey]
  * @returns {JsonRecord | null}
@@ -392,6 +457,11 @@ function frameScene(frame, localInspectedPresentationKey = undefined) {
 }
 
 /**
+ * Choose a stable retained-node key from an accepted display row.
+ *
+ * agent.display_key takes precedence when nonempty; otherwise use an integer
+ * global_slot, or null. This is a DOM join key, not a public label or new slot fact.
+ *
  * @param {JsonRecord} agent
  * @returns {number | string | null}
  */
@@ -402,13 +472,24 @@ function agentDisplayIdentity(agent) {
   return Number.isInteger(agent.global_slot) ? Number(agent.global_slot) : null;
 }
 
-/** @param {JsonRecord} agent @param {number} fallback */
+/**
+ * Return the integer global_slot on agent, otherwise fallback.
+ *
+ * fallback is a renderer-local layout index. It may position a POV body but must
+ * never be published as an undisclosed simulator global slot.
+ *
+ * @param {JsonRecord} agent @param {number} fallback
+ */
 function agentLayoutSlot(agent, fallback) {
   return Number.isInteger(agent.global_slot) ? Number(agent.global_slot) : fallback;
 }
 
 /**
- * Add only the identity actually carried by the accepted display row.
+ * Write only the identity actually present on record into element metadata.
+ *
+ * Prefer a nonempty presentation_key and remove data-slot; otherwise use integer
+ * global_slot and remove data-presentation-key. With neither, do nothing. Return
+ * undefined. The caller supplies an accepted display row.
  *
  * @param {SVGElement} element
  * @param {JsonRecord} record
@@ -426,7 +507,15 @@ function setDisplayIdentityData(element, record) {
   }
 }
 
-/** @param {JsonRecord} record */
+/**
+ * Return identity attributes from record without inventing a slot.
+ *
+ * A string presentation_key takes precedence (including empty strings); otherwise
+ * an integer global_slot gives data-slot, and neither gives an empty object. The
+ * input is unchanged; upstream normalization owns identity validity.
+ *
+ * @param {JsonRecord} record
+ */
 function displayIdentityAttributes(record) {
   return typeof record.presentation_key === "string"
     ? { "data-presentation-key": record.presentation_key }
@@ -436,8 +525,10 @@ function displayIdentityAttributes(record) {
 }
 
 /**
- * Build tooltip input with the accepted display identity only. A layout slot
- * may position a body, but it never becomes an Agent POV global-slot fact.
+ * Copy only the accepted public ID and optional string presentation key.
+ *
+ * agent supplies those facts. Return a new tooltip input with no layout/global slot,
+ * so a renderer-local index cannot become an Agent POV fact.
  *
  * @param {JsonRecord} agent
  */
@@ -451,6 +542,12 @@ function displayIdentityRecord(agent) {
 }
 
 /**
+ * Project a coordinate array through the current viewport transform.
+ *
+ * point is expected to be a world [x,y] array; absent/nonarray coordinates or
+ * nonfinite components fall back to zero. transform owns world-to-screen conversion.
+ * Return its projected point; this tolerant renderer helper is not source validation.
+ *
  * @param {unknown} point
  * @param {ViewportTransform} transform
  */
@@ -460,6 +557,11 @@ function screenPoint(point, transform) {
 }
 
 /**
+ * Create a detached SVG node in the browser document.
+ *
+ * tagName selects its SVG type; attributes defaults to an empty map and is applied
+ * by setAttributes. Return the node. Browser DOM errors propagate.
+ *
  * @param {string} tagName
  * @param {Record<string, unknown>} attributes
  * @returns {SVGElement}
@@ -471,6 +573,11 @@ function svgElement(tagName, attributes = {}) {
 }
 
 /**
+ * Apply attributes to an existing SVG element.
+ *
+ * Remove null/undefined entries and stringify every other value, including false.
+ * Return undefined. This mutates DOM; callers own safe attribute names and values.
+ *
  * @param {SVGElement} element
  * @param {Record<string, unknown>} attributes
  */
@@ -485,6 +592,11 @@ function setAttributes(element, attributes) {
 }
 
 /**
+ * Create a detached named SVG group for the battlefield layer stack.
+ *
+ * name sets data-layer; attributes defaults to an empty map and can override it.
+ * Return the group; the constructor owns insertion order.
+ *
  * @param {string} name
  * @param {Record<string, unknown>} attributes
  */
@@ -496,8 +608,11 @@ function createLayer(name, attributes = {}) {
 }
 
 /**
- * Build a four-corner target reticle around one body without covering the
- * controlled-actor halo.
+ * Return four corner strokes around a selected target body.
+ *
+ * centerX/centerY and outerRadius are caller-validated screen coordinates/lengths.
+ * The open corners avoid covering the separate controlled-actor halo. No collision
+ * or target legality is inferred.
  *
  * @param {number} centerX
  * @param {number} centerY
@@ -518,6 +633,16 @@ function targetReticlePath(centerX, centerY, outerRadius) {
 }
 
 /**
+ * Replace one layer with authorized aura/range circles and optional hit regions.
+ *
+ * layer is the target SVG group; records contains accepted center/radius rows;
+ * className and tokenAttribute identify their display grammar; transform maps world
+ * to screen. classByIdentity defaults to an empty map. explain defaults to null;
+ * when supplied it builds a tooltip or returns null to omit a circle. withStrokeHitRegion
+ * defaults to false and adds a separate transparent circular hit surface when true.
+ * Skip nonrecord/nonpositive-radius rows. Return undefined after replacing children;
+ * no game range or visibility is computed.
+ *
  * @param {SVGElement} layer
  * @param {any[]} records
  * @param {string} className
@@ -613,14 +738,23 @@ function renderCircleLayer(
 }
 
 /**
- * Retained, presentation-only painter for an authoritative debugger frame.
+ * Own durable SVG layers for an authoritative debugger or replay frame.
  *
- * The renderer owns the SVG layer lifecycle but derives no simulator facts.
- * Durable rendering may replace children inside durable layers. It never
- * replaces the SVG root or clears the `transient-events` layer.
+ * The constructor replaces the supplied SVG's children with the fixed layer stack.
+ * Later render calls update durable layers while retaining the SVG root and both
+ * transient layers for CombatChoreographer. Bodies keep stable node identities where
+ * possible. The class owns projection and drawing, not simulator rules or fetching.
  */
 export class BattlefieldRenderer {
   /**
+   * Install the battlefield layers into caller-supplied browser elements.
+   *
+   * The elements object requires battlefield (SVGSVGElement) and empty (HTMLElement).
+   * Replace battlefield children, initialize retained-node/authority maps and schedule
+   * numeric dock measurement after battlefield.ownerDocument.fonts.ready. The caller
+   * owns the elements and coordinates transient cleanup. A browser DOM/font API is
+   * required; unsupported element operations propagate their errors.
+   *
    * @param {{
    *   battlefield: SVGSVGElement,
    *   empty: HTMLElement,
@@ -717,7 +851,21 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * Paint the durable facts in a debugger frame.
+   * Paint the durable facts of a normalized authorized frame.
+   *
+   * frame may be unknown. options.offline defaults to false and changes only empty
+   * state text; showRanges defaults to true; localInspectedPresentationKey defaults to
+   * undefined; visualFilterState defaults to DEFAULT_VISUAL_FILTER_STATE. Optional
+   * renderPolicy is copied to SVG metadata without changing game time.
+   *
+   * Return true after rendering a recognized researcher/agent_pov scene with a positive
+   * map size. Otherwise clear durable state, show an unavailable message and return
+   * false; transient layers remain controller-owned. Use the element's measured viewport
+   * or a map-based fallback, with 24 px padding. Project disclosed rows, then allocate
+   * status/cooldown/modifier/legality docks and publish protected regions. Tooltips may
+   * use joined researcher references; bodies use only the authorized display scene.
+   * This mutates DOM and renderer caches. Layout, filter and browser errors propagate;
+   * no network request or game command is sent.
    *
    * @param {unknown} frame
    * @param {{
@@ -899,9 +1047,10 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * Compatibility seam retained for callers predating cross-phase occupancy.
-   * Durable scientific facts are never suppressed; the allocator now reserves
-   * their named regions at every supported viewport.
+   * Refresh protected regions for legacy callers and return false.
+   *
+   * _active is retained for compatibility and is ignored. Durable facts are not
+   * suppressed by transient activity; the shared allocator reserves their regions.
    *
    * @param {boolean} _active
    * @returns {boolean} Whether the effective compact-active state changed.
@@ -912,8 +1061,11 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * Convert the SVG-local pointer coordinate supplied by `controls.js` back
-   * into the Python debugger's world coordinate convention.
+   * Convert an SVG-local pointer point into debugger world_x/world_y.
+   *
+   * point must have finite x/y and a current transform must exist; otherwise return
+   * null. Return a new coordinate record without clamping it to the map. This does
+   * not issue a command or validate whether that position is actionable.
    *
    * @param {{x: number, y: number}} point
    * @returns {{world_x: number, world_y: number} | null}
@@ -930,12 +1082,14 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * Return the narrow presentation surface used by transient choreography.
+   * Return the narrow layer/projection contract for transient choreography.
    *
-   * The durable renderer retains ownership of every other layer. Callers may
-   * append only an owned child beneath `layer` and must project authoritative
-   * event anchors through these functions rather than reading successor body
-   * coordinates.
+   * Return null before a valid durable scene exists. Otherwise return a frozen surface
+   * with foreground/route layers, ownerDocument, map bounds, immutable protected-region
+   * snapshot and a viewportKey that includes those regions. Projection functions close
+   * over this render's transform. Callers may append only their owned children to
+   * layer/routeLayer and must project authorized event anchors instead of borrowing
+   * current body positions. Other layers remain owned by this renderer.
    *
    * @returns {Readonly<ChoreographySurface> | null}
    */
@@ -975,15 +1129,30 @@ export class BattlefieldRenderer {
       ].join(":"),
       viewportBounds: Object.freeze({ ...transform.mapBounds }),
       protectedRects: this.choreographyProtectedRects,
+      /**
+       * Project a supplied authorized world point with this surface's captured transform.
+       *
+       * point is an x/y object or coordinate pair. Return screen coordinates; no body
+       * lookup, authority expansion or DOM update occurs.
+       */
       worldToScreen: (point) => transform.worldToScreen(point),
+      /**
+       * Convert a supplied world length with this surface's captured scale.
+       *
+       * length uses the transform's numeric contract. Return a screen-pixel length without
+       * changing renderer state.
+       */
       worldLengthToScreen: (length) => transform.worldLengthToScreen(length),
     };
     return Object.freeze(surface);
   }
 
   /**
-   * Clear only durable presentation state. The transient layer is owned by
-   * the animation lifecycle and must survive every durable redraw.
+   * Remove durable drawing children and reset retained scene/projection caches.
+   *
+   * Clear body/selection/status/range/map/obstacle/pending-route metadata and owned
+   * node maps. Keep the SVG root, fixed layers and transient route/event children;
+   * the animation controller must clear its own authority. Return undefined.
    */
   #clearDurableScene() {
     this.layers.map.replaceChildren();
@@ -1026,6 +1195,12 @@ export class BattlefieldRenderer {
     this.transform = null;
   }
 
+  /**
+   * Publish a frozen copy of current body/dock/legality protected regions.
+   *
+   * Read base, status and legality groups in that order and copy nested bounds.
+   * Update choreographyProtectedRects; return undefined without recomputing layout.
+   */
   #refreshChoreographyProtectedRects() {
     const groups = this.choreographyProtectedRectGroups;
     this.choreographyProtectedRects = Object.freeze(
@@ -1039,6 +1214,12 @@ export class BattlefieldRenderer {
   }
 
   /**
+   * Replace the map boundary and optional one-world-unit grid.
+   *
+   * transform supplies screen bounds; width/height are world dimensions. showUnitGrid
+   * adds internal lines only when both dimensions are integers. Return undefined;
+   * this draws a display aid and does not generate map geometry or obstacles.
+   *
    * @param {ViewportTransform} transform
    * @param {number} width
    * @param {number} height
@@ -1089,6 +1270,14 @@ export class BattlefieldRenderer {
   }
 
   /**
+   * Draw the supplied inspected/draft route without treating it as an event.
+   *
+   * scene.pending_route owns disclosed source/target anchors, lane and legality.
+   * transform converts them to screen space; absent route clears the layer. Create a
+   * presentation curve with a directional marker and tooltip joined to matching scene
+   * identities. Return undefined. No target position, legality or accepted transition
+   * is inferred from drawing geometry.
+   *
    * @param {JsonRecord} scene
    * @param {ViewportTransform} transform
    */
@@ -1172,6 +1361,12 @@ export class BattlefieldRenderer {
   }
 
   /**
+   * Replace the obstacle layer using disclosed map geometry.
+   *
+   * map.obstacles supplies pillar circles or oriented wall rectangles; transform
+   * projects coordinates/lengths and flips wall angle for screen y. Ignore other roots
+   * or kinds. Register obstacle tooltips and return undefined; no collision is solved.
+   *
    * @param {JsonRecord} map
    * @param {ViewportTransform} transform
    */
@@ -1217,6 +1412,15 @@ export class BattlefieldRenderer {
   }
 
   /**
+   * Update retained body nodes and return their projected layout records.
+   *
+   * scene supplies accepted agents/selection; transform projects positions/radii;
+   * visualPolicy controls durable pieces. Remove missing identities, reuse/create
+   * remaining nodes, register audience-appropriate tooltips and reorder DOM to scene
+   * order. Return ProjectedAgent rows with screen center/radius and separate global,
+   * presentation and layout identities. Layout fallback indices never become public
+   * slot facts. Source records remain unchanged.
+   *
    * @param {JsonRecord} scene
    * @param {ViewportTransform} transform
    * @param {Readonly<DurableVisualPolicy>} visualPolicy
@@ -1307,10 +1511,14 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * Paint recipient-authorized POV body rows without assigning them simulator
-   * global slots. Their stable browser identity is exactly the disclosed
-   * `(relation, observation_row)` axis key; consequently they expose hover and
-   * keyboard inspection but never become target/control hit regions.
+   * Draw recipient-observed bodies without assigning undisclosed global slots.
+   *
+   * scene.observed_bodies must carry an ally/enemy relation, integer observation_row
+   * and exactly matching observation_key. transform projects their authorized values;
+   * showDurationStatusBadges controls status paint and matching accessible text.
+   * Retain nodes by relation-row key, remove absent bodies and update hover/keyboard
+   * inspection. These hit regions do not become target/control regions. Return
+   * undefined; no hidden body identity or position is invented.
    *
    * @param {JsonRecord} scene
    * @param {ViewportTransform} transform
@@ -1537,8 +1745,14 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * Render the two exact selected-pair mask values without deriving legality
-   * from geometry, cooldowns, class, or any other browser-visible fact.
+   * Draw the selected pair's supplied Basic/Ultimate legality at its exact owner.
+   *
+   * scene.selected_legality must join one projectedAgents row by presentation key and
+   * public ID. transform supplies viewport; reservedRects protects already placed
+   * cues. Allocate two lane pills, register mask-based explanations and return their
+   * ProtectedRegion array. Missing owner/legality, suppressed placement or unavailable
+   * explanation gives an empty array. Geometry/cooldown/class facts never determine
+   * legality. The legality layer is replaced; inputs stay unchanged.
    *
    * @param {JsonRecord} scene
    * @param {ProjectedAgent[]} projectedAgents
@@ -1701,8 +1915,16 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * Lay out Python-ordered status truth and exact modifier values as separate
-   * screen-space docks. This method owns collision policy, not semantics.
+   * Place separate current status, cooldown, modifier and legality docks.
+   *
+   * scene supplies exact legality; projectedAgents contains disclosed current bodies;
+   * transform supplies pixel bounds. policy supplies four show switches and audience.
+   * Required selected/controlled statuses and positive cooldowns are placed first,
+   * then optional statuses, exact pair legality and nonneutral modifiers. Small
+   * viewports use compact/overflow representations; the shared allocators own collision
+   * choices. Replace durable dock DOM, publish suppression/compaction metadata and
+   * protected regions, then measure numeric cells. Return undefined. Python-provided
+   * status order, values and actor identity remain the semantic authority.
    *
    * @param {JsonRecord} scene
    * @param {ProjectedAgent[]} projectedAgents
@@ -1944,6 +2166,12 @@ export class BattlefieldRenderer {
     const usesPresentationKeys = projectedAgents.some(
       ({ presentationKey }) => presentationKey !== null,
     );
+    /**
+     * Map internal layout indices to already disclosed presentation keys.
+     *
+     * slots is an ordered index array; omit missing/nonstring keys. Return a new array
+     * for suppression metadata, without exposing local indices as Agent POV slot facts.
+     */
     const presentationKeysForLayoutSlots = (
       /** @type {ReadonlyArray<number>} */ slots,
     ) =>
@@ -2047,7 +2275,14 @@ export class BattlefieldRenderer {
       ...statusNodes,
     );
     this.#resolveNumericDockCellContent();
-    /** @param {number} globalSlot */
+    /**
+     * Resolve an internal layout slot to its protected-region identity.
+     *
+     * globalSlot is the allocator index. Return a frozen ownerPresentationKey and
+     * ownerIdentity; a legacy slot key is used only when no presentation key exists.
+     *
+     * @param {number} globalSlot
+     */
     const protectedOwner = (globalSlot) => {
       const key = this.agentByLayoutSlot.get(globalSlot)?.presentation_key;
       const ownerPresentationKey = typeof key === "string" ? key : null;
@@ -2057,6 +2292,12 @@ export class BattlefieldRenderer {
       });
     };
     /**
+     * Package one allocator-owned body or dock rectangle for choreography.
+     *
+     * kind names the region, globalSlot is its internal owner index, bounds is its
+     * pixel rectangle, and placementIdentity distinguishes docks. Return a frozen
+     * region using the disclosed owner key when available; no spatial owner is guessed.
+     *
      * @param {"body" | "status" | "cooldown" | "modifier"} kind
      * @param {number} globalSlot
      * @param {Rectangle} bounds
@@ -2120,12 +2361,14 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * Keep exact dock numbers and glyphs in disjoint measured regions.
+   * Keep dock values readable using measured browser text/glyph bounds.
    *
-   * Ordinary values retain both. If future authoritative values exceed the
-   * compact pill budget, the decorative glyph yields to a readable abbreviated
-   * label. The exact value remains available in the cue's data, accessible
-   * label, and singleton tooltip instead of being squeezed into illegibility.
+   * Inspect current status/cooldown/modifier cells. Ordinary supported status durations
+   * 1..5 keep fixed compartments. Otherwise hide a colliding decorative icon and, if
+   * needed, abbreviate the visible number. Exact values remain in data attributes and
+   * semantic labels/tooltips. This reads browser layout and mutates current cells;
+   * return undefined. Missing graphics nodes are skipped; DOM measurement errors
+   * propagate. It also runs after fonts become ready.
    */
   #resolveNumericDockCellContent() {
     for (const cell of this.layers.durableStatusModifier.querySelectorAll(
@@ -2186,11 +2429,13 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * Render one mandatory class-specific Ultimate cooldown cue.
+   * Create one class-specific Ultimate cooldown dock from an allocated placement.
    *
-   * The exact tick value and icon occupy separate fixed compartments. Layout
-   * remains generic and collision-aware; this method owns only cooldown
-   * presentation.
+   * placement supplies a required-dock result and its one visible class/tick record.
+   * Use the owner from the renderer's layout map. Positive integer ticks are shown
+   * exactly before later measurement; invalid ticks display ?. A missing explanation
+   * returns an aria-hidden empty group. Otherwise return detached SVG with separate
+   * icon/value compartments and tooltip, including compact fallback metadata.
    *
    * @param {ReturnType<typeof layoutRequiredDocks>["docks"][number]} placement
    * @returns {SVGElement}
@@ -2312,6 +2557,15 @@ export class BattlefieldRenderer {
   }
 
   /**
+   * Create one status/modifier dock and its inspectable overflow cue.
+   *
+   * placement supplies ordered visible/hidden items and pixel geometry; kind is status
+   * or modifier; dimensions gives pixel cell width/height/gap; audience selects the
+   * researcher or Agent POV explanation path. Return a detached SVG group with exact
+   * value metadata, icons and accessible labels. Unknown values show ? rather than
+   * becoming measurements. Hidden items remain available through overflow tooltips;
+   * local layout slots never become undisclosed public identities.
+   *
    * @param {ReturnType<typeof layoutStatusDocks>["docks"][number]} placement
    * @param {"status" | "modifier"} kind
    * @param {{cellWidth: number, cellHeight: number, cellGap: number}} dimensions
@@ -2525,8 +2779,14 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * Use researcher-space source provenance only after an exact public-fact
-   * join to a status already present in the fog-authorized scene.
+   * Explain an already displayed status with optional joined source attribution.
+   *
+   * rawStatus is the local status, localRecipient carries public ID/local presentation
+   * key, and audience selects researcher or agent_pov. Researcher views use their
+   * scene list directly. Agent views look up the same public recipient and require
+   * exactly one matching public-status row before using researcher provenance, while
+   * retaining the local key; otherwise use the limited POV explanation. Return the
+   * semantic descriptor. This does not admit a status or add spatial geometry.
    *
    * @param {unknown} rawStatus
    * @param {JsonRecord} localRecipient
@@ -2565,6 +2825,14 @@ export class BattlefieldRenderer {
   }
 
   /**
+   * Explain all hidden local statuses using one consistent disclosure path.
+   *
+   * rawStatuses is the ordered hidden list, localRecipient supplies identity, and
+   * audience selects researcher/agent_pov. Agent views use researcher provenance only
+   * when every status has exactly one public-fact match and the local key exists;
+   * otherwise the whole list uses POV explanations. Return the descriptor without
+   * changing statuses or admitting new visible facts.
+   *
    * @param {ReadonlyArray<unknown>} rawStatuses
    * @param {JsonRecord} localRecipient
    * @param {"researcher" | "agent_pov"} audience
@@ -2606,6 +2874,11 @@ export class BattlefieldRenderer {
   }
 
   /**
+   * Create detached shield-chip, icon and text nodes for an accepted agent.
+   *
+   * agent supplies only display identity at this stage. Return {root, chip, icon, text};
+   * active state, position, counter and tooltip are set later by updateAgentNodes.
+   *
    * @param {JsonRecord} agent
    * @returns {{
    *   root: SVGElement,
@@ -2648,6 +2921,12 @@ export class BattlefieldRenderer {
   }
 
   /**
+   * Create a retained body/selection node bundle for an accepted display agent.
+   *
+   * agent supplies display identity; visualPolicy.showSpawnShield decides whether to
+   * allocate shield nodes immediately. Return AgentNodes with nullable shield members.
+   * Nodes are detached and have no current geometry until updateAgentNodes runs.
+   *
    * @param {JsonRecord} agent
    * @param {Readonly<DurableVisualPolicy>} visualPolicy
    * @returns {AgentNodes}
@@ -2737,6 +3016,16 @@ export class BattlefieldRenderer {
   }
 
   /**
+   * Refresh current body, health, shield and selection paint on retained nodes.
+   *
+   * nodes is the mutable AgentNodes bundle; agent supplies accepted current facts;
+   * spawnShieldMechanics supplies the public shield profile; center/radius are screen
+   * geometry. controlled/selected are exact current selection flags and visualPolicy
+   * controls shield/reticle paint. Update accessible labels, health arc, life marks,
+   * class icon, shield counter/tooltip and selection outlines. Lazily allocate shield
+   * nodes and blur a hidden focused shield. Return undefined. Health ratio is clipped
+   * only for drawing; this neither changes game health nor derives simulator legality.
+   *
    * @param {AgentNodes} nodes
    * @param {JsonRecord} agent
    * @param {unknown} spawnShieldMechanics

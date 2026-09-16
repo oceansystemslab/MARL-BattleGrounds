@@ -1,11 +1,12 @@
-"""Truthful launch and episode provenance for debugger evaluation capture.
+"""Give live debugger episodes explicit evaluation identities and seed records.
 
-This module is intentionally narrower than the live debugger service.  It
-constructs immutable CP2 context records from explicit launch inputs, but owns
-neither simulator execution nor CP3 observer lifecycle.  In particular, code
-revision provenance is supplied by the launcher after one launch-scoped source
-inspection; this module never discovers Git state, local paths, or browser
-tokens on its own.
+The launcher builds one ``DebuggerEvaluationLaunchSpecificationV1``. Session
+creation and deliberate restarts call ``build_debugger_evaluation_context_v1`` with
+the actual effective config and an increasing run generation. The result records
+custom, nonofficial provenance, both team controllers and the information mode.
+The control layer uses its recorded environment seed for simulator randomness.
+These builders validate and hash host data; they do not discover Git state, run a
+transition, or write artifacts.
 """
 
 from __future__ import annotations
@@ -100,6 +101,9 @@ class DebuggerEvaluationLaunchSpecificationV1(EvaluationModel):
     def _validate_launch_specification(
         self,
     ) -> DebuggerEvaluationLaunchSpecificationV1:
+        """Require both content digests and the launch ID to match the supplied
+        launch fields.
+        """
         launch_payload = {
             "schema_id": self.schema_id,
             "schema_version": self.schema_version,
@@ -128,7 +132,27 @@ def build_debugger_evaluation_launch_specification_v1(
     code_revision: CodeRevisionV1,
     capture_profile: DebuggerCaptureProfileV1 = "debug",
 ) -> DebuggerEvaluationLaunchSpecificationV1:
-    """Build one launch record without performing filesystem or Git discovery."""
+    """Build the immutable launch record shared by restarted debugger episodes.
+
+    Parameters
+    ----------
+    root_seed : int
+        Root seed in the unsigned 32-bit range, from zero through 2**32 - 1.
+    code_revision : CodeRevisionV1
+        Already discovered source identity. This function does not inspect Git itself.
+    capture_profile : {"debug", "evaluation_metric_complete"}, optional
+        Recorded capture contract, default ``debug``.
+
+    Returns
+    -------
+    DebuggerEvaluationLaunchSpecificationV1
+        Strict launch record with matching content digest, specification ID and digest.
+
+    Raises
+    ------
+    ValueError
+        If a seed, capture choice or identity fails strict model validation.
+    """
     launch_payload = {
         "schema_id": DEBUGGER_EVALUATION_LAUNCH_SPECIFICATION_SCHEMA_ID,
         "schema_version": DEBUGGER_EVALUATION_BRIDGE_SCHEMA_VERSION,
@@ -193,6 +217,9 @@ def _content_identity(
     identifier: str,
     payload: dict[str, object],
 ) -> ContentAddressedIdentityV1:
+    """Build a version-one content identity from a named payload and its SHA-256
+    digest.
+    """
     return ContentAddressedIdentityV1(
         identifier=identifier,
         version=1,
@@ -228,6 +255,9 @@ def _action_source_contract_payload(
     reactive_tdm_identity: ContentAddressedIdentityV1 | None = None,
     scenario_controller_identity: ContentAddressedIdentityV1 | None = None,
 ) -> dict[str, object]:
+    """Describe both team action sources and their input contract for stable
+    provenance.
+    """
     if action_source_kind not in ("manual", "scripted", "mixed", "policy"):
         raise ValueError(
             "action_source_kind must be manual, scripted, mixed, or policy"
@@ -287,6 +317,11 @@ def _policy_assignments(
     reactive_tdm_identity: ContentAddressedIdentityV1 | None = None,
     scenario_controller_identity: ContentAddressedIdentityV1 | None = None,
 ) -> tuple[PolicyAssignmentSlotV2, ...]:
+    """Assign each active fixed slot its recorded role and action-source identity.
+
+    Inactive slots remain unassigned. Controller identities and actor projection
+    describe execution; they do not introduce a learner or policy registry entry.
+    """
     profile = config.agent_profile
     active = np.asarray(profile.active_mask, dtype=np.bool_)
     team_ids = np.asarray(profile.team_ids, dtype=np.int32)
@@ -366,7 +401,23 @@ def debugger_action_source_kind_v1(
     team_a_controller: TeamController,
     team_b_controller: TeamBController,
 ) -> DebuggerActionSourceKindV1:
-    """Classify one scenario and controller pair for truthful provenance."""
+    """Describe the actual action source for a scenario and its team controllers.
+
+    Parameters
+    ----------
+    scenario : DebuggerScenario
+        Scenario metadata, including interactive or scripted mode.
+    team_a_controller : TeamController
+        Selected Team A controller.
+    team_b_controller : TeamBController
+        Selected Team B controller, including supported scenario pressure.
+
+    Returns
+    -------
+    DebuggerActionSourceKindV1
+        Scripted for registered playback; otherwise manual, policy or mixed according
+        to which teams use manual control. Individual controller IDs remain recorded.
+    """
     if scenario.mode == "scripted":
         return "scripted"
     return team_controller_action_source(team_a_controller, team_b_controller)
@@ -384,13 +435,52 @@ def build_debugger_evaluation_context_v1(
     execution_information_mode: ExecutionInformationMode,
     expected_horizon: int | None = None,
 ) -> EvaluationEpisodeContextV3:
-    """Build the truthful custom, nonofficial CP2 context for one live episode.
+    """Build the recorded custom-evaluation context for one live debugger episode.
 
-    The eventual ``create_session``/restart integration must construct this
-    context from the effective post-override ``EnvConfig`` and use
-    ``seed_protocol.environment_seed`` as the simulator RNG seed.  The same
-    launch specification is reused while ``run_generation`` increments for
-    each deliberate episode replacement.
+    Parameters
+    ----------
+    launch_specification : DebuggerEvaluationLaunchSpecificationV1
+        Exact validated launch record reused across deliberate episode replacements.
+    scenario : DebuggerScenario
+        Current scenario metadata and any exact authored-source provenance.
+    config : EnvConfig
+        Exact effective runtime config after caller choices have been applied.
+    run_generation : int
+        Nonnegative Python integer increased for each deliberate episode replacement.
+    action_source_kind : DebuggerActionSourceKindV1
+        Must agree with the scenario mode and both selected controllers.
+    team_a_controller : TeamController
+        Supported Team A controller selection.
+    team_b_controller : TeamBController
+        Supported Team B controller selection.
+    execution_information_mode : {"shared_obs", "no_shared_obs"}
+        Input contract for action selection. Reactive controllers require an
+        interactive SharedObs session.
+    expected_horizon : int or None, optional
+        Positive captured-transition bound no greater than config.max_steps. None uses
+        config.max_steps; callers pass script length or remaining interactive steps.
+
+    Returns
+    -------
+    EvaluationEpisodeContextV3
+        Matching roster, config, task/scenario identity, controller assignments,
+        named seed streams, capture choices and custom/nonofficial metadata.
+
+    Raises
+    ------
+    TypeError
+        If the launch record or config is not the exact supported model type.
+    ValueError
+        If generation, horizon, controllers, input mode, source classification,
+        configuration or recorded identity is invalid.
+
+    Notes
+    -----
+    The control layer uses ``seed_protocol.environment_seed`` for simulator keys.
+    Launch-stable named seeds preserve the same initial conditions across repeated
+    comparisons; run_generation changes episode identity without hiding new randomness.
+    This builds host metadata and may copy arrays for validation/hashing. It does not
+    start an episode or write a replay.
     """
     if type(launch_specification) is not DebuggerEvaluationLaunchSpecificationV1:
         raise TypeError(
@@ -459,6 +549,9 @@ def build_debugger_evaluation_context_v1(
     def controller_identity(
         descriptor: dict[str, object],
     ) -> ContentAddressedIdentityV1:
+        """Bind a controller behavior descriptor to this launch's recorded code
+        revision.
+        """
         return ContentAddressedIdentityV1.model_validate(
             {
                 "identifier": descriptor["policy_id"],
@@ -601,6 +694,7 @@ def build_debugger_evaluation_context_v1(
     }
 
     def seed(namespace: str) -> int:
+        """Derive a repeatable named seed from the unchanged launch root seed."""
         return _derive_named_seed(
             launch.root_seed,
             namespace=namespace,

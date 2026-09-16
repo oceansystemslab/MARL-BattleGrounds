@@ -1,3 +1,7 @@
+# Python package, dependency groups and developer-tool configuration.
+# pyproject.toml declares intent; uv.lock records exact resolved versions.
+# Runtime code lives under src. Training/interop extras install dependencies,
+# not a complete learner or every adapter. See docs/dev/dependency_policy.md.
 [project]
 name = "marl-battlegrounds"
 version = "0.0.0"

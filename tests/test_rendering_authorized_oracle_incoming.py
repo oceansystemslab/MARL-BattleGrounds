@@ -1,4 +1,4 @@
-"""Focused CP2.3 lossless Oracle incoming-event projection proofs."""
+"""Check that Oracle incoming displays retain the authorized event facts."""
 
 from __future__ import annotations
 

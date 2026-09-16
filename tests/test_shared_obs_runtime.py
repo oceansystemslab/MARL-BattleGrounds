@@ -1,4 +1,4 @@
-"""Structured SharedObs composition, adapter, and provenance proofs."""
+"""Check SharedObs composition, actor delivery and recorded input identity."""
 
 from operator import itemgetter
 from typing import cast
@@ -68,7 +68,6 @@ def _shared_random_policy(
     source_bank: SharedObsSensorSourceBankV2,
     recipient_source_availability: Array,
 ) -> ActorAction:
-    """Test-only SharedObs ABI wrapper retaining canonical Random key sensitivity."""
     del source_bank, recipient_source_availability
     return random_policy(observation, action_mask, actor_key)
 
@@ -78,7 +77,6 @@ def _tdm_config(
     team_sizes: tuple[int, int] = (3, 2),
     max_steps: int = 1,
 ) -> EnvConfig:
-    """Return an unshielded TDM configuration for policy execution."""
     return evaluation_env_config(
         team_sizes=team_sizes,
         task_mode=TASK_MODE_TDM,
@@ -88,7 +86,6 @@ def _tdm_config(
 
 
 def _scalar_actor(tree: object, global_slot: int) -> object:
-    """Select one global-slot row from every leaf in a fixed actor PyTree."""
 
     def _take_actor_row(leaf: Array) -> Array:
         return leaf[global_slot]
@@ -97,14 +94,12 @@ def _scalar_actor(tree: object, global_slot: int) -> object:
 
 
 def _team_bank(observation: Observation, team: int = 0) -> SharedObsSensorSourceBankV2:
-    """Select the own-team source rows before calling an actor policy."""
     return jax.tree.map(
         itemgetter(team), build_shared_obs_sensor_source_bank(observation)
     )
 
 
 def _historical_bank(observation: Observation) -> SharedObsSensorSourceBankV1:
-    """Build the explicitly historical Team-ID fixture's original source layout."""
     return build_shared_obs_sensor_source_bank_from_base_rows(
         observation.ally_unit_features,
         observation.enemy_unit_features,
@@ -117,7 +112,6 @@ def _historical_bank(observation: Observation) -> SharedObsSensorSourceBankV1:
 
 
 def _assert_tree_exact(actual: object, expected: object) -> None:
-    """Require exact structure, shape, dtype, and values."""
     assert jax.tree_util.tree_structure(actual) == jax.tree_util.tree_structure(
         expected
     )
@@ -140,7 +134,6 @@ def _bank_with_one_sighting(
     candidate: int,
     candidate_features: Array,
 ) -> SharedObsSensorSourceBankV2:
-    """Return a bank whose selected source carries one explicit candidate row."""
     return source_bank._replace(
         unit_features_by_source_and_candidate=(
             source_bank.unit_features_by_source_and_candidate.at[
@@ -156,7 +149,6 @@ def _bank_with_one_sighting(
 
 
 def test_source_bank_has_exact_closed_fields_shapes_dtypes_and_relative_joins() -> None:
-    """Every team/source/candidate row preserves the authored relative sensing."""
     config = _tdm_config()
     _, observation, _, _ = reset(config, jax.random.key(0))
     bank = build_shared_obs_sensor_source_bank(observation)
@@ -230,7 +222,6 @@ def test_source_bank_has_exact_closed_fields_shapes_dtypes_and_relative_joins() 
 
 
 def test_default_availability_is_static_same_team_active_and_off_diagonal() -> None:
-    """Asymmetric rosters retain dead-source authorization but exclude padding."""
     config = _tdm_config(team_sizes=(3, 2))
     availability = build_default_shared_obs_information_availability(
         config.agent_profile.active_mask,
@@ -248,7 +239,6 @@ def test_default_availability_is_static_same_team_active_and_off_diagonal() -> N
 def test_dead_source_is_authorized_but_contributes_no_sensor_or_objective_rows() -> (
     None
 ):
-    """Source lifecycle redaction is independent from static authorization."""
     config = _tdm_config(team_sizes=(2, 1))
     _, observation, _, _ = reset(config, jax.random.key(0))
     poisoned = observation._replace(
@@ -274,7 +264,6 @@ def test_dead_source_is_authorized_but_contributes_no_sensor_or_objective_rows()
 def test_compositor_preserves_base_rows_and_ignores_every_unavailable_mutation() -> (
     None
 ):
-    """Only an admitted source can add a hidden globally joined candidate row."""
     config = _tdm_config(team_sizes=(2, 1))
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
     recipient = cast(Observation, _scalar_actor(observation, 0))
@@ -340,7 +329,6 @@ def test_compositor_preserves_base_rows_and_ignores_every_unavailable_mutation()
 
 
 def test_random_adapter_preserves_local_policy_actions_and_key_sensitivity() -> None:
-    """A test-only ABI wrapper preserves the unchanged policy's per-key output."""
     config = _tdm_config()
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
     bank = _team_bank(observation)
@@ -360,7 +348,6 @@ def test_random_adapter_preserves_local_policy_actions_and_key_sensitivity() -> 
 
 
 def test_shared_adapter_ignores_cross_team_inactive_and_unavailable_mutations() -> None:
-    """Excluded source columns cannot perturb reactive action bytes."""
     config = _tdm_config(team_sizes=(2, 1))
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
     bank = _team_bank(observation)
@@ -408,7 +395,6 @@ def test_shared_adapter_ignores_cross_team_inactive_and_unavailable_mutations() 
 
 
 def test_bank_ignores_non_sensor_base_fields_and_previous_action_history() -> None:
-    """Maps, context, lifecycle metadata, and action history cannot enter the bank."""
     config = _tdm_config()
     _, observation, _, _ = reset(config, jax.random.key(0))
     baseline = build_shared_obs_sensor_source_bank(observation)
@@ -435,7 +421,6 @@ def test_bank_ignores_non_sensor_base_fields_and_previous_action_history() -> No
 
 
 def test_source_bank_and_shared_scalar_adapter_match_eager_jit_and_vmap() -> None:
-    """Structured composition preserves exact values under supported transforms."""
     config = _tdm_config()
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
     eager_bank = build_shared_obs_sensor_source_bank(observation)
@@ -507,7 +492,6 @@ def test_source_bank_and_shared_scalar_adapter_match_eager_jit_and_vmap() -> Non
 
 
 def test_shared_adapter_cannot_bypass_the_recipient_exact_action_mask() -> None:
-    """Arbitrary admitted source material cannot create an unsupported action."""
     config = _tdm_config()
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
     bank = _team_bank(observation)
@@ -546,7 +530,6 @@ def _forbidden_bank_reader_policy(
     source_bank: SharedObsSensorSourceBankV2,
     recipient_source_availability: Array,
 ) -> ActorAction:
-    """Ignore availability and inspect the actor's forbidden shared self source."""
     del key, recipient_source_availability
     forbidden_source = recipient_observation.self_ally_index
     leaked = jnp.logical_or(
@@ -570,7 +553,6 @@ def _forbidden_bank_reader_policy(
 
 
 def test_teammate_only_same_epoch_sighting_can_change_movement_intent() -> None:
-    """Reactive TDM acts on an admitted current teammate sighting."""
     config = _tdm_config(team_sizes=(2, 1))
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
     recipient = cast(Observation, _scalar_actor(observation, 0))._replace(
@@ -618,7 +600,6 @@ def test_teammate_only_same_epoch_sighting_can_change_movement_intent() -> None:
 def test_shared_team_executor_uses_global_slot_keys_and_homogeneous_source_bank() -> (
     None
 ):
-    """Both fixed team blocks receive aligned actor rows under JIT and vmap."""
     config = _tdm_config(team_sizes=(2, 1))
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
     keys = jax.random.split(jax.random.key(31), MAX_AGENT_SLOTS)
@@ -708,7 +689,6 @@ def test_shared_team_executor_uses_global_slot_keys_and_homogeneous_source_bank(
 
 
 def test_executor_masks_all_unavailable_bank_fields_before_arbitrary_policy() -> None:
-    """The executor enforces availability even when a policy ignores its mask row."""
     config = _tdm_config(team_sizes=(2, 1))
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
     keys = jax.random.split(jax.random.key(43), MAX_AGENT_SLOTS)
@@ -760,7 +740,6 @@ def test_executor_masks_all_unavailable_bank_fields_before_arbitrary_policy() ->
 def test_rollout_availability_and_host_reconstruction_preserve_exact_provenance() -> (
     None
 ):
-    """Capture stores base rows and matrix, then reconstructs no second copy."""
     config = _tdm_config()
     state, observation, action_mask, _ = reset(config, jax.random.key(0))
     observation = historical_observation(config, observation)
@@ -790,7 +769,6 @@ def test_rollout_availability_and_host_reconstruction_preserve_exact_provenance(
 
 
 def test_host_reconstruction_uses_recorded_relation_mapping() -> None:
-    """A valid recorded row permutation remains the reconstruction authority."""
     config = _tdm_config()
     state, observation, action_mask, _ = reset(config, jax.random.key(0))
     observation = historical_observation(config, observation)
@@ -873,7 +851,6 @@ def test_host_reconstruction_uses_recorded_relation_mapping() -> None:
 
 
 def test_shared_projection_identity_and_reconstruction_fail_closed() -> None:
-    """Mode, projection, frame identity, and availability all fail closed."""
     assert (
         SHARED_OBS_ACTOR_PROJECTION_ID
         == "base-observation-plus-authorized-sensor-source-bank"

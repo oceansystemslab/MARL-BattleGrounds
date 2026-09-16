@@ -1,3 +1,8 @@
+/**
+ * @file Build authorized presentation fixtures for browser unit tests from checked
+ * Python records. Helpers preserve the same normalization and join boundaries used by
+ * the client.
+ */
 import { createHash } from "node:crypto";
 
 /** @param {unknown} value @returns {unknown} */
@@ -11,13 +16,7 @@ function sortedJsonValue(value) {
   );
 }
 
-/**
- * Re-seal the generated empty overlay after a test deliberately changes only
- * its joined authority epoch. Empty overlays contain no schema-typed floats,
- * so sorted JSON is byte-identical to Python's canonical content encoding.
- *
- * @param {Record<string, any>} presentation
- */
+/** @param {Record<string, any>} presentation */
 export function resealEmptyLocalOracleCorpseOverlay(presentation) {
   const overlay = presentation.local_oracle_corpse_overlay;
   if (!overlay) return;

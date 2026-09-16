@@ -1,4 +1,10 @@
-"""One-shot Matplotlib rendering for an authorized debugger reset snapshot."""
+"""Display one authorized reset or replay frame with Matplotlib.
+
+The debugger and replay launchers call these helpers for static mode. They open
+one figure and wait for the display window; they do not start an HTTP server.
+Replay rendering reads saved evidence and never advances the simulator.
+Matplotlib is imported only when a static display is requested.
+"""
 
 from importlib import import_module
 from pathlib import Path
@@ -17,12 +23,19 @@ if TYPE_CHECKING:
 
 
 class _PyplotLike(Protocol):
-    def show(self) -> object: ...
+    """The small Matplotlib interface required to display or close a static figure."""
 
-    def close(self, figure: object) -> object: ...
+    def show(self) -> object:
+        """Display open figures using Matplotlib's configured window backend."""
+        ...
+
+    def close(self, figure: object) -> object:
+        """Close the supplied figure and release its display resources."""
+        ...
 
 
 def _load_pyplot() -> _PyplotLike:
+    """Import Matplotlib on demand and explain the optional install when unavailable."""
     try:
         return cast(_PyplotLike, import_module("matplotlib.pyplot"))
     except ImportError as exc:
@@ -43,7 +56,38 @@ def run_static_renderer(
     verbose: bool,
     show_ranges: bool,
 ) -> int:
-    """Render one reset scene without callbacks, a server, or a transition."""
+    """Display a scenario's initial researcher view without taking a simulator step.
+
+    Parameters
+    ----------
+    scenario : DebuggerScenario
+        Scenario factory used to create the initial endpoint.
+    seed : int
+        Root random seed passed to the live-session constructor.
+    evaluation_launch_specification : DebuggerEvaluationLaunchSpecificationV1
+        Recording identity and capture contract for that endpoint.
+    controlled_global_slot : int or None
+        Global actor slot to select; None uses the scenario default.
+    verbose : bool
+        Whether the session enables verbose host logging.
+    show_ranges : bool
+        Whether the view includes interaction and observation ranges.
+
+    Returns
+    -------
+    int
+        Zero after the display call returns.
+
+    Raises
+    ------
+    ImportError
+        If Matplotlib is unavailable.
+
+    Notes
+    -----
+    Creates a session and opens a Matplotlib window. The numerical session constructor
+    owns scenario and seed validation. No transition or replay file is written.
+    """
     from marl_battlegrounds.rendering.evaluation_adapter import (
         EvaluationScenePresentationStateV1,
         build_researcher_analyzer_projection_v2,
@@ -86,7 +130,33 @@ def run_static_replay_renderer(
     frame_index: int,
     show_ranges: bool,
 ) -> int:
-    """Validate, project, and render one canonical replay frame offline."""
+    """Load a saved replay and display one recorded researcher frame.
+
+    Parameters
+    ----------
+    replay_path : Path
+        Replay file accepted by the shared replay loader.
+    frame_index : int
+        Zero-based recorded frame index; must be a Python integer in range.
+    show_ranges : bool
+        Whether the view includes interaction and observation ranges.
+
+    Returns
+    -------
+    int
+        Zero after the display call returns.
+
+    Raises
+    ------
+    ValueError
+        If the replay cannot be loaded or the frame index is invalid.
+    ImportError
+        If Matplotlib is unavailable.
+
+    Notes
+    -----
+    Reads the replay file and opens a window. It does not write files or run steps.
+    """
     from marl_battlegrounds.evaluation.replay_io import (
         ReplayLoadError,
         load_replay,
@@ -111,7 +181,36 @@ def run_static_replay_artifact_renderer(
     frame_index: int,
     show_ranges: bool,
 ) -> int:
-    """Project and render one already-validated canonical replay artifact."""
+    """Display one frame from an already validated replay object.
+
+    Parameters
+    ----------
+    replay : ReplayArtifactV1 or ReplayArtifactV2 or ReplayArtifactV3
+        Exact supported replay model, with matching frame and transition sequences.
+    frame_index : int
+        Zero-based frame index, including zero for the reset frame.
+    show_ranges : bool
+        Whether to include configured range overlays.
+
+    Returns
+    -------
+    int
+        Zero after the Matplotlib display call returns.
+
+    Raises
+    ------
+    TypeError
+        If the replay is not an exact supported model type.
+    ValueError
+        If the frame index is not a Python integer in range.
+    ImportError
+        If Matplotlib is unavailable.
+
+    Notes
+    -----
+    Builds recorded status-source evidence and the authorized researcher projection.
+    It opens a window without advancing simulator state or changing the replay.
+    """
     from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
     from marl_battlegrounds.evaluation.replay import ReplayArtifactV1
     from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactV2

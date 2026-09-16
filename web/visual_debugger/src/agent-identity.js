@@ -1,9 +1,9 @@
 /**
- * Canonical public agent identity shared by scientific presentation builders.
- * This leaf owns only stable class/team vocabulary and identity validation; it
- * has no scene, authority, tooltip, or simulator dependencies.
+ * @file Format public agent identities for scientific browser cards. This module
+ * owns class/team labels and safe identity-field reads. It never derives an ID
+ * from a global slot, position or private simulator record. Source attribution
+ * checks belong to the caller that joins identities to recorded references.
  */
-
 const CLASS_BY_ID = Object.freeze({
   1: Object.freeze({ label: "Mage", accent: "mage" }),
   2: Object.freeze({ label: "Warrior", accent: "warrior" }),
@@ -25,9 +25,14 @@ const AUTHORIZED_IDENTITY_KEYS = Object.freeze([
 ]);
 
 /**
- * Return a neutral, display-safe identity for arbitrary scientific-card input.
- * Invalid fields degrade independently and never fall back to slots, keys, or
- * other private identity channels.
+ * Return a display label from rawAgent's own data fields.
+ *
+ * rawAgent may be any value. Read public_agent_id, class_id, team_id and
+ * optional display_agent_id without calling property getters. Invalid fields
+ * independently become Unknown, Agent ID unavailable or the neutral accent.
+ * A one-digit display ID takes precedence over the public ID. Return a frozen
+ * record with title, publicIdentity, classLabel, teamLabel and accent. This
+ * formats a label; it does not certify information rights or mutate the input.
  *
  * @param {unknown} rawAgent
  * @returns {Readonly<{
@@ -49,9 +54,15 @@ export function canonicalAgentIdentity(rawAgent) {
 }
 
 /**
- * Validate one complete authorized scene identity without invoking accessors.
- * Additional normalized scientific fields are allowed, but the four identity
- * fields must be own enumerable data properties and agree exactly.
+ * Check a plain identity record and return its frozen display projection.
+ *
+ * rawAgent must have own enumerable data fields presentation_key,
+ * public_agent_id, class_id and team_id. Class IDs are integers 1–5 and team IDs
+ * are 1–2. IDs are nonempty strings of at most 512 characters, with no outer
+ * whitespace or line breaks. Extra string-named fields are allowed; symbol
+ * keys and getter-backed required fields are rejected. A valid optional
+ * display_agent_id may override the shown ID. Invalid input returns null.
+ * Matching these fields alone does not establish a source-attribution join.
  *
  * @param {unknown} rawAgent
  * @returns {Readonly<{
@@ -108,7 +119,16 @@ export function exactAuthorizedAgentIdentityV1(rawAgent) {
   });
 }
 
-/** @param {unknown} publicAgentId @param {unknown} classId @param {unknown} teamId @param {unknown} displayId */
+/**
+ * Create a frozen title and class/team labels from four unchecked values.
+ *
+ * publicAgentId supplies the shown identifier unless displayId is one decimal
+ * digit. classId 1–5 selects a class/accent; teamId 1–2 selects Team A/B. Invalid
+ * parts receive neutral unavailable labels independently. No coercion, input
+ * mutation, source lookup or authority check occurs.
+ *
+ * @param {unknown} publicAgentId @param {unknown} classId @param {unknown} teamId @param {unknown} displayId
+ */
 function formatIdentity(publicAgentId, classId, teamId, displayId) {
   const normalizedPublicId =
     typeof displayId === "string" && /^[0-9]$/u.test(displayId)
@@ -138,12 +158,23 @@ function formatIdentity(publicAgentId, classId, teamId, displayId) {
   });
 }
 
-/** @param {unknown} value */
+/**
+ * Return value when it passes exactIdentifier, otherwise null.
+ * The function preserves the string exactly; it does not trim or derive an ID.
+ *
+ * @param {unknown} value
+ */
 function displayIdentifier(value) {
   return exactIdentifier(value);
 }
 
-/** @param {unknown} value */
+/**
+ * Accept a nonempty string of at most 512 characters with no outer whitespace
+ * or CR/LF. value is returned unchanged when valid; all other inputs return
+ * null. The function performs no registry lookup or identity comparison.
+ *
+ * @param {unknown} value
+ */
 function exactIdentifier(value) {
   return typeof value === "string" &&
     value.length > 0 &&
@@ -155,6 +186,13 @@ function exactIdentifier(value) {
 }
 
 /**
+ * Read four own data fields from value without calling their getters.
+ *
+ * Reject null, arrays and nonobjects. Copy public_agent_id, class_id, team_id
+ * and display_agent_id into a new null-prototype record; absent/getter-backed
+ * fields become undefined. The returned record is not frozen. Descriptor
+ * inspection errors return null. Field validity and authority are not checked.
+ *
  * @param {unknown} value
  * @returns {Readonly<Record<string, unknown>> | null}
  */
@@ -178,6 +216,14 @@ function identityDataFields(value) {
 }
 
 /**
+ * Read required identity data from a plain object or return null.
+ *
+ * value must have Object.prototype or a null prototype, no symbol keys and
+ * four own enumerable data fields named in AUTHORIZED_IDENTITY_KEYS. Extra
+ * string fields are allowed. Copy those fields and an eligible display_agent_id
+ * into a new null-prototype record, without freezing it or changing value.
+ * Inspection errors return null; field values are checked by the next helper.
+ *
  * @param {unknown} value
  * @returns {Readonly<Record<string, unknown>> | null}
  */

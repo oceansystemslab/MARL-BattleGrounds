@@ -1,4 +1,8 @@
-"""Qualify the fixed scalar schema without duplicating numerical reducers."""
+"""Check scalar metric names, ordering and schema rules.
+
+The catalog tests share the numerical definitions rather than implementing a
+second metric calculator.
+"""
 
 import hashlib
 import re
@@ -588,7 +592,6 @@ def test_family_budget_retains_requested_counts_without_duplicate_aliases() -> N
 
 
 def test_every_measure_has_its_reviewed_direction_without_a_default() -> None:
-    """Encode the approved interpretation policy independently of catalog loops."""
     expected: dict[str, dict[str, str]] = {}
 
     def classify(

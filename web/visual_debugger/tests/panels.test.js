@@ -1,3 +1,7 @@
+/**
+ * @file Check inspector and class-card views against authorized frames, selected
+ * recipients and exact section contracts.
+ */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -45,10 +49,6 @@ async function normalizedCompatibilityCase(kind) {
   );
 }
 
-/**
- * Minimal event-capable DOM for the roster constructor. It deliberately models
- * bubbling so a fact-chip click exposes any ancestor activation listener.
- */
 function rosterDomHarness() {
   /** @type {WeakMap<object, Map<string, Array<(...args: any[]) => void>>>} */
   const listenerRegistry = new WeakMap();

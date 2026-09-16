@@ -1,4 +1,4 @@
-"""Current Scenario 8 route and its seven matched timing interventions."""
+"""Check Scenario 8's current route and seven matched timing interventions."""
 
 import json
 from collections.abc import Callable
@@ -92,7 +92,6 @@ def scenario() -> TDMScenario:
 def _team_a_action(
     tick: int, command: ActorAction, changes: tuple[ActionChange, ...]
 ) -> ActorAction:
-    """Apply only the declared changes to the author's recorded Team A choices."""
     heads = list(command)
     for change in changes:
         if change.tick == tick:
@@ -107,7 +106,6 @@ def _run_witness(
     scenario: TDMScenario,
     changes: tuple[ActionChange, ...] = (),
 ) -> list[WitnessTransition]:
-    """Regenerate BETA from each current epoch; stop at the first terminal flag."""
     state, observation, mask, _ = initialize_scenario_state(
         scenario.initial_state, scenario.config
     )
@@ -310,7 +308,6 @@ def _assert_matched_intervention(
     baseline: list[WitnessTransition],
     changes: tuple[ActionChange, ...],
 ) -> None:
-    """Only approved Team A choices change; later BETA reactions are regenerated."""
     first_tick = min(change.tick for change in changes)
     for index, transition in enumerate(actual):
         if index < first_tick - 1:

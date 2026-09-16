@@ -1,4 +1,4 @@
-"""Launch-boundary proofs for debugger recording runtime provenance."""
+"""Check runtime metadata recorded at debugger launch."""
 
 from __future__ import annotations
 

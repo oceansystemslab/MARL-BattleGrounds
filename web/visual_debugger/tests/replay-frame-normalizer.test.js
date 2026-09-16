@@ -1,3 +1,7 @@
+/**
+ * @file Check replay audience schemas, cursor/timeline facts, immutable normalization
+ * and unknown-field rejection.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -169,7 +173,6 @@ const researcherStatusMechanics = Object.freeze([
   ],
 ]);
 
-/** Return the exact five-row BattlefieldSceneV2 mechanics catalog. */
 function researcherClassMechanics() {
   return [1, 2, 3, 4, 5].map((classId) => ({
     class_id: classId,
@@ -240,10 +243,8 @@ function researcherClassMechanics() {
   }));
 }
 
-/**
- * @param {number} frameIndex
- * @returns {any}
- */
+/** @param {number} frameIndex
+ * @returns {any} */
 function researcherProjection(frameIndex) {
   const frameId = `${episodeId}:frame:${frameIndex}`;
   const transitionId = frameIndex === 0 ? null : `${episodeId}:transition:0`;
@@ -815,16 +816,10 @@ function sourceFrame() {
   };
 }
 
-/**
- * Enumerate every object-record path in one JSON wire root. Arrays are
- * traversed because their record elements are independently strict schema
- * families, but only records receive an injected field.
- *
- * @param {unknown} value
+/** @param {unknown} value
  * @param {(string | number)[]} [path]
  * @param {Array<(string | number)[]>} [paths]
- * @returns {Array<(string | number)[]>}
- */
+ * @returns {Array<(string | number)[]>} */
 function recordPaths(value, path = [], paths = []) {
   if (Array.isArray(value)) {
     value.forEach((child, index) => {
@@ -858,14 +853,9 @@ function displayPath(path) {
       );
 }
 
-/**
- * Assert that every array and record in a normalized graph is frozen and
- * shares no mutable container identity with its raw wire input.
- *
- * @param {unknown} raw
+/** @param {unknown} raw
  * @param {unknown} normalized
- * @param {string} label
- */
+ * @param {string} label */
 function assertRecursivelyFrozenAndUnaliased(raw, normalized, label) {
   const rawContainers = new Set();
   /** @param {unknown} value */
@@ -906,14 +896,8 @@ function assertRecursivelyFrozenAndUnaliased(raw, normalized, label) {
   inspectNormalized(normalized, "$normalized");
 }
 
-/**
- * Destructively perturb every mutable raw container after normalization. This
- * deliberately changes existing scalar values as well as container shapes;
- * installed normalized bytes must remain unaffected.
- *
- * @param {unknown} value
- * @param {Set<object>} [visited]
- */
+/** @param {unknown} value
+ * @param {Set<object>} [visited] */
 function mutateRawGraph(value, visited = new Set()) {
   if (!value || typeof value !== "object" || visited.has(value)) {
     return;
@@ -1444,10 +1428,8 @@ test("replay errors are exact, settled, and never gain animation authority", () 
   );
 });
 
-/**
- * @param {string} kind
- * @returns {any}
- */
+/** @param {string} kind
+ * @returns {any} */
 function timeline(kind) {
   const timelineId =
     kind === "researcher"

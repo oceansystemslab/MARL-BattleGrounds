@@ -1,4 +1,4 @@
-"""Exhaustive host-side resolved environment configuration validation."""
+"""Check valid and invalid environment configurations at the host boundary."""
 # pyright: reportUnknownArgumentType=false, reportUnknownLambdaType=false
 
 from collections.abc import Callable
@@ -91,7 +91,6 @@ def _wall(
 
 
 def _spawn_pad_positions() -> Array:
-    """Return five real, statically valid pad locations for each team."""
     return jnp.asarray(
         (
             (0.5, 0.5),
@@ -387,7 +386,6 @@ def test_invalid_scalar_fields_fail_early(
 
 @pytest.mark.parametrize("max_steps", (1, 2**24), ids=("minimum", "float32-exact-max"))
 def test_max_steps_accepts_exact_float32_integer_domain(max_steps: int) -> None:
-    """Accept both closed endpoints of the public exact-integer horizon."""
     assert (
         validate_env_config(_replace_config(_valid_config(), max_steps=max_steps))
         is None
@@ -409,7 +407,6 @@ def test_max_steps_accepts_exact_float32_integer_domain(max_steps: int) -> None:
 def test_movement_scale_accepts_positive_finite_float32_execution_values(
     movement_scale: float,
 ) -> None:
-    """Prove validation accepts the complete documented execution domain."""
     config = _replace_config(
         _valid_config(),
         ordinary_movement_distance_scale=movement_scale,
@@ -459,7 +456,6 @@ def test_movement_scale_rejects_wrong_types_and_invalid_float32_values(
     invalid_scale: object,
     error_type: type[Exception],
 ) -> None:
-    """Prove the host boundary rejects scales that cannot authorize movement."""
     config = _replace_config(
         _valid_config(),
         ordinary_movement_distance_scale=invalid_scale,
@@ -481,7 +477,6 @@ def test_movement_scale_rejects_wrong_types_and_invalid_float32_values(
 def test_spawn_shield_duration_accepts_its_complete_host_domain(
     duration_steps: int,
 ) -> None:
-    """Accept every representative nonnegative int32-representable duration."""
     assert (
         validate_env_config(_valid_config(spawn_shield_duration_steps=duration_steps))
         is None
@@ -502,7 +497,6 @@ def test_spawn_shield_duration_rejects_wrong_types_and_invalid_values(
     invalid_duration: object,
     error_type: type[Exception],
 ) -> None:
-    """Keep the public host integer safe for the int32 runtime counter."""
     with pytest.raises(error_type, match="spawn_shield_duration_steps"):
         validate_env_config(
             _replace_config(
@@ -527,7 +521,6 @@ def test_spawn_shield_duration_rejects_wrong_types_and_invalid_values(
 def test_spawn_shield_speed_accepts_positive_finite_float32_execution_values(
     movement_speed: float,
 ) -> None:
-    """Accept host floats that remain finite and positive in the JAX core."""
     assert (
         validate_env_config(_valid_config(spawn_shield_movement_speed=movement_speed))
         is None
@@ -558,7 +551,6 @@ def test_spawn_shield_speed_rejects_wrong_types_and_invalid_float32_values(
     invalid_speed: object,
     error_type: type[Exception],
 ) -> None:
-    """Reject speeds that cannot produce a positive finite float32 delta."""
     with pytest.raises(error_type, match="spawn_shield_movement_speed"):
         validate_env_config(
             _replace_config(
@@ -591,7 +583,6 @@ def test_spawn_shield_speed_rejects_wrong_types_and_invalid_float32_values(
 def test_respawn_wave_period_accepts_positive_int32_team_values(
     period_step_counts: Array,
 ) -> None:
-    """Accept positive per-team periods across the complete int32 domain."""
     assert (
         validate_env_config(
             _valid_config(
@@ -632,7 +623,6 @@ def test_respawn_wave_period_enforces_exact_jax_storage(
     invalid_periods: object,
     error_type: type[Exception],
 ) -> None:
-    """Reject host containers and shape or dtype drift at the public boundary."""
     with pytest.raises(error_type, match="team_respawn_wave_period_step_count"):
         validate_env_config(
             _replace_config(
@@ -654,7 +644,6 @@ def test_respawn_wave_period_enforces_exact_jax_storage(
 def test_respawn_wave_period_rejects_nonpositive_team_values(
     invalid_periods: tuple[int, int],
 ) -> None:
-    """Require every team clock period to make forward progress."""
     periods = jnp.asarray(invalid_periods, dtype=jnp.int32)
     with pytest.raises(ValueError, match="positive"):
         validate_env_config(_valid_config(team_respawn_wave_period_step_count=periods))
@@ -785,7 +774,6 @@ def test_recovery_catalogs_require_exact_jax_storage(
     invalid_catalog: object,
     error_type: type[Exception],
 ) -> None:
-    """Reject catalog container, shape, and dtype drift at the host boundary."""
     config = _valid_config()
     monkeypatch.setattr(combat, catalog_name, invalid_catalog)
 
@@ -872,7 +860,6 @@ def test_recovery_catalogs_enforce_value_domains_and_neutral_rows(
     invalid_catalog: Array,
     message: str,
 ) -> None:
-    """Reject recovery tuning values outside their versioned catalog contract."""
     config = _valid_config()
     monkeypatch.setattr(combat, catalog_name, invalid_catalog)
 
@@ -883,7 +870,6 @@ def test_recovery_catalogs_enforce_value_domains_and_neutral_rows(
 def test_valid_alternate_recovery_catalogs_resolve_and_validate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep catalog values tunable while enforcing profile/catalog agreement."""
     alternate_delays = jnp.asarray((0, 1, 2, 3, 4, 5), dtype=jnp.int32)
     alternate_regeneration_fractions = jnp.asarray(
         (0.0, 0.01, 0.02, 0.03, 0.04, 1.0),
@@ -1004,7 +990,6 @@ def test_profile_recovery_delay_rejects_domain_and_catalog_drift(
     invalid_delay_steps: Callable[[Array], Array],
     message: str,
 ) -> None:
-    """Enforce exact per-slot delay values resolved from the class catalog."""
     config = _valid_config()
     invalid_values = invalid_delay_steps(config.agent_profile.out_of_combat_delay_steps)
 
@@ -1028,7 +1013,6 @@ def test_profile_recovery_regeneration_rejects_range_and_catalog_drift(
     replacement: float,
     message: str,
 ) -> None:
-    """Enforce bounded rates and exact per-slot catalog resolution."""
     config = _valid_config()
     invalid_values = (
         config.agent_profile.out_of_combat_health_regen_fraction_per_step.at[0].set(
@@ -1064,7 +1048,6 @@ def test_inactive_profile_recovery_rows_must_be_canonical_zero(
     field_name: str,
     replacement: int | float,
 ) -> None:
-    """Reject hidden recovery configuration in fixed-slot padding."""
     config = _valid_config(team_sizes=(1, 1))
     inactive_slot = 1
     values = cast(Array, getattr(config.agent_profile, field_name))
@@ -1191,7 +1174,6 @@ def test_spawn_pads_reject_nonfinite_bounds_and_fallback_formation_overlap() -> 
 
 
 def test_inactive_roster_slots_do_not_turn_real_spawn_pads_into_padding() -> None:
-    """Keep all ten configured pad rows even when ordinary reset zeros padding."""
     config = _valid_config(team_sizes=(1, 1))
     assert bool(jnp.all(config.team_spawn_pad_positions != 0.0))
     assert validate_env_config(config) is None
@@ -1206,7 +1188,6 @@ def test_inactive_roster_slots_do_not_turn_real_spawn_pads_into_padding() -> Non
 
 
 def test_every_spawn_pad_is_valid_for_its_largest_configured_team_body() -> None:
-    """Validate dormant pad locations with a real same-team fallback body."""
     config = _valid_config(team_sizes=(1, 0))
     invalid_pads = config.team_spawn_pad_positions.at[0, 4, 0].set(0.49)
 

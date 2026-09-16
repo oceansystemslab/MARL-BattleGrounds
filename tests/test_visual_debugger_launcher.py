@@ -1,4 +1,4 @@
-"""CLI and shell-launcher regression tests, including dependency isolation."""
+"""Check Python and shell launch commands, including dependency isolation."""
 
 import argparse
 import os
@@ -102,7 +102,6 @@ def test_recording_launch_rejects_retired_team_b_controller() -> None:
 
 
 def _write_valid_replay(tmp_path: Path) -> Path:
-    """Write one small canonical replay for launcher-boundary integration tests."""
     from tests.evaluation_fixtures import captured_evaluation_trajectory
 
     from marl_battlegrounds.evaluation.metrics import build_evaluation_observer_v1

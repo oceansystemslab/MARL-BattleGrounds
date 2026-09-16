@@ -1,3 +1,7 @@
+# Run the full contributor correctness inventory on hosted CPU runners.
+# The Python shard plugin and browser profile manifest own test membership.
+# Keep twelve Python shards, eight browser profiles and stable aggregate names.
+# Local GPU qualification is separate; see docs/dev/quality_gates.md.
 name: CI
 
 on:

@@ -1,3 +1,7 @@
+/**
+ * @file Provide browser-test setup and inspection for live-recording handoff to an
+ * immutable replay.
+ */
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,11 +14,7 @@ const REPLAY_FILE_SUFFIX = ".marlbg-replay.json";
 const METRIC_FILE_SUFFIX = ".marlbg-metrics.json";
 const STARTUP_TIMEOUT_MS = 60_000;
 
-/**
- * Derive the canonical report companion used by the production replay saver.
- *
- * @param {string} replayPath
- */
+/** @param {string} replayPath */
 export function metricReportPathForReplay(replayPath) {
   if (!replayPath.endsWith(REPLAY_FILE_SUFFIX)) {
     throw new TypeError(`Replay path must end with ${REPLAY_FILE_SUFFIX}.`);
@@ -22,11 +22,7 @@ export function metricReportPathForReplay(replayPath) {
   return `${replayPath.slice(0, -REPLAY_FILE_SUFFIX.length)}${METRIC_FILE_SUFFIX}`;
 }
 
-/**
- * Remove only a unique recording directory allocated by this support module.
- *
- * @param {string | null | undefined} outputDirectory
- */
+/** @param {string | null | undefined} outputDirectory */
 export async function removeRecordingArtifacts(outputDirectory) {
   if (!outputDirectory) {
     return;
@@ -41,20 +37,14 @@ export async function removeRecordingArtifacts(outputDirectory) {
   await rm(resolvedDirectory, { force: true, recursive: true });
 }
 
-/**
- * Start the production CLI with a structurally preflighted, initially absent
- * recording destination. Startup failures synchronously reap the child and
- * remove the unique directory before they escape.
- *
- * @param {{stem?: string}} options
+/** @param {{stem?: string}} options
  * @returns {Promise<{
  *   process: import("node:child_process").ChildProcess,
  *   url: string,
  *   outputDirectory: string,
  *   replayPath: string,
  *   metricReportPath: string,
- * }>}
- */
+ * }>} */
 export async function startRecordingDebugger({ stem = "episode" } = {}) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(stem)) {
     throw new TypeError("Recording E2E stems must be safe filename components.");
@@ -161,11 +151,7 @@ export async function startRecordingDebugger({ stem = "episode" } = {}) {
   }
 }
 
-/**
- * Stop one recording debugger and remove its exact temporary directory.
- *
- * @param {Awaited<ReturnType<typeof startRecordingDebugger>> | null} started
- */
+/** @param {Awaited<ReturnType<typeof startRecordingDebugger>> | null} started */
 export async function stopRecordingDebugger(started) {
   if (!started) {
     return;
@@ -187,14 +173,8 @@ export async function stopRecordingDebugger(started) {
   }
 }
 
-/**
- * Wait for a debugger child to terminate without sleeping or losing the exact
- * exit code/signal pair. This is used to prove Exit and Ctrl-C flush durable
- * recording bytes before process teardown.
- *
- * @param {import("node:child_process").ChildProcess} child
- * @param {number} [timeoutMs]
- */
+/** @param {import("node:child_process").ChildProcess} child
+ * @param {number} [timeoutMs] */
 export async function waitForRecordingDebuggerExit(child, timeoutMs = 30_000) {
   if (child.exitCode !== null || child.signalCode !== null) {
     return { exitCode: child.exitCode, signalCode: child.signalCode };
@@ -213,12 +193,8 @@ export async function waitForRecordingDebuggerExit(child, timeoutMs = 30_000) {
   });
 }
 
-/**
- * Create the deliberate post-preflight target race used by recovery tests.
- *
- * @param {Awaited<ReturnType<typeof startRecordingDebugger>>} started
- * @param {Uint8Array} [sentinel]
- */
+/** @param {Awaited<ReturnType<typeof startRecordingDebugger>>} started
+ * @param {Uint8Array} [sentinel] */
 export async function createReplayTargetRace(
   started,
   sentinel = new TextEncoder().encode("recording-e2e-target-race"),
@@ -227,11 +203,7 @@ export async function createReplayTargetRace(
   return sentinel;
 }
 
-/**
- * Read a materialized artifact without changing or reserializing its bytes.
- *
- * @param {string} path
- */
+/** @param {string} path */
 export async function readJsonArtifact(path) {
   const bytes = await readFile(path);
   return { bytes, value: JSON.parse(bytes.toString("utf8")) };

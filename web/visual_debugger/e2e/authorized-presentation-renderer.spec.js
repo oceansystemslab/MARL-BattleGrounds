@@ -1,3 +1,7 @@
+/**
+ * @file Check real rendered authority boundaries, agent identity, range preferences
+ * and the debugger grid.
+ */
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -72,11 +76,9 @@ test.afterAll(async () => {
   });
 });
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {Record<string, any>} rawPresentation
- * @param {boolean} showRanges
- */
+ * @param {boolean} showRanges */
 async function renderPresentation(page, rawPresentation, showRanges) {
   await page.goto(origin);
   return await page.evaluate(
@@ -540,9 +542,7 @@ test("durable visual filters remove owned paint and restore stable battlefield i
         ".agent-dead-mark",
         ".agent-selection",
       ];
-      /**
-       * @param {{left: number, top: number, right: number, bottom: number}} bounds
-       */
+      /** @param {{left: number, top: number, right: number, bottom: number}} bounds */
       const protectedRectangleKey = ({ left, top, right, bottom }) =>
         [left, top, right, bottom].map((value) => value.toFixed(3)).join(",");
       const protectedKey = () =>

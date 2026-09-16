@@ -1,3 +1,12 @@
+/**
+ * @file Turn authorized incoming facts into bounded combat presentation plans.
+ * The public buildChoreographyPlan reads normalized presentation frames, applies
+ * local paint filters, joins disclosed phase anchors, allocates display space and
+ * assigns explanation time in milliseconds. It does not read outgoing inspection,
+ * submit actions or reconstruct simulator events. Agent spatial facts come only
+ * from the fog-authorized branch; researcher references can supply joined display
+ * identity/help, never hidden positions or new event admission.
+ */
 import { canonicalAgentIdentity } from "./agent-identity.js";
 import {
   authorizedPresentationAgentDisplayId,
@@ -168,6 +177,10 @@ const REGENERATION_TEXT_CUE_RECTANGLE = Object.freeze({
  */
 
 /**
+ * Return whether value is a non-null object other than an array.
+ *
+ * This broad shape guard does not validate a wire record or grant authority.
+ *
  * @param {unknown} value
  * @returns {value is Record<string, any>}
  */
@@ -176,6 +189,10 @@ function isRecord(value) {
 }
 
 /**
+ * Return value unchanged when it is a non-array object, otherwise null.
+ *
+ * No fields are validated or copied; callers check the parts they need.
+ *
  * @param {unknown} value
  * @returns {Record<string, any> | null}
  */
@@ -184,6 +201,10 @@ function record(value) {
 }
 
 /**
+ * Return value unchanged when it is an array, otherwise a new empty array.
+ *
+ * Elements are not validated or copied. This is a tolerant shape reader.
+ *
  * @param {unknown} value
  * @returns {any[]}
  */
@@ -192,6 +213,10 @@ function array(value) {
 }
 
 /**
+ * Return a numeric integer unchanged, otherwise null.
+ *
+ * No positivity, range or safe-integer precision bound is imposed.
+ *
  * @param {unknown} value
  * @returns {number | null}
  */
@@ -200,6 +225,10 @@ function integer(value) {
 }
 
 /**
+ * Return value unchanged when it is a finite number, otherwise null.
+ *
+ * Numeric strings, NaN and infinity are not converted into valid values.
+ *
  * @param {unknown} value
  * @returns {number | null}
  */
@@ -208,6 +237,10 @@ function finiteNumber(value) {
 }
 
 /**
+ * Return trimmed nonblank string value, otherwise null.
+ *
+ * This checks text presence only, not a particular namespace or authority.
+ *
  * @param {unknown} value
  * @returns {string | null}
  */
@@ -216,9 +249,12 @@ function identifier(value) {
 }
 
 /**
- * Retain only the four already-authorized public identity fields needed by
- * semantic explanations. Scientific and geometry fields never cross this
- * narrow browser-internal boundary.
+ * Copy the narrow public identity needed by a semantic explanation.
+ *
+ * value must provide a nonblank presentation key/public ID, class ID 1..5 and team
+ * ID 1 or 2. Return a frozen record with those fields and display_agent_id (or null),
+ * or null if the required identity is invalid. Geometry/scientific fields are not
+ * copied; display_agent_id is carried as supplied rather than validated here.
  *
  * @param {unknown} value
  */
@@ -247,7 +283,14 @@ function authorizedIdentitySnapshot(value) {
   });
 }
 
-/** @param {unknown} left @param {unknown} right */
+/**
+ * Compare exact public values while allowing one float32 representation step.
+ *
+ * left/right match through Object.is, or when both finite numbers and one equals
+ * the float32 rounding of the other. Return a Boolean; no general tolerance is used.
+ *
+ * @param {unknown} left @param {unknown} right
+ */
 function sameRecordedPublicValue(left, right) {
   if (Object.is(left, right)) return true;
   return (
@@ -260,9 +303,12 @@ function sameRecordedPublicValue(left, right) {
 }
 
 /**
- * Compare the complete public durable-status fact carried by the accepted
- * local and geometry-free researcher branches. Direct-source identity is the
- * enrichment being joined, so it is deliberately checked separately.
+ * Compare all shared durable-status facts before joining display attribution.
+ *
+ * rawLocal and rawResearcher must be records. Return true when the eleven status
+ * identity, duration, mechanic and break fields match under sameRecordedPublicValue.
+ * Direct sources are intentionally checked separately by the attribution join.
+ * This comparison does not validate either complete record on its own.
  *
  * @param {unknown} rawLocal
  * @param {unknown} rawResearcher
@@ -286,7 +332,14 @@ function samePublicStatusFacts(rawLocal, rawResearcher) {
   ].every((field) => sameRecordedPublicValue(local[field], researcher[field]));
 }
 
-/** @param {unknown} left @param {unknown} right */
+/**
+ * Compare public ID, class and team after validating both identity snapshots.
+ *
+ * left/right may use different presentation keys or display IDs. Return false for
+ * invalid identities; matching public facts alone do not authorize shared geometry.
+ *
+ * @param {unknown} left @param {unknown} right
+ */
 function samePublicAgentIdentity(left, right) {
   const leftIdentity = authorizedIdentitySnapshot(left);
   const rightIdentity = authorizedIdentitySnapshot(right);
@@ -300,9 +353,11 @@ function samePublicAgentIdentity(left, right) {
 }
 
 /**
- * Retain the fog-authorized presentation key while taking canonical public
- * identity facts from the exact researcher-space join. Researcher opaque keys
- * therefore cannot enter cue identity, DOM metadata, or geometry.
+ * Use joined researcher display identity with the local authorized body key.
+ *
+ * rawResearcherAgent and rawLocalAgent must agree on public ID, class and team.
+ * Return a frozen identity carrying the local presentation key, or null on mismatch.
+ * Researcher keys and positions never enter cue geometry through this helper.
  *
  * @param {unknown} rawResearcherAgent
  * @param {unknown} rawLocalAgent
@@ -319,10 +374,15 @@ function researcherIdentityForLocalAgent(rawResearcherAgent, rawLocalAgent) {
 }
 
 /**
- * Enrich only already-admitted Agent lifecycle applications. Event rows and
- * local trajectories remain the sole authority for cue admission and spatial
- * placement; researcher space may contribute display identity only after the
- * recipient, current status, and direct source all agree exactly.
+ * Add display attribution only to status applications already locally admitted.
+ *
+ * applicationSources contains the validated local application identities. group
+ * names the recipient; statusChannel/statusId select exactly one current local
+ * status. sceneByKey and researcherAgentByPublicId supply the two identity spaces.
+ * Require equal recipient/status facts and exactly one matching direct source before
+ * adding each joined sourceIdentity; otherwise that field is null. Return a frozen
+ * array of frozen copies, including empty input. No source is added, no event is
+ * admitted, and local keys/anchors remain unchanged.
  *
  * @param {ReadonlyArray<Readonly<Record<string, any>>>} applicationSources
  * @param {AuthorizedStatusGroup} group
@@ -339,6 +399,12 @@ function researcherApplicationSources(
   sceneByKey,
   researcherAgentByPublicId,
 ) {
+  /**
+   * Return copies of admitted application sources with sourceIdentity set to null.
+   *
+   * The enclosing join failed. Preserve each local event/key/public ID and input order
+   * without adding researcher attribution or changing the source array.
+   */
   const withoutResearcherIdentity = () =>
     Object.freeze(
       applicationSources.map((source) =>
@@ -403,7 +469,10 @@ function researcherApplicationSources(
 }
 
 /**
- * V2 scientific identities are canonical strings.
+ * Read a serialized scientific identity as trimmed nonblank text.
+ *
+ * value returns a string or null via identifier. Canonical namespace/epoch joins
+ * are checked by the surrounding plan, not by this text helper.
  *
  * @param {unknown} value
  * @returns {string | null}
@@ -413,6 +482,11 @@ function scientificIdentity(value) {
 }
 
 /**
+ * Copy an exact two-number coordinate array into a frozen tuple.
+ *
+ * value must be an array of length two with finite numeric elements. Return null
+ * for other shapes/types; these coordinates do not establish authorization alone.
+ *
  * @param {unknown} value
  * @returns {readonly [number, number] | null}
  */
@@ -429,8 +503,11 @@ function point(value) {
 }
 
 /**
- * Place a non-spatial team clock cue in a stable presentation corner. The
- * position is UI layout only; team identity comes directly from the event.
+ * Choose a fixed presentation corner for a recorded team-wave cue.
+ *
+ * teamId must be 1 or 2 and surface must provide viewportBounds; otherwise return
+ * null. Return frozen screen x/y with an inset based on viewport width. The corner
+ * is UI layout, not a team world position; viewport values are caller-validated.
  *
  * @param {number | null} teamId
  * @param {ProjectionSurface | null} surface
@@ -448,6 +525,12 @@ function teamClockPoint(teamId, surface) {
 }
 
 /**
+ * Project an authorized world tuple onto a supplied screen surface.
+ *
+ * world or surface absent returns null. Otherwise call worldToScreen and return a
+ * frozen finite x/y point, or null for nonfinite output. Projection errors propagate;
+ * no hidden position is looked up and inputs are not changed.
+ *
  * @param {readonly [number, number] | null} world
  * @param {ProjectionSurface | null} surface
  * @returns {{x: number, y: number} | null}
@@ -464,15 +547,25 @@ function project(world, surface) {
 }
 
 /**
- * Size collision reservations from the paint parts that survived the local
- * filter. A disabled sibling may not enlarge or displace the remaining cue.
- * Plans predating visual filters retain the CP5 all-on dimensions.
+ * Reserve pixels only for enabled pieces of an outcome explanation.
+ *
+ * event supplies its kind, outcome and optional paintParts. Missing paintParts
+ * uses the legacy all-on footprint. Combine the relevant health, regeneration or
+ * lifecycle effect/text rectangles and return frozen centered width/height. Disabled
+ * siblings contribute no area, so they cannot displace the visible cue.
  *
  * @param {Record<string, any>} event
  */
 function paintedOutcomeCueDimensions(event) {
   const parts = event.paintParts;
-  /** @param {string} part */
+  /**
+   * Return whether a named paint part contributes to this event footprint.
+   *
+   * part is the local piece name. Missing paintParts retains legacy all-on behavior;
+   * otherwise only an exact true value enables the piece.
+   *
+   * @param {string} part
+   */
   const enabled = (part) => !parts || parts[part] === true;
   /** @type {Readonly<Record<string, number>>[]} */
   const rectangles = [];
@@ -502,7 +595,13 @@ function paintedOutcomeCueDimensions(event) {
   return unionCueRectangles(rectangles);
 }
 
-/** @param {number} width @param {number} height */
+/**
+ * Return frozen left/top/right/bottom offsets centered on zero.
+ *
+ * width and height are caller-owned pixel dimensions; no validation is performed.
+ *
+ * @param {number} width @param {number} height
+ */
 function centeredCueRectangle(width, height) {
   return Object.freeze({
     left: -width / 2,
@@ -512,7 +611,14 @@ function centeredCueRectangle(width, height) {
   });
 }
 
-/** @param {ReadonlyArray<Readonly<Record<string, number>>>} rectangles */
+/**
+ * Return the symmetric pixel footprint covering all centered cue rectangles.
+ *
+ * rectangles contains validated local offsets. Return frozen width/height based on
+ * the largest absolute extents; empty input gives zero by zero. Inputs are unchanged.
+ *
+ * @param {ReadonlyArray<Readonly<Record<string, number>>>} rectangles
+ */
 function unionCueRectangles(rectangles) {
   if (rectangles.length === 0) {
     return Object.freeze({ width: 0, height: 0 });
@@ -530,8 +636,10 @@ function unionCueRectangles(rectangles) {
 }
 
 /**
- * Give every layout-owned fragment a collision-safe identity without changing
- * the authorized event identity carried by the plan row.
+ * Create an unambiguous display-fragment key without changing event identity.
+ *
+ * eventId is stringified and role names the fragment. Return JSON text for the tuple
+ * [event, eventId, role]; this is a layout key, not a scientific event ID.
  *
  * @param {unknown} eventId
  * @param {string} role
@@ -541,6 +649,11 @@ function crossPhaseLayoutKey(eventId, role) {
 }
 
 /**
+ * Return a frozen finite rectangle with computed width/height, or null.
+ *
+ * value must contain ordered left/top/right/bottom; zero width/height is allowed.
+ * The original object is unchanged and no viewport containment is checked.
+ *
  * @param {unknown} value
  * @returns {{left: number, top: number, right: number, bottom: number, width: number, height: number} | null}
  */
@@ -574,9 +687,12 @@ function normalizedRectangle(value) {
 }
 
 /**
- * Accept the named scene contract while keeping older test/adapter surfaces
- * deterministic until their callers migrate. The allocator itself still sees
- * only explicit, stable keys.
+ * Read explicit protected drawing regions from the projection surface.
+ *
+ * surface may be null or omit protectedRects, producing a frozen empty array.
+ * Each region supplies bounds directly or under bounds; normalize it and retain its
+ * layoutKey, falling back to a deterministic legacy index key. Invalid regions throw
+ * TypeError. Return frozen region copies; this assigns no body ownership by position.
  *
  * @param {ProjectionSurface | null} surface
  */
@@ -598,8 +714,11 @@ function crossPhaseProtectedRects(surface) {
 }
 
 /**
- * Route endpoints may enter only the durable body regions that explicitly own
- * those endpoints. No containment or nearest-body inference is permitted.
+ * Find protected body regions explicitly owned by one presentation key.
+ *
+ * surface supplies protectedRects; ownerPresentationKey absent returns an empty
+ * array. Return matching nonblank layout keys in source order. No proximity or
+ * containment inference is used, and this helper does not reject duplicates.
  *
  * @param {ProjectionSurface | null} surface
  * @param {string | null | undefined} ownerPresentationKey
@@ -620,8 +739,10 @@ function protectedBodyKeys(surface, ownerPresentationKey) {
 }
 
 /**
- * Resolve an endpoint role to one exact durable body identity. Multiple body
- * regions for one presentation owner are ambiguous and must never be guessed.
+ * Return the single protected body key for a disclosed owner, or null.
+ *
+ * surface and ownerPresentationKey use protectedBodyKeys. More than one matching
+ * region throws RangeError because choosing a nearby body would invent ownership.
  *
  * @param {ProjectionSurface | null} surface
  * @param {string | null | undefined} ownerPresentationKey
@@ -636,7 +757,16 @@ function protectedBodyKey(surface, ownerPresentationKey) {
   return keys[0] ?? null;
 }
 
-/** @param {Record<string, any>} event */
+/**
+ * Return the allocator footprint for one surviving activation glyph.
+ *
+ * event supplies tokenId, optional target and paintParts. Source-local Mage Burst
+ * uses its larger footprint; semantic-only target impacts use compact dimensions.
+ * Otherwise use the registered ability footprint with the existing fallback. All
+ * returned dimensions are pixels and no event admission changes.
+ *
+ * @param {Record<string, any>} event
+ */
 function activationCueDimensions(event) {
   if (!event.target) {
     return event.tokenId === "mage_burst"
@@ -661,7 +791,14 @@ function activationCueDimensions(event) {
   );
 }
 
-/** @param {Record<string, any>} event */
+/**
+ * Return the fixed pixel footprint for a semantic pulse.
+ *
+ * event.cueSemantic selects the team-wave panel, death/respawn ring, or ordinary
+ * pulse size. These are drawing extents, not simulator radii.
+ *
+ * @param {Record<string, any>} event
+ */
 function semanticPulseCueDimensions(event) {
   if (event.cueSemantic === "respawn_wave_occurred") {
     return CHOREOGRAPHY_PAINT_FOOTPRINTS.respawnWave;
@@ -673,6 +810,12 @@ function semanticPulseCueDimensions(event) {
 }
 
 /**
+ * Project the disclosed body radius named by presentationKey.
+ *
+ * sceneByKey contains authorized current bodies; surface converts world lengths
+ * to pixels. Return zero when the body/radius/surface is absent or projection is
+ * nonfinite. Inputs are unchanged; missing bodies are not searched elsewhere.
+ *
  * @param {ProjectionSurface | null} surface
  * @param {Map<string, Record<string, any>>} sceneByKey
  * @param {string | null | undefined} presentationKey
@@ -694,10 +837,15 @@ const CHARGE_DIRECTION_MARKER_CANDIDATES = Object.freeze([
 ]);
 
 /**
- * Choose four evenly dispersed fifths for Charge direction markers, moving
- * only a colliding marker to its paired fallback. These compact underlay
- * markers do not enter the foreground allocator; they only avoid the two
- * endpoint bodies, the route's Agent-ID ownership label, and the viewport.
+ * Choose readable Charge direction markers on a presentation route.
+ *
+ * route is validated geometry. surface supplies viewport/protected regions;
+ * protectedBodyKeysForCharge names only the two owned endpoint bodies, and
+ * ownershipBounds is the optional Agent-ID label rectangle. Return a frozen array
+ * of up to four progress fractions, each using its preferred fifth or paired fallback.
+ * Omit candidates colliding with those protected areas or the inset viewport; no
+ * viewport yields an empty array. These compact underlay markers do not reserve
+ * foreground space. Invalid geometry/regions may propagate errors.
  *
  * @param {Record<string, any>} route
  * @param {ProjectionSurface | null} surface
@@ -723,7 +871,15 @@ function chargeDirectionMarkerProgresses(
     protectedBounds.push(ownership);
   }
   const padding = CHOREOGRAPHY_PAINT_FOOTPRINTS.route.activationCompactMarkerPadding;
-  /** @param {number} progress */
+  /**
+   * Check one route progress against the local viewport and protected rectangles.
+   *
+   * progress is a candidate fraction. Return true only when its compact marker padding
+   * clears the endpoint bodies, ownership label and viewport edge. Read enclosing
+   * geometry without mutation; routeMarkerPose errors propagate.
+   *
+   * @param {number} progress
+   */
   const isSafe = (progress) => {
     const marker = routeMarkerPose(/** @type {any} */ (route), progress);
     if (
@@ -751,10 +907,16 @@ function chargeDirectionMarkerProgresses(
 }
 
 /**
- * Run one filter-first reservation pass for every surviving collision-managed
- * fragment, then attach allocator-owned geometry without changing event order
- * or scientific anchors. Activation impacts deliberately stay on their direct
- * route/target anchor rather than entering this foreground allocator.
+ * Allocate display space for enabled fragments without rewriting event anchors.
+ *
+ * events are filtered plan rows; surface supplies projection/viewport/protected
+ * regions; sceneByKey supplies disclosed current radii. Return frozen copied rows
+ * with allocated cue/route geometry, or null when required viewport geometry is absent.
+ * Keep row order and identities. Activation routes remain direct underlays; direct
+ * impact and life-state rings stay at their authorized body anchors. Foreground
+ * health/status/callout fragments use the shared allocator. Filtered siblings make
+ * no requests. Layout/region errors propagate; a missing internal binding throws
+ * Error. The input scene, event rows and DOM are not modified.
  *
  * @param {ReadonlyArray<Record<string, any>>} events
  * @param {ProjectionSurface | null} surface
@@ -775,6 +937,13 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
   const chargeProtectedBodyKeysByEvent = new Map();
 
   /**
+   * Append one local allocation request and remember where its result belongs.
+   *
+   * eventIndex identifies the source row, role names its fragment, roleOrder breaks
+   * local ties, and request carries allocator fields. binding defaults to an empty
+   * object and adds result-join metadata. Mutate only the enclosing requests/bindings;
+   * return undefined. The scientific event ID is retained on the original row.
+   *
    * @param {number} eventIndex
    * @param {string} role
    * @param {number} roleOrder
@@ -1073,8 +1242,10 @@ function layoutCrossPhaseEvents(events, surface, sceneByKey) {
 }
 
 /**
- * Deterministic non-cryptographic content identity for an already-authorized
- * event batch. The hash is presentation state, not a trust boundary.
+ * Return an eight-digit unsigned hexadecimal hash of string value.
+ *
+ * This deterministic noncryptographic hash detects presentation content changes.
+ * It is neither authentication nor a substitute for authorization checks.
  *
  * @param {string} value
  */
@@ -1088,8 +1259,12 @@ function hashText(value) {
 }
 
 /**
- * Classify only the existing browser command envelope. This does not decide
- * simulator legality or acceptance.
+ * Recognize submission keys in the existing browser command envelope.
+ *
+ * command must be a record with command_type keyboard and a string key. Return
+ * true for space, enter or n after trimming/lowercasing (literal space is handled
+ * separately). Other values return false. This does not decide simulator legality,
+ * acceptance or whether a particular UI is currently allowed to submit.
  *
  * @param {unknown} command
  */
@@ -1106,7 +1281,15 @@ export function isSubmissionCommand(command) {
   return normalized === "space" || normalized === "enter" || normalized === "n";
 }
 
-/** @param {Record<string, any>} event @returns {ChoreographyFamily | null} */
+/**
+ * Map an authored plan row to its explanation-time family, or null.
+ *
+ * event kind/semantic selects ability, health, recovery, cooldown, movement, death,
+ * status, shield, wave or respawn. Feed-only/unknown kinds receive no family here;
+ * no scientific event ordering or simulator behavior is computed.
+ *
+ * @param {Record<string, any>} event @returns {ChoreographyFamily | null}
+ */
 function choreographyFamily(event) {
   if (event.kind === "activation") return "ability";
   if (event.kind === "net_health") return "health";
@@ -1131,16 +1314,27 @@ function choreographyFamily(event) {
 }
 
 /**
- * Resolve the independently owned visual parts of one authorized event. Rows
- * without a transient paint registration remain untouched: they still carry
- * feed/atomic identity, but never enter the paint registry by accident.
+ * Resolve independently switchable paint pieces for one admitted event.
+ *
+ * event supplies the registered kind/component/semantic; visualFilters is the local
+ * filter state. Return frozen piece booleans, or null for unregistered rows. Cooldown
+ * start is always visually suppressed because accepted Ultimate activation already
+ * shows it; its recorded truth remains available. Reapply/refresh status semantics
+ * share the applied filter. No row identity or information authority is changed.
  *
  * @param {Record<string, any>} event
  * @param {Record<string, boolean>} visualFilters
  * @returns {Readonly<Record<string, boolean>> | null}
  */
 function authorizedPaintParts(event, visualFilters) {
-  /** @param {Record<string, string>} tag */
+  /**
+   * Resolve one registered visual tag against this call's filter state.
+   *
+   * tag identifies surface/kind/component/part. Return the shared filter authority
+   * result; this local reader neither changes filters nor adds event admission.
+   *
+   * @param {Record<string, string>} tag
+   */
   const enabled = (tag) => isVisualPaintPartEnabled(visualFilters, tag);
   if (event.kind === "activation") {
     const ability = enabled({
@@ -1251,7 +1445,10 @@ function authorizedPaintParts(event, visualFilters) {
 }
 
 /**
- * Classify one registered transient before any presentation geometry exists.
+ * Return paint parts and whether any piece is enabled, or null.
+ *
+ * event and visualFilters use authorizedPaintParts. This decision precedes spatial
+ * projection and allocation, so disabled pieces need no geometry.
  *
  * @param {Record<string, any>} event
  * @param {Record<string, boolean>} visualFilters
@@ -1267,9 +1464,12 @@ function authorizedPaintDecision(event, visualFilters) {
 }
 
 /**
- * Apply browser-local paint policy without deleting or rewriting any authorized
- * row identity. A fully disabled event remains inspectable in plan order but is
- * made non-spatial before phase allocation and collision layout.
+ * Mark fully disabled events non-spatial while retaining inspection identity.
+ *
+ * events remain in input order; visualFilters resolves rows without existing paintParts.
+ * Return a new array, reusing unregistered rows and freezing changed row copies.
+ * Any exact true piece keeps spatial eligibility; no filter can make a previously
+ * non-spatial row spatial. Inputs and scientific identities are unchanged.
  *
  * @param {ReadonlyArray<Record<string, any>>} events
  * @param {Record<string, boolean>} visualFilters
@@ -1291,11 +1491,15 @@ function applyAuthorizedVisualFilters(events, visualFilters) {
 }
 
 /**
- * Allocate only families present in this authorized transition. M5 ability and
- * outcome anchors remain exact, while every readable outcome gets its own
- * complete dwell and later M6 lifecycle beats extend the clock in canonical
- * order. Ordinary movement deliberately owns a zero-duration presentation
- * slot because its scientific event remains feed-only spatially.
+ * Assign explanation windows only to families present in the filtered plan.
+ *
+ * events supplies already admitted/filtered rows. Return frozen phases and scheduled
+ * event copies in the same order; times are milliseconds, not simulator ticks.
+ * Ability retains its activation/impact anchors. Present outcome families follow
+ * the fixed display order and each keeps its readable dwell; death announcements
+ * use 1500 ms. Ordinary movement, if registered, has zero display duration.
+ * Reduced motion is capped at 220 ms except when a death announcement requires the
+ * full schedule. These windows explain recorded facts rather than recompute them.
  *
  * @param {ReadonlyArray<Record<string, any>>} events
  */
@@ -1331,7 +1535,14 @@ function scheduleChoreography(events) {
     cursor += duration;
   }
   const total = Math.max(cursor, windows.get("ability")?.end ?? 0);
-  /** @param {ChoreographyFamily} family */
+  /**
+   * Return a present family's window start, or total for an absent family.
+   *
+   * family is a known choreography family. Read the enclosing schedule in milliseconds
+   * without creating another window or changing event order.
+   *
+   * @param {ChoreographyFamily} family
+   */
   const startFor = (family) => windows.get(family)?.start ?? total;
   const phases = Object.freeze({
     ...CHOREOGRAPHY_PHASES,
@@ -1375,19 +1586,36 @@ function scheduleChoreography(events) {
   return Object.freeze({ phases, events: Object.freeze(scheduledEvents) });
 }
 
-/** @param {unknown} rawAnchor */
+/**
+ * Read a finite position tuple directly from a serialized anchor.
+ *
+ * rawAnchor may be unknown; return a frozen coordinate pair or null. Identity and
+ * phase agreement are checked separately before this point can drive a cue.
+ *
+ * @param {unknown} rawAnchor
+ */
 function authorizedWorldPoint(rawAnchor) {
   const anchor = record(rawAnchor);
   return anchor ? point(anchor.position) : null;
 }
 
-/** @param {unknown} rawAnchor @param {ProjectionSurface | null} surface */
+/**
+ * Project the position already supplied by an authorized anchor.
+ *
+ * rawAnchor supplies a finite tuple and surface supplies projection. Return frozen
+ * screen coordinates or null; this helper never substitutes another scene position.
+ *
+ * @param {unknown} rawAnchor @param {ProjectionSurface | null} surface
+ */
 function authorizedAnchor(rawAnchor, surface) {
   return project(authorizedWorldPoint(rawAnchor), surface);
 }
 
 /**
- * Validate the serialized team anchor without constructing viewport geometry.
+ * Validate a successor-phase team-wave anchor without creating geometry.
+ *
+ * rawAnchor must give team_index 0/1 and matching team_id 1/2. Return frozen team
+ * identity, side and label, or null. No body location is inferred from team identity.
  *
  * @param {unknown} rawAnchor
  */
@@ -1411,9 +1639,10 @@ function authorizedTeamWaveIdentity(rawAnchor) {
 }
 
 /**
- * Require exact point equality without using a scene position as trajectory
- * authority. The scene comparison below is only a coherence check: the
- * serialized successor trajectory remains the endpoint source.
+ * Return true when both values are exact finite coordinate pairs that match.
+ *
+ * left/right are checked with point. No rounding tolerance or scene-position
+ * substitution is allowed in this phase-anchor coherence comparison.
  *
  * @param {unknown} left
  * @param {unknown} right
@@ -1430,10 +1659,17 @@ function sameAuthorizedPoint(left, right) {
 }
 
 /**
- * Validate one causal visual trajectory identity graph. Oracle retains all
- * three phase anchors. Agent POV retains the authorized union of adjacent
- * scenes: either endpoint may be absent, but every non-null successor joins
- * exactly one current body and a start-only trajectory never invents one.
+ * Validate serialized phase anchors against their disclosed body identities.
+ *
+ * latest contains an Oracle or fog-filtered Agent visual inventory. sceneByKey holds
+ * current authorized bodies; actorInputSuccessorKeys is the exact Agent input-body
+ * set (required for Agent), and deathOverlaySuccessorKeys adds disclosed death bodies.
+ * Oracle trajectories keep start/post-Charge/successor anchors for every body. Agent
+ * trajectories omit post-Charge and may disclose only one adjacent endpoint; a
+ * start-only body must not appear in the current scene. Every successor must join
+ * the matching current public ID/class/position and exact allowed key set.
+ * Return a new key-to-existing-trajectory Map or null on inconsistency. The scene is
+ * a coherence check; serialized trajectory anchors remain the geometric authority.
  *
  * @param {Record<string, any>} latest
  * @param {Map<string, Record<string, any>>} sceneByKey
@@ -1556,8 +1792,12 @@ function authorizedTrajectoryMap(
 }
 
 /**
- * Exact-join one serialized event anchor to its phase trajectory. A key match
- * alone is insufficient: public identity, phase, and point must all agree.
+ * Join an event anchor to the exact serialized trajectory phase.
+ *
+ * trajectories is already validated; rawAnchor may be unknown; phase is
+ * transition_start, post_charge or successor. Require matching key, public ID,
+ * phase and position. Return the existing trajectory or null. A key match alone
+ * cannot authorize a point or substitute a different decision epoch.
  *
  * @param {Map<string, Record<string, any>>} trajectories
  * @param {unknown} rawAnchor
@@ -1602,13 +1842,23 @@ function trajectoryForAuthorizedAnchor(trajectories, rawAnchor, phase) {
  */
 
 /**
- * Resolve composition semantics from already validated status atomics without
- * constructing any screen-space geometry.
+ * Choose one visible status lifecycle from a validated group of atomics.
+ *
+ * group.atoms retains canonical recorded events. Return frozen applications,
+ * lifecycleId and primary, or null for no recognized atomic. Death-clear wins;
+ * apply/refresh share the applied cue; otherwise break precedes expiry. Atomic IDs
+ * remain available separately, so the simplified display does not erase event facts.
  *
  * @param {AuthorizedStatusGroup} group
  */
 function authorizedStatusSelection(group) {
-  /** @param {string} kind */
+  /**
+   * Find the first atom of kind in the enclosing validated status group.
+   *
+   * Return the existing atom or null; preserve canonical input order without mutation.
+   *
+   * @param {string} kind
+   */
   const first = (kind) => group.atoms.find(({ row }) => row.kind === kind) ?? null;
   const cleared = first("status_cleared_by_new_death");
   const refreshed = first("status_refreshed_or_extended");
@@ -1643,10 +1893,19 @@ function authorizedStatusSelection(group) {
 }
 
 /**
- * Compose exactly one display row per authorized status group while retaining
- * every serialized atomic and application identity as ordered metadata. The
- * normalized Latest Events rows remain separate and unchanged outside this
- * presentation-only plan.
+ * Compose one visible status row while retaining every atomic event identity.
+ *
+ * rows is the ordered normalized inventory and transitionId names its transition.
+ * sceneByKey supplies local bodies; researcherAgentByPublicId may provide display
+ * attribution only when useResearcherStatusAttribution is true and the exact local
+ * status/source join succeeds. trajectories supplies validated phase anchors,
+ * surface projects enabled cues, and visualFilters decides their paint pieces.
+ *
+ * Return a Map from every atomic ID to its shared frozen composition; no status
+ * rows gives an empty Map. Invalid/duplicate event identities, missing anchor joins,
+ * contradictory source facts or missing enabled projection return null. Filtered
+ * groups retain metadata but get no lane or geometry. Inputs and normalized Latest
+ * Events remain unchanged; source attribution never admits an event or hidden point.
  *
  * @param {ReadonlyArray<Readonly<{
  *   id: string,
@@ -1915,10 +2174,21 @@ function authorizedStatusCompositions(
 }
 
 /**
- * Build choreography strictly from the normalized presentation's Latest
- * Events branch. Outgoing inspection is intentionally outside this function.
- * Fog-authorized Agent visual events use the same causal planner as Oracle;
- * legacy observation deltas remain noncausal feed-only vocabulary.
+ * Build incoming explanations from the normalized presentation authority.
+ *
+ * presentation is a recognized frame. surface supplies optional pixel projection
+ * and allocator bounds; visualFilters is the local paint state. Use Agent visual_events
+ * or Oracle latest_events, not outgoing inspection. Join serialized anchors and
+ * preserve recorded atomic identity; legacy observation deltas remain noncausal and
+ * feed-only, while recipient health cues can show endpoint changes explicitly.
+ *
+ * Return a frozen plan with session/epoch/authority/content/paint identities, phases,
+ * ordered rows and resource bounds, or null when required facts/joins/projection are
+ * unavailable. Reference-only researcher data may add joined display identity or
+ * Ultimate help; local fog-authorized anchors own all world-space cues. Global death
+ * announcements use nonspatial match-summary facts in a HUD corner. Paint filters
+ * run before allocation. Allocator/token errors may propagate. No DOM, game command,
+ * random draw or source-record mutation occurs.
  *
  * @param {Record<string, any>} presentation
  * @param {ProjectionSurface | null} surface
@@ -2794,6 +3064,12 @@ function buildAuthorizedPresentationChoreographyPlan(
       const members = deaths
         .filter((death) => (death.killing_team_id ?? death.team_id) === sideId)
         .map((death) => {
+          /**
+           * Format a death-HUD public identity using the presentation's display-ID mapping.
+           *
+           * agent supplies already authorized match-summary identity fields. Return the shared
+           * canonical identity result; it adds no world position or actor-input permission.
+           */
           const identity = (/** @type {Record<string, any>} */ agent) =>
             canonicalAgentIdentity({
               ...agent,
@@ -2883,8 +3159,12 @@ function buildAuthorizedPresentationChoreographyPlan(
 }
 
 /**
- * Lay out complete identities with the painter's fixed monospace text size.
- * Wrapped lines increase the reserved panel height; no names are clipped.
+ * Wrap full death-HUD identity titles for a fixed-width monospace panel.
+ *
+ * members supplies title strings and width is the pixel panel width. Return frozen
+ * line/y rows and total pixel height. Long words are split rather than clipped;
+ * empty input yields no rows and the base header height. Inputs are unchanged.
+ *
  * @param {ReadonlyArray<Record<string, any>>} members
  * @param {number} width
  */
@@ -2918,9 +3198,11 @@ function deathAnnouncementRows(members, width) {
 }
 
 /**
- * Mirror the painter's maximum retained SVG shape for each planner-authored
- * persistent event kind. The event subtree plus its optional connector group
- * and line own at most seven nodes.
+ * Count the maximum retained nodes for one authored persistent event.
+ *
+ * event without spatial/persistent flags returns zero. A semantic pulse reserves
+ * seven nodes including optional connector shapes. Another persistent kind throws
+ * RangeError so an unsupported painter shape cannot silently escape the bound.
  *
  * @param {Record<string, any>} event
  */
@@ -2937,8 +3219,18 @@ function persistentEventNodeUpperBound(event) {
 }
 
 /**
- * Build one immutable presentation plan from the already-authorized latest
- * scene/event batch. No simulator fact is derived here.
+ * Build a frozen combat explanation from an already-authorized frame.
+ *
+ * frame must satisfy the normalized presentation envelope check; otherwise return
+ * null. surface defaults to null and supplies screen projection, viewport bounds
+ * and protected regions. visualFilters defaults to DEFAULT_VISUAL_FILTER_STATE.
+ * Return a plan with incoming identities, filtered ordered cues, millisecond phases
+ * and resource bounds, or null when required joins/projection are unavailable.
+ *
+ * Only incoming presentation facts are used. No outgoing draft/accepted action is
+ * read as an event, no hidden geometry is inferred, and inputs are unchanged.
+ * Allocator or dependent validation errors can propagate. Render policy is owned
+ * by the controller/painter; this builder does not accept or change that policy.
  *
  * @param {unknown} frame
  * @param {ProjectionSurface | null} surface

@@ -1,7 +1,10 @@
-"""Balanced tournament summaries and paired-block Davidson uncertainty.
+"""Qualify complete paired tournaments and estimate ratings with draw outcomes.
 
-Intervals describe repeated evaluation of these fixed systems on these fixed
-maps. They do not describe variation across independent training runs.
+summarize_tournament validates equal pair/map budgets and resamples whole seed
+blocks 5,000 times. Its Davidson rating model includes draws. Population rates
+use equal map weighting and declared opponent weights. Intervals describe
+repeated evaluation of these fixed systems/maps, not independent training runs.
+All fitting and resampling use host NumPy/SciPy; no simulator runs here.
 """
 
 from collections import Counter, defaultdict
@@ -34,7 +37,27 @@ ELO_CENTER = 1200.0
 
 @dataclass(frozen=True)
 class TournamentStatistics:
-    """Rows ready for CSV/DataFrame presentation, with estimator provenance."""
+    """Host summary tables with the method details needed to interpret them.
+
+    Attributes
+    ----------
+    tournament_results : tuple[ResultRow, ...]
+        One row per entrant: centered rating, rates, interval
+        availability and weighted worst-20-percent expected score.
+    matchup_results : tuple[ResultRow, ...]
+        Directed policy/opponent rows with rates and score intervals.
+    map_results : tuple[ResultRow, ...]
+        Policy/map rows with opponent-weighted rates and match counts.
+    metadata : dict[str, object]
+        Estimator, solver, versions, convergence settings, bootstrap seed,
+        independence checks and declared weighting.
+
+    Notes
+    -----
+    Rows use Python scalars; unavailable bounds are None with an explicit status.
+    The record is frozen but row dicts are not deeply immutable. No confidence
+    interval here measures variation across independently trained policies.
+    """
 
     tournament_results: tuple[ResultRow, ...]
     matchup_results: tuple[ResultRow, ...]
@@ -44,6 +67,14 @@ class TournamentStatistics:
 
 @dataclass(frozen=True)
 class _Population:
+    """Validated complete match population and compact resampling arrays.
+
+    Rows preserve whole paired blocks and any declared larger dependence groups.
+    Pair/map cells have equal exposure. Opponent and rate weights are precomputed
+    once for reuse by every bootstrap replicate; all numeric arrays are float64
+    counts/weights or int64 indexes on the host.
+    """
+
     names: tuple[str, ...]
     maps: tuple[int, ...]
     pairs: tuple[tuple[int, int], ...]
@@ -60,7 +91,33 @@ def validate_opponent_weights(
     names: Sequence[str],
     weights: Mapping[str, float] | None,
 ) -> dict[str, float]:
-    """Validate the population before execution and return its declared weights."""
+    """Validate the declared weight for every opponent identity.
+
+    Parameters
+    ----------
+    names : Sequence[str]
+        Complete entrant-name sequence, validated for distinctness by caller.
+    weights : Mapping[str, float] | None
+        Mapping with exactly those keys, or None for equal weights.
+
+    Returns
+    -------
+    dict[str, float]
+        Fresh dict of finite positive Python floats in names order. Defaults are
+        1.0; weights are not normalized here.
+
+    Raises
+    ------
+    ValueError
+        Keys differ from entrants or any value is nonfinite/nonpositive.
+    TypeError
+        A supplied value cannot be converted to float.
+
+    Notes
+    -----
+    Host-only and read-only. Population construction normalizes these weights
+    per focal entrant after removing that entrant from its opponent set.
+    """
     if weights is not None and set(weights) != set(names):
         raise ValueError("opponent_weights must name every entrant exactly once")
     result = {name: 1.0 if weights is None else float(weights[name]) for name in names}
@@ -75,6 +132,13 @@ def _population(
     outcomes: Mapping[int, int],
     opponent_weights: Mapping[str, float] | None,
 ) -> _Population:
+    """Validate exact schedule coverage and build paired resampling units.
+
+    Require unique legal IDs, terminal outcomes, opposite sides with equal map/seed,
+    equal pair/map budgets and coherent declared dependence. Group units by coverage
+    so resampling preserves exposure. Invalid populations raise ValueError before
+    any fit; the returned arrays are host-only and inputs are not changed.
+    """
     if not schedule:
         raise ValueError("The tournament schedule is empty")
     episodes: set[int] = set()
@@ -219,6 +283,14 @@ def _objective(
     pair_indices: IntArray,
     log_reference: FloatArray | None = None,
 ) -> tuple[float, FloatArray]:
+    """Return the penalized Davidson loss and analytic gradient for one parameter
+    vector.
+
+    Counts are win/draw/loss rows by unordered pair. Contrasts enforce centered
+    strengths; the last parameter models draws. An optional saturated-model log
+    reference changes only the objective's numerical offset, not its gradient.
+    Use float64 arrays with compatible validated dimensions.
+    """
     strengths = contrasts @ parameters[:-1]
     difference = (strengths[pair_indices[:, 0]] - strengths[pair_indices[:, 1]]) / 2
     logits = np.column_stack(
@@ -253,6 +325,12 @@ def _fit(
     # Subtract the saturated model's NLL inside each term, before summation.
     # This parameter-independent constant preserves the approved estimator and
     # gradient while avoiding subtraction of almost equal large NLL totals.
+    """Fit the fixed regularized rating model and require numerical convergence.
+
+    Use BFGS with the shared tolerance/iteration limit and a stable saturated-model
+    offset. Return a finite parameter vector only when the solver and gradient check
+    agree; otherwise raise RuntimeError with the point/bootstrap context.
+    """
     log_reference = np.log(
         np.divide(
             counts,
@@ -286,10 +364,19 @@ def _fit(
 
 
 def _rates(population: _Population, counts: FloatArray) -> FloatArray:
+    """Reduce pair/map outcome counts to weighted win/draw/loss rates for each
+    entrant.
+    """
     return np.einsum("prck,ck->pr", population.rate_weights, counts)
 
 
 def _sample_counts(population: _Population, rng: np.random.Generator) -> FloatArray:
+    """Resample complete dependence units and return matched pair/map outcome counts.
+
+    Draw with replacement inside equal-coverage pools using the supplied NumPy
+    generator. Each call advances that explicit RNG; it does not split paired games
+    or invent outcomes absent from their recorded blocks.
+    """
     selected = np.concatenate(
         [
             np.take_along_axis(
@@ -308,6 +395,12 @@ def _sample_counts(population: _Population, rng: np.random.Generator) -> FloatAr
 def _interval(
     samples: FloatArray, *, enough_blocks: bool, variation_supported: bool = True
 ) -> tuple[float | None, float | None, str]:
+    """Return percentile bounds only when blocks and variation support them.
+
+    samples is a finite float64 sample vector. Insufficient independent blocks or
+    effective variation returns (None, None, reason); otherwise use linear 2.5/97.5
+    percentiles and return status Available. No inference about training seeds occurs.
+    """
     if not enough_blocks:
         return None, None, "Insufficient Blocks"
     if not variation_supported:
@@ -322,10 +415,11 @@ def _interval(
 
 
 def _decisive_graph_connected(counts: FloatArray, pairs: IntArray, size: int) -> bool:
-    """Require observed decisive reversals across every policy partition.
+    """Check whether observed wins connect every entrant in both directions.
 
-    A bootstrap cannot invent a missing reversal. Regularization still supplies
-    finite point ratings, but cannot qualify uncertainty across that partition.
+    Inputs are win/draw/loss counts by pair and their entrant indexes. Draws add no
+    decisive edge. A missing reversal cannot be invented by resampling: regularized
+    point ratings may remain finite while their intervals stay unavailable.
     """
     reachable = np.eye(size, dtype=np.bool_)
     reachable[pairs[:, 0], pairs[:, 1]] |= counts[:, 0] > 0
@@ -336,6 +430,9 @@ def _decisive_graph_connected(counts: FloatArray, pairs: IntArray, size: int) ->
 
 
 def _weighted_tail(scores: FloatArray, weights: FloatArray) -> float:
+    """Average the lowest score mass totaling 20 percent, splitting boundary weight if
+    needed.
+    """
     order = np.argsort(scores, kind="stable")
     ordered_weights = weights[order]
     before = np.cumsum(ordered_weights) - ordered_weights
@@ -344,6 +441,7 @@ def _weighted_tail(scores: FloatArray, weights: FloatArray) -> float:
 
 
 def _rate_fields(rates: FloatArray) -> ResultRow:
+    """Package win/draw/loss rates and expected score, giving each draw half a point."""
     win, draw, loss = (float(value) for value in rates)
     return {
         "expected_score": win + 0.5 * draw,
@@ -361,6 +459,13 @@ def _summarize(
     opponent_weights: Mapping[str, float] | None,
     replicates: int,
 ) -> TournamentStatistics:
+    """Fit one complete population and its paired-block resampling distribution.
+
+    The public wrapper fixes replicates=5000; tests may supply a smaller count.
+    Validate seed and population first, reuse the point fit as bootstrap start,
+    and retain unsupported intervals as None with a reason. Return host summary
+    rows and exact method metadata; failed fits stop qualification.
+    """
     if (
         isinstance(seed, bool)
         or not isinstance(seed, Integral)
@@ -587,11 +692,46 @@ def summarize_tournament(
     seed: int = 0,
     opponent_weights: Mapping[str, float] | None = None,
 ) -> TournamentStatistics:
-    """Qualify a complete tournament with the fixed 5,000-replicate estimator.
+    """Summarize a complete paired tournament using the fixed 5,000-resample method.
 
-    Outcomes use the simulator's terminal codes: 1 for Team A, 2 for Team B,
-    and 3 for a draw. Incomplete outcomes and failed numerical fits raise.
-    Unavailable uncertainty has null bounds and an explicit reason in its row.
+    Parameters
+    ----------
+    schedule : Sequence[TournamentMatch]
+        Complete TournamentMatch sequence. Every pair/map cell has equal
+        exposure; each block has opposite policy sides sharing map and seed.
+        Reused seed coordinates across blocks need one declared bootstrap_group.
+    outcomes : Mapping[int, int]
+        Exact mapping from every scheduled episode ID to Core terminal
+        code 1 (Team A win), 2 (Team B win), or 3 (draw). No extra/missing IDs.
+    seed : int
+        uint32 integer for NumPy PCG64 resampling, default 0.
+    opponent_weights : Mapping[str, float] | None
+        Finite positive weights naming every entrant, or None for
+        equal opponent weights. Maps always receive equal rate weighting.
+
+    Returns
+    -------
+    TournamentStatistics
+        TournamentStatistics with sorted entrant, directed matchup and map rows.
+        Ratings are centered at 1200. Expected score gives a draw half a point.
+        Paired-block 95 percent intervals use 5,000 replicates when variation exists;
+        unavailable bounds are None with an explicit reason.
+
+    Raises
+    ------
+    ValueError
+        Schedule, outcomes, block joins, weights or seed are invalid.
+    RuntimeError
+        The point fit or any needed bootstrap fit fails convergence.
+
+    Notes
+    -----
+    Host-only NumPy/SciPy work; no games, file writes or JAX compilation.
+    Resampling keeps declared dependence groups whole and preserves pair/map
+    exposure. Constant samples skip redundant fitting and yield unavailable
+    variation-based intervals. Opponent weights affect aggregate rates and
+    tail scores, not the count-based rating fit. These intervals concern fixed
+    entrants and maps; they do not measure training-run variation.
     """
     return _summarize(
         schedule,

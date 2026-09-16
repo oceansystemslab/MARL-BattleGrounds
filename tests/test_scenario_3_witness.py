@@ -1,4 +1,7 @@
-"""Scenario 3's eight-turn body-screening win and its collision regression."""
+"""Check Scenario 3's saved eight-turn body-screening solution.
+
+The file also checks the collision regression and missed-movement variants.
+"""
 
 import json
 from collections.abc import Callable
@@ -83,7 +86,6 @@ class WitnessTransition(NamedTuple):
 
 @pytest.fixture(scope="module")
 def scenario() -> TDMScenario:
-    """Use the packaged approved setup, not the older r9 navigation fixture."""
     return load_tdm_scenario(3)
 
 
@@ -156,7 +158,6 @@ def trajectory(scenario: TDMScenario) -> tuple[WitnessTransition, ...]:
 
 
 def test_scenario_3_binds_the_approved_setup(scenario: TDMScenario) -> None:
-    """A changed map, roster or starting state needs an explicit witness review."""
     assert scenario.info.approved_source.revision == 24
     assert scenario.info.source.revision == 26
     assert scenario.info.source.semantic_digest == (
@@ -179,7 +180,6 @@ def test_scenario_3_binds_the_approved_setup(scenario: TDMScenario) -> None:
 def test_known_sequence_wins_at_step_298(
     trajectory: tuple[WitnessTransition, ...],
 ) -> None:
-    """Win on turn 8, keep Hunter alive, and preserve the exact death/reward timing."""
     assert len(trajectory) == 8
     for tick, transition in enumerate(trajectory, start=1):
         final = tick == 8
@@ -214,7 +214,6 @@ def test_known_sequence_wins_at_step_298(
 def test_all_slots_keep_the_recorded_positions_health_and_actions(
     trajectory: tuple[WitnessTransition, ...],
 ) -> None:
-    """Pin each tick to stored values, so a deterministic collision change is caught."""
     expected = json.loads(_EXPECTED_PATH.read_text())
     assert expected["scenario_id"] == 3
     assert expected["approved_revision"] == 24
@@ -256,7 +255,6 @@ def test_all_slots_keep_the_recorded_positions_health_and_actions(
 def test_final_turn_gives_hunter_a_safe_finishing_attack(
     trajectory: tuple[WitnessTransition, ...],
 ) -> None:
-    """Turn 8 lets Hunter finish while Warrior and Rogue cannot hit each other."""
     final = trajectory[-1]
     assert bool(final.mask.select_target_use_ultimate_joint_mask[2, 9, 0])
     assert not bool(final.mask.select_target_use_ultimate_joint_mask[1, 9, 0])
@@ -276,7 +274,6 @@ def test_final_turn_gives_hunter_a_safe_finishing_attack(
 def test_respawned_agents_keep_the_declared_behavior(
     trajectory: tuple[WitnessTransition, ...],
 ) -> None:
-    """The wave happens after turn 5; revived teammates stay still and do not fight."""
     revived = [0, 3, 4, 5, 6, 7, 9]
     for tick, transition in enumerate(trajectory, start=1):
         respawn = transition.info.transition_facts.respawn_facts
@@ -298,7 +295,6 @@ def test_respawned_agents_keep_the_declared_behavior(
 def test_omitting_south_south_loses_hunter_before_the_finish(
     scenario: TDMScenario, trajectory: tuple[WitnessTransition, ...]
 ) -> None:
-    """One fixed continuation without turn 4 loses Hunter on turn 7."""
     without_pause = _run_witness(scenario, omit_south_south=True)
     assert len(without_pause) == 7
     for original, changed in zip(trajectory[:3], without_pause[:3], strict=True):

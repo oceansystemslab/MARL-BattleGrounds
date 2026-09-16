@@ -1,4 +1,4 @@
-"""Replay wire proofs with fog-separated battlefields and shared artifact facts."""
+"""Check replay messages with POV-limited scenes and shared artifact metadata."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Resolved episode-profile contracts for Milestone 5 Step 2 CP3B."""
+"""Check how class choices become a fixed episode agent profile."""
 
 from typing import cast
 
@@ -189,7 +189,6 @@ def test_resolved_agent_profile_stats_match_combat_catalogs(
 
 
 def test_recovery_catalogs_pin_current_versioned_values() -> None:
-    """Lock the approved tuning rows without coupling independent surfaces."""
     expected_delays = jnp.asarray((0, 5, 5, 5, 3, 5), dtype=jnp.int32)
     expected_regeneration_fractions = jnp.asarray(
         (0.0, 0.04, 0.04, 0.04, 0.04, 0.04),

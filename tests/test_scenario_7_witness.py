@@ -1,4 +1,4 @@
-"""Scenario 7's coordinated-retreat witness and four matched heal omissions."""
+"""Check Scenario 7's coordinated retreat and four matched healing omissions."""
 
 from collections.abc import Callable
 from typing import NamedTuple, cast
@@ -79,7 +79,6 @@ def _run_witness(
     scenario: CompiledDevScenarioV1,
     omit_heal_tick: int | None = None,
 ) -> list[WitnessTransition]:
-    """Run the fixed Team A sequence; stop immediately at either terminal flag."""
     assert omit_heal_tick is None or 1 <= omit_heal_tick <= 4
     state, observation, mask = (
         scenario.initial_state,

@@ -1,4 +1,4 @@
-"""Focused allowlisting tests for canonical live-debugger browser frames."""
+"""Check which live-debugger frame fields may cross the browser boundary."""
 
 import json
 from dataclasses import replace
@@ -623,7 +623,6 @@ def test_researcher_envelope_rejects_hud_scene_selection_mismatch() -> None:
 
 
 def test_joint_action_test_inputs_keep_exact_int32_heads() -> None:
-    """Keep the custom-action regression independent of NumPy coercion."""
     action = make_neutral_joint_action()
     assert action.move.dtype == jnp.int32
     assert action.select_target.dtype == jnp.int32

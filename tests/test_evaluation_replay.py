@@ -1,4 +1,4 @@
-"""Standard replay artifact construction and semantic validation proofs."""
+"""Check replay construction and agreement between its recorded parts."""
 
 from __future__ import annotations
 
@@ -65,7 +65,6 @@ from marl_battlegrounds.evaluation.replay import (
 
 @pytest.fixture(scope="module")
 def runtime_provenance() -> RuntimeProvenanceV1:
-    """Return deterministic, path-free host provenance for replay tests."""
     return RuntimeProvenanceV1(
         python_version="3.13.0",
         package_version="0.0.0",
@@ -85,13 +84,11 @@ def runtime_provenance() -> RuntimeProvenanceV1:
 
 
 class _FailingAdvanceState(EvaluationMetricReducerStateV1):
-    """Valid immutable reducer state used before an intentional advance failure."""
+    pass
 
 
 @dataclass(slots=True)
 class _FailingAdvanceReducer:
-    """Fail after CP2 accepts one unit, separating physical and metric truth."""
-
     reducer_id: str = "test.replay.failing_advance"
     reducer_version: int = 1
 
@@ -126,8 +123,6 @@ class _FailingAdvanceReducer:
 
 @dataclass(slots=True)
 class _FailingFinalizeReducer:
-    """Process every unit, then fail while materializing the final report."""
-
     reducer_id: str = "test.replay.failing_finalize"
     reducer_version: int = 1
 
@@ -161,18 +156,14 @@ class _FailingFinalizeReducer:
 
 
 class _ReplayArtifactSubtype(ReplayArtifactV1):
-    """Undeclared wire-root subtype for exact-type rejection."""
+    pass
 
 
 class _PrivateRuntimeProvenance(RuntimeProvenanceV1):
-    """Nested subtype carrying private storage outside its wire fields."""
-
     _hidden: list[int] = PrivateAttr(default_factory=lambda: [1])
 
 
 class _UnfrozenFrame(EvaluationFrameV1):
-    """Nested frame subtype weakening the immutable wire contract."""
-
     model_config = ConfigDict(
         allow_inf_nan=False,
         extra="forbid",
@@ -297,7 +288,6 @@ def _with_recomputed_digests(
     frames: tuple[EvaluationFrameV1, ...] | None = None,
     transitions: tuple[EvaluationTransitionV1, ...] | None = None,
 ) -> ReplayArtifactV1:
-    """Re-address a locally valid envelope so O(T) semantic checks are exercised."""
     selected_header = artifact.header if header is None else header
     selected_completion = artifact.completion if completion is None else completion
     selected_processing = (
@@ -341,7 +331,6 @@ def _with_simulator_epoch(
     context: EvaluationEpisodeContextV1,
     simulator_step_count: int,
 ) -> EvaluationFrameV1:
-    """Shift one frame while preserving its public timestep projection."""
     context_rows = [list(row) for row in frame.base_observation.context_features]
     for global_slot, roster_row in enumerate(context.roster):
         if roster_row.configured_active:
@@ -363,7 +352,6 @@ def _with_readdressed_metric_reference(
     artifact: ReplayArtifactV1,
     reference: MetricReportReferenceV1,
 ) -> ReplayArtifactV1:
-    """Change only the sidecar reference and recompute the outer artifact digest."""
     payload: dict[str, object] = {
         "schema_id": artifact.schema_id,
         "schema_version": artifact.schema_version,
@@ -412,7 +400,6 @@ def test_replay_builds_every_rollout_outcome(
     failure_origin: RolloutFailureOrigin | None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Completion classification survives without becoming processing truth."""
     transition_count = 2 if completion_state == "complete" else 1
     trajectory = captured_evaluation_trajectory(
         transition_count=transition_count,
@@ -471,7 +458,6 @@ def test_replay_preserves_valid_t_zero_prefixes(
     completion_state: CompletionState,
     failure_origin: RolloutFailureOrigin | None,
 ) -> None:
-    """A validated initial frame is a persistable noncomplete artifact."""
     trajectory = captured_evaluation_trajectory(
         transition_count=0,
         expected_horizon=2,
@@ -495,7 +481,6 @@ def test_replay_preserves_valid_t_zero_prefixes(
 def test_replay_separates_complete_rollout_from_failed_processing(
     runtime_provenance: RuntimeProvenanceV1,
 ) -> None:
-    """Reducer failure cannot erase a fully validated horizon-complete trajectory."""
     trajectory = captured_evaluation_trajectory(
         transition_count=1,
         expected_horizon=1,
@@ -528,7 +513,6 @@ def test_replay_separates_complete_rollout_from_failed_processing(
 def test_replay_preserves_terminal_and_truncated_tail_truth(
     runtime_provenance: RuntimeProvenanceV1,
 ) -> None:
-    """Tail done flags, authoritative end reason, and completion stay aligned."""
     terminal_trajectory = captured_team_deathmatch_threshold_trajectory()
     horizon_trajectory = captured_evaluation_trajectory(
         transition_count=1,
@@ -585,7 +569,6 @@ def test_resumed_tdm_replay_completes_after_its_remaining_horizon(
 def test_replay_indices_epochs_counts_and_identifiers_are_canonical(
     complete_bundle: ReplayBundleV1,
 ) -> None:
-    """The serialized normal form is exactly T+1/T with adjacent epochs."""
     replay = complete_bundle.replay
     episode_id = replay.header.context.identity.episode_id
 
@@ -626,7 +609,6 @@ def test_replay_indices_epochs_counts_and_identifiers_are_canonical(
 def test_replay_allows_artifact_epoch_zero_to_start_later_in_simulator_time(
     runtime_provenance: RuntimeProvenanceV1,
 ) -> None:
-    """Artifact indexing remains independent from an initial simulator epoch."""
     trajectory = captured_evaluation_trajectory(
         transition_count=0,
         expected_horizon=2,
@@ -674,7 +656,6 @@ def test_replay_schema_maps_preserve_exact_cp2_and_envelope_bindings(
 def test_replay_and_metric_sidecar_round_trip_through_json(
     complete_bundle: ReplayBundleV1,
 ) -> None:
-    """Strict JSON revalidation preserves both separately addressed artifacts."""
     replay_json = complete_bundle.replay.model_dump_json()
     report_json = complete_bundle.metric_report_artifact.model_dump_json()
 

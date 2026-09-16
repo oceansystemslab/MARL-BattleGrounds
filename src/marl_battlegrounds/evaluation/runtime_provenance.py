@@ -1,4 +1,10 @@
-"""Launch-only runtime provenance capture for debugger replay recording."""
+"""Describe the actual software and device used by a recorded run.
+
+Runtime capture is host-only and may initialize JAX's default backend. JAX is
+imported inside the capture call so ordinary metadata readers do not initialize
+numerical devices just by importing this module. Records contain versions and
+device descriptions, not machine paths, measured speed or guessed driver data.
+"""
 
 from __future__ import annotations
 
@@ -12,10 +18,14 @@ from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 
 
 class _RuntimeClient(Protocol):
+    """Minimum runtime-client fields read when describing an active JAX backend."""
+
     platform_version: str
 
 
 class _RuntimeDevice(Protocol):
+    """Minimum device fields needed to record backend hardware and runtime version."""
+
     device_kind: str
     client: _RuntimeClient
 
@@ -30,6 +40,29 @@ def capture_debugger_runtime_provenance_v1(
     Imports of numerical runtimes stay inside this recording-only call so an
     ordinary CLI parse or a read-only replay launch does not acquire a new
     simulator/runtime dependency.
+
+    Parameters
+    ----------
+    code_revision : CodeRevisionV1
+        Exact validated CodeRevisionV1 for this recording launch.
+    policy_execution_included : bool
+        Whether policy work belongs to the record,
+        default False for manual debugger stepping.
+
+    Returns
+    -------
+    RuntimeProvenanceV1
+        RuntimeProvenanceV1 for one environment on the actual default JAX backend.
+
+    Raises
+    ------
+    TypeError
+        code_revision has another type or the inclusion flag is not bool.
+    RuntimeError
+        JAX exposes no selected device or invalid runtime metadata.
+
+    This host-only call may initialize JAX devices. It reads installed package
+    versions and returns metadata; it writes no files or local paths.
     """
     if type(code_revision) is not CodeRevisionV1:
         raise TypeError("code_revision must be exact CodeRevisionV1")
@@ -47,7 +80,37 @@ def capture_runtime_provenance(
     policy_execution_included: bool = True,
     num_envs: int = 1,
 ) -> RuntimeProvenanceV1:
-    """Capture the actual numerical runtime once for an evaluation pass."""
+    """Describe the active numerical runtime for one evaluation pass.
+
+    Parameters
+    ----------
+    package_version : str
+        Version of the MARL-BGs source/package being recorded.
+    policy_execution_included : bool
+        Whether policy execution is included in this
+        run's declared work; default True.
+    num_envs : int
+        Environment count recorded in batch_shape=(num_envs,), default 1.
+
+    Returns
+    -------
+    RuntimeProvenanceV1
+        Validated RuntimeProvenanceV1 with Python/library versions, default
+        backend, first device, runtime version and current JAX precision setting.
+        driver_version is None because this function does not query the driver.
+
+    Raises
+    ------
+    RuntimeError
+        The selected backend has no device or its precision flag
+        is not a boolean. JAX initialization errors also propagate.
+    ValueError
+        Supplied metadata violates the provenance model.
+
+    Host-only: imports JAX here, may initialize the default backend, and reads
+    installed distribution metadata. Missing distributions propagate their
+    lookup error. No device timing, hardware speed claim or file write occurs.
+    """
 
     import jax
 

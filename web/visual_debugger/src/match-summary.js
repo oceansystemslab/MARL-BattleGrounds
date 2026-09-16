@@ -1,8 +1,19 @@
+/**
+ * @file Build and paint match labels from an installed authorized presentation.
+ * The scoreboard uses the supplied task, map, team and result facts. It does
+ * not infer scores or winners from agents drawn on the battlefield.
+ */
 import { isAuthorizedPresentationFrame } from "./authorized-presentation-adapter.js";
 
 /**
- * Human-facing match facts retain the installed source epoch. No score, winner,
- * policy identity, or task mode is inferred from battlefield paint.
+ * Build labels from a recognized presentation's match_summary, or return null.
+ *
+ * presentation may be any input. Unrecognized frames and missing summaries
+ * produce null. Recognized records supply the map name/split, Team A/B names,
+ * policy/checkpoint references and outcome. TDM adds score/threshold text;
+ * combat diagnostics omit scores. The returned outer record and team records
+ * are frozen; the teams array is newly allocated but not frozen. No DOM or
+ * input record is changed. Normalization owns the validity of nested facts.
  *
  * @param {unknown} presentation
  */
@@ -44,6 +55,15 @@ export function matchSummaryView(presentation) {
 }
 
 /**
+ * Replace the supplied scoreboard DOM with the current authorized match labels.
+ *
+ * elements supplies root, task text, two team containers in Team A/B order and
+ * the task selector. presentation is passed to matchSummaryView. If unavailable,
+ * hide the root, clear team contents and disable the selector. Otherwise show
+ * task/map text, team names, TDM scores and any final result; policy references
+ * become name tooltips. This mutates those elements and returns undefined.
+ * The caller must supply matching containers; DOM shape is not validated.
+ *
  * @param {{root: HTMLElement, task: HTMLElement, teams: HTMLElement[], taskSelect: HTMLSelectElement}} elements
  * @param {unknown} presentation
  */

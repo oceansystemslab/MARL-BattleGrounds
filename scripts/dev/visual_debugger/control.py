@@ -1,4 +1,12 @@
-"""Pure debugger state transitions and the single simulator submission boundary."""
+"""Apply debugger drafts and scripted commands through the shared simulator boundary.
+
+The input layer calls these helpers to build immutable ``DebuggerSession`` values.
+Draft/selection helpers change host controls only. Submission builds both teams'
+actions before one Core step, then captures its matching state, observation, mask
+and transition record. Reset helpers create a new recorded episode. Random keys
+remain explicit in the session; this module does not write replay files or serve
+HTTP requests.
+"""
 
 from dataclasses import replace
 from typing import Literal, cast
@@ -109,6 +117,9 @@ class DebuggerTransitionFailureV1(RuntimeError):  # noqa: N818 - frozen protocol
         stage: DebuggerTransitionFailureStageV1,
         stable_code: DebuggerTransitionFailureCodeV1,
     ) -> None:
+        """Retain a stable failure stage/code without publishing raw exception
+        details.
+        """
         if stage not in ("action_build", "simulation", "capture", "validation"):
             raise ValueError("unknown debugger transition failure stage")
         if stable_code not in (
@@ -131,12 +142,23 @@ def _transition_failure(
     stable_code: DebuggerTransitionFailureCodeV1,
     error: Exception,
 ) -> DebuggerTransitionFailureV1:
+    """Convert a caught failure into the public stage/code pair; omit the raw
+    message.
+    """
     del error
     return DebuggerTransitionFailureV1(stage, stable_code)
 
 
 def make_neutral_joint_action() -> Action:
-    """Return the canonical fixed-shape neutral joint action."""
+    """Create a fixed-size joint action with no movement, target or Ultimate use.
+
+    Returns
+    -------
+    Action
+        Three int32 JAX arrays shaped [10], using Stay and zero combat categories.
+        This initializes a request; current masks still determine submitted-action
+        acceptance when the request reaches Core.
+    """
     return Action(
         move=jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32),
         select_target=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
@@ -150,6 +172,7 @@ def _validate_active_context_slot(
     *,
     name: str,
 ) -> None:
+    """Require a global slot in range whose recorded roster row is active."""
     if not 0 <= global_slot < MAX_AGENT_SLOTS:
         raise ValueError(f"{name} must be in [0, {MAX_AGENT_SLOTS}).")
     if not context.roster[global_slot].configured_active:
@@ -189,7 +212,30 @@ def lane_availability(
     target_action: int,
     armed_lane: Lane | None,
 ) -> LaneAvailability:
-    """Read exact lane availability from the authoritative joint mask."""
+    """Read exact lane availability from the authoritative joint mask.
+
+    Parameters
+    ----------
+    action_mask : ActionMask | ActionMaskV1
+        Current simulator mask or its recorded ActionMaskV1 representation.
+    actor_global_slot : int
+        Global actor index from zero through nine.
+    target_action : int
+        Target category on the actor-relative fixed target axis.
+    armed_lane : Lane | None
+        0 selects Basic, 1 selects Ultimate, and None means neither is armed.
+
+    Returns
+    -------
+    LaneAvailability
+        Both exact lane flags and whether the selected target/lane pair is
+        legal.
+
+    Raises
+    ------
+    ValueError
+        If an actor, action category or selection argument violates the stated domain.
+    """
     if not 0 <= actor_global_slot < MAX_AGENT_SLOTS:
         msg = f"actor_global_slot must be in [0, {MAX_AGENT_SLOTS})."
         raise ValueError(msg)
@@ -276,7 +322,29 @@ def build_interactive_joint_action(
     *,
     actor_global_slots: tuple[int, ...],
 ) -> Action:
-    """Build one authorized joint request without pre-filtering it by the mask."""
+    """Build one authorized joint request without pre-filtering it by the mask.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContextV3
+        Recorded episode roster and target-action mapping.
+    pending_actions : tuple[PendingAction, ...]
+        Exactly ten fixed-slot pending rows from the current decision.
+    actor_global_slots : tuple[int, ...]
+        Nonempty tuple of distinct active actors authorized for this
+        submission.
+
+    Returns
+    -------
+    Action
+        Fixed-slot joint request. Actions are not prefiltered by masks; Core
+        records acceptance.
+
+    Raises
+    ------
+    ValueError
+        If an actor, action category or selection argument violates the stated domain.
+    """
     if len(pending_actions) != MAX_AGENT_SLOTS:
         msg = (
             f"pending_actions must contain {MAX_AGENT_SLOTS} fixed-slot rows; "
@@ -325,6 +393,7 @@ def _policy_keys(session: DebuggerSession) -> Array:
     frame_index = session.current_evaluation_frame.frame_index
 
     def keys_for_seed(seed: object, *, role: str) -> Array:
+        """Derive this decision's actor keys from the recorded role-specific seed."""
         if type(seed) is not int:
             raise ValueError(f"{role} actors require a policy seed")
         decision_key = jax.random.fold_in(jax.random.key(seed), frame_index)
@@ -358,6 +427,7 @@ def _policy_keys(session: DebuggerSession) -> Array:
 
 
 def _required_seed(seed: int | None) -> int:
+    """Require a recorded seed value before deriving the next random-key stream."""
     if seed is None:
         raise ValueError("Live debugger execution requires a recorded seed")
     return seed
@@ -473,7 +543,27 @@ def build_scripted_joint_action(
     context: EvaluationEpisodeContextV3,
     frame: ScenarioFrame,
 ) -> Action:
-    """Build a potentially multi-actor scripted request from neutral defaults."""
+    """Build a potentially multi-actor scripted request from neutral defaults.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContextV3
+        Recorded episode roster and target-action mapping.
+    frame : ScenarioFrame
+        One script frame containing distinct actor commands; omitted actors
+        remain neutral.
+
+    Returns
+    -------
+    Action
+        Fixed-slot joint request with neutral heads for actors omitted from the
+        script frame.
+
+    Raises
+    ------
+    ValueError
+        If an actor, action category or selection argument violates the stated domain.
+    """
     action = make_neutral_joint_action()
     move = action.move
     target = action.select_target
@@ -616,6 +706,43 @@ def create_session(
 
     Defaults keep low-level diagnostics on their former manual, NoSharedObs
     contract while live launchers pass the researcher-facing values explicitly.
+
+    Parameters
+    ----------
+    scenario : DebuggerScenario
+        Factory and metadata for the authored initial state or scripted
+        demonstration.
+    seed : int
+        Root seed, which must equal the launch specification root seed.
+    evaluation_launch_specification : DebuggerEvaluationLaunchSpecificationV1
+        Recorded identity, seed and capture choices for the new episode.
+    controlled_global_slot : int | None
+        Requested zero-based active actor slot, or None for the scenario
+        default. An unavailable request falls back to that default.
+    show_ranges : bool
+        Whether the initial view displays configured range overlays.
+    verbose_logging : bool
+        Whether the host session requests verbose diagnostic logging.
+    team_a_controller : TeamController
+        Team A controller; default manual. Reactive choices require SharedObs.
+    team_b_controller : TeamBController
+        Team B controller; default manual. Includes supported scenario
+        pressure.
+    execution_information_mode : ExecutionInformationMode
+        no_shared_obs by default for direct diagnostics; shared_obs enables the
+        composed team input contract.
+
+    Returns
+    -------
+    DebuggerSession
+        Initial matching session with frame-zero evidence, default pending rows
+        and explicit random key.
+
+    Raises
+    ------
+    ValueError
+        If the scenario, seed, active selection or controller/input combination is
+        invalid.
     """
     if seed != evaluation_launch_specification.root_seed:
         raise ValueError("seed must equal the debugger evaluation launch root seed.")
@@ -716,7 +843,26 @@ def select_clicked_target(
     session: DebuggerSession,
     target_global_slot: int,
 ) -> DebuggerSession:
-    """Select an active target and auto-arm Basic only when exact lane zero is legal."""
+    """Select an active target and auto-arm Basic only when exact lane zero is legal.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Current immutable session and pending action rows.
+    target_global_slot : int
+        Active global target slot selected in the authorized researcher view.
+
+    Returns
+    -------
+    DebuggerSession
+        Session with the requested draft or controlled-actor selection.
+        Simulator state and the environment random key are unchanged.
+
+    Raises
+    ------
+    ValueError
+        If an actor, action category or selection argument violates the stated domain.
+    """
     _validate_active_context_slot(
         session.evaluation_context,
         target_global_slot,
@@ -743,7 +889,19 @@ def select_clicked_target(
 
 
 def clear_pending_target(session: DebuggerSession) -> DebuggerSession:
-    """Clear target selection while preserving an explicit Mage Burst arm."""
+    """Clear target selection while preserving an explicit Mage Burst arm.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Current immutable session and controlled actor draft.
+
+    Returns
+    -------
+    DebuggerSession
+        Session with the requested draft or controlled-actor selection.
+        Simulator state and the environment random key are unchanged.
+    """
     class_id = session.evaluation_context.roster[
         session.controlled_global_slot
     ].class_id
@@ -762,7 +920,19 @@ def clear_pending_target(session: DebuggerSession) -> DebuggerSession:
 
 
 def arm_basic(session: DebuggerSession) -> DebuggerSession:
-    """Explicitly arm lane zero even when the current pair is unavailable."""
+    """Explicitly arm lane zero even when the current pair is unavailable.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Current immutable session and controlled actor draft.
+
+    Returns
+    -------
+    DebuggerSession
+        Session with the requested draft or controlled-actor selection.
+        Simulator state and the environment random key are unchanged.
+    """
     return _replace_controlled_pending_action(
         session,
         replace(
@@ -774,7 +944,19 @@ def arm_basic(session: DebuggerSession) -> DebuggerSession:
 
 
 def arm_ultimate(session: DebuggerSession) -> DebuggerSession:
-    """Explicitly arm lane one; Mage Burst always uses target-none."""
+    """Explicitly arm lane one; Mage Burst always uses target-none.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Current immutable session and controlled actor draft.
+
+    Returns
+    -------
+    DebuggerSession
+        Session with the requested draft or controlled-actor selection.
+        Simulator state and the environment random key are unchanged.
+    """
     class_id = session.evaluation_context.roster[
         session.controlled_global_slot
     ].class_id
@@ -794,7 +976,19 @@ def arm_ultimate(session: DebuggerSession) -> DebuggerSession:
 
 
 def select_no_combat(session: DebuggerSession) -> DebuggerSession:
-    """Stage no-combat intent while preserving movement and target context."""
+    """Stage no-combat intent while preserving movement and target context.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Current immutable session and controlled actor draft.
+
+    Returns
+    -------
+    DebuggerSession
+        Session with the requested draft or controlled-actor selection.
+        Simulator state and the environment random key are unchanged.
+    """
     return _replace_controlled_pending_action(
         session,
         replace(
@@ -809,7 +1003,27 @@ def set_pending_movement(
     session: DebuggerSession,
     move_action: int,
 ) -> DebuggerSession:
-    """Set one in-domain pending movement category without inspecting legality."""
+    """Set one in-domain pending movement category without inspecting legality.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Current immutable session and controlled actor draft.
+    move_action : int
+        Movement category in the fixed move-action domain; current legality is
+        left to submission.
+
+    Returns
+    -------
+    DebuggerSession
+        Session with the requested draft or controlled-actor selection.
+        Simulator state and the environment random key are unchanged.
+
+    Raises
+    ------
+    ValueError
+        If an actor, action category or selection argument violates the stated domain.
+    """
     if not 0 <= move_action < NUM_MOVE_ACTIONS:
         msg = f"move_action must be in [0, {NUM_MOVE_ACTIONS}); got {move_action}."
         raise ValueError(msg)
@@ -823,7 +1037,26 @@ def cycle_controlled_actor(
     session: DebuggerSession,
     direction: int,
 ) -> DebuggerSession:
-    """Cycle active fixed slots through direct controlled-actor selection."""
+    """Cycle active fixed slots through direct controlled-actor selection.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Current immutable session with its active roster and selection.
+    direction : int
+        1 selects the next active slot; -1 selects the previous active slot.
+
+    Returns
+    -------
+    DebuggerSession
+        Session with the requested draft or controlled-actor selection.
+        Simulator state and the environment random key are unchanged.
+
+    Raises
+    ------
+    ValueError
+        If an actor, action category or selection argument violates the stated domain.
+    """
     if direction not in (-1, 1):
         msg = f"direction must be -1 or 1; got {direction}."
         raise ValueError(msg)
@@ -837,7 +1070,26 @@ def select_controlled_actor(
     session: DebuggerSession,
     global_slot: int,
 ) -> DebuggerSession:
-    """Select an active actor without changing any staged draft or simulator epoch."""
+    """Select an active actor without changing any staged draft or simulator epoch.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Current immutable session and staged joint draft.
+    global_slot : int
+        Active zero-based global actor slot to control.
+
+    Returns
+    -------
+    DebuggerSession
+        Session with the requested draft or controlled-actor selection.
+        Simulator state and the environment random key are unchanged.
+
+    Raises
+    ------
+    ValueError
+        If an actor, action category or selection argument violates the stated domain.
+    """
     _validate_active_context_slot(
         session.evaluation_context,
         global_slot,
@@ -847,6 +1099,7 @@ def select_controlled_actor(
 
 
 def _validate_joint_action(action: Action) -> None:
+    """Require all three submitted heads to be int32 arrays with shape [10]."""
     for name, head in zip(Action._fields, action, strict=True):
         if head.shape != (MAX_AGENT_SLOTS,):
             msg = (
@@ -859,6 +1112,9 @@ def _validate_joint_action(action: Action) -> None:
 
 
 def _terminal_reason(session: DebuggerSession) -> str | None:
+    """Return the sealed endpoint reason in priority order, or None while stepping is
+    allowed.
+    """
     if session.terminated:
         return "terminated"
     if session.truncated:
@@ -872,6 +1128,9 @@ def _post_submit_pending(
     session: DebuggerSession,
     action_mask: ActionMaskV1,
 ) -> tuple[PendingAction, ...]:
+    """Keep target choices while resetting movement and re-arming only a legal Basic
+    pair.
+    """
     pending_actions: list[PendingAction] = []
     for actor_slot in range(MAX_AGENT_SLOTS):
         if not session.evaluation_context.roster[actor_slot].configured_active:
@@ -907,7 +1166,39 @@ def submit_joint_action(
     submission_kind: SubmissionKind,
     report_actor_slots: tuple[int, ...],
 ) -> DebuggerSession:
-    """Split once, step once, diagnose once, and advance all paired epoch fields."""
+    """Split once, step once, diagnose once, and advance all paired epoch fields.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Current paired state, observation, action mask, random key and
+        evaluation frame.
+    submitted_action : Action
+        Three int32 action heads shaped [10], chosen before this transition.
+    submission_kind : SubmissionKind
+        interactive or scripted, retained with the resulting transition.
+    report_actor_slots : tuple[int, ...]
+        Distinct active global actor slots whose submitted/accepted rows should
+        be reported.
+
+    Returns
+    -------
+    DebuggerSession
+        Matching successor session and captured incoming transition, or the
+        unchanged session when already sealed.
+
+    Raises
+    ------
+    DebuggerTransitionFailureV1
+        If action construction, simulation, capture or successor packaging fails.
+        The stable stage/code identifies the boundary without exposing raw details.
+
+    Notes
+    -----
+        Numerical work runs through Core and transition capture; no file is written.
+        The input session is immutable, so a failed call cannot install a partial
+        successor. Higher-level recording code decides how to handle a failure.
+    """
     terminal_reason = _terminal_reason(session)
     if terminal_reason is not None:
         return session
@@ -1012,7 +1303,35 @@ def submit_interactive(
     *,
     actor_global_slots: tuple[int, ...] | None = None,
 ) -> DebuggerSession:
-    """Submit one authorized collection of same-epoch pending actor rows."""
+    """Submit one authorized collection of same-epoch pending actor rows.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Current session carrying both team controller choices and staged manual
+        rows.
+    actor_global_slots : tuple[int, ...] | None
+        Optional active manual submission subset. None means all active actors.
+        Configured policy mode resolves and reports both teams instead.
+
+    Returns
+    -------
+    DebuggerSession
+        Successor session after one shared submission, or the unchanged sealed
+        endpoint.
+
+    Raises
+    ------
+    DebuggerTransitionFailureV1
+        If action construction, simulation, capture or successor packaging fails.
+        The stable stage/code identifies the boundary without exposing raw details.
+
+    Notes
+    -----
+        Numerical work runs through Core and transition capture; no file is written.
+        The input session is immutable, so a failed call cannot install a partial
+        successor. Higher-level recording code decides how to handle a failure.
+    """
     if any(
         controller != "manual"
         for controller in (
@@ -1062,7 +1381,31 @@ def submit_interactive(
 def submit_next_script_frame(
     session: DebuggerSession,
 ) -> DebuggerSession:
-    """Submit the next registered multi-actor frame through the shared boundary."""
+    """Submit the next registered multi-actor frame through the shared boundary.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Current scripted session and its next-frame cursor.
+
+    Returns
+    -------
+    DebuggerSession
+        Session with one captured scripted transition and advanced script
+        cursor, or the original endpoint if no step is possible.
+
+    Raises
+    ------
+    DebuggerTransitionFailureV1
+        If action construction, simulation, capture or successor packaging fails.
+        The stable stage/code identifies the boundary without exposing raw details.
+
+    Notes
+    -----
+        Numerical work runs through Core and transition capture; no file is written.
+        The input session is immutable, so a failed call cannot install a partial
+        successor. Higher-level recording code decides how to handle a failure.
+    """
     scenario = session.scenario
     if session.next_script_frame_index >= len(scenario.frames):
         return session
@@ -1098,7 +1441,25 @@ def submit_next_script_frame(
 def reset_session(
     session: DebuggerSession,
 ) -> DebuggerSession:
-    """Recreate the deterministic initial epoch at the product scale."""
+    """Recreate the deterministic initial epoch at the product scale.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Session to recreate from its loaded scenario and recorded root seed.
+
+    Returns
+    -------
+    DebuggerSession
+        Fresh deterministic initial session with a new run generation and
+        preserved control choice when valid.
+
+    Raises
+    ------
+    ValueError
+        If the scenario, seed, active selection or controller/input combination is
+        invalid.
+    """
     scenario = session.scenario
     return _restart_session(
         session,
@@ -1234,7 +1595,32 @@ def set_combat_configuration(
     team_b_controller: TeamBController,
     execution_information_mode: ExecutionInformationMode,
 ) -> DebuggerSession:
-    """Replace the episode only when its controller or information mode changes."""
+    """Replace the episode only when its controller or information mode changes.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Current session, preserved if all requested settings already match.
+    team_a_controller : TeamController
+        Supported Team A controller kind.
+    team_b_controller : TeamBController
+        Supported Team B controller kind, including scenario pressure where
+        allowed.
+    execution_information_mode : ExecutionInformationMode
+        shared_obs or no_shared_obs; must satisfy the selected controllers'
+        input needs.
+
+    Returns
+    -------
+    DebuggerSession
+        New episode when settings change, otherwise the original session.
+
+    Raises
+    ------
+    ValueError
+        If the scenario, seed, active selection or controller/input combination is
+        invalid.
+    """
     if team_a_controller not in SUPPORTED_TEAM_CONTROLLERS:
         raise CombatConfigurationRejectedError(
             "team_a_controller must be manual, reactive_tdm, or random_valid"
@@ -1269,7 +1655,28 @@ def switch_scenario(
     session: DebuggerSession,
     scenario: DebuggerScenario,
 ) -> DebuggerSession:
-    """Start another scenario at the canonical product movement scale."""
+    """Start another scenario at the canonical product movement scale.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Current host session whose presentation settings carry into the
+        replacement.
+    scenario : DebuggerScenario
+        New validated scenario factory and metadata.
+
+    Returns
+    -------
+    DebuggerSession
+        Fresh episode for the selected scenario at the product movement
+        setting.
+
+    Raises
+    ------
+    ValueError
+        If the scenario, seed, active selection or controller/input combination is
+        invalid.
+    """
     return _restart_session(
         session,
         scenario,

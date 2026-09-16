@@ -1,3 +1,9 @@
+/**
+ * @file Render roster, agent details, action comparisons and frame facts.
+ * Only installed, branded presentations supply scientific data. This module
+ * updates DOM nodes and sends activation commands through the caller; it
+ * does not step the simulator or infer facts missing from an authorized view.
+ */
 import { canonicalAgentIdentity } from "./agent-identity.js";
 import {
   authorizedPresentationAudience,
@@ -80,6 +86,9 @@ import { classTokenFromId, resolveVisualToken, teamTokenFromId } from "./vocabul
  */
 
 /**
+ * Return whether value is a non-null object other than an array. This
+ * shallow check accepts class instances and does not validate their fields.
+ *
  * @param {unknown} value
  * @returns {value is Record<string, any>}
  */
@@ -88,8 +97,10 @@ function isRecord(value) {
 }
 
 /**
- * Neutral aggregate modifiers remain valid wire truth, but they are visual
- * noise. Filter exact ×1 rows only at this browser presentation boundary.
+ * Return an agent view with exact neutral multiplier rows removed. Prefer
+ * aura_modifiers when it is an array, otherwise modifiers. Copy that array
+ * and the outer agent; preserve other references. With neither array, return
+ * the original agent. This display filter changes no recorded metric or state.
  *
  * @param {Record<string, any>} agent
  */
@@ -112,6 +123,9 @@ function agentForPresentation(agent) {
 }
 
 /**
+ * Return value unchanged when it is an array, otherwise a new empty array.
+ * Elements are neither validated nor copied.
+ *
  * @param {unknown} value
  * @returns {any[]}
  */
@@ -130,6 +144,11 @@ export const DISCLOSURE_PANEL_IDS = Object.freeze([
 ]);
 
 /**
+ * Return the initial open state for a known DISCLOSURE_PANEL_IDS member.
+ * Roster Details is open in both modes; Command Deck is also open when replay
+ * is false. Every other known panel starts closed. Throw RangeError for an
+ * unknown panelId. This does not read or update a user's saved panel state.
+ *
  * @param {string} panelId
  * @param {boolean} replay
  */
@@ -141,8 +160,10 @@ export function disclosurePanelInitiallyOpen(panelId, replay) {
 }
 
 /**
- * Render the full projection into an existing persistent inspector container.
- * The caller owns pane visibility, close behavior, and focus return.
+ * Replace container's children with a hidden title and full details view.
+ * Pass descriptor to the shared semantic renderer and return its result.
+ * The caller owns visibility, closing and focus return. This replaces DOM
+ * content but does not change descriptor or register a new data authority.
  *
  * @param {HTMLElement} container
  * @param {unknown} descriptor
@@ -160,8 +181,10 @@ export function renderSemanticInspector(container, descriptor) {
 }
 
 /**
- * Join one already-authorized inspected owner to exactly one serialized class
- * mechanics row. Neither class name nor numeric-looking values are coerced.
+ * Return the sole class-mechanics row matching owner's exact numeric ID
+ * and class name. Return null for a non-array bank, invalid owner identity,
+ * no match or multiple matches. Do not coerce values or copy the matched row.
+ * Both inputs must already belong to the same authorized presentation.
  *
  * @param {Record<string, any>} owner
  * @param {unknown} rawClassMechanics
@@ -184,10 +207,14 @@ function exactOwnerClassMechanics(owner, rawClassMechanics) {
 }
 
 /**
- * Project the authorized Agent Details class-documentation surface without
- * consulting raw transport, outgoing target identity, or recipient fallbacks.
- * The selected actor owns the returned identity and class descriptor; command
- * and battlefield legality remain with their dedicated consumers.
+ * Build the selected agent's class-details view from a branded presentation.
+ * Return null when presentation/audience/scene is unavailable. Replay and
+ * researcher-space frames use the researcher scene; other frames use the
+ * scene selected by localInspectedPresentationKey (undefined uses its default).
+ * A nonempty activatedAgentPublicId selects that exact public identity;
+ * otherwise use the scene's inspection owner. Missing or ambiguous class
+ * mechanics leaves owner_descriptor null. Return a frozen outer record with
+ * referenced owner data; this does not grant battlefield or command access.
  *
  * @param {unknown} presentation
  * @param {string | null | undefined} [localInspectedPresentationKey]
@@ -243,6 +270,10 @@ export function authorizedInspectorView(
 }
 
 /**
+ * Create an unattached element of tagName. Set className only when truthy
+ * and textContent when text is not null; both default to null. Return the
+ * element. Text is inserted as text, not parsed as HTML.
+ *
  * @template {keyof HTMLElementTagNameMap} K
  * @param {K} tagName
  * @param {string | null} className
@@ -261,6 +292,10 @@ function htmlElement(tagName, className = null, text = null) {
 }
 
 /**
+ * Append one labelled fact row to container and return its element.
+ * Convert value with String and insert both fields as text. This performs no
+ * scientific validation or tooltip registration.
+ *
  * @param {HTMLElement} container
  * @param {string} label
  * @param {unknown} value
@@ -277,6 +312,10 @@ function addFact(container, label, value) {
 }
 
 /**
+ * Create an unattached action card labelled Submitted, Accepted or Pending.
+ * Read move_action, target_action and use_ultimate_action from action without
+ * recomputing acceptance. Return the section; inputs must be authorized rows.
+ *
  * @param {"Submitted" | "Accepted" | "Pending"} label
  * @param {Record<string, any>} action
  */
@@ -295,8 +334,10 @@ function authorizedTransitionTuple(label, action) {
 }
 
 /**
- * Render action rows with one shared grammar for pending, incoming, and
- * upcoming researcher-space panels.
+ * Create an unattached ordered list from already authorized action rows.
+ * With pending=false, show submitted and accepted tuples side by side; true
+ * shows pending_action only. Preserve input order and actor labels. Return
+ * the list without modifying rows or inferring missing action fields.
  *
  * @param {ReadonlyArray<Record<string, any>>} rows
  * @param {boolean} [pending]
@@ -331,8 +372,10 @@ function authorizedTransitionList(rows, pending = false) {
 }
 
 /**
- * Keep roster status values compact while leaving exact duration truth in the
- * owning chip's data, accessible label, and tooltip.
+ * Return the compact display form of an integer duration, otherwise ?.
+ * This accepts any JavaScript integer, including negative values; validation
+ * of legal durations belongs upstream. Exact duration remains in chip data
+ * and accessible text when renderFactTokens builds the chip.
  *
  * @param {unknown} duration
  */
@@ -341,8 +384,12 @@ export function rosterStatusDurationLabel(duration) {
 }
 
 /**
- * Render every authorized status/modifier record without sorting, merging, or
- * deriving mechanics.
+ * Replace container's children with status or modifier chips in input order.
+ * Hide exact multiplier=1 modifier rows; show emptyText if no chips remain.
+ * Use recipient and authorized sourceAgents only for explanation text.
+ * agent_pov status chips use the restricted explanation route. Register
+ * tooltips and keyboard focus on each chip; do not derive combat mechanics
+ * or mutate the input records. kind and audience must be the declared values.
  *
  * @param {HTMLElement} container
  * @param {unknown[]} items
@@ -424,14 +471,20 @@ function renderFactTokens(
 }
 
 /**
- * Render the debugger's HTML inspection panels from an authoritative frame.
- *
- * Authorized roster rows are keyed by presentation identity. A render updates
- * those nodes in place, so ordinary authoritative refreshes retain DOM
- * identity and keyboard focus without exposing a raw transport fallback.
+ * Keep debugger panel DOM nodes in sync with installed presentations.
+ * Reuse roster rows by display identity to preserve focus where possible.
+ * The caller supplies all DOM bindings and an activation command handler.
+ * This class owns panel updates, not transport, simulation or authorization.
+ * Call render for each installed frame; invalid frames clear scientific views.
  */
 export class DebuggerPanels {
   /**
+   * Store required DOM bindings, clear roster and create its team/visibility
+   * groups. Initialize row caches and transition-announcement state. onCommand
+   * receives activation records and pointer-origin context; returned promises
+   * are not awaited here. Bindings must be real, compatible DOM elements.
+   * Construction changes the supplied roster immediately and returns the instance.
+   *
    * @param {DebuggerPanelBindings} bindings
    */
   constructor({
@@ -476,6 +529,11 @@ export class DebuggerPanels {
   }
 
   /**
+   * Return the cached visible or not-visible roster group, creating it if
+   * needed. A new group starts hidden with an empty-state row and is appended
+   * to this.roster. visibility must be one of the two declared strings. The
+   * returned object and its DOM nodes are shared mutable view state.
+   *
    * @param {"visible" | "not-visible"} visibility
    * @returns {RosterTeamGroup}
    */
@@ -507,6 +565,11 @@ export class DebuggerPanels {
   }
 
   /**
+   * Return a cached group for numeric teamId or create and append it.
+   * Use the display vocabulary for labels, including unknown IDs; this does not
+   * validate team membership. The new group starts with zero authorized agents.
+   * Return shared DOM references for later count and row updates.
+   *
    * @param {number} teamId
    * @returns {RosterTeamGroup}
    */
@@ -535,10 +598,11 @@ export class DebuggerPanels {
   }
 
   /**
-   * Create one presentation-keyed native action. Scientific fact chips remain
-   * siblings of the button so their independent tooltip interactions cannot
-   * trigger agent activation. Main resolves the opaque key against the current
-   * installed authority before choosing any local or network effect.
+   * Create an unattached roster row for one authorized identity. Its button
+   * looks up the current activation record at click time and calls onCommand;
+   * status/modifier chips are siblings so their clicks do not activate the agent.
+   * Return mutable DOM references. The caller fills values, stores activation
+   * and inserts the row. This installs a listener but performs no network call.
    *
    * @param {ReturnType<typeof authorizedPresentationIdentityRows>[number]} identity
    * @returns {AuthorizedRosterRow}
@@ -586,6 +650,13 @@ export class DebuggerPanels {
   }
 
   /**
+   * Update roster rows, labels, activation state and groups for presentation.
+   * disabled blocks all row activation; localInspectedPresentationKey defaults
+   * to the scene's inspection choice. Researcher-space Agent POV groups the
+   * complete researcher roster by visibility; other views group authorized rows
+   * by team. Reuse rows by display key, remove stale ones and register tooltips.
+   * This changes DOM/cache state only and assumes a branded presentation.
+   *
    * @param {Record<string, any>} presentation
    * @param {boolean} disabled
    * @param {string | null | undefined} [localInspectedPresentationKey]
@@ -775,6 +846,15 @@ export class DebuggerPanels {
   }
 
   /**
+   * Refresh agent details, pending/upcoming actions, accepted actions and
+   * technical facts from presentation. Optional local inspection selects the
+   * scene; activatedAgentPublicId=null shows the activation prompt, while an
+   * omitted value allows scene-owner selection. Replay shows upcoming recorded
+   * actions; editable live frames show the staged joint action. Suppress repeated
+   * announcements while the session/transition key stays unchanged; returning
+   * to an earlier key can announce it again. Replace panel contents without changing
+   * recorded facts or submitting actions; input must already be branded.
+   *
    * @param {Record<string, any>} presentation
    * @param {string | null | undefined} [localInspectedPresentationKey]
    * @param {string | null | undefined} [activatedAgentPublicId]
@@ -897,6 +977,11 @@ export class DebuggerPanels {
   }
 
   /**
+   * Make container's element children match desired by identity and order.
+   * Remove unlisted elements and move/insert existing desired nodes in place.
+   * The caller supplies a duplicate-free array of elements. Text nodes are not
+   * part of this reconciliation. Return nothing; existing element state survives.
+   *
    * @param {HTMLElement} container
    * @param {HTMLElement[]} desired
    */
@@ -918,9 +1003,10 @@ export class DebuggerPanels {
   }
 
   /**
-   * Clear every scientific panel when no branded presentation is installed.
-   * Raw transport objects and forged lookalikes are deliberately unavailable;
-   * they never become a fallback presentation source.
+   * Clear roster caches and scientific panel content and show unavailable
+   * messages. Reset the last announced transition and action-scope attributes.
+   * Keep reusable group DOM and bindings. Return nothing; raw transport data
+   * is never used as a fallback when an installed presentation is absent.
    */
   renderUnavailable() {
     for (const row of this.rosterRows.values()) {
@@ -962,6 +1048,13 @@ export class DebuggerPanels {
   }
 
   /**
+   * Render a branded frame, or clear scientific panels for any other value.
+   * interactionState defaults to {}; busy, shutdown, resync, offline or explicit
+   * activationDisabled flags disable roster actions. Pass optional inspection
+   * and activated public identity to their owned views. This mutates panel DOM
+   * and caches, returns nothing, and neither advances simulation nor sends a
+   * command until a user later activates a row.
+   *
    * @param {Record<string, any> | null} frame
    * @param {PanelInteractionState} interactionState
    */

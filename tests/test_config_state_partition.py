@@ -1,4 +1,7 @@
-"""Focused config/state ownership and retained spawn-lifecycle proofs."""
+"""Check which values belong to configuration and which belong to live state.
+
+The tests also check that spawn behavior keeps using the episode's configuration.
+"""
 # pyright: reportPrivateUsage=false
 
 from typing import cast
@@ -140,7 +143,6 @@ def _zero_action() -> Action:
 
 
 def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
-    """Return the action mask paired with an explicitly built test state."""
     _, action_mask = _build_observation_and_action_mask(state, config)
     return action_mask
 
@@ -232,7 +234,6 @@ def test_reset_initializes_dynamic_state_from_resolved_profile() -> None:
 
 
 def test_spawn_lifecycle_is_team_relative_and_available_to_dead_observers() -> None:
-    """Expose team-relative counters and rules to living and dead observers."""
     configured_duration = 4
     configured_speed = 1.75
     config = _config(
@@ -405,7 +406,6 @@ def test_spawn_lifecycle_is_team_relative_and_available_to_dead_observers() -> N
 
 
 def test_disabled_spawn_shield_lifecycle_keeps_public_speed_and_zero_timing() -> None:
-    """Represent duration-zero ablation without hiding its configured speed."""
     configured_speed = 1.25
     config = _config(
         (1, 1),

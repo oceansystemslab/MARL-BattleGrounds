@@ -1,4 +1,4 @@
-"""Focused proof for canonical replay and recipient-POV presentation adapters."""
+"""Check conversion of replay and actor-POV records into display data."""
 
 from __future__ import annotations
 
@@ -130,11 +130,11 @@ class _ReplaySceneCase:
 
 
 class _PoisonEvaluationContextV1(EvaluationEpisodeContextV1):
-    """No-extra subtype used to prove exact authority input ownership."""
+    pass
 
 
 class _PoisonEvaluationFrameV1(EvaluationFrameV1):
-    """No-extra subtype used to prove exact authority input ownership."""
+    pass
 
 
 def _runtime_provenance() -> RuntimeProvenanceV1:
@@ -352,7 +352,6 @@ def test_researcher_scene_v2_projects_only_canonical_context_and_frame_truth(
 
 
 def test_slot_31_reaches_capture_actor_pov_and_researcher_rendering() -> None:
-    """The expanded obstacle tail stays visible through every public join."""
     config = evaluation_env_config()
     pillar = jnp.zeros((8,), dtype=jnp.float32)
     pillar = pillar.at[OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_PILLAR)

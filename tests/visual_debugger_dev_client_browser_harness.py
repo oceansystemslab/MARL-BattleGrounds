@@ -1,4 +1,4 @@
-"""Run the real DevClient launcher with an isolated authoring artifact root."""
+"""Run the real DevClient for browser tests with an isolated authoring directory."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Delegate to the public launcher after replacing only its store root."""
     options = _parser().parse_args(argv)
 
     from scripts.dev import debug_renderer

@@ -1,4 +1,8 @@
-"""Public wrapper trajectories, configuration ownership and episode accounting."""
+"""Check the public environment against Core trajectories.
+
+The tests cover configuration ownership, metric selection, batched execution
+and episode bookkeeping.
+"""
 
 from collections.abc import Callable
 from typing import Literal, cast
@@ -86,7 +90,6 @@ def _scenario_start(
     initial_step: int = 0,
     mutual: bool = False,
 ) -> EnvironmentState:
-    """Attach a public Core-authored scenario start to fresh wrapper accounting."""
     config = evaluation_env_config(
         task_mode=TASK_MODE_TDM,
         team_deathmatch_score_threshold=20,
@@ -157,7 +160,6 @@ def test_scalar_wrapper_matches_core_with_rejected_submitted_action(
 
 
 def test_typed_and_legacy_root_keys_preserve_native_policy_trajectories() -> None:
-    """Key representation preserves stochastic actions and the complete trajectory."""
     env = make("tdm", num_envs=2)
     config = _config(max_steps=2)
     random_apply = policy("random").apply
@@ -266,6 +268,60 @@ def test_reset_reuses_one_executable_for_changed_config_and_roster() -> None:
     )
 
 
+def test_separate_handles_reuse_jit_with_changed_capture_selections() -> None:
+    key, config = jax.random.key(28), _config(max_steps=1)
+    ids = jnp.asarray((11, 12), jnp.int32)
+    first = make(
+        "tdm",
+        num_envs=2,
+        metrics="none",
+        full_metrics_episodes=(11,),
+        replay_episodes=(12,),
+    )
+    second = make(
+        "tdm",
+        num_envs=2,
+        metrics="none",
+        full_metrics_episodes=(12,),
+        replay_episodes=(11,),
+    )
+    traces = 0
+
+    def run(current: Environment, config: EnvConfig, key: Array) -> StepResult:
+        nonlocal traces
+        traces += 1
+        _, state = current.reset(key, config, episode_id=ids)
+        return current.step(key, state, _idle(2))
+
+    compiled = cast(Callable[[Environment, EnvConfig, Array], StepResult], jax.jit(run))
+    before = compiled(first, config, key)
+    after = compiled(second, config, key)
+    assert traces == 1
+    _assert_tree_exact(before[0], after[0])
+    _assert_tree_exact(before[1].core_state, after[1].core_state)
+    _assert_tree_exact(before[1].action_mask, after[1].action_mask)
+    _assert_tree_exact(before[2:4], after[2:4])
+
+    for result, selected, replay_id in (
+        (before, (True, False), 12),
+        (after, (False, True), 11),
+    ):
+        _, state, _, _, info = result
+        np.testing.assert_array_equal(state.collect_full_metrics, selected)
+        np.testing.assert_array_equal(state.collect_replay, np.logical_not(selected))
+        assert info.priority is not None and info.full is not None
+        np.testing.assert_array_equal(info.priority.valid.any(axis=-1), selected)
+        np.testing.assert_array_equal(info.full.valid.any(axis=-1), selected)
+        assert info.replay is not None
+        np.testing.assert_array_equal(info.replay.valid, (True,))
+        np.testing.assert_array_equal(info.replay.episode_id, (replay_id,))
+        lane = replay_id - 11
+        _assert_tree_exact(_row(info.replay.state, 0), _row(state.core_state, lane))
+        _assert_tree_exact(
+            _row(info.replay.action_mask, 0), _row(state.action_mask, lane)
+        )
+
+
 def test_scalar_reset_remains_valid_under_external_vmap() -> None:
     env = make("tdm")
     config = _config()
@@ -285,7 +341,6 @@ def test_scalar_reset_remains_valid_under_external_vmap() -> None:
 
 
 def test_concrete_reset_rejects_invalid_ids_and_retained_lane_collisions() -> None:
-    """Compiled ID values are preconditions; concrete host inputs are checked."""
     key, config = jax.random.key(0), _config()
     scalar = make("tdm")
     for episode_id in (0, -1):

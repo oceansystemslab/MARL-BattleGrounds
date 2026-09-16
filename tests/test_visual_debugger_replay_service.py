@@ -1,4 +1,4 @@
-"""Read-only replay-service authority, privacy, and cursor proofs."""
+"""Check read-only replay navigation, authority and privacy limits."""
 
 from __future__ import annotations
 
@@ -140,13 +140,11 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class _FinalizeFailureState(EvaluationMetricReducerStateV1):
-    """Valid immutable state used before an intentional finalization failure."""
+    pass
 
 
 @dataclass(slots=True)
 class _FinalizeFailureReducer:
-    """Fail only while materializing metrics, after every unit was processed."""
-
     reducer_id: str = "test.replay_service.finalize_failure"
     reducer_version: int = 1
 
@@ -181,8 +179,6 @@ class _FinalizeFailureReducer:
 
 @dataclass(frozen=True, slots=True)
 class _ServiceCase:
-    """One canonical loaded bundle plus its source report."""
-
     bundle: LoadedReplayBundleV1
     report: EvaluationMetricReportV1
 
@@ -218,15 +214,15 @@ type _ReplayAgentViewerFrame = (
 
 
 class _PoisonActorPovAnalyzerProjectionV1(ActorPovAnalyzerProjectionV1):
-    """Exact-field subtype used to prove the selective projection fence."""
+    pass
 
 
 class _PoisonReplayCursorV1(ReplayCursorV1):
-    """No-extra subtype used to prove exact cursor ownership."""
+    pass
 
 
 class _PoisonActorPovReplayViewerFrameV1(ActorPovReplayViewerFrameV1):
-    """No-extra subtype used to prove the exact raw-frame boundary."""
+    pass
 
 
 def _runtime_provenance() -> RuntimeProvenanceV1:
@@ -324,7 +320,6 @@ def _with_movement_scale(
     *,
     movement_scale: float,
 ) -> CapturedEvaluationTrajectory:
-    """Replace only recorded experimental movement-scale provenance."""
     experimental_config = evaluation_env_config()._replace(
         ordinary_movement_distance_scale=movement_scale
     )
@@ -4726,7 +4721,6 @@ def test_loaded_commands_and_static_render_never_enter_scientific_factories(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Loaded replay consumers cannot become a second simulator or event source."""
     source = service_cases.complete.bundle
     assert source.metric_report_artifact is not None
     replay_path = tmp_path / "scientific-authority-sentinel.marlbg-replay.json"

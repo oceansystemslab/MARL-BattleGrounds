@@ -1,4 +1,11 @@
-"""Immutable host-side contracts for the comprehensive visual debugger."""
+"""Define immutable host state for live debugger controls and scripted playback.
+
+The control layer creates ``DebuggerSession`` endpoints and replaces them after
+validated actions. These models keep one coherent simulator state, observation,
+mask, random key, and evaluation record. Pending actions remain separate from
+accepted simulator actions. Construction checks host contracts; this module has
+no file, network, or simulator-step entry point.
+"""
 
 from __future__ import annotations
 
@@ -63,7 +70,21 @@ def team_controller_action_source(
     team_a_controller: TeamController,
     team_b_controller: TeamBController,
 ) -> TeamControllerActionSource:
-    """Classify one interactive pair without hiding either controller identity."""
+    """Describe whether the two team controllers supply manual or policy actions.
+
+    Parameters
+    ----------
+    team_a_controller : TeamController
+        Team A's selected controller kind.
+    team_b_controller : TeamBController
+        Team B's selected controller kind, including scenario pressure when supported.
+
+    Returns
+    -------
+    {"manual", "policy", "mixed"}
+        Manual if both teams are manual, policy if neither is manual, otherwise mixed.
+        The classification does not replace the recorded identities of either team.
+    """
     if team_a_controller == team_b_controller == "manual":
         return "manual"
     if team_a_controller != "manual" and team_b_controller != "manual":
@@ -72,6 +93,7 @@ def team_controller_action_source(
 
 
 def _validate_slot(global_slot: int, *, name: str) -> None:
+    """Reject a global agent slot outside the fixed ten-slot axis."""
     if not 0 <= global_slot < MAX_AGENT_SLOTS:
         msg = f"{name} must be in [0, {MAX_AGENT_SLOTS}); got {global_slot}."
         raise ValueError(msg)
@@ -79,12 +101,21 @@ def _validate_slot(global_slot: int, *, name: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class PendingAction:
+    """One actor's editable move, target, and selected Basic/Ultimate lane.
+
+    ``armed_lane`` is 0 for Basic, 1 for Ultimate, or None when neither is armed.
+    ``arm_origin`` records whether that choice was automatic or explicit.
+    """
+
     move_action: int = _MOVE_STAY_V1
     selected_global_target_slot: int | None = None
     armed_lane: Lane | None = 0
     arm_origin: ArmOrigin | None = "automatic"
 
     def __post_init__(self) -> None:
+        """Validate action ranges and require an arm origin exactly when a lane is
+        armed.
+        """
         if not 0 <= self.move_action < NUM_MOVE_ACTIONS:
             msg = (
                 f"move_action must be in [0, {NUM_MOVE_ACTIONS}); "
@@ -109,6 +140,12 @@ class PendingAction:
 
 @dataclass(frozen=True, slots=True)
 class LaneAvailability:
+    """Legality of both Basic/Ultimate lanes for one target choice.
+
+    ``armed_pair_legal`` must equal the availability of the selected lane; no
+    selected lane means that pair is not ready to submit.
+    """
+
     target_action: int
     lane_0_available: bool
     lane_1_available: bool
@@ -116,6 +153,7 @@ class LaneAvailability:
     armed_pair_legal: bool
 
     def __post_init__(self) -> None:
+        """Require valid target/lane values and consistent selected-pair legality."""
         if not 0 <= self.target_action < NUM_TARGET_ACTIONS:
             msg = f"invalid target_action: {self.target_action}."
             raise ValueError(msg)
@@ -136,12 +174,19 @@ class LaneAvailability:
 
 @dataclass(frozen=True, slots=True)
 class ActorCommand:
+    """One scripted actor command using global actor and target slots.
+
+    Missing targets mean no target. ``use_ultimate`` is 0 for Basic or 1 for Ultimate;
+    legality against current masks is checked when the command is submitted.
+    """
+
     actor_global_slot: int
     move_action: int = _MOVE_STAY_V1
     target_global_slot: int | None = None
     use_ultimate: int = 0
 
     def __post_init__(self) -> None:
+        """Check fixed action categories and actor/target slot ranges."""
         _validate_slot(self.actor_global_slot, name="actor_global_slot")
         if not 0 <= self.move_action < NUM_MOVE_ACTIONS:
             msg = (
@@ -158,11 +203,14 @@ class ActorCommand:
 
 @dataclass(frozen=True, slots=True)
 class ScenarioFrame:
+    """One labeled scripted transition containing at most one command per actor."""
+
     label: str
     description: str
     commands: tuple[ActorCommand, ...]
 
     def __post_init__(self) -> None:
+        """Reject duplicate commands for the same actor in one scripted frame."""
         actor_slots = tuple(command.actor_global_slot for command in self.commands)
         if len(actor_slots) != len(set(actor_slots)):
             msg = f"scenario frame {self.label!r} contains duplicate actor commands."
@@ -182,6 +230,9 @@ class DebuggerScenarioProvenance:
     map_id: int | None = None
 
     def __post_init__(self) -> None:
+        """Require a known source kind, valid optional map ID, and exact SHA-256
+        digests.
+        """
         if self.source_kind not in ("current_buffer", "saved_draft"):
             raise ValueError("unknown authored scenario source kind.")
         if not self.source_identity:
@@ -204,6 +255,12 @@ class DebuggerScenarioProvenance:
 
 @dataclass(frozen=True, slots=True)
 class DebuggerScenario:
+    """A live or scripted scenario factory and its ordered transition instructions.
+
+    The factory returns fresh configuration and state. Audience distinguishes
+    researcher examples from explicitly selected stress demonstrations.
+    """
+
     name: str
     title: str
     description: str
@@ -215,6 +272,7 @@ class DebuggerScenario:
     provenance: DebuggerScenarioProvenance | None = None
 
     def __post_init__(self) -> None:
+        """Validate the controlled slot, scenario mode, and declared audience."""
         _validate_slot(self.default_controlled_slot, name="default_controlled_slot")
         if self.mode not in ("interactive", "scripted"):
             msg = f"unknown scenario mode: {self.mode!r}."
@@ -243,7 +301,27 @@ class RawContinuationIdentity:
         observation: Observation,
         action_mask: ActionMask,
     ) -> bool:
-        """Return whether every raw continuation object is the bound object."""
+        """Check that a continuation still uses the exact objects that were bound.
+
+        Parameters
+        ----------
+        config : EnvConfig
+            Configuration to use for the next transition.
+        key : Array
+            Random key to use for the next transition.
+        state : EnvState
+            Current simulator state.
+        observation : Observation
+            Observation produced with that state.
+        action_mask : ActionMask
+            Action mask produced with that state.
+
+        Returns
+        -------
+        bool
+            True only when all five arguments are the original objects by identity.
+            This does not compare array contents or copy device buffers.
+        """
         return (
             self.config is config
             and self.key is key
@@ -255,6 +333,12 @@ class RawContinuationIdentity:
 
 @dataclass(frozen=True, slots=True)
 class DebuggerSession:
+    """One immutable live endpoint with its raw continuation and recording context.
+
+    State, observation, mask, config, and random key must refer to the same next
+    simulator step. Host controls and pending actions live beside that endpoint.
+    """
+
     scenario: DebuggerScenario
     seed: int
     run_generation: int
@@ -285,6 +369,9 @@ class DebuggerSession:
         return self.scenario.name
 
     def __post_init__(self) -> None:
+        """Bind the exact continuation objects and validate the host endpoint
+        contract.
+        """
         from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
         from marl_battlegrounds.evaluation.models import (
             AssignedPolicySlotV2,

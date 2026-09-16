@@ -1,11 +1,9 @@
 /**
- * Display-only vocabulary for renderer-neutral debugger scene records.
- *
- * This module maps stable semantic IDs to labels and visual keys. It does not
- * define durations, legality, ranges, acceptance, combat values, or any other
- * simulator behavior.
+ * @file Map recorded semantic IDs to browser labels, glyphs and CSS keys.
+ * Definitions are display-only: this module does not calculate durations,
+ * ranges, action legality or combat results. Callers supply validated kinds
+ * and authorized label text; the local registry owns visual identities.
  */
-
 /**
  * @typedef {"class" | "team" | "status" | "activation" | "modifier" | "lifecycle"} VisualTokenKind
  */
@@ -37,6 +35,10 @@
  */
 
 /**
+ * Freeze and return definition itself. It must already be a complete
+ * VisualToken. This does not copy or validate fields, so the owning registry
+ * must not expect to edit the object after this call.
+ *
  * @param {VisualToken} definition
  * @returns {Readonly<VisualToken>}
  */
@@ -534,6 +536,10 @@ const TEAM_ID_TO_TOKEN = Object.freeze({
 });
 
 /**
+ * Return trimmed nonempty string value, or null for another/empty value.
+ * No length, markup or authority check is performed; callers use the result
+ * as text within already authorized presentation data.
+ *
  * @param {unknown} value
  * @returns {string | null}
  */
@@ -542,6 +548,10 @@ function displayString(value) {
 }
 
 /**
+ * Return an object payload as-is, or {} for null/nonobject input. Arrays
+ * also pass this shallow check. No copy, freeze or accessor validation occurs;
+ * callers provide trusted/normalized display data.
+ *
  * @param {unknown} payload
  * @returns {TokenPayload}
  */
@@ -552,6 +562,9 @@ function tokenPayload(payload) {
 }
 
 /**
+ * Return tokenId as a trimmed nonempty string, or unknown otherwise.
+ * This does not check registry membership or change the case of an ID.
+ *
  * @param {unknown} tokenId
  * @returns {string}
  */
@@ -560,6 +573,11 @@ function normalizedTokenId(tokenId) {
 }
 
 /**
+ * Create a frozen neutral visual token retaining tokenId and naming kind
+ * in its accessible text. Use unknown glyph/CSS keys and question-mark labels.
+ * Both inputs are caller-owned display identifiers; no scientific meaning is
+ * inferred from them.
+ *
  * @param {VisualTokenKind} kind
  * @param {string} tokenId
  * @returns {Readonly<VisualToken>}
@@ -577,8 +595,11 @@ function unknownToken(kind, tokenId) {
 }
 
 /**
- * Apply Python-authored display prose without allowing payloads to select
- * glyphs or CSS hooks.
+ * Apply optional payload labels to a frozen definition without changing
+ * its glyph, CSS or token identity. Use label, then snake-case short_label/
+ * accessible_name before camel-case alternatives; invalid/empty strings fall
+ * back to the definition. Return the original for no change, or a newly
+ * frozen shallow copy. This does not validate payload authority or escape HTML.
  *
  * @param {Readonly<VisualToken>} definition
  * @param {unknown} payload
@@ -612,11 +633,14 @@ function withPayloadProse(definition, payload) {
 }
 
 /**
- * Resolve a stable semantic ID to display-only metadata.
+ * Resolve tokenId in the registry for kind and apply optional payload prose.
  *
- * Python-provided labels and accessible names override registry prose. Glyph
- * and CSS keys always come from this allowlisted registry so future/unknown
- * payload IDs cannot inject selectors or markup.
+ * kind must be class, team, status, activation, modifier or lifecycle; an
+ * unsupported kind is not handled and may throw TypeError. Normalize tokenId
+ * and apply declared status/aura aliases. Unlisted IDs receive a neutral
+ * unknown definition. payload is optional and may change labels only, never
+ * glyph/CSS selection. Return a frozen token, possibly shared. No input
+ * mutation or simulator lookup occurs.
  *
  * @param {VisualTokenKind} kind
  * @param {unknown} tokenId
@@ -639,8 +663,10 @@ export function resolveVisualToken(kind, tokenId, payload) {
 }
 
 /**
- * Return the display token ID for one exact catalog status ID. Unknown future
- * IDs remain visible and fail through the ordinary unknown-token grammar.
+ * Map normalized statusId through the declared catalog-status aliases.
+ * Return the unchanged normalized ID when unlisted, or unknown for invalid/
+ * empty input. This preserves future IDs for the ordinary unknown-token view
+ * rather than inferring a status from a class or slot.
  *
  * @param {unknown} statusId
  */
@@ -652,7 +678,10 @@ export function statusTokenIdFromCatalogId(statusId) {
 }
 
 /**
- * Resolve a simulator class identity without copying class mechanics.
+ * Resolve integer classId 1–5 to its display token, with optional payload
+ * labels. Other integers retain a class_id_N unknown identity; nonintegers
+ * use unknown. Return the frozen token from resolveVisualToken without
+ * copying class mechanics or granting access to an agent.
  *
  * @param {unknown} classId
  * @param {unknown} [payload]
@@ -670,7 +699,11 @@ export function classTokenFromId(classId, payload) {
 }
 
 /**
- * Resolve the class-specific Ultimate display token used by cooldown cues.
+ * Resolve a class's Ultimate display token for cooldown/activation cues.
+ * Integer classId 1–5 selects the declared Ultimate; other integers retain an
+ * ultimate_for_class_id_N unknown identity and nonintegers use unknown.
+ * Optional payload affects labels only. Return a frozen display token; no
+ * ability availability or damage is calculated.
  *
  * @param {unknown} classId
  * @param {unknown} [payload]
@@ -689,11 +722,12 @@ export function ultimateTokenFromClassId(classId, payload) {
 }
 
 /**
- * Resolve the presentation-only recipient impact grammar for an activation.
- *
- * This registry does not calculate combat outcomes or health attribution. It
- * only assigns a stable, non-numeric visual mark to an already-authoritative
- * activation token. Unknown future tokens fail closed to a neutral impact.
+ * Look up the visual impact category for a normalized activation tokenId.
+ * Known IDs return damage, healing or local; an absent lookup returns neutral.
+ * This classifies an already validated activation, not its damage amount or
+ * recipient attribution. The current direct object lookup does not guard
+ * inherited property names such as constructor; callers must not pass those
+ * as arbitrary unknown IDs. This helper does not validate raw wire input.
  *
  * @param {unknown} tokenId
  * @returns {"damage" | "healing" | "neutral" | "local"}
@@ -704,7 +738,10 @@ export function activationImpactSemantic(tokenId) {
 }
 
 /**
- * Resolve a simulator team identity without copying team mechanics.
+ * Resolve integer teamId 1 or 2 to Team A/B display metadata. Other integers
+ * retain a team_id_N unknown identity; nonintegers use unknown. Optional
+ * payload may override display labels. Return a frozen token without changing
+ * team ownership or copying simulator rules.
  *
  * @param {unknown} teamId
  * @param {unknown} [payload]

@@ -1,8 +1,17 @@
-"""Recipient-authorized NoSharedObs presentation derived from frozen V1 rows.
+"""Build neutral scenes without crossing a recipient's information boundary.
 
-The builder in this module accepts only an exact actor-POV source and a
-separately validated public mechanics catalog.  It never accepts an Oracle
-scene, full episode context, event batch, simulator object, or hidden row.
+build_no_shared_obs_authorized_scene_v1 uses exact recipient POV records and
+a separately validated public mechanics catalog. The SharedObs builder
+checks every supplied source's identity and epoch, then reads unit payloads
+only from the recipient and its recorded admitted allies. It keeps body
+provenance and the recipient-owned next-decision mask.
+
+These host builders accept no Oracle scene, full episode context, event
+batch, simulator state or renderer. Public class documentation is separate
+from observed per-slot profile values. Opaque presentation keys are scoped
+to a viewing session and recipient; they are display IDs, not credentials.
+Strong boundary checks may rebuild records and perform JSON validation in
+memory. No file I/O, JAX execution, hidden-source inference or mutation occurs.
 """
 
 from __future__ import annotations
@@ -106,11 +115,21 @@ _SHARED_SOURCE_MATERIAL_DISCLOSURE_V1 = (
 
 
 def _require_text(value: str, *, name: str) -> None:
+    """Require value to be a nonblank exact Python string.
+
+    name labels ValueError for a wrong type or blank value. Return None without
+    trimming or converting valid text.
+    """
     if type(value) is not str or not value.strip():
         raise ValueError(f"{name} must be a non-empty Python string.")
 
 
 def _require_opaque_pov_key(value: str, *, name: str) -> None:
+    """Check value has the canonical pov_ plus 64-lowercase-hex format.
+
+    name labels ValueError. Return None on success; format validity does not
+    prove that a key was issued by a particular authority session.
+    """
     _require_text(value, name=name)
     digest = value.removeprefix("pov_")
     if (
@@ -127,6 +146,14 @@ def _validate_pov_scene_envelope(
     recipient_public_agent_id: str,
     recipient_presentation_key: str,
 ) -> AuthorizedAgentV1:
+    """Revalidate a neutral scene and join its one recipient self row.
+
+    scene must be the exact authorized scene root. recipient_public_agent_id
+    and recipient_presentation_key must identify exactly one self body; all
+    body keys must be opaque POV keys and relations must match recipient/team
+    identity. Return that AuthorizedAgentV1. Raise ValueError for bad roots or
+    joins. JSON structural revalidation is host work, with no file I/O.
+    """
     if type(scene) is not AuthorizedBattlefieldSceneV1:
         raise ValueError("scene must be the exact authorized neutral scene.")
     validated_scene = TypeAdapter(AuthorizedBattlefieldSceneV1).validate_json(
@@ -171,6 +198,12 @@ def _validate_pov_scene_envelope(
 
 
 def _catalog_or_exact_f32(recorded: float, catalog: float) -> bool:
+    """Compare recorded with catalog or its exactly rounded float32 value.
+
+    Return True for either exact equality, False otherwise or when float32
+    conversion overflows. This allows recorded float32 roundoff without a
+    broad tolerance that could admit changed mechanics. Inputs are host floats.
+    """
     if recorded == catalog:
         return True
     try:
@@ -181,6 +214,11 @@ def _catalog_or_exact_f32(recorded: float, catalog: float) -> bool:
 
 
 def _catalog_as_f32(catalog: float, *, name: str) -> float:
+    """Round catalog to its exact IEEE float32 value and return a Python float.
+
+    name labels ValueError if packing overflows. This host conversion does not
+    allocate a JAX array or apply an approximate tolerance.
+    """
     try:
         return unpack(">f", pack(">f", catalog))[0]
     except OverflowError as error:
@@ -193,6 +231,11 @@ def _require_catalog_float_join(
     *,
     name: str,
 ) -> None:
+    """Require recorded to equal catalog or its exact float32 rounding.
+
+    name labels ValueError on mismatch. Return None without replacing the
+    recorded value or allowing arbitrary near-equality.
+    """
     if not _catalog_or_exact_f32(recorded, catalog):
         raise ValueError(f"{name} does not join the public V1 mechanics catalog.")
 
@@ -203,7 +246,33 @@ def pov_presentation_key_v1(
     recipient_public_agent_id: str,
     public_agent_id: str,
 ) -> str:
-    """Return one opaque key stable within an exact recipient authority root."""
+    """Create a stable opaque body key within one recipient authority session.
+
+    Parameters
+    ----------
+    authority_session_id : str
+        Nonblank host-owned identifier for the exact viewing authority session.
+    recipient_public_agent_id : str
+        Nonblank public ID of the recipient whose view owns the key.
+    public_agent_id : str
+        Nonblank public ID of the body being presented.
+
+    Returns
+    -------
+    str
+        pov_ followed by the lowercase SHA-256 digest of the scoped identities.
+        The same inputs give the same key; changing scope changes its input.
+
+    Raises
+    ------
+    ValueError
+        Any input is not a nonblank Python string.
+
+    Notes
+    -----
+    This deterministic display identity is not an access credential. It draws
+    no randomness, stores no registry and writes no files.
+    """
     _require_text(authority_session_id, name="authority_session_id")
     _require_text(
         recipient_public_agent_id,
@@ -219,20 +288,75 @@ def pov_presentation_key_v1(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NoSharedObsAuthorizedScenePartsV1:
-    """Neutral scene plus the exact recipient-owned next-decision mask."""
+    """Bind a NoSharedObs scene to its recipient and exact decision mask.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    source_episode_id : str
+        Nonblank recorded source episode ID.
+    source_frame_index : int
+        Nonnegative Python recorded frame index.
+    source_recipient_frame_id : str
+        Canonical episode:actor-pov:recipient:frame:index ID.
+    source_simulator_step_count : int
+        Nonnegative Python simulator step count for the selected frame.
+    recipient_public_agent_id : str
+        Nonblank public ID of the one recipient whose authority is represented.
+    recipient_presentation_key : str
+        Canonical pov_ key with 64 lowercase hexadecimal digest characters.
+    scene : AuthorizedBattlefieldSceneV1
+        Exact AuthorizedBattlefieldSceneV1 restricted to the recipient, with one
+        matching self row.
+    next_decision_action_mask : ActorPovActionMaskV1
+        Exact ActorPovActionMaskV1 copied from this recipient at the selected decision.
+
+    Raises
+    ------
+    ValueError
+        Source identity/counters, canonical frame/key, recipient scene joins or
+        exact mask validation fails.
+
+    Notes
+    -----
+    Scene and mask are structurally revalidated. This object does not contain an
+    incoming event batch or a full researcher snapshot.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_SHARED_WIRE_CONFIG
+    """Class-level Pydantic settings: strict values, no extra fields and no
+    nonfinite numbers.
+    """
 
     source_episode_id: str
+    """Nonblank recorded source episode ID."""
     source_frame_index: int
+    """Nonnegative Python recorded frame index."""
     source_recipient_frame_id: str
+    """Canonical episode:actor-pov:recipient:frame:index ID."""
     source_simulator_step_count: int
+    """Nonnegative Python simulator step count for the selected frame."""
     recipient_public_agent_id: str
+    """Nonblank public ID of the one recipient whose authority is represented."""
     recipient_presentation_key: str
+    """Canonical pov_ key with 64 lowercase hexadecimal digest characters."""
     scene: AuthorizedBattlefieldSceneV1
+    """Exact AuthorizedBattlefieldSceneV1 restricted to the recipient, with one
+    matching self row.
+    """
     next_decision_action_mask: ActorPovActionMaskV1
+    """Exact ActorPovActionMaskV1 copied from this recipient at the selected
+    decision.
+    """
 
     def __post_init__(self) -> None:
+        """Validate NoSharedObsAuthorizedScenePartsV1 at the presentation boundary.
+
+        Raise ValueError if source identity/counters, canonical frame/key,
+        recipient scene joins or exact mask validation fails.
+        Return None without changing valid values.
+        """
         _require_text(self.source_episode_id, name="source_episode_id")
         for name in ("source_frame_index", "source_simulator_step_count"):
             value = cast(int, getattr(self, name))
@@ -268,15 +392,48 @@ class NoSharedObsAuthorizedScenePartsV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsAuthorizedSensorSourceV1:
-    """One recipient-authorized sensor source in a SharedObs visual union."""
+    """Identify one admitted sensor source in a recipient visual union.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    source_kind : Literal['recipient_base', 'shared_sensor_source']
+        recipient_base for self input or shared_sensor_source for an admitted ally.
+    source_presentation_key : str
+        Canonical opaque key scoped to the same recipient authority.
+    source_public_agent_id : str
+        Nonblank public ID of the contributing sensor source.
+
+    Raises
+    ------
+    ValueError
+        Source kind, opaque key format or public ID is invalid.
+
+    Notes
+    -----
+    This row records admission already decided from the recipient's availability
+    matrix; it does not decide permission itself.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_SHARED_WIRE_CONFIG
+    """Class-level Pydantic settings: strict values, no extra fields and no
+    nonfinite numbers.
+    """
 
     source_kind: Literal["recipient_base", "shared_sensor_source"]
+    """recipient_base for self input or shared_sensor_source for an admitted ally."""
     source_presentation_key: str
+    """Canonical opaque key scoped to the same recipient authority."""
     source_public_agent_id: str
+    """Nonblank public ID of the contributing sensor source."""
 
     def __post_init__(self) -> None:
+        """Validate SharedObsAuthorizedSensorSourceV1 at the presentation boundary.
+
+        Raise ValueError if source kind, opaque key format or public ID is invalid.
+        Return None without changing valid values.
+        """
         if self.source_kind not in ("recipient_base", "shared_sensor_source"):
             raise ValueError("unknown SharedObs authorized source kind.")
         _require_opaque_pov_key(
@@ -292,6 +449,11 @@ class SharedObsAuthorizedSensorSourceV1:
 def _shared_source_sort_key(
     source: SharedObsAuthorizedSensorSourceV1,
 ) -> tuple[int, str]:
+    """Order source with the recipient first, then by source public ID.
+
+    Return (kind rank, public ID), where recipient_base has rank zero and
+    shared_sensor_source rank one. The source record is already validated.
+    """
     return (
         0 if source.source_kind == "recipient_base" else 1,
         source.source_public_agent_id,
@@ -300,15 +462,49 @@ def _shared_source_sort_key(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsAgentObservationProvenanceV1:
-    """Ordered sensor-source provenance for one deduplicated agent body."""
+    """List the admitted sensors that supplied one deduplicated body.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    agent_presentation_key : str
+        Canonical opaque key for the displayed agent.
+    agent_public_agent_id : str
+        Nonblank public ID of the displayed agent.
+    observation_sources : tuple[SharedObsAuthorizedSensorSourceV1, ...]
+        Nonempty tuple of exact source rows, recipient first then shared sources
+        by public ID, with no repeated source IDs.
+
+    Raises
+    ------
+    ValueError
+        Agent identity, source record types, nonempty ordering or unique source
+        IDs are invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_SHARED_WIRE_CONFIG
+    """Class-level Pydantic settings: strict values, no extra fields and no
+    nonfinite numbers.
+    """
 
     agent_presentation_key: str
+    """Canonical opaque key for the displayed agent."""
     agent_public_agent_id: str
+    """Nonblank public ID of the displayed agent."""
     observation_sources: tuple[SharedObsAuthorizedSensorSourceV1, ...]
+    """Nonempty tuple of exact source rows, recipient first then shared sources by
+    public ID, with no repeated source IDs.
+    """
 
     def __post_init__(self) -> None:
+        """Validate SharedObsAgentObservationProvenanceV1 at the presentation
+        boundary.
+
+        Raise ValueError if agent identity, source record types, nonempty
+        ordering or unique source IDs are invalid.
+        Return None without changing valid values.
+        """
         _require_opaque_pov_key(
             self.agent_presentation_key,
             name="agent_presentation_key",
@@ -341,22 +537,90 @@ class SharedObsAgentObservationProvenanceV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsAuthorizedScenePartsV1:
-    """Neutral SharedObs union plus recipient-owned decision authority."""
+    """Bind a SharedObs visual union to one recipient's decision authority.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    source_episode_id : str
+        Nonblank recorded source episode ID.
+    source_frame_index : int
+        Nonnegative Python recorded frame index.
+    source_recipient_frame_id : str
+        Canonical episode:shared-obs-visual-union:recipient:frame:index ID.
+    source_simulator_step_count : int
+        Nonnegative Python simulator step count for the selected frame.
+    recipient_public_agent_id : str
+        Nonblank public ID of the one recipient whose authority is represented.
+    recipient_presentation_key : str
+        Canonical pov_ key with 64 lowercase hexadecimal digest characters.
+    scene : AuthorizedBattlefieldSceneV1
+        Exact AuthorizedBattlefieldSceneV1 restricted to the recipient, with one
+        matching self row.
+    next_decision_action_mask : ActorPovActionMaskV1
+        Exact ActorPovActionMaskV1 copied from this recipient at the selected decision.
+    authorized_sensor_sources : tuple[SharedObsAuthorizedSensorSourceV1, ...]
+        Nonempty ordered tuple containing exactly one recipient-base source plus
+        unique admitted ally sources.
+    agent_observation_provenance : tuple[SharedObsAgentObservationProvenanceV1, ...]
+        Ordered tuple covering scene agents exactly and naming only authorized sources.
+
+    Raises
+    ------
+    ValueError
+        Frame/key/recipient joins, scene/mask revalidation, ordered unique
+        source set, exact body coverage or provenance/source joins fail.
+
+    Notes
+    -----
+    Agents are sorted by physical team ID then public ID. Every admitted source
+    contributes its own self row. This is a visual union with the recipient's
+    mask, not an export of composed policy tensors.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_SHARED_WIRE_CONFIG
+    """Class-level Pydantic settings: strict values, no extra fields and no
+    nonfinite numbers.
+    """
 
     source_episode_id: str
+    """Nonblank recorded source episode ID."""
     source_frame_index: int
+    """Nonnegative Python recorded frame index."""
     source_recipient_frame_id: str
+    """Canonical episode:shared-obs-visual-union:recipient:frame:index ID."""
     source_simulator_step_count: int
+    """Nonnegative Python simulator step count for the selected frame."""
     recipient_public_agent_id: str
+    """Nonblank public ID of the one recipient whose authority is represented."""
     recipient_presentation_key: str
+    """Canonical pov_ key with 64 lowercase hexadecimal digest characters."""
     scene: AuthorizedBattlefieldSceneV1
+    """Exact AuthorizedBattlefieldSceneV1 restricted to the recipient, with one
+    matching self row.
+    """
     next_decision_action_mask: ActorPovActionMaskV1
+    """Exact ActorPovActionMaskV1 copied from this recipient at the selected
+    decision.
+    """
     authorized_sensor_sources: tuple[SharedObsAuthorizedSensorSourceV1, ...]
+    """Nonempty ordered tuple containing exactly one recipient-base source plus
+    unique admitted ally sources.
+    """
     agent_observation_provenance: tuple[SharedObsAgentObservationProvenanceV1, ...]
+    """Ordered tuple covering scene agents exactly and naming only authorized
+    sources.
+    """
 
     def __post_init__(self) -> None:
+        """Validate SharedObsAuthorizedScenePartsV1 at the presentation boundary.
+
+        Raise ValueError if frame/key/recipient joins, scene/mask revalidation,
+        ordered unique source set, exact body coverage or provenance/source
+        joins fail.
+        Return None without changing valid values.
+        """
         _require_text(self.source_episode_id, name="source_episode_id")
         for name in ("source_frame_index", "source_simulator_step_count"):
             value = cast(int, getattr(self, name))
@@ -472,38 +736,137 @@ class SharedObsAuthorizedScenePartsV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _SourceSelectionV1:
+    """Keep the selected POV frame and its declared recipient identity.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    frame : ActorPovFrame
+        Exact supported ActorPovFrame selected from a validated source.
+    public_agent_id : str
+        Selected recipient's public ID.
+    selected_team_local_slot : int
+        Recipient roster index in 0..4.
+    configured_team_id : int
+        Recipient physical team ID 1 or 2.
+    class_id : int
+        Recipient class ID in 1..5.
+    axis_mapping : ActorPovAxisMapping
+        Version-matched public action and observation-row mapping.
+
+    Notes
+    -----
+    Construction performs no validation. Callers supply already checked values.
+    """
+
     frame: ActorPovFrame
+    """Exact supported ActorPovFrame selected from a validated source."""
     public_agent_id: str
+    """Selected recipient's public ID."""
     selected_team_local_slot: int
+    """Recipient roster index in 0..4."""
     configured_team_id: int
+    """Recipient physical team ID 1 or 2."""
     class_id: int
+    """Recipient class ID in 1..5."""
     axis_mapping: ActorPovAxisMapping
+    """Version-matched public action and observation-row mapping."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _AuthorizedRowV1:
+    """Keep one decoded body row after its authority and identity joins.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    public_agent_id : str
+        Joined public body ID.
+    relation : Literal['self', 'ally', 'opponent']
+        self, ally or opponent relative to the fixed recipient.
+    decoded : DecodedAgentFeatureRowV1
+        Decoded visible/self feature row with physical team metadata.
+    spawn_shield_remaining : int
+        Nonnegative shield steps from the recipient-owned lifecycle row.
+
+    Notes
+    -----
+    Construction performs no validation. Callers supply already checked values.
+    """
+
     public_agent_id: str
+    """Joined public body ID."""
     relation: Literal["self", "ally", "opponent"]
+    """self, ally or opponent relative to the fixed recipient."""
     decoded: DecodedAgentFeatureRowV1
+    """Decoded visible/self feature row with physical team metadata."""
     spawn_shield_remaining: int
+    """Nonnegative shield steps from the recipient-owned lifecycle row."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _SharedSourceHeaderV1:
+    """Keep a source projection after metadata joins and before admission.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    projection : SharedObsSourceMaterialProjection
+        Original source-material projection; unit payload may still be unadmitted.
+    source_global_slot : int
+        Source global slot in 0..9 established by recipient topology.
+    source_public_agent_id : str
+        Source public ID joined to the same topology and frame epoch.
+
+    Notes
+    -----
+    Construction performs no validation. Callers supply already checked values.
+    """
+
     projection: SharedObsSourceMaterialProjection
+    """Original source-material projection; unit payload may still be unadmitted."""
     source_global_slot: int
+    """Source global slot in 0..9 established by recipient topology."""
     source_public_agent_id: str
+    """Source public ID joined to the same topology and frame epoch."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _SharedContributionV1:
+    """Pair one authorized decoded body with its contributing sensor.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    row : _AuthorizedRowV1
+        Authorized body facts relative to the fixed recipient.
+    source : SharedObsAuthorizedSensorSourceV1
+        Admitted recipient-base or ally-source identity that supplied row.
+
+    Notes
+    -----
+    Construction performs no validation. Callers supply already checked values.
+    """
+
     row: _AuthorizedRowV1
+    """Authorized body facts relative to the fixed recipient."""
     source: SharedObsAuthorizedSensorSourceV1
+    """Admitted recipient-base or ally-source identity that supplied row."""
 
 
 def _validated_catalog(
     catalog: StaticMechanicsCatalogV1,
 ) -> StaticMechanicsCatalogV1:
+    """Revalidate the exact public mechanics catalog and its content digest.
+
+    catalog must be StaticMechanicsCatalogV1, not a subclass. Return a validated
+    copy from its Python payload. Raise TypeError for a wrong root and
+    ValueError for invalid data/digest, including bypassed model construction.
+    """
     if type(catalog) is not StaticMechanicsCatalogV1:
         raise TypeError("catalog must be the exact StaticMechanicsCatalogV1 root.")
     # Revalidation closes the `model_construct` escape hatch at this authority
@@ -514,7 +877,14 @@ def _validated_catalog(
 def _validate_shared_projection_declaration(
     projection: SharedObsSourceMaterialProjection,
 ) -> None:
-    """Validate used identity declarations without diagnostic branches."""
+    """Check a SharedObs projection's used version, identity and frame headers.
+
+    projection must be an exact supported source-material root. Verify the
+    source-only disclosure, version, canonical frame IDs and self/header joins.
+    Raise TypeError for a wrong root or ValueError for contradictory metadata;
+    return None. This deliberately does not validate all unit payloads before
+    source availability has been checked.
+    """
     if (
         type(projection) is not SharedObsSourceMaterialProjectionV1
         and type(projection) is not SharedObsSourceMaterialProjectionV2
@@ -577,7 +947,13 @@ def _validate_shared_projection_declaration(
 def _shared_public_id_by_global_slot(
     projection: SharedObsSourceMaterialProjection,
 ) -> dict[int, str]:
-    """Read only the declared identity topology, never a unit feature row."""
+    """Validate and return the declared ten-slot public identity mapping.
+
+    projection supplies two five-row relation axes and their versioned public
+    mapping. Revalidate that mapping, require a partition of slots and unique
+    public IDs, then return a fresh dictionary. Raise ValueError on mismatch.
+    No unit feature row is read.
+    """
     if (
         type(projection.axis_mapping) is not ActorPovAxisMappingV1
         and type(projection.axis_mapping) is not ActorPovAxisMappingV2
@@ -633,7 +1009,14 @@ def _shared_source_header(
     recipient_public_id_by_slot: dict[int, str],
     recipient_topology_by_slot: dict[int, SharedObsSensorSourceAvailabilityV1],
 ) -> _SharedSourceHeaderV1:
-    """Validate source identity/topology/epoch before any availability filter."""
+    """Join one source's identity and frame epoch before admission filtering.
+
+    projection is a candidate source. recipient_projection supplies the selected
+    epoch/version; recipient_public_id_by_slot and recipient_topology_by_slot
+    supply the validated ten-slot authority. Return a _SharedSourceHeaderV1
+    when source/frame/self metadata agrees. Raise TypeError/ValueError through
+    root/header checks. Do not decode an unavailable source's unit payload.
+    """
     _validate_shared_projection_declaration(projection)
     for name in (
         "schema_version",
@@ -703,7 +1086,12 @@ def _shared_source_header(
 def _validate_shared_unit_axes(
     projection: SharedObsSourceMaterialProjection,
 ) -> None:
-    """Validate only the self/visible unit containers this source contributes."""
+    """Check the containers needed to read one admitted source's unit rows.
+
+    projection must have a tuple self row, two five-entry unit tuples and two
+    five-entry bool visibility tuples. Raise ValueError for bad containers;
+    return None. Row features are decoded later only for self or visible rows.
+    """
     frame = projection.base_sensor_frame
     if type(frame.self_features) is not tuple:
         raise ValueError("SharedObs self features must use an exact tuple row.")
@@ -738,7 +1126,15 @@ def _validated_recipient_topology(
     SharedObsSensorSourceAvailabilityV1,
     MapSceneV1,
 ]:
-    """Validate the one endpoint-local availability matrix Shared composition uses."""
+    """Validate the recipient's source topology and its own base scene.
+
+    projection supplies the ten ordered availability cells, public mappings
+    and recipient base frame. Return (rows, rows by slot, public IDs by slot,
+    self topology row, map). Require canonical team/slot/self joins, decode
+    recipient self and rebuild its base scene. Raise TypeError/ValueError for
+    invalid roots, identity or payload. This is the only availability matrix
+    used to decide which other sources may contribute.
+    """
     _validate_shared_projection_declaration(projection)
     public_id_by_slot = _shared_public_id_by_global_slot(projection)
     rows = projection.sensor_source_availability
@@ -847,7 +1243,14 @@ def _validated_recipient_topology(
 
 
 def _validated_source(source: NoSharedObsPovSourceV1) -> NoSharedObsPovSourceV1:
-    """Revalidate exact POV roots before any row is selected or decoded."""
+    """Revalidate an exact NoSharedObs source before reading selected rows.
+
+    source may be a current/adjacent slice, replay content or projection index
+    using supported versions. Return a structurally revalidated slice or a new
+    validated replay index. Even an existing index is revalidated at this
+    stronger authority boundary. Raise TypeError for an unsupported root and
+    ValueError for invalid content/digests. No file is read.
+    """
     if (
         type(source) is ActorPovAdjacentTransitionSliceV1
         or type(source) is ActorPovAdjacentTransitionSliceV2
@@ -879,6 +1282,15 @@ def _select_source(
     *,
     frame_index: int | None,
 ) -> _SourceSelectionV1:
+    """Select one frame and identity from an already validated POV source.
+
+    source may be a replay/index or current/adjacent slice. frame_index is
+    required and range-checked for replay/index, optional but equal to the
+    current frame for a current slice, and required to match one exact endpoint
+    for an adjacent slice. Return _SourceSelectionV1. Bad replay indices raise
+    IndexError, mismatched live indices ValueError, and unsupported roots
+    TypeError. No preceding history is invented for an adjacent start frame.
+    """
     if type(source) is ActorPovProjectionIndexV1:
         content = source.content
         if type(frame_index) is not int or not 0 <= frame_index < len(content.frames):
@@ -952,6 +1364,12 @@ def _select_source(
 def _authorized_map(source_map: MapSceneV1) -> AuthorizedMapV1:
     # The old scalar POV projection remains the compatibility oracle for map
     # decoding.  Exact concrete row checks occur in its constructors.
+    """Copy an exact scalar POV map into the neutral authorized map schema.
+
+    source_map must be MapSceneV1 with exact ObstacleSceneV1 rows. Return a new
+    AuthorizedMapV1 with unchanged world dimensions and obstacle geometry.
+    Raise TypeError for wrong roots; nested constructors reject invalid values.
+    """
     if type(source_map) is not MapSceneV1 or any(
         type(row) is not ObstacleSceneV1 for row in source_map.obstacles
     ):
@@ -979,6 +1397,15 @@ def _validate_row_against_class_catalog(
     class_catalog: ClassMechanicsV1,
     catalog: StaticMechanicsCatalogV1,
 ) -> None:
+    """Check active identity and fixed class capabilities without erasing profiles.
+
+    row is decoded authorized data; class_catalog and catalog are its validated
+    public class and mechanic authorities. Check raw ability outputs, cooldown
+    capability, status/aura ownership and strengths, and countdown upper bounds.
+    Resolved per-slot radius, speed, health, range and recovery profile values
+    need not equal generic class documentation. Return None or raise ValueError
+    for an invalid identity or changed fixed capability.
+    """
     if (
         not row.configured_active
         or not 1 <= row.class_id <= 5
@@ -1072,6 +1499,11 @@ def _validate_row_against_class_catalog(
 def _status_mechanic(
     row: StatusMechanicV1,
 ) -> AuthorizedClassStatusMechanicV1:
+    """Copy one public status catalog row into a neutral class-card record.
+
+    row is a validated StatusMechanicV1. Return AuthorizedClassStatusMechanicV1
+    with unchanged channel, timing, strength and damage-break declarations.
+    """
     return AuthorizedClassStatusMechanicV1(
         status_channel=row.status_channel_id,
         status_id=row.status_id,
@@ -1087,6 +1519,11 @@ def _status_mechanic(
 def _catalog_aura_mechanic(
     row: AuraMechanicV1,
 ) -> AuthorizedClassAuraMechanicV1:
+    """Copy one catalog aura into a neutral class-card mechanic.
+
+    row is a validated AuraMechanicV1. Return its unchanged radius, per-emitter
+    strength and stacking/clamp declarations as AuthorizedClassAuraMechanicV1.
+    """
     return AuthorizedClassAuraMechanicV1(
         aura_id=row.aura_id,
         radius=row.radius,
@@ -1101,6 +1538,12 @@ def _row_aura_mechanic(
     row: AuraMechanicV1,
     decoded: DecodedAgentFeatureRowV1,
 ) -> AuthorizedClassAuraMechanicV1:
+    """Combine a declared aura rule with its authorized wire capability values.
+
+    row supplies aura ID/stacking/clamp semantics; decoded supplies that class's
+    wire radius and multiplier. Return an AuthorizedClassAuraMechanicV1.
+    The caller has already joined wire capabilities to the public catalog.
+    """
     if row.aura_id == "mage_damage_amplification":
         radius = decoded.mage_aura_radius
         multiplier = decoded.mage_aura_per_emitter_multiplier
@@ -1123,6 +1566,14 @@ def _class_mechanics(
     *,
     documentation_profile: AuthorizedClassDocumentationProfileV1,
 ) -> AuthorizedClassMechanicsV2:
+    """Build a generic public class card after checking an authorized row.
+
+    decoded supplies a class in 1..5; catalog supplies class/status/aura facts;
+    documentation_profile supplies the public wording version. Return an
+    AuthorizedClassMechanicsV2 card with catalog values, keeping per-agent
+    resolved profile values on body records. Raise ValueError for invalid
+    class IDs or mismatched fixed wire capabilities.
+    """
     if not 1 <= decoded.class_id <= 5:
         raise ValueError("authorized POV class ID must be in the V1 range 1..5.")
     class_catalog = catalog.class_mechanics[decoded.class_id]
@@ -1166,6 +1617,14 @@ def _active_statuses(
     decoded: DecodedAgentFeatureRowV1,
     catalog: StaticMechanicsCatalogV1,
 ) -> tuple[AuthorizedStatusV1, ...]:
+    """Build active status labels from authorized durations and public mechanics.
+
+    decoded supplies nine remaining durations and available strength columns;
+    catalog supplies channel meaning and missing-column strength. Return
+    positive-duration AuthorizedStatusV1 rows in display order, with empty
+    direct_sources. Recorded strengths must exactly join catalog/f32 values
+    or raise ValueError. A class label is never used to guess a source agent.
+    """
     statuses: list[AuthorizedStatusV1] = []
     for mechanic in catalog.status_channels:
         remaining = decoded.status_remaining_duration_by_channel[
@@ -1217,6 +1676,13 @@ def _aura_modifiers(
     decoded: DecodedAgentFeatureRowV1,
     catalog: StaticMechanicsCatalogV1,
 ) -> tuple[AuthorizedAuraModifierV1, ...]:
+    """Return only non-neutral authorized aura multipliers after bounds checks.
+
+    decoded supplies current recipient multipliers; catalog supplies the
+    float32-rounded Mage ceiling and Warrior floor. Return an ordered tuple
+    for values different from 1.0. Raise ValueError when a multiplier exceeds
+    its declared range. No hidden emitter list is inferred.
+    """
     aura_by_id = {row.aura_id: row for row in catalog.aura_mechanics}
     mage_clamp = _catalog_as_f32(
         aura_by_id["mage_damage_amplification"].clamp_value,
@@ -1255,6 +1721,14 @@ def _agent(
     authority_session_id: str,
     recipient_public_agent_id: str,
 ) -> AuthorizedAgentV1:
+    """Build one neutral agent from an already authorized decoded row.
+
+    row owns public identity, recipient relation and shield counter. catalog
+    supplies class wording and status/aura meaning. authority_session_id and
+    recipient_public_agent_id scope the opaque key. Return AuthorizedAgentV1
+    with observed profile/dynamic values; direct status sources remain empty.
+    Constructors reject invalid values. No hidden facts are added.
+    """
     decoded = row.decoded
     class_catalog = catalog.class_mechanics[decoded.class_id]
     return AuthorizedAgentV1(
@@ -1291,6 +1765,11 @@ def _agent(
 
 
 def _absolute_team_id(*, recipient_team_id: int, actor_relative_index: int) -> int:
+    """Translate an own/opponent team axis to physical team ID.
+
+    recipient_team_id is 1/2 and actor_relative_index is 0/1. Return recipient
+    team for zero, opposing team for one; raise ValueError outside these axes.
+    """
     if recipient_team_id not in (1, 2) or actor_relative_index not in (0, 1):
         raise ValueError("POV lifecycle team identity is outside the V1 axes.")
     return recipient_team_id if actor_relative_index == 0 else 3 - recipient_team_id
@@ -1303,6 +1782,12 @@ def _shared_relation(
     recipient_public_agent_id: str,
     recipient_team_id: int,
 ) -> Literal["self", "ally", "opponent"]:
+    """Label a body relative to the fixed SharedObs recipient.
+
+    public_agent_id equal to recipient_public_agent_id yields self. Otherwise,
+    team_id equal to recipient_team_id yields ally, and all others opponent.
+    Return the label; callers already validated IDs and team values.
+    """
     if public_agent_id == recipient_public_agent_id:
         return "self"
     return "ally" if team_id == recipient_team_id else "opponent"
@@ -1318,6 +1803,15 @@ def _shared_authorized_row(
     lifecycle: ActorPovSpawnLifecycleV1,
     relation_row_must_be_alive: bool,
 ) -> _AuthorizedRowV1:
+    """Join a decoded visible/self body to the recipient's topology and lifecycle.
+
+    public_agent_id/decoded identify the candidate; topology supplies canonical
+    membership/team/local-slot identity. recipient_public_agent_id and
+    recipient_team_id fix relation. lifecycle is the recipient-owned record
+    used for life/shield truth. relation_row_must_be_alive=True rejects corpses;
+    False allows a source's own corpse row. Return _AuthorizedRowV1 or raise
+    ValueError for identity, active/life or visibility contradictions.
+    """
     if (
         not topology.sensor_source_configured_active
         or not decoded.configured_active
@@ -1364,7 +1858,15 @@ def _shared_projection_contributions(
     recipient_team_id: int,
     recipient_lifecycle: ActorPovSpawnLifecycleV1,
 ) -> tuple[_SharedContributionV1, ...]:
-    """Decode only one already-admitted source's self and visible rows."""
+    """Decode only self and visible rows from one already admitted source.
+
+    projection supplies source material; source/source_global_slot identify
+    its admission. topology_by_global_slot, recipient_public_agent_id,
+    recipient_team_id and recipient_lifecycle supply fixed recipient authority.
+    Return body/source pairs, skipping hidden rows and a matching self diagonal.
+    Raise ValueError for conflicting identities, self copies or lifecycle facts.
+    Call this only after complete source-set/epoch checks and availability gating.
+    """
     _validate_shared_unit_axes(projection)
     frame = projection.base_sensor_frame
     public_id_by_slot = _shared_public_id_by_global_slot(projection)
@@ -1452,6 +1954,13 @@ def _merge_shared_contributions(
     tuple[_AuthorizedRowV1, ...],
     dict[str, tuple[SharedObsAuthorizedSensorSourceV1, ...]],
 ]:
+    """Deduplicate authorized bodies while retaining every contributing sensor.
+
+    contributions is a tuple of admitted body/source pairs. Equal public IDs
+    must have exactly equal decoded facts; otherwise raise ValueError. Return
+    (rows sorted by physical team/public ID, provenance by public ID), with
+    unique sources ordered recipient-first then public ID. Inputs are unchanged.
+    """
     row_by_public_id: dict[str, _AuthorizedRowV1] = {}
     sources_by_public_id: dict[str, dict[str, SharedObsAuthorizedSensorSourceV1]] = {}
     for contribution in contributions:
@@ -1490,7 +1999,45 @@ def build_no_shared_obs_authorized_scene_v1(
     authority_session_id: str,
     frame_index: int | None = None,
 ) -> NoSharedObsAuthorizedScenePartsV1:
-    """Build one NoSharedObs scene from recipient-authorized recorded rows."""
+    """Build a neutral NoSharedObs scene from recipient-authorized records.
+
+    Parameters
+    ----------
+    source : NoSharedObsPovSourceV1
+        Exact supported POV replay/index, current slice or adjacent-transition
+        slice. The authority boundary revalidates even an existing replay index.
+    public_catalog : StaticMechanicsCatalogV1
+        Exact public catalog; contents and digest are revalidated independently.
+    authority_session_id : str
+        Nonblank host-owned viewing-session ID used to scope opaque body keys.
+    frame_index : int or None, optional
+        Required for replay/index and adjacent slices. For an adjacent slice it
+        must equal one endpoint index. A current slice accepts None or its index.
+
+    Returns
+    -------
+    NoSharedObsAuthorizedScenePartsV1
+        New neutral scene, recipient/frame identity and the recipient's exact
+        next-decision mask. Bodies contain self plus visible living relation rows.
+
+    Raises
+    ------
+    TypeError
+        Source or catalog has the wrong exact supported root.
+    IndexError
+        A replay/index frame index is missing, invalid or outside its prefix.
+    ValueError
+        Session text, live index, source/catalog validation, identity, lifecycle
+        or fixed class-capability joins fail.
+
+    Notes
+    -----
+    This host path never accepts an Oracle scene or full episode context.
+    It uses public catalog explanations while keeping observed per-slot profile
+    values on agent rows. Hidden bodies are absent; unshown spawn-pad assignments
+    have no body identity. Current statuses have no invented direct source IDs.
+    No simulator, policy or renderer runs, and input records remain unchanged.
+    """
     _require_text(authority_session_id, name="authority_session_id")
     catalog = _validated_catalog(public_catalog)
     documentation_profile = authorized_class_documentation_profile_v1(catalog)
@@ -1762,7 +2309,46 @@ def build_shared_obs_authorized_scene_v1(
     public_catalog: StaticMechanicsCatalogV1,
     authority_session_id: str,
 ) -> SharedObsAuthorizedScenePartsV1:
-    """Build one fixed-recipient visual union from recorded SharedObs rows."""
+    """Build one recipient's visual union from admitted recorded SharedObs sources.
+
+    Parameters
+    ----------
+    recipient_source_material : SharedObsSourceMaterialProjectionV1 or V2
+        Exact selected recipient projection. Its availability, lifecycle, map and
+        next-decision mask own the resulting view.
+    all_active_nonrecipient_source_material : tuple of SharedObsSourceMaterialProjection
+        Every and only configured-active nonrecipient source, including opponents
+        and unavailable sources. Roots, headers, identity topology and epoch are
+        checked before admission. Order is arbitrary; duplicates are rejected.
+    public_catalog : StaticMechanicsCatalogV1
+        Exact public catalog; structure and digest are revalidated.
+    authority_session_id : str
+        Nonblank host-owned viewing-session ID used to scope recipient body keys.
+
+    Returns
+    -------
+    SharedObsAuthorizedScenePartsV1
+        Neutral scene sorted by physical team/public ID, recipient-owned mask,
+        admitted sensor list and per-body observation provenance. This is a
+        visual union, not an export of exact composed SharedObs policy tensors.
+
+    Raises
+    ------
+    TypeError
+        Catalog or source container/root types are unsupported.
+    ValueError
+        Source set, headers, topology, epoch, availability, lifecycle, catalog
+        or duplicate-body facts disagree.
+
+    Notes
+    -----
+    Read body payloads only from the recipient and allies admitted by that
+    recipient's recorded availability. Unavailable source unit payloads are
+    not validated, decoded or composed. Admitted self/visible rows must agree
+    with recipient lifecycle; duplicate body facts must match exactly. The
+    recipient's map, lifecycle and mask are never replaced by another source.
+    No Oracle snapshot, policy execution, file I/O or input mutation is used.
+    """
     _require_text(authority_session_id, name="authority_session_id")
     catalog = _validated_catalog(public_catalog)
     documentation_profile = authorized_class_documentation_profile_v1(catalog)

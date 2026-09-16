@@ -1,4 +1,8 @@
-"""Compare one scenario turn with saved results from a reviewed solution."""
+"""Compare a scenario turn with the saved result of a reviewed solution.
+
+Tests use the same comparison helpers to check recorded state and action facts.
+The saved result is a reference for its exact scenario revision.
+"""
 
 from collections.abc import Mapping
 from typing import Any
@@ -18,12 +22,6 @@ def assert_witness_tick(
     info: Info,
     case_name: str,
 ) -> None:
-    """Check every slot; report the case, turn and first changed field.
-
-    Expected values come from a saved file, never another run of current code.
-    Position rounding reuses the 0.00016 bound for CPU/GPU snapshot comparisons.
-    Health and damage keep 0.00001. Actions, life flags and outcomes are exact.
-    """
     label = f"{case_name}, turn {expected['tick']}"
     facts = info.transition_facts
     combat = facts.combat_transition_facts

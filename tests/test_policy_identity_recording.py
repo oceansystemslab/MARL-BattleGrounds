@@ -1,4 +1,4 @@
-"""Current recordings preserve actual actor inputs and reject mixed versions."""
+"""Check recorded actor inputs and rejection of incompatible input versions."""
 
 from pathlib import Path
 from typing import Literal, cast
@@ -184,7 +184,6 @@ def test_current_actor_pov_persistence_keeps_exact_version_and_bytes(
 
 
 def test_custom_source_subsets_survive_separate_writer_chunks(tmp_path: Path) -> None:
-    """The input delivered at each decision is the input reconstructed from disk."""
     import jax
     import jax.numpy as jnp
     from jax import Array

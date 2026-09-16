@@ -1,10 +1,17 @@
-"""Recorded provenance distinguishes known facts from absent external history."""
+"""Check current and historical map identity, exact geometry and recording metadata.
 
+Old recordings retain their declared names and layouts. New evaluations require
+the current catalog; unknown sources never gain an ID from matching geometry.
+"""
+
+import json
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import pytest
 
+from marl_battlegrounds import _tdm_assets
 from marl_battlegrounds.evaluation import revision
 from marl_battlegrounds.evaluation.actor_projection import (
     NO_SHARED_OBS_ACTOR_PROJECTION_V3,
@@ -29,8 +36,12 @@ from marl_battlegrounds.tasks import make_standard_team_deathmatch_config
     ),
 )
 def test_recorded_map_names_splits_geometry_and_safe_filenames(
-    map_id: int, original_id: int, original_name: str
+    map_id: int,
+    original_id: int,
+    original_name: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from marl_battlegrounds.evaluation import map_identity
     from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v1
     from marl_battlegrounds.evaluation.map_identity import approved_map_id, recorded_map
     from marl_battlegrounds.evaluation.replay_io import generated_replay_filename
@@ -39,6 +50,18 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(
     config = make_standard_team_deathmatch_config(
         map_id=map_id, team_a_roster=("priest",), team_b_roster=("mage", "mage")
     )
+    old_geometry = _tdm_assets.map_history()[map_id].geometry
+    old_config = config._replace(
+        map_width=old_geometry.map_width,
+        map_height=old_geometry.map_height,
+        obstacles=jnp.asarray(old_geometry.obstacles, dtype=jnp.float32),
+        team_spawn_pad_positions=jnp.asarray(
+            old_geometry.team_spawn_pad_positions, dtype=jnp.float32
+        ),
+    )
+    old_resolved = build_resolved_env_config_v1(old_config)
+    alias = _tdm_assets.map_id_aliases().maps[original_id]
+    assert alias.current_map_id == map_id and alias.name == original_name
     context, _ = build_recording_context(
         jax.device_get(config),
         run_id="run-1",
@@ -56,7 +79,13 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(
             ),
         },
     )
-    metadata = recorded_map(context)
+
+    def unexpected_history_read() -> None:
+        pytest.fail("reading a current map loaded historical geometry")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(map_identity, "map_history", unexpected_history_read)
+        metadata = recorded_map(context)
     expected = list_tdm_maps()[map_id]
     assert (
         approved_map_id(expected.source.asset_id, expected.source.semantic_digest)
@@ -101,6 +130,7 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(
 
     legacy = context.model_copy(
         update={
+            "resolved_env_config": old_resolved,
             "aggregation_keys": tuple(
                 row.model_copy(update={"value": str(original_id)})
                 if row.name == "map_id"
@@ -108,7 +138,7 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(
                 if row.name == "map_name"
                 else row
                 for row in context.aggregation_keys
-            )
+            ),
         }
     )
     legacy_bytes = legacy.model_dump_json()
@@ -120,6 +150,13 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(
     assert generated_replay_filename(legacy, "a" * 64, episode_id=17) == name.replace(
         expected.name, original_name, 1
     )
+    previous = context.model_copy(update={"resolved_env_config": old_resolved})
+    assert recorded_map(previous) == metadata
+    if old_geometry != _tdm_assets.map_geometry(expected):
+        with pytest.raises(ValueError, match="geometry"):
+            map_identity.registered_map_metadata(map_id, old_resolved)  # pyright: ignore[reportArgumentType]
+        with pytest.raises(ValueError, match="catalogue"):
+            _tdm_assets.current_map_id(_tdm_assets.map_history()[map_id].info)
 
     # Neither a current nor an old recording may borrow another map's ID,
     # source name or split. Those fields must all identify the same source.
@@ -196,25 +233,79 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(
     authored_bytes = authored.model_dump_json()
     assert recorded_map(authored) == metadata
     assert authored.model_dump_json() == authored_bytes
-    legacy_authored = authored.model_copy(
+    old_source = _tdm_assets.map_history()[map_id].info.source
+    previous_authored = authored.model_copy(
         update={
+            "resolved_env_config": old_resolved,
             "identity": authored.identity.model_copy(
                 update={
                     "layout": authored.identity.layout.model_copy(
-                        update={"identifier": original_name.replace("-", "_")}
+                        update={
+                            "identifier": old_source.asset_id,
+                            "version": old_source.revision,
+                            "canonical_digest": old_source.semantic_digest,
+                        }
                     )
                 }
-            )
+            ),
+        }
+    )
+    assert recorded_map(previous_authored) == metadata
+    if old_geometry != _tdm_assets.map_geometry(expected):
+        for wrong_version in (
+            authored.model_copy(update={"resolved_env_config": old_resolved}),
+            previous_authored.model_copy(
+                update={"resolved_env_config": context.resolved_env_config}
+            ),
+        ):
+            with pytest.raises(ValueError, match="geometry"):
+                recorded_map(wrong_version)
+    legacy_authored = authored.model_copy(
+        update={
+            "resolved_env_config": old_resolved,
+            "identity": authored.identity.model_copy(
+                update={
+                    "layout": authored.identity.layout.model_copy(
+                        update={
+                            "identifier": alias.asset_id,
+                            "version": alias.revision,
+                            "canonical_digest": alias.semantic_digest,
+                        }
+                    )
+                }
+            ),
         }
     )
     legacy_authored_bytes = legacy_authored.model_dump_json()
     assert recorded_map(legacy_authored) == legacy_metadata
     assert legacy_authored.model_dump_json() == legacy_authored_bytes
+    for record in (authored, previous_authored, legacy_authored):
+        registered_keys = (
+            legacy.aggregation_keys
+            if record is legacy_authored
+            else context.aggregation_keys
+        )
+        registered = record.model_copy(update={"aggregation_keys": registered_keys})
+        assert recorded_map(registered) == recorded_map(record)
+        for mismatch in ({"canonical_digest": "0" * 64}, {"version": 2**31 - 1}):
+            conflict = registered.model_copy(
+                update={
+                    "identity": registered.identity.model_copy(
+                        update={
+                            "layout": registered.identity.layout.model_copy(
+                                update=mismatch
+                            )
+                        }
+                    )
+                }
+            )
+            with pytest.raises(ValueError, match="source identity conflicts"):
+                recorded_map(conflict)
     for record in (authored, legacy_authored):
         for mismatch in (
             {"canonical_digest": "0" * 64},
             {"identifier": "custom-copy-of-the-same-geometry"},
-            {"version": expected.source.revision + 1},
+            {"version": 2**31 - 1},
         ):
             unverified = record.model_copy(
                 update={
@@ -288,6 +379,52 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(
     )
     with pytest.raises(ValueError, match="custom map metadata"):
         recorded_map(custom_conflict)
+
+
+def test_map_history_is_complete_cached_and_immutable() -> None:
+    history = _tdm_assets.map_history()
+    assert history is _tdm_assets.map_history()
+    assert tuple(row.info.map_id for row in history) == tuple(range(52))
+    assert all(len(row.geometry.obstacles) == 32 for row in history)
+    assert all(
+        tuple(len(team) for team in row.geometry.team_spawn_pad_positions) == (5, 5)
+        for row in history
+    )
+    with pytest.raises(ValueError, match="frozen"):
+        history[0].geometry.map_width = 99.0  # type: ignore[misc]
+    for alias in _tdm_assets.map_id_aliases().maps:
+        assert (
+            alias.semantic_digest
+            == history[alias.current_map_id].info.source.semantic_digest
+        )
+
+
+@pytest.mark.parametrize("corruption", ["missing", "duplicate", "name", "geometry"])
+def test_map_history_rejects_changed_or_incomplete_content(
+    corruption: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_reader = _tdm_assets._resource_bytes  # pyright: ignore[reportPrivateUsage]
+    raw = json.loads(original_reader("map_history.json"))
+    if corruption == "missing":
+        raw["maps"].pop()
+        message = "ordered maps"
+    elif corruption == "duplicate":
+        raw["maps"][1] = raw["maps"][0]
+        message = "ordered maps"
+    elif corruption == "name":
+        raw["maps"][1]["info"]["name"] = raw["maps"][0]["info"]["name"]
+        message = "distinct names"
+    else:
+        raw["maps"][0]["geometry"]["map_width"] += 1
+        message = "geometry digest mismatch"
+    payload = json.dumps(raw).encode()
+
+    def read_resource(path: str) -> bytes:
+        return payload if path == "map_history.json" else original_reader(path)
+
+    monkeypatch.setattr(_tdm_assets, "_resource_bytes", read_resource)
+    with pytest.raises(ValueError, match=message):
+        _tdm_assets.map_history.__wrapped__()
 
 
 @pytest.mark.parametrize("mode", ["shared_obs", "no_shared_obs"])

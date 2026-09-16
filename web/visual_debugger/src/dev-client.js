@@ -1,3 +1,10 @@
+/**
+ * @file Install the DevClient map/scenario editor when the server enables authoring.
+ * Local drafts, selection, camera, and bounded undo history belong to the browser;
+ * validation, saved revisions, and live scenario replacement belong to the host.
+ * This module binds DOM events and sends whole-draft commands through api.js.
+ * Combat selectors reflect confirmed host configuration, not unconfirmed choices.
+ */
 import {
   acquireCapabilityToken,
   DebuggerApiError,
@@ -51,8 +58,8 @@ const ASSET_ID_COLLATOR = new Intl.Collator("en", {
 });
 
 /**
- * Project persisted assets into a deterministic human order without mutating
- * the host-owned discovery response.
+ * Return a sorted copy of assets using English numeric asset-ID order, then kind
+ * and revision. The host discovery array and its entry objects are not changed.
  *
  * @param {ReadonlyArray<Record<string, any>>} assets
  */
@@ -67,7 +74,12 @@ export function orderedAuthoringAssets(assets) {
   });
 }
 
-/** @param {ReadonlyArray<Record<string, any>>} assets @param {"map" | "scenario"} kind */
+/**
+ * Return saved-draft assets of the requested map or scenario kind in display order.
+ * Invalid-for-execution drafts remain openable for repair. No asset is loaded.
+ *
+ * @param {ReadonlyArray<Record<string, any>>} assets @param {"map" | "scenario"} kind
+ */
 export function openableDraftAssets(assets, kind) {
   return orderedAuthoringAssets(
     assets.filter(
@@ -76,7 +88,12 @@ export function openableDraftAssets(assets, kind) {
   );
 }
 
-/** @param {ReadonlyArray<Record<string, any>>} assets */
+/**
+ * Return execution-valid saved drafts in deterministic display order. These are
+ * eligible launcher choices; listing them does not reset the live debugger.
+ *
+ * @param {ReadonlyArray<Record<string, any>>} assets
+ */
 export function debuggableAuthoringAssets(assets) {
   return orderedAuthoringAssets(
     assets.filter(
@@ -86,9 +103,9 @@ export function debuggableAuthoringAssets(assets) {
 }
 
 /**
- * Validation echoes are evidence about the submitted snapshot, not a newer
- * mutable document. Keeping the current reference prevents a delayed response
- * from erasing local edits.
+ * Choose the editor draft after a host response. Validation replies and replies
+ * without a draft preserve the exact currentDraft reference so delayed validation
+ * cannot erase edits. Other returned drafts are cloned before local editing.
  *
  * @param {any} currentDraft
  * @param {Readonly<Record<string, any>>} response
@@ -100,7 +117,13 @@ export function draftAfterAuthoringResponse(currentDraft, response) {
   return cloneAuthoringValue(response.draft);
 }
 
-/** @param {Readonly<Record<string, any>>} asset */
+/**
+ * Build an explicit saved-draft source descriptor from asset kind, ID, and revision.
+ * Throw TypeError for any source_kind other than saved_draft. Return a new object
+ * without mutating the discovery row.
+ *
+ * @param {Readonly<Record<string, any>>} asset
+ */
 export function persistedAuthoringSource(asset) {
   if (asset.source_kind !== "saved_draft") {
     throw new TypeError("DevClient sources must identify a saved draft revision.");
@@ -113,12 +136,21 @@ export function persistedAuthoringSource(asset) {
   };
 }
 
-/** @param {Readonly<Record<string, any>>} asset */
+/**
+ * Format asset ID, name, revision, and map dimensions for an open-draft option.
+ * Dimensions use the host row's map units; this returns text only.
+ *
+ * @param {Readonly<Record<string, any>>} asset
+ */
 export function savedDraftOptionLabel(asset) {
   return `${asset.asset_id} · ${asset.name} · revision ${asset.revision} · ${asset.map_width} × ${asset.map_height}`;
 }
 
 /**
+ * Return saved maps for copy_saved_map or saved scenarios for duplicate_saved_scenario.
+ * Other creationMode values return an empty array. Keep deterministic display order
+ * and allow drafts needing validation fixes so they can be edited.
+ *
  * @param {ReadonlyArray<Record<string, any>>} assets
  * @param {string} creationMode
  */
@@ -139,13 +171,24 @@ export function newScenarioSourceAssets(assets, creationMode) {
       );
 }
 
-/** @param {Readonly<Record<string, any>>} asset */
+/**
+ * Format a source draft label with identity, dimensions, and execution-valid status.
+ * This returns text and does not perform validation.
+ *
+ * @param {Readonly<Record<string, any>>} asset
+ */
 export function authoringSourceOptionLabel(asset) {
   const status = asset.execution_valid ? "execution-valid" : "needs validation fixes";
   return `${asset.asset_id} · ${asset.name} · revision ${asset.revision} · ${asset.map_width} × ${asset.map_height} · ${status}`;
 }
 
-/** @param {Readonly<Record<string, any>>} asset */
+/**
+ * Format a saved asset's debug-launch label. Map choices describe a default 5v5 TDM
+ * preview; scenario choices describe their authored scenario. This assumes the
+ * caller already filtered execution-valid assets.
+ *
+ * @param {Readonly<Record<string, any>>} asset
+ */
 export function debugAssetOptionLabel(asset) {
   const identity = `${asset.asset_id} · revision ${asset.revision}`;
   return asset.asset_kind === "map"
@@ -153,7 +196,14 @@ export function debugAssetOptionLabel(asset) {
     : `${identity} · Scenario · ${asset.name} · ${asset.map_width} × ${asset.map_height} · execution-valid`;
 }
 
-/** @param {Record<string, any> | null} draft @param {Record<string, any> | null} baseline */
+/**
+ * Describe whether draft is absent, new, changed, or equal to baseline content.
+ * baseline is the last installed saved/new content snapshot, or null. Return a
+ * status string including the saved path only for unchanged persisted content.
+ * JSON serialization errors propagate; no file existence check occurs.
+ *
+ * @param {Record<string, any> | null} draft @param {Record<string, any> | null} baseline
+ */
 export function authoringPersistenceMessage(draft, baseline) {
   if (draft === null) {
     return "No authoring draft is open.";
@@ -173,8 +223,9 @@ export function authoringPersistenceMessage(draft, baseline) {
 }
 
 /**
- * Preserve an open deleted asset as an ordinary unsaved recovery buffer.
- * Deleting any other selected identity must not disturb the current editor.
+ * Preserve unrelated draft references. If source names the open saved asset, return
+ * a cloned unsaved recovery draft with an untitled ID and revision zero. This
+ * changes no server file and does not discard the open content.
  *
  * @param {Record<string, any> | null} draft
  * @param {Readonly<Record<string, any>>} source
@@ -195,12 +246,22 @@ export function draftAfterSavedAssetDeletion(draft, source) {
   return recovery;
 }
 
-/** @param {Readonly<Record<string, any>>} asset */
+/**
+ * Build confirmation text explaining that deleting asset removes all saved revisions.
+ * Return text only; the caller owns confirmation and the host deletion command.
+ *
+ * @param {Readonly<Record<string, any>>} asset
+ */
 export function savedAssetDeletionPrompt(asset) {
   return `Permanently delete saved ${asset.asset_kind} "${asset.name}" (asset ID: ${asset.asset_id}) and all of its revisions? This cannot be undone.`;
 }
 
-/** @param {unknown} value */
+/**
+ * Return whether value is a nonempty lowercase snake_case string of at most
+ * 64 characters. Only lowercase letters, digits, and single separators are allowed.
+ *
+ * @param {unknown} value
+ */
 export function isValidAuthoringAssetId(value) {
   return (
     typeof value === "string" &&
@@ -210,9 +271,11 @@ export function isValidAuthoringAssetId(value) {
 }
 
 /**
- * Keep the Combat selectors as projections of installed host authority.
- * A browser change is an intent only: the controls snap back immediately and
- * move only after a successor frame confirms the requested configuration.
+ * Create install/request/render operations around the supplied selector bindings.
+ * Only confirmed host configuration becomes authoritative. A user request first
+ * restores displayed confirmed values, then emits a valid changed intent. Return
+ * a frozen controller; no HTTP request is sent directly. Reactive/Scenario 5
+ * controllers require SharedObs, and Scenario 5 is allowed only on Team B.
  *
  * @param {{
  *   teamAController: {value: string, disabled: boolean},
@@ -229,12 +292,21 @@ export function createCombatConfigurationController(bindings) {
   /** @type {Readonly<Record<string, string>> | null} */
   let authoritative = null;
 
-  /** @param {unknown} value */
+  /**
+   * Return whether value is manual, reactive_tdm, or random_valid.
+   *
+   * @param {unknown} value
+   */
   function isSupportedController(value) {
     return value === "manual" || value === "reactive_tdm" || value === "random_valid";
   }
 
-  /** @param {unknown} value */
+  /**
+   * Return a frozen supported controller/information-mode selection or null.
+   * Reject unsupported combinations without changing controls or host state.
+   *
+   * @param {unknown} value
+   */
   function normalize(value) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       return null;
@@ -260,6 +332,10 @@ export function createCombatConfigurationController(bindings) {
     });
   }
 
+  /**
+   * Project installed configuration into selector values, enabled options, and root
+   * dataset fields. With no authority, disable selectors and retain no inferred config.
+   */
   function render() {
     const configuration = authoritative;
     bindings.teamAController.disabled = configuration === null;
@@ -288,7 +364,11 @@ export function createCombatConfigurationController(bindings) {
   }
 
   return Object.freeze({
-    /** @param {unknown} value */
+    /**
+     * Install a supported confirmed configuration and redraw selectors.
+     * Return false without changes for invalid value, or true after installation.
+     * @param {unknown} value
+     */
     install(value) {
       const normalized = normalize(value);
       if (normalized === null) {
@@ -298,6 +378,11 @@ export function createCombatConfigurationController(bindings) {
       render();
       return true;
     },
+    /**
+     * Read selector intent, restore confirmed values, and emit a valid changed choice.
+     * Return true only when emit is called. Callback errors propagate; this method
+     * does not optimistically replace the installed configuration.
+     */
     request() {
       const requested = normalize({
         team_a_controller: bindings.teamAController.value,
@@ -322,8 +407,19 @@ export function createCombatConfigurationController(bindings) {
   });
 }
 
+/**
+ * Bind the enabled DevClient DOM, independent map/scenario editor state, and events.
+ * Acquire the tab token, initialize confirmed combat controls, and install local
+ * editing, navigation, pointer, keyboard, save, validation, and host-handoff handlers.
+ * Missing required shell elements throw Error. Returns undefined; listeners live
+ * for this page lifetime and are installed only for an authoring-enabled live product.
+ */
 function installDevClient() {
-  /** @param {string} id */
+  /**
+   * Find the DOM element with id or throw Error naming the missing DevClient shell node.
+   *
+   * @param {string} id
+   */
   function required(id) {
     const candidate = document.getElementById(id);
     if (!candidate) {
@@ -381,6 +477,10 @@ function installDevClient() {
     problemCount: required("authoring-problem-count"),
   };
 
+  /**
+   * Return fresh empty draft, baseline, selection, validation, camera, and history state.
+   * Map and scenario editors receive independent objects and arrays.
+   */
   function createEditorState() {
     return {
       draft: null,
@@ -423,6 +523,12 @@ function installDevClient() {
     reactiveControllerOptions: elements.reactiveControllerOptions,
     noSharedOption: elements.noSharedOption,
     root: document.documentElement,
+    /**
+     * Publish the resolved combat configuration as a document event.
+     * The configuration argument contains both controller choices and the execution
+     * information mode. Listeners own applying/resetting the live session; this
+     * callback only dispatches marl-devclient-combat-configuration synchronously.
+     */
     emit: (configuration) => {
       document.dispatchEvent(
         new CustomEvent("marl-devclient-combat-configuration", {
@@ -437,12 +543,22 @@ function installDevClient() {
   document.documentElement.dataset.devclientArea = "combat";
   combatConfiguration.render();
 
-  /** @param {Event} event @param {string} selector */
+  /**
+   * Return the nearest selector match from an Element event target, otherwise null.
+   * The DOM is unchanged; invalid selector syntax can throw.
+   *
+   * @param {Event} event @param {string} selector
+   */
   function closest(event, selector) {
     return event.target instanceof Element ? event.target.closest(selector) : null;
   }
 
-  /** @param {Event | null} [event] */
+  /**
+   * Return whether an authoring request is busy. If blocked, prevent the optional
+   * event's default action; event defaults to null. No command is queued.
+   *
+   * @param {Event | null} [event]
+   */
   function authoringInteractionBlocked(event = null) {
     if (!state.busy) {
       return false;
@@ -451,7 +567,12 @@ function installDevClient() {
     return true;
   }
 
-  /** @param {string} message */
+  /**
+   * Replace editor problems with one field-linked browser error and redraw the problem
+   * list. editor defaults to the current editor; message is shown as text.
+   *
+   * @param {string} message
+   */
   function showLocalError(message, editor = state.editor) {
     editor.problems = [
       {
@@ -465,7 +586,14 @@ function installDevClient() {
     renderProblems();
   }
 
-  /** @param {Record<string, any>} response */
+  /**
+   * Install a host reply into editor, which defaults to the current editor.
+   * New/open drafts reset selection/history/camera; saved responses refresh the baseline.
+   * Validation echoes preserve local draft identity. Update catalog/assets/problems
+   * when supplied, then render all controls. Invalid model operations can throw.
+   *
+   * @param {Record<string, any>} response
+   */
   function installResponse(response, editor = state.editor) {
     const nextDraft = draftAfterAuthoringResponse(editor.draft, response);
     if (nextDraft !== editor.draft) {
@@ -520,7 +648,14 @@ function installDevClient() {
     renderAll();
   }
 
-  /** @param {Record<string, any>} command */
+  /**
+   * Send one authoring command for editor, defaulting to the active editor. Busy calls
+   * resolve null. Otherwise fence interaction, install the response, and return it.
+   * Errors become local problem text and a null result; the busy fence always clears.
+   * The API helper never retries an uncertain POST.
+   *
+   * @param {Record<string, any>} command
+   */
   async function send(command, editor = state.editor) {
     if (state.busy) {
       return null;
@@ -545,11 +680,20 @@ function installDevClient() {
     }
   }
 
+  /**
+   * Send one all-assets list command and install its response. Resolve after completion;
+   * failures are shown by send and do not replace existing discovery state.
+   */
   async function refreshAssets() {
     await send({ command_type: "list", asset_kind: "all" });
   }
 
-  /** @param {Record<string, any>} command */
+  /**
+   * Send command and refresh asset discovery only if the response reports ok.
+   * Return the original response or null; failed commands are not retried.
+   *
+   * @param {Record<string, any>} command
+   */
   async function sendAndRefreshAssets(command) {
     const response = await send(command);
     if (response?.ok) {
@@ -558,11 +702,21 @@ function installDevClient() {
     return response;
   }
 
+  /**
+   * Dispatch the page event that tells the main client its live scenario was replaced.
+   * This notification alone does not fetch or install a frame.
+   */
   function notifyDebugSessionReplaced() {
     document.dispatchEvent(new CustomEvent("marl-devclient-debug-session-replaced"));
   }
 
-  /** @param {Record<string, any>} source @param {boolean} returnToCombat */
+  /**
+   * Ask the host to load source into the live debugger. On success notify the main
+   * client and optionally select Combat; returnToCombat defaults to false. Failed
+   * commands leave the current area unchanged and are reported by send.
+   *
+   * @param {Record<string, any>} source @param {boolean} returnToCombat
+   */
   async function openInDebug(source, returnToCombat = false) {
     const response = await send({ command_type: "open_in_debug", source });
     if (!response?.ok) {
@@ -574,7 +728,12 @@ function installDevClient() {
     }
   }
 
-  /** @param {"maximum_obstacle_slots" | "fixed_grid_world_units" | "fixed_snap_world_units"} key */
+  /**
+   * Read the requested positive finite numeric catalog field. Return its value or
+   * throw TypeError naming the missing field; grid and snap values use map units.
+   *
+   * @param {"maximum_obstacle_slots" | "fixed_grid_world_units" | "fixed_snap_world_units"} key
+   */
   function catalogNumber(key) {
     const value = state.catalog?.[key];
     if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
@@ -583,7 +742,12 @@ function installDevClient() {
     return value;
   }
 
-  /** @param {string} promptText @param {string} defaultId */
+  /**
+   * Prompt with promptText and defaultId. Return a valid lowercase asset ID or null
+   * on cancellation/invalid text; invalid text also becomes a local error. Sends no request.
+   *
+   * @param {string} promptText @param {string} defaultId
+   */
   function promptAssetId(promptText, defaultId) {
     const requested = window.prompt(promptText, defaultId);
     if (requested === null) {
@@ -598,7 +762,14 @@ function installDevClient() {
     return requested;
   }
 
-  /** @param {"map" | "scenario"} kind */
+  /**
+   * Create a map or scenario through the host unless busy. Scenario mode selects blank,
+   * copied saved map, or duplicated saved scenario and requires its explicit source.
+   * Missing/invalid choices become local errors; saved-source JSON parse errors can
+   * propagate. A successful response is installed by send.
+   *
+   * @param {"map" | "scenario"} kind
+   */
   async function createDraft(kind) {
     if (state.busy) {
       return;
@@ -633,7 +804,13 @@ function installDevClient() {
     await send(command);
   }
 
-  /** @param {"combat" | "maps" | "scenarios"} area */
+  /**
+   * Switch between Combat, Maps, and Scenarios unless busy. Update navigation and
+   * visibility, refresh assets, and create a draft when the selected editor is empty.
+   * Each editor retains its own draft/history; switching does not save it.
+   *
+   * @param {"combat" | "maps" | "scenarios"} area
+   */
   async function selectArea(area) {
     if (state.busy) {
       return;
@@ -665,7 +842,13 @@ function installDevClient() {
     }
   }
 
-  /** @param {Record<string, any>} next @param {Record<string, any>} [before] */
+  /**
+   * Install next as a local edit and push before content into a 50-entry undo history.
+   * before defaults to the current draft. Busy or null-before calls do nothing.
+   * Clear redo/validation, redraw, and start host validation without awaiting it.
+   *
+   * @param {Record<string, any>} next @param {Record<string, any>} [before]
+   */
   function commit(next, before = state.editor.draft) {
     if (state.busy || before === null) {
       return;
@@ -679,7 +862,10 @@ function installDevClient() {
     void validateDraft();
   }
 
-  /** Clear a selection whose structural identity is absent after history restore. */
+  /**
+   * Clear selectedId only when the restored draft no longer contains that object.
+   * The draft and history are unchanged.
+   */
   function clearStaleSelection() {
     if (
       state.editor.draft !== null &&
@@ -690,6 +876,10 @@ function installDevClient() {
     }
   }
 
+  /**
+   * Clear the active draft's camera and redraw its canvas unless busy or no draft exists.
+   * This changes only the browser view, not authored content.
+   */
   function recenterAuthoringView() {
     if (state.busy || state.editor.draft === null) {
       return;
@@ -698,6 +888,11 @@ function installDevClient() {
     renderCanvas();
   }
 
+  /**
+   * Restore the active draft content from its baseline and recenter the view.
+   * Changed content becomes one undoable edit, clears selection/redo/validation, and
+   * starts host validation. Busy, missing-draft, or missing-baseline calls do nothing.
+   */
   function resetAuthoringDraft() {
     const editor = state.editor;
     if (state.busy || editor.draft === null || editor.baseline === null) {
@@ -718,12 +913,20 @@ function installDevClient() {
     void validateDraft(editor);
   }
 
+  /**
+   * Submit editor's full draft for host validation when present. editor defaults to
+   * the current editor. Resolve after send; validation echoes cannot replace local content.
+   */
   async function validateDraft(editor = state.editor) {
     if (editor.draft !== null) {
       await send({ command_type: "validate", draft: editor.draft }, editor);
     }
   }
 
+  /**
+   * Rebuild the debug-launch dropdown from valid saved assets, retaining its selected
+   * source if still present. Update Load availability; send no host command.
+   */
   function renderCombatOptions() {
     const selected = elements.scenarioSelect.value;
     elements.scenarioSelect.replaceChildren(new Option("Built-in arena", ""));
@@ -743,6 +946,11 @@ function installDevClient() {
     elements.scenarioLoad.disabled = !elements.scenarioSelect.value;
   }
 
+  /**
+   * Rebuild saved-map or saved-scenario choices for the current area. Retain the open
+   * source when possible, otherwise select the first available asset and update
+   * editor.openSourceValue. Opening still requires an explicit command.
+   */
   function renderSavedDraftOptions() {
     const kind = state.area === "scenarios" ? "scenario" : "map";
     const assets = openableDraftAssets(state.assets, kind);
@@ -772,6 +980,10 @@ function installDevClient() {
     elements.savedDraftSelect.setAttribute("aria-label", `Saved ${kind} draft`);
   }
 
+  /**
+   * Rebuild source choices for the selected scenario creation mode. Preserve a separate
+   * selection per copy/duplicate mode and hide the source picker for blank creation.
+   */
   function renderNewScenarioSourceOptions() {
     const mode = elements.newScenarioMode.value;
     const candidates = newScenarioSourceAssets(state.assets, mode);
@@ -811,6 +1023,9 @@ function installDevClient() {
     }
   }
 
+  /**
+   * Show the active draft's saved/unsaved status from its current content and baseline.
+   */
   function renderPersistenceStatus() {
     elements.persistenceStatus.textContent = authoringPersistenceMessage(
       state.editor.draft,
@@ -818,6 +1033,10 @@ function installDevClient() {
     );
   }
 
+  /**
+   * Rebuild document/object buttons and count from the active draft. Mark current
+   * selection and make agent rows draggable. An absent draft clears the list.
+   */
   function renderObjectList() {
     elements.objectList.replaceChildren();
     if (state.editor.draft === null) {
@@ -850,6 +1069,10 @@ function installDevClient() {
     elements.objectCount.textContent = String(objects.length);
   }
 
+  /**
+   * Rebuild field-linked validation/error buttons. When no problems exist, show
+   * execution-valid status or ask for host validation; this renderer validates nothing itself.
+   */
   function renderProblems() {
     elements.problemList.replaceChildren();
     elements.problemCount.textContent = String(state.editor.problems.length);
@@ -876,6 +1099,11 @@ function installDevClient() {
     }
   }
 
+  /**
+   * Render the active draft with selected object, normalized camera, and host grid/catalog.
+   * Store the resulting camera; an absent draft clears the canvas. Missing required
+   * catalog numbers throw through catalogNumber. No authored values are changed.
+   */
   function renderCanvas() {
     if (state.editor.draft === null) {
       elements.canvas.replaceChildren();
@@ -892,7 +1120,12 @@ function installDevClient() {
     );
   }
 
-  /** @param {number} clientX @param {number} clientY */
+  /**
+   * Convert clientX/clientY browser pixels into map coordinates using the canvas bounds
+   * and current camera. Return null without a draft or usable dimensions. No state is changed.
+   *
+   * @param {number} clientX @param {number} clientY
+   */
   function authoringWorldPoint(clientX, clientY) {
     if (state.editor.draft === null) {
       return null;
@@ -911,6 +1144,11 @@ function installDevClient() {
     );
   }
 
+  /**
+   * Set busy/inert state and control availability from draft, selection, history, and
+   * host validation. Only selected obstacles enable duplicate/delete/reorder controls.
+   * Opening in Debug requires an execution-valid draft.
+   */
   function renderAvailability() {
     const selected =
       state.editor.draft &&
@@ -949,6 +1187,10 @@ function installDevClient() {
       state.busy || !state.editor.draft || !state.editor.validation?.execution_valid;
   }
 
+  /**
+   * Refresh source choices, editor labels, persistence, objects, canvas, inspector,
+   * problems, and availability from current local state. This performs DOM work only.
+   */
   function renderAll() {
     renderCombatOptions();
     renderSavedDraftOptions();
@@ -1441,7 +1683,13 @@ function installDevClient() {
       );
     },
   );
-  /** @param {PointerEvent} event */
+  /**
+   * Finish only the matching active pointer gesture and release pointer capture.
+   * A completed drag commits one undoable edit when not busy; panning only updates
+   * the view. Both pointerup and pointercancel use this same behavior.
+   *
+   * @param {PointerEvent} event
+   */
   function finishPointer(event) {
     if (!state.pointer || state.pointer.pointerId !== event.pointerId) {
       return;

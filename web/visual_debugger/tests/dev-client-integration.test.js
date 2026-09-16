@@ -1,3 +1,7 @@
+/**
+ * @file Check separation of DevClient authoring from Replay Viewer startup and the
+ * allowed saved-draft surfaces.
+ */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";

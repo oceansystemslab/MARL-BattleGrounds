@@ -5,35 +5,39 @@
 > **NORMATIVE CONTRACT — ACTIVATED 2026-08-10.** Metric rows remain subject to
 > their stated readiness and validity gates.
 
-This document is the normative MARL-BattleGrounds metric contract. It owns
-metric identities, meanings, dispositions, amount stages, opportunity rules,
-attribution limits, and presentation tiers. The companion
+This document defines what each MARL-BattleGrounds metric means. It names the
+metric, the recorded facts it uses, when it applies, who can receive credit,
+and what the result may claim. It also says where the metric may be shown. The companion
 [evaluation protocol](protocol.md) owns evaluation cells, aggregation,
 uncertainty, cross-play, scenarios, and leakage control. Accepted departures
 from the original PDF are recorded in the
 [specification amendments](../design/specification_amendments.md).
 
-The specification is deliberately broader than the initial implementation.
-`derivable_now` means the completed mechanics and Milestone 6 evaluation seam
-can support the metric. `requires_future_task_authority` means the disposition
-is settled but the formula cannot activate until the owning task defines its
-score, objective, reward, and terminal facts. A deferred or blocked row is not
-an official result.
+**Reading rule, 2026-09-15:** start with the current scalar TDM contract below.
+The later V1 registry is retained history, and the KOTH/CTF tables are inactive
+proposals. Their old IDs, formulas, and presentation rules must not be mistaken
+for the current scalar CSV inventory. No metric formula, schema, or column is
+changed by this documentation update.
 
-Stable IDs are public semantic references for documentation, artifacts and
-tests. Formulas may be implemented only by their named owner.
+In the historical registry, `derivable_now` means the completed mechanics and
+M6 evaluation records could support a metric; it does not mean every listed
+formula is implemented today. `requires_future_task_authority` means the owning
+task must first define its score, objectives, reward, and completion facts.
+A deferred or blocked row cannot be reported as an official result.
+
+Stable IDs let documentation, artifacts, and tests refer to one exact meaning.
+Only the named implementation owner may compute that formula.
 
 ## Current scalar TDM contract
 
 ### Manuscript family summary
 
-The table below groups measurements by what they tell us. A group can have many
-columns because it records numbers for different teams, agents, targets, or
-statuses. For example, damage from Agent 0 to Agent 5 and damage from Agent 0 to
-Agent 6 need separate columns. They describe the same kind of measurement.
-Each row of a run table describes one episode. Each numerical column is counted
-once here, even if several viewer groups show it. The data dictionary also lists
-the columns that identify the run, episode, and agents.
+Use this table to see the kinds of measurements the current scalar export
+contains. One kind can need many columns: damage from Agent 0 to Agent 5 and
+damage from Agent 0 to Agent 6 are separate values of the same kind. A run-table
+row is one episode. Each numerical column is counted once here, even when the
+Viewer shows it in more than one topic. Run, episode, and agent identity fields
+are listed separately in the data dictionary.
 
 <!-- metric-family-summary:start -->
 | Measurement family | Numerical columns | What the family describes |
@@ -80,10 +84,11 @@ that is two Burst kill contributions but one enemy killed with Burst help.
 Only damage and useful Priest healing on that enemy's death tick earn kill
 credit. Earlier damage does not turn a later one-helper kill into a shared kill.
 
-A blank CSV cell means the value does not apply or cannot be calculated. For
-example, an inactive agent has no measurements. An agent that made no casts has
-no share of casts on a target: there is no total to divide by. An active agent
-that could deal damage but dealt none has a real zero.
+A blank cell means the value does not apply or lacks a valid denominator.
+Inactive agents have blank measurements. An agent that made no casts has no
+cast-allocation fraction because its total is zero. An active agent that could
+deal damage but dealt none has a real zero amount. Keep blank values and zeros
+distinct when loading the CSV.
 
 Averaging episode fractions gives every episode the same weight. Dividing the
 total count by the total number of chances gives each chance the same weight.
@@ -92,11 +97,11 @@ question you want to answer; the tables provide the counts for both.
 
 ### Schema and compatibility
 
-The current schema is `marlbg.tdm.scalar@13`: **26 priority numeric columns** and
-**11,158 full numeric columns**, with priority included in full. The viewer has
-27 topics and 43 tables; different topics can show the same exported column. Column order and
-names remain identical across valid one-through-five-agent, asymmetric,
-permuted-class and repeated-class rosters. This schema supersedes the historical
+New scalar runs use `marlbg.tdm.scalar@13`: **26 priority numeric columns** or
+**11,158 full numeric columns**, including those 26 priority values. The Viewer
+has 27 topics and 43 tables. Several topics may show the same exported column.
+The names and order stay fixed for valid one-through-five-agent, asymmetric,
+permuted-class, and repeated-class rosters. This schema supersedes the historical
 46-ID report catalog for new computation. It contains no KOTH or CTF metrics.
 The former host `full=True` reducer factory and unused draft accumulator are
 retired. `build_tdm_metric_reducers()` retains only the five basic V1 outcome
@@ -159,10 +164,10 @@ name available. It does not insert an impossible row into the table. A zero
 denominator is different: the measurement applies, but its fraction is blank.
 The search list has no tick values and is loaded once per replay analysis.
 
-The tables use the recorded classes and active slots to hide impossible roles.
-For example, a Priest can help save a Warrior: the Priest appears as the healer,
-and the Warrior appears as the saved ally. A Warrior cannot appear as a healing
-helper. Moving the Priest to another slot moves these rows with it.
+The Viewer uses recorded classes and active slots to hide impossible roles.
+For example, a Priest can be the healer in a Warrior's rescue, and the Warrior
+can be the patient. The Warrior cannot be a healing helper. If the Priest moves
+to another slot, the displayed healer rows move with it; CSV slots stay fixed.
 
 The same rule covers all topics. Solo kills and damage-caused Trap breaks need
 a damaging agent. Priest kill support needs a damaging teammate. Burst damage
@@ -261,9 +266,9 @@ than old column positions when comparing exports across these versions.
 
 ### Schema 13 team ability application columns
 
-Schema 13 adds six columns that name the whole ability. It renames no existing
-column. Slow, Stun, Anti-Heal and other status-application columns keep their
-exact names, meanings and Status Applications rows.
+Schema 13 adds six whole-ability counts without renaming any existing column.
+Slow, Stun, Anti-Heal, and other status-application columns keep their exact
+names, meanings, and rows in Status Applications.
 
 | Added CSV columns | Count | Ultimate topic |
 | --- | ---: | --- |
@@ -290,7 +295,7 @@ Existing CSV files stay untouched;
 an older schema cannot resume under schema 13. The writer rejects that mismatch
 before recovery, truncation or writing. The replay file format is unchanged.
 
-The five-topic audit separates numerical equality from correct column names.
+The five-topic audit checks both the value and the exact column name.
 Charge and Poison ability totals must point to their own ability columns, even
 when their counts equal the existing Slow application counts. Those status
 columns remain useful separate measurements. Priest also needed team Salvation
@@ -334,11 +339,11 @@ There are two helpers and one save. If Basic and Ultimate healing both help
 with that save, both team ability fractions are `1.0`. The fractions can
 overlap; adding them does not give the number of saves.
 
-These fractions are blank when the team has no saves. Inactive agents' shares
-are also blank. The viewer shows healer rows only for Priests in active slots;
-moving or repeating Priests does not change the fixed CSV columns. These are
-shares of actual saves, not shares of rescue opportunities or proof that one
-Priest could save the ally alone. Existing recipient-specific Basic shares
+When the team has no saves, these fractions are blank. Inactive agents' shares
+are blank too. The Viewer shows healer rows only for active Priests, while the
+CSV keeps the same columns for moved or repeated classes. These fractions count
+shares of actual saves. They do not count opportunities or prove that a helper
+could have saved the ally alone. Existing recipient-specific Basic shares
 keep their own denominators: all unique saves of that recipient.
 
 The twelve values and their valid/blank flags add 60 logical bytes to each full
@@ -411,9 +416,9 @@ directory to use the new columns; the replay file format is unchanged.
 
 ### Schema 6 additions and migration
 
-This earlier schema added ten agent fractions and two team fractions, bringing
-its full output to 11,126 numerical columns and 11,156 run-table columns with
-identity. These measurements remain in schema 7. Here `i` is an agent slot from
+Schema 6 added ten agent fractions and two team fractions. At that time its
+full output had 11,126 numerical columns and 11,156 columns including identity.
+These measurements survived schema 7 and remain in the current scalar contract. Here `i` is an agent slot from
 0 to 9. Slots 0–4 belong to Team A; slots 5–9 belong to Team B.
 
 | Added columns | Count | Meaning |
@@ -489,10 +494,10 @@ unchanged.
 
 ### Reading source and recipient names
 
-Read a name from left to right. Before `to` is the agent or team doing something
-(the source). After `to` is the agent it affects (the recipient). The rest names
-the measurement. Two teammates use `and` when neither acts on the other, such
-as their distance apart. The lower agent number comes first.
+Read directed column names from left to right. The source comes before `to`;
+the affected agent comes after it. The rest names the measurement. A teammate
+pair uses `and` when neither acts on the other, such as a distance measurement.
+Write the lower agent number first in that unordered pair.
 
 | Schema 3 prefix | Schema 4 prefix | Relationship | Columns renamed |
 | --- | --- | --- | ---: |
@@ -587,11 +592,11 @@ effective Priest-healing amounts keep their existing guidance.
 Fully accepted action counts and the acceptance rate
 use "Higher is better."
 
-Use these labels to compare similar situations, not to rank policies by every
-column. A contribution count shows how many kills or saves an agent
-helped with. Its participation fraction shows its share of those events. If a
-teammate gets another kill, that fraction can fall even though the team did
-better. Participation and target-allocation fractions are context dependent.
+Use direction labels only when comparing similar situations. They are not a
+recipe for ranking policies by every column. A contribution count records kills
+or saves an agent helped with; participation divides that count by the team's
+events. A teammate's extra kill can lower the first agent's participation even
+though the team improved. Participation and target-allocation fractions are context dependent.
 Aura coverage and activation frequency are also context dependent: more coverage
 can limit positioning, and more casts can give only excess healing.
 
@@ -631,20 +636,28 @@ does not multiply it. Kills count deaths during this episode, independently of
 initialized scenario scores. Full includes every retained family below. None
 retains only intrinsic environment completion/outcome needed for execution.
 
-Numerical accumulation/finalization is JAX, with fixed-size integer/float32/boolean
-arrays and no mandatory trajectory. Floating GPU matrix reductions explicitly
-preserve float32 precision. Formatting, host metadata and CSV are outside the
-compiled numerical path. The performance command measures these stages separately;
-a fast final formatting operation is not evidence for fast metric computation.
+JAX accumulates and finishes numerical metrics using fixed-size integer,
+float32, and boolean arrays. Metrics do not require a retained trajectory.
+Floating GPU matrix reductions preserve float32 precision. Formatting, host
+metadata, and CSV writing happen outside that compiled path and must be timed
+separately from the numerical work.
+
+Current performance qualification targets the complete GPU workflow. CPU
+checks still cover correctness and compatibility. A small output buffer or fast
+formatting step is not proof of fast metric computation, low peak memory, or
+low data-transfer cost. Compare the same workload and retained outputs, and
+synchronize GPU work before timing. See the
+[runtime protocol](protocol.md#runtime-and-resource-protocol).
 
 ### Tables and identity
 
-Each CSV row describes one episode. `priority_metrics.csv` includes priority/full
-selected episodes; `full_metrics.csv` includes full-selected episodes and copies
-already computed priority values. Tournament `match_results.csv` replaces a
-redundant priority file, preserving mandatory outcomes when optional metrics are
-disabled. Shared definitions/configurations/provenance live in `run_details.json`.
-Without an output destination, return in-memory columns and create no files.
+Each run CSV row describes one episode. `priority_metrics.csv` includes episodes
+selected for priority or full metrics. `full_metrics.csv` contains the full
+selection and reuses its already computed priority values. Tournaments keep
+mandatory outcomes in `match_results.csv`, including when optional metrics are
+disabled, so they do not need a duplicate priority file. Shared definitions,
+configuration, and provenance are stored in `run_details.json`. With no output
+destination, the API returns in-memory columns and creates no files.
 
 Identity columns are `run_id`, `phase`, `pass_id`, `episode_id`, `seed_id`, `map_id`,
 `config_id`, `team_a_policy`, `team_b_policy`, `checkpoint_id`, then
@@ -670,11 +683,13 @@ remains visible when the recorded agent can produce it. Initial status and Trap
 records remain without a current caster. Poison prevention needs a friendly
 Priest, but not an opposing Rogue.
 
-`RunWriter.write(infos)` consumes all completion records and selected packets in
-a step or rollout chunk. `flush()` acknowledges durability; closing flushes.
-Writes append buffered batches. New output destinations get unique child runs;
-resumption requires `resume_from`. Recovery uses durable boundaries, preserving
-exactly-once completion. Disk failures are also recorded when possible.
+Pass each step or rollout chunk's completion records and selected packets to
+`RunWriter.write(infos)`. It buffers appended batches. `flush()` makes them
+durable, and closing flushes too. A new output destination gets a unique child
+run; use `resume_from` to continue an existing run. Recovery follows the durable
+boundaries so completed records are not published twice. Disk failures are
+recorded when possible. This is the current writer contract; the accepted
+future recording/tracking APIs are not implied by this description.
 
 ### Retained families and attribution
 
@@ -879,18 +894,22 @@ unless the catalog justifies a stronger interpretation.
 
 ## Historical rationale and V1 registry
 
-The sections below preserve design rationale, historical V1 metric IDs and
-future-task proposals used by existing artifacts and references. Their older
-presentation budgets, standalone metric dispositions and raw-component report
-layout do not override the current scalar contract above. V1 artifacts remain
-readable; new runs do not retain obsolete cooldown-edge, net-health-change,
-clamp-overflow, Trap-interval-end, spawn-shield-expiry, phase-displacement,
-combat-countdown-reset, priority-target-share or lifecycle-cause metric groups.
-Future KOTH/CTF proposals remain inactive until after manuscript submission.
+The following sections preserve the V1 design, IDs, formulas, and references
+needed to read older artifacts. Their presentation budgets and raw-component
+report layout do not override the current scalar contract above. A historical
+row marked `pass` is not, by itself, a current exported scalar column.
+
+V1 artifacts remain readable. New scalar runs do not retain the obsolete
+cooldown-edge, net-health-change, clamp-overflow, Trap-interval-end,
+spawn-shield-expiry, phase-displacement, combat-countdown-reset,
+priority-target-share, or lifecycle-cause groups. Current scalar kill support,
+healing allocation, and Trap-period rules are defined above; do not replace them
+with a different historical V1 denominator or attribution rule below. Future
+KOTH/CTF proposals stay inactive until after manuscript submission.
 
 ## Metric constitution
 
-A MARL-BattleGrounds metric must pass all of these tests:
+Use these tests when proposing or reviewing a metric:
 
 1. A researcher can explain it in one sentence.
 2. It answers a real behavioral question rather than merely reporting an
@@ -910,16 +929,16 @@ A MARL-BattleGrounds metric must pass all of these tests:
 11. It is replay-verifiable from an authoritative owner without reconstructing
     simulator semantics.
 
-Failure does not always mean deletion. A candidate may move to advanced
-description, a controlled scenario, diagnostics, validation-pending research,
-or an explicitly rejected ledger.
+A metric that fails one test need not be deleted. It may still belong in an
+advanced description, a controlled scenario, diagnostics, or pending research.
+Record a rejection explicitly when its meaning cannot be supported.
 
 ## Data and interpretation vocabulary
 
 ### Health-effect and resolution stages
 
-Every damage, healing, or health-resolution value must use one of these exact
-stages:
+The historical V1 contract distinguishes these exact health-effect stages.
+Use the stage name to tell a delivered amount from a health-state result:
 
 | Stage | Meaning | Attribution |
 | --- | --- | --- |
@@ -930,8 +949,10 @@ stages:
 | `realized_net_health_change` | Combat-resolution health minus transition-start health | Recipient only; not uniquely attributable to damage or healing sources |
 | `actual_regeneration` | Separately authored post-combat recovery applied after combat resolution | Recipient/lifecycle source |
 
-The word **effective** is not an amount stage. Existing code fields containing
-that word are interpreted through the table above.
+In this V1 vocabulary, **effective** alone does not identify an amount stage.
+Interpret historical fields through the table. The current scalar contract
+above gives effective Priest healing its explicit delivered-minus-excess
+meaning and proportional source allocation; that later rule is unchanged.
 
 Milestone 6 CP2 preserves the fixed transition facts losslessly and exposes
 sparse events only as a deterministic semantic view. Event absence never
@@ -959,16 +980,18 @@ team_index, -1, wave_subtype, neutral_source)` and realized agent respawns by
 neutral_source)`. Each team wave therefore precedes its realized agents, with
 teams kept in canonical order.
 
-Recipient-modified gross damage can exceed remaining health. Gross healing can
-offset simultaneous damage without producing a positive net-health change.
-Consequently, individual realized damage, individual realized healing, and
-individual overhealing are undefined without an arbitrary apportionment rule.
-MARL-BattleGrounds does not invent one.
+Delivered damage can exceed the recipient's remaining health. Delivered
+healing can offset damage on the same tick without making health rise. The
+historical V1 contract therefore did not divide the final net health change or
+clamp overflow among individual sources. Preserve that meaning when reading V1.
+The later scalar contract's explicit proportional excess-healing allocation
+is defined above; it does not turn net health change into individual causal
+credit.
 
 ### Attribution grades
 
-Every effect-derived metric declares the strongest attribution supported by
-the recorded trajectory:
+For each effect metric, state the strongest credit the recorded trajectory
+supports. The historical attribution labels are:
 
 | Grade | Meaning |
 | --- | --- |
@@ -978,9 +1001,10 @@ the recorded trajectory:
 | `combined_emitter_set_exact` | The combined team/class effect is exact but division among overlapping emitters is not |
 | `attribution_ambiguous` | The requested subject credit is not identifiable and the value is `N/A` |
 
-Canonical non-duplicate rosters can make some aura, anti-heal, Trap, and rescue
-credit unique. Duplicate-source rosters fall back to combined team/class
-attribution or `N/A`; offline analysis must not invent an apportionment rule.
+A roster with one possible source can make some aura, anti-heal, Trap, or
+rescue credit unique. Under this V1 rule, overlapping sources use combined
+team/class credit or `N/A`. Offline analysis must not invent a source split.
+Current scalar contribution rules remain the separately stated rules above.
 
 ### Causal-support tiers
 
@@ -1004,7 +1028,8 @@ class is `N/A`, never zero.
 
 ### Disposition axes
 
-Each canonical candidate has four independent labels.
+Each historical candidate has four separate labels. Read all four: being
+computable does not make a candidate valid or suitable for a headline.
 
 | Axis | Values |
 | --- | --- |
@@ -1035,9 +1060,8 @@ eligibility, and edge semantics exist.
 
 ### Contract layering
 
-Stable metric semantics must not change merely because a new paper uses a
-different opponent pool or confidence interval. The public contract is split
-conceptually into four layers:
+A metric keeps its meaning when a study changes its opponents or confidence
+interval. Keep the four contract roles separate:
 
 - **Metric definition:** ID/version, question, scope, data authority, amount
   stage, eligibility, sufficient components, reduction kind, zero-opportunity
@@ -1056,45 +1080,49 @@ conceptually into four layers:
   status, rollout completion, observer-processing status, per-statistic
   endpoint observation where applicable, and source-schema versions.
 
-Only a semantic-definition change increments a metric version. Population,
-weighting, comparison, or inferential changes increment the suite or manifest
-version instead. These are documentation contracts in the current milestone,
-not a request for a universal production registry.
+Change the metric version when its meaning changes. Change the suite or
+manifest version when the population, weights, comparison, or uncertainty
+method changes. These are record responsibilities; they do not require a
+universal production registry.
 
 ### Execution-information provenance
 
 [Amendment A25](../design/specification_amendments.md#a25-sharedobs-only-canonical-benchmark-execution)
-makes execution information invariant provenance for the Paper 1 benchmark,
-not a comparison dimension. Every new official metric result is backed by an
-episode with mode `shared_obs`, actor projection
-`base-observation-plus-authorized-sensor-source-bank@1`, and the exact
-configured-active, same-team, off-diagonal availability matrix on every replay
-frame. This provenance is retained so consumers can prove eligibility; it does
-not create separate metric IDs, suite strata, cell weights, leaderboard rows,
-or matchup directions.
+requires SharedObs for new official benchmark evidence. Information mode and
+projection are eligibility facts, not separate metric IDs, comparison groups,
+cell weights, or leaderboard directions.
 
-The expected matrix comes from the frozen configured roster, not living state,
-health, visibility, policy identity, or frame index. Configured-but-dead sources
-remain authorized while their ordinary sensor material remains
-lifecycle-zeroed. Exact all-frame equality rejects an incomplete teammate
-topology and mid-episode drift; an all-false matrix is canonical only when the
-roster contains no same-team off-diagonal pair.
+Historical V1 episodes used `EvaluationEpisodeContextV1`, mode `shared_obs`,
+and projection `base-observation-plus-authorized-sensor-source-bank@1`.
+Preserve that exact projection when reading those artifacts. Current recordings
+use episode context V3, base observation/frame V2, SharedObs projection
+`base-observation-plus-authorized-sensor-source-bank@2`, NoSharedObs projection
+V3, and replay V3 under
+[A37](../design/specification_amendments.md#a37-relative-policy-identity-and-versioned-recordings).
+Do not relabel an old record or resume a run with a different input contract.
 
-`EvaluationEpisodeContextV1` retains one episode-global
-`execution_information_mode` and one episode-global `actor_projection`.
-Generic/custom V1 evaluation and replay validation continue to support both
-homogeneous SharedObs and homogeneous NoSharedObs, and V1 still cannot encode a
-mixed per-slot assignment by overloading its global mode, policy ID, or false
-availability rows. NoSharedObs evidence remains valid for diagnostics, custom
-research, and historical replay compatibility, but it is ineligible as a new
-official metric result. The current roadmap contains no mixed-regime V2 work.
+Every official replay frame must have exactly the availability matrix implied
+by the frozen configured roster: active recipients may use other configured
+active teammates. The diagonal, other team, and inactive slots remain false.
+Health, visibility, policy identity, and frame index do not change this topology.
+A configured but dead source stays authorized while its ordinary sensor values
+remain zeroed by the lifecycle. An all-false matrix is canonical only if the
+roster has no pair of different active teammates.
+
+Generic/custom readers also support homogeneous NoSharedObs and permitted
+SharedObs subsets. That compatibility does not make those records eligible for
+new official evidence. The episode context owns one `execution_information_mode`
+and one `actor_projection`; policy IDs or availability rows cannot encode mixed
+per-slot modes. The current
+roadmap does not activate a mixed-regime contract.
 
 ## Presentation budgets
 
 ### Primary team card
 
-Each task receives at most four endpoint blocks under the canonical SharedObs
-eligibility contract; this is a ceiling, not a quota:
+The historical compact-card proposal allows at most four endpoint blocks per
+task under canonical SharedObs. It does not require filling all four, and it
+does not replace the current Viewer's scalar topics:
 
 1. win/draw/loss as one outcome distribution;
 2. terminal canonical score differential;
@@ -1106,8 +1134,8 @@ episodes, failures/truncations, cell weighting, and uncertainty method.
 
 ### Primary agent/class card
 
-The compact card contains four universal descriptive blocks and at most one
-class signature:
+The historical compact agent/class card has four common descriptive blocks
+and at most one class-specific signature:
 
 - recipient-modified gross damage output and team share;
 - recipient-modified gross healing output and team share, otherwise `N/A`;
@@ -1122,9 +1150,9 @@ primary role fact.
 
 ### Advanced, scenario, and diagnostic surfaces
 
-The advanced export preserves tidy long-form observations and raw sufficient
-statistics. It favors distributions, medians, and interquartile ranges over
-default min/max columns. Scenario cards contain one primary quantitative
+The V1 advanced-export proposal keeps long-form observations and raw values
+needed to reproduce summaries. It favors distributions, medians, and
+interquartile ranges over default minimum/maximum columns. Scenario cards contain one primary quantitative
 matched full-method-versus-ablation contrast, at most two supporting secondary
 margins, explicit violations, and replay. Scenario cards describe controlled
 behavior under their frozen conditions; they are not general-strength scores
@@ -1141,10 +1169,9 @@ references this contract and does not own a second formula.
 
 ## Raw sufficient-component defaults
 
-This document owns what each semantic metric must preserve; the
-[evaluation protocol](protocol.md) exclusively owns reduction order, cell
-weighting, inferential units, and uncertainty. Unless a metric row states
-otherwise, preserve:
+This section says which raw values a metric must keep. The
+[evaluation protocol](protocol.md) says how to combine them, weight cells, and
+estimate uncertainty. Unless a historical metric row states otherwise, keep:
 
 - a total's sum and eligible episode count;
 - a rate's numerator, genuine-opportunity denominator, and zero-opportunity
@@ -1153,10 +1180,10 @@ otherwise, preserve:
 - a duration's qualifying and eligible agent-steps; and
 - a distribution's event- or episode-level observations at its declared unit.
 
-A zero opportunity produces `N/A`, not zero. Partial prefixes are excluded
-from every official endpoint estimator unless the metric explicitly declares
-prefix validity. Scientific censoring is a separate per-statistic endpoint
-observation, not an episode completion state. Prefix-valid diagnostic or
+If there is no opportunity, the rate is `N/A`, not zero. Exclude a partial
+prefix from an official endpoint unless that metric explicitly allows prefixes.
+Record scientific censoring separately for each endpoint; it does not replace
+the rollout completion state. Prefix-valid diagnostic or
 descriptive components may be exported only with rollout and processing status
 and remain outside the official estimator.
 
@@ -1167,9 +1194,9 @@ ineligible prefix is insufficient data rather than zero opportunity. A
 right-censored result is defined only when that versioned metric declares a
 censoring estimand and preserves the required censoring component.
 
-Milestone 6 CP3 supplies strict generic count, sum, ratio-component,
-duration-component, opportunity, and distribution-observation records. It does
-not implement the metric formulas below. Historical records preserve raw
+M6 CP3 added validated records for counts, sums, ratio components, duration
+components, opportunities, and distribution observations. Those record types
+alone do not implement the historical metric formulas below. Historical records preserve raw
 components and complete semantic keys; ratios, means, ratings, uncertainty,
 and presentation values remain downstream derivations. Agent and policy
 subjects must join configured-active context rows. An absent class may appear
@@ -1324,9 +1351,9 @@ named analysis needs them. They do not enter the primary tactical scorecard.
 
 ## Future and pending task-owned metrics
 
-These dispositions are stable, but each row remains inactive until its named
-activation dependency exists. Team Deathmatch score/outcome authority and its
-episode reducers are implemented; the candidate below remains inactive.
+These proposals stay inactive until their named prerequisite is implemented
+and accepted. TDM score/outcome facts and episode reducers already exist, but
+the separate team-wipe candidate below is still inactive.
 
 ### Team Deathmatch
 
@@ -1386,17 +1413,16 @@ confirmatory families merely because all raw components are visible.
 
 ## Scenario-owned behavior matrix
 
-Scenario metrics are designed primarily for matched behavioral ablations. The
-evaluation definition binds one full method and one declared ablation to the
-same content-addressed scenario, deterministic pressure controller, canonical
-SharedObs contract, seeds, side assignments, training budget,
-checkpoint-selection rule, and endpoint. One predeclared primary behavioral
-contrast answers the claim; no more than two secondary margins may support it.
-Differences outside the declared ablation invalidate causal interpretation.
+A scenario tests one bounded behavior by comparing a full method with a
+matched ablation. Both use the same content-addressed scenario, deterministic
+pressure controller, SharedObs contract, seeds, side assignments, training
+budget, checkpoint-selection rule, and endpoint. Choose one primary contrast
+and at most two supporting margins before evaluation. Differences beyond the
+declared ablation prevent that contrast from isolating the ablation's effect.
 
-The pressure binding may use the general Reactive TDM policy or a specialist
-such as Scenario 3's body-aware Rogue. Its exact behavior identity remains an
-evaluation condition, not a metric or baseline-strength claim. DevClient
+The pressure binding may use Reactive TDM ALPHA or the approved BETA variant
+for Scenarios 3 and 5. Record its exact behavior version as an evaluation
+condition. A pressure controller is not a metric or a qualified baseline. DevClient
 availability and physical regression results alone do not qualify a scenario,
 define its endpoint, or establish its horizon. Scenario-derived rules remain
 within the protected evaluation content closure; their originating results
@@ -1440,36 +1466,45 @@ shaping, curricula, population weights, or any other adaptive process.
 | `marlbg.runtime.environment_throughput.v1` | Environment transitions per second under a versioned hardware/batch/JIT protocol. | `diagnostic_qc` / learning runtime | trainer/runtime harness |
 | `marlbg.runtime.policy_inference.v1` | Policy inference latency/throughput under the same declared measurement protocol. | `diagnostic_qc` / learning runtime | trainer/runtime harness |
 
-Cross-play summaries never discard the underlying focal-by-partner-by-opponent
-tensor. Matched, held-out, cooperative-partner, and adversarial-opponent
-experiments are distinct populations and cannot share an unlabeled
-“robustness” number.
+Keep the focal-by-partner-by-opponent results behind every cross-play summary.
+Matched partners, held-out partners, and held-out opponents answer different
+questions. Label the population; one unexplained “robustness” number cannot
+stand for all of them.
 
-For the planned Big 12 instantiation, exactly twelve method entrants contribute
-one validation-selected fixed system and one Elo value each. The resulting 66
-unordered pairings contain 100 episodes apiece—five maps by ten evaluation
-coordinates by two side assignments—for 6,600 episodes total. The complete
-win/draw/loss matrix is authoritative. The qualified compact estimator is one
-jointly fitted, draw-aware Bradley–Terry–Davidson model centred at 1200, and is
-secondary to that matrix. The evaluation protocol freezes its
-[parameterization, uncertainty, convergence, failure rules and presentation](protocol.md#frozen-rating-and-uncertainty-contract).
-The implementation is qualified on bounded synthetic tournaments; manuscript
-policy training and the full Paper 1 tournament remain future work.
+The accepted future Big 12 design uses an immutable monthly snapshot of
+exactly twelve systems. A canonical run will use those twelve alone or add one
+challenger: 66 or 78 unordered matchups. Every matchup has one uniform game
+budget and complete paired map/spawn coverage. The official numerical budget
+is still awaiting approval. The earlier 100-game, 6,600-episode workload remains
+a historical reference and the current custom runner's twelve-policy example;
+it is not the future official budget.
 
-Rows 1–11 each retain three independent training runs. A rule frozen before
-training first selects an eligible checkpoint within each run from validation
-information alone, then selects the validation-highest of those three as the
-method's sole tournament system. Locked scenarios and tournament outcomes may
-not participate. Qwen-Five remains tentative until it passes a measured cost,
-throughput, reproducibility, and compatibility gate. Weekly Big 12 ratings are
-identified by immutable roster snapshot and are not directly comparable across
-changing pools without a separately specified longitudinal model.
+The complete raw win/draw/loss matrix is the outcome authority. Ratings use one
+joint draw-aware Bradley–Terry–Davidson fit centred at 1200, with the
+[existing uncertainty and convergence contract](protocol.md#frozen-rating-and-uncertainty-contract).
+The accepted future runner will verify and reuse incumbent games, add challenger
+games, and refit the complete population. A local call will not promote or
+publish. Monthly admission, provisional replacement/refit, complete full-report
+coverage, and the remaining launch gates are specified in the
+[Big 12 protocol](protocol.md#big-12-tournament-and-baseline-library).
+The current custom executor uses opposite policy-side assignments; its records
+must not be relabelled as fixed-team spawn pairs. Canonical enrollment, verified
+reuse, and maintainer admission are not claimed as implemented here.
+
+The rating implementation has bounded synthetic-tournament qualification.
+That does not qualify manuscript training, a full Paper 1 tournament, or the
+future admission pipeline. Rows 1–11 keep three independent training runs and
+select one system using the fixed validation-only rule. Locked scenarios and
+tournament outcomes cannot select it. Qwen-Five remains tentative until measured
+cost, throughput, reproducibility, and compatibility gates pass. Keep ratings
+bound to their immutable snapshot; scores from changing populations are not
+directly comparable without a separate model for changes over time.
 
 ## Reward-shaping classification
 
-Metric definitions do not automatically become rewards. A single label would
-conflate availability, information privilege, credit, and objective impact, so
-future M10 tooling records four independent axes:
+A metric is not automatically a useful reward. The planned M10 review records
+four separate things: when the value is available, which information it needs,
+who receives credit, and whether it changes the task objective:
 
 | Axis | Values |
 | --- | --- |
@@ -1481,9 +1516,9 @@ future M10 tooling records four independent axes:
 Each proposed component additionally records whether it is available on the
 JAX hot path and its known reward-hacking risks.
 
-The following classification covers every current retained family. It states
-what an experiment could access, not what MARL-BattleGrounds recommends as a
-default reward. In particular, `shared_obs_observable` remains a semantic
+The following historical classification covers the V1 families listed here.
+It says what a proposed experiment could access. It does not prescribe a default
+reward or claim that all these families are current scalar outputs. In particular, `shared_obs_observable` remains a semantic
 information-availability classification; A25 does not rename or erase it.
 
 | Metric IDs | Availability | Information | Credit | Objective effect and principal risk |
@@ -1502,10 +1537,10 @@ information-availability classification; A25 does not rename or erase it.
 | scenario-owned behavior | `offline_only` | `external_annotation` plus replay | scenario subject | `unsuitable`; official scenario material and results are prohibited from reward shaping, curriculum design, or any other adaptive use |
 | population, learning, and runtime IDs | `offline_only` | `external_annotation` | population | `unsuitable`; not transition credit signals |
 
-“Actor observable” means the actor legitimately receives the required
-same-epoch or adjacent own values; it does not authorize privileged team facts
-as actor input. Any implementation promotes an ID to a shaping component only
-through its own versioned configuration and reward-hacking review.
+“Actor observable” means the actor is allowed to receive the required current
+or adjacent own values. It does not permit hidden team facts as actor input.
+A shaping component needs its own versioned configuration and review of ways a
+policy could increase the reward without achieving the intended task.
 
 The canonical task reward and each named shaping component remain separately
 logged. Host Pydantic models, sparse events, metric formulas, and replay files
@@ -1513,8 +1548,9 @@ never feed the training hot path.
 
 ## Consolidated disposition index
 
-This index consolidates aliases from the design PDF and metric brainstorm. The
-private M6 source ledger preserves the line-level source trace.
+This historical index maps names from the design PDF and early metric review
+to their V1 decisions. Keep it for interpreting old references. The current
+scalar contract above owns today's columns and later clarified meanings.
 
 | Candidate family or alias | Final disposition | Canonical replacement or reason |
 | --- | --- | --- |
@@ -1580,9 +1616,12 @@ Before a metric becomes active, its owner must provide:
 - matched full-method/ablation scenario evidence with independently trained
   pairs, one predeclared primary endpoint, and proof that no scenario content or
   result entered training, selection, shaping, or curriculum decisions;
-- for a Big 12 rating, exact twelve-system cardinality, complete 6,600-episode
-  outcome/failure accounting, validation-only final-system selection, immutable
-  roster-snapshot identity, and a qualified draw-aware estimator; and
+- for a future canonical Big 12 rating, the exact twelve-system snapshot with
+  at most one challenger, complete 66- or 78-matchup coverage at the same
+  resolved budget, intact paired blocks, verified origin/asset identities,
+  complete outcome/failure accounting, validation-only system selection, and
+  the qualified draw-aware estimator; official promotion also requires every
+  remaining admission gate and the official budget; and
 - explicit Four-North-Star verdicts.
 
 No unresolved `blocked` or `validation_pending` row may appear as an official

@@ -1,3 +1,7 @@
+/**
+ * @file Check eight nonempty browser profiles, exact disjoint test coverage and safe
+ * deterministic profile environments.
+ */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import path from "node:path";

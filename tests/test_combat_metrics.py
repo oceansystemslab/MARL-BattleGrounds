@@ -1,4 +1,4 @@
-"""Combat measurements against accepted public Core transition witnesses."""
+"""Check combat measurements against the facts produced by Core transitions."""
 
 from collections.abc import Callable
 from typing import cast
@@ -237,7 +237,6 @@ def test_direct_and_priest_contributors_share_one_victim_without_extra_kills() -
 def test_death_announcer_matches_public_direct_and_priest_credit(
     missing_health: float, dying_priest: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Recorded global events preserve support, excess and simultaneous deaths."""
     config, state, mask = _start(
         class_changes=((1, 1), (3, 5)),
         arrange=lambda state: state._replace(

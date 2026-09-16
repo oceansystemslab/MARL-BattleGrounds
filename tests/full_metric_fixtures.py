@@ -1,4 +1,8 @@
-"""Shared public-trajectory fixtures for scalar metric tests."""
+"""Provide shared game steps and metric lookups for full-metric tests.
+
+The helpers drive public transitions and keep the game state paired with its
+metric counters. Tests choose the setup and expected result.
+"""
 
 from collections.abc import Callable
 from typing import NamedTuple, cast
