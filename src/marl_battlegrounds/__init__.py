@@ -15,7 +15,13 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from marl_battlegrounds.autoreset import AutoReset
     from marl_battlegrounds.environment import Environment, EnvironmentState, make
+    from marl_battlegrounds.episode_tracking import (
+        EpisodeTrackingState,
+        init_episode_tracking,
+        track_episode_step,
+    )
     from marl_battlegrounds.evaluation.evaluate import EvaluationResult, evaluate
     from marl_battlegrounds.evaluation.policy_execution import (
         Policy,
@@ -45,8 +51,10 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "AutoReset",
     "Environment",
     "EnvironmentState",
+    "EpisodeTrackingState",
     "EvaluationResult",
     "Policy",
     "RunWriter",
@@ -61,6 +69,7 @@ __all__ = [
     "canonical_tournament_rosters",
     "evaluate",
     "independent_policies",
+    "init_episode_tracking",
     "init_systems",
     "list_tdm_maps",
     "list_tdm_scenarios",
@@ -70,9 +79,14 @@ __all__ = [
     "run_tournament",
     "shared_policy",
     "system_step_data",
+    "track_episode_step",
 ]
 
 _MODULES = {
+    "AutoReset": "autoreset",
+    "EpisodeTrackingState": "episode_tracking",
+    "init_episode_tracking": "episode_tracking",
+    "track_episode_step": "episode_tracking",
     "Environment": "environment",
     "EnvironmentState": "environment",
     "make": "environment",

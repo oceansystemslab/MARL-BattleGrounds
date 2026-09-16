@@ -620,7 +620,10 @@ class RunWriter:
             One immutable source config or a leading source batch. Required for
             a new referenced bank; omit it once that content identity is saved.
             Order belongs to identity. Reusing identical immutable JAX leaves
-            avoids hashing; mutable NumPy contents are checked on every resupply.
+            avoids hashing. Fresh JAX leaves with matching structure are checked
+            on the same device placement against the latest verified bank;
+            one bool is read back. A changed device placement uses normal hashing.
+            Mutable NumPy contents are hashed on every resupply.
 
         Returns
         -------
@@ -642,6 +645,9 @@ class RunWriter:
         -----
         Host-only. Never mutate or donate a live source bank. Reset generations
         do not permit reusing an episode ID for another game within one pass.
+        Empty numerical starts with an unchanged saved bank are checked, then
+        return without flushing other pending data. Use flush explicitly when
+        that data must become durable. Mutable banks are still hashed on resupply.
         """
         self._check_open()
         from marl_battlegrounds.evaluation.recording_types import EpisodeStartRecords
@@ -651,9 +657,9 @@ class RunWriter:
             bank_id, bank_refs, contents, cache = self._prepare_source_bank(
                 source_configs
             )
-            banks = {**self._details["source_banks"]}
-            if bank_id is not None:
-                banks[bank_id] = bank_refs
+            banks = self._details["source_banks"]
+            if bank_id is not None and bank_id not in banks:
+                banks = {**banks, bank_id: bank_refs}
             declarations = self._start_declarations(schedule, banks)
             for episode_id, declaration in declarations.items():
                 if (
@@ -674,14 +680,20 @@ class RunWriter:
                     raise ValueError(
                         f"episode {episode_id} differs from its recorded start"
                     )
+            bank_changed = bank_id is not None and (
+                bank_id not in self._details["source_banks"]
+                or any(
+                    self._details["configurations"].get(identifier) != content
+                    for identifier, content in contents.items()
+                )
+            )
             if bank_id is not None:
                 self._details["source_banks"][bank_id] = bank_refs
                 self._details["configurations"].update(contents)
                 if cache is not None:
-                    self._source_cache = [
-                        item for item in self._source_cache if item[2] != bank_id
-                    ]
-                    self._source_cache.append(cache)
+                    self._source_cache = [cache]
+            if not declarations and not bank_changed:
+                return
             for episode_id, declaration in declarations.items():
                 entry["episode_starts"].setdefault(
                     episode_id,
@@ -766,14 +778,22 @@ class RunWriter:
     ]:
         """Identify an ordered source bank without changing recorded state.
 
-        Content hashes use configuration_identity once per source. Only held
-        immutable JAX leaf references permit the fast path; NumPy is rechecked.
+        Content hashes use configuration_identity once per source. Exact held
+        immutable references skip all comparison. Fresh immutable leaves use one
+        device equality check against the latest verified bank when their tree,
+        shapes, dtypes and device placement match. Only its boolean result reaches
+        the host. A changed placement uses normal hashing. NumPy
+        is always hashed. The cache retains at most one complete source bank.
         """
         if source_configs is None:
             return None, [], {}, None
         import jax
 
         from marl_battlegrounds.core.types import EnvConfig
+        from marl_battlegrounds.evaluation.recording_identity import (
+            _source_bank_values_equal,  # pyright: ignore[reportPrivateUsage]
+            ordered_source_bank_identity,
+        )
 
         if not isinstance(cast(object, source_configs), EnvConfig):
             raise TypeError("source_configs must be an EnvConfig source or batch")
@@ -782,39 +802,32 @@ class RunWriter:
         immutable = all(isinstance(leaf, jax.Array) for leaf in leaves)
         if immutable:
             for old_structure, old_leaves, identifier in self._source_cache:
-                if (
-                    old_structure == structure
-                    and len(old_leaves) == len(leaves)
-                    and all(
-                        old is new for old, new in zip(old_leaves, leaves, strict=True)
+                if old_structure != structure or len(old_leaves) != len(leaves):
+                    continue
+                pairs = tuple(zip(old_leaves, leaves, strict=True))
+                identical = all(old is new for old, new in pairs)
+                old_arrays = cast(tuple[jax.Array, ...], old_leaves)
+                new_arrays = cast(tuple[jax.Array, ...], tuple(leaves))
+                if identical or (
+                    all(
+                        old.shape == new.shape
+                        and old.dtype == new.dtype
+                        and old.sharding == new.sharding
+                        for old, new in zip(old_arrays, new_arrays, strict=True)
+                    )
+                    and bool(
+                        cast(
+                            jax.Array, _source_bank_values_equal(old_arrays, new_arrays)
+                        )
                     )
                 ):
                     return (
                         identifier,
                         self._details["source_banks"][identifier],
                         {},
-                        None,
+                        None if identical else (structure, tuple(leaves), identifier),
                     )
-        shape = np.shape(source_configs.agent_profile.active_mask)
-        if shape == (10,):
-            configs = [source_configs]
-        elif len(shape) == 2 and shape[1] == 10 and shape[0] > 0:
-            host_sources = jax.device_get(source_configs)
-            configs = [
-                jax.tree.map(partial(_host_row, index=i), host_sources)
-                for i in range(shape[0])
-            ]
-        else:
-            raise ValueError(
-                "source bank must contain one or more ten-slot configurations"
-            )
-        contents: dict[str, object] = {}
-        references: list[str] = []
-        for config in configs:
-            identifier, content = configuration_identity(config)
-            references.append(identifier)
-            contents[identifier] = content
-        identifier = sha256(_json_bytes(references)).hexdigest()
+        identifier, references, contents = ordered_source_bank_identity(source_configs)
         cached = (structure, tuple(leaves), identifier) if immutable else None
         return identifier, references, contents, cached
 
@@ -1239,7 +1252,9 @@ class RunWriter:
 
         Notes
         -----
-        Host-only; transfers supplied numerical records. A healthy flush/close
+        Host-only; transfers supplied numerical recording fields. Learner-only
+        final inputs are excluded before transfer and are never serialized.
+        A healthy flush/close
         makes pending data durable. Unavailable measurements stay blank. A
         failed call cannot be retried on this writer; earlier committed records
         remain authoritative. This does not restore a learner or provider.
@@ -1253,7 +1268,7 @@ class RunWriter:
 
         try:
             validate_recording_errors(infos)
-            host = jax.device_get(infos._replace(replay=None))
+            host = jax.device_get(infos._replace(replay=None, final=None))
             completion = np.asarray(host.completed)
             if completion.dtype != np.bool_:
                 raise ValueError("completed must have boolean dtype")

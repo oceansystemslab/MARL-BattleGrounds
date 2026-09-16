@@ -80,6 +80,7 @@ from marl_battlegrounds.tasks import (
 )
 
 if TYPE_CHECKING:
+    from marl_battlegrounds.autoreset import FinalEpisodeData
     from marl_battlegrounds.evaluation.policy_execution import SystemInput
     from marl_battlegrounds.evaluation.recording_types import EpisodeStartRecords
 
@@ -226,6 +227,10 @@ class EpisodeInfo(NamedTuple):
     episode_tracking_error : Array | None
         Optional int32 tracking-error flags with the same leading shape as
         episode_id. None means no tracker supplied; zero means no reported error.
+    final : FinalEpisodeData | None
+        Optional pre-reset observations and masks from AutoReset. Its valid mask
+        selects completed episodes. Base steps leave this None. This learner-only
+        data is excluded from automatic recording and actor inputs.
 
     Notes
     -----
@@ -247,6 +252,7 @@ class EpisodeInfo(NamedTuple):
     lifecycle_error: Array
     episode_start_records: EpisodeStartRecords | None = None
     episode_tracking_error: Array | None = None
+    final: FinalEpisodeData | None = None
 
     @property
     def class_ids(self) -> Array:
@@ -265,6 +271,16 @@ class EpisodeInfo(NamedTuple):
         roster participation, not current life or visibility, and is privileged.
         """
         return self.config.agent_profile.active_mask
+
+
+def episode_advanced(info: EpisodeInfo) -> Array:
+    """Return Core-derived real-transition validity with info's lane shape.
+
+    A nonnegative episode-local decision index includes a terminal transition.
+    Minus one marks padding. This numerical helper works in JAX transformations
+    and does not infer advancement from counters, actions or reset state.
+    """
+    return info.decision_step >= 0
 
 
 def _episode_selection(values: Iterable[int], name: str) -> tuple[int, ...]:

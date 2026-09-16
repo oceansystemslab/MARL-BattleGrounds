@@ -993,14 +993,17 @@ def system_step_data(
     -------
     SystemStepData
         Batched action, reward, roster activity, pre-step ID and advancement.
-        A live pre-step lane advances, including its terminal transition;
-        padding does not. Rewards retain all five per-agent entries.
+        Core-derived result validity includes terminal transitions and excludes
+        padding, even when AutoReset returns a fresh state. Rewards retain all
+        five per-agent entries.
 
     Raises
     ------
     ValueError
         system is not 0/1 or the result is not the complete five-part tuple.
     """
+    from marl_battlegrounds.environment import episode_advanced
+
     team = _team_index(system)
     if not isinstance(cast(object, step_result), tuple) or len(step_result) != 5:
         raise ValueError(
@@ -1017,7 +1020,7 @@ def system_step_data(
             :, start : start + 5
         ],
         _batched(before_state.episode_id, native),
-        _batched(~before_state.done.done, native),
+        _batched(episode_advanced(step_result[4]), native),
     )
 
 

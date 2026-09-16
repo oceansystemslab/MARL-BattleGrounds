@@ -22,6 +22,8 @@ compilation/load evidence and memory limits. The fake host method uses no networ
 Use --recording-contracts for only Packet 3: batch 32, rollout 16 and five warm
 samples of none/priority/full plus separate host save costs. Set PYTHONPATH to
 the selected --package-root/src when comparing committed and current sources.
+Use --tracking for only Packet 4: batch 32, rollout 16, manual/tracked reset
+comparisons and optional recording/final-state payload costs.
 No mode establishes learning efficiency or proves theoretical optimality.
 """
 
@@ -3769,7 +3771,23 @@ def main() -> int:
         action="store_true",
         help="Packet 3 only: batch 32, rollout 16, priority/full/none and save costs",
     )
+    parser.add_argument(
+        "--tracking",
+        action="store_true",
+        help="Packet 4 only: batch 32, rollout 16, tracking and automatic resets",
+    )
+    parser.add_argument(
+        "--tracking-case",
+        choices=("manual", "tracking", "autoreset", "starts", "training-state"),
+        help="one tracking case; default compares all five",
+    )
     args = parser.parse_args()
+    if args.tracking:
+        from scripts.dev.benchmark_tracking import run
+
+        return run(args)
+    if args.tracking_case:
+        parser.error("--tracking-case requires --tracking")
     if args.recording_contracts:
         return _run_recording_contracts(args)
     if args.systems:

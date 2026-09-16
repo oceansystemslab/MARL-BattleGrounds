@@ -46,6 +46,10 @@ Available types:
         roots and last numerical trace. Obtain it through init_systems.
     SystemStepData: One team's submitted actions, rewards, configured activity,
         pre-step episode identities and real-transition flags, with leading B.
+    EpisodeTrackingState: Immutable episode/source bindings and checked stage counts.
+        Carry it beside the matching environment state; stage checks are host-only.
+    FinalEpisodeData: Compact pre-reset observations, masks and old episode identity.
+        Its valid mask selects completed games; privileged state is opt-in.
     EpisodeStartRecords: Compact numerical first-transition source claims. The
         writer verifies them before treating source relationships as known.
     PolicyTrace: Decision identities and reported component choices. This is
@@ -76,6 +80,8 @@ from marl_battlegrounds.core.types import (
 from marl_battlegrounds.policies.actor import ActorAction
 
 if TYPE_CHECKING:
+    from marl_battlegrounds.autoreset import FinalEpisodeData
+    from marl_battlegrounds.episode_tracking import EpisodeTrackingState
     from marl_battlegrounds.evaluation.policy_execution import (
         PolicyTrace,
         System,
@@ -93,6 +99,8 @@ __all__ = [
     "DoneFlags",
     "EnvConfig",
     "EpisodeStartRecords",
+    "EpisodeTrackingState",
+    "FinalEpisodeData",
     "Observation",
     "PolicyTrace",
     "System",
@@ -128,6 +136,11 @@ def __getattr__(name: str) -> object:
     Import failures propagate to the caller. Existing Core and actor classes
     are already present and do not use this fallback.
     """
+    if name in {"FinalEpisodeData", "EpisodeTrackingState"}:
+        module = "autoreset" if name == "FinalEpisodeData" else "episode_tracking"
+        value = getattr(import_module(f"marl_battlegrounds.{module}"), name)
+        globals()[name] = value
+        return value
     if name == "EpisodeStartRecords":
         value = getattr(
             import_module("marl_battlegrounds.evaluation.recording_types"), name

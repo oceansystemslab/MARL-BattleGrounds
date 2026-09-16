@@ -641,8 +641,8 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
         ("file:tests/test_combat_ultimate_effects.py", 7, 5),
         ("file:tests/test_combat_effects.py", 8, 11),
         ("file:tests/test_tdm_scenarios.py", 11, 8),
-        ("file:tests/test_combat_ultimate_masks.py", 8, 2),
-        ("file:tests/test_policy_identity_recording.py", 11, 12),
+        ("file:tests/test_combat_ultimate_masks.py", 9, 2),
+        ("file:tests/test_policy_identity_recording.py", 5, 12),
     )
     assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset()
 

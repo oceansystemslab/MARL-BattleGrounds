@@ -7,7 +7,7 @@ The [environment example](../../examples/environment.py) and
 [evaluation example](../../examples/evaluation.py) run the public interfaces.
 
 This page describes implemented behavior. Later accepted M8 contracts, including
-stage tracking, phase-specific map defaults, fixed-team spawn-paired evaluation
+phase-specific map defaults, fixed-team spawn-paired evaluation
 and official snapshot reuse, are not all implemented. Raw Systems are available;
 public evaluation and tournament calls still accept the existing Policy route. Do not assume other proposed calls exist until their implementation is
 qualified. In particular, current `evaluate(..., phase="validation")` still needs
@@ -315,9 +315,8 @@ transitions and exclude reset calls and terminal padding.
 
 Equal lane counts alone do not prove balanced training. A supported training
 stage must consume equal real advances from each spawn choice; equal completed
-game counts are insufficient. This raw API exposes the underlying lifecycle,
-while library stage tracking and coordinated recorded-training recovery belong
-to later packets. Do not claim those later checks from this example.
+game counts are insufficient. The optional tracker below checks real stage
+coverage. Coordinated learner/writer restart remains later work.
 
 Scalar/native calls compose with `jit`, external `vmap` and `lax.scan`. Reuse a
 callable and pass changing numerical data dynamically; repeatedly making new
@@ -385,6 +384,146 @@ buffer can reduce metadata writes but uses more RAM and can leave more records
 to repeat after interruption. Full rows are much wider than priority rows.
 `flush()` and normal context-manager exit establish durability and report failures.
 See the [replay contract](replay_format.md) for versioned persistence behavior.
+
+### Track Experience and Reset Finished Games
+
+The [tracking example](../../examples/episode_tracking.py) shows two complete
+routes: compiled explicit resets for changing curricula, and `AutoReset` for
+reusing each lane's resolved configuration. Both use recurrent Systems and keep
+learning values from the same action call. These are rollout examples, not a
+learning algorithm. Default invocation creates no files.
+
+```python
+import jax
+import marl_battlegrounds as marl_bgs
+
+base = marl_bgs.make("tdm", map_id=0, num_envs=32, max_steps=4)
+env = marl_bgs.AutoReset(base)
+key, reset_key = jax.random.split(jax.random.key(42))
+obs, state = env.reset(reset_key)
+tracking = marl_bgs.init_episode_tracking(env, state)
+tracking = tracking.begin_stage(state, total_env_steps=512)
+for _ in range(16):
+    key, action_key, step_key = jax.random.split(key, 3)
+    actions = env.sample_actions(action_key, state)
+    before_state = state
+    tracking, result = marl_bgs.track_episode_step(
+        tracking, before_state, env.step(step_key, before_state, actions),
+    )
+    obs, state, reward, done, info = result
+print(tracking.stage_summary(state))
+```
+
+Tracking is optional. Initialize once on the host and carry the returned tracker
+beside the matching environment state. `track_episode_step` belongs inside the
+numerical loop; `begin_stage` and `stage_summary` belong outside it. After a scan,
+unpack both latest states before checking or starting a stage. Host checks read
+small counters, not the source bank or observations. An older matching pair or a
+discarded execution branch cannot be discovered from those counters.
+
+A balanced stage needs a positive even native batch and a positive budget divisible
+by that batch size. Each round must advance every lane once. Completion requires
+exactly the requested real transitions, equal default/swapped spawn steps and no
+unknown coverage. Padding cannot be offset by later steps. Terminal transitions
+count; reset calls do not. Summary includes requested/actual steps, each spawn
+category, status and an incomplete reason. Accounting errors raise instead.
+
+For a curriculum, supply one immutable `source_configs` bank and initial
+`source_indices` at initialization. Sample from `tracking.source_configs`; pass
+new indices to tracking after explicit reset of the affected games. The helper
+owns reset masks, clearing and source checks. An undeclared override clears its
+previous binding. Unknown, ambiguous and authored starts do not earn balance
+credit. Exact supplied configurations remain exact. Keep changing source values
+and method parameters dynamic; do not recreate compiled closures each update.
+
+`AutoReset(env, include_training_state=False)` calls the same step/reset paths.
+Its returned observations/state belong to the next decision; reward, done and
+info describe the old transition. `info.final.valid` selects games completed on
+that step. `env.final_policy_inputs(info, team=0)` returns that team's separate
+permitted terminal inputs, with exact masks and no new sharing rights. Use these
+for terminal learning calculations; continuing inputs come from returned obs.
+The learner decides termination/truncation targets. No extra policy call occurs.
+System memory resets on the next decision, using reset generations.
+
+The optional final training state is privileged and absent by default. It never
+enters actor inputs or automatic recordings. Automatic reset derives its key by
+folding `0x4155544F` into the supplied step key, lane by lane for explicit lane
+keys. Base step receives the original key; ordinary explicit reset keys are not
+changed. Use explicit reset loops when selecting new curriculum configurations.
+
+For optional immediate host recording, initialize with `record_starts=True` before
+the first real transition. After tracking, call `writer.register_episodes(
+info.episode_start_records, source_configs=tracking.source_configs)`, then
+`writer.write(info, policy_trace=memory.policy_trace)`. The writer verifies the
+first transition's actual configuration before dependent output. Empty unchanged
+registration does not flush other buffered data. Use `writer.flush()` for that.
+Disabled start recording performs no source hashing or start serialization.
+
+The example's `--output-dir PATH` enables this host recording route. It does not
+provide bounded compiled collection. Save complete numerical carries to continue
+unrecorded execution; do not treat that as coordinated recorded-training recovery.
+Each independent seed needs its own environment, memory, RNG, tracker, budget and
+recording pass. Validation uses a separate context and leaves training untouched.
+
+### Tracking and AutoReset Costs — 2026-09-16
+
+An RTX 5090 check used 32 games, 16 decisions, priority metrics and fixed legal
+random methods. Games ended after four or seven transitions, so the workload
+included frequent partial resets. Five synchronized warm samples followed separate
+compilation. All common actions, rewards, observations, masks, metrics, counters
+and final states matched the manual reference, including committed `f051ded`.
+The [comparison record](../../artifacts/m8-api-tracking/20260916T215430Z/final_gpu_comparison.json)
+links exact source, frozen assets, workload identities and all raw samples.
+
+| Route | GPU Time for 512 Transitions | Real Transitions per Second | Compile Time |
+| --- | --- | --- | --- |
+| Manual bookkeeping and explicit reset | 106.44 ms | 4,810 | 7.03 s |
+| Tracking and explicit reset | 107.54 ms | 4,761 | 6.14 s |
+| Tracking and AutoReset | 107.16 ms | 4,778 | 6.23 s |
+| AutoReset with start records | 107.09 ms | 4,781 | 6.19 s |
+| AutoReset with final training state | 107.15 ms | 4,778 | 6.07 s |
+
+The helpers add about 1% median time in this workload. Small differences between
+helper cases overlap the sample spread and do not establish speedups. The old
+manual reference took 106.43 ms. Same-shaped key, configuration, source-bank and
+ready-handle changes added no outer compilation. Warm loops passed the host-transfer
+guard and contained no host callbacks. Stage checks took 0.20–0.34 ms on the host.
+
+The tracker uses 4,721 logical bytes, including one 3,108-byte source bank; start
+recording adds a 32-byte bank digest. Sixteen retained start-record batches add
+28,160 bytes. Optional privileged final-state history adds 384,512 bytes. Compact
+final data is still substantial: 1,660,704 logical bytes per batch step, or
+1,684,736 with privileged state. These counts include shared array references;
+they are not extra allocations by themselves. Consume final data on device and
+retain only what the learner needs. The writer excludes it before host transfer.
+
+Compiler temporary storage was 2.80–3.23 MiB and output storage 3.13–3.50 MiB.
+The process allocator peaked near 256 MiB; peak RAM rose from 1.71 to 1.92 GiB
+across the five cases. Those whole-process peaks include setup, compilation and
+previous cases, so they cannot isolate each helper's memory cost. Setup, validation
+and initial resets took 2.13–3.64 seconds; these include cached work from earlier
+cases and are not independent startup comparisons.
+
+The [source-cache probe](../../artifacts/m8-api-tracking/20260916T215430Z/source_cache_gpu.json)
+measured fresh unchanged bank verification at 0.104–0.121 ms for one to three
+sources, versus 0.411–0.598 ms to hash fresh banks. Only one comparison Boolean
+returns to the host. Empty registration took 0.153–0.199 ms and performs no disk
+write or unrelated flush. This avoids repeated hashing after a compiled rollout
+returns new array objects. Changed or mutable banks still receive content checks.
+
+A separate [rebinding probe](../../artifacts/m8-api-tracking/20260916T215430Z/tracker_rebind_gpu.json)
+returned identical tracker results for an already checked binding and a pending
+reset binding. Both used one compiled function with no warm transfers. Median
+standalone call times were 0.557/0.549 ms; dispatch noise is larger than that
+difference. This verifies the conditional path without claiming it is faster.
+The composed rollout above is the useful measure of total helper overhead.
+
+These results support low added cost for the reviewed helpers. About 4,800 real
+transitions per second at this small, reset-heavy batch is a workload result,
+not maximum simulator throughput. Full learner updates, larger batches and
+complete recorded training remain unmeasured here. In particular, immediate host
+recording still crosses the device boundary; Packet 5 will qualify bounded
+collection. This work proves no learning, geometry or theoretical-optimality claim.
 
 ### Recording Costs — 2026-09-16
 

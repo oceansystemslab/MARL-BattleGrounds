@@ -1,10 +1,12 @@
-"""Describe recorded methods once at the shared host registration boundary.
+"""Identify recorded methods and ordered source banks at host setup.
 
 Policy evaluation, raw System recording and replay metadata use these helpers.
 Descriptions contain labels and available numerical/code evidence, never live
 memory, sessions or learning outputs. A content hash identifies these recorded
 facts; missing code or external-state evidence does not become a verified
-controller merely because its description has a hash. No method is executed.
+controller merely because its description has a hash. Source-bank identities use
+the existing configuration serialization and preserve source order. These helpers
+perform no recording or method execution; the writer owns verified-content caches.
 """
 
 import json
@@ -12,16 +14,115 @@ import marshal
 from collections.abc import Mapping
 from hashlib import sha256
 from numbers import Number
+from operator import itemgetter
 from types import CodeType, FunctionType
 from typing import TYPE_CHECKING, cast
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from marl_battlegrounds.evaluation.models import canonical_digest_sha256
 
 if TYPE_CHECKING:
+    from marl_battlegrounds.core.types import EnvConfig
     from marl_battlegrounds.evaluation.policy_execution import Policy
+
+
+@jax.jit
+def _source_bank_values_equal(  # pyright: ignore[reportUnusedFunction]
+    previous: tuple[jax.Array, ...], current: tuple[jax.Array, ...]
+) -> jax.Array:
+    """Compare verified immutable bank leaves on device and return one boolean.
+
+    Parameters
+    ----------
+    previous, current : tuple of jax.Array
+        Ordered source-bank leaves with matching shapes and dtypes. The caller
+        checks that structure before entering this compiled helper. Previous
+        leaves belong to a content-verified bank and must remain immutable.
+
+    Returns
+    -------
+    jax.Array
+        Scalar bool, true only when every leaf has identical bits. Floating
+        values use a byte view so +0.0 cannot borrow the identity of -0.0.
+
+    Notes
+    -----
+    This performs no host transfer, hashing or serialization. The writer reads
+    the one result boolean and retains its existing verified digest on a match.
+    Ordinary changed values reuse the compiled comparison for matching shapes.
+    """
+    equal = jnp.asarray(True)
+    for old, new in zip(previous, current, strict=True):
+        if jnp.issubdtype(old.dtype, jnp.floating):
+            old = jax.lax.bitcast_convert_type(old, jnp.uint8)
+            new = jax.lax.bitcast_convert_type(new, jnp.uint8)
+        equal &= jnp.all(old == new)
+    return equal
+
+
+def ordered_source_bank_identity(
+    source_configs: EnvConfig,
+) -> tuple[str, list[str], dict[str, object]]:
+    """Hash the complete contents and order of an immutable source bank.
+
+    Parameters
+    ----------
+    source_configs : EnvConfig
+        One scalar configuration, or a numerical tree whose every leaf has a
+        leading source axis of the same positive length. The active-mask shape
+        is (10,) for one source or (N, 10) for a bank. Source order is significant.
+        Callers own configuration validation and must not mutate or donate the
+        bank while it is used for tracking or recording.
+
+    Returns
+    -------
+    tuple[str, list[str], dict[str, object]]
+        The lowercase SHA256 bank identity, ordered configuration identities,
+        and identity-to-content mapping. Repeated equal sources keep repeated
+        entries in the ordered list but share one content entry. Each digest
+        uses the existing sorted compact JSON with a trailing newline.
+
+    Raises
+    ------
+    TypeError
+        The input is not EnvConfig, or its contents cannot be serialized.
+    ValueError
+        The source-bank shape is invalid, or JSON contains NaN or Infinity.
+
+    Notes
+    -----
+    Host-only. Reading device leaves may synchronize and transfer their values.
+    This neither writes files nor certifies a source-to-episode relationship.
+    The writer owns caching; tracking calls this once during recorded setup.
+    """
+    from marl_battlegrounds.core.types import EnvConfig
+    from marl_battlegrounds.evaluation.run_writer import (
+        _json_bytes,  # pyright: ignore[reportPrivateUsage]
+        configuration_identity,
+    )
+
+    if not isinstance(cast(object, source_configs), EnvConfig):
+        raise TypeError("source_configs must be an EnvConfig source or batch")
+    shape = np.shape(source_configs.agent_profile.active_mask)
+    if shape == (10,):
+        configs = [source_configs]
+    elif len(shape) == 2 and shape[1] == 10 and shape[0] > 0:
+        host_sources = jax.device_get(source_configs)
+        configs = [
+            jax.tree.map(itemgetter(index), host_sources) for index in range(shape[0])
+        ]
+    else:
+        raise ValueError("source bank must contain one or more ten-slot configurations")
+    contents: dict[str, object] = {}
+    references: list[str] = []
+    for config in configs:
+        identifier, content = configuration_identity(config)
+        references.append(identifier)
+        contents[identifier] = content
+    return sha256(_json_bytes(references)).hexdigest(), references, contents
 
 
 def tree_digest(tree: object) -> str:

@@ -1,6 +1,6 @@
 """Define optional numerical recording records and shared host error checks.
 
-EpisodeStartRecords carries compact source claims from a future tracker to the
+EpisodeStartRecords carries compact source claims from the optional tracker to the
 writer. It contains only numerical leaves, so callers may carry it through JAX
 loops. Constructing a record does not verify its claim. The writer owns that
 check. validate_recording_errors rejects reported failures before any consumer
