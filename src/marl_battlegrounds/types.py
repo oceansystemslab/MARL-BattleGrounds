@@ -1,18 +1,21 @@
-"""Import the existing simulator and actor types from one public location.
+"""Import simulator, actor and System types from one public location.
 
-These are the original NamedTuple classes, not copies or adapters. Importing
-``Action`` here gives the same class as importing it from Core. Their arrays
-remain dynamic JAX data. Constructing a NamedTuple packages values; it does not
-validate shapes, dtypes, physical validity or action legality.
+These names refer to their original owning classes. Importing ``Action`` here
+gives the same class as importing it from Core. Core and actor types load with
+this module; System types load only when requested. Their numerical arrays stay
+dynamic JAX data. Core NamedTuple constructors package values without validating
+shapes, dtypes, physical validity or action legality. Each System type documents
+its own validation and host/JAX contract.
 
 Available types:
     Action: Joint ``move``, ``select_target`` and ``use_ultimate`` int32 arrays.
         Each field has shape ``(10,)`` for a scalar environment or ``(B, 10)``
         for a native batch. Slots 0..4 belong to Team A and 5..9 to Team B.
         Target categories keep their actor-relative meaning in both teams.
-    ActorAction: The same three action fields for one actor, each shape ``()``
-        and dtype int32. Category ranges are move 0..8, target 0..10 and
-        Ultimate 0..1. A category within range may still be masked out.
+    ActorAction: The same three int32 action fields. A scalar Policy uses shape
+        ``()`` per field; a team adds five slots, and a System uses ``(B, 5)``.
+        Category ranges are move 0..8, target 0..10 and Ultimate 0..1. A category
+        within range may still be masked out.
     ActionMask: Bool arrays describing current allowed choices. For one actor,
         move, target and Ultimate masks have shapes ``(9,)``, ``(11,)`` and
         ``(2,)``; their joint target/Ultimate mask has shape ``(11, 2)``.
@@ -33,10 +36,23 @@ Available types:
         Feature values are float32, masks bool, and index/count values int32.
         ``env.observation_space(agent)`` describes each remaining field shape
         without flattening it or adding identity features.
+    System: Immutable method description with explicit parameters, initialization
+        and reset hooks. It adds no actor information rights or hidden RNG.
+    SystemInput: One team's five separate permitted actor views, masks and
+        lifecycle flags, always with a leading environment axis B.
+    SystemOutput: Frozen method result holding submitted actions, next memory,
+        optional learning values and optional component choices.
+    SystemState: The two methods' memories, reset bindings, saved initialization
+        roots and last numerical trace. Obtain it through init_systems.
+    SystemStepData: One team's submitted actions, rewards, configured activity,
+        pre-step episode identities and real-transition flags, with leading B.
+    PolicyTrace: Decision identities and reported component choices. This is
+        numerical runner data, not actor input or an automatic recording stream.
 
 Import these names explicitly, for example
-``from marl_battlegrounds.types import Action, ActorAction``. They are not
-package-root exports such as ``marl_bgs.Action``.
+``from marl_battlegrounds.types import Action, ActorAction``. Core and actor types
+are not package-root exports such as ``marl_bgs.Action``. The System types also
+have package-root exports, except PolicyTrace.
 
 Use ``env.action_space(agent).contains(value)`` for host-side structural checks
 of one ActorAction. It may copy device data and is not for a JAX rollout loop.
@@ -44,6 +60,9 @@ Use the actual ActionMask for legal choices and ``env.sample_actions`` for the
 optional legal sampler. Runner EnvironmentState and privileged step diagnostics
 are separate from an actor's Observation and are not exported as Core types here.
 """
+
+from importlib import import_module
+from typing import TYPE_CHECKING
 
 from marl_battlegrounds.core.types import (
     Action,
@@ -54,6 +73,16 @@ from marl_battlegrounds.core.types import (
 )
 from marl_battlegrounds.policies.actor import ActorAction
 
+if TYPE_CHECKING:
+    from marl_battlegrounds.evaluation.policy_execution import (
+        PolicyTrace,
+        System,
+        SystemInput,
+        SystemOutput,
+        SystemState,
+        SystemStepData,
+    )
+
 __all__ = [
     "Action",
     "ActionMask",
@@ -61,4 +90,51 @@ __all__ = [
     "DoneFlags",
     "EnvConfig",
     "Observation",
+    "PolicyTrace",
+    "System",
+    "SystemInput",
+    "SystemOutput",
+    "SystemState",
+    "SystemStepData",
 ]
+
+
+def __getattr__(name: str) -> object:
+    """Load and cache an original System type when it is first requested.
+
+    Parameters
+    ----------
+    name : str
+        Exact System type name listed in this module's __all__.
+
+    Returns
+    -------
+    object
+        The class owned by evaluation.policy_execution. Later access reuses
+        the same cached object; no wrapper or duplicate class is constructed.
+
+    Raises
+    ------
+    AttributeError
+        name is not one of the supported lazy System types.
+
+    Notes
+    -----
+    Loading a System type imports its method-execution module and dependencies.
+    Import failures propagate to the caller. Existing Core and actor classes
+    are already present and do not use this fallback.
+    """
+    if name in {
+        "PolicyTrace",
+        "System",
+        "SystemInput",
+        "SystemOutput",
+        "SystemState",
+        "SystemStepData",
+    }:
+        value = getattr(
+            import_module("marl_battlegrounds.evaluation.policy_execution"), name
+        )
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

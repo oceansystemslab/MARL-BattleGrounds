@@ -58,7 +58,6 @@ from marl_battlegrounds.core.types import (
     TEAM_B_ID,
     Action,
     ActionMask,
-    Observation,
 )
 from marl_battlegrounds.evaluation import policy_execution
 from marl_battlegrounds.evaluation.models import (
@@ -68,7 +67,7 @@ from marl_battlegrounds.evaluation.models import (
 )
 from marl_battlegrounds.evaluation.policy_execution import Policy, PolicyTree
 from marl_battlegrounds.policies.actor import ActorAction
-from marl_battlegrounds.policies.input import ActorInput
+from marl_battlegrounds.policies.input import ActorInput, Observations
 
 
 def _session(
@@ -869,14 +868,14 @@ def test_mixed_submission_keeps_team_a_rows_and_uses_identical_policy_keys(
         use_ultimate=jnp.ones((5,), dtype=jnp.int32),
     )
 
-    real_bank = policy_execution.build_shared_obs_sensor_source_bank
+    real_bank = policy_execution.build_team_actor_input
     real_apply = control.apply_policies
 
-    def counting_bank(observation: Observation) -> object:
+    def counting_bank(observations: Observations, team: int) -> ActorInput:
         nonlocal bank_calls
         bank_calls += 1
-        assert observation is shared.observation
-        return real_bank(observation)
+        assert observations.observation is shared.observation
+        return real_bank(observations, team)
 
     def fake_policy(name: str) -> Policy:
         assert name == "random"
@@ -922,9 +921,7 @@ def test_mixed_submission_keeps_team_a_rows_and_uses_identical_policy_keys(
         submitted.append(action)
         return session
 
-    monkeypatch.setattr(
-        policy_execution, "build_shared_obs_sensor_source_bank", counting_bank
-    )
+    monkeypatch.setattr(policy_execution, "build_team_actor_input", counting_bank)
     monkeypatch.setattr(control, "policy", fake_policy)
     monkeypatch.setattr(control, "apply_policies", record_shared)
     monkeypatch.setattr(control, "execute_no_shared_obs_team_policy", fake_no_shared)
@@ -933,7 +930,7 @@ def test_mixed_submission_keeps_team_a_rows_and_uses_identical_policy_keys(
     assert submit_interactive(shared) is shared
     assert submit_interactive(no_shared) is no_shared
 
-    assert bank_calls == 1
+    assert bank_calls == 2
     assert _tree_equal(policy_keys["shared"], policy_keys["no_shared"])
     for action in submitted:
         assert tuple(int(value) for value in action.move[:5]) == (
@@ -962,7 +959,7 @@ def test_random_team_a_combines_with_manual_team_b_from_one_epoch(
     )
     submitted: list[Action] = []
 
-    def fail_bank(_observation: object) -> object:
+    def fail_bank(_observations: object, _team: int) -> object:
         raise AssertionError("NoSharedObs must not construct a source bank")
 
     def fake_no_shared(
@@ -991,9 +988,7 @@ def test_random_team_a_combines_with_manual_team_b_from_one_epoch(
         submitted.append(action)
         return session
 
-    monkeypatch.setattr(
-        policy_execution, "build_shared_obs_sensor_source_bank", fail_bank
-    )
+    monkeypatch.setattr(policy_execution, "build_team_actor_input", fail_bank)
     monkeypatch.setattr(control, "execute_no_shared_obs_team_policy", fake_no_shared)
     monkeypatch.setattr(control, "submit_joint_action", fake_submit)
 
@@ -1078,7 +1073,7 @@ def test_mixed_manual_policy_keeps_inactive_submitted_rows_neutral(
     )
 
 
-def test_two_reactive_teams_share_one_same_epoch_source_bank(
+def test_two_reactive_teams_build_one_bank_each_from_the_same_epoch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _session(
@@ -1090,14 +1085,14 @@ def test_two_reactive_teams_share_one_same_epoch_source_bank(
     policy_names: list[str] = []
     epoch_calls: list[tuple[object, ...]] = []
     submitted: list[Action] = []
-    real_bank = policy_execution.build_shared_obs_sensor_source_bank
+    real_bank = policy_execution.build_team_actor_input
     real_apply = control.apply_policies
 
-    def counting_bank(observation: Observation) -> object:
+    def counting_bank(observations: Observations, team: int) -> ActorInput:
         nonlocal bank_calls
-        assert observation is session.observation
+        assert observations.observation is session.observation
         bank_calls += 1
-        return real_bank(observation)
+        return real_bank(observations, team)
 
     def fail_manual(*_args: object, **_kwargs: object) -> Action:
         raise AssertionError("both-policy execution must not build manual rows")
@@ -1156,16 +1151,14 @@ def test_two_reactive_teams_share_one_same_epoch_source_bank(
         submitted.append(action)
         return session
 
-    monkeypatch.setattr(
-        policy_execution, "build_shared_obs_sensor_source_bank", counting_bank
-    )
+    monkeypatch.setattr(policy_execution, "build_team_actor_input", counting_bank)
     monkeypatch.setattr(control, "build_interactive_joint_action", fail_manual)
     monkeypatch.setattr(control, "policy", fake_policy)
     monkeypatch.setattr(control, "apply_policies", record_shared)
     monkeypatch.setattr(control, "submit_joint_action", fake_submit)
 
     assert submit_interactive(session) is session
-    assert bank_calls == 1
+    assert bank_calls == 2
     assert policy_names == ["tdm-alpha", "tdm-alpha"]
     assert len(epoch_calls) == 1
     observations, mask, keys = epoch_calls[0][6:]
@@ -1199,24 +1192,22 @@ def test_every_controller_and_information_mode_executes_one_real_coherent_step(
     team_b_controller: TeamController,
     information_mode: ExecutionInformationMode,
 ) -> None:
-    real_bank = policy_execution.build_shared_obs_sensor_source_bank
+    real_bank = policy_execution.build_team_actor_input
     real_step = control.step
     bank_calls = 0
     step_calls = 0
 
-    def counting_bank(observation: object) -> object:
+    def counting_bank(observations: Observations, team: int) -> ActorInput:
         nonlocal bank_calls
         bank_calls += 1
-        return real_bank(observation)  # type: ignore[arg-type]
+        return real_bank(observations, team)
 
     def counting_step(*args: object) -> object:
         nonlocal step_calls
         step_calls += 1
         return real_step(*args)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(
-        policy_execution, "build_shared_obs_sensor_source_bank", counting_bank
-    )
+    monkeypatch.setattr(policy_execution, "build_team_actor_input", counting_bank)
     monkeypatch.setattr(control, "step", counting_step)
 
     def execute() -> DebuggerSession:
@@ -1243,7 +1234,7 @@ def test_every_controller_and_information_mode_executes_one_real_coherent_step(
     )
 
     assert step_calls == 2
-    assert bank_calls == (2 if information_mode == "shared_obs" and any_policy else 0)
+    assert bank_calls == (4 if information_mode == "shared_obs" and any_policy else 0)
     assert int(first.state.step_count) == 1
     assert first.current_evaluation_frame.frame_index == 1
     assert first.incoming_evaluation_view is not None

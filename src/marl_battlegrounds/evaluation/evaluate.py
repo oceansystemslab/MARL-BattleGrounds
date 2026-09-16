@@ -48,7 +48,7 @@ from marl_battlegrounds.evaluation.policy_execution import (
     Policy,
     PolicyApply,
     PolicyTree,
-    apply_policies,
+    apply_policy_batch,
     controller_identity,
     freeze_variables,
     initial_policy_carry,
@@ -399,9 +399,7 @@ def _jax_chunk(
             current.state.core_state.step_count - current.state.initial_step_count
         )
         actor_keys = _actor_keys(root_key, seed_ids, local_steps)
-        actions, next_a, next_b = jax.vmap(
-            apply_policies, in_axes=(None, None, None, None, 0, 0, 0, 0, 0)
-        )(
+        actions, next_a, next_b = apply_policy_batch(
             apply_a,
             apply_b,
             variables_a,
@@ -411,10 +409,8 @@ def _jax_chunk(
             current.observations,
             current.state.action_mask,
             actor_keys,
+            ~current.state.done.done,
         )
-        active = ~current.state.done.done
-        next_a = select_policy_carry(active, next_a, current.policy_a)
-        next_b = select_policy_carry(active, next_b, current.policy_b)
         observations, state, _, _, info = env.step(
             episode_keys(root_key, seed_ids, local_steps, 1), current.state, actions
         )
@@ -461,43 +457,20 @@ def _host_chunk(
     for _ in range(chunk_size):
         local_steps = carry.state.core_state.step_count - carry.state.initial_step_count
         keys = _actor_keys(root_key, seed_ids, local_steps)
-        rows: list[tuple[Action, PolicyTree, PolicyTree]] = []
-        done = np.asarray(carry.state.done.done)
-        for index in range(done.size):
-
-            def row(value: Array, index: int = index) -> Array:
-                """Read one lane's actor inputs and memory for its Python policy
-                calls.
-                """
-                return value[index]
-
-            memory_a = jax.tree.map(row, carry.policy_a)
-            memory_b = jax.tree.map(row, carry.policy_b)
-            if done[index]:
-                zero = jnp.zeros(10, jnp.int32)
-                rows.append((Action(zero, zero, zero), memory_a, memory_b))
-            else:
-                rows.append(
-                    apply_policies(
-                        team_a.apply,
-                        team_b.apply,
-                        variables_a,
-                        variables_b,
-                        memory_a,
-                        memory_b,
-                        jax.tree.map(row, carry.observations),
-                        jax.tree.map(row, carry.state.action_mask),
-                        keys[index],
-                        execution_a=team_a.execution,
-                        execution_b=team_b.execution,
-                    )
-                )
-
-        def stack(*values: Array) -> Array:
-            """Restore the environment axis after separate lane policy calls."""
-            return jnp.stack(values)
-
-        action, next_a, next_b = jax.tree.map(stack, *rows)
+        action, next_a, next_b = apply_policy_batch(
+            team_a.apply,
+            team_b.apply,
+            variables_a,
+            variables_b,
+            carry.policy_a,
+            carry.policy_b,
+            carry.observations,
+            carry.state.action_mask,
+            keys,
+            ~carry.state.done.done,
+            execution_a=team_a.execution,
+            execution_b=team_b.execution,
+        )
         observations, state, _, _, info = cast(
             tuple[Observations, EnvironmentState, Reward, DoneFlags, EpisodeInfo],
             _step_environment(

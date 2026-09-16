@@ -13,7 +13,7 @@ carry it through ``jit``, ``vmap`` or ``lax.scan`` without hidden mutable state.
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from numbers import Integral
-from typing import Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -78,6 +78,9 @@ from marl_battlegrounds.tasks import (
     make_standard_team_deathmatch_config,
     prepare_exact_env_config,
 )
+
+if TYPE_CHECKING:
+    from marl_battlegrounds.evaluation.policy_execution import SystemInput
 
 type MetricMode = Literal["none", "priority", "full"]
 type CoreStepResult = tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]
@@ -536,6 +539,109 @@ class Environment:
         the mask. Do not combine it with observations from another decision.
         """
         return state.action_mask
+
+    def policy_inputs(
+        self, observations: Observations, state: EnvironmentState, team: int = 0
+    ) -> SystemInput:
+        """Prepare one team's separate permitted inputs for this decision.
+
+        Parameters
+        ----------
+        observations : Observations
+            Compact observations and source permissions from the same decision
+            as state. Supplied permission restrictions remain in force.
+        state : EnvironmentState
+            Matching scalar or native state, providing Core's action masks,
+            roster activity, episode-start flags and live-game flags.
+        team : int
+            Static routing choice, 0 for Team A or 1 for Team B; default 0.
+            Booleans and other values are rejected.
+
+        Returns
+        -------
+        SystemInput
+            Recipient-indexed actors and masks with leading shape (B, 5),
+            active_mask (B, 5), and episode_start and valid (B,). A scalar game
+            becomes B=1. Valid marks live games, not living agents; a dead actor
+            can belong to a live game. No raw state or absolute team ID is added.
+
+        Raises
+        ------
+        ValueError
+            team is not an integer 0 or 1, or is a Boolean.
+
+        Notes
+        -----
+        Works in jit and vmap with a static team. The supplied snapshot must be
+        coherent; this helper does not compare epochs. It builds only this
+        team's transient source banks and does not transfer data to the host.
+        Each recipient's private rows remain separate information rights. A
+        method must not use another actor's private input to choose its action.
+        """
+        from marl_battlegrounds.evaluation.policy_execution import system_inputs
+
+        return system_inputs(observations, state, team=team)
+
+    def join_actions(self, a: ActorAction, b: ActorAction) -> Action:
+        """Join both teams' submitted actions in Core's fixed slot order.
+
+        Parameters
+        ----------
+        a, b : ActorAction
+            Team A and Team B actions. Each of the three fields must be int32
+            with five team slots. A scalar handle accepts (5,) or (1, 5);
+            native batches require matching (B, 5) fields.
+
+        Returns
+        -------
+        Action
+            Team A slots followed by Team B slots. Fields have shape (10,) for
+            a scalar handle or (B, 10) for a native batch, including B=1.
+
+        Raises
+        ------
+        TypeError
+            Either input is not ActorAction, a field is not int32, or the
+            field shapes do not match the required team or batch axes.
+
+        Notes
+        -----
+        This shape-only assembly works under jit and external vmap. It does not
+        sample, mask or repair choices. Submitted values, including illegal
+        choices, reach Core unchanged; Core owns action acceptance. Callers use
+        the established neutral actions for inactive slots. Learning values
+        still describe submitted actions if Core accepts a different action.
+        """
+        from marl_battlegrounds.evaluation.policy_execution import join_system_actions
+
+        actions = join_system_actions(a, b, batched=self.num_envs is not None)
+        if self.num_envs is not None and actions.move.shape[0] != self.num_envs:
+            raise TypeError("action batch size must match the environment's num_envs")
+        return actions
+
+    def training_state(self, state: EnvironmentState) -> EnvState:
+        """Return full Core state for a separately authorized training use.
+
+        Parameters
+        ----------
+        state : EnvironmentState
+            Current scalar or native state from reset or step.
+
+        Returns
+        -------
+        EnvState
+            The exact state.core_state object, preserving its arrays, device
+            placement and optional leading environment axis. No copy is made.
+
+        Notes
+        -----
+        This is privileged simulator data, not an actor observation. A training
+        experiment must explicitly permit its use, such as by a training-only
+        critic. Do not feed it to an action-producing method or its memory.
+        The accessor neither advances the game nor expands SystemInput and can
+        be used inside a compiled training function.
+        """
+        return state.core_state
 
     def _reset_one(
         self, key: Array, config: EnvConfig, episode_id: Array

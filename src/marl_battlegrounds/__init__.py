@@ -1,8 +1,10 @@
 """Expose the researcher API without loading every subsystem at import time.
 
 Use import marl_battlegrounds as marl_bgs, then call make for the environment,
-evaluate for frozen-policy games, or run_tournament for cross-play. Setup helpers
-and the Policy adapter are available from the same package.
+evaluate for frozen-policy games, or run_tournament for cross-play. System,
+init_systems and apply_systems support researcher-owned methods in raw loops.
+Setup helpers and the existing Policy adapter use the same package entry point.
+Generic Systems are not yet accepted by the Policy evaluator or tournament.
 
 Exports load their owning module when first requested and are then cached here.
 Importing this package alone does not import the environment or start JAX.
@@ -15,7 +17,20 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from marl_battlegrounds.environment import Environment, EnvironmentState, make
     from marl_battlegrounds.evaluation.evaluate import EvaluationResult, evaluate
-    from marl_battlegrounds.evaluation.policy_execution import Policy, policy
+    from marl_battlegrounds.evaluation.policy_execution import (
+        Policy,
+        System,
+        SystemInput,
+        SystemOutput,
+        SystemState,
+        SystemStepData,
+        apply_systems,
+        independent_policies,
+        init_systems,
+        policy,
+        shared_policy,
+        system_step_data,
+    )
     from marl_battlegrounds.evaluation.run_writer import RunWriter
     from marl_battlegrounds.evaluation.tournament import (
         TournamentResult,
@@ -35,16 +50,26 @@ __all__ = [
     "EvaluationResult",
     "Policy",
     "RunWriter",
+    "System",
+    "SystemInput",
+    "SystemOutput",
+    "SystemState",
+    "SystemStepData",
     "TournamentResult",
+    "apply_systems",
     "balanced_spawn_configs",
     "canonical_tournament_rosters",
     "evaluate",
+    "independent_policies",
+    "init_systems",
     "list_tdm_maps",
     "list_tdm_scenarios",
     "load_tdm_scenario",
     "make",
     "policy",
     "run_tournament",
+    "shared_policy",
+    "system_step_data",
 ]
 
 _MODULES = {
@@ -55,6 +80,16 @@ _MODULES = {
     "evaluate": "evaluation.evaluate",
     "Policy": "evaluation.policy_execution",
     "policy": "evaluation.policy_execution",
+    "System": "evaluation.policy_execution",
+    "SystemInput": "evaluation.policy_execution",
+    "SystemOutput": "evaluation.policy_execution",
+    "SystemState": "evaluation.policy_execution",
+    "SystemStepData": "evaluation.policy_execution",
+    "apply_systems": "evaluation.policy_execution",
+    "independent_policies": "evaluation.policy_execution",
+    "init_systems": "evaluation.policy_execution",
+    "shared_policy": "evaluation.policy_execution",
+    "system_step_data": "evaluation.policy_execution",
     "RunWriter": "evaluation.run_writer",
     "TournamentResult": "evaluation.tournament",
     "run_tournament": "evaluation.tournament",

@@ -1,22 +1,29 @@
 """Keep rollout observations compact and expand permitted actor inputs on demand.
 
 Observations stores the ten base observation rows and a source-permission matrix.
-build_actor_input constructs the larger per-actor SharedObs banks when needed.
+build_team_actor_input expands one team's permitted inputs when needed.
+build_actor_input provides the compatible all-actor route with default permissions.
 A source is another actor's sensor row; it is not access to hidden Core state.
 Policy masks and random keys remain separate arguments.
 """
 
+from numbers import Integral
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 from jax import Array
 
-from marl_battlegrounds.core.types import EnvConfig, Observation
+from marl_battlegrounds.core.types import (
+    AGENT_FEATURE_ACTIVE,
+    AGENT_FEATURE_ALIVE,
+    EnvConfig,
+    Observation,
+)
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsSensorSourceBankV2,
     build_default_shared_obs_information_availability,
-    build_shared_obs_sensor_source_bank,
+    build_shared_obs_team_source_bank_from_base_rows,
     mask_source_bank_for_recipient,
 )
 
@@ -27,17 +34,17 @@ class ActorInput(NamedTuple):
     Attributes
     ----------
     observation : Observation
-        The actor's own current observation. In the result of build_actor_input,
-        each leaf has a leading axis of ten actors; select one row before a
-        scalar policy call.
+        The actor's own current observation. The team builder adds five recipient
+        rows; build_actor_input adds ten. Select one row before a scalar policy
+        call. An outer vmap adds the environment axis.
     source_bank : SharedObsSensorSourceBankV2
         Shared sensor data with unavailable source rows cleared. One actor's
         feature, visibility and objective arrays have shapes (5, 10, 58),
-        (5, 10) and (5, 8, 12). The builder adds a leading ten-actor axis.
+        (5, 10) and (5, 8, 12). Builders add their leading recipient axis.
     source_availability : Array
         Boolean permission for five own-team sources. Shape (5,) for one actor,
-        or (10, 5) in the builder result. This is permission, not a visibility
-        claim: an admitted source can have no current sensor data.
+        (5, 5) for one team, or (10, 5) for all actors. This is permission, not
+        a visibility claim: an admitted source can have no current sensor data.
 
     Notes
     -----
@@ -107,6 +114,72 @@ def build_observations(observation: Observation, config: EnvConfig) -> Observati
     )
 
 
+def build_team_actor_input(observations: Observations, team: int) -> ActorInput:
+    """Expand one team's supplied permissions into separate actor inputs.
+
+    Parameters
+    ----------
+    observations : Observations
+        One game's ten current observation rows and Boolean source permissions
+        shaped (10, 10). Permissions must already be a valid same-team, non-self
+        subset. This helper never replaces them with broader defaults.
+    team : int
+        Static routing choice: 0 selects Team A and 1 selects Team B. Pass a
+        Python integer, not a traced array. Booleans are not accepted.
+
+    Returns
+    -------
+    ActorInput
+        Five recipient observations, Boolean permissions (5, 5), and redacted
+        source banks. Bank feature, visibility and objective shapes are
+        (5, 5, 10, 58), (5, 5, 10), and (5, 5, 8, 12). Features are float32;
+        visibility is Boolean. Dead, inactive, hidden and forbidden source
+        material is cleared by the existing sensor and redaction authorities.
+
+    Raises
+    ------
+    ValueError
+        team is not an integer 0 or 1, or is a Boolean.
+
+    Notes
+    -----
+    Only the requested team's bank is built. The five recipient rows retain
+    separate information rights; they do not form a shared private observation.
+    Inputs stay unchanged and numerical values stay on device. Shapes and
+    permission validity are caller preconditions. Use jit with a static team
+    and vmap to add environment batches. Keep the expanded result transient
+    instead of storing it for every rollout step.
+    """
+    if isinstance(team, bool) or not isinstance(team, Integral) or team not in (0, 1):
+        raise ValueError("team must be the integer 0 or 1")
+    start = int(team) * 5
+
+    def take(value: Array) -> Array:
+        """Select this team's five routing rows without changing feature axes."""
+        return value[start : start + 5]
+
+    observation = jax.tree.map(take, observations.observation)
+    source_is_living = (observation.self_features[:, AGENT_FEATURE_ACTIVE] > 0.0) & (
+        observation.self_features[:, AGENT_FEATURE_ALIVE] > 0.0
+    )
+    bank = build_shared_obs_team_source_bank_from_base_rows(
+        observation.ally_unit_features,
+        observation.enemy_unit_features,
+        observation.objective_features,
+        observation.ally_visibility_mask,
+        observation.enemy_visibility_mask,
+        source_is_living,
+    )
+    availability = observations.source_availability[
+        start : start + 5, start : start + 5
+    ]
+    return ActorInput(
+        observation,
+        jax.vmap(mask_source_bank_for_recipient, in_axes=(None, 0))(bank, availability),
+        availability,
+    )
+
+
 def build_actor_input(observation: Observation, config: EnvConfig) -> ActorInput:
     """Build permitted SharedObs inputs for all ten actors in one game.
 
@@ -134,27 +207,27 @@ def build_actor_input(observation: Observation, config: EnvConfig) -> ActorInput
     under jit. Use vmap to add a game axis. No action mask or hidden simulator state
     is constructed here.
     """
-    availability = build_default_shared_obs_information_availability(
-        config.agent_profile.active_mask, config.agent_profile.team_ids
-    )
-    source_bank = build_shared_obs_sensor_source_bank(observation)
-    team_availability = jnp.stack((availability[:5, :5], availability[5:, 5:]))
-    authorized_banks = jax.vmap(
-        jax.vmap(mask_source_bank_for_recipient, in_axes=(None, 0))
-    )(source_bank, team_availability)
+    observations = build_observations(observation, config)
+    team_a = build_team_actor_input(observations, 0)
+    team_b = build_team_actor_input(observations, 1)
 
-    def actor_rows(value: Array) -> Array:
-        """Flatten the two-team and five-recipient axes into ten actor rows.
-
-        The remaining source and feature axes keep their order and values.
-        """
-        return value.reshape((10, *value.shape[2:]))
+    def join(a: Array, b: Array) -> Array:
+        """Join Team A's five recipients followed by Team B's five recipients."""
+        return jnp.concatenate((a, b), axis=0)
 
     return ActorInput(
         observation=observation,
-        source_bank=jax.tree.map(actor_rows, authorized_banks),
-        source_availability=team_availability.reshape((10, 5)),
+        source_bank=jax.tree.map(join, team_a.source_bank, team_b.source_bank),
+        source_availability=join(
+            team_a.source_availability, team_b.source_availability
+        ),
     )
 
 
-__all__ = ("ActorInput", "Observations", "build_actor_input", "build_observations")
+__all__ = (
+    "ActorInput",
+    "Observations",
+    "build_actor_input",
+    "build_observations",
+    "build_team_actor_input",
+)

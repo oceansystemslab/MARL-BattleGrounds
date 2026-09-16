@@ -61,7 +61,7 @@ from marl_battlegrounds.evaluation.replay_io import (
 )
 from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3, build_replay_v3
 from marl_battlegrounds.policies.actor import ActorAction
-from marl_battlegrounds.policies.input import Observations
+from marl_battlegrounds.policies.input import ActorInput, Observations
 from marl_battlegrounds.policies.reactive_tdm_alpha import reactive_tdm_alpha_policy
 from marl_battlegrounds.policies.shared_obs import (
     build_shared_obs_sensor_source_bank,
@@ -153,16 +153,16 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
 ) -> None:
     session = _session(team_a=team_a, team_b=scenario_controller)
     calls = {"bank": 0, "assembler": 0, "step": 0}
-    real_bank = policy_execution.build_shared_obs_sensor_source_bank
+    real_bank = policy_execution.build_team_actor_input
     real_assembler = policy_execution.build_joint_action_from_actor_actions
     real_step = control.step
     real_executor = control.apply_policies
     input_epochs: list[tuple[object, object, object]] = []
 
-    def bank(observation: object) -> object:
+    def bank(observations: Observations, team: int) -> ActorInput:
         calls["bank"] += 1
-        assert observation is session.observation
-        return real_bank(observation)  # type: ignore[arg-type]
+        assert observations.observation is session.observation
+        return real_bank(observations, team)
 
     def assembler(*args: object) -> object:
         calls["assembler"] += 1
@@ -180,14 +180,14 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
             assert args[0] is policy(expected).apply
         return real_executor(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(policy_execution, "build_shared_obs_sensor_source_bank", bank)
+    monkeypatch.setattr(policy_execution, "build_team_actor_input", bank)
     monkeypatch.setattr(
         policy_execution, "build_joint_action_from_actor_actions", assembler
     )
     monkeypatch.setattr(control, "step", step)
     monkeypatch.setattr(control, "apply_policies", executor)
     advanced = control.submit_interactive(session)
-    assert calls == {"bank": 1, "assembler": 1, "step": 1}
+    assert calls == {"bank": 2, "assembler": 1, "step": 1}
     assert len(input_epochs) == 1
     observations, mask, keys = input_epochs[0]
     assert isinstance(observations, Observations)

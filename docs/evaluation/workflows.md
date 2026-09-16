@@ -7,11 +7,82 @@ The [environment example](../../examples/environment.py) and
 [evaluation example](../../examples/evaluation.py) run the public interfaces.
 
 This page describes implemented behavior. Later accepted M8 contracts, including
-Systems, stage tracking, phase-specific map defaults, fixed-team spawn-paired
-evaluation and official snapshot reuse, are not all implemented by the current
-raw-environment packet. Do not assume a proposed call exists until its packet is
+stage tracking, phase-specific map defaults, fixed-team spawn-paired evaluation
+and official snapshot reuse, are not all implemented. Raw Systems are available;
+public evaluation and tournament calls still accept the existing Policy route. Do not assume other proposed calls exist until their implementation is
 qualified. In particular, current `evaluate(..., phase="validation")` still needs
 explicit validation maps, and the current generic tournament pairs team roles.
+
+## Use Your Own Method
+
+The [Systems example](../../examples/systems.py) runs a complete compiled
+recurrent loop, ordered independent Policies and a local host method with a JAX
+opponent. It uses the public API, chooses each action once and keeps its learning
+values beside the resulting transition. It does not implement a learning
+algorithm or call a network service.
+
+`System(name, apply, variables=(), init=None, reset_memory=None, execution="jax")`
+is an optional description of your team method. It does not require inheritance,
+a model framework or our learner. The method receives:
+
+- `variables`: the parameter tree you supply.
+- `memory`: its own previous memory, separate from the other team's memory.
+- `inputs`: permitted actor views, exact masks, roster activity, episode-start
+  flags and a live-lane mask. Every numerical input includes batch axis B.
+- `keys`: one JAX key per lane. Split keys for your own components.
+
+Return `(actions, next_memory)`, `(actions, next_memory, policy_ids)`, or
+`SystemOutput(actions, next_memory, learning_outputs=..., policy_ids=...)`.
+A bare third value always means policy IDs. Learning outputs can include already
+computed log probabilities or values; MARL-BGs never calls your model again to
+obtain them. The two teams may return different trees. Keep each JAX callable's
+output structure, shapes and dtypes fixed.
+
+Initialize with `init_systems`, then carry the returned `SystemState` through
+`apply_systems`. The latter returns joint actions, new SystemState and the pair
+of learning outputs. Pass changing model weights explicitly through
+`variables_a` and `variables_b` inside compiled loops. Do not put changing
+parameters into static functions or create a new closure for every update.
+
+Use `env.step` once for those actions. Keep `system_step_data(before_state,
+actions, result)` and the learning outputs before calling `env.reset_done`.
+Also retain the step result's next observation and termination/truncation flags.
+A terminal observation belongs to the game that just ended; a reset observation
+belongs to the new game. Your learner decides how those flags affect value
+bootstrapping. Terminal transitions are valid; later terminal padding is not. Learning values
+describe the submitted action, even when Core rejects it. Do not attach its log
+probability to a different accepted action.
+
+Reset generations refresh only new episodes' memory. Death and respawn do not
+reset episode memory. Default JAX memory has leading B; other layouts supply
+`reset_memory(memory, fresh_memory, reset_mask)`. That hook handles resets only.
+Methods must preserve invalid lanes during ordinary application. A new unrelated
+environment context requires a new `init_systems` call.
+
+`shared_policy(existing_policy)` batches an existing scalar Policy. Use
+`independent_policies((first, second, ...))` for one Policy per active roster slot
+in supplied order. Repeated classes remain separate agents. Independent entries
+must use the same execution mode, but their parameter and memory trees may differ.
+The adapter rejects an incompatible concrete roster rather than moving agents.
+
+For `execution="host"`, the method receives one stable full batch of permitted
+NumPy inputs; keys remain JAX keys. Use `valid` to gather requests and restore
+responses in lane order. Entirely invalid batches make no host apply call.
+Default host memory is an empty tuple or a list of lane states; other opaque
+layouts need a custom reset hook. Retained host learning outputs must remain
+stable when later calls occur. MARL-BGs does not copy arbitrary objects or undo
+a provider's side effects after an exception. The JAX opponent remains batched.
+
+**Information rights stay per actor.** A team-shaped return does not authorize
+pooling private observations, memories or provider prompts. `env.policy_inputs`
+and `env.join_actions` expose the same small tools for custom loops without a
+System. `env.training_state` is a separate privileged training route; using it
+requires the experiment's declared training permissions.
+
+Raw traces identify their submitted decision but are not a new writer stream.
+Generic System support in public `evaluate` and tournament calls, and persisted
+component traces, remain later work. Existing Policy recordings retain their
+current schemas and identities.
 
 ## Map ID Change — 2026-09-12
 

@@ -122,7 +122,7 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
             ("file:tests/test_combat_effects.py", 8, 11),
             ("file:tests/test_tdm_scenarios.py", 11, 8),
             ("file:tests/test_combat_ultimate_masks.py", 9, 2),
-            ("file:tests/test_policy_identity_recording.py", 7, 12),
+            ("file:tests/test_policy_identity_recording.py", 6, 12),
         )
     },
     strict=True,

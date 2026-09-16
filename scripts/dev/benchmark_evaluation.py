@@ -11,7 +11,15 @@ production evaluator.
 The separate --foundations mode qualifies GPU setup and explicit-reset workflows.
 CPU mode is available for diagnostics; CPU timings are not acceptance evidence.
 Use --setup-only for preparation checks, or --action-workload sample to include
-legal action sampling. Legacy workloads and their defaults remain unchanged.
+legal action sampling. GPU environment sizes are 32, 64, 128, 512 and 1024.
+
+Use --systems --package-root CANDIDATE --baseline-root BASELINE --output RESULTS
+for the bounded Packet 2 comparisons: raw B32/L16, raw B128/L128, mixed B32/L16,
+and the old/new Policy evaluator at B128/chunk128. --systems-case selects one.
+The same frozen --assets-root and this harness serve both package revisions.
+Systems workers save matching retained payloads, five or more warmed samples,
+compilation/load evidence and memory limits. The fake host method uses no network.
+No mode establishes learning efficiency or proves theoretical optimality.
 """
 
 from __future__ import annotations
@@ -2095,7 +2103,7 @@ def _run_foundations_worker(args: argparse.Namespace, output_path: Path) -> None
 
 
 def _run_foundations(args: argparse.Namespace) -> int:
-    """Run isolated foundations workers while preserving legacy workload defaults.
+    """Run isolated foundations workers with allowed GPU batch defaults.
 
     GPU is the foundations default; cuda,cpu permits efficient host setup checks.
     An explicit cuda-only platform list supports a separate compatibility check.
@@ -2128,7 +2136,16 @@ def _run_foundations(args: argparse.Namespace) -> int:
     args.api = args.api or "reference"
     args.action_workload = args.action_workload or "fixed"
     args.lengths = args.lengths or [16, 128]
-    args.sizes = args.sizes or [2, 128, 1024]
+    args.sizes = args.sizes or [32, 128, 1024]
+    if args.backend == "gpu" and (
+        args.include_scalar
+        or any(size not in _GPU_BATCHES for size in args.sizes)
+        or (args.worker is not None and args.worker not in _GPU_BATCHES)
+    ):
+        raise ValueError(
+            "GPU environment batches must be 32, 64, 128, 512 or 1024; "
+            "scalar and odd checks belong on CPU"
+        )
     args.rollout_modes = args.rollout_modes or ["none", "priority"]
     args.map_id = 12 if args.map_id is None else args.map_id
     if (
@@ -2240,11 +2257,1066 @@ def _run_foundations(args: argparse.Namespace) -> int:
     return int(failed)
 
 
+_SYSTEM_CASES = {
+    "raw-short": (32, 16),
+    "raw-long": (128, 128),
+    "mixed": (32, 16),
+    "evaluator": (128, 128),
+}
+_GPU_BATCHES = (32, 64, 128, 512, 1024)
+
+
+class _SystemsCarry(NamedTuple):
+    """Retain final raw state, method memory and real-transition totals.
+
+    Observations and state have native leading B axes. Memory is SystemState;
+    advances/completions are int32 [B], and rewards are float32 [B,10]. Full
+    per-decision actions and learning values are returned separately by the scan.
+    """
+
+    observations: Tree
+    state: Tree
+    memory: Tree
+    advances: Array
+    completions: Array
+    rewards: Array
+
+
+def _systems_numeric_tree(tree: Tree) -> Tree:
+    """Replace typed PRNG-key leaves by uint32 data for size and digest reports.
+
+    tree is any retained System/array tree. Return the same structure with typed
+    key leaves replaced by key_data; other leaves are untouched. This helper does
+    not transfer arrays and runs outside measured work. It keeps saved NPZ files
+    independent of JAX's typed-key object representation.
+    """
+
+    def numeric(value: Tree) -> Tree:
+        """Expose key bits only when this leaf has JAX's typed PRNG-key dtype."""
+        if hasattr(value, "dtype") and jnp.issubdtype(value.dtype, jax.dtypes.prng_key):
+            return jax.random.key_data(value)
+        return value
+
+    return jax.tree.map(numeric, tree)
+
+
+def _systems_method(
+    variables: Tree, memory: Tree, inputs: Tree, keys: Tree, *, host: bool = False
+) -> Tree:
+    """Apply the same small recurrent method with JAX or NumPy array operations.
+
+    Parameters
+    ----------
+    variables : tuple of arrays
+        Projection weights [58,8] and action weights [8,31], both float32.
+    memory : array
+        Float32 [B,5,8] previous actor memories. Actors never share memories.
+    inputs : SystemInput
+        Recipient-authorized native inputs, masks and validity from the public API.
+    keys : array
+        Typed JAX keys [B], or already-read host uint32 key data [B,2]. The
+        fake provider owns the required key read. A deterministic key
+        offset influences each actor's numerical work; this is not a trained model.
+    host : bool, default=False
+        Use NumPy for the fake provider when True. No network or credentials.
+
+    Returns
+    -------
+    SystemOutput
+        Legal ActorAction int32 [B,5], fresh [B,5,8] memory, and float32 value
+        [B,5] learning outputs. No actor may read another recipient's inputs.
+
+    Notes
+    -----
+    This fixed method consumes self features and every permitted source-bank
+    field. It chooses movement and the coupled target/Ultimate category. It is
+    a reproducible workload, not a learning or tactical-competence claim. Host
+    returns own their numerical buffers; later calls cannot overwrite them.
+    """
+    from marl_battlegrounds.evaluation.policy_execution import SystemOutput
+    from marl_battlegrounds.policies.actor import ActorAction
+
+    xp: Any = np if host else jnp
+    data = keys if host else jax.random.key_data(keys)
+    features = inputs.actors.observation.self_features
+    summary = xp.zeros(features.shape[:2], dtype=xp.float32)
+    for leaf in jax.tree.leaves(inputs.actors.source_bank):
+        summary = summary + xp.mean(
+            xp.asarray(leaf, dtype=xp.float32), axis=tuple(range(2, leaf.ndim))
+        )
+    noise = xp.asarray(data[:, 0] % xp.uint32(97), dtype=xp.float32)[
+        :, None, None
+    ] * xp.float32(0.0001)
+    proposed = xp.tanh(
+        features @ variables[0] * xp.float32(0.01)
+        + memory * xp.float32(0.5)
+        + summary[..., None] * xp.float32(0.001)
+        + noise
+    )
+    valid = inputs.valid[:, None] & inputs.active_mask
+    following = xp.where(valid[..., None], proposed, memory)
+    logits = following @ variables[1]
+    move = xp.argmax(
+        xp.where(inputs.action_mask.move_mask, logits[..., :9], -xp.inf), axis=-1
+    ).astype(xp.int32)
+    joint_mask = inputs.action_mask.select_target_use_ultimate_joint_mask.reshape(
+        (*valid.shape, 22)
+    )
+    joint = xp.argmax(xp.where(joint_mask, logits[..., 9:], -xp.inf), axis=-1).astype(
+        xp.int32
+    )
+    actions = ActorAction(
+        xp.where(valid, move, xp.int32(0)),
+        xp.where(valid, joint // 2, xp.int32(0)),
+        xp.where(valid, joint % 2, xp.int32(0)),
+    )
+    return SystemOutput(
+        actions, following, learning_outputs={"value": xp.mean(following, axis=-1)}
+    )
+
+
+def _systems_initial_memory(variables: Tree, inputs: Tree, keys: Tree) -> Tree:
+    """Create float32 [B,5,8] zero memory without choosing an action.
+
+    variables and keys follow System.init but are unused by this fixed workload.
+    inputs supplies the native batch shape. Return device memory; the host
+    factory supplies its own NumPy initializer and reset hook instead.
+    """
+    del variables, keys
+    return jnp.zeros((*inputs.active_mask.shape, 8), jnp.float32)
+
+
+def _systems_pair(*, mixed: bool = False) -> tuple[Tree, Tree, dict[str, Any]]:
+    """Build stable JAX methods, optionally replacing Team A with a fake provider.
+
+    Parameters
+    ----------
+    mixed : bool, default=False
+        True returns one NumPy host method and one JAX method. False returns two
+        JAX methods. Both use identical immutable numerical weight values.
+
+    Returns
+    -------
+    tuple
+        Team A System, Team B System, and mutable benchmark-only host counters.
+        Counters measure delivered logical payload, provider compute and calls;
+        they do not claim to count every runtime transfer or allocation.
+    """
+    from marl_battlegrounds.evaluation.policy_execution import System
+
+    weights = (
+        jnp.sin(jnp.arange(58 * 8, dtype=jnp.float32)).reshape(58, 8) * 0.1,
+        jnp.cos(jnp.arange(8 * 31, dtype=jnp.float32)).reshape(8, 31) * 0.1,
+    )
+    second = System(
+        "benchmark-jax", _systems_method, weights, init=_systems_initial_memory
+    )
+    counts: dict[str, Any] = {
+        "apply_calls": 0,
+        "input_logical_bytes": 0,
+        "output_logical_bytes": 0,
+        "provider_seconds": 0.0,
+        "key_read_seconds": 0.0,
+    }
+    if not mixed:
+        return second, second, counts
+    host_weights = jax.device_get(weights)
+
+    def initialize(variables: Tree, inputs: Tree, keys: Tree) -> Tree:
+        """Return new NumPy [B,5,8] zeros; no action or provider request is made."""
+        del variables, keys
+        return cast(Tree, np.zeros((*inputs.active_mask.shape, 8), np.float32))
+
+    def reset(memory: Tree, fresh: Tree, selected: Tree) -> Tree:
+        """Replace only selected [B] rows of the host [B,5,8] memory array."""
+        return cast(Tree, np.where(np.asarray(selected)[:, None, None], fresh, memory))
+
+    def provider(variables: Tree, memory: Tree, inputs: Tree, keys: Tree) -> Tree:
+        """Count one batch request and return fresh NumPy action and learning arrays."""
+        started = time.perf_counter()
+        numerical_keys = np.asarray(jax.random.key_data(keys))
+        counts["key_read_seconds"] += time.perf_counter() - started
+        started = time.perf_counter()
+        output = _systems_method(variables, memory, inputs, numerical_keys, host=True)
+        counts["provider_seconds"] += time.perf_counter() - started
+        counts["apply_calls"] += 1
+        counts["input_logical_bytes"] += _bytes((inputs, _systems_numeric_tree(keys)))
+        counts["output_logical_bytes"] += _bytes(
+            (output.actions, output.learning_outputs)
+        )
+        return output
+
+    return (
+        System(
+            "benchmark-host",
+            provider,
+            host_weights,
+            init=initialize,
+            reset_memory=reset,
+            execution="host",
+        ),
+        second,
+        counts,
+    )
+
+
+def _systems_run(
+    first: Tree, second: Tree, *, length: int, manual: bool, mixed: bool
+) -> Callable[..., Tree]:
+    """Build a raw public or manual loop retaining identical decision data.
+
+    Parameters
+    ----------
+    first, second : System
+        Fixed method structures. Ordinary weights are explicit dynamic arguments
+        to the returned callable; no checkpoint values are captured by a new jit.
+    length : int
+        Number of real reset/act/step rounds, 16 or 128 in the agreed cases.
+    manual : bool
+        Use public permitted-input/action tools plus explicit method/memory
+        composition instead of apply_systems. RNG primitives and initial
+        SystemState are shared so this comparison isolates application overhead.
+    mixed : bool
+        True uses a host loop with one batched JAX teammate and compiled step.
+        False uses lax.scan and supports an enclosing jit.
+
+    Returns
+    -------
+    Callable
+        Accepts env, initial carry, root key and both weight trees. Returns final
+        carry plus complete action, separate learning-output, reward, terminal
+        valid and priority-metric histories. Full simulator-state history is never
+        retained.
+    """
+    from marl_battlegrounds.evaluation import policy_execution as execution
+
+    def reset_call(env: Environment, key: Array, state: EnvironmentState) -> Tree:
+        """Reset finished lanes through the public wrapper with explicit keys."""
+        return env.reset_done(key, state)
+
+    def step_call(
+        env: Environment, key: Array, state: EnvironmentState, actions: Action
+    ) -> Tree:
+        """Advance the native environment once using the already-chosen actions."""
+        return env.step(key, state, actions)
+
+    def prepare_call(
+        env: Environment,
+        observations: Observations,
+        state: EnvironmentState,
+        team: int,
+        key: Array,
+    ) -> Tree:
+        """Build one team's permitted inputs and keys from the same pre-step epoch."""
+        return env.policy_inputs(
+            observations, state, team=team
+        ), execution._action_keys(key, state.episode_id, team)  # pyright: ignore[reportPrivateUsage]
+
+    def second_call(
+        env: Environment,
+        observations: Observations,
+        state: EnvironmentState,
+        variables: Tree,
+        memory: Tree,
+        generations: Array,
+        key: Array,
+    ) -> Tree:
+        """Fuse the manual JAX teammate's input, zero-reset and method application.
+
+        Inputs describe one native batch. The benchmark initializer is exactly
+        zero memory, so selected generations choose zeros with no action call.
+        Return the same complete SystemOutput as the unfused method. Ordinary
+        variables, memory and keys stay dynamic in this stable compiled function.
+        """
+        inputs, keys = prepare_call(env, observations, state, 1, key)
+        selected = state.reset_generation != generations
+        memory = jnp.where(selected[:, None, None], jnp.zeros_like(memory), memory)
+        return second.apply(variables, memory, inputs, keys)
+
+    numerical_second = cast(Callable[..., Tree], jax.jit(second_call))
+
+    reset_environment = cast(
+        Callable[..., Tree], jax.jit(reset_call) if mixed else reset_call
+    )
+    step_environment = cast(
+        Callable[..., Tree], jax.jit(step_call) if mixed else step_call
+    )
+    prepare = cast(
+        Callable[..., Tree],
+        jax.jit(prepare_call, static_argnums=3) if mixed else prepare_call,
+    )
+
+    def run(
+        env: Tree,
+        initial: _SystemsCarry,
+        root: Array,
+        variables_a: Tree,
+        variables_b: Tree,
+    ) -> Tree:
+        """Run from the same initial arrays and retain every method result."""
+
+        def advance(current: _SystemsCarry, tick: Array) -> tuple[_SystemsCarry, Tree]:
+            """Reset completed lanes, apply both teams once, then advance Core once."""
+            observations, state = reset_environment(
+                env, jax.random.fold_in(root, tick * 3), current.state
+            )
+            decision_key = jax.random.fold_in(root, tick * 3 + 1)
+            if manual:
+                memory = current.memory
+                selected = state.reset_generation != memory.reset_generation
+                outputs: list[Tree] = []
+                memories: list[Tree] = []
+                for team, method, variables, old in (
+                    (0, first, variables_a, memory.team_a),
+                    (1, second, variables_b, memory.team_b),
+                ):
+                    if mixed and team == 1:
+                        output = numerical_second(
+                            env,
+                            observations,
+                            state,
+                            variables,
+                            old,
+                            memory.reset_generation,
+                            decision_key,
+                        )
+                        memories.append(output.next_memory)
+                        outputs.append(output)
+                        continue
+                    inputs, keys = prepare(env, observations, state, team, decision_key)
+                    if mixed and team == 0:
+                        host_inputs, host_selected = jax.device_get((inputs, selected))
+                        if np.any(host_selected):
+                            fresh = first.init(variables, host_inputs, keys)
+                            old = first.reset_memory(old, fresh, host_selected)
+                        output = first.apply(variables, old, host_inputs, keys)
+                    else:
+                        fresh = _systems_initial_memory(
+                            variables,
+                            inputs,
+                            execution._initialization_keys(  # pyright: ignore[reportPrivateUsage]
+                                memory.init_key, state.episode_id, team
+                            ),
+                        )
+                        old = jnp.where(selected[:, None, None], fresh, old)
+                        output = method.apply(variables, old, inputs, keys)
+                    memories.append(output.next_memory)
+                    outputs.append(output)
+                actions = env.join_actions(outputs[0].actions, outputs[1].actions)
+                valid = ~state.done.done
+                trace = memory.policy_trace._replace(
+                    episode_id=state.episode_id,
+                    decision_step=state.core_state.step_count
+                    - state.initial_step_count,
+                    valid=valid,
+                    policy_ids=jnp.full((*state.episode_id.shape, 10), -1, jnp.int32),
+                )
+                memory = memory._replace(
+                    team_a=memories[0],
+                    team_b=memories[1],
+                    episode_id=state.episode_id,
+                    reset_generation=state.reset_generation,
+                    policy_trace=trace,
+                )
+                learning = (outputs[0].learning_outputs, outputs[1].learning_outputs)
+            else:
+                actions, memory, learning = execution.apply_systems(
+                    first,
+                    second,
+                    current.memory,
+                    observations,
+                    state,
+                    decision_key,
+                    variables_a=variables_a,
+                    variables_b=variables_b,
+                )
+            valid = ~state.done.done
+            observations, following, reward, done, info = step_environment(
+                env, jax.random.fold_in(root, tick * 3 + 2), state, actions
+            )
+            updated = _SystemsCarry(
+                observations,
+                following,
+                memory,
+                current.advances + valid.astype(jnp.int32),
+                current.completions + info.completed.astype(jnp.int32),
+                current.rewards + reward.rewards,
+            )
+            return updated, (
+                actions,
+                learning,
+                reward.rewards,
+                done.done,
+                valid,
+                info.priority,
+            )
+
+        if not mixed:
+            return jax.lax.scan(advance, initial, jnp.arange(length, dtype=jnp.int32))
+        current = initial
+        history = []
+        for tick in range(length):
+            current, row = advance(current, jnp.asarray(tick, jnp.int32))
+            history.append(row)
+        return current, jax.tree.map(lambda *rows: jnp.stack(rows), *history)
+
+    return run
+
+
+def _systems_host_measure(
+    function: Callable[..., Tree],
+    args: tuple[Tree, ...],
+    repeats: int,
+    probes: tuple[tuple[Tree, ...], ...] = (),
+) -> tuple[Tree, dict[str, Any], list[Tree]]:
+    """Time a host-controlled workflow and observe JAX compile/load events.
+
+    Parameters
+    ----------
+    function : Callable
+        Complete synchronous host/mixed or evaluator operation. Returned numerical
+        leaves are synchronized; EvaluationResult already owns ready host arrays.
+    args : tuple
+        First call arguments. Each warm repeat starts from these same inputs.
+    repeats : int
+        At least five warm samples for qualification.
+    probes : tuple, default=()
+        Extra argument sets, used for changed values and repeated matchup checks.
+
+    Returns
+    -------
+    tuple
+        Last warm result, first/warm/event reports, and separate probe results.
+        Backend events include persistent-cache loads, not only new compilations.
+        Their durations are not subtracted to invent an isolated execution time.
+    """
+    events: list[dict[str, Any]] = []
+    cache_hits: list[str] = []
+
+    def duration(event: str, duration_secs: float, **metadata: str | int) -> None:
+        """Retain only JAX's backend compilation-or-cache-load duration events."""
+        if event == "/jax/core/compile/backend_compile_duration":
+            events.append({"seconds": duration_secs, **metadata})
+
+    def cache_event(event: str, **metadata: str | int) -> None:
+        """Count persistent-cache hits separately from backend compile/load events."""
+        del metadata
+        if event == "/jax/compilation_cache/cache_hits":
+            cache_hits.append(event)
+
+    def call(values: tuple[Tree, ...]) -> tuple[Tree, dict[str, Any]]:
+        """Synchronize one operation and associate only its new monitor events."""
+        before, hits = len(events), len(cache_hits)
+        started = time.perf_counter()
+        output = function(*values)
+        if not hasattr(output, "episodes"):
+            jax.block_until_ready(output)
+        report = {
+            "wall_ms": (time.perf_counter() - started) * 1000,
+            "backend_compile_or_load_events": events[before:],
+            "persistent_cache_hits": len(cache_hits) - hits,
+        }
+        return output, report
+
+    jax.monitoring.register_event_duration_secs_listener(duration)
+    jax.monitoring.register_event_listener(cache_event)
+    try:
+        result, initial = call(args)
+        warmed: list[dict[str, Any]] = []
+        for _ in range(repeats):
+            result, report = call(args)
+            warmed.append(report)
+        extra: list[Tree] = []
+        probe_reports: list[dict[str, Any]] = []
+        for values in probes:
+            output, report = call(values)
+            extra.append(output)
+            probe_reports.append(report)
+    finally:
+        jax.monitoring.unregister_event_duration_listener(duration)
+        jax.monitoring.unregister_event_listener(cache_event)
+    samples = [row["wall_ms"] for row in warmed]
+    return (
+        result,
+        {
+            "first_call": initial,
+            "warm_calls": warmed,
+            "warm_samples_ms": samples,
+            "warm_median_ms": statistics.median(samples),
+            "warm_spread_ms": max(samples) - min(samples),
+            "probe_calls": probe_reports,
+            "compile_count_limit": (
+                "JAX backend compile/load monitoring, with cache hits separate; "
+                "first wall time also includes host setup and first execution."
+            ),
+        },
+        extra,
+    )
+
+
+def _systems_transfer_probe(
+    function: Callable[..., Tree], args: tuple[Tree, ...]
+) -> dict[str, Any]:
+    """Measure explicit device_get boundaries during one untimed mixed repeat.
+
+    Parameters
+    ----------
+    function : Callable
+        The already-warmed public or manual mixed loop. No concurrent work may
+        use this worker while its temporary device_get observer is installed.
+    args : tuple
+        Same initial environment, memories, root and weights used by warm calls.
+
+    Returns
+    -------
+    dict
+        Each explicit get's logical device-array bytes and wall time, including
+        waits for producing work. Implicit NumPy reads and automatic host-to-device
+        placement are not counted. The fake provider separately times key reads.
+        This is a boundary diagnostic, not an exhaustive transfer profiler.
+    """
+    original = jax.device_get
+    calls: list[dict[str, Any]] = []
+
+    def observed(value: Tree) -> Tree:
+        """Time one explicit get without changing its returned structure or values."""
+        size = sum(
+            _bytes(_systems_numeric_tree(leaf))
+            for leaf in jax.tree.leaves(value)
+            if isinstance(leaf, Array)
+        )
+        started = time.perf_counter()
+        output = original(value)
+        calls.append(
+            {
+                "logical_device_input_bytes": size,
+                "wall_ms": (time.perf_counter() - started) * 1000,
+            }
+        )
+        return output
+
+    cast(Any, jax).device_get = observed
+    try:
+        jax.block_until_ready(function(*args))
+    finally:
+        cast(Any, jax).device_get = original
+    return {
+        "calls": calls,
+        "count": len(calls),
+        "logical_device_input_bytes": sum(
+            row["logical_device_input_bytes"] for row in calls
+        ),
+        "wall_ms": sum(row["wall_ms"] for row in calls),
+        "scope": "One separate warmed repeat. Explicit device_get only; bytes count "
+        "logical leaves, and wall time includes required synchronization. "
+        "Provider key reads are separate; no exhaustive H2D/D2H event claim.",
+    }
+
+
+def _systems_evaluator(args: argparse.Namespace) -> tuple[Tree, dict[str, Any]]:
+    """Measure the existing Policy evaluator against the same frozen schedule.
+
+    args supplies map_id and repeats. Run 128 ordinary 300-tick-limit episodes,
+    batch 128, chunk 128, priority metrics and no writer/replay. Retain all public
+    episode rows and metric columns. Repeated same-shaped values and compatible
+    matchup probes are outside warmed timing. Return numerical/identity results
+    and complete-call timing; source-dependent runtime provenance is excluded.
+    """
+    from dataclasses import asdict, replace
+
+    from marl_battlegrounds.evaluation.evaluate import (
+        EpisodeSpec,
+        evaluate_episodes,
+        policy_description,
+    )
+    from marl_battlegrounds.evaluation.policy_execution import Policy
+
+    roster_a, roster_b = _benchmark_rosters()
+    config = make_standard_team_deathmatch_config(
+        map_id=args.map_id, team_a_roster=roster_a, team_b_roster=roster_b
+    )
+    schedule = tuple(
+        EpisodeSpec(index + 1, config, args.map_id, index + 1) for index in range(128)
+    )
+    first = policy("tdm-alpha")
+    second = policy("tdm-beta")
+
+    def run(a: Policy, b: Policy, seed: int) -> Tree:
+        """Complete one fixed pass; methods and numerical variables are arguments."""
+        return evaluate_episodes(
+            a,
+            b,
+            schedule,
+            seed=seed,
+            num_envs=128,
+            chunk_size=128,
+            metrics="priority",
+            run_id="systems-benchmark",
+            pass_id="1",
+        )
+
+    changed = replace(first, variables=jnp.asarray(1.0, jnp.float32))
+    base = replace(first, variables=jnp.asarray(0.0, jnp.float32))
+    output, timing, probes = _systems_host_measure(
+        run,
+        (base, second, 42),
+        args.repeats,
+        ((changed, second, 43), (second, base, 42), (second, changed, 43)),
+    )
+    timing["compilation_reuse_pass"] = not any(
+        call["backend_compile_or_load_events"]
+        for call in (
+            *timing["warm_calls"],
+            timing["probe_calls"][0],
+            timing["probe_calls"][2],
+        )
+    )
+    descriptions = [
+        policy_description(
+            team, team.variables, team.initial_carry, include_digests=True
+        )
+        for team in (base, second)
+    ]
+    retained = {
+        "episodes": [asdict(episode) for episode in output.episodes],
+        "priority_metrics": {
+            name: values.tolist() for name, values in output.priority_metrics.items()
+        },
+        "full_metrics": {
+            name: values.tolist() for name, values in output.full_metrics.items()
+        },
+        "completed_episode_ids": list(output.completed_episode_ids),
+        "policies": descriptions,
+        "probe_completed_counts": [len(item.episodes) for item in probes],
+    }
+    timing["real_transitions"] = sum(
+        episode.episode_length for episode in output.episodes
+    )
+    timing["transitions_per_second"] = (
+        timing["real_transitions"] * 1000 / timing["warm_median_ms"]
+    )
+    timing["reuse_probe_limit"] = (
+        "Reactive Policies ignore numerical variables; probes test "
+        "wrapper recompilation on same-shaped values and repeated "
+        "compatible callable pairings, not neural-model parameter use. A "
+        "reversed callable pairing may require its first distinct "
+        "compilation."
+    )
+    timing["retained_output_bytes"] = len(json.dumps(retained, sort_keys=True).encode())
+    timing["output_size_limit"] = (
+        "JSON encoding size of retained comparison payload; encoding "
+        "occurs outside timing. No writer/storage throughput is measured."
+    )
+    return retained, timing
+
+
+def _run_systems_worker(args: argparse.Namespace, output_path: Path) -> None:
+    """Save one isolated Systems comparison with frozen source and asset identities.
+
+    args selects one named case and public/manual or baseline/current route.
+    output_path is updated on success or failure. GPU is qualification; CPU is a
+    diagnostic only. Results include retained numerical payload for direct paired
+    comparison, plus process/device peaks with their whole-worker limitations.
+    """
+    count, length = _SYSTEM_CASES[args.systems_case]
+    before = _foundation_identity(args.package_root, args.assets_root)
+    _foundation_assets(args.assets_root)
+    result: dict[str, Any] = {
+        "status": "running",
+        "benchmark_mode": "systems",
+        "case": args.systems_case,
+        "route": args.systems_route,
+        "identity": before,
+        "source_revision": args.source_revision,
+        "num_envs": count,
+        "rollout_length": length,
+        "metrics_mode": "priority",
+        "map_id": args.map_id,
+        "backend": args.backend,
+        "repeats": args.repeats,
+        "jax": jax.__version__,
+        "python": sys.version,
+        "worker_pid": os.getpid(),
+        "qualification_scope": "GPU workflow efficiency"
+        if args.backend == "gpu"
+        else "CPU diagnostic only",
+    }
+    output_path.write_text(json.dumps(result, indent=2) + "\n")
+    try:
+        device = cast(Any, jax.devices(args.backend)[0])
+        result["device"] = str(device)
+        result["device_kind"] = device.device_kind
+        with jax.default_device(device):
+            if args.systems_case == "evaluator":
+                retained, timing = _systems_evaluator(args)
+                result.update(
+                    timing=timing,
+                    retained=retained,
+                    common_result_sha256=sha256(
+                        json.dumps(retained, sort_keys=True).encode()
+                    ).hexdigest(),
+                )
+                if not timing["compilation_reuse_pass"]:
+                    raise AssertionError(
+                        "Repeated evaluator/matchup calls recompiled on ordinary values"
+                    )
+            else:
+                from marl_battlegrounds.evaluation.policy_execution import init_systems
+
+                mixed = args.systems_case == "mixed"
+                first, second, counters = _systems_pair(mixed=mixed)
+                roster_a, roster_b = _benchmark_rosters()
+                started = time.perf_counter()
+                config = make_standard_team_deathmatch_config(
+                    map_id=args.map_id, team_a_roster=roster_a, team_b_roster=roster_b
+                )
+                env = make(
+                    "tdm",
+                    num_envs=count,
+                    env_config=config,
+                    metrics="priority",
+                    balance_spawn_locations=False,
+                )
+                root = jax.random.key(42)
+                observations, state = env.reset(root)
+                memory = init_systems(
+                    first, second, observations, state, jax.random.key(43)
+                )
+                initial = _SystemsCarry(
+                    observations,
+                    state,
+                    memory,
+                    jnp.zeros(count, jnp.int32),
+                    jnp.zeros(count, jnp.int32),
+                    jnp.zeros((count, 10), jnp.float32),
+                )
+                jax.block_until_ready(initial)
+                result["setup_including_first_initialization_ms"] = (
+                    time.perf_counter() - started
+                ) * 1000
+                function = _systems_run(
+                    first,
+                    second,
+                    length=length,
+                    manual=args.systems_route == "manual",
+                    mixed=mixed,
+                )
+                values = (env, initial, root, first.variables, second.variables)
+
+                def changed_value(leaf: Tree) -> Tree:
+                    """Change a numerical value while keeping its shape and dtype."""
+                    return leaf + jnp.asarray(0.0001, dtype=leaf.dtype)
+
+                changed_a = (
+                    jax.tree.map(changed_value, first.variables)
+                    if not mixed
+                    else first.variables
+                )
+                changed_b = jax.tree.map(changed_value, second.variables)
+                changed_memory = memory._replace(
+                    team_a=memory.team_a
+                    if mixed
+                    else jax.tree.map(changed_value, memory.team_a),
+                    team_b=jax.tree.map(changed_value, memory.team_b),
+                )
+                probes = (
+                    (
+                        env,
+                        initial._replace(memory=changed_memory),
+                        jax.random.key(44),
+                        changed_a,
+                        changed_b,
+                    ),
+                )
+                if mixed:
+                    observed, timing, _ = _systems_host_measure(
+                        function, values, args.repeats, probes
+                    )
+                    result["timing"] = timing
+                    if any(
+                        call["backend_compile_or_load_events"]
+                        for call in (*timing["warm_calls"], *timing["probe_calls"])
+                    ):
+                        raise AssertionError(
+                            "Repeated mixed calls or same-shaped values triggered "
+                            "backend compile/load work"
+                        )
+                    result["host_method_counters"] = dict(counters)
+                    expected_calls = length * (args.repeats + 2)
+                    if counters["apply_calls"] != expected_calls:
+                        raise AssertionError(
+                            "The live mixed loop did not call its host method "
+                            "once per decision"
+                        )
+                    result["explicit_transfer_probe"] = _systems_transfer_probe(
+                        function, values
+                    )
+                    result["host_counter_scope"] = (
+                        "Includes first, warm and changed-value calls; delivered "
+                        "logical payload and provider compute, not all "
+                        "device transfer events."
+                    )
+                else:
+                    observed, timing, _ = _foundation_measure(
+                        function, values, args.repeats, probes
+                    )
+                    result["timing"] = timing
+                    if timing["new_traces_for_changed_values"]:
+                        raise AssertionError(
+                            "Same-shaped raw System values triggered a new trace"
+                        )
+                carry, history = observed
+                result["timing"] = timing
+                result["real_transitions"] = int(
+                    np.asarray(jax.device_get(carry.advances)).sum()
+                )
+                result["transitions_per_second"] = (
+                    result["real_transitions"] * 1000 / timing["warm_median_ms"]
+                )
+                result["completed_episodes"] = int(
+                    np.asarray(jax.device_get(carry.completions)).sum()
+                )
+                numeric_output = _systems_numeric_tree(observed)
+                result["retained_tree_structure"] = str(
+                    cast(object, jax.tree.structure(numeric_output))
+                )
+                result["retained_output_bytes"] = _bytes(numeric_output)
+                result["retained_history_bytes"] = _bytes(history)
+                started = time.perf_counter()
+                host_output = jax.device_get(numeric_output)
+                result["ready_output_transfer_ms"] = (
+                    time.perf_counter() - started
+                ) * 1000
+                result["common_result_sha256"] = _foundation_digest(host_output)
+                payload_path = output_path.with_suffix(".npz")
+                payload: dict[str, Any] = {
+                    f"leaf_{index:04d}": np.asarray(leaf)
+                    for index, leaf in enumerate(jax.tree.leaves(host_output))
+                }
+                np.savez(payload_path, allow_pickle=False, **payload)
+                result["comparison_payload"] = str(payload_path)
+                result["output_file_bytes"] = payload_path.stat().st_size
+                result["reference_dependencies"] = (
+                    "Same initial SystemState, public permitted-input/action/reset "
+                    "helpers, and private action/init key primitives. Manual route "
+                    "replaces System application, reset-memory selection and trace "
+                    "packaging."
+                )
+                result["method_scope"] = (
+                    "Fixed recurrent numerical method consuming recipient-authorized "
+                    "self/source data and returning values; not training, sample "
+                    "efficiency or learned tactics. Full final carry and all "
+                    "action/learning/reward/terminal/valid histories retained "
+                    "equally."
+                )
+            result["device_memory_stats"] = device.memory_stats()
+            result["process_peak_ram_bytes"] = (
+                resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+            )
+            result["memory_limit"] = (
+                "Whole-worker peaks include setup, compile/load, warmed calls, "
+                "probes and retained outputs. Compiler estimates describe "
+                "individual executables; process peaks are not pure execution "
+                "allocations."
+            )
+        if before != _foundation_identity(args.package_root, args.assets_root):
+            raise RuntimeError(
+                "Package, harness or fixed assets changed during measurement"
+            )
+        result["status"] = "complete"
+    except Exception as error:
+        result.update(status="failed", error=f"{type(error).__name__}: {error}")
+        raise
+    finally:
+        output_path.write_text(json.dumps(result, indent=2) + "\n")
+
+
+def _run_systems(args: argparse.Namespace) -> int:
+    """Dispatch only the three agreed shapes and compare their isolated workers.
+
+    args supplies candidate/baseline source roots, one fixed asset root and output
+    directory. Named cases avoid an accidental Cartesian workload matrix. Both
+    evaluator workers run this exact harness, importing their requested package.
+    Return nonzero for worker failure or mismatched retained outputs. Never run
+    concurrent GPU workers, reduce a batch, or overwrite an existing result.
+    """
+    root = Path(__file__).resolve().parents[2]
+    args.package_root = (args.package_root or root).resolve()
+    args.assets_root = (
+        args.assets_root or args.package_root / "src/marl_battlegrounds/data/tdm"
+    ).resolve()
+    args.backend = args.backend or "gpu"
+    args.map_id = 12 if args.map_id is None else args.map_id
+    if args.repeats < 5 or any(
+        (
+            args.foundations,
+            args.setup_only,
+            args.metrics_only,
+            args.sizes,
+            args.lengths,
+            args.include_scalar,
+            args.rollout_modes,
+            args.api,
+            args.action_workload,
+        )
+    ):
+        raise ValueError(
+            "Systems uses named cases, priority metrics and at least five warm repeats"
+        )
+    args.output.mkdir(parents=True, exist_ok=True)
+    if args.systems_route is not None:
+        if args.systems_case is None:
+            raise ValueError("A Systems worker needs one named case")
+        allowed_routes = (
+            ("baseline", "current")
+            if args.systems_case == "evaluator"
+            else ("manual", "public")
+        )
+        if args.systems_route not in allowed_routes:
+            raise ValueError("The route does not belong to this Systems case")
+        output = (
+            args.output
+            / f"systems-{args.systems_case}-{args.systems_route}-{args.backend}.json"
+        )
+        _run_systems_worker(args, output)
+        return 0
+    cases = (args.systems_case,) if args.systems_case else tuple(_SYSTEM_CASES)
+    if "evaluator" in cases and args.baseline_root is None:
+        raise ValueError(
+            "The evaluator case needs --baseline-root for committed 91415c3"
+        )
+    failed = False
+    for case in cases:
+        paths: list[Path] = []
+        for route in (
+            ("baseline", "current") if case == "evaluator" else ("manual", "public")
+        ):
+            package = (
+                args.baseline_root.resolve()
+                if route == "baseline"
+                else args.package_root
+            )
+            path = args.output / f"systems-{case}-{route}-{args.backend}.json"
+            if path.exists() or path.with_suffix(".npz").exists():
+                raise FileExistsError(
+                    f"Preserve prior evidence; choose a new output directory: {path}"
+                )
+            command = [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--systems",
+                "--systems-case",
+                case,
+                "--systems-route",
+                route,
+                "--backend",
+                args.backend,
+                "--package-root",
+                str(package),
+                "--assets-root",
+                str(args.assets_root),
+                "--map-id",
+                str(args.map_id),
+                "--repeats",
+                str(args.repeats),
+                "--output",
+                str(args.output.resolve()),
+            ]
+            revision = (
+                "91415c33193402aa7a5166ee8a53763fe2d24156"
+                if route == "baseline"
+                else args.source_revision
+            )
+            if revision:
+                command.extend(("--source-revision", revision))
+            _notify(f"Systems {case}/{route}/{args.backend}")
+            process = subprocess.run(
+                command,
+                cwd=package,
+                env={
+                    **os.environ,
+                    "PYTHONPATH": str(package / "src"),
+                    "JAX_PLATFORMS": "cpu" if args.backend == "cpu" else "cuda,cpu",
+                    "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                },
+                check=False,
+            )
+            failed |= process.returncode != 0
+            paths.append(path)
+        if any(not path.exists() for path in paths):
+            failed = True
+            continue
+        records = [json.loads(path.read_text()) for path in paths]
+        if any(record["status"] != "complete" for record in records):
+            failed = True
+            continue
+        if (
+            records[0]["identity"]["asset_sha256"]
+            != records[1]["identity"]["asset_sha256"]
+            or records[0]["identity"]["harness_sha256"]
+            != records[1]["identity"]["harness_sha256"]
+        ):
+            raise AssertionError(
+                "Paired workers used different assets or harness bytes"
+            )
+        if (
+            case != "evaluator"
+            and records[0]["identity"]["package_sha256"]
+            != records[1]["identity"]["package_sha256"]
+        ):
+            raise AssertionError("Public/manual workers used different package bytes")
+        if case == "evaluator":
+            if records[0]["common_result_sha256"] != records[1]["common_result_sha256"]:
+                raise AssertionError(
+                    "Legacy evaluator retained outputs or identities changed"
+                )
+        else:
+            if (
+                records[0]["retained_tree_structure"]
+                != records[1]["retained_tree_structure"]
+            ):
+                raise AssertionError("Retained result structures differ")
+            with (
+                np.load(paths[0].with_suffix(".npz")) as expected,
+                np.load(paths[1].with_suffix(".npz")) as actual,
+            ):
+                if expected.files != actual.files:
+                    raise AssertionError("Retained result leaf inventories differ")
+                for name in expected.files:
+                    _assert_equal(np.asarray(expected[name]), np.asarray(actual[name]))
+        comparison = {
+            "status": "complete",
+            "case": case,
+            "workers": [str(path) for path in paths],
+            "warm_median_ms": {
+                record["route"]: record["timing"]["warm_median_ms"]
+                for record in records
+            },
+            "second_over_first_median_ratio": records[1]["timing"]["warm_median_ms"]
+            / records[0]["timing"]["warm_median_ms"],
+            "retained_output_agreement": (
+                "Exact evaluator JSON; integer/bool equality and rtol=3e-5, "
+                "atol=0.002 for raw floating leaves"
+            ),
+            "memory_limit": (
+                "Separate worker peaks avoid simultaneous public/reference "
+                "executables; allocator/process measurements retain their "
+                "declared limits."
+            ),
+        }
+        (args.output / f"systems-{case}-comparison-{args.backend}.json").write_text(
+            json.dumps(comparison, indent=2) + "\n"
+        )
+    return int(failed)
+
+
 def main() -> int:
     """Parse options and run fresh workers for the chosen benchmark mode.
 
-    Legacy workloads keep their existing defaults. Foundations mode uses frozen
-    package and asset paths, records each case separately, and treats GPU timings
+    Legacy workloads keep their behavior with allowed GPU batch sizes. Foundations
+    mode uses frozen package and asset paths, records each case separately,
+    and treats GPU timings
     as performance evidence. CPU foundations runs are diagnostics only.
 
     Returns
@@ -2272,7 +3344,7 @@ def main() -> int:
     parser.add_argument(
         "--backend",
         choices=("cpu", "gpu"),
-        help="foundations backend (default: gpu; cpu is diagnostic only)",
+        help="foundations/Systems backend (default: gpu; cpu is diagnostic only)",
     )
     parser.add_argument(
         "--setup-only",
@@ -2303,16 +3375,16 @@ def main() -> int:
     parser.add_argument(
         "--package-root",
         type=Path,
-        help="foundations source checkout to import in isolated workers",
+        help="source checkout/export to import in foundations/Systems workers",
     )
     parser.add_argument(
         "--assets-root",
         type=Path,
-        help="fixed TDM resource directory for foundations workers",
+        help="fixed TDM resources shared by foundations/Systems workers",
     )
     parser.add_argument(
         "--source-revision",
-        help="declared foundations revision; file hashes identify the actual bytes",
+        help="declared package revision; file hashes identify the actual bytes",
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repeats", type=int, default=5)
@@ -2336,7 +3408,31 @@ def main() -> int:
         help="modes to measure; legacy mode also compares full CPU/GPU metrics",
     )
     parser.add_argument("--worker", type=int, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--systems",
+        action="store_true",
+        help="run the bounded Packet 2 System and legacy Policy comparisons",
+    )
+    parser.add_argument(
+        "--systems-case",
+        choices=tuple(_SYSTEM_CASES),
+        help="one named case; default runs all four comparisons at three agreed shapes",
+    )
+    parser.add_argument(
+        "--baseline-root",
+        type=Path,
+        help="source export of committed 91415c3 for the Systems evaluator comparison",
+    )
+    parser.add_argument(
+        "--systems-route",
+        choices=("manual", "public", "baseline", "current"),
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
+    if args.systems:
+        return _run_systems(args)
+    if any((args.systems_case, args.systems_route, args.baseline_root)):
+        parser.error("--systems-case/--systems-route/--baseline-root require --systems")
     if args.foundations:
         return _run_foundations(args)
     if any(
@@ -2357,7 +3453,11 @@ def main() -> int:
             "--assets-root/--source-revision/--setup-only/--action-workload "
             "require --foundations"
         )
-    args.sizes = args.sizes or [64, 128, 256, 512, 1024]
+    args.sizes = args.sizes or [32, 64, 128, 512, 1024]
+    if any(size not in _GPU_BATCHES for size in args.sizes) or (
+        args.worker is not None and args.worker not in _GPU_BATCHES
+    ):
+        parser.error("GPU environment batches must be 32, 64, 128, 512 or 1024")
     args.rollout_modes = args.rollout_modes or list(_ROLLOUT_MODES)
     if args.repeats < 2 or any(size < 1 for size in args.sizes):
         parser.error("positive batch sizes and at least two warm repeats are required")
