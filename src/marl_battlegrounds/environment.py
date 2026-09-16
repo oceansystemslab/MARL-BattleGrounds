@@ -81,6 +81,7 @@ from marl_battlegrounds.tasks import (
 
 if TYPE_CHECKING:
     from marl_battlegrounds.evaluation.policy_execution import SystemInput
+    from marl_battlegrounds.evaluation.recording_types import EpisodeStartRecords
 
 type MetricMode = Literal["none", "priority", "full"]
 type CoreStepResult = tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]
@@ -207,6 +208,24 @@ class EpisodeInfo(NamedTuple):
         Named full values and validity flags, or None if disabled.
     replay : ReplayPackets | None
         Selected numerical replay packets, or None if capture is disabled.
+    decision_step : Array
+        Int32 index of the submitted action within its episode, starting at
+        zero even for authored starts. Minus one means no real transition.
+    episode_length : Array
+        Int32 number of real transitions since this episode's start, including
+        the current transition. Reset calls and terminal padding do not count.
+    team_scores : Array
+        Int32 resulting scores, shaped ``(..., 2)`` in Team A/Team B order.
+        These include authored starting scores; they are not observed kills.
+    lifecycle_error : Array
+        Boolean sticky wrapper failure, including invalid IDs and exhausted
+        counters. Recording must reject it even without a completed episode.
+    episode_start_records : EpisodeStartRecords | None
+        Optional numerical start declarations attached by a recording producer.
+        The ordinary environment leaves this None.
+    episode_tracking_error : Array | None
+        Optional int32 tracking-error flags with the same leading shape as
+        episode_id. None means no tracker supplied; zero means no reported error.
 
     Notes
     -----
@@ -222,6 +241,12 @@ class EpisodeInfo(NamedTuple):
     priority: MetricValues | None
     full: MetricValues | None
     replay: ReplayPackets | None
+    decision_step: Array
+    episode_length: Array
+    team_scores: Array
+    lifecycle_error: Array
+    episode_start_records: EpisodeStartRecords | None = None
+    episode_tracking_error: Array | None = None
 
     @property
     def class_ids(self) -> Array:
@@ -1122,6 +1147,14 @@ class Environment:
             values,
             None,
             None,
+            jnp.where(
+                info.transition_facts.has_transition,
+                state.core_state.step_count - state.initial_step_count,
+                jnp.asarray(-1, jnp.int32),
+            ),
+            core_state.step_count - state.initial_step_count,
+            core_state.team_deathmatch_scores,
+            successor.lifecycle_error,
         )
         return successor, reward, result, info
 

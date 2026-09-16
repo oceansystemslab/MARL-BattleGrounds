@@ -8,8 +8,9 @@ iterator and close the collector to release unfinished temporary files.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
+from numbers import Integral
 from pathlib import Path
 from tempfile import TemporaryFile
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
@@ -121,6 +122,116 @@ class ReplayCollector:
         """Return the immutable set of episode IDs whose replay is still incomplete."""
         return frozenset(self._episodes)
 
+    def preflight(
+        self,
+        packets: ReplayPackets,
+        *,
+        completed_episode_ids: Iterable[int] = (),
+    ) -> ReplayPackets:
+        """Check the complete incoming packet sequence without recording it.
+
+        Parameters
+        ----------
+        packets : ReplayPackets
+            Numerical packets with capacity axes and optional leading chunk
+            axes. Every leaf must share the bool valid array's leading shape.
+            Valid rows need positive int32 IDs, consecutive int32 indices,
+            matching initial flags and real Core transitions.
+        completed_episode_ids : Iterable[int], default ()
+            Episode summaries the caller intends to record in the same call.
+            A positive ID must not remain pending after these packets. IDs with
+            no selected replay are allowed; this does not require every game
+            to have a replay.
+
+        Returns
+        -------
+        ReplayPackets
+            The supplied tree transferred to host NumPy leaves. Pass this tree
+            to write to avoid another device transfer. No input is changed.
+
+        Raises
+        ------
+        RuntimeError
+            This collector was closed.
+        TypeError
+            packets is not ReplayPackets or a completion ID is not an integer.
+        ValueError
+            A leading shape, dtype, ID, transition order, initial flag or real
+            transition is invalid, or a submitted completion still lacks its
+            selected replay's terminal packet.
+
+        Notes
+        -----
+        Host-only. This does not call the context factory, open/write spools,
+        build artifacts or change pending/completed state. It keeps only the
+        incoming host packet and temporary per-episode counters. Context and
+        full replay validation still belong to write; this is a numerical
+        sequence and completion check, not proof of arbitrary context metadata.
+        """
+        if self._closed:
+            raise RuntimeError("replay collector is closed")
+        if not isinstance(cast(object, packets), ReplayPackets):
+            raise TypeError("replay packets must be ReplayPackets")
+        host = jax.device_get(packets)
+        valid = np.asarray(host.valid)
+        if valid.dtype != np.bool_:
+            raise ValueError("replay valid flags must have boolean dtype")
+        shape = valid.shape
+        for leaf in jax.tree.leaves(host):
+            if np.shape(leaf)[: len(shape)] != shape:
+                raise ValueError("replay leaves must share the valid leading shape")
+        fields = {
+            "episode_id": (host.episode_id, np.int32),
+            "transition_index": (host.transition_index, np.int32),
+            "initial": (host.initial, np.bool_),
+            "has_transition": (host.info.transition_facts.has_transition, np.bool_),
+            "terminated": (host.done.terminated, np.bool_),
+            "truncated": (host.done.truncated, np.bool_),
+        }
+        arrays: dict[str, np.ndarray[Any, Any]] = {}
+        for name, (value, dtype) in fields.items():
+            array = np.asarray(value)
+            if array.shape != shape or array.dtype != dtype:
+                raise ValueError(f"replay {name} has the wrong shape or dtype")
+            arrays[name] = array.reshape(-1)
+        pending = {
+            identifier: episode.count for identifier, episode in self._episodes.items()
+        }
+        finished: set[int] = set()
+        for row in np.flatnonzero(valid):
+            episode_id = int(arrays["episode_id"][row])
+            index = int(arrays["transition_index"][row])
+            if (
+                episode_id <= 0
+                or episode_id in self._completed
+                or episode_id in finished
+            ):
+                raise ValueError("replay packet has an invalid or completed episode ID")
+            expected = pending.get(episode_id, 0)
+            if index != expected or bool(arrays["initial"][row]) != (index == 0):
+                raise ValueError(
+                    f"episode {episode_id} replay packets have a gap or duplicate"
+                )
+            if not bool(arrays["has_transition"][row]):
+                raise ValueError(
+                    "valid replay packet does not contain a real transition"
+                )
+            if bool(arrays["terminated"][row] or arrays["truncated"][row]):
+                pending.pop(episode_id, None)
+                finished.add(episode_id)
+            else:
+                pending[episode_id] = index + 1
+        for episode_id in completed_episode_ids:
+            if isinstance(episode_id, bool) or not isinstance(episode_id, Integral):
+                raise TypeError("completed replay episode IDs must be integers")
+            if episode_id <= 0:
+                raise ValueError("completed replay episode IDs must be positive")
+            if int(episode_id) in pending:
+                raise ValueError(
+                    f"episode {episode_id} completed before its replay packets"
+                )
+        return host
+
     def write(self, packets: ReplayPackets) -> Iterator[ReplayArtifactV3]:
         """Consume selected packets and yield each replay as soon as it completes.
 
@@ -147,15 +258,17 @@ class ReplayCollector:
             A temporary spool cannot be read or written. Context/artifact
             validation errors propagate before that replay is yielded.
 
-        The call transfers packets to the host and mutates this collector. It keeps
-        unfinished episodes for later chunks. Completion closes that episode's spool;
-        the returned artifact owns its materialized replay data.
+        The complete numerical sequence is checked before its first mutation or
+        context-factory call. A later invalid row cannot follow an already yielded
+        replay from this call. Context/artifact validation can still fail during
+        collection; callers must treat that failure as a failed recording call.
+        The call transfers device packets to the host and mutates this collector.
+        It keeps unfinished episodes for later chunks. Completion closes that
+        episode's spool; the returned artifact owns its materialized replay data.
         """
         from marl_battlegrounds.evaluation.replay_v3 import replay_from_packets
 
-        if self._closed:
-            raise RuntimeError("replay collector is closed")
-        host = jax.device_get(packets)
+        host = self.preflight(packets)
         valid = np.asarray(host.valid)
         leading = valid.ndim
 
@@ -173,19 +286,7 @@ class ReplayCollector:
 
             packet = cast(ReplayPackets, jax.tree.map(select, rows))
             episode_id = int(packet.episode_id)
-            index = int(packet.transition_index)
-            if episode_id <= 0 or episode_id in self._completed:
-                raise ValueError("replay packet has an invalid or completed episode ID")
             episode = self._episodes.get(episode_id)
-            expected = 0 if episode is None else episode.count
-            if index != expected or bool(packet.initial) != (index == 0):
-                raise ValueError(
-                    f"episode {episode_id} replay packets have a gap or duplicate"
-                )
-            if not bool(packet.info.transition_facts.has_transition):
-                raise ValueError(
-                    "valid replay packet does not contain a real transition"
-                )
             if episode is None:
                 context, runtime = self._factory(packet)
                 episode = _Episode(

@@ -6,17 +6,21 @@ RunWriter output owns match/full/replay files. The same in-memory statistics
 serve both routes; this module does not define a second rating implementation.
 """
 
-import csv
+import json
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
+from hashlib import sha256
 from numbers import Integral
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
+import jax
+import jax.numpy as jnp
 import numpy as np
+from jax import Array
 
 from marl_battlegrounds._tdm_assets import current_map_id
 from marl_battlegrounds.environment import MetricMode, make
@@ -40,7 +44,11 @@ from marl_battlegrounds.evaluation.run_writer import (
     IDENTITY_COLUMNS,
     MATCH_COLUMNS,
     RunWriter,
+    _json_bytes,  # pyright: ignore[reportPrivateUsage]
+    _json_value,  # pyright: ignore[reportPrivateUsage]
+    configuration_identity,
 )
+from marl_battlegrounds.evaluation.scalar_reports import iter_scalar_rows
 from marl_battlegrounds.evaluation.tournament_schedule import (
     TournamentMatch,
     build_tournament_schedule,
@@ -106,7 +114,8 @@ def _memory_matches(
     """Join each scheduled completion to its available scalar and identity columns.
 
     When optional metrics were disabled, use compact episode/config evidence for
-    the required match identity and outcome. Missing metric cells remain None.
+    the required match identity, outcome, length and scores. Other missing metric
+    cells remain None. Exact integer summaries replace their float32 views.
     """
     indices = {
         int(value): index
@@ -150,44 +159,29 @@ def _memory_matches(
             block_id=match.block_id,
             bootstrap_group=match.bootstrap_group,
             outcome=completed[match.episode_id].outcome,
+            episode_length=completed[match.episode_id].episode_length,
+            team_a_score=completed[match.episode_id].team_a_score,
+            team_b_score=completed[match.episode_id].team_b_score,
         )
         rows.append(row)
     return rows
 
 
 def _read_matches(path: Path) -> list[ResultRow]:
-    """Read the exact match CSV schema, preserving blanks and restoring numeric
-    types.
+    """Read the manifest's durable match rows through the shared schema reader.
+
+    Current tables require MATCH_COLUMNS. Historical supported tables retain
+    their stored columns and meanings. Ignore an interrupted, uncommitted suffix
+    without modifying it. Missing or incompatible metadata raises ValueError.
     """
-    integer_columns = {
-        "episode_id",
-        "seed_id",
-        "map_id",
-        "block_id",
-        "outcome",
-        *(
-            f"agent_{slot}_{field}"
-            for slot in range(10)
-            for field in ("class_id", "active")
-        ),
-    }
-    with path.open(newline="", encoding="utf-8") as stream:
-        reader = csv.DictReader(stream)
-        if tuple(reader.fieldnames or ()) != MATCH_COLUMNS:
-            raise ValueError("tournament match table has an incompatible schema")
-        return [
-            {
-                name: None
-                if value == ""
-                else int(value)
-                if name in integer_columns
-                else float(value)
-                if name in PRIORITY_METRIC_NAMES
-                else value
-                for name, value in row.items()
-            }
-            for row in reader
-        ]
+    manifest = json.loads((path.parent / "run_details.json").read_bytes())
+    return [
+        row
+        for batch in iter_scalar_rows(
+            path, manifest=manifest, expected_header=MATCH_COLUMNS
+        )
+        for row in batch
+    ]
 
 
 def _merge_columns(tables: Sequence[Columns]) -> Columns:
@@ -387,6 +381,19 @@ def run_tournament(
         if opponent_weights is None
         else dict(opponent_weights),
     }
+    if recording:
+
+        def normalize(value: object) -> Array:
+            """Match the numerical config leaves used by environment recording."""
+            return jnp.asarray(value)
+
+        metadata["configuration_ids_by_map"] = {
+            str(map_id): configuration_identity(jax.tree.map(normalize, config))[0]
+            for map_id, config in configs.items()
+        }
+        metadata["schedule_digest"] = sha256(
+            _json_bytes(_json_value([asdict(match) for match in schedule]))
+        ).hexdigest()
     with ExitStack() as cleanup:
         writer = None
         if output_dir is not None or resume_from is not None:

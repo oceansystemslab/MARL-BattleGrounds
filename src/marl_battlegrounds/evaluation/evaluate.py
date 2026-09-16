@@ -49,7 +49,6 @@ from marl_battlegrounds.evaluation.policy_execution import (
     PolicyApply,
     PolicyTree,
     apply_policy_batch,
-    controller_identity,
     freeze_variables,
     initial_policy_carry,
     policy,
@@ -59,6 +58,13 @@ from marl_battlegrounds.evaluation.recording_context import (
     build_recording_context,
     capture_recording_provenance,
 )
+from marl_battlegrounds.evaluation.recording_identity import (
+    policy_description,
+)
+from marl_battlegrounds.evaluation.recording_identity import (
+    tree_digest as _tree_digest,
+)
+from marl_battlegrounds.evaluation.recording_types import validate_recording_errors
 from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 from marl_battlegrounds.evaluation.replay_capture import ReplayPackets
 from marl_battlegrounds.evaluation.replay_recording import ReplayCollector
@@ -66,6 +72,8 @@ from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
 from marl_battlegrounds.evaluation.run_writer import (
     IDENTITY_COLUMNS,
     RunWriter,
+    _json_bytes,  # pyright: ignore[reportPrivateUsage]
+    _json_value,  # pyright: ignore[reportPrivateUsage]
     configuration_identity,
 )
 from marl_battlegrounds.policies.input import Observations
@@ -211,6 +219,8 @@ class _Completed(NamedTuple):
     config: EnvConfig
     priority: MetricValues | None
     full: MetricValues | None
+    decision_step: Array
+    lifecycle_error: Array
 
     @property
     def info(self) -> EpisodeInfo:
@@ -223,6 +233,10 @@ class _Completed(NamedTuple):
             self.priority,
             self.full,
             None,
+            self.decision_step,
+            self.length,
+            self.scores,
+            self.lifecycle_error,
         )
 
 
@@ -299,26 +313,35 @@ def _empty_completed(state: EnvironmentState) -> _Completed:
         state.config,
         empty(len(PRIORITY_METRIC_NAMES)) if state.priority is not None else None,
         empty(len(FULL_METRIC_NAMES)) if state.full is not None else None,
+        jnp.full(count, -1, jnp.int32),
+        state.lifecycle_error,
     )
 
 
 def _retain_completion(
     old: _Completed, state: EnvironmentState, info: EpisodeInfo
 ) -> _Completed:
-    """Replace only newly completed lanes, preserving prior terminal data in the
-    chunk.
+    """Retain terminal info and every lane's sticky failure across chunk rounds.
+
+    state is retained for the existing chunk-call contract. Episode summaries
+    come only from info; unfinished or padded rounds cannot replace them.
+    Lifecycle failures are combined on every round, including unfinished games.
     """
+    del state
     current = _Completed(
         info.completed,
         info.episode_id,
         info.outcome,
-        state.core_state.step_count - state.initial_step_count,
-        state.core_state.team_deathmatch_scores,
+        info.episode_length,
+        info.team_scores,
         info.config,
         info.priority,
         info.full,
+        info.decision_step,
+        info.lifecycle_error,
     )
-    return cast(_Completed, select_policy_carry(info.completed, current, old))
+    retained = cast(_Completed, select_policy_carry(info.completed, current, old))
+    return retained._replace(lifecycle_error=old.lifecycle_error | info.lifecycle_error)
 
 
 @jax.jit
@@ -522,78 +545,6 @@ def positive_int(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
         raise ValueError(f"{name} must be a positive integer")
     return int(value)
-
-
-def _tree_digest(tree: PolicyTree) -> str:
-    """Hash frozen tree structure, leaf shapes/dtypes and host bytes once for
-    recording.
-    """
-    leaves = jax.tree.leaves(tree)
-    structure = cast(object, jax.tree.structure(tree))
-    digest = sha256(str(structure).encode())
-    for value in jax.device_get(leaves):
-        array = np.asarray(value)
-        header = f"{array.dtype.str}:{array.shape}".encode()
-        digest.update(len(header).to_bytes(8, "big"))
-        digest.update(header)
-        digest.update(np.ascontiguousarray(array).data)
-    return digest.hexdigest()
-
-
-def _callable_name(apply: PolicyApply) -> str:
-    """Describe a callable by module/name, using its type when those fields are
-    absent.
-    """
-    owner = type(apply)
-    module = getattr(apply, "__module__", owner.__module__)
-    name = getattr(apply, "__qualname__", owner.__qualname__)
-    return f"{module}.{name}"
-
-
-def policy_description(
-    team: Policy,
-    variables: PolicyTree,
-    initial_carry: PolicyTree,
-    *,
-    include_digests: bool,
-) -> dict[str, object]:
-    """Describe the fixed policy values used by an evaluation pass.
-
-    Parameters
-    ----------
-    team : Policy
-        Policy descriptor supplying label, callable, execution and checkpoint.
-    variables : PolicyTree
-        Numerical variable tree already snapshotted for this pass.
-    initial_carry : PolicyTree
-        Numerical actor-memory template already snapshotted.
-    include_digests : bool
-        Whether recording needs content/controller hashes.
-
-    Returns
-    -------
-    dict[str, object]
-        Fresh metadata dict. The callable name and declared checkpoint are kept;
-        variables_frozen is True. Digest/controller fields are None when disabled.
-
-    Notes
-    -----
-        Host-only. Call after freezing values; this function does not freeze them
-        itself or verify a caller's checkpoint label. Enabled hashes read numerical
-        leaves to the host. Disabled hashes skip that content work.
-    """
-    return {
-        "name": team.name,
-        "checkpoint": team.checkpoint,
-        "execution": team.execution,
-        "variables_frozen": True,
-        "callable_name": _callable_name(team.apply),
-        "controller_identity": controller_identity(team) if include_digests else None,
-        "variables_digest": _tree_digest(variables) if include_digests else None,
-        "initial_carry_digest": _tree_digest(initial_carry)
-        if include_digests
-        else None,
-    }
 
 
 def _stack_configs(specs: Sequence[EpisodeSpec]) -> EnvConfig:
@@ -973,7 +924,59 @@ def evaluate_episodes(
     }
     if recording:
         metadata.update(capture_recording_provenance(num_envs=batch_size))
-    policies: dict[str, object] = {"team_a": team_a.name, "team_b": team_b.name}
+    configs = {id(spec.env_config): spec.env_config for spec in specs}
+
+    def normalize(value: object) -> Array:
+        """Convert a resolved config leaf to the numerical form used by content
+        hashing.
+        """
+        return jnp.asarray(value)
+
+    configuration_records = {
+        key: configuration_identity(jax.tree.map(normalize, config))
+        for key, config in configs.items()
+    }
+    config_ids = {key: value[0] for key, value in configuration_records.items()}
+    metadata["configurations"] = {
+        key: value for key, value in configuration_records.values()
+    }
+    schedule: dict[int, dict[str, object]] = {}
+    if recording:
+        starts = {
+            id(spec.initial_state): spec.initial_state
+            for spec in specs
+            if spec.initial_state is not None
+        }
+        start_digests = {key: _tree_digest(value) for key, value in starts.items()}
+        schedule = {
+            spec.episode_id: {
+                **({} if spec.metadata is None else spec.metadata),
+                "episode_id": spec.episode_id,
+                "seed_id": spec.random_seed_id,
+                "map_id": spec.map_id,
+                "configuration_digest": config_ids[id(spec.env_config)],
+                "initial_state_digest": (
+                    start_digests[id(spec.initial_state)]
+                    if spec.initial_state is not None
+                    else None
+                ),
+                "expected_horizon": int(spec.env_config.max_steps)
+                - (
+                    int(spec.initial_state.step_count)
+                    if spec.initial_state is not None
+                    else 0
+                ),
+            }
+            for spec in specs
+        }
+    if recording:
+        metadata["schedule_digest"] = sha256(
+            _json_bytes(_json_value(list(schedule.values())))
+        ).hexdigest()
+    descriptions = cast(list[dict[str, object]], metadata["policies"])
+    policies: dict[str, object] = dict(
+        zip(("team_a", "team_b"), descriptions, strict=True)
+    )
     pass_details = dict(metadata)
     with ExitStack() as cleanup:
         if writer is None and (output_dir is not None or resume_from is not None):
@@ -985,9 +988,15 @@ def evaluate_episodes(
                     pass_id=pass_id,
                     policies=policies,
                     details=pass_details,
+                    _expected_run_id=run_id if resume_from is not None else None,
                 )
             )
         elif writer is not None:
+            if run_id is not None and run_id != writer.run_id:
+                raise ValueError("run_id differs from the writer identity")
+            writer.start_pass(
+                phase=phase, pass_id=pass_id, policies=policies, details=pass_details
+            )
 
             def record_failure(
                 exception_type: object,
@@ -1002,9 +1011,6 @@ def evaluate_episodes(
                     recorder.record_failure(error)
 
             cleanup.push(record_failure)
-            writer.start_pass(
-                phase=phase, pass_id=pass_id, policies=policies, details=pass_details
-            )
         if writer is not None:
             if run_id is not None and run_id != writer.run_id:
                 raise ValueError("run_id differs from the writer identity")
@@ -1012,22 +1018,6 @@ def evaluate_episodes(
         elif run_id is None:
             run_id = "in-memory-" + uuid4().hex
         metadata["run_id"] = run_id
-        configs = {id(spec.env_config): spec.env_config for spec in specs}
-
-        def normalize(value: object) -> Array:
-            """Convert a resolved config leaf to the numerical form used by content
-            hashing.
-            """
-            return jnp.asarray(value)
-
-        configuration_records = {
-            key: configuration_identity(jax.tree.map(normalize, config))
-            for key, config in configs.items()
-        }
-        config_ids = {key: value[0] for key, value in configuration_records.items()}
-        metadata["configurations"] = {
-            key: value for key, value in configuration_records.values()
-        }
         identity = {
             "run_id": run_id,
             "phase": phase,
@@ -1036,35 +1026,6 @@ def evaluate_episodes(
             "team_b_policy": team_b.name,
             "checkpoint_id": None,
         }
-        schedule: dict[int, dict[str, object]] = {}
-        if recording:
-            starts = {
-                id(spec.initial_state): spec.initial_state
-                for spec in specs
-                if spec.initial_state is not None
-            }
-            start_digests = {key: _tree_digest(value) for key, value in starts.items()}
-            schedule = {
-                spec.episode_id: {
-                    **({} if spec.metadata is None else spec.metadata),
-                    "episode_id": spec.episode_id,
-                    "seed_id": spec.random_seed_id,
-                    "map_id": spec.map_id,
-                    "configuration_digest": config_ids[id(spec.env_config)],
-                    "initial_state_digest": (
-                        start_digests[id(spec.initial_state)]
-                        if spec.initial_state is not None
-                        else None
-                    ),
-                    "expected_horizon": int(spec.env_config.max_steps)
-                    - (
-                        int(spec.initial_state.step_count)
-                        if spec.initial_state is not None
-                        else 0
-                    ),
-                }
-                for spec in specs
-            }
         previous: frozenset[int] = frozenset()
         if writer is not None:
             writer.register_episodes(schedule.values())
@@ -1201,13 +1162,13 @@ def evaluate_episodes(
                         chunk_size,
                     )
                 completed, packets = jax.device_get((carry.completed, packets))
-                if packets is not None:
-                    if writer is not None:
-                        writer.write_replay(packets)
-                    elif collector is not None:
-                        replays.extend(collector.write(packets))
+                publication = completed.info._replace(replay=packets)
                 if writer is not None:
-                    writer.write(completed.info)
+                    writer.write(publication)
+                else:
+                    validate_recording_errors(publication)
+                    if packets is not None and collector is not None:
+                        replays.extend(collector.write(packets))
             except BaseException as error:
                 error.add_note(
                     f"Evaluation policies {team_a.name!r}/{team_b.name!r}; "

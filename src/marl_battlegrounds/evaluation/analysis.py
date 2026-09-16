@@ -4,7 +4,9 @@ analyze_replay reads captured Core facts once and uses the same numerical
 metric functions as live evaluation. Fixed-size JAX blocks limit temporary
 decoding; ReplayAnalysis keeps only scalar values for each captured frame.
 Seeking and exporting then select stored values without replaying game physics.
-Full metrics require a matching recorded mechanics catalog.
+Full metrics require a matching recorded mechanics catalog. This computes the
+current scalar schema from captured facts. Historical stored metric reports
+keep their own recorded schemas and are not overwritten or relabelled.
 """
 
 from __future__ import annotations

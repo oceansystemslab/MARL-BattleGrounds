@@ -124,7 +124,7 @@ def test_search_catalog_uses_recorded_rosters_without_numerical_analysis() -> No
         assert by_name["agent_0_to_agent_1_healing_done"]["subjects"] == (0, 1)
         for slot in range(10):
             assert (
-                by_name[f"agent_{slot}_return"]["applicable"] == agents[slot]["active"]
+                by_name[f"agent_{slot}_deaths"]["applicable"] == agents[slot]["active"]
             )
 
 
@@ -586,7 +586,7 @@ def test_replay_scalar_prefixes_match_direct_metrics_and_wide_csv(
             "agent_0_to_agent_5_ultimate_applications",
             "agent_1_to_agent_2_ultimate_applications",
             "agent_2_to_agent_5_ultimate_applications",
-            "agent_3_return",
+            "agent_3_deaths",
             "agent_0_to_agent_0_healing_done",
             "agent_2_to_agent_5_damage_done",
             "agent_0_to_agent_5_ultimate_damage_done",
@@ -705,7 +705,7 @@ def test_replay_scalar_prefixes_match_direct_metrics_and_wide_csv(
                 assert (field == "subtitle" and value == "") or (
                     value and value[0].isupper()
                 )
-    assert catalog_by_name["agent_3_return"]["not_applicable_reason"] == (
+    assert catalog_by_name["agent_3_deaths"]["not_applicable_reason"] == (
         "Agent ID 3 is inactive in this replay."
     )
     for name, phrase, included in (

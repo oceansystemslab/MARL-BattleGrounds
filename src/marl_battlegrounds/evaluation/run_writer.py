@@ -15,6 +15,7 @@ import json
 import os
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from functools import partial
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -31,6 +32,7 @@ from marl_battlegrounds.evaluation.metric_catalog import (
     METRIC_SCHEMA_ID,
     METRIC_SCHEMA_VERSION,
     PRIORITY_METRIC_NAMES,
+    PRIORITY_OUTCOME_CODES,
 )
 
 if TYPE_CHECKING:
@@ -60,6 +62,27 @@ IDENTITY_COLUMNS = (
     ),
 )
 
+RUN_SCHEMA_VERSION = 2
+EPISODE_COLUMNS = (
+    *IDENTITY_COLUMNS,
+    "outcome",
+    "episode_length",
+    "team_a_score",
+    "team_b_score",
+)
+ASSIGNMENT_COLUMNS = (
+    "run_id",
+    "phase",
+    "pass_id",
+    "episode_id",
+    "team",
+    "global_slot",
+    "system_id",
+    "policy_id",
+    "decision_start",
+    "decision_stop",
+)
+
 MATCH_COLUMNS = (
     *IDENTITY_COLUMNS,
     "block_id",
@@ -72,6 +95,11 @@ _INPUT_PROJECTIONS = {
     "shared_obs": SHARED_OBS_ACTOR_PROJECTION_V2.model_dump(mode="json"),
     "no_shared_obs": NO_SHARED_OBS_ACTOR_PROJECTION_V3.model_dump(mode="json"),
 }
+
+
+def _host_row(value: object, *, index: int) -> np.ndarray[Any, Any]:
+    """Select one host record row without changing its dtype or remaining axes."""
+    return np.asarray(value)[index]
 
 
 def _json_value(value: object) -> object:
@@ -152,6 +180,36 @@ def configuration_identity(config: EnvConfig) -> tuple[str, dict[str, object]]:
     return sha256(_json_bytes(content)).hexdigest(), content
 
 
+def _replay_summaries(packets: ReplayPackets) -> dict[int, tuple[int, int, int, int]]:
+    """Read terminal outcome, local length and scores from authoritative packet facts.
+
+    Transfer only these small leaves when packets are still on device. This
+    performs no simulator calculation and leaves unfinished episodes absent.
+    """
+    import jax
+
+    valid, ended, ids, indices, outcomes, scores = jax.device_get(
+        (
+            packets.valid,
+            packets.done.done,
+            packets.episode_id,
+            packets.transition_index,
+            packets.info.transition_facts.team_deathmatch_facts.outcome,
+            packets.state.team_deathmatch_scores,
+        )
+    )
+    result: dict[int, tuple[int, int, int, int]] = {}
+    for index in np.flatnonzero(np.asarray(valid) & np.asarray(ended)):
+        score = np.asarray(scores).reshape(-1, 2)[index]
+        result[int(np.asarray(ids).reshape(-1)[index])] = (
+            int(np.asarray(outcomes).reshape(-1)[index]),
+            int(np.asarray(indices).reshape(-1)[index]) + 1,
+            int(score[0]),
+            int(score[1]),
+        )
+    return result
+
+
 class RunWriter:
     """Own one durable run directory for episode tables and selected replays.
 
@@ -167,14 +225,18 @@ class RunWriter:
     pass_id : str, default "1"
         Nonempty identifier within phase. Reopening it must preserve saved identity.
     policies : dict, optional
-        Team policy descriptions for the pass. Defaults to an empty description.
+        Team A/B System, Policy or serialized descriptions. Defaults to empty.
+        Raw registration records available identity facts; it does not freeze
+        methods. Only explicit frozen-snapshot evidence establishes that status.
     checkpoint_id : str, optional
         Caller-supplied checkpoint identity; absent when unknown.
     details : dict, optional
         JSON-compatible pass metadata. Source discovery is added only when capture
         needs it. Resume allows runtime_provenance, num_envs and chunk_size to vary.
     buffer_size : int, default 128
-        Positive completed-row count that triggers automatic flush; bool is invalid.
+        Positive completed-row limit; bool is invalid. Optional assignment
+        intervals share a capacity of 10 * buffer_size open and closed segments.
+        They also flush without a completed game, preserving whole decisions.
 
     Attributes
     ----------
@@ -214,6 +276,7 @@ class RunWriter:
         checkpoint_id: str | None = None,
         buffer_size: int = 128,
         details: dict[str, object] | None = None,
+        _expected_run_id: str | None = None,
     ) -> None:
         """Open and lock a new or resumed run, validate its schema and start the first
         pass.
@@ -232,12 +295,16 @@ class RunWriter:
         self._failed: BaseException | None = None
         self._buffer_size = buffer_size
         self._rows: dict[str, list[list[object]]] = {
+            "episodes.csv": [],
+            "policy_assignments.csv": [],
             "priority_metrics.csv": [],
             "full_metrics.csv": [],
             "match_results.csv": [],
             **{name: [] for name in _SUMMARY_TABLES},
         }
         self._headers: dict[str, tuple[str, ...]] = {
+            "episodes.csv": EPISODE_COLUMNS,
+            "policy_assignments.csv": ASSIGNMENT_COLUMNS,
             "priority_metrics.csv": (*IDENTITY_COLUMNS, *PRIORITY_METRIC_NAMES),
             "full_metrics.csv": (*IDENTITY_COLUMNS, *FULL_METRIC_NAMES),
             "match_results.csv": MATCH_COLUMNS,
@@ -245,8 +312,14 @@ class RunWriter:
         self._pending: list[tuple[str, int]] = []
         self._collector: ReplayCollector | None = None
         self._replay_ids: dict[str, int] = {}
+        self._replay_config_ids: dict[int, str] = {}
+        self._preflight_contexts: dict[
+            int, tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]
+        ] = {}
         self._pending_replays: dict[str, dict[str, object]] = {}
         self._recording_provenance: dict[str, object] | None = None
+        self._assignment_open: dict[tuple[int, int], list[object]] = {}
+        self._source_cache: list[tuple[object, tuple[object, ...], str]] = []
         self._lock = -1
         if resume_from is None:
             root = Path(cast(str | Path, output_dir))
@@ -261,13 +334,15 @@ class RunWriter:
             self.run_dir = root / run_id
             self.run_dir.mkdir()
             self._details: dict[str, Any] = {
-                "schema_version": 1,
+                "schema_version": RUN_SCHEMA_VERSION,
                 "run_id": run_id,
                 "created_at": datetime.now(UTC).isoformat(),
                 "metric_schema_id": METRIC_SCHEMA_ID,
                 "metric_schema_version": METRIC_SCHEMA_VERSION,
                 "actor_input_projections": _INPUT_PROJECTIONS,
                 "configurations": {},
+                "systems": {},
+                "source_banks": {},
                 "passes": {},
                 "tables": {},
                 "details": {} if details is None else _json_value(details),
@@ -284,7 +359,7 @@ class RunWriter:
                     (self.run_dir / "run_details.json").read_bytes()
                 )
                 if (
-                    self._details.get("schema_version") != 1
+                    self._details.get("schema_version") != RUN_SCHEMA_VERSION
                     or self._details.get("metric_schema_id") != METRIC_SCHEMA_ID
                     or self._details.get("metric_schema_version")
                     != METRIC_SCHEMA_VERSION
@@ -301,6 +376,12 @@ class RunWriter:
                         "run actor input contract differs from this writer; "
                         "start a new run. Existing files have not been changed."
                     )
+                if (
+                    _expected_run_id is not None
+                    and self._details["run_id"] != _expected_run_id
+                ):
+                    raise ValueError("run_id differs from the recorded run")
+                self._prepare_pass(phase, pass_id, policies, checkpoint_id, details)
                 self._recover_tables()
             self.run_id = str(self._details["run_id"])
             self._completed = {
@@ -392,7 +473,8 @@ class RunWriter:
         pass_id : str
             Nonempty identity within phase.
         policies : dict[str, object] | None
-            Optional JSON-compatible team descriptions, default empty.
+            Optional team System, Policy or serialized descriptions, default
+            empty. Component order and identity must remain fixed within a pass.
         checkpoint_id : str | None
             Optional caller-known checkpoint label, default None.
         details : dict[str, object] | None
@@ -414,54 +496,29 @@ class RunWriter:
 
         Notes
         -----
-            Host-only and mutating. A training pass without a checkpoint is labeled
-            evolving; other pass identities are labeled frozen. This describes the
-            caller's declared run and does not perform training or freeze model values.
+            Host-only and mutating after identity checks. Training remains evolving.
+            Other calls need explicit freezing evidence; a label is not proof that
+            weights stay fixed. No method is called or frozen by registration.
         """
         self._check_open()
-        if not phase or not pass_id:
-            raise ValueError("phase and pass_id must be nonempty")
-        if self._pending or self._pending_replays:
+        key, identity, systems = self._prepare_pass(
+            phase, pass_id, policies, checkpoint_id, details
+        )
+        if self._collector is not None and self._collector.pending_episode_ids:
+            raise ValueError("cannot change pass while selected replays are incomplete")
+        if (
+            self._pending
+            or self._pending_replays
+            or self._assignment_open
+            or any(self._rows.values())
+        ):
             self.flush()
         if self._collector is not None:
-            if self._collector.pending_episode_ids:
-                raise ValueError(
-                    "cannot change pass while selected replays are incomplete"
-                )
             self._collector.close()
             self._collector = None
-        key = json.dumps((phase, pass_id), separators=(",", ":"))
-        identity: dict[str, object] = {
-            "phase": phase,
-            "pass_id": pass_id,
-            "policies": {} if policies is None else _json_value(policies),
-            "checkpoint_id": checkpoint_id,
-            "details": {} if details is None else _json_value(details),
-            "policy_state": "evolving"
-            if phase == "training" and checkpoint_id is None
-            else "frozen",
-        }
+        self._details["systems"].update(systems)
         previous = self._details["passes"].get(key)
-        execution_fields = {"runtime_provenance", "num_envs", "chunk_size"}
-
-        def stable_details(value: object) -> dict[str, object]:
-            """Exclude only execution placement/chunk details when comparing pass
-            identity.
-            """
-            return {
-                name: item
-                for name, item in cast(dict[str, object], value).items()
-                if name not in execution_fields
-            }
-
         if previous is not None:
-            if any(
-                (stable_details(previous.get(name, {})) != stable_details(value))
-                if name == "details"
-                else previous.get(name) != value
-                for name, value in identity.items()
-            ):
-                raise ValueError("pass identity differs from the recorded run")
             previous["details"] = identity["details"]
         else:
             self._details["passes"][key] = {
@@ -469,55 +526,509 @@ class RunWriter:
                 "completed_episode_ids": [],
                 "episodes": {},
                 "replays": {},
+                "recorded_metrics_by_episode": {},
+                "episode_starts": {},
+                "trace_epochs": {},
+                "trace_config_ids": {},
             }
         self._pass_key = key
 
-    def register_episodes(self, schedule: Iterable[dict[str, object]]) -> None:
-        """Record the schedule metadata needed to interpret upcoming completions.
+    def _prepare_pass(
+        self,
+        phase: str,
+        pass_id: str,
+        policies: dict[str, object] | None,
+        checkpoint_id: str | None,
+        details: dict[str, object] | None,
+    ) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        """Validate supplied pass facts without flushing, recovering or changing files.
+
+        Normalize each team once. Returned registrations contain only serializable
+        identity evidence, never method memory or a call to the method itself.
+        Existing stable facts must match; execution placement may differ.
+        """
+        from marl_battlegrounds.evaluation.recording_identity import (
+            normalize_system_registration,
+        )
+
+        if (
+            not isinstance(cast(object, phase), str)
+            or not phase
+            or not isinstance(cast(object, pass_id), str)
+            or not pass_id
+        ):
+            raise ValueError("phase and pass_id must be nonempty strings")
+        descriptions: dict[str, object] = {}
+        systems: dict[str, Any] = {}
+        system_ids: dict[str, str] = {}
+        for team, value in (policies or {}).items():
+            identifier, registration = normalize_system_registration(value, phase=phase)
+            systems[identifier] = registration
+            system_ids[team] = identifier
+            # Legacy serialized Policy descriptions retain their exact public fields.
+            descriptions[team] = (
+                _json_value(cast(object, value))
+                if isinstance(value, (str, dict))
+                else registration
+            )
+        identity: dict[str, Any] = {
+            "phase": phase,
+            "pass_id": pass_id,
+            "policies": descriptions,
+            "system_ids": system_ids,
+            "checkpoint_id": checkpoint_id,
+            "details": {} if details is None else _json_value(details),
+            "policy_state": "frozen"
+            if systems
+            and all(v["parameter_status"] == "frozen" for v in systems.values())
+            else "evolving",
+        }
+        key = json.dumps((phase, pass_id), separators=(",", ":"))
+        previous = self._details["passes"].get(key)
+        execution_fields = {"runtime_provenance", "num_envs", "chunk_size"}
+        if previous is not None:
+            for name, value in identity.items():
+                old = previous.get(name)
+                if name == "details":
+                    value = {
+                        k: v for k, v in value.items() if k not in execution_fields
+                    }
+                    old = {
+                        k: v
+                        for k, v in cast(dict[str, Any], old or {}).items()
+                        if k not in execution_fields
+                    }
+                if old != value:
+                    raise ValueError("pass identity differs from the recorded run")
+        return key, identity, systems
+
+    def register_episodes(
+        self,
+        schedule: Iterable[dict[str, object]] | object,
+        *,
+        source_configs: EnvConfig | None = None,
+    ) -> None:
+        """Register immutable schedule facts or pending first-start declarations.
 
         Parameters
         ----------
-        schedule : Iterable[dict[str, object]]
-            Iterable of JSON-compatible dicts, each with a positive integer
-            episode_id. Optional seeds, map identity and pairing metadata are kept.
+        schedule : iterable of dict or EpisodeStartRecords
+            Host schedule dictionaries contain a positive int32 episode_id.
+            Numerical starts carry source-bank references and reset generations.
+            An identical repeated declaration is allowed; a changed one fails.
+        source_configs : EnvConfig or None, default None
+            One immutable source config or a leading source batch. Required for
+            a new referenced bank; omit it once that content identity is saved.
+            Order belongs to identity. Reusing identical immutable JAX leaves
+            avoids hashing; mutable NumPy contents are checked on every resupply.
 
         Returns
         -------
         None
-            None. Records are merged into the active pass and flushed durably.
+            The whole declaration is checked, then published at one durable
+            boundary. A start remains pending until write receives its actual
+            first-transition configuration. This does not certify spawn balance.
 
         Raises
         ------
         ValueError
-            An ID is invalid or an existing ID's metadata differs.
+            IDs, shapes, source references or existing declarations disagree.
         RuntimeError
             The writer is closed or failed.
         OSError
-            Schedule publication fails.
+            Durable publication fails.
 
         Notes
         -----
-            Repeating identical records is allowed. This does not execute episodes,
-            mark them complete or validate a promised map against future game state.
+        Host-only. Never mutate or donate a live source bank. Reset generations
+        do not permit reusing an episode ID for another game within one pass.
         """
         self._check_open()
-        episodes = self._details["passes"][self._pass_key].setdefault("episodes", {})
-        for specification in schedule:
-            record = cast(dict[str, object], _json_value(specification))
-            episode_id = record.get("episode_id")
-            if (
-                isinstance(episode_id, bool)
-                or not isinstance(episode_id, int)
-                or episode_id < 1
-            ):
-                raise ValueError("scheduled episode_id must be a positive integer")
-            key = str(episode_id)
-            if key in episodes and episodes[key] != record:
-                raise ValueError(
-                    f"episode {episode_id} differs from the recorded schedule"
+        from marl_battlegrounds.evaluation.recording_types import EpisodeStartRecords
+
+        entry = self._details["passes"][self._pass_key]
+        if isinstance(schedule, EpisodeStartRecords):
+            bank_id, bank_refs, contents, cache = self._prepare_source_bank(
+                source_configs
+            )
+            banks = {**self._details["source_banks"]}
+            if bank_id is not None:
+                banks[bank_id] = bank_refs
+            declarations = self._start_declarations(schedule, banks)
+            for episode_id, declaration in declarations.items():
+                if (
+                    bank_id is not None
+                    and declaration["source_known"]
+                    and declaration["source_table_id"] != bank_id
+                ):
+                    raise ValueError(
+                        "supplied source bank differs from the declared "
+                        "source-table identity"
+                    )
+                previous = entry["episode_starts"].get(episode_id)
+                if previous is None and self._episode_has_records(int(episode_id)):
+                    raise ValueError("register starts before recording an episode")
+                if previous is not None and any(
+                    previous.get(k) != v for k, v in declaration.items()
+                ):
+                    raise ValueError(
+                        f"episode {episode_id} differs from its recorded start"
+                    )
+            if bank_id is not None:
+                self._details["source_banks"][bank_id] = bank_refs
+                self._details["configurations"].update(contents)
+                if cache is not None:
+                    self._source_cache = [
+                        item for item in self._source_cache if item[2] != bank_id
+                    ]
+                    self._source_cache.append(cache)
+            for episode_id, declaration in declarations.items():
+                entry["episode_starts"].setdefault(
+                    episode_id,
+                    {
+                        **declaration,
+                        "verification": "pending",
+                        "resolved_config_id": None,
+                    },
                 )
-            episodes[key] = record
+        else:
+            if source_configs is not None:
+                raise ValueError(
+                    "source_configs accompanies numerical start records only"
+                )
+            episodes = entry["episodes"]
+            records: dict[str, dict[str, object]] = {}
+            registrations: dict[str, object] = {}
+            from marl_battlegrounds.evaluation.recording_identity import (
+                normalize_system_registration,
+            )
+
+            for specification in cast(Iterable[dict[str, object]], schedule):
+                record = cast(dict[str, object], _json_value(specification))
+                episode_id = str(
+                    self._integer(
+                        record.get("episode_id"), "scheduled episode_id", minimum=1
+                    )
+                )
+                if episode_id not in episodes and self._episode_has_records(
+                    int(episode_id)
+                ):
+                    raise ValueError(
+                        "register episode declarations before recording data"
+                    )
+                if "policies" in record:
+                    ids: dict[str, str] = {}
+                    for team, definition in cast(
+                        dict[str, object], record["policies"]
+                    ).items():
+                        identifier, normalized = normalize_system_registration(
+                            definition, phase=entry["phase"]
+                        )
+                        registrations[identifier] = normalized
+                        ids[team] = identifier
+                    record["system_ids"] = ids
+                if (episode_id in episodes and episodes[episode_id] != record) or (
+                    episode_id in records and records[episode_id] != record
+                ):
+                    raise ValueError(
+                        f"episode {episode_id} differs from the recorded schedule"
+                    )
+                records[episode_id] = record
+            episodes.update(records)
+            self._details["systems"].update(registrations)
         self.flush()
+
+    def _episode_has_records(self, episode_id: int) -> bool:
+        """Check for admitted evidence whose owner later labels cannot change."""
+        entry = self._details["passes"][self._pass_key]
+        key = str(episode_id)
+        return (
+            (self._pass_key, episode_id) in self._completed
+            or key in entry["trace_epochs"]
+            or key in entry["replays"]
+            or key in self._pending_replays
+            or entry["episode_starts"].get(key, {}).get("verification")
+            in ("verified", "custom")
+            or (
+                self._collector is not None
+                and episode_id in self._collector.pending_episode_ids
+            )
+        )
+
+    def _prepare_source_bank(
+        self,
+        source_configs: EnvConfig | None,
+    ) -> tuple[
+        str | None,
+        list[str],
+        dict[str, object],
+        tuple[object, tuple[object, ...], str] | None,
+    ]:
+        """Identify an ordered source bank without changing recorded state.
+
+        Content hashes use configuration_identity once per source. Only held
+        immutable JAX leaf references permit the fast path; NumPy is rechecked.
+        """
+        if source_configs is None:
+            return None, [], {}, None
+        import jax
+
+        from marl_battlegrounds.core.types import EnvConfig
+
+        if not isinstance(cast(object, source_configs), EnvConfig):
+            raise TypeError("source_configs must be an EnvConfig source or batch")
+        leaves = jax.tree.leaves(source_configs)
+        structure = cast(object, jax.tree.structure(source_configs))
+        immutable = all(isinstance(leaf, jax.Array) for leaf in leaves)
+        if immutable:
+            for old_structure, old_leaves, identifier in self._source_cache:
+                if (
+                    old_structure == structure
+                    and len(old_leaves) == len(leaves)
+                    and all(
+                        old is new for old, new in zip(old_leaves, leaves, strict=True)
+                    )
+                ):
+                    return (
+                        identifier,
+                        self._details["source_banks"][identifier],
+                        {},
+                        None,
+                    )
+        shape = np.shape(source_configs.agent_profile.active_mask)
+        if shape == (10,):
+            configs = [source_configs]
+        elif len(shape) == 2 and shape[1] == 10 and shape[0] > 0:
+            host_sources = jax.device_get(source_configs)
+            configs = [
+                jax.tree.map(partial(_host_row, index=i), host_sources)
+                for i in range(shape[0])
+            ]
+        else:
+            raise ValueError(
+                "source bank must contain one or more ten-slot configurations"
+            )
+        contents: dict[str, object] = {}
+        references: list[str] = []
+        for config in configs:
+            identifier, content = configuration_identity(config)
+            references.append(identifier)
+            contents[identifier] = content
+        identifier = sha256(_json_bytes(references)).hexdigest()
+        cached = (structure, tuple(leaves), identifier) if immutable else None
+        return identifier, references, contents, cached
+
+    def _start_declarations(
+        self, starts: object, banks: dict[str, Any]
+    ) -> dict[str, dict[str, object]]:
+        """Check numerical start shapes, IDs and references, without granting evidence.
+
+        Invalid rows are padding; every field still has its declared shape/dtype.
+        Unknown sources keep unknown indices/choices and a zero source-table ID.
+        """
+        import jax
+
+        from marl_battlegrounds.evaluation.recording_types import EpisodeStartRecords
+
+        if not isinstance(starts, EpisodeStartRecords):
+            raise TypeError("episode_start_records must be EpisodeStartRecords")
+        host = jax.device_get(starts)
+        shape = np.shape(host.valid)
+        arrays: dict[str, np.ndarray[Any, Any]] = {}
+        for name in EpisodeStartRecords._fields:
+            array = np.asarray(getattr(host, name))
+            wanted = (*shape, 8) if name == "source_table_id" else shape
+            dtype = (
+                np.uint32
+                if name == "source_table_id"
+                else np.bool_
+                if name in ("source_known", "authored_start", "valid")
+                else np.int32
+            )
+            if array.shape != wanted or array.dtype != dtype:
+                raise ValueError(f"start {name} has the wrong shape or dtype")
+            arrays[name] = array.reshape(
+                (-1, 8) if name == "source_table_id" else (-1,)
+            )
+        result: dict[str, dict[str, object]] = {}
+        for index in np.flatnonzero(arrays["valid"]):
+            episode_id = str(
+                self._integer(
+                    arrays["episode_id"][index], "start episode_id", minimum=1
+                )
+            )
+            generation = self._integer(
+                arrays["reset_generation"][index], "reset_generation", minimum=0
+            )
+            source_index = self._integer(
+                arrays["source_index"][index], "source_index", minimum=-1
+            )
+            spawn = self._integer(
+                arrays["spawn_locations"][index], "spawn_locations", minimum=-1
+            )
+            if spawn not in (-1, 0, 1):
+                raise ValueError("spawn_locations must be -1, 0 or 1")
+            stage = self._integer(
+                arrays["episode_start_stage"][index], "episode_start_stage", minimum=-1
+            )
+            known = bool(arrays["source_known"][index])
+            words = arrays["source_table_id"][index]
+            table_id = words.astype(">u4").tobytes().hex() if np.any(words) else None
+            if known:
+                if table_id not in banks or not 0 <= source_index < len(
+                    banks[table_id]
+                ):
+                    raise ValueError(
+                        "start source bank or source index is missing or invalid"
+                    )
+            elif source_index != -1 or spawn != -1 or table_id is not None:
+                raise ValueError(
+                    "unknown starts require unknown source index/spawn "
+                    "and a zero bank ID"
+                )
+            declaration: dict[str, object] = {
+                "episode_id": int(episode_id),
+                "reset_generation": generation,
+                "source_table_id": table_id,
+                "source_index": source_index,
+                "spawn_locations": spawn,
+                "episode_start_stage": stage,
+                "source_known": known,
+                "authored_start": bool(arrays["authored_start"][index]),
+            }
+            if episode_id in result and result[episode_id] != declaration:
+                raise ValueError("one episode ID has conflicting start declarations")
+            result[episode_id] = declaration
+        return result
+
+    def _verify_starts(
+        self,
+        records: EpisodeInfo,
+        config_cache: dict[int, tuple[EnvConfig, str, dict[str, object]]],
+    ) -> list[tuple[int, dict[str, object], str, dict[str, object]]]:
+        """Join registered starts to their actual first-transition configurations.
+
+        Return verified updates only after checking all rows. Unknown/authored
+        starts remain custom. Later real rows must keep the recorded binding.
+        """
+        from marl_battlegrounds.tasks import (
+            prepare_exact_env_config,
+            spawn_locations_for_source,
+        )
+
+        entry = self._details["passes"][self._pass_key]
+        starts = records.episode_start_records
+        updates: list[tuple[int, dict[str, object], str, dict[str, object]]] = []
+        declarations = (
+            {}
+            if starts is None
+            else self._start_declarations(starts, self._details["source_banks"])
+        )
+        pending_bindings: dict[str, str] = {}
+        for index in range(np.size(records.episode_id)):
+            episode_id = str(int(records.episode_id[index]))
+            start_valid = starts is not None and bool(starts.valid[index])
+            bound = entry["episode_starts"].get(episode_id)
+            if not start_valid and bound is None:
+                continue
+            config_tree, config_id, content = self._config_evidence(
+                records, index, config_cache
+            )
+            if start_valid:
+                assert starts is not None
+                if str(int(starts.episode_id[index])) != episode_id:
+                    raise ValueError("start episode ID must match the producing info")
+                declaration = declarations[episode_id]
+                if bound is None or any(
+                    bound.get(k) != v for k, v in declaration.items()
+                ):
+                    raise ValueError(
+                        "first-start evidence must match its registered declaration"
+                    )
+                if (
+                    int(starts.episode_id[index]) != int(records.episode_id[index])
+                    or int(records.decision_step[index]) != 0
+                ):
+                    raise ValueError(
+                        "start evidence must belong to this episode's "
+                        "first real transition"
+                    )
+                if bound["verification"] != "pending" or episode_id in pending_bindings:
+                    raise ValueError(
+                        "first-start evidence was already recorded for this episode"
+                    )
+                prepare_exact_env_config(config_tree, num_envs=None)
+                known = bool(declaration["source_known"])
+                if known:
+                    refs = self._details["source_banks"][declaration["source_table_id"]]
+                    source = self._details["configurations"][
+                        refs[cast(int, declaration["source_index"])]
+                    ]
+
+                    def restore(template: object, values: object) -> object:
+                        """Restore source data using the actual tuple/dtype tree."""
+                        if isinstance(template, tuple) and hasattr(
+                            cast(object, template), "_fields"
+                        ):
+                            data = cast(dict[str, object], values)
+                            named = cast(Any, template)
+                            return type(named)(
+                                *(
+                                    restore(getattr(named, k), data[k])
+                                    for k in cast(tuple[str, ...], named._fields)
+                                )
+                            )
+                        return np.asarray(values, dtype=np.asarray(template).dtype)
+
+                    source_tree = cast("EnvConfig", restore(config_tree, source))
+                    matches, choice = spawn_locations_for_source(
+                        config_tree, source_tree
+                    )
+                    if (
+                        not bool(matches)
+                        or int(choice) != declaration["spawn_locations"]
+                    ):
+                        raise ValueError(
+                            "actual first-start configuration differs from "
+                            "its declared source/spawn choice"
+                        )
+                verification = (
+                    "verified"
+                    if known and not declaration["authored_start"]
+                    else "custom"
+                )
+                updates.append(
+                    (
+                        int(episode_id),
+                        {
+                            **declaration,
+                            "verification": verification,
+                            "resolved_config_id": config_id,
+                        },
+                        config_id,
+                        content,
+                    )
+                )
+                pending_bindings[episode_id] = config_id
+            expected = pending_bindings.get(episode_id) or cast(
+                dict[str, Any], bound or {}
+            ).get("resolved_config_id")
+            if expected is not None and config_id != expected:
+                raise ValueError(
+                    "episode configuration changed after its recorded start"
+                )
+            if (
+                not start_valid
+                and int(records.decision_step[index]) >= 0
+                and bound
+                and bound["verification"] == "pending"
+                and episode_id not in pending_bindings
+            ):
+                raise ValueError(
+                    "registered start needs its first-transition evidence "
+                    "before later records"
+                )
+        return updates
 
     @property
     def completed_episode_ids(self) -> frozenset[int]:
@@ -558,6 +1069,9 @@ class RunWriter:
             capture_recording_provenance,
         )
 
+        cached = self._preflight_contexts.pop(int(packet.episode_id), None)
+        if cached is not None:
+            return cached
         entry = self._details["passes"][self._pass_key]
         details = entry["details"]
         if "runtime_provenance" not in details:
@@ -581,7 +1095,11 @@ class RunWriter:
             policies=cast(
                 dict[str, object], episode.get("policies", entry["policies"])
             ),
-            details=details,
+            details={
+                **details,
+                "system_ids": episode.get("system_ids", entry["system_ids"]),
+                "systems": self._details["systems"],
+            },
         )
         self._replay_ids[context.identity.episode_id] = episode_id
         return context, runtime
@@ -619,6 +1137,20 @@ class RunWriter:
             Any collection/publication failure marks this writer failed.
         """
         self._check_open()
+        try:
+            checked = self._preflight_replays(packets, {}, {})
+            assert checked is not None
+            self._consume_replay(checked)
+        except BaseException as error:
+            self._record_failure(error)
+            raise
+
+    def _consume_replay(self, packets: ReplayPackets) -> None:
+        """Publish packets after whole-call checks; retain their summary and config.
+
+        Only the two guarded writer entry points call this host-only method.
+        It consumes preflighted initial contexts and marks publication failures.
+        """
         from marl_battlegrounds.evaluation.replay_io import (
             PreparedReplay,
             generated_replay_filename,
@@ -632,6 +1164,7 @@ class RunWriter:
                 self._collector = ReplayCollector(
                     self._replay_context, spool_dir=self.run_dir / ".replay_spool"
                 )
+            summaries = _replay_summaries(packets)
             for replay in self._collector.write(packets):
                 episode_id = self._replay_ids[replay.header.context.identity.episode_id]
                 if (self._pass_key, episode_id) in self._completed:
@@ -665,107 +1198,376 @@ class RunWriter:
                     "path": str(path.relative_to(self.run_dir)),
                     "canonical_digest_sha256": replay.canonical_digest_sha256,
                     "bytes": path.stat().st_size,
+                    "summary": summaries[episode_id],
+                    "config_id": self._replay_config_ids.pop(episode_id),
                 }
         except BaseException as error:
             self._record_failure(error)
             raise
 
-    def write(self, infos: EpisodeInfo) -> None:
-        """Buffer all completed episodes in one step or collected chunk.
+    def write(self, infos: EpisodeInfo, *, policy_trace: object = None) -> None:
+        """Validate a whole step or chunk, then record its selected data.
 
         Parameters
         ----------
         infos : EpisodeInfo
-            EpisodeInfo with scalar, batch or time/batch leading dimensions.
-            completed admits rows. Config and selected metric leaves must share
-            those dimensions; optional replay packets are collected first.
+            Scalar, native-batch or time/batch records with matching numerical
+            leading axes. Required lifecycle errors and optional tracking errors
+            reject the whole call, even on padding. Replay keeps its own axes.
+        policy_trace : PolicyTrace or None, default None
+            Optional submitted-action component choices with the same leading
+            shape. A scalar System's batch-one trace is also accepted for scalar
+            info. IDs index each team's registered ordered components; -1 means
+            unknown. No memory or learning outputs are recorded.
 
         Returns
         -------
         None
-            None. Selected valid metric rows are buffered; reaching buffer_size
-            flushes automatically. Explicit flush or healthy close makes the remainder
-            durable, including completions that have no metric row.
+            Completed outcomes and selected metrics are buffered. Start evidence
+            is checked before dependent output. Trace intervals also flush at
+            their bounded capacity, without waiting for a game to finish.
 
         Raises
         ------
-        RuntimeError
-            The writer is closed or failed.
         ValueError
-            A completion ID is invalid/repeated, its replay is incomplete,
-            metric columns are malformed/nonfinite, or tournament metadata is invalid.
+            An error flag, shape, ID, epoch, source claim, metric or completion is
+            invalid. The full call is checked before consuming its replay data.
+        RuntimeError
+            This writer is closed or failed. Reopen through resume after failure.
         OSError
-            A triggered flush or replay write fails.
+            Replay or durable table publication failed.
 
         Notes
         -----
-            Transfers numerical data to the host. False completion rows are ignored.
-            Unavailable metric cells are blank, not measured zeros. The writer records
-            actual supplied config/slot identity; it does not reset games or generate
-            IDs.
-            Call once for each completion; no implicit duplicate suppression occurs.
+        Host-only; transfers supplied numerical records. A healthy flush/close
+        makes pending data durable. Unavailable measurements stay blank. A
+        failed call cannot be retried on this writer; earlier committed records
+        remain authoritative. This does not restore a learner or provider.
         """
         self._check_open()
         import jax
 
-        if infos.replay is not None:
-            self.write_replay(infos.replay)
-        host = jax.device_get(infos._replace(replay=None))
-        completion = np.asarray(host.completed)
-        leading = completion.ndim
+        from marl_battlegrounds.evaluation.recording_types import (
+            validate_recording_errors,
+        )
 
-        def flatten(value: object) -> np.ndarray[Any, Any]:
-            """Flatten completion-leading axes while retaining each field's payload
-            shape.
-            """
-            array = np.asarray(value)
-            return array.reshape((-1, *array.shape[leading:]))
-
-        records = jax.tree.map(flatten, host)
         try:
+            validate_recording_errors(infos)
+            host = jax.device_get(infos._replace(replay=None))
+            completion = np.asarray(host.completed)
+            if completion.dtype != np.bool_:
+                raise ValueError("completed must have boolean dtype")
+            leading = completion.shape
+            for name in (
+                "episode_id",
+                "outcome",
+                "decision_step",
+                "episode_length",
+                "team_scores",
+                "lifecycle_error",
+            ):
+                value = np.asarray(getattr(host, name))
+                expected = (*leading, 2) if name == "team_scores" else leading
+                dtype = np.bool_ if name == "lifecycle_error" else np.int32
+                if value.shape != expected or value.dtype != dtype:
+                    raise ValueError(f"info.{name} has the wrong shape or dtype")
+
+            def flatten(value: object) -> np.ndarray[Any, Any]:
+                """Check and flatten info axes, leaving each record's payload intact."""
+                array = np.asarray(value)
+                if array.shape[: len(leading)] != leading:
+                    raise ValueError(
+                        "info fields must share the completed leading shape"
+                    )
+                return array.reshape((-1, *array.shape[len(leading) :]))
+
+            records = jax.tree.map(flatten, host)
+            config_cache: dict[int, tuple[EnvConfig, str, dict[str, object]]] = {}
+            starts = self._verify_starts(records, config_cache)
+            traces = self._prepare_traces(records, policy_trace, leading, config_cache)
+            prepared: list[
+                tuple[int, str, dict[str, object], list[tuple[str, list[object]]], str]
+            ] = []
+            seen: set[int] = set()
             for index in np.flatnonzero(completion):
-                self._write_record(records, int(index))
+                record = self._prepare_record(records, int(index), config_cache)
+                episode_id = record[0]
+                if episode_id in seen:
+                    raise ValueError(
+                        f"episode {episode_id} completed twice in one call"
+                    )
+                seen.add(episode_id)
+                prepared.append(record)
+            terminal_epochs = {
+                int(records.episode_id[i]): int(records.decision_step[i])
+                for i in np.flatnonzero(completion)
+            }
+            if any(
+                trace[0] in terminal_epochs and trace[1] > terminal_epochs[trace[0]]
+                for trace in traces
+            ):
+                raise ValueError(
+                    "trace decision follows the supplied episode completion"
+                )
+            bindings: dict[int, str] = {}
+            for episode_id, _, config_id, _ in starts:
+                bindings[episode_id] = config_id
+            for trace in traces:
+                if bindings.get(trace[0], trace[5]) != trace[5]:
+                    raise ValueError("trace configuration differs from its start")
+                bindings[trace[0]] = trace[5]
+            for episode_id, config_id, _, _, _ in prepared:
+                if bindings.get(episode_id, config_id) != config_id:
+                    raise ValueError(
+                        "completion configuration differs from its trace/start"
+                    )
+                bindings[episode_id] = config_id
+            summaries = {
+                int(records.episode_id[i]): (
+                    int(records.outcome[i]),
+                    int(records.episode_length[i]),
+                    int(records.team_scores[i, 0]),
+                    int(records.team_scores[i, 1]),
+                )
+                for i in np.flatnonzero(completion)
+            }
+            replay = self._preflight_replays(infos.replay, summaries, bindings)
+            entry = self._details["passes"][self._pass_key]
+            # Every declaration and trace has passed before any dependent output.
+            for episode_id, declaration, config_id, config in starts:
+                entry["episode_starts"][str(episode_id)] = declaration
+                self._details["configurations"].setdefault(config_id, config)
+            if replay is not None:
+                self._consume_replay(replay)
+            for trace in traces:
+                self._append_trace(*trace)
+            for episode_id, config_id, config, rows, coverage in prepared:
+                if (
+                    self._collector is not None
+                    and episode_id in self._collector.pending_episode_ids
+                ):
+                    raise ValueError(
+                        f"episode {episode_id} completed before its replay packets"
+                    )
+                self._details["configurations"].setdefault(config_id, config)
+                for filename, row in rows:
+                    self._rows[filename].append(row)
+                entry = self._details["passes"][self._pass_key]
+                entry["recorded_metrics_by_episode"][str(episode_id)] = coverage
+                key = (self._pass_key, episode_id)
+                self._completed.add(key)
+                self._pending.append(key)
                 if len(self._pending) >= self._buffer_size:
                     self.flush()
         except BaseException as error:
             self._record_failure(error)
             raise
 
-    def _write_record(self, records: EpisodeInfo, index: int) -> None:
-        """Validate one completion and append its selected rows to the active pass
-        buffers.
+    def _preflight_replays(
+        self,
+        packets: ReplayPackets | None,
+        completed: dict[int, tuple[int, int, int, int]],
+        bindings: dict[int, str],
+    ) -> ReplayPackets | None:
+        """Check replay order, completion joins and initial identities before output.
+
+        ReplayCollector owns packet ordering. Cache each validated initial context
+        until its factory consumes it, avoiding repeated source discovery. Existing
+        bindings and supplied schedule digests must match actual initial configs.
         """
         import jax
 
-        episode_id = int(records.episode_id[index])
-        key = (self._pass_key, episode_id)
-        if episode_id < 1:
-            raise ValueError("completed episode ID must be positive")
-        if key in self._completed:
+        from marl_battlegrounds.evaluation.replay_recording import ReplayCollector
+
+        entry = self._details["passes"][self._pass_key]
+        for episode_id, expected_config in bindings.items():
+            replay_record = self._pending_replays.get(str(episode_id))
+            if replay_record is None:
+                replay_record = cast(
+                    dict[str, object], entry["replays"].get(str(episode_id), {})
+                )
+            actual_config = replay_record.get(
+                "config_id", self._replay_config_ids.get(episode_id)
+            )
+            if actual_config is not None and actual_config != expected_config:
+                raise ValueError("record configuration differs from its replay")
+        for episode_id, expected in completed.items():
+            recorded = self._pending_replays.get(str(episode_id))
+            if recorded is None:
+                recorded = cast(
+                    dict[str, object], entry["replays"].get(str(episode_id), {})
+                )
+            if (
+                "summary" in recorded
+                and tuple(cast(Iterable[int], recorded["summary"])) != expected
+            ):
+                raise ValueError("completed summary differs from its recorded replay")
+
+        if packets is None:
+            if (
+                self._collector is not None
+                and set(completed) & self._collector.pending_episode_ids
+            ):
+                raise ValueError("episode completed before its replay packets")
+            return None
+        if self._collector is None:
+            self._collector = ReplayCollector(
+                self._replay_context, spool_dir=self.run_dir / ".replay_spool"
+            )
+        host = self._collector.preflight(packets, completed_episode_ids=completed)
+        for episode_id in np.unique(
+            np.asarray(host.episode_id)[np.asarray(host.valid)]
+        ):
+            if (self._pass_key, int(episode_id)) in self._completed:
+                raise ValueError(
+                    f"replay episode {int(episode_id)} was already completed"
+                )
+        for episode_id, actual in _replay_summaries(host).items():
+            if episode_id in completed and completed[episode_id] != actual:
+                raise ValueError("completed summary differs from its terminal replay")
+        shape = np.shape(host.valid)
+
+        def flatten(value: object) -> np.ndarray[Any, Any]:
+            """Retain replay payload axes while flattening its own leading axes."""
+            array = np.asarray(value)
+            return array.reshape((-1, *array.shape[len(shape) :]))
+
+        rows = jax.tree.map(flatten, host)
+        entry = self._details["passes"][self._pass_key]
+        contexts: dict[int, tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]] = {}
+        replay_configs: dict[int, str] = {}
+        for index in np.flatnonzero(np.asarray(rows.valid) & np.asarray(rows.initial)):
+            packet = cast(
+                "ReplayPackets",
+                jax.tree.map(partial(_host_row, index=int(index)), rows),
+            )
+            episode_id = int(packet.episode_id)
+            config_id, _ = configuration_identity(packet.config)
+            episode = entry["episodes"].get(str(episode_id), {})
+            start = entry["episode_starts"].get(str(episode_id), {})
+            if start.get("verification") == "pending" and episode_id not in bindings:
+                raise ValueError("replay needs verified first-start evidence")
+            expected = (
+                bindings.get(episode_id),
+                episode.get("configuration_digest", episode.get("config_id")),
+                start.get("resolved_config_id"),
+                entry["trace_config_ids"].get(str(episode_id)),
+            )
+            if any(value is not None and value != config_id for value in expected):
+                raise ValueError(
+                    "replay configuration differs from its episode evidence"
+                )
+            contexts[episode_id] = self._replay_context(packet)
+            replay_configs[episode_id] = config_id
+        self._preflight_contexts.update(contexts)
+        self._replay_config_ids.update(replay_configs)
+        return host
+
+    @staticmethod
+    def _config_evidence(
+        records: EpisodeInfo,
+        index: int,
+        cache: dict[int, tuple[EnvConfig, str, dict[str, object]]],
+    ) -> tuple[EnvConfig, str, dict[str, object]]:
+        """Hash a supplied host row once for this write call.
+
+        Start, trace and completion checks share this evidence. Each row is
+        checked against its own actual configuration; no prior call, mutable
+        object identity or assumed episode binding substitutes for its contents.
+        The caller releases the cache when the bounded input call returns.
+        """
+        import jax
+
+        if index not in cache:
+            config = jax.tree.map(partial(_host_row, index=index), records.config)
+            identifier, content = configuration_identity(config)
+            cache[index] = config, identifier, content
+        return cache[index]
+
+    def _prepare_record(
+        self,
+        records: EpisodeInfo,
+        index: int,
+        config_cache: dict[int, tuple[EnvConfig, str, dict[str, object]]],
+    ) -> tuple[int, str, dict[str, object], list[tuple[str, list[object]]], str]:
+        """Validate one completion without mutating buffers or metadata.
+
+        Keep exact integer outcomes separate from float32 optional measurements.
+        Return its ID, config identity/content, table rows and actual metric mode.
+        """
+        episode_id = self._integer(
+            records.episode_id[index], "completed episode ID", minimum=1
+        )
+        if (self._pass_key, episode_id) in self._completed:
             raise ValueError(f"episode {episode_id} was already written in this pass")
+        outcome = self._integer(records.outcome[index], "outcome", minimum=1)
+        if outcome not in (1, 2, 3):
+            raise ValueError("outcome must be terminal code 1, 2 or 3")
+        length = self._integer(
+            records.episode_length[index], "episode_length", minimum=1
+        )
+        decision = self._integer(
+            records.decision_step[index], "decision_step", minimum=0
+        )
+        if decision != length - 1:
+            raise ValueError(
+                "completed decision_step must equal episode_length minus one"
+            )
+        scores = np.asarray(records.team_scores[index])
+        if scores.shape != (2,):
+            raise ValueError("team_scores must contain Team A and Team B")
+        score_a, score_b = (self._integer(v, "team score", minimum=0) for v in scores)
+        config_tree, config_id, config = self._config_evidence(
+            records, index, config_cache
+        )
+        entry = self._details["passes"][self._pass_key]
+        episode = entry["episodes"].get(str(episode_id), {})
+        if entry["trace_epochs"].get(str(episode_id), -1) > decision:
+            raise ValueError("completion precedes an already recorded trace decision")
         if (
-            self._collector is not None
-            and episode_id in self._collector.pending_episode_ids
+            episode.get("configuration_digest", episode.get("config_id", config_id))
+            != config_id
+        ):
+            raise ValueError("completion config differs from the recorded schedule")
+        if entry["trace_config_ids"].get(str(episode_id), config_id) != config_id:
+            raise ValueError("completion config differs from recorded trace ownership")
+        bound = entry["episode_starts"].get(str(episode_id), {})
+        if bound.get("resolved_config_id", config_id) not in (None, config_id):
+            raise ValueError("completion config differs from its episode start")
+        if (
+            bound
+            and bound["verification"] == "pending"
+            and (
+                records.episode_start_records is None
+                or not np.any(
+                    np.asarray(records.episode_start_records.valid)
+                    & (
+                        np.asarray(records.episode_start_records.episode_id)
+                        == episode_id
+                    )
+                )
+            )
+        ):
+            raise ValueError("completion lacks verified first-start evidence")
+        active = np.asarray(records.active_mask[index])
+        classes = np.asarray(records.class_ids[index])
+        if (
+            active.shape != (10,)
+            or active.dtype != np.bool_
+            or classes.shape != (10,)
+            or classes.dtype != np.int32
         ):
             raise ValueError(
-                f"episode {episode_id} completed before its replay packets"
+                "recorded roster must contain ten bool active and int32 class slots"
             )
-
-        def select(value: object) -> object:
-            """Read one host record's scalar configuration leaf."""
-            return np.asarray(value)[index]
-
-        config_id, config = configuration_identity(jax.tree.map(select, records.config))
-        self._details["configurations"].setdefault(config_id, config)
-        entry = self._details["passes"][self._pass_key]
-        policies = entry["policies"]
-        episode = entry["episodes"].get(str(episode_id), {})
+        if not np.array_equal(
+            active, config_tree.agent_profile.active_mask
+        ) or not np.array_equal(classes, config_tree.agent_profile.class_ids):
+            raise ValueError("recorded roster differs from the actual configuration")
 
         def policy_name(team: str) -> object:
-            """Use per-episode team metadata when present, otherwise the pass
-            description.
-            """
-            definition: object = episode.get("policies", policies).get(team, "")
+            """Read an episode override label, otherwise the pass label."""
+            definition = episode.get("policies", entry["policies"]).get(team, "")
             return (
                 cast(dict[str, object], definition).get("name", "")
                 if isinstance(definition, dict)
@@ -785,59 +1587,292 @@ class RunWriter:
             entry["checkpoint_id"] or "",
         ]
         for slot in range(10):
-            identity.extend(
-                (
-                    int(records.class_ids[index, slot]),
-                    int(records.active_mask[index, slot]),
-                )
-            )
+            identity.extend((int(classes[slot]), int(active[slot])))
+        cells_by_mode: dict[str, list[object]] = {}
+        for mode, values, names in (
+            ("priority", records.priority, PRIORITY_METRIC_NAMES),
+            ("full", records.full, FULL_METRIC_NAMES),
+        ):
+            if values is not None:
+                cells = self._metric_cells(values, index, names)
+                if np.any(values.valid[index]):
+                    if not np.all(values.valid[index][: len(PRIORITY_METRIC_NAMES)]):
+                        raise ValueError(
+                            "completed priority measurements must all be available"
+                        )
+                    cells_by_mode[mode] = cells
+        if "full" in cells_by_mode:
+            full_prefix = cells_by_mode["full"][: len(PRIORITY_METRIC_NAMES)]
+            if "priority" in cells_by_mode and full_prefix != cells_by_mode["priority"]:
+                raise ValueError("priority and full measurements disagree")
+            cells_by_mode.setdefault("priority", full_prefix)
+        summary = {
+            "episode_length": length,
+            "team_a_score": score_a,
+            "team_b_score": score_b,
+        }
+        expected_measurements = {
+            **summary,
+            **{
+                name: int(outcome == code)
+                for name, code in PRIORITY_OUTCOME_CODES.items()
+            },
+        }
+        for mode, cells in cells_by_mode.items():
+            names = PRIORITY_METRIC_NAMES if mode == "priority" else FULL_METRIC_NAMES
+            for name, value in expected_measurements.items():
+                cell = cells[names.index(name)]
+                if cell != "" and cell != float(np.float32(value)):
+                    raise ValueError(
+                        f"{name} measurement differs from the required summary"
+                    )
+        rows: list[tuple[str, list[object]]] = []
         tournament = entry["phase"] == "tournament"
         if tournament:
             if "tournament_summary" in self._details:
                 raise ValueError(
                     "a qualified tournament cannot accept additional matches"
                 )
-            block_id = episode.get("block_id")
-            if (
-                isinstance(block_id, bool)
-                or not isinstance(block_id, int)
-                or block_id < 1
-            ):
-                raise ValueError(
-                    "tournament episodes require a registered positive block_id"
-                )
-            outcome = int(records.outcome[index])
-            if outcome not in (1, 2, 3):
-                raise ValueError("tournament outcome must be terminal code 1, 2 or 3")
-            cells: list[object] = [""] * len(PRIORITY_METRIC_NAMES)
-            if records.priority is not None:
-                cells = self._metric_cells(
-                    records.priority, index, PRIORITY_METRIC_NAMES
-                )
-            self._rows["match_results.csv"].append(
-                [
-                    *identity,
-                    block_id,
-                    episode.get("bootstrap_group") or "",
-                    outcome,
-                    *cells,
-                ]
+            block_id = self._integer(
+                episode.get("block_id"), "registered block_id", minimum=1
             )
-        for filename, values, names in (
-            ("priority_metrics.csv", records.priority, PRIORITY_METRIC_NAMES),
-            ("full_metrics.csv", records.full, FULL_METRIC_NAMES),
+            cells = cells_by_mode.get(
+                "priority", [""] * len(PRIORITY_METRIC_NAMES)
+            ).copy()
+            for name, value in summary.items():
+                cells[PRIORITY_METRIC_NAMES.index(name)] = value
+            rows.append(
+                (
+                    "match_results.csv",
+                    [
+                        *identity,
+                        block_id,
+                        episode.get("bootstrap_group") or "",
+                        outcome,
+                        *cells,
+                    ],
+                )
+            )
+        else:
+            rows.append(
+                ("episodes.csv", [*identity, outcome, length, score_a, score_b])
+            )
+        for mode, cells in cells_by_mode.items():
+            if mode == "priority" and tournament:
+                continue
+            rows.append((f"{mode}_metrics.csv", [*identity, *cells]))
+        coverage = (
+            "full"
+            if "full" in cells_by_mode
+            else "priority"
+            if "priority" in cells_by_mode
+            else "none"
+        )
+        return episode_id, config_id, config, rows, coverage
+
+    @staticmethod
+    def _integer(value: object, name: str, *, minimum: int) -> int:
+        """Read an int32-range host integer; never coerce floats."""
+        array = np.asarray(value)
+        if array.shape != () or array.dtype.kind not in "iu":
+            raise ValueError(f"{name} must be an integer")
+        result = int(array)
+        if result < minimum or result > np.iinfo(np.int32).max:
+            raise ValueError(f"{name} must be between {minimum} and the int32 limit")
+        return result
+
+    def _prepare_traces(
+        self,
+        records: EpisodeInfo,
+        trace: object,
+        leading: tuple[int, ...],
+        config_cache: dict[int, tuple[EnvConfig, str, dict[str, object]]],
+    ) -> list[
+        tuple[
+            int,
+            int,
+            np.ndarray[Any, Any],
+            np.ndarray[Any, Any],
+            dict[str, str],
+            str,
+            dict[str, object],
+        ]
+    ]:
+        """Check every trace join before output and return ordered decision groups.
+
+        Scalar info alone accepts a batch-one trace. Each valid decision advances
+        its episode's saved epoch and indexes the immutable team component table.
+        """
+        if trace is None:
+            return []
+        import jax
+
+        from marl_battlegrounds.evaluation.policy_execution import PolicyTrace
+
+        if not isinstance(trace, PolicyTrace):
+            raise TypeError("policy_trace must be a PolicyTrace")
+        host = jax.device_get(trace)
+        scalar_batch = leading == () and np.shape(host.valid) == (1,)
+        arrays: dict[str, np.ndarray[Any, Any]] = {}
+        for name in PolicyTrace._fields:
+            value = np.asarray(getattr(host, name))
+            shape = (*leading, 10) if name == "policy_ids" else leading
+            if scalar_batch:
+                if value.shape != (1, *shape):
+                    raise ValueError(
+                        f"scalar policy_trace.{name} must have exactly one batch row"
+                    )
+                value = value[0]
+            if value.shape != shape or value.dtype != (
+                np.bool_ if name == "valid" else np.int32
+            ):
+                raise ValueError(f"policy_trace.{name} has the wrong shape or dtype")
+            arrays[name] = value.reshape((-1, 10) if name == "policy_ids" else (-1,))
+        entry = self._details["passes"][self._pass_key]
+        epochs: dict[str, int] = {}
+        config_ids: dict[str, str] = {}
+        result: list[
+            tuple[
+                int,
+                int,
+                np.ndarray[Any, Any],
+                np.ndarray[Any, Any],
+                dict[str, str],
+                str,
+                dict[str, object],
+            ]
+        ] = []
+        for index in np.flatnonzero(arrays["valid"]):
+            episode_id = self._integer(
+                arrays["episode_id"][index], "trace episode ID", minimum=1
+            )
+            decision = self._integer(
+                arrays["decision_step"][index], "trace decision_step", minimum=0
+            )
+            if episode_id != int(records.episode_id[index]) or decision != int(
+                records.decision_step[index]
+            ):
+                raise ValueError("trace episode and action epoch must match info")
+            if (self._pass_key, episode_id) in self._completed:
+                raise ValueError("trace follows an already completed episode")
+            previous_epoch = epochs.get(str(episode_id))
+            if previous_epoch is None:
+                previous_epoch = int(entry["trace_epochs"].get(str(episode_id), -1))
+            if decision <= previous_epoch:
+                raise ValueError("trace decisions must move forward without duplicates")
+            active = np.asarray(records.active_mask[index])
+            choices = arrays["policy_ids"][index]
+            if active.shape != (10,) or active.dtype != np.bool_:
+                raise ValueError("trace roster must have ten boolean active slots")
+            if not np.array_equal(
+                active, records.config.agent_profile.active_mask[index]
+            ):
+                raise ValueError("trace roster differs from the actual configuration")
+            if np.any(choices[~active] != -1):
+                raise ValueError("inactive slots must have policy ID -1")
+            episode = entry["episodes"].get(str(episode_id), {})
+            system_ids = episode.get("system_ids", entry["system_ids"])
+            for slot in np.flatnonzero(active):
+                team = "team_a" if slot < 5 else "team_b"
+                system_id = system_ids.get(team)
+                if system_id not in self._details["systems"]:
+                    raise ValueError(f"trace needs a registered {team} System")
+                count = len(self._details["systems"][system_id]["components"])
+                if choices[slot] < -1 or choices[slot] >= count:
+                    raise ValueError(
+                        f"policy ID for slot {slot} is outside its component table"
+                    )
+            _, config_id, config = self._config_evidence(
+                records, int(index), config_cache
+            )
+            start_binding = entry["episode_starts"].get(str(episode_id), {})
+            expected = (
+                episode.get("configuration_digest", episode.get("config_id")),
+                start_binding.get("resolved_config_id"),
+            )
+            if any(v is not None and v != config_id for v in expected):
+                raise ValueError(
+                    "trace configuration differs from recorded episode evidence"
+                )
+            if int(records.episode_length[index]) != decision + 1:
+                raise ValueError(
+                    "trace decision does not match the played episode length"
+                )
+            previous_config = config_ids.get(
+                str(episode_id), entry["trace_config_ids"].get(str(episode_id))
+            )
+            if previous_config is not None and previous_config != config_id:
+                raise ValueError("trace configuration changed within an episode")
+            config_ids[str(episode_id)] = config_id
+            epochs[str(episode_id)] = decision
+            result.append(
+                (episode_id, decision, choices, active, system_ids, config_id, config)
+            )
+        return result
+
+    def _append_trace(
+        self,
+        episode_id: int,
+        decision: int,
+        choices: np.ndarray[Any, Any],
+        active: np.ndarray[Any, Any],
+        system_ids: dict[str, str],
+        config_id: str,
+        config: dict[str, object],
+    ) -> None:
+        """Append one validated decision without splitting it across durable commits.
+
+        Open and closed segments share one capacity of ten times buffer_size.
+        Flush releases all intervals, including games abandoned before completion.
+        """
+        capacity = 10 * self._buffer_size
+        additions = 0
+        for slot in np.flatnonzero(active):
+            previous = self._assignment_open.get((episode_id, int(slot)))
+            if (
+                previous is None
+                or previous[7] != int(choices[slot])
+                or previous[9] != decision
+            ):
+                additions += 1
+        if (
+            len(self._assignment_open)
+            + len(self._rows["policy_assignments.csv"])
+            + additions
+            > capacity
         ):
-            if tournament and filename == "priority_metrics.csv":
+            self.flush()
+        entry = self._details["passes"][self._pass_key]
+        for slot_value in np.flatnonzero(active):
+            slot = int(slot_value)
+            key = (episode_id, slot)
+            previous = self._assignment_open.get(key)
+            policy_id = int(choices[slot])
+            if (
+                previous is not None
+                and previous[7] == policy_id
+                and previous[9] == decision
+            ):
+                previous[9] = decision + 1
                 continue
-            if values is None:
-                continue
-            available = np.asarray(values.valid[index])
-            cells = self._metric_cells(values, index, names)
-            if not available.any():
-                continue
-            self._rows[filename].append([*identity, *cells])
-        self._completed.add(key)
-        self._pending.append(key)
+            if previous is not None:
+                self._rows["policy_assignments.csv"].append(previous)
+            team = "team_a" if slot < 5 else "team_b"
+            self._assignment_open[key] = [
+                self.run_id,
+                entry["phase"],
+                entry["pass_id"],
+                episode_id,
+                team,
+                slot,
+                system_ids[team],
+                policy_id,
+                decision,
+                decision + 1,
+            ]
+        entry["trace_config_ids"][str(episode_id)] = config_id
+        self._details["configurations"].setdefault(config_id, config)
+        entry["trace_epochs"][str(episode_id)] = decision
 
     @staticmethod
     def _metric_cells(
@@ -851,7 +1886,12 @@ class RunWriter:
         metric = cast(MetricValues, values)
         valid = np.asarray(metric.valid[index])
         numeric = np.asarray(metric.values[index])
-        if numeric.shape != (len(names),) or valid.shape != numeric.shape:
+        if (
+            numeric.shape != (len(names),)
+            or valid.shape != numeric.shape
+            or valid.dtype != np.bool_
+            or numeric.dtype != np.float32
+        ):
             raise ValueError("measurements do not match the scalar column schema")
         if not np.isfinite(numeric[valid]).all():
             raise ValueError("available measurements contain a nonfinite value")
@@ -942,10 +1982,15 @@ class RunWriter:
         Notes
         -----
             Host-only and synchronous. Publication failures mark the writer failed.
-            The previous metadata boundary remains the recovery authority; resume
-            removes table suffixes not covered by that boundary.
+            The readable atomic metadata file is the recovery authority. A failure
+            before its replacement leaves the old boundary; a failure after
+            replacement may leave the new one. Resume removes table suffixes not
+            covered by that published boundary. A failed directory fsync does not
+            promise that the replacement survives a machine or power failure.
         """
         self._check_open()
+        self._rows["policy_assignments.csv"].extend(self._assignment_open.values())
+        self._assignment_open.clear()
         # Flush mutates only publication boundaries; frozen schedules/configs can
         # stay shared during this synchronous operation.
         candidate = {
@@ -967,15 +2012,15 @@ class RunWriter:
                 previous = candidate["tables"].get(
                     filename, {"durable_bytes": 0, "rows": 0}
                 )
-                text = io.StringIO(newline="")
-                writer = csv.writer(text, lineterminator="\n")
-                if previous["durable_bytes"] == 0:
-                    writer.writerow(self._headers[filename])
-                writer.writerows(rows)
-                payload = text.getvalue().encode("utf-8")
                 path = self._table_path(filename)
                 with path.open("ab") as stream:
-                    stream.write(payload)
+                    for start in range(0, len(rows), self._buffer_size):
+                        text = io.StringIO(newline="")
+                        writer = csv.writer(text, lineterminator="\n")
+                        if previous["durable_bytes"] == 0 and start == 0:
+                            writer.writerow(self._headers[filename])
+                        writer.writerows(rows[start : start + self._buffer_size])
+                        stream.write(text.getvalue().encode("utf-8"))
                     stream.flush()
                     os.fsync(stream.fileno())
                     candidate["tables"][filename] = {

@@ -434,7 +434,7 @@ existing team application columns. Earlier CSV files stay untouched. See the
 [schema-13 column
 contract](../evaluation/metric_specification.md#schema-13-team-ability-application-columns).
 
-**Find a Measurement** searches all 11,158 numerical columns. An exact CSV name
+**Find a Measurement** searches all 11,148 numerical columns. An exact CSV name
 is checked first and returns that column, including one that does not apply to
 the recorded roster. Other searches use measurement names, topics, related words
 and recorded agent identities. The start of a word works too: `regen` finds
@@ -483,7 +483,7 @@ strategic reasoning.
 
 **Download Metrics CSV** exports one wide row for the selected boundary, using
 the same scalar names, order and values as the run tables; unavailable cells are
-empty. Schema 13 exports 11,207 columns: 49 identity fields and 11,158 numerical
+empty. Schema 14 exports 11,197 columns: 49 identity fields and 11,148 numerical
 measurements. The export identifies its scope, local frame index, actual
 simulator tick, and captured roster/policy identities. **Episode Details**
 downloads the recorded episode, policy, completion and runtime metadata as JSON

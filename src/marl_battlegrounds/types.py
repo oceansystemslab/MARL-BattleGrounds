@@ -2,10 +2,10 @@
 
 These names refer to their original owning classes. Importing ``Action`` here
 gives the same class as importing it from Core. Core and actor types load with
-this module; System types load only when requested. Their numerical arrays stay
-dynamic JAX data. Core NamedTuple constructors package values without validating
-shapes, dtypes, physical validity or action legality. Each System type documents
-its own validation and host/JAX contract.
+this module; System and recording types load only when requested. Their numerical
+arrays stay dynamic JAX data. Core NamedTuple constructors store values without
+validating shapes, dtypes, physical validity or action legality. Each System type
+documents its own validation and host/JAX contract.
 
 Available types:
     Action: Joint ``move``, ``select_target`` and ``use_ultimate`` int32 arrays.
@@ -46,6 +46,8 @@ Available types:
         roots and last numerical trace. Obtain it through init_systems.
     SystemStepData: One team's submitted actions, rewards, configured activity,
         pre-step episode identities and real-transition flags, with leading B.
+    EpisodeStartRecords: Compact numerical first-transition source claims. The
+        writer verifies them before treating source relationships as known.
     PolicyTrace: Decision identities and reported component choices. This is
         numerical runner data, not actor input or an automatic recording stream.
 
@@ -82,6 +84,7 @@ if TYPE_CHECKING:
         SystemState,
         SystemStepData,
     )
+    from marl_battlegrounds.evaluation.recording_types import EpisodeStartRecords
 
 __all__ = [
     "Action",
@@ -89,6 +92,7 @@ __all__ = [
     "ActorAction",
     "DoneFlags",
     "EnvConfig",
+    "EpisodeStartRecords",
     "Observation",
     "PolicyTrace",
     "System",
@@ -100,23 +104,23 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
-    """Load and cache an original System type when it is first requested.
+    """Load and cache an original System or recording type when requested.
 
     Parameters
     ----------
     name : str
-        Exact System type name listed in this module's __all__.
+        Exact lazy type name listed in this module's __all__.
 
     Returns
     -------
     object
-        The class owned by evaluation.policy_execution. Later access reuses
+        The class owned by policy_execution or recording_types. Later access reuses
         the same cached object; no wrapper or duplicate class is constructed.
 
     Raises
     ------
     AttributeError
-        name is not one of the supported lazy System types.
+        name is not one of the supported lazy types.
 
     Notes
     -----
@@ -124,6 +128,12 @@ def __getattr__(name: str) -> object:
     Import failures propagate to the caller. Existing Core and actor classes
     are already present and do not use this fallback.
     """
+    if name == "EpisodeStartRecords":
+        value = getattr(
+            import_module("marl_battlegrounds.evaluation.recording_types"), name
+        )
+        globals()[name] = value
+        return value
     if name in {
         "PolicyTrace",
         "System",

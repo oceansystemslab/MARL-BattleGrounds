@@ -19,6 +19,9 @@ and the old/new Policy evaluator at B128/chunk128. --systems-case selects one.
 The same frozen --assets-root and this harness serve both package revisions.
 Systems workers save matching retained payloads, five or more warmed samples,
 compilation/load evidence and memory limits. The fake host method uses no network.
+Use --recording-contracts for only Packet 3: batch 32, rollout 16 and five warm
+samples of none/priority/full plus separate host save costs. Set PYTHONPATH to
+the selected --package-root/src when comparing committed and current sources.
 No mode establishes learning efficiency or proves theoretical optimality.
 """
 
@@ -61,6 +64,7 @@ from marl_battlegrounds.environment import (
     Environment,
     EnvironmentState,
     EpisodeInfo,
+    MetricMode,
     make,
 )
 from marl_battlegrounds.evaluation.episode_metrics import (
@@ -782,7 +786,17 @@ def run_size(
         _, priority, full = gpu_values
         outcomes = facts.info.transition_facts.team_deathmatch_facts.outcome.max(axis=0)
         completed = EpisodeInfo(
-            ids, jnp.ones(count, bool), outcomes, configs, priority, full, None
+            ids,
+            jnp.ones(count, bool),
+            outcomes,
+            configs,
+            priority,
+            full,
+            None,
+            final.core_state.step_count - final.initial_step_count - 1,
+            final.core_state.step_count - final.initial_step_count,
+            final.core_state.team_deathmatch_scores,
+            final.lifecycle_error,
         )
         started = time.perf_counter()
         with RunWriter(
@@ -3311,6 +3325,328 @@ def _run_systems(args: argparse.Namespace) -> int:
     return int(failed)
 
 
+def _recording_rollout(
+    env: Environment, initial: EnvironmentState, root: Array
+) -> Tree:
+    """Advance 32 games for 16 decisions and retain terminal records only.
+
+    The environment and initial state are dynamic numerical inputs. Both old and
+    new packages use the same ALPHA/BETA actions, keys and complete final state.
+    No writer, trace history or host callback belongs to this compiled workload.
+    """
+
+    def advance(carry: Tree, tick: Array) -> tuple[Tree, None]:
+        """Choose and apply one action per game, retaining first terminal summaries."""
+        state, completed = carry
+        actions = _actions(state, env, tick, exploration=False)
+        keys = episode_keys(
+            root, state.episode_id, jnp.full_like(state.episode_id, tick), 1
+        )
+        _, successor, _, _, info = env.step(keys, state, actions)
+        return (successor, _retain_completion(completed, successor, info)), None
+
+    final, _ = jax.lax.scan(
+        advance, (initial, _empty_completed(initial)), jnp.arange(16, dtype=jnp.int32)
+    )
+    return final[0], final[1].info
+
+
+def _recording_save_costs(
+    output: Path, host_state: Tree, host_info: Tree, mode: str, repeats: int
+) -> dict[str, Any]:
+    """Measure current writer saves and a simple exact-summary CSV reference.
+
+    Inputs are already on the host. Every repeat writes the same 32 completed
+    games to a fresh run and flushes it. The manual reference writes and fsyncs
+    only required summary cells; it excludes identities, metrics and recovery.
+    A separate current-schema probe measures trace compression without games.
+    These host timings explain recording costs; they are not GPU simulation rates.
+    """
+    import csv
+
+    from marl_battlegrounds.evaluation.evaluate import policy_description
+    from marl_battlegrounds.evaluation.run_writer import RunWriter
+
+    samples: list[float] = []
+    sizes: list[int] = []
+    manual_samples: list[float] = []
+    identity_samples: list[float] = []
+    descriptors = (policy("tdm-alpha"), policy("tdm-beta"))
+    for _ in range(repeats):
+        started = time.perf_counter()
+        for descriptor in descriptors:
+            policy_description(
+                descriptor,
+                descriptor.variables,
+                descriptor.initial_carry,
+                include_digests=True,
+            )
+        identity_samples.append((time.perf_counter() - started) * 1000)
+    summaries = np.column_stack(
+        (
+            np.asarray(host_state.episode_id),
+            np.asarray(host_info.outcome),
+            np.asarray(
+                host_state.core_state.step_count - host_state.initial_step_count
+            ),
+            np.asarray(host_state.core_state.team_deathmatch_scores),
+        )
+    ).tolist()
+    for repeat in range(repeats):
+        started = time.perf_counter()
+        with RunWriter(
+            output / f"saved-{repeat}",
+            policies={"team_a": policy("tdm-alpha"), "team_b": policy("tdm-beta")}
+            if hasattr(host_info, "decision_step")
+            else {"team_a": "tdm-alpha", "team_b": "tdm-beta"},
+            details={"metrics": mode},
+        ) as writer:
+            writer.write(host_info)
+            writer.flush()
+        samples.append((time.perf_counter() - started) * 1000)
+        sizes.append(
+            sum(
+                path.stat().st_size
+                for path in writer.run_dir.rglob("*")
+                if path.is_file()
+            )
+        )
+        started = time.perf_counter()
+        with (output / f"manual-outcomes-{repeat}.csv").open("w", newline="") as stream:
+            csv_writer = csv.writer(stream)
+            csv_writer.writerow(
+                (
+                    "episode_id",
+                    "outcome",
+                    "episode_length",
+                    "team_a_score",
+                    "team_b_score",
+                )
+            )
+            csv_writer.writerows(summaries)
+            stream.flush()
+            os.fsync(stream.fileno())
+        manual_samples.append((time.perf_counter() - started) * 1000)
+    result: dict[str, Any] = {
+        "complete_save_samples_ms": samples,
+        "complete_save_median_ms": statistics.median(samples),
+        "complete_run_bytes": sizes,
+        "two_policy_identity_samples_ms": identity_samples,
+        "two_policy_identity_median_ms": statistics.median(identity_samples),
+        "manual_summary_samples_ms": manual_samples,
+        "manual_summary_median_ms": statistics.median(manual_samples),
+        "manual_scope": (
+            "32 exact integer outcome rows, CSV encoding and file fsync only; "
+            "excludes policy/config identity, metrics, manifest and recovery."
+        ),
+        "prior_schema_none_limit": (
+            "Schema 1 has no ordinary none-mode outcome CSV; the manual reference "
+            "records those required summaries on both revisions."
+        ),
+    }
+    if hasattr(host_info, "decision_step"):
+        from marl_battlegrounds.evaluation.policy_execution import PolicyTrace
+
+        started = time.perf_counter()
+        with RunWriter(
+            output / "assignments",
+            buffer_size=32,
+            policies={"team_a": policy("tdm-alpha"), "team_b": policy("tdm-beta")},
+        ) as writer:
+            for tick in range(16):
+                local = np.full(32, tick, np.int32)
+                info = host_info._replace(
+                    completed=np.zeros(32, bool),
+                    priority=None,
+                    full=None,
+                    decision_step=local,
+                    episode_length=local + 1,
+                )
+                trace = PolicyTrace(
+                    host_info.episode_id,
+                    cast(Array, local),
+                    cast(Array, np.ones(32, bool)),
+                    cast(Array, np.full((32, 10), -1 if tick % 2 else 0, np.int32)),
+                )
+                writer.write(info, policy_trace=trace)
+            writer.flush()
+        result["assignment_probe_ms"] = (time.perf_counter() - started) * 1000
+        with writer.paths["policy_assignments"].open(newline="") as stream:
+            result["assignment_rows"] = sum(1 for _ in csv.DictReader(stream))
+        result["assignment_csv_bytes"] = (
+            writer.paths["policy_assignments"].stat().st_size
+        )
+        result["assignment_probe_scope"] = (
+            "Host-only synthetic 16-decision epochs over the actual roster: "
+            "alternating known/unknown choices, no completions. This measures "
+            "bounded flushing, not action generation."
+        )
+    return result
+
+
+def _run_recording_contracts(args: argparse.Namespace) -> int:
+    """Measure only the Packet 3 batch-32, length-16 recording contract.
+
+    Run this harness in separate processes with PYTHONPATH selecting the declared
+    package root. Output stores each mode's exact source/assets, final common
+    payload, measurements and writer files. This mode never launches the older
+    benchmark campaign. GPU qualifies performance; CPU is a smoke check only.
+    """
+    from marl_battlegrounds.evaluation.metric_catalog import (
+        METRIC_SCHEMA_VERSION,
+        PRIORITY_METRIC_NAMES,
+    )
+
+    root = Path(__file__).resolve().parents[2]
+    args.package_root = (args.package_root or root).resolve()
+    args.assets_root = (
+        args.assets_root or args.package_root / "src/marl_battlegrounds/data/tdm"
+    ).resolve()
+    args.backend = args.backend or "gpu"
+    args.map_id = 12 if args.map_id is None else args.map_id
+    if (
+        args.repeats < 5
+        or args.sizes not in (None, [32])
+        or args.lengths not in (None, [16])
+    ):
+        raise ValueError(
+            "Recording contracts use batch 32, length 16 and at least five warm samples"
+        )
+    if args.systems or args.foundations or args.metrics_only or args.include_scalar:
+        raise ValueError(
+            "Recording contracts cannot be combined with another benchmark mode"
+        )
+    modes = args.rollout_modes or ["none", "priority", "full"]
+    if any(mode not in ("none", "priority", "full") for mode in modes):
+        raise ValueError("Recording contracts support none, priority and full only")
+    identity = _foundation_identity(args.package_root, args.assets_root)
+    _foundation_assets(args.assets_root)
+    args.output.mkdir(parents=True, exist_ok=True)
+    device = cast(Any, jax.devices(args.backend)[0])
+    for mode in modes:
+        path = args.output / f"recording-{mode}-{args.backend}.json"
+        if path.exists():
+            raise FileExistsError(
+                f"Preserve prior measurements; choose another output folder: {path}"
+            )
+        record: dict[str, Any] = {
+            "status": "running",
+            "identity": identity,
+            "source_revision": args.source_revision,
+            "metric_schema_version": METRIC_SCHEMA_VERSION,
+            "mode": mode,
+            "batch": 32,
+            "rollout_length": 16,
+            "backend": args.backend,
+            "device": str(device),
+            "device_kind": device.device_kind,
+            "jax": jax.__version__,
+            "qualification_scope": "GPU efficiency"
+            if args.backend == "gpu"
+            else "CPU smoke only",
+        }
+        path.write_text(json.dumps(record, indent=2) + "\n")
+        try:
+            with jax.default_device(device):
+                started = time.perf_counter()
+                roster_a, roster_b = _benchmark_rosters()
+                config = make_standard_team_deathmatch_config(
+                    map_id=args.map_id,
+                    team_a_roster=roster_a,
+                    team_b_roster=roster_b,
+                    max_steps=16,
+                )
+                env = make(
+                    "tdm",
+                    num_envs=32,
+                    env_config=config,
+                    metrics=cast(MetricMode, mode),
+                )
+                _, initial = env.reset(jax.random.key(42))
+                jax.block_until_ready(initial)
+                record["setup_including_reset_ms"] = (
+                    time.perf_counter() - started
+                ) * 1000
+                (final, info), timing, _ = _foundation_measure(
+                    _recording_rollout,
+                    (env, initial, jax.random.key(43)),
+                    args.repeats,
+                    ((env, initial, jax.random.key(44)),),
+                )
+                if timing["new_traces_for_changed_values"]:
+                    raise AssertionError(
+                        "Same-shaped changed keys caused recompilation"
+                    )
+                record["timing"] = timing
+                started = time.perf_counter()
+                host_state, host_info = jax.device_get((final, info))
+                record["retained_host_transfer_ms"] = (
+                    time.perf_counter() - started
+                ) * 1000
+                record["retained_logical_bytes"] = _bytes((final, info))
+                record["state_bytes"] = _bytes(final)
+                record["info_bytes"] = _bytes(info)
+                record["priority_value_validity_bytes"] = (
+                    _bytes(info.priority) if info.priority is not None else 0
+                )
+                record["full_value_validity_bytes"] = (
+                    _bytes(info.full) if info.full is not None else 0
+                )
+                record["real_transitions"] = int(
+                    np.asarray(host_state.cumulative_transition_count).sum()
+                )
+                record["transitions_per_second"] = (
+                    record["real_transitions"] * 1000 / timing["warm_median_ms"]
+                )
+                common = (
+                    host_state,
+                    host_info.episode_id,
+                    host_info.completed,
+                    host_info.outcome,
+                )
+                record["common_trajectory_sha256"] = _foundation_digest(common)
+                record["metrics_by_name"] = {
+                    group: {
+                        name: {
+                            "values": np.asarray(values.values[:, index]).tolist(),
+                            "valid": np.asarray(values.valid[:, index]).tolist(),
+                        }
+                        for index, name in enumerate(names)
+                        if not (name.startswith("agent_") and name.endswith("_return"))
+                    }
+                    for group, names, values in (
+                        ("priority", PRIORITY_METRIC_NAMES, host_info.priority),
+                        ("full", FULL_METRIC_NAMES, host_info.full),
+                    )
+                    if values is not None
+                }
+                folder = args.output / f"recording-{mode}-{args.backend}-files"
+                folder.mkdir()
+                record["saving"] = _recording_save_costs(
+                    folder, host_state, host_info, mode, args.repeats
+                )
+                record["device_memory_stats"] = device.memory_stats()
+                record["process_peak_ram_bytes"] = (
+                    resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+                )
+                record["memory_scope"] = (
+                    "Process/device allocator peaks include prior modes, setup, "
+                    "compilation and save probes. Per-executable memory is "
+                    "reported separately."
+                )
+            if identity != _foundation_identity(args.package_root, args.assets_root):
+                raise RuntimeError(
+                    "Package, harness or assets changed during measurement"
+                )
+            record["status"] = "complete"
+        except Exception as error:
+            record.update(status="failed", error=f"{type(error).__name__}: {error}")
+            raise
+        finally:
+            path.write_text(json.dumps(record, indent=2) + "\n")
+    return 0
+
+
 def main() -> int:
     """Parse options and run fresh workers for the chosen benchmark mode.
 
@@ -3428,7 +3764,14 @@ def main() -> int:
         choices=("manual", "public", "baseline", "current"),
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--recording-contracts",
+        action="store_true",
+        help="Packet 3 only: batch 32, rollout 16, priority/full/none and save costs",
+    )
     args = parser.parse_args()
+    if args.recording_contracts:
+        return _run_recording_contracts(args)
     if args.systems:
         return _run_systems(args)
     if any((args.systems_case, args.systems_route, args.baseline_root)):

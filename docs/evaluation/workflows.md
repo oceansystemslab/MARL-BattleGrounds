@@ -79,10 +79,11 @@ and `env.join_actions` expose the same small tools for custom loops without a
 System. `env.training_state` is a separate privileged training route; using it
 requires the experiment's declared training permissions.
 
-Raw traces identify their submitted decision but are not a new writer stream.
-Generic System support in public `evaluate` and tournament calls, and persisted
-component traces, remain later work. Existing Policy recordings retain their
-current schemas and identities.
+Raw traces identify the submitted decision. Pass them to `writer.write(info,
+policy_trace=memory.policy_trace)` to save known component choices alongside the
+same transition. Generic System support in public `evaluate` and tournament calls
+remains later work. Policy identities keep their meanings; new recordings use
+host run schema 2 and scalar schema 14. Historical reports remain readable.
 
 ## Map ID Change — 2026-09-12
 
@@ -223,9 +224,10 @@ Pandas is not a runtime dependency. For a saved run, read the path in
 full rows in memory. Read selected columns with `usecols` when a full table is
 unnecessarily large. Blank cells mean unavailable measurements, not zero.
 
-Current scalar schema 13 has 26 priority measurements and 11,158 full measurements,
+Current scalar schema 14 has 16 priority measurements and 11,148 full measurements,
 including priority. A full run CSV adds 30 identity columns; a Viewer CSV adds 49.
-The accepted future 16-measurement priority migration belongs to a later packet.
+Team returns count shared rewards once. The ten duplicate scalar agent-return
+columns are removed; Core, learner and replay reward vectors remain unchanged.
 Existing files retain their headers; incompatible append/resume is rejected.
 Replay format versions and analysis schema versions are separate.
 
@@ -333,19 +335,96 @@ recorded policy/configuration context through the writer's documented methods.
 Training episodes spanning updates must be labelled as evolving policies,
 not assigned falsely to a single checkpoint.
 
+Each step also returns required outcome fields independently of the metric mode:
+`info.decision_step` is the submitted action's index within its episode;
+`info.episode_length` counts played transitions; and `info.team_scores` gives
+the resulting Team A and Team B scores. An authored start begins at decision
+zero even when its simulator tick is already nonzero. Terminal transitions keep
+their action index. Padding uses `decision_step=-1` and does not add a transition.
+The writer rejects `info.lifecycle_error` before consuming any records.
+
+Saved ordinary evaluation now writes `episodes.csv` in every metric mode,
+including `metrics="none"`. Tournament outcomes remain in `match_results.csv`.
+Those required lengths and scores do not imply that optional metrics were
+collected. The pass's `recorded_metrics_by_episode` metadata states actual
+`none`, `priority` or `full` coverage. Selected full reports under a none pass
+do not change that pass's default mode.
+
+Raw Systems can pass the trace from their same action-producing call:
+
+```python
+# Inside a raw System loop with an open RunWriter:
+actions, memory, learning = marl_bgs.apply_systems(a, b, memory, obs, state, action_key)
+obs, state, reward, done, info = env.step(step_key, state, actions)
+writer.write(info, policy_trace=memory.policy_trace)
+```
+
+Register the two systems with `RunWriter(..., policies={"team_a": a, "team_b": b})`.
+The trace is optional. Known component choices go to `policy_assignments.csv`;
+unknown choices remain unknown. Learning outputs and recurrent/provider memory
+are never serialized automatically. This is a host recording call. The later
+bounded training collector and coordinated learner/writer restart are separate
+work. Run `python examples/systems.py --output-dir artifacts/system-example`
+for a complete raw System recording and saved none-mode evaluation example.
+Omitting that option keeps the example's no-file behavior.
+
 Full info arrays are dense even on nonterminal steps or sparse full selection.
-Schema 13 returns 55,790 logical bytes of values/validity per full-result lane;
-retaining 1,024 lanes over 128 steps is about 6.81 GiB for that subtree alone.
+Schema 14 returns 55,740 logical bytes of values/validity per full-result lane;
+retaining 1,024 lanes over 128 steps is about 6.80 GiB for that subtree alone.
 This is a size calculation, not peak-memory measurement. Priority without full
 selection has no full subtree. Empty replay selection has no capture subtree;
 selected scan packets still cost chunk memory. Use bounded chunks. The writer
 spools incomplete replay data and publishes completed artifacts.
 
-The writer defaults to a 128-row buffer. A larger buffer can reduce repeated
-metadata writes but uses more RAM and can leave more completions to repeat after
-abrupt interruption. Full rows are much wider than priority rows. `flush()` and
-normal context-manager exit establish durability and report write failures.
+The writer defaults to a 128-completion buffer. Policy assignments have a separate
+limit of ten times that value, counting both open and closed intervals. A full
+completion buffer or an assignment that would exceed its limit flushes pending
+records, even when no game has ended. Unchanged assignments can extend their open
+intervals without adding rows or forcing a flush. A larger
+buffer can reduce metadata writes but uses more RAM and can leave more records
+to repeat after interruption. Full rows are much wider than priority rows.
+`flush()` and normal context-manager exit establish durability and report failures.
 See the [replay contract](replay_format.md) for versioned persistence behavior.
+
+### Recording Costs — 2026-09-16
+
+A matched RTX 5090 check used 32 games, 16 decisions, ALPHA/BETA controllers,
+the same map and keys, and five synchronized warm samples per mode. Every retained
+metric and final trajectory matched the committed `f43c2cb` reference by value.
+The [comparison record](../../artifacts/m8-api-recording/20260916T194952Z/final_gpu_comparison.json)
+records exact package, asset and workload identities. Later changes affected only
+host recording; [final host costs](../../artifacts/m8-api-recording/20260916T194952Z/final_host_costs_final.json)
+measure that final writer separately.
+
+| Mode | GPU Time for 512 Transitions | Real Transitions per Second | Save 32 Completed Games |
+| --- | --- | --- | --- |
+| None | 143.53 ms | 3,567 | 20.72 ms |
+| Priority | 142.49 ms | 3,593 | 23.27 ms |
+| Full | 144.12 ms | 3,553 | 52.20 ms |
+
+Warmed GPU speed is effectively unchanged for this small workload. This is not a
+peak training-throughput result. Compilation took 16.3–20.0 seconds, about
+2.3–2.4 seconds longer than the one reference compile per mode. Those single
+samples do not establish the cause. Same-shaped changed keys reused compilation;
+the numerical loop had no host callbacks or explicit device-to-host transfers.
+
+The priority vector falls from 130 to 80 logical bytes per lane. Full falls only
+from 55,790 to 55,740 bytes. Required summaries add 17 bytes per lane under none.
+The measured GPU allocation peak was about 339 MiB; process peak RAM was
+2.0–2.4 GiB, including compilation and earlier modes. These are allocator/process
+peaks, not isolated learner-memory requirements. Explicitly transferring the
+retained state and info took 3.7–11.4 ms in the individual measured transfers.
+
+Saving includes identity checks, CSV encoding, file synchronization and the run
+metadata. A minimal five-column outcome CSV took 2–3 ms, but supplies none of the
+writer's identity or recovery checks. Full output was about 1.43 MB for 32 games.
+Optional component routing also has a real cost: 16 host calls with stable choices
+compressed to 320 intervals and took 53 ms; changing choices every decision made
+5,120 intervals and took roughly 180–190 ms. Unchanged intervals stay open at
+capacity. Disabled traces create no assignment table or interval buffer entries.
+The later bounded training collector has its own efficiency proof; these host
+calls do not qualify it. No geometry, learning or theoretical-optimality claim
+follows from this check.
 
 ## Repeat validation in one run
 

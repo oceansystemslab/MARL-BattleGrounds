@@ -81,14 +81,9 @@ def test_three_entrants_preserve_global_ids_and_sparse_diagnostic_independence()
     )
     assert [row["episode_id"] for row in result.matches] == list(range(1, 7))
     assert {row["outcome"] for row in result.matches} == {3}
-    assert [row["episode_length"] for row in result.matches] == [
-        None,
-        1,
-        None,
-        None,
-        None,
-        None,
-    ]
+    assert [row["episode_length"] for row in result.matches] == [1] * 6
+    assert [row["team_a_score"] for row in result.matches] == [0] * 6
+    assert [row["team_b_score"] for row in result.matches] == [0] * 6
     assert all(name in result.full_metrics for name in FULL_METRIC_NAMES)
     np.testing.assert_array_equal(result.full_metrics["episode_id"], [2])
     np.testing.assert_array_equal(

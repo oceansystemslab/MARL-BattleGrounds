@@ -156,7 +156,7 @@ def test_csv_headers_full_priority_copy_and_missing_values_survive_roster_change
         assert len(IDENTITY_COLUMNS) == 30
         assert priority_header == [*IDENTITY_COLUMNS, *PRIORITY_METRIC_NAMES]
         assert full_header == [*IDENTITY_COLUMNS, *FULL_METRIC_NAMES]
-        assert len(priority_header) == 30 + 26 and len(full_header) == 30 + 11_158
+        assert len(priority_header) == 30 + 16 and len(full_header) == 30 + 11_148
         assert len(priority) == len(full) == 2
         for small, complete in zip(priority, full, strict=True):
             assert {name: complete[name] for name in priority_header} == small
@@ -168,10 +168,10 @@ def test_csv_headers_full_priority_copy_and_missing_values_survive_roster_change
             assert float(complete["episode_length"]) == 1
         assert float(full[0]["agent_0_healing_done"]) == 0
         assert float(full[0]["agent_1_damage_done"]) == 0
-        assert full[0]["agent_2_return"] == ""
+        assert "agent_2_return" not in full[0]
         assert full[0]["agent_0_excess_healing"] == ""
         assert full[0]["agent_0_damage_done_fraction"] == ""
-        assert full[1]["agent_1_return"] == ""
+        assert "agent_1_return" not in full[1]
         assert full[0]["config_id"] != full[1]["config_id"]
         details = _details(writer.run_dir)
         assert details["metric_schema_id"] == METRIC_SCHEMA_ID
@@ -193,7 +193,7 @@ def test_sparse_tables_and_none_mode_do_not_create_unrequested_csvs(
 ) -> None:
     with RunWriter(tmp_path, buffer_size=1) as writer:
         writer.write(episodes.priority)
-        assert set(writer.paths) == {"run_details", "priority_metrics"}
+        assert set(writer.paths) == {"run_details", "episodes", "priority_metrics"}
         writer.write(episodes.full[0])
         writer.write(episodes.none)
         assert len(_table(writer.paths["priority_metrics"])[1]) == 2
@@ -202,8 +202,8 @@ def test_sparse_tables_and_none_mode_do_not_create_unrequested_csvs(
     with RunWriter(tmp_path) as disabled:
         disabled.write(episodes.none)
         disabled.flush()
-        assert set(disabled.paths) == {"run_details"}
-        assert not list(disabled.run_dir.glob("*.csv"))
+        assert set(disabled.paths) == {"run_details", "episodes"}
+        assert [p.name for p in disabled.run_dir.glob("*.csv")] == ["episodes.csv"]
         assert disabled.completed_episode_ids == frozenset((5,))
 
 
@@ -284,7 +284,7 @@ def test_shared_passes_keep_policy_checkpoint_identity_and_separate_episode_keys
             training["policy_state"] == "evolving" and training["checkpoint_id"] is None
         )
         assert (
-            validation["policy_state"] == "frozen"
+            validation["policy_state"] == "evolving"
             and validation["checkpoint_id"] == "weights-7"
         )
         with pytest.raises(ValueError, match="identity differs"):
@@ -336,7 +336,11 @@ def test_registered_schedule_is_durable_and_supplies_truthful_row_identity(
     ]
     with RunWriter(tmp_path) as writer:
         writer.register_episodes(schedule)
-        assert _pass(writer.run_dir)["episodes"]["1"] == schedule[0]
+        assert {
+            k: v
+            for k, v in _pass(writer.run_dir)["episodes"]["1"].items()
+            if k != "system_ids"
+        } == schedule[0]
         assert writer.completed_episode_ids == frozenset()
         assert not list(writer.run_dir.glob("*.csv"))
         writer.register_episodes(schedule)
@@ -352,7 +356,11 @@ def test_registered_schedule_is_durable_and_supplies_truthful_row_identity(
         with pytest.raises(ValueError, match="differs from the recorded schedule"):
             resumed.register_episodes([{**schedule[0], "seed_id": 702}])
         assert resumed.completed_episode_ids == frozenset((1,))
-        assert _pass(resumed.run_dir)["episodes"]["1"] == schedule[0]
+        assert {
+            k: v
+            for k, v in _pass(resumed.run_dir)["episodes"]["1"].items()
+            if k != "system_ids"
+        } == schedule[0]
 
 
 def test_resume_truncates_uncommitted_csv_suffixes_and_retries_once(
@@ -492,7 +500,11 @@ def test_invalid_measurement_write_fails_loudly_without_committing_partial_rows(
     info = episodes.full[0]
     assert info.full is not None
     if fault == "nonfinite":
-        malformed = info.full._replace(values=info.full.values.at[26].set(jnp.nan))
+        malformed = info.full._replace(
+            values=info.full.values.at[
+                FULL_METRIC_NAMES.index("team_a_damage_done")
+            ].set(jnp.nan)
+        )
     else:
         malformed = info.full._replace(values=info.full.values[:-1])
     writer = RunWriter(tmp_path)

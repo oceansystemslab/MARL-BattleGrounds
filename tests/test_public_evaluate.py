@@ -92,8 +92,11 @@ def test_public_evaluate_cycles_one_total_budget_and_creates_no_files(
     )
     np.testing.assert_array_equal(result.priority_metrics["team_a_draw"], [1, 1, 1])
     np.testing.assert_array_equal(result.priority_metrics["phase"], ["validation"] * 3)
-    assert np.isnan(result.priority_metrics["agent_1_return"]).all()
-    np.testing.assert_array_equal(result.priority_metrics["agent_0_return"], [0, 0, 0])
+    assert not any(
+        name.endswith("_return") and name.startswith("agent_")
+        for name in result.priority_metrics
+    )
+    np.testing.assert_array_equal(result.priority_metrics["team_a_return"], [0, 0, 0])
     assert result.full_metrics == {}
     assert list(tmp_path.iterdir()) == []
 
@@ -519,8 +522,8 @@ def test_persistence_keeps_scalar_tables_and_replays_independently(
         with result.paths[name].open(newline="") as stream:
             rows = list(csv.DictReader(stream))
         assert [row["episode_id"] for row in rows] == ["1"]
-        assert rows[0]["agent_1_return"] == ""
-        assert float(rows[0]["agent_0_return"]) == 0
+        assert "agent_1_return" not in rows[0]
+        assert float(rows[0]["team_a_return"]) == 0
     replays = list(result.paths["replays"].glob("*.json"))
     assert len(replays) == 1
     assert replays[0].name.startswith("tdm_custom_map_")
@@ -626,7 +629,7 @@ def test_resume_skips_durable_episodes_and_rejects_changed_inputs(
             resume_from=run_dir,
             seed=1,
         )
-    with pytest.raises(ValueError, match="recorded schedule"):
+    with pytest.raises(ValueError, match="identity differs"):
         evaluate(
             controller, "random", num_episodes=4, maps=[_config(2)], resume_from=run_dir
         )

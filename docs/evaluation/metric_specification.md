@@ -42,7 +42,7 @@ are listed separately in the data dictionary.
 <!-- metric-family-summary:start -->
 | Measurement family | Numerical columns | What the family describes |
 | --- | ---: | --- |
-| Episode results | 26 | Episode length, outcomes, returns, scores, kills, and deaths. |
+| Episode results | 16 | Episode length, outcomes, returns, scores, kills, and deaths. |
 | Ability use and action acceptance | 754 | How often abilities were used, who they targeted, and which actions the game rejected. |
 | Deaths and respawning | 48 | Who died, how long agents were dead, and when they returned. |
 | Kills and coordination | 746 | Who helped kill each enemy, who killed alone, and whether attackers chose the same target. |
@@ -56,7 +56,7 @@ are listed separately in the data dictionary.
 | Poison healing prevention | 12 | Priest healing prevented on affected agents and teams. |
 | Lethal-damage rescues | 544 | Who could be saved from lethal damage, who survived, and which healers and abilities helped. |
 | Formation | 44 | Distances between living teammates and how many times each pair was measured. |
-| **Total** | **11,158** | **Unique numerical columns; shared viewer appearances are counted once.** |
+| **Total** | **11,148** | **Unique numerical columns; shared viewer appearances are counted once.** |
 <!-- metric-family-summary:end -->
 
 Allocation asks where an agent's output went. Contribution asks how much that
@@ -97,8 +97,8 @@ question you want to answer; the tables provide the counts for both.
 
 ### Schema and compatibility
 
-New scalar runs use `marlbg.tdm.scalar@13`: **26 priority numeric columns** or
-**11,158 full numeric columns**, including those 26 priority values. The Viewer
+New scalar runs use `marlbg.tdm.scalar@14`: **16 priority numeric columns** or
+**11,148 full numeric columns**, including those 16 priority values. The Viewer
 has 27 topics and 43 tables. Several topics may show the same exported column.
 The names and order stay fixed for valid one-through-five-agent, asymmetric,
 permuted-class, and repeated-class rosters. This schema supersedes the historical
@@ -142,7 +142,8 @@ named Ultimate topics may use their ability's name in row labels and tooltips;
 other topics keep the shared column names. A wording change or another appearance
 in a topic does not add a measurement. Neither addition needs new per-tick counters.
 The full CSV is ordered by primary topic, then view, team, agent, recipient,
-and source-to-recipient detail; priority retains its original 26-value order.
+and source-to-recipient detail. Schema 14 keeps the relative order of the 16
+retained priority measurements.
 Within each subject, All abilities come before Basic and then Ultimate. Each
 amount is followed by its fractions, with allocation before contribution.
 The Viewer uses the same order and the same exported measurements.
@@ -158,7 +159,7 @@ tables for one topic share no rows. Team Formation and ten other focused topics
 need only one table. Six headings keep the Topic dropdown easy to scan.
 
 Use **Find a Measurement** to search a plain name or an exact CSV column. Search
-covers all 11,158 numerical measurements, even ones that do not apply to this
+covers all 11,148 numerical measurements, even ones that do not apply to this
 replay. An inapplicable result explains why and keeps its definition and CSV
 name available. It does not insert an impossible row into the table. A zero
 denominator is different: the measurement applies, but its fraction is blank.
@@ -224,7 +225,7 @@ counts concepts separately from these navigation locations.
 <!-- metric-navigation:start -->
 | Topic | Primary columns in Totals | Primary columns By Recipient | Primary columns in single view |
 | --- | ---: | ---: | ---: |
-| Episode Results | — | — | 26 |
+| Episode Results | — | — | 16 |
 | Ability Activations | 24 | 640 | — |
 | Accepted and Rejected Actions | — | — | 84 |
 | Damage Done | 46 | 450 | — |
@@ -251,18 +252,38 @@ counts concepts separately from these navigation locations.
 | Freezing Trap (Hunter Ultimate) | 28 | 190 | — |
 | Crippling Poison (Rogue Ultimate) | 4 | 10 | — |
 | Holy Word: Salvation (Priest Ultimate) | 2 | 0 | — |
-| **Total** | | | **11,158 unique measurements** |
+| **Total** | | | **11,148 unique measurements** |
 <!-- metric-navigation:end -->
 
 Schema 8 preserved all schema-7 names, definitions, calculations and blank-value
 rules. Schema 9 changed the excess-healing names only. Schema 10 removed 46 wait
 measurements, schema 11 added 40 recipient measurements, schema 12 added 12
 Basic healing-save shares, and schema 13 adds six team ability application
-counts. The full-run table has 30 identity fields plus 11,158 measurements:
-11,188 columns in total. Replay exports keep their 49 identity
-fields, giving 11,207 columns. Historical files stay untouched;
+counts. Schema 14 then removes ten repeated agent-return columns. The full-run
+table has 30 identity fields plus 11,148 measurements: 11,178 columns in total.
+Replay exports keep their 49 identity fields, giving 11,197 columns.
+Historical files stay untouched;
 the writer rejects older schemas before recovery or writing. Use names rather
 than old column positions when comparing exports across these versions.
+
+### Schema 14 shared team returns
+
+Schema 14 removes exactly `agent_0_return` through `agent_9_return` from new
+priority and full scalar reports. Keep `team_a_return` and `team_b_return`:
+each adds the team's shared reward once per transition. Adding the five repeated
+agent rewards would incorrectly make the return depend on team size.
+
+Every retained measurement keeps its name, relative order, value and availability
+rule. Core rewards, learner rewards, replay transition reward vectors and the
+internal per-agent reward accumulator are unchanged. Older sufficient-statistic
+report formats are unchanged too. Historical CSV readers use the stored header;
+they do not create removed columns or rewrite values. Replay analysis computes
+current schema 14 from captured facts and does not relabel historical reports.
+
+The priority values and availability flags occupy 80 logical bytes per game,
+down from 130. Full output occupies 55,740 logical bytes, down from 55,790.
+These are array-size calculations, not speed or peak-memory measurements.
+Existing schema-13 audit results below describe the historical schema-13 output.
 
 ### Schema 13 team ability application columns
 
@@ -600,9 +621,9 @@ though the team improved. Participation and target-allocation fractions are cont
 Aura coverage and activation frequency are also context dependent: more coverage
 can limit positioning, and more casts can give only excess healing.
 
-[The column data dictionary](metric_columns.csv) lists all **11,188 full-table
-columns**: 30 identity columns followed by 11,158 numerical measurements. Priority
-tables have **56 columns**. The dictionary includes meaning, units, scope,
+[The column data dictionary](metric_columns.csv) lists all **11,178 full-table
+columns**: 30 identity columns followed by 11,148 numerical measurements. Priority
+tables have **46 columns**. The dictionary includes meaning, units, scope,
 subjects, subject/recipient roles, numerators, denominators, missingness, priority/full
 membership, GUI labels, relevant views, family and defensible direction.
 `gui_text_by_topic` contains the row and tooltip wording used in named Ultimate

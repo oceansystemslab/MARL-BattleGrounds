@@ -293,7 +293,6 @@ def test_priority_order_matches_the_public_result_vector() -> None:
         "team_b_loss",
         "team_a_return",
         "team_b_return",
-        *(f"agent_{slot}_return" for slot in range(10)),
         "team_a_score",
         "team_b_score",
         "score_difference",
@@ -303,13 +302,13 @@ def test_priority_order_matches_the_public_result_vector() -> None:
         "team_b_deaths",
     )
     assert expected == PRIORITY_METRIC_NAMES
-    assert len(PRIORITY_METRIC_COLUMNS) == 26
-    assert METRIC_COLUMNS[:26] == PRIORITY_METRIC_COLUMNS
+    assert len(PRIORITY_METRIC_COLUMNS) == 16
+    assert METRIC_COLUMNS[: len(PRIORITY_METRIC_COLUMNS)] == PRIORITY_METRIC_COLUMNS
 
 
 def test_fixed_catalog_has_unique_names_and_immutable_complete_definitions() -> None:
-    assert len(FULL_METRIC_NAMES) == len(set(FULL_METRIC_NAMES)) == 11158
-    assert METRIC_SCHEMA_VERSION == 13
+    assert len(FULL_METRIC_NAMES) == len(set(FULL_METRIC_NAMES)) == 11148
+    assert METRIC_SCHEMA_VERSION == 14
     additions = {
         f"agent_{slot}_{stem}"
         for slot in range(10)
@@ -340,8 +339,16 @@ def test_fixed_catalog_has_unique_names_and_immutable_complete_definitions() -> 
     }
     assert len(ability_counts) == 6
     assert ability_counts <= set(FULL_METRIC_NAMES)
-    earlier_names = [name for name in FULL_METRIC_NAMES if name not in ability_counts]
-    # Every earlier name and its relative position stays unchanged.
+    removed_returns = tuple(f"agent_{slot}_return" for slot in range(10))
+    assert not set(removed_returns) & set(FULL_METRIC_NAMES)
+    # Reinsert only the accepted ten removals to keep the historical order proof.
+    historical_names = (
+        *FULL_METRIC_NAMES[:9],
+        *removed_returns,
+        *FULL_METRIC_NAMES[9:],
+    )
+    earlier_names = [name for name in historical_names if name not in ability_counts]
+    # Every other earlier name and its relative position stays unchanged.
     assert len(earlier_names) == 11152
     assert hashlib.sha256("\n".join(earlier_names).encode()).hexdigest() == (
         "5217c631d20da81f7e90ba5ef3d17a7a244bdda986c6983a64a387ca7f41296e"
@@ -538,7 +545,7 @@ def test_applicability_distinguishes_general_zeros_from_class_specific_absence()
         in METRIC_COLUMNS_BY_NAME["agent_0_and_agent_1_ally_distance_mean"].missing_when
     )
     assert "was not included in this game" in (
-        METRIC_COLUMNS_BY_NAME["agent_9_return"].missing_when
+        METRIC_COLUMNS_BY_NAME["agent_9_deaths"].missing_when
     )
     opportunity = METRIC_COLUMNS_BY_NAME["agent_0_rescue_opportunities"]
     assert opportunity.subject_role == "recipient"
@@ -553,7 +560,7 @@ def test_applicability_distinguishes_general_zeros_from_class_specific_absence()
 
 def test_family_budget_retains_requested_counts_without_duplicate_aliases() -> None:
     assert dict(FAMILY_COLUMN_COUNTS) == {
-        "priority": 26,
+        "priority": 16,
         "abilities": 670,
         "deaths": 42,
         "kill_contributions": 734,
@@ -1611,7 +1618,7 @@ def test_scope_order_separates_totals_from_recipient_detail() -> None:
         "ally_pair": 4,
     }
     keys: list[tuple[int, bool, int, tuple[int, ...]]] = []
-    for column in METRIC_COLUMNS[26:]:
+    for column in METRIC_COLUMNS[len(PRIORITY_METRIC_COLUMNS) :]:
         topic, view = metric_primary_location(column)
         section = (
             2
@@ -1760,7 +1767,7 @@ def test_generated_dictionary_and_manuscript_summary_match_catalog() -> None:
     assert Path("docs/evaluation/metric_columns.csv").read_text() == dictionary_csv()
     specification = Path("docs/evaluation/metric_specification.md").read_text()
     assert family_summary_markdown() in specification
-    assert "**11,158**" in family_summary_markdown()
+    assert "**11,148**" in family_summary_markdown()
 
 
 def test_topics_match_the_approved_researcher_questions() -> None:

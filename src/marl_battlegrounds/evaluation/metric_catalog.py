@@ -22,7 +22,20 @@ type MetricScope = Literal[
 type MetricDirection = Literal["higher", "lower", "descriptive"]
 
 METRIC_SCHEMA_ID = "marlbg.tdm.scalar"
-METRIC_SCHEMA_VERSION = 13
+METRIC_SCHEMA_VERSION = 14
+
+# Core's terminal codes, in the same Team A/Team B win/draw/loss order as
+# the priority catalog. Packing and host consistency checks share this mapping.
+PRIORITY_OUTCOME_CODES = MappingProxyType(
+    {
+        "team_a_win": 1,
+        "team_a_draw": 3,
+        "team_a_loss": 2,
+        "team_b_win": 2,
+        "team_b_draw": 3,
+        "team_b_loss": 1,
+    }
+)
 
 _BURST_KILL_NOTE = (
     "A Mage's Basic attack during Burst counts as Basic and Burst help. "
@@ -2624,6 +2637,7 @@ def _build_columns() -> tuple[MetricColumn, ...]:
         ),
         team_description="The team's rewards so far, added together across ticks. "
         "The team reward counts once each tick, not once for every teammate.",
+        scopes=("team",),
         direction="higher",
         priority=True,
     )
@@ -4999,9 +5013,11 @@ def _build_columns() -> tuple[MetricColumn, ...]:
 
 _columns = _build_columns()
 _MEASURE_ORDER = _measure_order(list(_columns))
-METRIC_COLUMNS = _columns[:26] + tuple(sorted(_columns[26:], key=metric_csv_order))
+PRIORITY_METRIC_COLUMNS = tuple(column for column in _columns if column.priority)
+METRIC_COLUMNS = PRIORITY_METRIC_COLUMNS + tuple(
+    sorted((column for column in _columns if not column.priority), key=metric_csv_order)
+)
 del _columns
-PRIORITY_METRIC_COLUMNS = tuple(column for column in METRIC_COLUMNS if column.priority)
 PRIORITY_METRIC_NAMES = tuple(column.name for column in PRIORITY_METRIC_COLUMNS)
 FULL_METRIC_NAMES = tuple(column.name for column in METRIC_COLUMNS)
 METRIC_COLUMNS_BY_NAME = MappingProxyType(

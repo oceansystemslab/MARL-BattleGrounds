@@ -404,12 +404,11 @@ def test_terminal_win_counts_observed_kills_separately_from_initialized_score(
         ("team_b_loss", 1),
     ):
         assert _metric(info, name) == expected
-    for slot, active in enumerate(np.asarray(state.config.agent_profile.active_mask)):
-        assert info.priority is not None
-        column = PRIORITY_METRIC_NAMES.index(f"agent_{slot}_return")
-        assert bool(info.priority.valid[column]) == bool(active)
-        if active:
-            assert _metric(info, f"agent_{slot}_return") == float(reward.rewards[slot])
+    assert successor.priority is not None
+    np.testing.assert_array_equal(successor.priority.agent_returns, reward.rewards)
+    assert not any(
+        f"agent_{slot}_return" in PRIORITY_METRIC_NAMES for slot in range(10)
+    )
 
     obs, padded, padding_reward, padding_done, padding_info = scalar_step(
         jax.random.key(4), successor, action

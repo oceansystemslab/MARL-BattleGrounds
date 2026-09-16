@@ -2069,8 +2069,13 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
     const catalogResult = await catalogResponse;
     expect(catalogResult.status()).toBe(200);
     const catalog = await catalogLoaded;
-    expect(catalog.metric_schema_version).toBe(13);
-    expect(catalog.measurements).toHaveLength(11158);
+    expect(catalog.metric_schema_version).toBe(14);
+    expect(catalog.measurements).toHaveLength(11148);
+    expect(
+      catalog.measurements.some((/** @type {Record<string, any>} */ row) =>
+        /^agent_\d_return$/u.test(row.name),
+      ),
+    ).toBe(false);
     expect(
       catalog.measurements.every(
         (/** @type {Record<string, any>} */ row) =>
@@ -3723,7 +3728,7 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
       );
       if (heldCsv !== null) await page.locator("#evaluation-metrics > summary").click();
       expect(download.suggestedFilename()).toBe(
-        `tdm-metrics__episode-episode-001__schema-13__${scope}__frame-${frameIndex}.csv`,
+        `tdm-metrics__episode-episode-001__schema-14__${scope}__frame-${frameIndex}.csv`,
       );
       const path = await download.path();
       if (path === null) throw new Error("Metric CSV has no local path.");
@@ -3737,7 +3742,7 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
       const cells = rows[0].split(",");
       expect(names).toContain("agent_9_class_id");
       // Replay exports retain their 49 replay/agent identity fields. The run
-      // writer's separate CSV uses 30; both expose the same 11,158 measurements.
+      // writer's separate CSV uses 30; both expose the same 11,148 measurements.
       const replayIdentity = [
         "episode_id",
         "scope",
@@ -3755,9 +3760,10 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
         ).flat(),
       ];
       expect(names.slice(0, 49)).toEqual(replayIdentity);
-      expect(names.slice(49)).toHaveLength(11158);
-      expect(new Set(names).size).toBe(11207);
-      expect(cells[names.indexOf("metric_schema_version")]).toBe("13");
+      expect(names.slice(49)).toHaveLength(11148);
+      expect(new Set(names).size).toBe(11197);
+      expect(cells[names.indexOf("metric_schema_version")]).toBe("14");
+      expect(names.some((name) => /^agent_\d_return$/u.test(name))).toBe(false);
       const selectedTopic = await page.locator("#metric-selection").inputValue();
       const selectedView = await page.locator("#metric-view").inputValue();
       let checkedTables = 0;

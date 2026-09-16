@@ -2,11 +2,15 @@
 
 Run ``python examples/systems.py`` from an installed checkout. Set
 JAX_PLATFORMS=cpu for CPU correctness or JAX_PLATFORMS=cuda for the 32-game GPU
-example. No training algorithm, network service or output file is used. The
-example retains learning values from the same call that chooses each action.
+example. The default creates no files. Add ``--output-dir PATH`` to save a short
+raw System run with optional policy-choice traces and a separate none-mode
+Policy evaluation. No training algorithm or network service is used. Learning
+values come from the same call that chooses each action and are never recorded.
 """
 
-from typing import Any
+import argparse
+from pathlib import Path
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -42,7 +46,12 @@ def act(
     The values describe submitted actions and are invalid on padding lanes.
     """
     del variables
-    actor_keys = jax.vmap(lambda key: jax.random.split(key, 5))(keys)
+
+    def split_actors(key: Array) -> Array:
+        """Derive five actor keys from one lane's action key."""
+        return jax.random.split(key, 5)
+
+    actor_keys = jax.vmap(split_actors)(keys)
     actions = jax.vmap(jax.vmap(random_policy))(
         inputs.actors.observation, inputs.action_mask, actor_keys
     )
@@ -71,18 +80,74 @@ def host_act(
     rights, gather its own requests and restore the same response order.
     """
     del variables, keys
-    zero = np.zeros(inputs.active_mask.shape, np.int32)
+    zero = cast(Array, np.zeros(inputs.active_mask.shape, np.int32))
     return ActorAction(zero, zero, zero), memory
 
 
+def record_examples(output_dir: Path) -> None:
+    """Save raw System choices and ordinary evaluation outcomes through RunWriter.
+
+    Parameters
+    ----------
+    output_dir : Path
+        Parent directory for two new run folders. Existing files remain intact.
+
+    Notes
+    -----
+    This is a short host recording loop with 32 games and a 16-step horizon.
+    It passes each returned trace with that exact transition before flushing.
+    No curriculum tracking, automatic reset or compiled collector is implied.
+    Recording and provider errors propagate; context managers close each writer.
+    """
+    from marl_battlegrounds.evaluation.run_writer import RunWriter
+
+    env = marl_bgs.make("tdm", map_id=0, num_envs=32, max_steps=16, metrics="none")
+    first = marl_bgs.System("Recurrent Random", act, init=initialize)
+    second = marl_bgs.shared_policy(marl_bgs.policy("random"))
+    key, reset_key, init_key = jax.random.split(jax.random.key(47), 3)
+    observations, state = env.reset(reset_key)
+    memory = marl_bgs.init_systems(first, second, observations, state, init_key)
+    with RunWriter(
+        output_dir / "raw-systems",
+        policies={"team_a": first, "team_b": second},
+        details={"metrics": "none"},
+    ) as writer:
+        while not bool(np.all(state.done.done)):
+            key, action_key, step_key = jax.random.split(key, 3)
+            actions, memory, _ = marl_bgs.apply_systems(
+                first, second, memory, observations, state, action_key
+            )
+            observations, state, _, _, info = env.step(step_key, state, actions)
+            writer.write(info, policy_trace=memory.policy_trace)
+        writer.flush()
+        print("Raw System outcomes:", writer.paths["episodes"])
+
+    result = marl_bgs.evaluate(
+        "random",
+        "random",
+        num_episodes=32,
+        maps=[0],
+        num_envs=32,
+        max_steps=16,
+        metrics="none",
+        output_dir=output_dir / "policy-evaluation",
+    )
+    assert result.paths is not None
+    print("None-mode evaluation outcomes:", result.paths["episodes"])
+
+
 def main() -> None:
-    """Run all three supported raw workflows without automatic recording.
+    """Run the three raw workflows, optionally saving separate recording examples.
 
     Compile a 16-round, 32-game recurrent rollout with explicit terminal resets.
     Retain both rewards and method learning values before resetting. Then show
     ordered independent Policies and one host/JAX decision on the same 2v3
-    roster. Wait for numerical work before printing the output shapes.
+    roster. Wait for numerical work before printing the output shapes. The
+    optional --output-dir argument runs record_examples after this no-file path.
     """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", type=Path, help="save both recording examples")
+    args = parser.parse_args()
     env = marl_bgs.make(
         "tdm",
         map_id=0,
@@ -129,8 +194,8 @@ def main() -> None:
 
         return jax.lax.scan(step, carry, None, length=16)
 
-    (key, observations, state, memory), history = rollout(
-        (key, observations, state, memory)
+    (key, observations, state, memory), history = cast(
+        tuple[Tree, Tree], rollout((key, observations, state, memory))
     )
     # Each supplied entry follows its roster slot, including repeated classes.
     independent = marl_bgs.independent_policies(
@@ -154,6 +219,8 @@ def main() -> None:
     jax.block_until_ready((history, result, memory, separate))
     print("Recurrent rollout learning shape:", history[1]["log_probability"].shape)
     print("Independent and host/JAX decisions completed for 32 games.")
+    if args.output_dir is not None:
+        record_examples(args.output_dir)
 
 
 if __name__ == "__main__":

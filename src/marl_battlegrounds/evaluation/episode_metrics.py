@@ -12,6 +12,7 @@ import jax.numpy as jnp
 from jax import Array
 
 from marl_battlegrounds.core.types import EnvConfig, EnvState, Info, Reward
+from marl_battlegrounds.evaluation.metric_catalog import PRIORITY_OUTCOME_CODES
 
 
 class PriorityTotals(NamedTuple):
@@ -127,9 +128,10 @@ def priority_values(
     Returns
     -------
     MetricValues
-        MetricValues with float32 values and bool validity, each shape (26,),
-        ordered by PRIORITY_METRIC_NAMES. Inactive actor returns and unresolved
-        outcome flags are unavailable. Other valid neutral values can be zero.
+        MetricValues with float32 values and bool validity, each shape (16,),
+        ordered by PRIORITY_METRIC_NAMES. Unresolved outcome flags are unavailable.
+        Team returns count the shared reward once, not once per teammate.
+        Per-agent rewards stay in the internal accumulator and Core reward vector.
 
     This pure numerical read supports jit and outer vmap. It does not reset
     counters, validate configs, write tables or decide when an episode completes.
@@ -139,21 +141,13 @@ def priority_values(
     team_returns = totals.agent_returns.reshape(2, 5)[jnp.arange(2), first_active]
     scores = state.team_deathmatch_scores
     outcomes = jnp.stack(
-        (
-            outcome == 1,
-            outcome == 3,
-            outcome == 2,
-            outcome == 2,
-            outcome == 3,
-            outcome == 1,
-        )
+        tuple(outcome == code for code in PRIORITY_OUTCOME_CODES.values())
     )
     values = jnp.concatenate(
         (
             (state.step_count - initial_step_count)[None],
             outcomes,
             team_returns,
-            totals.agent_returns,
             scores,
             (scores[0] - scores[1])[None],
             totals.team_deaths[::-1],
@@ -165,7 +159,6 @@ def priority_values(
             jnp.ones(1, bool),
             jnp.repeat(outcome != 0, 6),
             jnp.ones(2, bool),
-            active,
             jnp.ones(7, bool),
         )
     )

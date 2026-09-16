@@ -216,8 +216,8 @@ def build_recording_context(
     run_id : str
         Run identity used to form stable recording identifiers.
     phase : str
-        Recorded phase label; "training" permits evolving policy metadata
-        when no frozen variable descriptor was supplied.
+        Recorded phase label. Training is evolving. Other phase names do not
+        establish that parameters are frozen.
     pass_id : str
         Recorded pass identity within that phase.
     episode : dict[str, object]
@@ -228,8 +228,9 @@ def build_recording_context(
         Team names or labels under team_a and team_b, used when detailed
         policy descriptors are absent.
     details : dict[str, object]
-        Pass metadata, including policy descriptors, seed/RNG protocol
-        and optional captured code_revision/runtime_provenance. Missing source
+        Pass metadata, including policy descriptors, optional system_ids and
+        systems registration tables, seed/RNG protocol, and captured
+        code_revision/runtime_provenance. Missing source
         or runtime data triggers one discovery call for this context.
 
     Returns
@@ -286,30 +287,67 @@ def build_recording_context(
     )
     active = np.asarray(config.agent_profile.active_mask)
     roles = _scenario_roles(episode, active)
+    registered = details.get("systems", {})
+    registered = (
+        cast(dict[str, dict[str, object]], registered)
+        if isinstance(registered, dict)
+        else {}
+    )
+    system_ids = episode.get("system_ids", details.get("system_ids", {}))
+    system_ids = (
+        cast(dict[str, str], system_ids) if isinstance(system_ids, dict) else {}
+    )
     assignments: list[PolicyAssignmentSlotV2] = []
     for slot in range(10):
         if not active[slot]:
             assignments.append(NotApplicablePolicySlotV1(global_slot=slot))
             continue
         team = 0 if slot < 5 else 1
-        name = policies.get("team_a" if team == 0 else "team_b", "unknown")
+        team_name = "team_a" if team == 0 else "team_b"
+        name = policies.get(team_name, "unknown")
         descriptor = descriptors[team] if team < len(descriptors) else {}
-        policy_name = str(descriptor.get("name", name))
+        system_id = system_ids.get(team_name)
+        registration = (
+            registered.get(system_id, {}) if isinstance(system_id, str) else {}
+        )
+        if registration:
+            descriptor = registration
+        policy_kind = "callable"
+        policy_id = _identifier(descriptor.get("name", name))
+        if registration.get("kind") == "system":
+            policy_kind = "system"
+            policy_id = str(system_id)
+            adapter_policies = registration.get("adapter_policies", [])
+            if isinstance(adapter_policies, list) and adapter_policies:
+                adapter_policies = cast(list[dict[str, object]], adapter_policies)
+                component = (
+                    0 if registration.get("adapter_kind") == "shared" else slot % 5
+                )
+                if component >= len(adapter_policies):
+                    raise ValueError(
+                        "recorded adapter does not cover the active roster"
+                    )
+                descriptor = adapter_policies[component]
+                policy_kind = "callable"
+                policy_id = f"{system_id}:component-{component}"
         checkpoint = descriptor.get("checkpoint")
         checkpoint_digest = (
             checkpoint
             if isinstance(checkpoint, str) and re.fullmatch("[0-9a-f]{64}", checkpoint)
             else None
         )
+        frozen = (
+            registration.get("parameter_status") == "frozen"
+            if registration
+            else descriptor.get("variables_frozen") is True
+        ) and phase != "training"
         assignments.append(
             AssignedPolicySlotV2(
                 global_slot=slot,
                 evaluation_role=cast(EvaluationRole, roles[slot]),
-                policy_kind="callable",
-                policy_id=_identifier(policy_name),
-                lifecycle="frozen"
-                if descriptor.get("variables_frozen") or phase != "training"
-                else "evolving",
+                policy_kind=policy_kind,
+                policy_id=policy_id,
+                lifecycle="frozen" if frozen else "evolving",
                 callable_name=(
                     _identifier(descriptor["callable_name"])
                     if descriptor.get("callable_name") is not None
@@ -356,6 +394,33 @@ def build_recording_context(
         AggregationKeyV1(name="pass_id", value=pass_id),
         AggregationKeyV1(name="phase", value=phase),
     ]
+    if system_ids:
+        aggregation_keys.extend(
+            (
+                AggregationKeyV1(name="marl_bgs.run_id", value=run_id),
+                AggregationKeyV1(
+                    name="marl_bgs.policy_assignments", value="policy_assignments.csv"
+                ),
+            )
+        )
+        for team_name in ("team_a", "team_b"):
+            system_id = system_ids.get(team_name)
+            if not isinstance(system_id, str) or system_id not in registered:
+                raise ValueError(
+                    "recorded system IDs must resolve to registered systems"
+                )
+            registration = registered[system_id]
+            aggregation_keys.extend(
+                (
+                    AggregationKeyV1(
+                        name=f"marl_bgs.system_id.{team_name}", value=system_id
+                    ),
+                    AggregationKeyV1(
+                        name=f"marl_bgs.parameter_status.{team_name}",
+                        value=str(registration.get("parameter_status", "unknown")),
+                    ),
+                )
+            )
     if episode.get("map_id") is not None:
         from marl_battlegrounds.evaluation.map_identity import registered_map_metadata
 

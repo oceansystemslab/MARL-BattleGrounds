@@ -527,14 +527,15 @@ def full_values(
     config : EnvConfig
         Matching exact scalar config, including active classes/teams.
     priority : MetricValues
-        MetricValues for the same episode boundary, in the 26-column
+        MetricValues for the same episode boundary, in the 16-column
         PRIORITY_METRIC_COLUMNS order.
 
     Returns
     -------
     MetricValues
         MetricValues with float32 values and boolean availability, each shape
-        (len(METRIC_COLUMNS),). The first 26 entries copy priority exactly.
+        (len(METRIC_COLUMNS),). The first len(PRIORITY_METRIC_COLUMNS) entries
+        copy priority exactly.
         Invalid entries are unavailable, not measurements of zero; consumers must
         apply valid before publishing them.
 

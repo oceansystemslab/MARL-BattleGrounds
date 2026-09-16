@@ -90,8 +90,12 @@ def test_match_table_keeps_outcomes_optional_priority_and_block_identity(
         assert [row["block_id"] for row in rows] == ["1", "1"]
         assert [row["bootstrap_group"] for row in rows] == ["shared-weather"] * 2
         assert float(rows[0]["episode_length"]) == 1
-        assert rows[0]["agent_1_return"] == ""
-        assert all(rows[1][name] == "" for name in PRIORITY_METRIC_NAMES)
+        assert "agent_1_return" not in rows[0]
+        assert all(
+            rows[1][name] == ""
+            for name in PRIORITY_METRIC_NAMES
+            if name not in ("episode_length", "team_a_score", "team_b_score")
+        )
 
 
 def test_summary_is_idempotent_across_explicit_resume_and_rejects_new_population(
