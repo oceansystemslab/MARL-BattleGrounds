@@ -242,6 +242,7 @@ def prepare_schedule(
     specs: Sequence[EpisodeSpec],
     *,
     saved_declarations: Mapping[str, Any] | None = None,
+    registered_maps: Mapping[int, Mapping[str, Any]] | None = None,
 ) -> tuple[dict[int, dict[str, object]], dict[str, dict[str, object]], dict[int, str]]:
     """Verify exact source/pair declarations and build shared recording evidence.
 
@@ -250,7 +251,10 @@ def prepare_schedule(
     setup call only. Object IDs never become durable evidence. A single authored
     episode is valid. A comparison needs two exact games and explicit equal seeds;
     only unambiguous source-bank pairs without authored starts earn verified credit.
-    Invalid declarations raise ValueError before writer mutation.
+    Invalid declarations raise ValueError before writer mutation. Private optional
+    registered_maps supplies exact snapshot TDMMapInfo entries; these still need
+    approved current/history identities and matching source geometry. None uses
+    today's catalog. Saved declarations keep their earlier identity as before.
     """
     records: dict[str, dict[str, object]] = {}
     cached: dict[int, str] = {}
@@ -343,6 +347,7 @@ def prepare_schedule(
                 build_resolved_env_config_v1,
             )
             from marl_battlegrounds.evaluation.map_identity import (
+                _snapshot_map_metadata,
                 registered_map_metadata,
             )
 
@@ -360,10 +365,14 @@ def prepare_schedule(
                     )
                 }
             )
-            declared["map_metadata"] = [
-                row.model_dump(mode="json")
-                for row in registered_map_metadata(spec.map_id, source_geometry)  # pyright: ignore[reportArgumentType]
-            ]
+            map_rows = (
+                registered_map_metadata(spec.map_id, source_geometry)  # pyright: ignore[reportArgumentType]
+                if registered_maps is None or spec.map_id not in registered_maps
+                else _snapshot_map_metadata(
+                    spec.map_id, source_geometry, registered_maps[spec.map_id]
+                )
+            )
+            declared["map_metadata"] = [row.model_dump(mode="json") for row in map_rows]
             map_keys[spec.map_id, source_id or resolved] = declared["map_metadata"]
         if spec.initial_state is not None:
             from marl_battlegrounds.evaluation.recording_identity import tree_digest

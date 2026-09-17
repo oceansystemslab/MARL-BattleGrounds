@@ -66,15 +66,20 @@ def content_digest(value: object) -> str:
     ).hexdigest()
 
 
-def match_digest(matches: Sequence[Mapping[str, object]]) -> str:
+def match_digest(
+    matches: Sequence[Mapping[str, object]], *, full_origins: bool = False
+) -> str:
     """Identify final rows in deterministic origin order, independent of arrival.
 
     Rows must contain JSON-compatible values and phase, pass_id and episode_id.
     Missing fields or nonfinite numbers fail instead of changing missing cells.
+    ``full_origins=True`` includes run identity in ordering for referenced games;
+    the default preserves existing version-1 summary identities.
     """
     ordered = sorted(
         matches,
         key=lambda row: (
+            *((str(row["run_id"]),) if full_origins else ()),
             str(row["phase"]),
             str(row["pass_id"]),
             int(cast(int, row["episode_id"])),
@@ -93,6 +98,9 @@ def validate_evidence(
     population, schedule or set of measurements. It does not turn an arbitrary
     caller-provided ID into physical proof. Invalid joins raise ValueError.
     """
+    if evidence.get("version") == 2:
+        _validate_reuse_evidence(matches, evidence)
+        return
     if (
         evidence.get("version") != 1
         or evidence.get("protocol") != "fixed-team-spawn-v1"
@@ -154,6 +162,101 @@ def validate_evidence(
             )
     if evidence.get("schedule_digest") != content_digest(evidence.get("schedule")):
         raise ValueError("tournament schedule differs from its prepared evidence")
+
+
+def _game_key(row: Mapping[str, object], evidence: Mapping[str, Any]) -> str:
+    """Use exact origin keys for reused rows and legacy IDs for local evidence."""
+    if evidence.get("version") == 2:
+        from marl_battlegrounds.evaluation.tournament_records import origin_text
+
+        return origin_text(row)
+    return str(row["episode_id"])
+
+
+def _validate_reuse_evidence(
+    matches: Sequence[Mapping[str, object]], evidence: Mapping[str, Any]
+) -> None:
+    """Bind version-2 physical checks to exact original rows and logical owners.
+
+    The runner has already checked configurations and registered controller
+    content. This host-only validation checks the shared ownership join again
+    without fitting, importing JAX or loading full reports. Missing, repeated or
+    inconsistent evidence raises ValueError before summary publication.
+    """
+    if evidence.get("population_complete") is not True:
+        raise ValueError(
+            "partial tournament preflight cannot qualify a complete summary"
+        )
+    if evidence.get("protocol") != "fixed-team-spawn-v1" or not evidence.get("run_id"):
+        raise ValueError("canonical evidence needs fixed-team pairs and a logical run")
+    if evidence.get("match_digest") != match_digest(matches, full_origins=True):
+        raise ValueError("tournament evidence does not match the supplied game rows")
+    if evidence.get("schedule_digest") != content_digest(evidence.get("schedule")):
+        raise ValueError("tournament schedule differs from its prepared evidence")
+    games = cast(Mapping[str, Any], evidence.get("games", {}))
+    schedule = {row["episode_id"]: row for row in evidence.get("schedule", ())}
+    if (
+        not isinstance(games, Mapping)  # pyright: ignore[reportUnnecessaryIsInstance]
+        or len(games) != len(matches)
+        or len(schedule) != len(matches)
+    ):
+        raise ValueError("tournament evidence must cover every logical game once")
+    seen: set[str] = set()
+    logical: set[int] = set()
+    for row in matches:
+        key = _game_key(row, evidence)
+        if key in seen or key not in games:
+            raise ValueError("duplicate or missing tournament game evidence")
+        seen.add(key)
+        game = games[key]
+        identifier = game.get("logical_game_id")
+        if identifier in logical or identifier not in schedule:
+            raise ValueError("canonical logical game join is not one-to-one")
+        logical.add(identifier)
+        scheduled = schedule[identifier]
+        if any(
+            game.get(field) != row.get(field)
+            for field in ("run_id", "phase", "pass_id", "episode_id")
+        ) or any(
+            game.get(field) != scheduled.get(field)
+            for field in (
+                "block_id",
+                "source_config_id",
+                "resolved_config_id",
+                "spawn_locations",
+            )
+        ):
+            raise ValueError("canonical game origin or pair differs from its evidence")
+        if row.get("config_id") != game["resolved_config_id"]:
+            raise ValueError("canonical game configuration differs from its evidence")
+        pass_key = json.dumps(
+            (row["run_id"], row["phase"], row["pass_id"]),
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        entry = evidence.get("passes", {}).get(pass_key)
+        if entry is None:
+            raise ValueError("canonical evidence has no originating pass")
+        episode = entry.get("episodes", {}).get(str(row["episode_id"]), {})
+        owners = episode.get("system_ids", entry.get("system_ids", {}))
+        for team in ("team_a", "team_b"):
+            registration_id = game.get(team + "_registration_id")
+            system_id = game.get(team + "_system_id")
+            registered = evidence.get("registrations", {}).get(registration_id)
+            participant = evidence.get("systems", {}).get(system_id)
+            if (
+                registration_id != owners.get(team)
+                or registered is None
+                or registered.get("name") != row.get(team + "_policy")
+                or participant is None
+                or registration_id not in participant.get("registration_ids", ())
+                or participant.get("name") != scheduled[team]
+            ):
+                raise ValueError(
+                    "canonical participant differs from its recorded owner"
+                )
+        if game.get("comparison_kind") != "verified_spawn_pair":
+            raise ValueError("canonical headlines require verified spawn pairs")
 
 
 def _integer(row: Mapping[str, object], field: str) -> int:
@@ -257,17 +360,22 @@ def summarize_headlines(
         identifier: defaultdict(list) for identifier in population
     }
     run_ids = {row["run_id"] for row in matches}
-    if len(run_ids) != 1:
-        raise ValueError("headline rows must belong to one resolved tournament run")
+    if evidence.get("version") == 2:
+        run_id = evidence["run_id"]
+    else:
+        if len(run_ids) != 1:
+            raise ValueError("headline rows must belong to one resolved tournament run")
+        run_id = next(iter(run_ids))
     for row in sorted(
         matches,
         key=lambda r: (
+            *((str(r["run_id"]),) if evidence.get("version") == 2 else ()),
             str(r["phase"]),
             str(r["pass_id"]),
             int(cast(int, r["episode_id"])),
         ),
     ):
-        game = evidence["games"][str(row["episode_id"])]
+        game = evidence["games"][_game_key(row, evidence)]
         length = _integer(row, "episode_length")
         score_a, score_b = (
             _integer(row, "team_a_score"),
@@ -307,7 +415,7 @@ def summarize_headlines(
         total_kills = float(np.sum(entry["kills"], dtype=np.float64))
         total_deaths = float(np.sum(entry["deaths"], dtype=np.float64))
         row = {
-            "run_id": next(iter(run_ids)),
+            "run_id": run_id,
             "system_id": identifier,
             "system_name": systems[identifier]["name"],
             "games_played": len(lengths),

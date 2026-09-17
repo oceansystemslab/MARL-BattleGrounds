@@ -6,10 +6,12 @@ must match the caller's shared schema. This is a low-level host reader; it does
 not resume a writer, recompute metrics or qualify a tournament population.
 """
 
+from __future__ import annotations
+
 import csv
 import io
 import math
-from collections.abc import Buffer, Iterator, Mapping, Sequence
+from collections.abc import Buffer, Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import BinaryIO, cast
 
@@ -211,6 +213,241 @@ def _csv_rows(stream: io.TextIOBase) -> Iterator[list[str]]:
         raise ValueError("invalid scalar CSV encoding or quoting") from error
 
 
+class _ByteLines:
+    """Yield UTF-8 physical lines while retaining exact byte positions.
+
+    ``csv.reader`` asks for additional lines when a quoted field spans a newline.
+    Reading one physical line at a time keeps the byte offset at the end of the
+    consumed CSV record. The supplied binary stream stays caller-owned. ``stop``
+    is an exclusive durable byte boundary; bytes beyond it are never read.
+    """
+
+    def __init__(self, stream: BinaryIO, stop: int) -> None:
+        """Borrow a positioned binary stream and its checked exclusive boundary."""
+        self.stream = stream
+        self.stop = stop
+        self.position = stream.tell()
+
+    def __iter__(self) -> _ByteLines:
+        """Return this single-pass physical-line iterator."""
+        return self
+
+    def __next__(self) -> str:
+        """Read one physical line, failing if the durable prefix became shorter."""
+        if self.position >= self.stop:
+            raise StopIteration
+        payload = self.stream.readline(self.stop - self.position)
+        if not payload:
+            raise ValueError("durable scalar table was truncated while reading")
+        self.position += len(payload)
+        return payload.decode("utf-8")
+
+
+def _csv_rows_from_lines(lines: _ByteLines) -> Iterator[list[str]]:
+    """Use the shared CSV quoting rules with exact binary record positions."""
+    try:
+        yield from csv.reader(lines, strict=True)
+    except (csv.Error, UnicodeError) as error:
+        raise ValueError("invalid scalar CSV encoding or quoting") from error
+
+
+def _parse_report_row(
+    header: Sequence[str],
+    cells: Sequence[str],
+    *,
+    current: bool,
+    summary: bool = False,
+    columns: frozenset[str] | None = None,
+) -> dict[str, ScalarCell]:
+    """Check width and parse requested cells with the shared historical rules.
+
+    ``columns=None`` parses every cell. A narrow internal request avoids turning
+    unused full-report values into Python floats. The CSV record is still parsed
+    correctly, including quoting. Unknown requested columns are not invented.
+    """
+    if len(cells) != len(header):
+        raise ValueError("scalar row width differs from its header")
+    return {
+        name: _parse_cell(name, value, current=current, summary=summary)
+        for name, value in zip(header, cells, strict=True)
+        if columns is None or name in columns
+    }
+
+
+type OriginKey = tuple[str, str, str, int]
+_OWNERSHIP_COLUMNS = frozenset(
+    {"run_id", "phase", "pass_id", "episode_id", "seed_id", "map_id", "config_id"}
+)
+
+
+def _origin_key(row: Mapping[str, ScalarCell]) -> OriginKey:
+    """Keep full recorded ownership; episode numbers alone are not unique."""
+    return (
+        str(row["run_id"]),
+        str(row["phase"]),
+        str(row["pass_id"]),
+        cast(int, row["episode_id"]),
+    )
+
+
+def _file_stamp(path: Path) -> tuple[int, int, int, int, int]:
+    """Detect file replacement and same-size edits while an index is borrowed."""
+    value = path.stat()
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+class IndexedScalarTable:
+    """Read selected immutable report rows in requested origin order.
+
+    Parameters
+    ----------
+    path : str or Path
+        Verified local content file. Its basename need not be the table role.
+    table_name : str
+        Original CSV role, such as ``full_metrics.csv``, in the source manifest.
+    manifest : mapping
+        Immutable source manifest with durable byte/row counts and completions.
+    expected_header : sequence of str or None
+        Exact current header; historical files use their stored header.
+    origins : sequence of (str, str, str, int)
+        Unique full run/phase/pass/episode keys that this index must contain.
+
+    Notes
+    -----
+    Host-only. Construction scans the committed prefix once through the shared
+    reader and retains byte offsets only for selected games. It validates every
+    row's ownership but does not convert optional measurements. Each later read
+    seeks directly to the selected records, with memory bounded by its batch and
+    one CSV record. A changed file invalidates the index. Asset content hashing
+    belongs to the caller's asset authority, not to every indexed row read.
+    No files are created, repaired or changed.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        table_name: str,
+        manifest: Mapping[str, object],
+        expected_header: Sequence[str] | None,
+        origins: Sequence[OriginKey],
+    ) -> None:
+        """Validate one immutable prefix and index all requested game origins.
+
+        Raises ValueError for duplicate/missing origins, unsafe content, malformed
+        CSV, ownership errors or changing files. File access can raise OSError.
+        """
+        self.path = Path(path)
+        self.table_name = table_name
+        self.manifest = manifest
+        self.origins = frozenset(origins)
+        if len(self.origins) != len(origins):
+            raise ValueError("indexed scalar selection repeats an origin")
+        self._positions: dict[OriginKey, tuple[int, int]] = {}
+        self._stamp = _file_stamp(self.path)
+        for _ in _iter_rows(
+            self.path,
+            manifest=manifest,
+            expected_header=expected_header,
+            table_name=table_name,
+            columns=_OWNERSHIP_COLUMNS,
+            index_record=self._remember,
+        ):
+            pass
+        if self.origins != self._positions.keys():
+            raise ValueError("indexed scalar table is missing selected origins")
+        self._check_unchanged()
+        tables = cast(Mapping[str, Mapping[str, int]], manifest["tables"])
+        self.size = tables[table_name]["durable_bytes"]
+        with self.path.open("rb") as stream:
+            self.header = tuple(
+                next(_csv_rows_from_lines(_ByteLines(stream, self.size)))
+            )
+        self._passes = _pass_lookup(manifest)
+        self._exact = manifest["schema_version"] == 2 and table_name in {
+            "episodes.csv",
+            "match_results.csv",
+        }
+
+    def _remember(self, row: dict[str, ScalarCell], start: int, stop: int) -> None:
+        """Retain one selected record span; reject duplicate selected ownership."""
+        key = _origin_key(row)
+        if key not in self.origins:
+            return
+        if key in self._positions:
+            raise ValueError("indexed scalar table repeats a selected origin")
+        self._positions[key] = start, stop
+
+    def _check_unchanged(self) -> None:
+        """Reject symlinks and changed bytes before using saved record offsets."""
+        if self.path.is_symlink() or _file_stamp(self.path) != self._stamp:
+            raise ValueError("indexed scalar source changed after verification")
+
+    def iter_rows(
+        self,
+        origins: Sequence[OriginKey],
+        *,
+        batch_size: int = 128,
+        columns: Sequence[str] | None = None,
+    ) -> Iterator[tuple[dict[str, ScalarCell], ...]]:
+        """Yield selected rows in caller order without scanning unrelated rows.
+
+        ``origins`` must be unique indexed keys. ``batch_size`` is a positive
+        integer, excluding booleans. ``columns=None`` returns the entire stored
+        row; a sequence selects existing columns without recomputing values.
+        Missing keys/columns or changed content raise ValueError. Returned dicts
+        are fresh caller-owned values. Errors may follow earlier yielded batches.
+        """
+        if type(batch_size) is not int or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
+        if len(set(origins)) != len(origins) or any(
+            key not in self._positions for key in origins
+        ):
+            raise ValueError("requested origins must be unique indexed game keys")
+        selected = None if columns is None else frozenset(columns)
+        if selected is not None and not selected.issubset(self.header):
+            raise ValueError("requested scalar columns are not stored in this table")
+        parsed = None if selected is None else selected | _OWNERSHIP_COLUMNS
+        self._check_unchanged()
+        batch: list[dict[str, ScalarCell]] = []
+        with self.path.open("rb") as stream:
+            for key in origins:
+                start, stop = self._positions[key]
+                stream.seek(start)
+                reader = _csv_rows_from_lines(_ByteLines(stream, stop))
+                row = _parse_report_row(
+                    self.header,
+                    next(reader),
+                    current=self._exact,
+                    columns=parsed,
+                )
+                _check_ownership(row, self.manifest, self._passes)
+                if _origin_key(row) != key or next(reader, None) is not None:
+                    raise ValueError(
+                        "indexed scalar record no longer matches its origin"
+                    )
+                batch.append(
+                    row
+                    if selected is None
+                    else {
+                        name: value for name, value in row.items() if name in selected
+                    }
+                )
+                if len(batch) == batch_size:
+                    self._check_unchanged()
+                    yield tuple(batch)
+                    batch.clear()
+            self._check_unchanged()
+            if batch:
+                yield tuple(batch)
+
+
 def _iter_rows(
     path: str | Path,
     *,
@@ -220,6 +457,9 @@ def _iter_rows(
     assignments: bool = False,
     passes: _Passes | None = None,
     summary: bool = False,
+    table_name: str | None = None,
+    columns: frozenset[str] | None = None,
+    index_record: Callable[[dict[str, ScalarCell], int, int], None] | None = None,
 ) -> Iterator[tuple[dict[str, ScalarCell], ...]]:
     """Parse shared durable rows, admitting unfinished games only for assignments.
 
@@ -245,11 +485,12 @@ def _iter_rows(
     if current and expected_header is None and not summary:
         raise ValueError("current scalar reports require an exact expected header")
     selected = Path(path)
+    filename = selected.name if table_name is None else table_name
     tables = manifest.get("tables")
     if not isinstance(tables, Mapping):
         raise ValueError("run manifest has no valid table boundaries")
     boundary = cast(Mapping[str, object], tables).get(
-        selected.name, {"durable_bytes": 0, "rows": 0}
+        filename, {"durable_bytes": 0, "rows": 0}
     )
     if not isinstance(boundary, Mapping):
         raise ValueError("run table has an invalid durable boundary")
@@ -270,7 +511,7 @@ def _iter_rows(
         )
     if passes is None and not summary:
         passes = _pass_lookup(manifest)
-    exact_summaries = current and selected.name in {"episodes.csv", "match_results.csv"}
+    exact_summaries = current and filename in {"episodes.csv", "match_results.csv"}
     with selected.open("rb") as binary:
         binary.seek(size - 1)
         if binary.read(1) != b"\n":
@@ -281,7 +522,8 @@ def _iter_rows(
             encoding="utf-8",
             newline="",
         ) as text:
-            reader = _csv_rows(text)
+            lines = _ByteLines(binary, size) if index_record is not None else None
+            reader = _csv_rows(text) if lines is None else _csv_rows_from_lines(lines)
             try:
                 header = next(reader)
             except StopIteration as error:
@@ -311,20 +553,26 @@ def _iter_rows(
                 raise ValueError("scalar table has an incompatible current header")
             batch: list[dict[str, ScalarCell]] = []
             count = 0
-            for cells in reader:
-                if len(cells) != len(header):
-                    raise ValueError("scalar row width differs from its header")
-                row = {
-                    name: _parse_cell(
-                        name, value, current=exact_summaries, summary=summary
-                    )
-                    for name, value in zip(header, cells, strict=True)
-                }
+            while True:
+                start = 0 if lines is None else lines.position
+                try:
+                    cells = next(reader)
+                except StopIteration:
+                    break
+                row = _parse_report_row(
+                    header,
+                    cells,
+                    current=exact_summaries,
+                    summary=summary,
+                    columns=columns,
+                )
                 if not summary:
                     assert passes is not None
                     _check_ownership(
                         row, manifest, passes, require_completion=not assignments
                     )
+                if index_record is not None and lines is not None:
+                    index_record(row, start, lines.position)
                 count += 1
                 if count > expected_rows:
                     raise ValueError("scalar table exceeds its durable row count")

@@ -36,6 +36,7 @@ from marl_battlegrounds.evaluation.scalar_reports import (
 
 if TYPE_CHECKING:
     from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+    from marl_battlegrounds.evaluation.tournament_records import TournamentRecords
 
 Columns = dict[str, NDArray[np.generic]]
 Row = dict[str, Any]
@@ -422,8 +423,15 @@ class _View:
             for key, entry in manifest["passes"].items()
             if entry.get("phase") == "tournament"
         }
-        self.whole_tournament = bool(tournament_keys) and tournament_keys.issubset(
-            self.selected
+        self.whole_tournament = bool(tournament_keys) and (
+            tournament_keys.issubset(self.selected)
+            or (
+                manifest.get("tournament_reuse") is not None
+                and any(
+                    entry.get("pass_role") == "tournament_coordinator"
+                    for entry in self.selected.values()
+                )
+            )
         )
         self.scope = _scope(self.selected, self.whole_tournament)
         states = {key: _state(entry, manifest) for key, entry in self.selected.items()}
@@ -1056,6 +1064,24 @@ class _View:
         return tuple(path for _, _, path in result)
 
 
+def _result_view(
+    manifest: Row,
+    *,
+    run_dir: Path | None,
+    phase: str | None = None,
+    pass_id: str | None = None,
+    memory: Mapping[str, object] | None = None,
+) -> _View:
+    """Dispatch additive canonical references without importing execution code."""
+    if "tournament_reuse" in manifest:
+        from marl_battlegrounds.evaluation.canonical_results import CanonicalView
+
+        return CanonicalView(
+            manifest, run_dir=run_dir, phase=phase, pass_id=pass_id, memory=memory
+        )
+    return _View(manifest, run_dir=run_dir, phase=phase, pass_id=pass_id, memory=memory)
+
+
 class _ResultAccess:
     """Share bounded table methods across saved, evaluation and tournament results."""
 
@@ -1220,6 +1246,8 @@ def _memory_manifest(
         "tables": {},
         "details": dict(metadata),
     }
+    if tournament and "tournament_reuse" in metadata:
+        result["tournament_reuse"] = metadata["tournament_reuse"]
     if tournament:
         result["tournament_summary"] = metadata.get(
             "tournament_summary", {"digest": "in-memory-qualified"}
@@ -1343,7 +1371,7 @@ class TournamentResult(_ResultAccess):
         """Bind complete tournament rows to their actual pass and system owners."""
         if self.paths and "run_details" in self.paths:
             directory = Path(self.paths["run_details"]).parent
-            view = _View(
+            view = _result_view(
                 _read_manifest(directory), run_dir=directory, phase="tournament"
             )
         else:
@@ -1360,9 +1388,55 @@ class TournamentResult(_ResultAccess):
                 memory["full_metrics"] = self.full_metrics
             if self.headline_metrics:
                 memory["tournament_headline_metrics"] = self.headline_metrics
-            view = _View(manifest, run_dir=None, phase="tournament", memory=memory)
+            if isinstance(self, CanonicalTournamentResult):
+                memory["_record_access"] = self._record_access  # pyright: ignore[reportPrivateUsage]
+            view = _result_view(
+                manifest, run_dir=None, phase="tournament", memory=memory
+            )
         object.__setattr__(self, "_view", view)
         self.metadata.update(view.metadata)
+
+
+@dataclass(frozen=True)
+class CanonicalTournamentResult(TournamentResult):
+    """Expose a complete selected snapshot through ordinary tournament tables.
+
+    Attributes
+    ----------
+    snapshot_id : str
+        Immutable selected configuration identity; also ``big_12_id``
+        in metadata. Fixture snapshots do not establish official qualification.
+    challenger_id : str or None
+        Logical entrant ID of the optional canonical challenger. None means
+        twelve only for a canonical call. Custom configuration results describe
+        their selected population, of any supported size, with no separate challenger.
+    planned_games, reused_games, executed_games : int
+        Whole logical-run counts, including durable games from earlier attempts.
+        Metadata ``executed_this_call`` counts only new work in this call.
+    games_per_opponent : int
+        Uniform resolved number of completed games per unordered participant pair.
+    protocol_compliant : bool
+        Whether the resolved scientific conditions match the snapshot protocol.
+        This is not admission approval or proof of scientific eligibility.
+
+    Notes
+    -----
+    Original row and replay identities remain unchanged. Uniform tables cover
+    reused and newly executed games; inherited full_metrics/replays retain only
+    new in-memory captures. No-file results borrow immutable source files for
+    lazy access. Keep those files available for the lifetime of the result.
+    """
+
+    snapshot_id: str = field(kw_only=True)
+    challenger_id: str | None = field(kw_only=True)
+    planned_games: int = field(kw_only=True)
+    reused_games: int = field(kw_only=True)
+    executed_games: int = field(kw_only=True)
+    games_per_opponent: int = field(kw_only=True)
+    protocol_compliant: bool = field(kw_only=True)
+    _record_access: TournamentRecords | None = field(
+        default=None, kw_only=True, repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True)
@@ -1409,7 +1483,7 @@ def load_results(
         Files cannot be read. No files, locks, downloads or JAX work are created.
     """
     directory = Path(run_dir)
-    view = _View(
+    view = _result_view(
         _read_manifest(directory), run_dir=directory, phase=phase, pass_id=pass_id
     )
     return SavedResults(view.metadata, view)

@@ -12,7 +12,7 @@ remain valid and are never expanded into undeclared comparisons.
 from collections import Counter
 from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import jax
 import numpy as np
@@ -348,3 +348,38 @@ def test_adapter_roster_failure_does_not_open_writer(tmp_path: Path) -> None:
             output_dir=tmp_path,
         )
     assert not list(tmp_path.iterdir())
+
+
+def test_pinned_source_map_keeps_approved_historical_geometry() -> None:
+    import jax.numpy as jnp
+
+    from marl_battlegrounds._tdm_assets import map_history
+    from marl_battlegrounds.evaluation.evaluate import EpisodeSpec
+    from marl_battlegrounds.evaluation.evaluation_conditions import prepare_schedule
+    from marl_battlegrounds.tasks import (
+        make_canonical_team_deathmatch_evaluation_config,
+    )
+
+    old = next(row for row in map_history() if row.info.map_id == 47)
+    source = make_canonical_team_deathmatch_evaluation_config(map_id=old.info.map_id)
+    source = source._replace(
+        map_width=old.geometry.map_width,
+        map_height=old.geometry.map_height,
+        obstacles=jnp.asarray(old.geometry.obstacles, dtype=jnp.float32),
+        team_spawn_pad_positions=jnp.asarray(
+            old.geometry.team_spawn_pad_positions, dtype=jnp.float32
+        ),
+    )
+    spec = EpisodeSpec(1, source, old.info.map_id, 1, source_config=source)
+    declarations, _, _ = prepare_schedule(
+        [spec], registered_maps={old.info.map_id: old.info.model_dump(mode="json")}
+    )
+    metadata = {
+        row["name"]: row["value"]
+        for row in cast(list[dict[str, str]], declarations[1]["map_metadata"])
+    }
+    assert metadata["map_name"] == old.info.name
+    bad = old.info.model_dump(mode="json")
+    bad["name"] = "forged"
+    with pytest.raises(ValueError, match="snapshot map identity"):
+        prepare_schedule([spec], registered_maps={old.info.map_id: bad})

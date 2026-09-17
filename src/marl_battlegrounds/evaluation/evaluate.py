@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from numbers import Integral
 from pathlib import Path
-from typing import NamedTuple, cast
+from typing import Any, NamedTuple, cast
 from uuid import uuid4
 
 import jax
@@ -892,6 +892,7 @@ def _run_evaluation(
     contract: dict[str, object] | None = None,
     saved: tuple[dict[str, object], dict[str, object]] | None = None,
     source_choices: Sequence[EpisodeSpec] | None = None,
+    registered_maps: Mapping[int, Mapping[str, Any]] | None = None,
 ) -> EvaluationResult:
     """Execute already resolved frozen methods through the chunk/refill authority.
 
@@ -965,6 +966,10 @@ def _run_evaluation(
     source_choices : Sequence[EpisodeSpec] | None
         Complete ordered sources for a newly resolved generated schedule. Include
         unplayed choices. None preserves a resumed contract's saved references.
+    registered_maps : mapping or None
+        Private exact source map identities from an immutable tournament snapshot.
+        None uses the current catalog. Supplied entries still require an approved
+        current or historical identity and exact source geometry.
 
     Returns
     -------
@@ -1159,6 +1164,7 @@ def _run_evaluation(
     else:
         schedule, configuration_contents, config_ids = prepare_schedule(
             specs,
+            registered_maps=registered_maps,
             saved_declarations=None
             if saved is None
             else cast(Mapping[str, object], saved[1].get("episodes")),
@@ -1652,6 +1658,54 @@ def evaluate_episodes(
     valid action once. Learning outputs are discarded without host transfer.
     Validation uses fresh state/RNG/memory and does not edit training carry.
     """
+    return _evaluate_tournament_episodes(
+        system,
+        opponent,
+        episodes,
+        seed=seed,
+        num_envs=num_envs,
+        metrics=metrics,
+        full_metrics_episodes=full_metrics_episodes,
+        replay_episodes=replay_episodes,
+        save_replays=save_replays,
+        output_dir=output_dir,
+        resume_from=resume_from,
+        writer=writer,
+        phase=phase,
+        pass_id=pass_id,
+        chunk_size=chunk_size,
+        run_id=run_id,
+    )
+
+
+def _evaluate_tournament_episodes(
+    system: System | Policy | str,
+    opponent: System | Policy | str,
+    episodes: Sequence[EpisodeSpec],
+    *,
+    seed: int | Omitted = OMITTED,
+    num_envs: int = 128,
+    metrics: MetricMode | Omitted = OMITTED,
+    full_metrics_episodes: Iterable[int] | Omitted = OMITTED,
+    replay_episodes: Iterable[int] | Omitted = OMITTED,
+    save_replays: int | Omitted = OMITTED,
+    output_dir: str | Path | None = None,
+    resume_from: str | Path | None = None,
+    writer: RunWriter | None = None,
+    phase: str = "evaluation",
+    pass_id: str = "1",
+    chunk_size: int = 16,
+    run_id: str | None = None,
+    registered_maps: Mapping[int, Mapping[str, Any]] | None = None,
+) -> EvaluationResult:
+    """Share exact-schedule resolution with immutable tournament source maps.
+
+    Arguments, defaults, outputs and errors match evaluate_episodes. The private
+    registered_maps argument maps source map IDs to exact serialized TDMMapInfo
+    identities; None uses current catalog metadata. Supplied identities undergo
+    approved-history and source-geometry checks before writer mutation. No public
+    setting or alternate executor is introduced.
+    """
     saved = read_saved_pass(resume_from, writer, phase, pass_id)
     details = None if saved is None else saved[1]["details"]
     previous_contract = None if details is None else details.get("evaluation_contract")
@@ -1717,6 +1771,7 @@ def evaluate_episodes(
         run_id=run_id,
         contract=contract,
         saved=saved,
+        registered_maps=registered_maps,
     )
 
 

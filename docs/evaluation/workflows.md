@@ -8,8 +8,10 @@ The [environment example](../../examples/environment.py) and
 
 Public evaluation accepts frozen Systems, Policies and built-in names. It keeps
 Team A/B fixed and exchanges complete spawn locations for paired games. Result
-objects and `load_results` share table access. Official Big 12 snapshot selection,
-reuse and admission remain later work. The runnable
+objects and `load_results` share table access. The
+[canonical tournament tools](canonical_tournaments.md) select immutable snapshots
+and verify reusable games. A qualified official bundle is a separate release,
+not a set of built-ins invented by the library. The runnable
 [evaluation/results example](../../examples/evaluation_results.py) covers the
 implemented evaluation and analysis paths without requiring a learner.
 Run `python examples/evaluation_results.py validation --output-dir runs/checkpoints`

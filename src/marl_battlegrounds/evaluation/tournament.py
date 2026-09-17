@@ -497,8 +497,10 @@ def _saved_tournament(
 
 
 def run_tournament(
-    policies: Sequence[System | Policy | str],
+    policies: Sequence[System | Policy | str] | None = None,
     *,
+    config: str | Path | Mapping[str, Any] | None = None,
+    save_replays: int | Omitted = OMITTED,
     maps: Sequence[int | TDMMapInfo] | None | Omitted = OMITTED,
     episodes_per_pair: int | Omitted = OMITTED,
     seed: int | Omitted = OMITTED,
@@ -517,10 +519,17 @@ def run_tournament(
 
     Parameters
     ----------
-    policies : Sequence[System | Policy | str]
+    policies : Sequence[System | Policy | str] or None
         At least two Systems, Policies or built-in names. Entrant labels must
         be distinct. Numerical variables and initial memory templates are
         snapshotted once; opaque external providers remain caller-owned.
+    config : JSON path, mapping or None
+        Complete custom tournament population and conditions. Use this or a
+        policies sequence, not both. Scientific programmatic options must stay
+        omitted on this route. Saved configuration runs inherit their config.
+    save_replays : int, default=0
+        First N scheduled games to capture. A nonempty explicit selection must
+        agree with this shorthand. Configuration runs use logical game IDs.
     maps : Sequence[int | TDMMapInfo] | None
         Optional distinct integer map IDs or TDMMapInfo entries. None uses
         canonical evaluation maps 47..51 for a new run. Omitted maps on resume
@@ -594,7 +603,8 @@ def run_tournament(
     none skips them, even with selected full reports. Completed saved summaries
     are loaded without fitting again. Historical reversed-team schedules retain
     their original interpretation and receive no fabricated spawn-pair headlines.
-    This generic runner does not implement official Big 12 admission or reuse.
+    Configuration runs support verified game reuse through the shared canonical
+    machinery. This call does not perform admission or publish official releases.
 
     Examples
     --------
@@ -626,6 +636,46 @@ def run_tournament(
 
     if output_dir is not None and resume_from is not None:
         raise ValueError("output_dir and resume_from are mutually exclusive")
+    configured_resume = False
+    if resume_from is not None:
+        from marl_battlegrounds.evaluation.results import _read_manifest
+
+        configured_resume = "tournament_reuse" in _read_manifest(Path(resume_from))
+    if config is not None or configured_resume:
+        from marl_battlegrounds.evaluation.canonical import _run_configured_tournament
+
+        if policies is not None:
+            raise ValueError("Supply policies or config, not competing populations")
+        explicit_rules = {
+            "maps": maps,
+            "episodes_per_pair": episodes_per_pair,
+            "seed": seed,
+            "opponent_weights": opponent_weights,
+            "score_threshold": score_threshold,
+            "max_steps": max_steps,
+        }
+        conflicts = [
+            name
+            for name, value in explicit_rules.items()
+            if not isinstance(value, Omitted)
+        ]
+        if conflicts:
+            raise ValueError(
+                "Config owns scientific settings; omit " + ", ".join(conflicts)
+            )
+        return _run_configured_tournament(
+            config,
+            metrics=metrics,
+            full_metrics_episodes=full_metrics_episodes,
+            replay_episodes=replay_episodes,
+            save_replays=save_replays,
+            output_dir=output_dir,
+            resume_from=resume_from,
+            num_envs=num_envs,
+            chunk_size=chunk_size,
+        )
+    if policies is None:
+        raise ValueError("Supply a policies sequence or a tournament config")
     saved = read_saved_pass(resume_from, None, "tournament", "schedule")
     saved_details = None if saved is None else saved[1]["details"]
     seed = cast(int, option(seed, saved_details, "seed", 0))
@@ -668,6 +718,12 @@ def run_tournament(
         map_ids,
         episodes_per_pair=episodes_per_pair,
     )
+    from marl_battlegrounds.evaluation.evaluation_conditions import capture_ids
+
+    if not isinstance(save_replays, Omitted):
+        replay_episodes = capture_ids(
+            [match.episode_id for match in schedule], replay_episodes, save_replays
+        )
     validate_opponent_weights(tuple(sorted(frozen)), opponent_weights)
     num_envs = positive_int(num_envs, "num_envs")
     chunk_size = positive_int(chunk_size, "chunk_size")
@@ -771,20 +827,24 @@ def run_tournament(
     executions = {
         name: prepare_evaluation_system(entrant)[0] for name, entrant in frozen.items()
     }
-    for config in configs.values():
+    for env_config in configs.values():
         for name_a, name_b in {(match.team_a, match.team_b) for match in schedule}:
-            validate_evaluation_rosters(executions[name_a], executions[name_b], config)
+            validate_evaluation_rosters(
+                executions[name_a], executions[name_b], env_config
+            )
     source_ids: dict[int, str] = {}
     resolved_ids: dict[tuple[int, int], str] = {}
-    for map_id, config in configs.items():
-        _validate_config_choices(config, batched=False, both_spawn_choices=not legacy)
-        identifier, content = config_record(config)
+    for map_id, env_config in configs.items():
+        _validate_config_choices(
+            env_config, batched=False, both_spawn_choices=not legacy
+        )
+        identifier, content = config_record(env_config)
         configurations[identifier] = content
         source_ids[cast(int, map_id)] = identifier
-        resolved[cast(int, map_id), 0] = config
+        resolved[cast(int, map_id), 0] = env_config
         resolved_ids[cast(int, map_id), 0] = identifier
         if not legacy:
-            exchanged = _swap_spawn_banks(config)
+            exchanged = _swap_spawn_banks(env_config)
             swapped_id, swapped_content = config_record(exchanged)
             configurations[swapped_id] = swapped_content
             resolved[cast(int, map_id), 1] = exchanged

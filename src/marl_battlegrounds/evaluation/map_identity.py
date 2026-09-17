@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import re
 from array import array
+from collections.abc import Mapping
 from functools import lru_cache
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field
 
 from marl_battlegrounds._tdm_assets import (
     MapGeometry,
+    TDMMapInfo,
     asset_manifest,
     map_geometry,
     map_history,
@@ -246,6 +248,38 @@ def registered_map_metadata(
         AggregationKeyV1(name="map_name", value=identity.technical_name),
         AggregationKeyV1(name="map_origin", value="registered"),
         AggregationKeyV1(name="map_split", value=str(identity.split)),
+    )
+
+
+def _snapshot_map_metadata(  # pyright: ignore[reportUnusedFunction]
+    map_id: int, config: ResolvedEnvConfigV1, declared: Mapping[str, Any]
+) -> tuple[AggregationKeyV1, ...]:
+    """Verify one pinned map revision without replacing it with today's catalog.
+
+    The private tournament bridge supplies serialized TDMMapInfo and the actual
+    source configuration, before any spawn exchange. Require an approved current
+    or historical source, exact name/ID/split and exact geometry. Return the same
+    recording keys as registered_map_metadata. Invalid evidence raises ValueError;
+    no files, model calls or simulator work occur here.
+    """
+    info = TDMMapInfo.model_validate(declared)
+    approved = _authored_map(
+        info.source.asset_id, info.source.revision, info.source.semantic_digest
+    )
+    if (
+        approved is None
+        or info.map_id != map_id
+        or approved[0].map_id != map_id
+        or approved[0].technical_name != info.name
+        or approved[0].split != info.split
+        or not _geometry_matches(config, approved[1])
+    ):
+        raise ValueError("snapshot map identity does not match its approved geometry")
+    return (
+        AggregationKeyV1(name="map_id", value=str(map_id)),
+        AggregationKeyV1(name="map_name", value=info.name),
+        AggregationKeyV1(name="map_origin", value="registered"),
+        AggregationKeyV1(name="map_split", value=info.split),
     )
 
 

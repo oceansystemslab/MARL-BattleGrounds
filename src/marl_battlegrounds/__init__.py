@@ -1,10 +1,11 @@
 """Expose the researcher API without loading every subsystem at import time.
 
 Use import marl_battlegrounds as marl_bgs, then call make for the environment,
-evaluate for frozen-policy games, or run_tournament for cross-play. System,
+evaluate for frozen-System games, or run_tournament for cross-play. System,
 init_systems and apply_systems support researcher-owned methods in raw loops.
 Setup helpers and the existing Policy adapter use the same package entry point.
-Generic Systems are not yet accepted by the Policy evaluator or tournament.
+run_canonical_tournament uses a released Big 12 snapshot and verified records.
+It requires a separately installed, qualified bundle; none is fabricated here.
 
 Exports load their owning module when first requested and are then cached here.
 Importing this package alone does not import the environment or start JAX.
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
         init_episode_tracking,
         track_episode_step,
     )
+    from marl_battlegrounds.evaluation.canonical import run_canonical_tournament
     from marl_battlegrounds.evaluation.evaluate import (
         EpisodeSpec,
         evaluate,
@@ -42,7 +44,11 @@ if TYPE_CHECKING:
         shared_policy,
         system_step_data,
     )
-    from marl_battlegrounds.evaluation.results import EvaluationResult, load_results
+    from marl_battlegrounds.evaluation.results import (
+        CanonicalTournamentResult,
+        EvaluationResult,
+        load_results,
+    )
     from marl_battlegrounds.evaluation.run_writer import RunWriter
     from marl_battlegrounds.evaluation.tournament import (
         TournamentResult,
@@ -58,6 +64,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AutoReset",
+    "CanonicalTournamentResult",
     "Environment",
     "EnvironmentState",
     "EpisodeSpec",
@@ -86,6 +93,7 @@ __all__ = [
     "load_tdm_scenario",
     "make",
     "policy",
+    "run_canonical_tournament",
     "run_tournament",
     "shared_policy",
     "system_step_data",
@@ -102,6 +110,7 @@ _MODULES = {
     "EnvironmentState": "environment",
     "make": "environment",
     "EvaluationResult": "evaluation.results",
+    "CanonicalTournamentResult": "evaluation.results",
     "EpisodeSpec": "evaluation.evaluate",
     "evaluate_episodes": "evaluation.evaluate",
     "load_results": "evaluation.results",
@@ -121,6 +130,7 @@ _MODULES = {
     "RunWriter": "evaluation.run_writer",
     "TournamentResult": "evaluation.tournament",
     "run_tournament": "evaluation.tournament",
+    "run_canonical_tournament": "evaluation.canonical",
     "balanced_spawn_configs": "tasks",
     "canonical_tournament_rosters": "tasks",
     "list_tdm_maps": "tasks",

@@ -3805,7 +3805,30 @@ def main() -> int:
         choices=("legacy", "manual", "systems", "mixed", "capture"),
         help="one required evaluation case; no automatic benchmark campaign",
     )
+    parser.add_argument(
+        "--canonical-contracts",
+        action="store_true",
+        help="Packet 7 only: exact tournament jobs, active model loading and reuse",
+    )
+    parser.add_argument(
+        "--canonical-case",
+        choices=("shared", "canonical", "capture", "reuse"),
+        help="one required canonical case; no automatic benchmark campaign",
+    )
+    parser.add_argument(
+        "--canonical-workload",
+        type=Path,
+        help="explicit prepared Packet 7 benchmark workload JSON",
+    )
     args = parser.parse_args()
+    if args.canonical_contracts:
+        from scripts.dev.benchmark_canonical import run
+
+        return run(args)
+    if args.canonical_case or args.canonical_workload:
+        parser.error(
+            "--canonical-case/--canonical-workload require --canonical-contracts"
+        )
     if args.evaluation_access:
         from scripts.dev.benchmark_evaluation_access import run
 

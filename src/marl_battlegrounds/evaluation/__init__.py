@@ -275,6 +275,7 @@ if TYPE_CHECKING:
         validate_replay_artifact_v3,
     )
     from marl_battlegrounds.evaluation.results import (
+        CanonicalTournamentResult,
         EpisodeResult,
         EvaluationResult,
         TournamentResult,
@@ -684,6 +685,7 @@ __all__ = [
     "AuraTransitionFactsV1",
     "BaseObservationV1",
     "BaseObservationV2",
+    "CanonicalTournamentResult",
     "CaptureProfile",
     "ChargePhaseDisplacementEventV1",
     "ClassMechanicsV1",
@@ -973,7 +975,13 @@ _register_lazy_exports(
 )
 _register_lazy_exports(
     "marl_battlegrounds.evaluation.results",
-    ("EpisodeResult", "EvaluationResult", "TournamentResult", "load_results"),
+    (
+        "EpisodeResult",
+        "EvaluationResult",
+        "TournamentResult",
+        "CanonicalTournamentResult",
+        "load_results",
+    ),
 )
 
 

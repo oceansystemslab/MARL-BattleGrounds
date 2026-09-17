@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
     from marl_battlegrounds.evaluation.replay_capture import ReplayPackets
     from marl_battlegrounds.evaluation.replay_recording import ReplayCollector
+    from marl_battlegrounds.evaluation.tournament_records import TournamentRecords
     from marl_battlegrounds.evaluation.tournament_statistics import TournamentStatistics
 
 IDENTITY_COLUMNS = (
@@ -423,6 +424,7 @@ class RunWriter:
         self._collection_active = False
         self._checkpoint_hashes: dict[str, Any] | None = None
         self._checkpoint_pass: str | None = None
+        self._canonical_records: TournamentRecords | None = None
         self._validated_start_configs: dict[_ConfigValidationKey, None] = {}
         self._verified_source_choices: dict[tuple[_ConfigValidationKey, str], int] = {}
         self._lock = -1
@@ -2761,6 +2763,125 @@ class RunWriter:
         cells[~valid] = ""
         return cast(list[object], cells.tolist())
 
+    def _install_tournament_plan(
+        self,
+        config: Mapping[str, Any],
+        games: Sequence[Mapping[str, Any]],
+        reuse: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Durably attach immutable canonical references under this writer's lock.
+
+        The canonical runner validates science, source coverage and resume before
+        opening this writer. This method checks exact saved bytes and the additive
+        version again, writes missing immutable config/JSONL files, synchronizes
+        their directory, then publishes their hashes with the existing manifest
+        transaction. Unreferenced files from an interrupted attempt remain inert.
+        Conflicting files/metadata fail before replacement. It returns the saved
+        reference mapping and never adds table roles to a training checkpoint.
+        """
+        self._check_open()
+        if (
+            reuse.get("version") != 1
+            or self._details["passes"][self._pass_key].get("phase") != "tournament"
+        ):
+            raise ValueError(
+                "canonical references require version 1 and a tournament pass"
+            )
+        payloads = {
+            "tournament_config.json": _json_bytes(config),
+            "tournament_games.jsonl": b"".join(_json_bytes(game) for game in games),
+        }
+        resolved = dict(reuse)
+        resolved["config_sha256"] = sha256(
+            payloads["tournament_config.json"]
+        ).hexdigest()
+        resolved["games_sha256"] = sha256(
+            payloads["tournament_games.jsonl"]
+        ).hexdigest()
+        previous = self._details.get("tournament_reuse")
+        if previous is not None:
+            if {
+                key: value
+                for key, value in previous.items()
+                if key not in {"state", "asset_locations"}
+            } != {
+                key: value
+                for key, value in resolved.items()
+                if key not in {"state", "asset_locations"}
+            }:
+                raise ValueError(
+                    "canonical tournament references differ from the saved run"
+                )
+            resolved["state"] = previous["state"]
+            if "asset_locations" in previous:
+                resolved["asset_locations"] = previous["asset_locations"]
+        for filename, payload in payloads.items():
+            path = self.run_dir / filename
+            if path.is_symlink() or (path.exists() and path.read_bytes() != payload):
+                raise ValueError(
+                    "immutable canonical reference already has different content"
+                )
+        for filename, payload in payloads.items():
+            path = self.run_dir / filename
+            if path.exists():
+                continue
+            temporary = path.with_name("." + path.name + ".tmp")
+            with temporary.open("wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        os.fsync(self._lock)
+        self._details["tournament_reuse"] = resolved
+        self.flush()
+        return resolved
+
+    def _set_tournament_asset_locations(self, locations: Mapping[str, Any]) -> None:
+        """Publish only changed canonical asset hints after runner preflight.
+
+        Immutable config bytes and scientific hashes remain unchanged. The caller
+        has verified required contents before opening this writer. Validate the
+        known asset IDs and hint shapes here, then use the existing flush boundary.
+        An identical map is a no-op. This method never downloads or loads models.
+        """
+        from marl_battlegrounds.evaluation.tournament_assets import (
+            asset_location_config,
+        )
+        from marl_battlegrounds.evaluation.tournament_config import read_config_json
+
+        self._check_open()
+        reuse = self._details.get("tournament_reuse")
+        if reuse is None or reuse.get("version") != 1:
+            raise ValueError("asset hints require an installed canonical plan")
+        config = read_config_json(self.run_dir / "tournament_config.json")
+        asset_location_config(config, locations)
+        if reuse.get("asset_locations", {}) != locations:
+            reuse["asset_locations"] = _json_value(locations)
+            self.flush()
+
+    def _use_tournament_records(self, records: TournamentRecords) -> None:
+        """Share the runner's original-record accessor for version-2 publication.
+
+        The accessor must describe this run and its attached immutable game plan.
+        It is borrowed only for final qualification, never serialized or used by
+        numerical execution. Calling this method does not open files or flush.
+        """
+        self._check_open()
+        if records.manifest.get("run_id") != self.run_id or not self._details.get(
+            "tournament_reuse"
+        ):
+            raise ValueError("canonical record accessor belongs to a different run")
+        reuse = self._details["tournament_reuse"]
+        if (
+            sha256(_json_bytes(records.config)).hexdigest() != reuse["config_sha256"]
+            or sha256(b"".join(_json_bytes(game) for game in records.games)).hexdigest()
+            != reuse["games_sha256"]
+        ):
+            raise ValueError(
+                "canonical record accessor differs from the immutable run plan"
+            )
+        self._canonical_records = records
+
     def write_tournament_results(
         self,
         statistics: TournamentStatistics,
@@ -2921,19 +3042,47 @@ class RunWriter:
                 validate_evidence,
             )
 
-            matches: list[dict[str, object]] = [
-                dict(row)
-                for batch in iter_scalar_rows(
-                    self.run_dir / "match_results.csv",
-                    manifest=self._details,
-                    expected_header=MATCH_COLUMNS,
+            if evidence.get("version") == 2:
+                if self._canonical_records is None:
+                    raise ValueError(
+                        "canonical publication needs its shared record accessor"
+                    )
+                if self._rows["match_results.csv"]:
+                    raise ValueError(
+                        "flush local canonical games before summary qualification"
+                    )
+                matches: list[dict[str, object]] = [
+                    {name: row.get(name) for name in MATCH_COLUMNS}
+                    for batch in self._canonical_records.iter_rows(
+                        "match_results.csv",
+                        columns=(
+                            *IDENTITY_COLUMNS,
+                            "block_id",
+                            "bootstrap_group",
+                            "outcome",
+                            "episode_length",
+                            "team_a_score",
+                            "team_b_score",
+                        )
+                        if qualified["metrics"] == "none"
+                        else None,
+                    )
+                    for row in batch
+                ]
+            else:
+                matches = [
+                    dict(row)
+                    for batch in iter_scalar_rows(
+                        self.run_dir / "match_results.csv",
+                        manifest=self._details,
+                        expected_header=MATCH_COLUMNS,
+                    )
+                    for row in batch
+                ]
+                matches.extend(
+                    dict(zip(MATCH_COLUMNS, row, strict=True))
+                    for row in self._rows["match_results.csv"]
                 )
-                for row in batch
-            ]
-            matches.extend(
-                dict(zip(MATCH_COLUMNS, row, strict=True))
-                for row in self._rows["match_results.csv"]
-            )
             validate_evidence(matches, evidence)
             if evidence.get("schedule_digest") != qualified[
                 "schedule_digest"
@@ -2962,6 +3111,8 @@ class RunWriter:
                         "reason": None,
                         "schedule_digest": qualified["schedule_digest"],
                     }
+        if "tournament_reuse" in self._details:
+            self._details["tournament_reuse"]["state"] = "complete"
         self.flush()
 
     def checkpoint_recording(self) -> dict[str, object]:

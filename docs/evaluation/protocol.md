@@ -920,15 +920,16 @@ again; it does not silently fill only missing games. Report planned, reused,
 and new game counts. Incomplete or failed runs keep valid raw records but cannot
 claim a finished tournament or headline result.
 
-**Implemented custom behavior:** `run_tournament` currently accepts an explicit
-policy population, defaults to `episodes_per_pair=100`, and schedules opposite
-policy-side assignments. It has no twelve-policy limit. Its schedule and
-statistics validator do not yet implement the fixed-team spawn-pair and verified
-reuse rules above. Historical paired games retain their original meaning.
-A twelve-policy, five-map run at that custom default has 66 matchups and 6,600
-episodes: ten seed blocks per map, each with both policy-side assignments. These
-numbers preserve the earlier workload definition; they are not the future
-official game budget.
+**Implemented custom behavior:** `run_tournament` accepts an explicit System or
+Policy population, or an immutable configuration. Its programmatic default is
+`episodes_per_pair=100`, with fixed Team A/B ownership and opposite complete
+spawn banks. There is no twelve-entry limit on custom fields. Canonical calls
+use the same execution, statistics and result authorities, with verified reuse
+and one optional challenger. See [Canonical Tournaments](canonical_tournaments.md).
+A qualified official bundle and its numerical budget remain separate release
+gates. Historical team-swapped records keep their original meaning. The earlier
+6,600-game workload had ten seed blocks per map with opposite policy-side
+assignments; that historical workload is not an official game budget.
 
 The compact report is **Policy | Elo with uncertainty | Expected Score with
 uncertainty | Win % | Draw % | Loss %**, with the matchup matrix and per-map
