@@ -11,18 +11,22 @@ how to report uncertainty, and how to select checkpoints. It also owns actor
 information records, cross-play, controlled scenarios, runtime measurements,
 and the treatment of failures and unobserved endpoints.
 
-**Current reading rule, 2026-09-15:** a protocol requirement is not proof that
-its full runner exists. The package implements raw reset/step, custom policy
-evaluation, custom all-pairs tournaments, scalar TDM metrics, recording, and
-historical artifact readers. The accepted monthly Big 12 design below is future
-work: no released official snapshot, canonical enrollment runner, verified-game
-reuse service, or maintainer admission pipeline is claimed here. Its numerical
-game/resource budgets and the remaining approval gates stay open. This update
+**Current reading rule, 2026-09-17:** a protocol requirement is not proof of
+scientific qualification. The package implements native reset/step and Systems,
+evaluation, custom and canonical tournaments, verified game reuse, headlines,
+recording, recorded restart, result reading, commands and portable replay viewing.
+Separate maintainer admission and release machinery is tested with fixtures.
+There is no qualified official Big 12 bundle or trained baseline population.
+Official numerical game/resource budgets and the remaining approval gates stay open. This update
 supersedes the older weekly review and fixed 100-game official budget; it does
 not change old records or the current custom runner's default of 100.
 Current milestone numbers follow
 [A36's executive roadmap mapping](../design/specification_amendments.md#a36-submission-roadmap-approved-tdm-content-and-m7-closeout).
 Historical amendment titles and anchors retain their original milestone numbers.
+Gymnasium/PettingZoo adapters are deferred until a specific learner integration
+shows a need. Optional dependencies do not implement those adapters. M9 owns
+training distributions and curricula; M10 owns learners and learning experiments.
+The growing-pool example checks API integration, not an approved M9 curriculum.
 The companion [metric specification](metric_specification.md) owns stable
 metric meanings, sufficient components, eligibility, attribution, and allowed
 interpretations. Accepted departures from the original design PDF are recorded
@@ -845,10 +849,11 @@ full-team policy without separable partner assignments.
 
 ## Big 12 tournament and Baseline Library
 
-**Accepted future design; canonical execution and admission are not implemented
-by the current custom runner.** A released Big 12 snapshot contains exactly
+**Canonical execution, reuse and separate maintainer admission machinery are
+implemented. Official rules, trained controllers and a qualified released bundle
+are still required.** A released Big 12 snapshot contains exactly
 twelve method-level entrants. Each has one fixed executable system and one Elo
-value. An ordinary canonical call will evaluate those twelve alone, or add one
+value. An ordinary canonical call evaluates those twelve alone, or adds one
 challenger to make thirteen. A system may contain several internal policies;
 those components do not become extra entrants. Larger or edited populations
 use the custom tournament route.
@@ -881,7 +886,7 @@ resource, reproducibility, and protocol-compatibility checks. It is not assumed
 to fit a JAX training loop. If it fails, its place stays unresolved until an
 explicit governance decision chooses what happens next.
 
-An immutable monthly configuration will name the exact twelve controller
+An immutable monthly configuration names the exact twelve controller
 versions, approved maps and mirrored rosters, SharedObs input contract, game
 budget, seed schedule, memory/rating settings, and artifact references with
 hashes and sizes. Resolve it once. Resume must use the saved resolved version;
@@ -889,7 +894,7 @@ a newer installed default must not change an existing run. Missing official
 assets must produce a clear error, never substitute ALPHA, BETA, or another
 library member. Models and reports remain separate from the small configuration.
 
-The planned field has 66 unordered matchups for twelve entrants and 78 for
+The resolved field has 66 unordered matchups for twelve entrants and 78 for
 thirteen. Every matchup uses the same game budget, equal coverage across the
 five test maps, and complete default/swapped spawn pairs. The challenger stays
 Team A; incumbent games keep their recorded A/B assignments. Exchange complete
@@ -897,15 +902,15 @@ ordered spawn banks, including respawns. Keep roster order, world directions,
 action meanings, map/seed pairing, and fresh per-game memory fixed.
 
 **The official numerical game budget is not yet approved.** An omitted
-`games_per_opponent` will inherit the snapshot's positive integer budget. An
+`games_per_opponent` inherits the snapshot's positive integer budget. An
 explicit budget must be positive, nonboolean, and divisible by ten for five
 maps. It applies to every incumbent and challenger matchup. A different budget
 is a declared research override and cannot qualify promotion; an explicit equal
-budget remains compatible with the official rule. These are accepted future
-argument semantics, not a claim that this entry point is available now.
+budget remains compatible with the official rule. These argument rules are
+implemented; they do not settle the official numerical budget.
 
-By default, the future runner will verify and reuse all 66 incumbent matchups.
-With a challenger, it will run twelve more matchups and fit all thirteen systems
+By default, the canonical runner verifies and reuses all 66 incumbent matchups.
+With a challenger, it runs twelve more matchups and fits all thirteen systems
 together. Reuse raw games, never old Elo as rating credit. Check controller,
 protocol, environment/schema, map, roster, assignment, spawn, budget, and random
 stream identities before reuse. Preserve original game IDs and seeds when an
@@ -964,10 +969,10 @@ per-episode metrics stay on JAX and can run on GPU. The 1,200 display center
 changes neither fitted strengths nor rating gaps.
 
 Use 5,000 deterministic bootstrap replicates, resampling independent seed blocks
-within pair/map cells while retaining each complete paired block. The current
-schedule's block contains opposite policy sides; the accepted future schedule
-will preserve fixed-team default/swapped spawn pairs under a versioned input
-join. Existing records must not be relabelled. Intervals are approximate 95%
+within pair/map cells while retaining each complete paired block. Current
+schedules preserve fixed-team default/swapped spawn pairs through the versioned
+schedule-to-statistics join. Historical team-swapped schedules retain their
+original interpretation. Existing records must not be relabelled. Intervals are approximate 95%
 percentile intervals conditional on the frozen systems and map panel. They do not
 represent training-run variation. Failed fits are errors and are never discarded.
 Constant samples and inadequate independent variation produce an explicit

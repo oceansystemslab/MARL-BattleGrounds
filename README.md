@@ -5,9 +5,10 @@ competitive games. Agents have different classes and abilities, so a team
 must combine movement, attacks, healing and support. The simulator uses JAX
 for compiled, batched GPU execution.
 
-The project is under development. Team Deathmatch and the current researcher
-tools are available; later learner, official tournament and manuscript work
-are described below as plans, not completed results.
+The project is under development. Team Deathmatch, the native researcher API,
+evaluation, recording and canonical tournament machinery are implemented.
+Trained baselines, a qualified official Big 12 bundle and manuscript results
+remain future work.
 
 The installed package also has terminal commands:
 
@@ -254,6 +255,14 @@ workflow. KOTH (M13) and CTF (M14) follow manuscript submission and that audit.
 [Amendment A36](docs/design/specification_amendments.md#a36-submission-roadmap-approved-tdm-content-and-m7-closeout)
 records the executive override and historical milestone-number mapping.
 
+M8's native API scope is complete. M9 will define training distributions and
+curricula; M10 will add learners and learning experiments. The growing-pool
+example shows how to use the API, not an approved training curriculum.
+Gymnasium/PettingZoo adapters are deferred until a specific learner integration
+shows a need. The optional `interop` dependencies do not provide those adapters.
+The native JAX workflow is the supported route; see the
+[researcher workflows](docs/evaluation/workflows.md).
+
 Public evaluation scenarios and their complete content closure must not inform
 training, checkpoint selection, early stopping, hyperparameters, prompts,
 curricula, population weights, or any other adaptive choice. Future M9/M10
@@ -291,17 +300,19 @@ the final official numerical budget is not settled. The raw
 win/draw/loss matrix remains authoritative. The compact ladder presentation is
 Policy, Elo with uncertainty, Expected Score with uncertainty, Win %, Draw % and
 Loss %, accompanied by full matchup and per-map results. Full tactical metrics
-are optional when running a local tournament. The planned headline report identifies tournament entries, rather than calling
+are optional when running a local tournament. The headline report identifies tournament entries, rather than calling
 them teams. Its K/D ratio divides total kills by total deaths and stays blank
 when deaths are zero. This is descriptive evidence, not a rating input.
 
-The accepted next design uses immutable monthly snapshots with exactly twelve
+The implemented canonical machinery uses immutable monthly snapshots with exactly twelve
 controller versions. A challenger comparison contains those twelve plus one
 challenger; the growing Baseline Library does not enlarge that population.
 Custom tournaments may use other populations. Local runs produce results and
 do not admit or publish a controller. Numerical budgets and several admission
-rules still need approval; the canonical snapshot/reuse runner is later M8 work.
-The current generic tournament tools do not establish that release qualification.
+rules still need approval. The snapshot/reuse runner and separate maintainer
+admission machinery are implemented and tested with fixtures. Those fixtures
+do not supply trained controllers or a qualified official bundle. See
+[Canonical Tournaments](docs/evaluation/canonical_tournaments.md).
 
 The Paper 1 snapshot stays frozen. Pool-centred Elo values from different
 populations are not directly comparable over time. Current and former entrants
