@@ -70,7 +70,7 @@ Use `reset_done` for ordinary terminal resets, or explicit `reset` arguments
 for custom episode starts. A mask describes current legal actions; a structural
 action space alone cannot express every coupled action constraint.
 
-Use one callable for frozen-policy validation and evaluation:
+Use one callable for frozen-System validation and evaluation:
 
 ```python
 import marl_battlegrounds as marl_bgs
@@ -82,6 +82,7 @@ result = marl_bgs.evaluate(
     output_dir="runs/evaluation",
 )
 print(result.paths)
+print(result.table("episodes")["system_game_score"])
 ```
 
 `Policy(name, apply, variables, initial_carry)` adapts a learned policy through
@@ -89,6 +90,11 @@ print(result.paths)
 Variables stay frozen during evaluation; recurrent memory resets per actor and
 episode. The authorized SharedObs input remains structured. Custom encoders and
 training algorithms remain the researcher's choice.
+Shared, independent, recurrent and host `System` methods use the same evaluator.
+The researcher stays Team A. The default runs complete pairs with exchanged
+spawn locations; `spawn_mode="default"` or `"swapped"` runs a fixed choice.
+Omitted maps use validation maps for `phase="validation"` and test maps for
+`phase="evaluation"`. Custom phases require explicit maps.
 Actor inputs use self/ally/enemy roles and a local self row, with no simulator
 team ID or global slot. See the [input contract](docs/evaluation/workflows.md#policy-inputs)
 for shapes and the recording-version change.
@@ -100,6 +106,10 @@ No replay is needed for metrics.
 Without an output directory, results are column arrays suitable for
 `pandas.DataFrame(result.full_metrics)`, and no files are created. Each output
 request creates a unique child run; `resume_from` explicitly resumes a run.
+`load_results(run_dir)` reads saved tables without loading the simulator or
+changing files. Use `iter_table("full_metrics", rows=128)` for bounded reading.
+See the [complete evaluation examples](examples/evaluation_results.py) for
+validation, exact authored episodes, resume and tournament analysis.
 
 The [metric specification and data dictionary](docs/evaluation/metric_specification.md)
 explain scalar columns, missing values, attribution and recording. The

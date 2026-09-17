@@ -40,6 +40,11 @@ if TYPE_CHECKING:
         build_evaluation_episode_context_v3,
         build_static_mechanics_catalog_v1,
     )
+    from marl_battlegrounds.evaluation.evaluate import (
+        EpisodeSpec,
+        evaluate,
+        evaluate_episodes,
+    )
     from marl_battlegrounds.evaluation.events import decode_evaluation_events_v1
     from marl_battlegrounds.evaluation.metrics import (
         AgentPairStatisticSubjectV1,
@@ -268,6 +273,12 @@ if TYPE_CHECKING:
         replay_from_packets,
         replay_reference_v3,
         validate_replay_artifact_v3,
+    )
+    from marl_battlegrounds.evaluation.results import (
+        EpisodeResult,
+        EvaluationResult,
+        TournamentResult,
+        load_results,
     )
     from marl_battlegrounds.evaluation.scenario import (
         ResolvedScenarioSpecificationV1,
@@ -688,6 +699,8 @@ __all__ = [
     "DistributionComponentV1",
     "DistributionObservationV1",
     "DurationComponentV1",
+    "EpisodeResult",
+    "EpisodeSpec",
     "EpisodeStatisticSubjectV1",
     "EvaluationEpisodeCompletionV1",
     "EvaluationEpisodeContextV1",
@@ -704,6 +717,7 @@ __all__ = [
     "EvaluationMetricReportV1",
     "EvaluationProcessingFailureV1",
     "EvaluationProcessingStatusV1",
+    "EvaluationResult",
     "EvaluationRole",
     "EvaluationSeedProtocolV1",
     "EvaluationSeedProtocolV2",
@@ -799,6 +813,7 @@ __all__ = [
     "TeamDeathmatchScoreChangedEventV1",
     "TeamDeathmatchTransitionFactsV1",
     "TeamStatisticSubjectV1",
+    "TournamentResult",
     "TransitionFactsV1",
     "VersionedIdentityV1",
     "build_evaluation_episode_context_v1",
@@ -827,6 +842,8 @@ __all__ = [
     "capture_initial_evaluation_frame_v1",
     "capture_initial_evaluation_frame_v2",
     "decode_evaluation_events_v1",
+    "evaluate",
+    "evaluate_episodes",
     "export_actor_pov_replay_v1",
     "export_actor_pov_replay_v2",
     "iter_replay_transition_views_v1",
@@ -835,6 +852,7 @@ __all__ = [
     "load_replay",
     "load_replay_artifact_v1",
     "load_replay_bundle_v1",
+    "load_results",
     "load_scenario_evaluation_record_v1",
     "load_scenario_evaluation_record_v2",
     "load_scenario_evaluation_record_v3",
@@ -948,6 +966,16 @@ _register_lazy_exports(
         "validate_actor_pov_replay_content",
     ),
 )
+
+_register_lazy_exports(
+    "marl_battlegrounds.evaluation.evaluate",
+    ("EpisodeSpec", "evaluate", "evaluate_episodes"),
+)
+_register_lazy_exports(
+    "marl_battlegrounds.evaluation.results",
+    ("EpisodeResult", "EvaluationResult", "TournamentResult", "load_results"),
+)
+
 
 if len(__all__) != len(set(__all__)) or set(__all__) != set(
     _LAZY_EXPORT_MODULE_BY_NAME

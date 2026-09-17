@@ -63,7 +63,9 @@ def _planned_episode(
     """Resolve one approved scenario and qualification seed into an explicit episode.
 
     The coordinate must index the fixed seed schedule. Carry scenario, layout,
-    controller, and pairing identities into the evaluator metadata.
+    controller and qualification identities into the evaluator metadata. The
+    qualification key links repeated witnesses of this one condition; it does
+    not declare a two-game comparison or require another authored start.
     """
     scenario = load_tdm_scenario(scenario_id)
     schedule = build_tdm_qualification_seed_schedule()
@@ -89,7 +91,9 @@ def _planned_episode(
         ),
         "team_a_controller_identity": controller_identity(policy("tdm-alpha")),
         "team_b_controller_identity": pressure.model_dump(mode="json"),
-        "paired_comparison_key": f"tdm-scenario-{scenario_id}-coordinate-{coordinate}",
+        "scenario_qualification_key": (
+            f"tdm-scenario-{scenario_id}-coordinate-{coordinate}"
+        ),
     }
     return specification, EpisodeSpec(
         episode_id=(scenario_id - 1) * 2 + coordinate + 1,

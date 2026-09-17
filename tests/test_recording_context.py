@@ -20,6 +20,7 @@ from marl_battlegrounds.evaluation.models import (
     AggregationKeyV1,
     AssignedPolicySlotV2,
     CodeRevisionV2,
+    EvaluationEpisodeContextV3,
 )
 from marl_battlegrounds.evaluation.recording_context import build_recording_context
 from marl_battlegrounds.evaluation.runtime_provenance import capture_runtime_provenance
@@ -625,3 +626,220 @@ def test_scenario_metadata_cannot_replace_execution_authority(conflict: str) -> 
                 "runtime_provenance": capture_runtime_provenance("0.0.0"),
             },
         )
+
+
+def _source_context(
+    source: object,
+    actual: object,
+    *,
+    choice: int | None,
+    map_id: int | None = 0,
+    metadata: object = None,
+    change: str | None = None,
+) -> EvaluationEpisodeContextV3:
+    from typing import cast
+
+    from marl_battlegrounds.core.types import EnvConfig
+    from marl_battlegrounds.evaluation.evaluation_conditions import config_record
+
+    source = cast(EnvConfig, source)
+    actual = cast(EnvConfig, actual)
+    source_id, source_content = config_record(source)
+    actual_id, _ = config_record(actual)
+    episode: dict[str, object] = {
+        "episode_id": 1,
+        "map_id": map_id,
+        "source_config_id": source_id,
+        "spawn_locations": choice,
+        "configuration_digest": actual_id,
+    }
+    details: dict[str, object] = {
+        "configurations": {source_id: source_content},
+        "code_revision": CodeRevisionV2(package_version="0.0.0").model_dump(
+            mode="json"
+        ),
+        "runtime_provenance": capture_runtime_provenance("0.0.0").model_dump(
+            mode="json"
+        ),
+    }
+    if metadata is not None:
+        episode["map_metadata"] = metadata
+    if change == "missing_source":
+        details["configurations"] = {}
+    elif change == "source_hash":
+        details["configurations"] = {source_id: {**source_content, "max_steps": 123}}
+    elif change == "actual_hash":
+        episode["configuration_digest"] = "0" * 64
+    return build_recording_context(
+        actual,
+        run_id="paired-map",
+        phase="evaluation",
+        pass_id="test",
+        episode=episode,
+        policies={"team_a": "A", "team_b": "B"},
+        details=details,
+    )[0]
+
+
+@pytest.mark.parametrize("choice", [0, 1])
+def test_explicit_source_replay_keeps_actual_banks_and_verified_map(
+    choice: int,
+) -> None:
+    from marl_battlegrounds.evaluation.map_identity import recorded_map
+    from marl_battlegrounds.tasks import list_tdm_maps
+
+    source = make_standard_team_deathmatch_config(
+        map_id=0, team_a_roster=("priest",), team_b_roster=("mage",)
+    )
+    actual = (
+        source._replace(team_spawn_pad_positions=source.team_spawn_pad_positions[::-1])
+        if choice
+        else source
+    )
+    context = _source_context(source, actual, choice=choice)
+    assert context.resolved_env_config.team_spawn_pad_positions == tuple(
+        tuple(tuple(float(x) for x in pad) for pad in bank)
+        for bank in actual.team_spawn_pad_positions
+    )
+    assert recorded_map(context).technical_name == list_tdm_maps()[0].name
+    assert type(context).model_validate_json(context.model_dump_json()) == context
+    legacy = context.model_copy(
+        update={
+            "aggregation_keys": tuple(
+                row
+                for row in context.aggregation_keys
+                if not row.name.startswith("marl_bgs.spawn_")
+                and row.name != "marl_bgs.source_config_id"
+            )
+        }
+    )
+    if choice:
+        with pytest.raises(ValueError, match="geometry"):
+            recorded_map(legacy)
+    else:
+        assert recorded_map(legacy) == recorded_map(context)
+
+
+def test_saved_historical_source_map_metadata_survives_swapped_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from marl_battlegrounds.evaluation import map_identity
+
+    history = _tdm_assets.map_history()[0]
+    geometry = history.geometry
+    source = make_standard_team_deathmatch_config(
+        map_id=0, team_a_roster=("priest",), team_b_roster=("mage",)
+    )._replace(
+        map_width=geometry.map_width,
+        map_height=geometry.map_height,
+        obstacles=jnp.asarray(geometry.obstacles, jnp.float32),
+        team_spawn_pad_positions=jnp.asarray(
+            geometry.team_spawn_pad_positions, jnp.float32
+        ),
+    )
+    actual = source._replace(
+        team_spawn_pad_positions=source.team_spawn_pad_positions[::-1]
+    )
+    metadata = [
+        {"name": "map_id", "value": "0"},
+        {"name": "map_name", "value": history.info.name},
+        {"name": "map_origin", "value": "registered"},
+        {"name": "map_split", "value": history.info.split},
+    ]
+
+    def forbidden(*args: object) -> None:
+        del args
+        pytest.fail("saved map names must not be replaced with current map metadata")
+
+    monkeypatch.setattr(map_identity, "registered_map_metadata", forbidden)
+    context = _source_context(source, actual, choice=1, metadata=metadata)
+    before = context.model_dump_json()
+    assert map_identity.recorded_map(context).technical_name == history.info.name
+    assert context.model_dump_json() == before
+
+
+@pytest.mark.parametrize("change", ["missing_source", "source_hash", "actual_hash"])
+def test_replay_source_content_and_actual_identity_must_match(change: str) -> None:
+    source = make_standard_team_deathmatch_config(
+        map_id=0, team_a_roster=("priest",), team_b_roster=("mage",)
+    )
+    with pytest.raises(ValueError, match=r"content|digest"):
+        _source_context(source, source, choice=0, change=change)
+
+
+@pytest.mark.parametrize("choice", [None, 0])
+def test_swapped_replay_cannot_hide_or_mislabel_source_choice(
+    choice: int | None,
+) -> None:
+    source = make_standard_team_deathmatch_config(
+        map_id=0, team_a_roster=("priest",), team_b_roster=("mage",)
+    )
+    actual = source._replace(
+        team_spawn_pad_positions=source.team_spawn_pad_positions[::-1]
+    )
+    with pytest.raises(ValueError, match="spawn"):
+        _source_context(source, actual, choice=choice)
+
+
+def test_replay_source_relation_rejects_changed_non_spawn_fields() -> None:
+    source = make_standard_team_deathmatch_config(
+        map_id=0, team_a_roster=("priest",), team_b_roster=("mage",)
+    )
+    actual = source._replace(max_steps=source.max_steps + 1)
+    with pytest.raises(ValueError, match="source differs"):
+        _source_context(source, actual, choice=0)
+
+
+def test_custom_swapped_source_stays_custom_and_reader_rejects_bad_markers() -> None:
+    from marl_battlegrounds.evaluation.map_identity import recorded_map
+
+    source = make_standard_team_deathmatch_config(
+        map_id=0, team_a_roster=("priest",), team_b_roster=("mage",)
+    )
+    actual = source._replace(
+        team_spawn_pad_positions=source.team_spawn_pad_positions[::-1]
+    )
+    context = _source_context(source, actual, choice=1, map_id=None)
+    assert recorded_map(context).map_id is None
+    for name, value in (
+        ("marl_bgs.spawn_locations", "2"),
+        ("marl_bgs.source_config_id", "unknown"),
+    ):
+        invalid = context.model_copy(
+            update={
+                "aggregation_keys": tuple(
+                    row.model_copy(update={"value": value}) if row.name == name else row
+                    for row in context.aggregation_keys
+                )
+            }
+        )
+        with pytest.raises(ValueError, match="spawn"):
+            recorded_map(invalid)
+
+
+def test_replay_valid_requested_choice_does_not_validate_unused_source_banks() -> None:
+    from marl_battlegrounds.core.config import (
+        resolve_agent_profile,
+        validate_env_config,
+    )
+
+    actual = make_standard_team_deathmatch_config(
+        map_id=0, team_a_roster=("priest",), team_b_roster=("mage",)
+    )._replace(
+        task_mode=0,
+        team_deathmatch_score_threshold=0,
+        agent_profile=resolve_agent_profile(
+            jnp.array([5] + [0] * 9, jnp.int32), jnp.array([1, 0], jnp.int32)
+        ),
+    )
+    actual = actual._replace(
+        team_spawn_pad_positions=actual.team_spawn_pad_positions.at[1, :, 0].set(0)
+    )
+    source = actual._replace(
+        team_spawn_pad_positions=actual.team_spawn_pad_positions[::-1]
+    )
+    validate_env_config(actual)
+    with pytest.raises(ValueError, match="radius-adjusted map bounds"):
+        validate_env_config(source)
+    context = _source_context(source, actual, choice=1, map_id=None)
+    assert context.resolved_env_config.task_mode == 0

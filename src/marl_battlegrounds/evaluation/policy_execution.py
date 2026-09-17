@@ -14,9 +14,10 @@ advancing the game. Generic host Systems keep opaque memory outside JAX, while
 their JAX opponents remain batched. Privileged training state stays separate.
 """
 
+from __future__ import annotations
+
 # Private System adapter fields are shared only by their owning module's helpers.
 # pyright: reportPrivateUsage=false
-
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import partial
@@ -1121,11 +1122,6 @@ def _initial_memory(
     return execution.init(variables, inputs, keys)
 
 
-def _validate_roster(system: System, inputs: SystemInput) -> None:
-    """Validate concrete independent rosters; compiled values remain preconditions."""
-    _validate_adapter_roster(_execution(system), inputs.active_mask)
-
-
 def _validate_adapter_roster(execution: _SystemExecution, active: Array) -> None:
     """Reject incompatible concrete active prefixes before choosing any action.
 
@@ -1209,22 +1205,83 @@ def init_systems(
     Save the returned state and pass each successor to apply_systems. A new
     unrelated environment context requires a new call instead of reusing it.
     """
+    return _init_system_pair(
+        _execution(a),
+        _execution(b),
+        a.variables if variables_a is None else variables_a,
+        b.variables if variables_b is None else variables_b,
+        (_adapter_template(a), _adapter_template(b)),
+        observations,
+        state,
+        key,
+    )
+
+
+def _init_system_pair(
+    execution_a: _SystemExecution,
+    execution_b: _SystemExecution,
+    variables_a: PolicyTree,
+    variables_b: PolicyTree,
+    templates: tuple[PolicyTree, PolicyTree],
+    observations: Observations,
+    state: EnvironmentState,
+    init_roots: Array,
+) -> SystemState:
+    """Initialize a pair using stable call structure and explicit setup values.
+
+    Parameters
+    ----------
+    execution_a, execution_b : _SystemExecution
+        Fixed callables and adapter layout for Team A and Team B. These small
+        descriptors may be static JAX arguments; parameter values must not be.
+    variables_a, variables_b : Any
+        Each method's dynamic parameters. Opaque host values stay outside jit.
+    templates : tuple[Any, Any]
+        Already prepared numerical adapter templates, or () for generic teams.
+    observations : Observations
+        Permitted compact inputs at the same epoch as state.
+    state : EnvironmentState
+        Scalar or native state; each method receives a leading batch dimension.
+    init_roots : Array
+        Supported typed or legacy root, or B lane roots. Initialization folds
+        episode IDs and the existing initialization/team domains. The evaluator
+        supplies its separately scheduled stream-3 lane roots here.
+
+    Returns
+    -------
+    SystemState
+        Independent fresh memories, lifecycle bindings, original roots and an
+        invalid trace. No action method is called. Carry this returned state.
+
+    Raises
+    ------
+    ValueError
+        Key shape or a concrete independent-adapter roster is invalid.
+    TypeError
+        A method initializer or JAX rejects incompatible numerical structure.
+
+    Notes
+    -----
+    This is the shared lower initialization authority for raw calls and runners.
+    Host inputs alone become NumPy; opaque sessions are neither copied nor saved.
+    No descriptors, templates or parameter snapshots are constructed in this call.
+    """
     ids = _batched(state.episode_id, state.episode_id.ndim != 0)
     memories: list[PolicyTree] = []
-    templates = (_adapter_template(a), _adapter_template(b))
-    for team, (system, override) in enumerate(((a, variables_a), (b, variables_b))):
+    for team, (execution, variables) in enumerate(
+        ((execution_a, variables_a), (execution_b, variables_b))
+    ):
         inputs = system_inputs(observations, state, team=team)
-        _validate_roster(system, inputs)
-        execution = _execution(system)
-        if system.execution == "host":
+        _validate_adapter_roster(execution, inputs.active_mask)
+        if execution.execution == "host":
             inputs = jax.device_get(inputs)
         memories.append(
             _initial_memory(
                 execution,
-                system.variables if override is None else override,
+                variables,
                 templates[team],
                 inputs,
-                _initialization_keys(key, ids, team),
+                _initialization_keys(init_roots, ids, team),
             )
         )
     return SystemState(
@@ -1232,7 +1289,7 @@ def init_systems(
         memories[1],
         ids,
         _batched(state.reset_generation, state.episode_id.ndim != 0),
-        key,
+        init_roots,
         _empty_trace(ids),
         templates,
     )
@@ -1319,8 +1376,16 @@ def _adapter_actions(
     memory: PolicyTree,
     inputs: SystemInput,
     keys: Array,
+    *,
+    actor_keys: Array | None = None,
 ) -> SystemOutput:
-    """Batch scalar Policies while keeping their original parameter trees separate."""
+    """Batch scalar Policies with generic team keys or exact legacy actor keys.
+
+    keys contains B team keys. Optional actor_keys contains (B,5) typed keys
+    or (B,5,2) uint32 legacy keys, already assigned to these team-local rows by
+    the evaluator's global-slot authority. Supplied actor keys are used unchanged;
+    otherwise fold local slots into keys. Parameters and memory stay separate.
+    """
     count = inputs.valid.shape[0]
 
     def actor_streams(key: Array) -> Array:
@@ -1329,7 +1394,8 @@ def _adapter_actions(
             key, jnp.arange(5, dtype=jnp.uint32)
         )
 
-    actor_keys = jax.vmap(actor_streams)(keys)
+    if actor_keys is None:
+        actor_keys = jax.vmap(actor_streams)(keys)
     if execution.shared:
 
         def lane(
@@ -1497,13 +1563,25 @@ def _jax_apply(
     keys: Array,
     init_keys: Array,
     reset_mask: Array,
+    *,
+    actor_keys: Array | None = None,
+    keep_learning_outputs: bool = True,
 ) -> SystemOutput:
-    """Apply one numerical team, with selected reset and no host callbacks."""
+    """Apply one numerical team, with selected reset and no host callbacks.
+
+    execution fixes call structure; all numerical arguments stay dynamic.
+    Optional actor_keys preserves an evaluator's exact (B,5) typed or (B,5,2)
+    legacy adapter draws. Generic methods use keys unchanged. The static
+    keep_learning_outputs flag defaults to True; False drops unused learner
+    values inside the compiled call, without another method invocation.
+    """
     memory = _reset_for_decision(
         execution, variables, template, memory, inputs, init_keys, reset_mask
     )
     result = (
-        _adapter_actions(execution, variables, memory, inputs, keys)
+        _adapter_actions(
+            execution, variables, memory, inputs, keys, actor_keys=actor_keys
+        )
         if execution.policies
         else execution.apply(variables, memory, inputs, keys)
     )
@@ -1516,12 +1594,16 @@ def _jax_apply(
     return SystemOutput(
         output.actions,
         _preserve_padding(execution, memory, output.next_memory, inputs.valid),
-        learning_outputs=output.learning_outputs,
+        learning_outputs=output.learning_outputs if keep_learning_outputs else (),
         policy_ids=output.policy_ids,
     )
 
 
-@partial(jax.jit, static_argnums=0, static_argnames=("team",))
+@partial(
+    jax.jit,
+    static_argnums=0,
+    static_argnames=("team", "keep_learning_outputs"),
+)
 def _mixed_jax_apply(
     execution: _SystemExecution,
     variables: PolicyTree,
@@ -1538,6 +1620,8 @@ def _mixed_jax_apply(
     reset_mask: Array,
     *,
     team: int,
+    actor_keys: Array | None = None,
+    keep_learning_outputs: bool = True,
 ) -> SystemOutput:
     """Prepare and apply the JAX team in one mixed-loop device call.
 
@@ -1552,12 +1636,18 @@ def _mixed_jax_apply(
     reset. Return one SystemOutput without reading device data on the host.
     Concrete independent-roster validation belongs to the caller before this
     helper; compiled numerical ID ranges retain their existing precondition.
+    Optional actor_keys bypasses adapter key derivation only. False for the static
+    keep_learning_outputs flag removes learner values before returning from jit.
     """
     inputs = cast(
         SystemInput,
         _prepare_system_inputs(observations, masks, active, starts, valid, team=team),
     )
-    action_keys = _action_keys(key, episode_ids, team)
+    action_keys = (
+        actor_keys[:, 0]
+        if actor_keys is not None
+        else _action_keys(key, episode_ids, team)
+    )
     init_keys = action_keys
     if execution.init is not None:
 
@@ -1583,6 +1673,8 @@ def _mixed_jax_apply(
         action_keys,
         init_keys,
         reset_mask,
+        actor_keys=actor_keys,
+        keep_learning_outputs=keep_learning_outputs,
     )
 
 
@@ -1605,8 +1697,17 @@ def _host_apply(
     keys: Array,
     init_keys: Array,
     reset_mask: Array,
+    *,
+    actor_keys: Array | None = None,
+    keep_learning_outputs: bool = True,
 ) -> SystemOutput:
-    """Transfer only the host team's inputs and keep its full lane order."""
+    """Transfer only the host team's inputs and keep its full lane order.
+
+    Optional actor_keys supplies exact legacy adapter draws without changing key
+    representation. keep_learning_outputs=False releases unused host learner
+    values after the one method call; it never converts or serializes them.
+    The remaining arguments follow the shared numerical team's call contract.
+    """
     inputs, selected = jax.device_get((inputs, reset_mask))
     _validate_adapter_roster(execution, inputs.active_mask)
     memory = _reset_for_decision(
@@ -1615,7 +1716,9 @@ def _host_apply(
     if not np.any(inputs.valid):
         return _padding_output(memory, len(inputs.valid))
     result = (
-        _adapter_actions(execution, variables, memory, inputs, keys)
+        _adapter_actions(
+            execution, variables, memory, inputs, keys, actor_keys=actor_keys
+        )
         if execution.policies
         else execution.apply(variables, memory, inputs, keys)
     )
@@ -1628,7 +1731,7 @@ def _host_apply(
     return SystemOutput(
         output.actions,
         _preserve_padding(execution, memory, output.next_memory, inputs.valid),
-        learning_outputs=output.learning_outputs,
+        learning_outputs=output.learning_outputs if keep_learning_outputs else (),
         policy_ids=output.policy_ids,
     )
 
@@ -1692,15 +1795,100 @@ def apply_systems(
     external mutations cannot be rolled back by this helper. A returned action
     does not itself advance the environment.
     """
+    return _apply_system_pair(
+        _execution(a),
+        _execution(b),
+        a.variables if variables_a is None else variables_a,
+        b.variables if variables_b is None else variables_b,
+        memory,
+        observations,
+        state,
+        key,
+    )
+
+
+def _apply_system_pair(
+    execution_a: _SystemExecution,
+    execution_b: _SystemExecution,
+    variables_a: PolicyTree,
+    variables_b: PolicyTree,
+    memory: SystemState,
+    observations: Observations,
+    state: EnvironmentState,
+    action_roots: Array,
+    *,
+    actor_keys: Array | None = None,
+    keep_learning_outputs: bool = True,
+) -> tuple[Action, SystemState, tuple[PolicyTree, PolicyTree]]:
+    """Share one method application authority between raw calls and evaluation.
+
+    Parameters
+    ----------
+    execution_a, execution_b : _SystemExecution
+        Fixed callables and adapter layout for Team A/B. Keep these descriptors
+        static under jit; their changing numerical values are separate inputs.
+    variables_a, variables_b : Any
+        Each method's explicit parameters. Opaque host values stay outside jit.
+    memory : SystemState
+        Latest memories, saved initialization roots and reset bindings. The
+        evaluator replaces selected lane roots before applying after refill.
+    observations : Observations
+        Compact permitted inputs from the same decision epoch as state.
+    state : EnvironmentState
+        Scalar or native state. New reset generations reset only selected live
+        memories. Finished lanes preserve memory and have invalid traces.
+    action_roots : Array
+        Typed/legacy root or B lane roots. Generic methods use the existing
+        System action/team domains. Evaluation supplies scheduled stream-2 roots.
+    actor_keys : Array | None
+        Optional exact legacy global-slot keys, typed (B,10) or uint32 (B,10,2).
+        Policy adapters use their five keys unchanged. Generic methods ignore
+        this argument. None retains the raw System adapter key rules.
+    keep_learning_outputs : bool
+        Static True by default. False returns ((), ()) and removes learner data
+        inside mixed JAX application before it leaves that compiled boundary.
+
+    Returns
+    -------
+    tuple[Action, SystemState, tuple[Any, Any]]
+        Submitted joint actions, successor memories/trace and separate optional
+        learner values. No environment step, extra method call or I/O occurs.
+
+    Raises
+    ------
+    ValueError
+        Key shapes, memory lane count, component IDs or concrete adapter rosters
+        are invalid. Compiled numerical ID ranges remain caller preconditions.
+    TypeError
+        An action/result/memory structure or key dtype is unsupported.
+
+    Notes
+    -----
+    Pure JAX pairs compose with jit/scan. Mixed pairs run on the host; generic
+    host methods receive one stable permitted batch while JAX remains batched.
+    Initializers choose no actions. Provider exceptions propagate without a
+    fabricated action or any promise to undo the provider's own mutable state.
+    """
     native = state.episode_id.ndim != 0
     ids = _batched(state.episode_id, native)
+    if actor_keys is not None:
+        typed = jax.dtypes.issubdtype(  # pyright: ignore[reportPrivateImportUsage]
+            actor_keys.dtype, jax.dtypes.prng_key
+        )
+        expected = (ids.shape[0], 10) if typed else (ids.shape[0], 10, 2)
+        if actor_keys.shape != expected or (
+            not typed and actor_keys.dtype != jnp.uint32
+        ):
+            raise ValueError(
+                "actor_keys must contain one supported key per global slot"
+            )
     generations = _batched(state.reset_generation, native)
     if memory.episode_id.shape != ids.shape:
         raise ValueError("SystemState and environment must have the same lane count")
     valid = _batched(~state.done.done, native)
     reset = (generations != memory.reset_generation) & valid
     outputs: list[SystemOutput] = []
-    mixed = a.execution == "host" or b.execution == "host"
+    mixed = execution_a.execution == "host" or execution_b.execution == "host"
     # One small host check can skip every expanded input/ID transfer on padding.
     if mixed:
         host_valid, host_reset = jax.device_get((valid, reset))
@@ -1709,15 +1897,21 @@ def apply_systems(
     else:
         host_has_work = True
         needs_initialization = True
-    for team, (system, old, override) in enumerate(
-        ((a, memory.team_a, variables_a), (b, memory.team_b, variables_b))
+    for team, (execution, old, variables) in enumerate(
+        (
+            (execution_a, memory.team_a, variables_a),
+            (execution_b, memory.team_b, variables_b),
+        )
     ):
-        if system.execution == "host" and not host_has_work:
+        if execution.execution == "host" and not host_has_work:
             outputs.append(_padding_output(old, ids.shape[0]))
             continue
-        execution = _execution(system)
-        variables = system.variables if override is None else override
-        if mixed and system.execution == "jax":
+        team_actor_keys = (
+            actor_keys[:, team * 5 : team * 5 + 5]
+            if actor_keys is not None and execution.policies
+            else None
+        )
+        if mixed and execution.execution == "jax":
             active = _batched(state.config.agent_profile.active_mask, native)
             if needs_initialization:
                 _validate_adapter_roster(execution, active[:, team * 5 : team * 5 + 5])
@@ -1735,19 +1929,25 @@ def apply_systems(
                         _batched(state.episode_start, native),
                         valid,
                         ids,
-                        key,
+                        action_roots,
                         memory.init_key,
                         reset,
                         team=team,
+                        actor_keys=team_actor_keys,
+                        keep_learning_outputs=keep_learning_outputs,
                     ),
                 )
             )
             continue
         inputs = system_inputs(observations, state, team=team)
-        if system.execution == "jax":
+        if execution.execution == "jax":
             _validate_adapter_roster(execution, inputs.active_mask)
-        function = _host_apply if system.execution == "host" else _jax_apply
-        action_keys = _action_keys(key, ids, team)
+        function = _host_apply if execution.execution == "host" else _jax_apply
+        action_keys = (
+            team_actor_keys[:, 0]
+            if team_actor_keys is not None
+            else _action_keys(action_roots, ids, team)
+        )
         # Adapters broadcast stored templates; they never consume init RNG.
         # On mixed steps without resets, the unused argument can reuse keys.
         init_keys = (
@@ -1764,6 +1964,8 @@ def apply_systems(
             action_keys,
             init_keys,
             reset,
+            actor_keys=team_actor_keys,
+            keep_learning_outputs=keep_learning_outputs,
         )
         outputs.append(output)
     valid = _batched(~state.done.done, native)

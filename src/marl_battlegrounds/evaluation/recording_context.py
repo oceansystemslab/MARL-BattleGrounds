@@ -197,6 +197,109 @@ def _scenario_roles(metadata: dict[str, object], active: np.ndarray) -> tuple[st
     return cast(tuple[str, ...], roles)
 
 
+def _map_recording_keys(
+    config: EnvConfig,
+    episode: dict[str, object],
+    details: dict[str, object],
+) -> tuple[AggregationKeyV1, ...]:
+    """Verify declared source content before preserving recorded map metadata.
+
+    config is the actual scalar episode configuration. Optional source_config_id
+    must resolve through details.configurations and match its content hash. A
+    declared choice must match the whole source bank exchange with all other
+    fields unchanged. Saved map keys are retained for later historical geometry
+    verification; they are never silently replaced by the current catalog.
+    Missing or inconsistent declarations raise ValueError. This host setup helper
+    does not change the actual config, load a policy, or write files.
+    """
+    from marl_battlegrounds.evaluation.evaluation_conditions import (
+        config_record,
+        restore_config,
+    )
+    from marl_battlegrounds.evaluation.map_identity import registered_map_metadata
+    from marl_battlegrounds.tasks import spawn_locations_for_source
+
+    declared_digest = episode.get("configuration_digest")
+    source_id = episode.get("source_config_id")
+    declared_choice = episode.get("spawn_locations")
+    source = config
+    keys: list[AggregationKeyV1] = []
+    if declared_digest is not None and config_record(config)[0] != declared_digest:
+        raise ValueError(
+            "recorded configuration digest differs from the actual episode"
+        )
+    if source_id is not None:
+        contents = details.get("configurations")
+        if not isinstance(source_id, str) or not isinstance(contents, dict):
+            raise ValueError(
+                "recorded spawn source requires saved configuration content"
+            )
+        content = cast(dict[str, object], contents).get(source_id)
+        if not isinstance(content, dict):
+            raise ValueError("recorded spawn source content is missing")
+        source = restore_config(cast(dict[str, object], content), validate=False)
+        if config_record(source)[0] != source_id:
+            raise ValueError("recorded spawn source content differs from its identity")
+        matches, choice = jax.device_get(spawn_locations_for_source(config, source))
+        if not bool(matches):
+            raise ValueError("recorded spawn source differs from actual episode fields")
+        actual_choice = int(choice)
+        if declared_choice is not None:
+            if type(declared_choice) is not int or declared_choice not in (0, 1):
+                raise ValueError("recorded spawn locations must be 0, 1 or None")
+            if declared_choice != actual_choice:
+                raise ValueError(
+                    "recorded spawn locations differ from actual episode banks"
+                )
+            keys.extend(
+                (
+                    AggregationKeyV1(name="marl_bgs.source_config_id", value=source_id),
+                    AggregationKeyV1(
+                        name="marl_bgs.spawn_locations", value=str(declared_choice)
+                    ),
+                )
+            )
+        elif actual_choice == 1 and episode.get("map_id") is not None:
+            raise ValueError(
+                "an exchanged registered episode requires its spawn choice"
+            )
+    elif declared_choice is not None:
+        raise ValueError("recorded spawn locations require explicit source content")
+    map_id = episode.get("map_id")
+    metadata = episode.get("map_metadata")
+    if map_id is None:
+        if metadata is not None:
+            raise ValueError("custom episodes cannot supply registered map metadata")
+        keys.append(AggregationKeyV1(name="map_origin", value="custom"))
+    else:
+        if type(map_id) is not int:
+            raise ValueError("recorded map_id must be an integer")
+        if metadata is None:
+            source_geometry = build_resolved_env_config_v1(source)
+            keys.extend(registered_map_metadata(map_id, source_geometry))  # pyright: ignore[reportArgumentType]
+        else:
+            if not isinstance(metadata, (list, tuple)):
+                raise ValueError(
+                    "recorded map metadata must contain four identity keys"
+                )
+            rows = tuple(
+                AggregationKeyV1.model_validate(row)
+                for row in cast(list[object] | tuple[object, ...], metadata)
+            )
+            names = {"map_id", "map_name", "map_origin", "map_split"}
+            if len(rows) != 4 or {row.name for row in rows} != names:
+                raise ValueError(
+                    "recorded map metadata must contain four identity keys"
+                )
+            values = {row.name: row.value for row in rows}
+            if values["map_id"] != str(map_id) or values["map_origin"] != "registered":
+                raise ValueError(
+                    "recorded map metadata conflicts with the episode map ID"
+                )
+            keys.extend(rows)
+    return tuple(keys)
+
+
 def build_recording_context(
     config: EnvConfig,
     *,
@@ -223,7 +326,11 @@ def build_recording_context(
     episode : dict[str, object]
         Episode metadata. Requires episode_id; may include seed_id,
         expected_horizon, map_id, authored layout/start identities, ten actor
-        IDs/roles and paired-comparison metadata.
+        IDs/roles and paired-comparison metadata. Source/config content IDs and
+        spawn choices are checked against the actual configuration. Saved map
+        metadata may name a retained historical map revision. An optional
+        scenario_qualification_key is a descriptive witness correlation string;
+        it is retained as an aggregation key and never declares a spawn pair.
     policies : dict[str, object]
         Team names or labels under team_a and team_b, used when detailed
         policy descriptors are absent.
@@ -394,6 +501,13 @@ def build_recording_context(
         AggregationKeyV1(name="pass_id", value=pass_id),
         AggregationKeyV1(name="phase", value=phase),
     ]
+    qualification_key = episode.get("scenario_qualification_key")
+    if qualification_key is not None:
+        aggregation_keys.append(
+            AggregationKeyV1(
+                name="scenario_qualification_key", value=cast(str, qualification_key)
+            )
+        )
     if system_ids:
         aggregation_keys.extend(
             (
@@ -421,15 +535,7 @@ def build_recording_context(
                     ),
                 )
             )
-    if episode.get("map_id") is not None:
-        from marl_battlegrounds.evaluation.map_identity import registered_map_metadata
-
-        map_id = episode["map_id"]
-        if type(map_id) is not int:
-            raise ValueError("recorded map_id must be an integer")
-        aggregation_keys.extend(registered_map_metadata(map_id, resolved))  # pyright: ignore[reportArgumentType]
-    else:
-        aggregation_keys.append(AggregationKeyV1(name="map_origin", value="custom"))
+    aggregation_keys.extend(_map_recording_keys(config, episode, details))
     for team_index, team in enumerate(("team_a", "team_b")):
         descriptor = descriptors[team_index] if team_index < len(descriptors) else {}
         name = f"{team}_controller_identity"
@@ -523,4 +629,7 @@ def build_recording_context(
         code_revision=code,
         scenario_name=cast(str | None, episode.get("scenario_name")),
     )
+    from marl_battlegrounds.evaluation.map_identity import recorded_map
+
+    recorded_map(context)
     return context, runtime

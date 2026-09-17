@@ -292,6 +292,41 @@ def _recorded_map(bindings: tuple[tuple[str, str], ...], layout: str) -> Recorde
     )
 
 
+def _declared_source_geometry(context: EvaluationEpisodeContext) -> ResolvedEnvConfigV1:
+    """Return source-order geometry only for an explicit verified spawn marker.
+
+    Older records without the namespaced marker keep their exact bank order.
+    New markers require a source-content ID and choice 0 or 1. Choice 1 exchanges
+    both complete banks for identity checking only; the replay's actual config
+    stays unchanged. This checks a declared map relationship, not an unspecified
+    geometry match. Writer creation separately verifies full source content.
+    """
+    names = {"marl_bgs.spawn_locations", "marl_bgs.source_config_id"}
+    rows = tuple(row for row in context.aggregation_keys if row.name in names)
+    if not rows:
+        return context.resolved_env_config
+    bindings = {row.name: row.value for row in rows}
+    if len(rows) != 2 or set(bindings) != names:
+        raise ValueError(
+            "recorded spawn locations require one source ID and one choice"
+        )
+    if re.fullmatch(r"[0-9a-f]{64}", bindings["marl_bgs.source_config_id"]) is None:
+        raise ValueError("recorded spawn source ID must be a SHA-256 content identity")
+    choice = bindings["marl_bgs.spawn_locations"]
+    if choice not in ("0", "1"):
+        raise ValueError("recorded spawn locations must be 0 or 1")
+    resolved = context.resolved_env_config
+    if choice == "0":
+        return resolved
+    return resolved.model_copy(
+        update={
+            "team_spawn_pad_positions": tuple(
+                reversed(resolved.team_spawn_pad_positions)
+            )
+        }
+    )
+
+
 def recorded_map(context: EvaluationEpisodeContext) -> RecordedMap:
     """Return a verified display identity for an episode's recorded layout.
 
@@ -318,9 +353,12 @@ def recorded_map(context: EvaluationEpisodeContext) -> RecordedMap:
     Notes
     -----
         Host-only and read-only. An exact authored name/revision/digest may identify
-        an older recording without keys. Matching geometry by itself is never used
+        an older recording without keys. An explicit verified spawn choice permits
+        checking the complete exchanged banks against that source. Records without
+        that marker still need an exact bank match. Matching geometry is never used
         to invent a historical map assignment.
     """
+    source_geometry = _declared_source_geometry(context)
     bindings = tuple(
         (row.name, row.value)
         for row in context.aggregation_keys
@@ -336,7 +374,7 @@ def recorded_map(context: EvaluationEpisodeContext) -> RecordedMap:
         )
         if authored is not None:
             result, geometry = authored
-            if not _geometry_matches(context.resolved_env_config, geometry):
+            if not _geometry_matches(source_geometry, geometry):
                 raise ValueError("recorded source does not match the episode geometry")
         return result
     if result.map_id is None:
@@ -349,16 +387,16 @@ def recorded_map(context: EvaluationEpisodeContext) -> RecordedMap:
         )
         if authored is None or authored[0] != result:
             raise ValueError("recorded source identity conflicts with its map metadata")
-        if not _geometry_matches(context.resolved_env_config, authored[1]):
+        if not _geometry_matches(source_geometry, authored[1]):
             raise ValueError("recorded source does not match the episode geometry")
         return result
     _, map_id = _registered_map_by_name(result.technical_name)
     current = asset_manifest().maps[map_id]
     if result.technical_name == current.name and _geometry_matches(
-        context.resolved_env_config, map_geometry(current)
+        source_geometry, map_geometry(current)
     ):
         return result
     historical = map_history()[map_id]
-    if _geometry_matches(context.resolved_env_config, historical.geometry):
+    if _geometry_matches(source_geometry, historical.geometry):
         return result
     raise ValueError("recorded map_id does not match the episode geometry")

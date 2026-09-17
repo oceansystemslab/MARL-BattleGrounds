@@ -558,6 +558,8 @@ def test_package_exports_legacy_and_current_replay_public_functions() -> None:
         if inspect.isfunction(getattr(evaluation_api, name))
     }
     assert exported_functions == {
+        "evaluate_episodes",
+        "load_results",
         "build_evaluation_episode_context_v2",
         "build_evaluation_episode_context_v3",
         "build_replay_v2",

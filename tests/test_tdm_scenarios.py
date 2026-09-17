@@ -1,4 +1,8 @@
-"""Check all eight packaged TDM scenarios through their replay records."""
+"""Check exact TDM scenario starts, witness identities and replay round trips.
+
+Single authored qualifications retain their scenario/seed correlation without
+claiming a two-game spawn comparison. Existing scenario content stays unchanged.
+"""
 
 from __future__ import annotations
 
@@ -91,6 +95,10 @@ def test_all_eight_scenarios_join_packaged_content_and_roundtrip_evidence(
         4 if scenario_id in (3, 5, 8) else 2
     )
     assert replay.completion.completion_state == "complete"
+    assert replay.header.context.identity.paired_comparison_key is None
+    assert {row.name: row.value for row in replay.header.context.aggregation_keys}[
+        "scenario_qualification_key"
+    ] == f"tdm-scenario-{scenario_id}-coordinate-0"
     assert tuple(evidence.full_metrics) == (*IDENTITY_COLUMNS, *FULL_METRIC_NAMES)
     assert all(value.shape == (1,) for value in evidence.full_metrics.values())
     assert record.measurement_results[0].result_status == "defined"
@@ -138,6 +146,10 @@ def test_schedule_coordinates_are_unique_and_retry_reproduces_exact_evidence(
     other = capture_tdm_qualification_episode(1, 1)
     assert other.specification == retried.specification
     assert other.record.schedule_coordinate == 1
+    assert {
+        row.name: row.value for row in other.replay.header.context.aggregation_keys
+    }["scenario_qualification_key"] == "tdm-scenario-1-coordinate-1"
+    assert other.replay.header.context.identity.paired_comparison_key is None
     assert (
         other.record.canonical_digest_sha256 != retried.record.canonical_digest_sha256
     )

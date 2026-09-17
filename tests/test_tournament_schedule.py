@@ -25,10 +25,8 @@ def test_big_twelve_has_exact_pair_map_side_and_seed_balance() -> None:
     pairs = Counter(tuple(sorted((m.team_a, m.team_b))) for m in schedule)
     assert pairs == {pair: 100 for pair in combinations(names, 2)}
     assert Counter((m.team_a, m.team_b, m.map_id) for m in schedule) == {
-        (a, b, map_id): 10
-        for a in names
-        for b in names
-        if a != b
+        (a, b, map_id): 20
+        for a, b in combinations(names, 2)
         for map_id in CANONICAL_TDM_EVALUATION_MAP_IDS
     }
     blocks: dict[int, list[TournamentMatch]] = defaultdict(list)
@@ -36,7 +34,11 @@ def test_big_twelve_has_exact_pair_map_side_and_seed_balance() -> None:
         blocks[match.block_id].append(match)
     assert len(blocks) == len({m.seed_id for m in schedule}) == 3300
     for first, second in blocks.values():
-        assert (first.team_a, first.team_b) == (second.team_b, second.team_a)
+        assert (first.team_a, first.team_b) == (second.team_a, second.team_b)
+        assert (first.spawn_locations, second.spawn_locations) == (0, 1)
+        assert (
+            first.pairing_protocol == second.pairing_protocol == "fixed-team-spawn-v1"
+        )
         assert first.map_id == second.map_id
         assert first.seed_id == second.seed_id == first.block_id == second.block_id
 

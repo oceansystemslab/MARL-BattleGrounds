@@ -31,7 +31,9 @@ def _outcomes(
     for match in schedule:
         first_side = match.team_a < match.team_b
         outcome = block_patterns[(match.block_id - 1) % len(block_patterns)][
-            int(not first_side)
+            match.spawn_locations
+            if match.spawn_locations is not None
+            else int(not first_side)
         ]
         result[match.episode_id] = (
             outcome if first_side or outcome == 3 else 3 - outcome

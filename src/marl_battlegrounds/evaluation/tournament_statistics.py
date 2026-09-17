@@ -134,7 +134,7 @@ def _population(
 ) -> _Population:
     """Validate exact schedule coverage and build paired resampling units.
 
-    Require unique legal IDs, terminal outcomes, opposite sides with equal map/seed,
+    Require unique legal IDs, terminal outcomes, versioned pairs with equal map/seed,
     equal pair/map budgets and coherent declared dependence. Group units by coverage
     so resampling preserves exposure. Invalid populations raise ValueError before
     any fit; the returned arrays are host-only and inputs are not changed.
@@ -172,6 +172,13 @@ def _population(
             raise ValueError("Duplicate tournament episode identity")
         episodes.add(match.episode_id)
         blocks[match.block_id].append(match)
+    protocols = {
+        "team-swap-v1" if match.pairing_protocol is None else match.pairing_protocol
+        for match in schedule
+    }
+    if len(protocols) != 1 or not protocols <= {"team-swap-v1", "fixed-team-spawn-v1"}:
+        raise ValueError("Tournament pairing protocols must be known and consistent")
+    protocol = next(iter(protocols))
     if set(outcomes) != episodes:
         raise ValueError("Outcomes must cover the complete exact tournament schedule")
     if any(
@@ -198,16 +205,30 @@ def _population(
                 "Every seed block must contain exactly two side assignments"
             )
         first, second = sorted(matches, key=lambda m: m.team_a)
+        sides_match = (first.team_a, first.team_b) == (second.team_b, second.team_a)
+        if protocol == "fixed-team-spawn-v1":
+            sides_match = (
+                (first.team_a, first.team_b) == (second.team_a, second.team_b)
+                and all(
+                    not isinstance(m.spawn_locations, bool)
+                    and isinstance(m.spawn_locations, Integral)
+                    for m in matches
+                )
+                and {first.spawn_locations, second.spawn_locations} == {0, 1}
+                and first.source_config_id == second.source_config_id
+            )
         if (
-            (first.team_a, first.team_b) != (second.team_b, second.team_a)
+            not sides_match
             or first.map_id != second.map_id
             or first.seed_id != second.seed_id
             or first.bootstrap_group != second.bootstrap_group
         ):
             raise ValueError("Broken side, map, seed or coupling join within a block")
-        cells[index] = pair_ids[first.team_a, first.team_b] * len(maps) + maps.index(
-            first.map_id
+        canonical_pair = (
+            min(first.team_a, first.team_b),
+            max(first.team_a, first.team_b),
         )
+        cells[index] = pair_ids[canonical_pair] * len(maps) + maps.index(first.map_id)
         group = (
             ("block", first.block_id)
             if first.bootstrap_group is None
@@ -225,7 +246,7 @@ def _population(
                 1
                 if outcome == 3
                 else 0
-                if (outcome == 1) == (match.team_a == first.team_a)
+                if (outcome == 1) == (match.team_a == canonical_pair[0])
                 else 2
             )
             values[index, category] += 1

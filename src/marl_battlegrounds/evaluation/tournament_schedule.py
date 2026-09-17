@@ -1,7 +1,7 @@
-"""Build deterministic all-pairs schedules with equal map and team-side exposure.
+"""Build deterministic all-pairs schedules with equal map and spawn-bank exposure.
 
-The current executor uses one block for two games that swap the policy sides
-while sharing a map and seed identity. Schedule creation performs no simulation
+One block holds two games with fixed Team A/B ownership and opposite complete
+spawn banks. They share a source map and seed. Schedule creation performs no simulation
 or random draw. Statistics later treat each block, or an explicitly larger
 coupled group, as one resampling unit.
 """
@@ -37,7 +37,7 @@ class TournamentMatch:
     episode_id : int
         Unique positive int32 row identity.
     block_id : int
-        Positive identity joining the two opposite side assignments.
+        Positive identity joining the two complementary games.
     seed_id : int
         uint32 stream coordinate folded into the tournament root seed.
     map_id : int
@@ -50,11 +50,21 @@ class TournamentMatch:
         Optional nonempty name declaring dependence across several
         blocks. None treats this block as its own independent unit.
 
+    pairing_protocol : str | None
+        "fixed-team-spawn-v1" for new schedules. None or "team-swap-v1"
+        preserves historical reversed-team records.
+    spawn_locations : int | None
+        Source bank order (0) or complete exchange (1); absent for old records.
+    source_config_id, resolved_config_id : str | None
+        Configuration content references filled by the runner. IDs alone do not
+        prove that actual configurations form a physical spawn pair.
+
     Notes
     -----
     This frozen description stores values; the schedule/statistics helpers
     validate them. Sharing a seed does not guarantee equal actions under
-    different policy inputs. Sides refer to policy assignment, not a bank shuffle.
+    different policy inputs. Statistical validation checks logical pair structure;
+    the runner separately verifies physical source and resolved configurations.
     """
 
     episode_id: int
@@ -64,6 +74,10 @@ class TournamentMatch:
     team_a: str
     team_b: str
     bootstrap_group: str | None = None
+    pairing_protocol: str | None = None
+    spawn_locations: int | None = None
+    source_config_id: str | None = None
+    resolved_config_id: str | None = None
 
 
 def build_tournament_schedule(
@@ -72,7 +86,7 @@ def build_tournament_schedule(
     *,
     episodes_per_pair: int = 100,
 ) -> tuple[TournamentMatch, ...]:
-    """Give every unordered policy pair equal maps and both team assignments.
+    """Give each unordered pair equal maps and opposite spawn-bank choices.
 
     Parameters
     ----------
@@ -82,15 +96,16 @@ def build_tournament_schedule(
         Nonempty distinct nonnegative int32-compatible map IDs. This helper
         checks ID form, not whether packaged geometry exists.
     episodes_per_pair : int
-        Positive total across maps and both sides, default 100.
+        Positive total across maps and both spawn choices, default 100.
         Must be divisible by twice the number of maps.
 
     Returns
     -------
     tuple[TournamentMatch, ...]
         Tuple of TournamentMatch in sorted pair, sorted map, block and side order.
-        IDs are sequential from 1. Each block contains opposite policy assignments
-        with the same seed_id equal to block_id. bootstrap_group defaults to None.
+        IDs are sequential from 1. The sorted first participant stays Team A in
+        both games. Each block uses choices 0 and 1 and seed_id equal to block_id.
+        bootstrap_group defaults to None.
 
     Raises
     ------
@@ -135,15 +150,17 @@ def build_tournament_schedule(
         for map_id in map_ids:
             for _ in range(episodes_per_pair // (2 * len(map_ids))):
                 block_id += 1
-                for team_a, team_b in ((first, second), (second, first)):
+                for spawn_locations in (0, 1):
                     matches.append(
                         TournamentMatch(
                             episode_id=len(matches) + 1,
                             block_id=block_id,
                             seed_id=block_id,
                             map_id=map_id,
-                            team_a=team_a,
-                            team_b=team_b,
+                            team_a=first,
+                            team_b=second,
+                            pairing_protocol="fixed-team-spawn-v1",
+                            spawn_locations=spawn_locations,
                         )
                     )
     return tuple(matches)

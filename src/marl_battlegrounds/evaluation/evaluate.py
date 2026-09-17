@@ -1,10 +1,14 @@
-"""Run fixed-policy evaluation with a host scheduler and compiled game chunks.
+"""Run frozen methods with exact schedules, compiled chunks and lane refill.
 
 The schedule owns exact configs, episode IDs and random-stream identities.
 JAX policies run in batches; host methods use synchronous Python calls with
 the same decision inputs. Optional metrics/replays go to memory or RunWriter.
-This module does not train policies or apply future phase-specific map rules.
+Map defaults and saved-first conditions resolve before execution. This module
+does not train methods or use training trackers, automatic resets or collectors.
 """
+
+# Numerical execution and recording use shared private authorities.
+# pyright: reportPrivateUsage=false
 
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack
@@ -36,7 +40,23 @@ from marl_battlegrounds.environment import (
     MetricMode,
     make,
 )
+from marl_battlegrounds.evaluation.collection_types import CollectedAssignments
 from marl_battlegrounds.evaluation.episode_metrics import MetricValues
+from marl_battlegrounds.evaluation.evaluation_capture import evaluation_record_batch
+from marl_battlegrounds.evaluation.evaluation_conditions import (
+    OMITTED,
+    Omitted,
+    capture_ids,
+    config_record,
+    default_maps,
+    option,
+    prepare_schedule,
+    prepare_source_choices,
+    read_saved_pass,
+    restore_config,
+    roster_default,
+    saved_specs,
+)
 from marl_battlegrounds.evaluation.metric_catalog import (
     FULL_METRIC_NAMES,
     METRIC_SCHEMA_ID,
@@ -47,11 +67,15 @@ from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV3
 from marl_battlegrounds.evaluation.policy_execution import (
     Policy,
     PolicyApply,
+    PolicyTrace,
     PolicyTree,
+    System,
+    SystemState,
+    _apply_system_pair,
+    _init_system_pair,
+    _SystemExecution,
     apply_policy_batch,
-    freeze_variables,
     initial_policy_carry,
-    policy,
     select_policy_carry,
 )
 from marl_battlegrounds.evaluation.recording_context import (
@@ -59,6 +83,7 @@ from marl_battlegrounds.evaluation.recording_context import (
     capture_recording_provenance,
 )
 from marl_battlegrounds.evaluation.recording_identity import (
+    normalize_system_registration,
     policy_description,
 )
 from marl_battlegrounds.evaluation.recording_identity import (
@@ -69,6 +94,7 @@ from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 from marl_battlegrounds.evaluation.replay_capture import ReplayPackets
 from marl_battlegrounds.evaluation.replay_recording import ReplayCollector
 from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+from marl_battlegrounds.evaluation.results import EpisodeResult, EvaluationResult
 from marl_battlegrounds.evaluation.run_writer import (
     IDENTITY_COLUMNS,
     RunWriter,
@@ -76,11 +102,19 @@ from marl_battlegrounds.evaluation.run_writer import (
     _json_value,  # pyright: ignore[reportPrivateUsage]
     configuration_identity,
 )
+from marl_battlegrounds.evaluation.system_evaluation import (
+    freeze_evaluation_method,
+    prepare_evaluation_system,
+    replace_initialization_roots,
+    validate_evaluation_rosters,
+)
 from marl_battlegrounds.policies.input import Observations
 from marl_battlegrounds.tasks import (
     CANONICAL_TDM_EVALUATION_MAP_IDS,
     AgentClassName,
     TDMMapInfo,
+    _roster_ids,
+    _swap_spawn_banks,
     canonical_tournament_rosters,
     make_standard_team_deathmatch_config,
 )
@@ -114,6 +148,16 @@ class EpisodeSpec:
     metadata : Mapping[str, object] | None
         Optional descriptive fields retained with the scheduled episode.
 
+    source_config : EnvConfig | None
+        Optional exact source for a declared complete spawn-bank relationship.
+    spawn_locations : int | None
+        Optional 0 for source banks or 1 for exchanged banks. This describes the
+        supplied config; it never changes it. Requires matching source evidence.
+    paired_comparison_key : str | None
+        Optional nonempty key joining exactly two supplied conditions. Both need
+        equal explicit seeds/maps. An authored comparison stays custom; a single
+        authored episode without this key needs no counterpart.
+
     Construction only stores this immutable description. evaluate_episodes owns
     schedule/config/start validation before execution. Reordering specifications
     does not change their assigned random streams. Matching seeds do not promise
@@ -126,86 +170,14 @@ class EpisodeSpec:
     seed_id: int | None = None
     initial_state: EnvState | None = None
     metadata: Mapping[str, object] | None = None
+    source_config: EnvConfig | None = None
+    spawn_locations: int | None = None
+    paired_comparison_key: str | None = None
 
     @property
     def random_seed_id(self) -> int:
         """Return explicit seed_id, or episode_id when no seed was supplied."""
         return self.episode_id if self.seed_id is None else self.seed_id
-
-
-@dataclass(frozen=True)
-class EpisodeResult:
-    """Compact host result for one completed episode.
-
-    Attributes
-    ----------
-    episode_id : int
-        Positive schedule ID identifying the completed row.
-    seed_id : int
-        uint32-compatible random-stream identity assigned by the schedule.
-    map_id : int | None
-        Declared map ID, or None for an unlabeled explicit config.
-    outcome : int
-        Core terminal code: 1 Team A win, 2 Team B win, 3 draw.
-    episode_length : int
-        Number of real transitions since this episode's start.
-    team_a_score : int
-        Final Team A score, including any authored starting score.
-    team_b_score : int
-        Final Team B score, including any authored starting score.
-    config_id : str
-        Content digest linking to metadata's resolved configuration.
-
-    The frozen record contains no trajectory, model weights or open file handle.
-    """
-
-    episode_id: int
-    seed_id: int
-    map_id: int | None
-    outcome: int
-    episode_length: int
-    team_a_score: int
-    team_b_score: int
-    config_id: str
-
-
-@dataclass(frozen=True)
-class EvaluationResult:
-    """Evaluation outputs and the identities needed to interpret them.
-
-    Attributes
-    ----------
-    priority_metrics : Columns
-        Selected priority table as NumPy columns, or {} when
-        unselected or retained by a writer.
-    full_metrics : Columns
-        Selected full table with the same ownership rule.
-    episodes : tuple[EpisodeResult, ...]
-        Compact results newly completed by this call, in episode-ID order.
-    metadata : dict[str, object]
-        Run, policy, config, schedule and runtime descriptions.
-    completed_episode_ids : tuple[int, ...]
-        Sorted union of prior durable and new completions;
-        default () when constructing a result directly.
-    paths : dict[str, Path] | None
-        Produced run-file paths when a writer was used; otherwise None.
-    replays : tuple[ReplayArtifactV3, ...]
-        Completed in-memory replay artifacts; default (), and empty when
-        a writer owns the replay files.
-
-    Columns are one-dimensional arrays. Valid scalar metrics are float32;
-    unavailable values are NaN. Identity columns keep their own string/integer
-    types. The descriptor is frozen but its contained dicts/arrays are not deeply
-    immutable. Results never own an open RunWriter.
-    """
-
-    priority_metrics: Columns
-    full_metrics: Columns
-    episodes: tuple[EpisodeResult, ...]
-    metadata: dict[str, object]
-    completed_episode_ids: tuple[int, ...] = ()
-    paths: dict[str, Path] | None = None
-    replays: tuple[ReplayArtifactV3, ...] = ()
 
 
 class _Completed(NamedTuple):
@@ -522,6 +494,167 @@ def _host_chunk(
     )
 
 
+class _SystemCarry(NamedTuple):
+    """Keep numerical or opaque System memory beside the existing game carry."""
+
+    observations: Observations
+    state: EnvironmentState
+    memory: SystemState
+    completed: _Completed
+
+
+def _selected_assignments(
+    env: Environment,
+    info: EpisodeInfo,
+    trace: PolicyTrace,
+) -> CollectedAssignments | None:
+    """Gather compact replay-selected decisions without metric or config history.
+
+    Return capacity-shaped rows for this round, or None when capture is disabled.
+    Independent info IDs/epochs and lane indices remain beside supplied trace
+    claims. trace.valid marks occupied rows; padding cannot become a decision.
+    """
+    capacity = min(env.num_envs or 1, env._execution.replay_capacity)
+    if not capacity:
+        return None
+    selected = jnp.any(info.episode_id[:, None] == env._replay_ids[None, :], axis=1)
+    selected &= info.decision_step >= 0
+    indices = jnp.nonzero(selected, size=capacity, fill_value=0)[0]
+    occupied = jnp.arange(capacity) < jnp.sum(selected)
+
+    def take(value: Array) -> Array:
+        """Select fixed-capacity rows from one trace field."""
+        return value[indices]
+
+    picked = cast(PolicyTrace, jax.tree.map(take, trace))
+    picked = picked._replace(valid=picked.valid & occupied)
+    return CollectedAssignments(
+        picked,
+        info.episode_id[indices],
+        info.decision_step[indices],
+        info.episode_length[indices],
+        indices.astype(jnp.int32),
+    )
+
+
+def _system_advance(
+    env: Environment,
+    execution_a: _SystemExecution,
+    execution_b: _SystemExecution,
+    variables_a: PolicyTree,
+    variables_b: PolicyTree,
+    current: _SystemCarry,
+    root_key: Array,
+    seed_ids: Array,
+    capture_routes: bool,
+) -> tuple[_SystemCarry, tuple[ReplayPackets | None, CollectedAssignments | None]]:
+    """Apply both methods once, then advance the same pre-step environment.
+
+    Stable descriptors supply callables. Parameters, memories and scheduled roots
+    remain dynamic. Learner outputs are discarded inside application, before any
+    host transfer. Refilling is the host scheduler's separate responsibility.
+    """
+    local = current.state.core_state.step_count - current.state.initial_step_count
+    actions, memory, _ = _apply_system_pair(
+        execution_a,
+        execution_b,
+        variables_a,
+        variables_b,
+        current.memory,
+        current.observations,
+        current.state,
+        episode_keys(root_key, seed_ids, local, 2),
+        actor_keys=_actor_keys(root_key, seed_ids, local),
+        keep_learning_outputs=False,
+    )
+    observations, state, _, _, info = cast(
+        tuple[Observations, EnvironmentState, Reward, DoneFlags, EpisodeInfo],
+        _step_environment(
+            env, episode_keys(root_key, seed_ids, local, 1), current.state, actions
+        ),
+    )
+    return _SystemCarry(
+        observations,
+        state,
+        memory,
+        _retain_completion(current.completed, state, info),
+    ), (
+        info.replay,
+        _selected_assignments(env, info, memory.policy_trace)
+        if capture_routes
+        else None,
+    )
+
+
+@jax.jit(static_argnames=("execution_a", "execution_b", "chunk_size", "capture_routes"))
+def _jax_system_chunk(
+    env: Environment,
+    execution_a: _SystemExecution,
+    execution_b: _SystemExecution,
+    variables_a: PolicyTree,
+    variables_b: PolicyTree,
+    carry: _SystemCarry,
+    root_key: Array,
+    seed_ids: Array,
+    chunk_size: int,
+    capture_routes: bool = False,
+) -> tuple[_SystemCarry, tuple[ReplayPackets | None, CollectedAssignments | None]]:
+    """Run a fixed numerical chunk with dynamic System values and compact capture."""
+
+    def advance(
+        current: _SystemCarry, unused: None
+    ) -> tuple[_SystemCarry, tuple[ReplayPackets | None, CollectedAssignments | None]]:
+        """Run one decision while retaining only requested recording outputs."""
+        del unused
+        return _system_advance(
+            env,
+            execution_a,
+            execution_b,
+            variables_a,
+            variables_b,
+            current,
+            root_key,
+            seed_ids,
+            capture_routes,
+        )
+
+    return jax.lax.scan(advance, carry, None, length=chunk_size)
+
+
+def _host_system_chunk(
+    env: Environment,
+    execution_a: _SystemExecution,
+    execution_b: _SystemExecution,
+    variables_a: PolicyTree,
+    variables_b: PolicyTree,
+    carry: _SystemCarry,
+    root_key: Array,
+    seed_ids: Array,
+    chunk_size: int,
+    capture_routes: bool = False,
+) -> tuple[_SystemCarry, tuple[ReplayPackets | None, CollectedAssignments | None]]:
+    """Keep a host method outside jit while its numerical opponent stays batched.
+
+    A provider failure propagates before the environment step. Opaque memory is
+    retained without array conversion. No provider rollback or retry is attempted.
+    """
+    captures = []
+    for _ in range(chunk_size):
+        carry, capture = _system_advance(
+            env,
+            execution_a,
+            execution_b,
+            variables_a,
+            variables_b,
+            carry,
+            root_key,
+            seed_ids,
+            capture_routes,
+        )
+        captures.append(capture)
+    return carry, jax.tree.map(lambda *values: jnp.stack(values), *captures)
+
+
 def positive_int(value: object, name: str) -> int:
     """Validate a positive integer setting at a host boundary.
 
@@ -548,15 +681,39 @@ def positive_int(value: object, name: str) -> int:
 
 
 def _stack_configs(specs: Sequence[EpisodeSpec]) -> EnvConfig:
-    """Stack validated scalar episode configs into a native numerical batch."""
+    """Prepare one active batch of validated scalar episode configurations.
+
+    Parameters
+    ----------
+    specs : Sequence[EpisodeSpec]
+        Nonempty active or refill batch. Each configuration has already passed
+        setup checks and has matching field shapes. Repeated immutable source
+        objects are transferred to the host once within this call.
+
+    Returns
+    -------
+    EnvConfig
+        One device array per field, with the episode axis first. JAX's dtype
+        promotion rules apply before host stacking. Values and source objects
+        remain unchanged. This host setup helper does not retain a numerical
+        copy of the complete schedule or run inside a compiled simulation step.
+    """
+    host_by_identity: dict[int, EnvConfig] = {}
+    configs = []
+    for spec in specs:
+        identity = id(spec.env_config)
+        if identity not in host_by_identity:
+            host_by_identity[identity] = jax.device_get(spec.env_config)
+        configs.append(host_by_identity[identity])
 
     def stack(*values: object) -> Array:
-        """Convert matching scalar-config leaves to arrays and stack their episode
-        axis.
-        """
-        return jnp.stack(tuple(jnp.asarray(value) for value in values))
+        """Stack matching host leaves and upload this whole field once."""
+        dtype = jnp.result_type(*values)
+        return jnp.asarray(
+            np.stack([np.asarray(value, dtype=dtype) for value in values])
+        )
 
-    return cast(EnvConfig, jax.tree.map(stack, *(spec.env_config for spec in specs)))
+    return cast(EnvConfig, jax.tree.map(stack, *configs))
 
 
 def normalize_episode_specs(
@@ -715,9 +872,9 @@ class _MetricTable:
         return {name: columns[name] for name in (*IDENTITY_COLUMNS, *self.names)}
 
 
-def evaluate_episodes(
-    team_a: Policy,
-    team_b: Policy,
+def _run_evaluation(
+    team_a: System | Policy | str,
+    team_b: System | Policy | str,
     episodes: Sequence[EpisodeSpec],
     *,
     seed: int = 0,
@@ -732,17 +889,20 @@ def evaluate_episodes(
     pass_id: str = "1",
     chunk_size: int = 16,
     run_id: str | None = None,
+    contract: dict[str, object] | None = None,
+    saved: tuple[dict[str, object], dict[str, object]] | None = None,
+    source_choices: Sequence[EpisodeSpec] | None = None,
 ) -> EvaluationResult:
-    """Run two fixed policies over an explicit, nonempty TDM episode schedule.
+    """Execute already resolved frozen methods through the chunk/refill authority.
 
     Parameters
     ----------
-    team_a : Policy
-        Team A Policy, including its callable, variables, initial actor
-        memory and execution mode. This call does not train the policy.
-    team_b : Policy
-        Team B Policy with the same contract. Use policy(name) to adapt
-        a built-in controller; this function requires Policy objects.
+    team_a : System | Policy | str
+        Frozen Team A method or built-in name. Numerical variables and memory
+        templates are snapshotted once. No learning update is performed.
+    team_b : System | Policy | str
+        Frozen Team B method with separate episode memory. Host sessions remain
+        caller-owned; this function cannot freeze or undo their external effects.
     episodes : Sequence[EpisodeSpec]
         EpisodeSpec sequence in scheduling order. Each item supplies
         an exact scalar config, a unique positive int32 episode ID, an
@@ -794,6 +954,17 @@ def evaluate_episodes(
     run_id : str | None
         Optional in-memory run identity. The default is a fresh generated
         identity. With a writer, any supplied value must equal writer.run_id.
+    contract : dict | None
+        Private resolved evaluation contract, default None for the historical
+        schedule route. Public resolvers supply versioned conditions and source
+        evidence. This executor does not apply map defaults or expand schedules.
+    saved : tuple[dict, dict] | None
+        Private saved manifest/pass snapshot read before output mutation. None
+        means no earlier snapshot was supplied. Scientific identity is checked
+        again by the writer before recovery.
+    source_choices : Sequence[EpisodeSpec] | None
+        Complete ordered sources for a newly resolved generated schedule. Include
+        unplayed choices. None preserves a resumed contract's saved references.
 
     Returns
     -------
@@ -829,6 +1000,9 @@ def evaluate_episodes(
     Mutable NumPy policy values are copied at entry; input descriptions are not
     edited. Policy/provider errors propagate, including provider timeouts.
     """
+    team_a = freeze_evaluation_method(team_a)
+    team_b = freeze_evaluation_method(team_b)
+    legacy = isinstance(team_a, Policy) and isinstance(team_b, Policy)
     specs = tuple(episodes)
     if not specs:
         raise ValueError("episodes must contain at least one specification")
@@ -867,6 +1041,11 @@ def evaluate_episodes(
             validated.add(id(spec.env_config))
     if writer is not None and (output_dir is not None or resume_from is not None):
         raise ValueError("writer cannot be combined with output_dir or resume_from")
+    if output_dir is not None and run_id is not None:
+        raise ValueError(
+            "run_id is for in-memory results or an existing writer; "
+            "new runs allocate their own ID"
+        )
     if not phase or not pass_id:
         raise ValueError("phase and pass_id must be nonempty")
     env = make(
@@ -886,12 +1065,10 @@ def evaluate_episodes(
             raise ValueError(f"{name} contains an episode outside the schedule")
     full_ids = set(spec_by_id) if metrics == "full" else set(full_selection)
     priority_ids = set(spec_by_id) if metrics != "none" else full_ids
-    variables_a, variables_b = (
-        freeze_variables(team_a.variables),
-        freeze_variables(team_b.variables),
-    )
-    base_carry_a = freeze_variables(team_a.initial_carry)
-    base_carry_b = freeze_variables(team_b.initial_carry)
+    execution_a, variables_a, base_carry_a = prepare_evaluation_system(team_a)
+    execution_b, variables_b, base_carry_b = prepare_evaluation_system(team_b)
+    for cfg in {id(spec.env_config): spec.env_config for spec in specs}.values():
+        validate_evaluation_rosters(execution_a, execution_b, cfg)
     recording = bool(
         writer is not None
         or output_dir is not None
@@ -914,70 +1091,124 @@ def evaluate_episodes(
         "replay_episodes": list(replay_selection),
         "policies": [
             policy_description(
-                team, variables, initial_carry, include_digests=recording
+                team,
+                team.variables,
+                team.initial_carry,
+                include_digests=recording or contract is not None,
             )
-            for team, variables, initial_carry in (
-                (team_a, variables_a, base_carry_a),
-                (team_b, variables_b, base_carry_b),
-            )
+            if isinstance(team, Policy)
+            else normalize_system_registration(team, phase=phase, frozen=True)[1]
+            for team in (team_a, team_b)
         ],
     }
+    if not legacy:
+        metadata["rng_protocol"] = "evaluation-systems-v1"
     if recording:
         metadata.update(capture_recording_provenance(num_envs=batch_size))
-    configs = {id(spec.env_config): spec.env_config for spec in specs}
-
-    def normalize(value: object) -> Array:
-        """Convert a resolved config leaf to the numerical form used by content
-        hashing.
-        """
-        return jnp.asarray(value)
-
-    configuration_records = {
-        key: configuration_identity(jax.tree.map(normalize, config))
-        for key, config in configs.items()
-    }
-    config_ids = {key: value[0] for key, value in configuration_records.items()}
-    metadata["configurations"] = {
-        key: value for key, value in configuration_records.values()
-    }
     schedule: dict[int, dict[str, object]] = {}
-    if recording:
-        starts = {
-            id(spec.initial_state): spec.initial_state
-            for spec in specs
-            if spec.initial_state is not None
+    if contract is None:
+        configs = {id(spec.env_config): spec.env_config for spec in specs}
+
+        def normalize(value: object) -> Array:
+            """Convert a resolved config leaf to the numerical form used by content
+            hashing.
+            """
+            return jnp.asarray(value)
+
+        configuration_records = {
+            key: configuration_identity(jax.tree.map(normalize, config))
+            for key, config in configs.items()
         }
-        start_digests = {key: _tree_digest(value) for key, value in starts.items()}
-        schedule = {
-            spec.episode_id: {
-                **({} if spec.metadata is None else spec.metadata),
-                "episode_id": spec.episode_id,
-                "seed_id": spec.random_seed_id,
-                "map_id": spec.map_id,
-                "configuration_digest": config_ids[id(spec.env_config)],
-                "initial_state_digest": (
-                    start_digests[id(spec.initial_state)]
-                    if spec.initial_state is not None
-                    else None
-                ),
-                "expected_horizon": int(spec.env_config.max_steps)
-                - (
-                    int(spec.initial_state.step_count)
-                    if spec.initial_state is not None
-                    else 0
-                ),
+        config_ids = {key: value[0] for key, value in configuration_records.items()}
+        metadata["configurations"] = {
+            key: value for key, value in configuration_records.values()
+        }
+        schedule: dict[int, dict[str, object]] = {}
+        if recording:
+            starts = {
+                id(spec.initial_state): spec.initial_state
+                for spec in specs
+                if spec.initial_state is not None
             }
-            for spec in specs
-        }
-    if recording:
+            start_digests = {key: _tree_digest(value) for key, value in starts.items()}
+            schedule = {
+                spec.episode_id: {
+                    **({} if spec.metadata is None else spec.metadata),
+                    "episode_id": spec.episode_id,
+                    "seed_id": spec.random_seed_id,
+                    "map_id": spec.map_id,
+                    "configuration_digest": config_ids[id(spec.env_config)],
+                    "initial_state_digest": (
+                        start_digests[id(spec.initial_state)]
+                        if spec.initial_state is not None
+                        else None
+                    ),
+                    "expected_horizon": int(spec.env_config.max_steps)
+                    - (
+                        int(spec.initial_state.step_count)
+                        if spec.initial_state is not None
+                        else 0
+                    ),
+                }
+                for spec in specs
+            }
+        if recording:
+            metadata["schedule_digest"] = sha256(
+                _json_bytes(_json_value(list(schedule.values())))
+            ).hexdigest()
+    else:
+        schedule, configuration_contents, config_ids = prepare_schedule(
+            specs,
+            saved_declarations=None
+            if saved is None
+            else cast(Mapping[str, object], saved[1].get("episodes")),
+        )
+        saved_details = (
+            {} if saved is None else cast(dict[str, object], saved[1]["details"])
+        )
+        old_contract = cast(
+            dict[str, object], saved_details.get("evaluation_contract", {})
+        )
+        if source_choices is not None:
+            choices = prepare_source_choices(
+                source_choices, schedule, configuration_contents, config_ids
+            )
+            if old_contract and choices != old_contract.get("source_choices"):
+                raise ValueError("explicit maps differ from the saved source choices")
+            contract["source_choices"] = choices
+        elif contract.get("source_choices"):
+            old_contents = cast(
+                dict[str, dict[str, object]], saved_details.get("configurations", {})
+            )
+            for choice in cast(list[dict[str, object]], contract["source_choices"]):
+                identifier = cast(str, choice["source_config_id"])
+                if identifier not in configuration_contents:
+                    content = old_contents.get(identifier)
+                    if (
+                        content is None
+                        or config_record(restore_config(content, validate=False))[0]
+                        != identifier
+                    ):
+                        raise ValueError("saved source choice lacks matching content")
+                    configuration_contents[identifier] = content
+        metadata["configurations"] = configuration_contents
         metadata["schedule_digest"] = sha256(
             _json_bytes(_json_value(list(schedule.values())))
         ).hexdigest()
+        metadata["evaluation_contract"] = contract
+    # Raw in-memory access uses the same exact declarations without triggering IO.
     descriptions = cast(list[dict[str, object]], metadata["policies"])
     policies: dict[str, object] = dict(
         zip(("team_a", "team_b"), descriptions, strict=True)
     )
     pass_details = dict(metadata)
+    metadata["schedule"] = schedule
+    registrations = {
+        name: normalize_system_registration(value, phase=phase)
+        for name, value in policies.items()
+    }
+    metadata["systems"] = {key: value for key, value in registrations.values()}
+    metadata["system_ids"] = {name: value[0] for name, value in registrations.items()}
     with ExitStack() as cleanup:
         if writer is None and (output_dir is not None or resume_from is not None):
             writer = cleanup.enter_context(
@@ -1030,8 +1261,17 @@ def evaluate_episodes(
         if writer is not None:
             writer.register_episodes(schedule.values())
             previous = writer.completed_episode_ids
+            if contract is not None:
+                writer.mark_pass_result(
+                    "incomplete", schedule_digest=str(metadata["schedule_digest"])
+                )
         pending = tuple(spec for spec in specs if spec.episode_id not in previous)
         if not pending:
+            metadata["completion_order"] = []
+            if writer is not None and contract is not None:
+                writer.mark_pass_result(
+                    "complete", schedule_digest=str(metadata["schedule_digest"])
+                )
             return EvaluationResult(
                 {},
                 {},
@@ -1096,8 +1336,8 @@ def evaluate_episodes(
 
             collector = ReplayCollector(context)
             cleanup.callback(collector.close)
-        initial_a = initial_policy_carry(base_carry_a, batch_size)
-        initial_b = initial_policy_carry(base_carry_b, batch_size)
+        initial_a = initial_policy_carry(base_carry_a, batch_size) if legacy else ()
+        initial_b = initial_policy_carry(base_carry_b, batch_size) if legacy else ()
         root = jax.random.key(int(seed))
         lanes = list(pending[:batch_size])
 
@@ -1122,9 +1362,23 @@ def evaluate_episodes(
                 initial=_initial_snapshots(lanes, reset_keys),
             ),
         )
-        carry = _Carry(
-            observations, state, initial_a, initial_b, _empty_completed(state)
-        )
+        carry: _Carry | _SystemCarry
+        if legacy:
+            carry = _Carry(
+                observations, state, initial_a, initial_b, _empty_completed(state)
+            )
+        else:
+            memory = _init_system_pair(
+                execution_a,
+                execution_b,
+                variables_a,
+                variables_b,
+                (base_carry_a, base_carry_b),
+                observations,
+                state,
+                episode_keys(root, seeds(), jnp.zeros(batch_size, jnp.int32), 3),
+            )
+            carry = _SystemCarry(observations, state, memory, _empty_completed(state))
         next_episode = batch_size
         results: dict[int, EpisodeResult] = {}
         while len(results) < len(pending):
@@ -1133,8 +1387,34 @@ def evaluate_episodes(
                     completed=jnp.zeros(batch_size, jnp.bool_),
                 )
             )
+            before_chunk = carry.state
+            assignments = None
             try:
-                if team_a.execution == team_b.execution == "jax":
+                if isinstance(carry, _SystemCarry):
+                    runner = (
+                        _jax_system_chunk
+                        if team_a.execution == team_b.execution == "jax"
+                        else _host_system_chunk
+                    )
+                    carry, (packets, assignments) = cast(
+                        tuple[
+                            _SystemCarry,
+                            tuple[ReplayPackets | None, CollectedAssignments | None],
+                        ],
+                        runner(
+                            env,
+                            execution_a,
+                            execution_b,
+                            variables_a,
+                            variables_b,
+                            carry,
+                            root,
+                            seeds(),
+                            chunk_size,
+                            capture_routes=writer is not None,
+                        ),
+                    )
+                elif team_a.execution == team_b.execution == "jax":
                     carry, packets = cast(
                         tuple[_Carry, ReplayPackets | None],
                         _jax_chunk(
@@ -1152,8 +1432,8 @@ def evaluate_episodes(
                 else:
                     carry, packets = _host_chunk(
                         env,
-                        team_a,
-                        team_b,
+                        cast(Policy, team_a),
+                        cast(Policy, team_b),
                         variables_a,
                         variables_b,
                         carry,
@@ -1161,10 +1441,39 @@ def evaluate_episodes(
                         seeds(),
                         chunk_size,
                     )
-                completed, packets = jax.device_get((carry.completed, packets))
+                if writer is not None and assignments is not None:
+                    writer._write_collected(
+                        evaluation_record_batch(
+                            before_chunk,
+                            carry.completed,
+                            packets,
+                            assignments,
+                        )
+                    )
+                    summary_fields = (
+                        "completed",
+                        "episode_id",
+                        "outcome",
+                        "length",
+                        "scores",
+                        "decision_step",
+                        "lifecycle_error",
+                    )
+                    summary_values = jax.device_get(
+                        tuple(getattr(carry.completed, name) for name in summary_fields)
+                    )
+                    completed = carry.completed._replace(
+                        **dict(zip(summary_fields, summary_values, strict=True)),
+                        priority=None,
+                        full=None,
+                    )
+                    packets = None
+                else:
+                    completed, packets = jax.device_get((carry.completed, packets))
                 publication = completed.info._replace(replay=packets)
                 if writer is not None:
-                    writer.write(publication)
+                    if assignments is None:
+                        writer.write(publication)
                 else:
                     validate_recording_errors(publication)
                     if packets is not None and collector is not None:
@@ -1214,15 +1523,30 @@ def evaluate_episodes(
                         _initial_snapshots(lanes, reset_keys),
                     ),
                 )
-                carry = _Carry(
-                    observations,
-                    state,
-                    select_policy_carry(mask, initial_a, carry.policy_a),
-                    select_policy_carry(mask, initial_b, carry.policy_b),
-                    carry.completed,
-                )
+                if isinstance(carry, _SystemCarry):
+                    memory = replace_initialization_roots(
+                        carry.memory,
+                        episode_keys(
+                            root, seeds(), jnp.zeros(batch_size, jnp.int32), 3
+                        ),
+                        mask,
+                    )
+                    carry = _SystemCarry(observations, state, memory, carry.completed)
+                else:
+                    carry = _Carry(
+                        observations,
+                        state,
+                        select_policy_carry(mask, initial_a, carry.policy_a),
+                        select_policy_carry(mask, initial_b, carry.policy_b),
+                        carry.completed,
+                    )
         if writer is not None:
             writer.flush()
+            if contract is not None:
+                writer.mark_pass_result(
+                    "complete", schedule_digest=str(metadata["schedule_digest"])
+                )
+        metadata["completion_order"] = list(results)
         return EvaluationResult(
             priority.columns(spec_by_id, identity, config_ids),
             full.columns(spec_by_id, identity, config_ids),
@@ -1234,150 +1558,443 @@ def evaluate_episodes(
         )
 
 
-def evaluate(
-    team_a: Policy | str,
-    team_b: Policy | str,
+def evaluate_episodes(
+    system: System | Policy | str,
+    opponent: System | Policy | str,
+    episodes: Sequence[EpisodeSpec],
     *,
-    num_episodes: int,
-    maps: Iterable[MapInput] | None = None,
-    seed: int = 0,
+    seed: int | Omitted = OMITTED,
     num_envs: int = 128,
-    metrics: MetricMode = "priority",
-    full_metrics_episodes: Iterable[int] = (),
-    replay_episodes: Iterable[int] = (),
+    metrics: MetricMode | Omitted = OMITTED,
+    full_metrics_episodes: Iterable[int] | Omitted = OMITTED,
+    replay_episodes: Iterable[int] | Omitted = OMITTED,
+    save_replays: int | Omitted = OMITTED,
     output_dir: str | Path | None = None,
     resume_from: str | Path | None = None,
     writer: RunWriter | None = None,
-    team_a_roster: Sequence[AgentClassName] = _ROSTER_A,
-    team_b_roster: Sequence[AgentClassName] = _ROSTER_B,
-    score_threshold: int = 20,
-    max_steps: int = 300,
     phase: str = "evaluation",
     pass_id: str = "1",
     chunk_size: int = 16,
+    run_id: str | None = None,
 ) -> EvaluationResult:
-    """Run two fixed policies with one total episode budget across chosen maps.
+    """Run an exact schedule once, with fixed Team A/B method ownership.
 
     Parameters
     ----------
-    team_a : Policy | str
-        Team A Policy, or built-in name "random", "tdm-alpha" or
-        "tdm-beta". Variables stay fixed throughout this evaluation.
-    team_b : Policy | str
-        Team B Policy or built-in name, with the same contract.
-    num_episodes : int
-        Required positive total episode count across all maps.
-        Episodes receive IDs 1 through num_episodes in scheduling order.
-    maps : Iterable[MapInput] | None
-        Optional nonempty iterable of integer map IDs, TDMMapInfo objects
-        or exact scalar TDM EnvConfig objects. Entries cycle in supplied
-        order, including repeats. None selects canonical evaluation maps
-        47, 48, 49, 50 and 51. Explicit configs keep their own rules, roster
-        and banks; use host configs accepted by Core's validator.
-    seed : int
-        Root uint32 integer, default 0. Episode IDs supply seed identities;
-        streams also use local step counts, not batch placement.
-    num_envs : int
-        Positive maximum simultaneous games, default 128. The actual
-        batch is capped by the number of pending episodes.
-    metrics : MetricMode
-        "priority" by default. "full" collects priority and full values
-        for every episode; "none" skips default collection. Explicit full
-        metric selections still collect both kinds of values.
-    full_metrics_episodes : Iterable[int]
-        IDs in 1..num_episodes selected for full metrics,
-        default empty. No replay or file output is required.
-    replay_episodes : Iterable[int]
-        IDs in 1..num_episodes selected for replay capture,
-        default empty. Replays are returned in memory without a writer.
-    output_dir : str | Path | None
-        Optional parent folder for a new run. This call creates and
-        closes a RunWriter, which creates a run folder below this parent.
-    resume_from : str | Path | None
-        Optional existing run folder for the same pass and settings.
-        Skip durable completions and restart unfinished episodes. Supply
-        this or output_dir, not both; this is not a policy-memory checkpoint.
-        Batch size and chunk size may change on resume.
-    writer : RunWriter | None
-        Optional caller-owned open RunWriter. This call starts the pass,
-        writes and flushes results, and leaves it open. Do not combine it
-        with output_dir or resume_from.
-    team_a_roster : Sequence[AgentClassName]
-        Ordered classes used when building configs from map IDs
-        or TDMMapInfo. Defaults to the canonical tournament roster: mage,
-        warrior, hunter, rogue, priest. Explicit EnvConfig entries ignore it.
-    team_b_roster : Sequence[AgentClassName]
-        Same rule and default class order for Team B.
-    score_threshold : int
-        Positive score target for constructed map configs,
-        default 20. Explicit EnvConfig entries keep their own target.
-    max_steps : int
-        Positive episode horizon for constructed map configs,
-        default 300. Explicit EnvConfig entries keep their own horizon.
-    phase : str
-        Nonempty saved label, default "evaluation". Changing it does not
-        select maps or apply phase-specific map enrollment rules. With a writer,
-        "tournament" selects match tables and requires pairing metadata;
-        run_tournament supplies that metadata.
-    pass_id : str
-        Nonempty saved pass label, default "1". A resumed pass must
-        match its recorded policies, schedule, seed and output selections.
-    chunk_size : int
-        Positive steps per scheduling chunk, default 16. Completed
-        lanes are replaced by pending episodes at chunk boundaries.
+    system, opponent : System | Policy | str
+        Team A and Team B methods, or built-in names. Numerical values are frozen
+        once for this pass. Memories are fresh for each team and episode. Host
+        sessions remain caller-owned; keep their external behavior fixed.
+    episodes : sequence of EpisodeSpec
+        Nonempty exact scalar configurations and unique positive int32 IDs.
+        No automatic bank exchange, extra game or counterpart is added. A single
+        authored episode is valid. Declared comparisons need two exact conditions.
+    seed : int, default=0
+        uint32 root for scheduled episode/decision keys. Omission on resume uses
+        the saved value; explicitly passing zero checks that value instead.
+    num_envs : int, default=128
+        Positive maximum worker count, reduced to the number of pending games.
+        It does not change schedule identities or random coordinates.
+    metrics : {'priority', 'full', 'none'}, default='priority'
+        Default scalar collection. none still retains required game outcomes.
+    full_metrics_episodes, replay_episodes : iterable of int, default=()
+        Scheduled IDs for optional full measurements or replays. Selected full
+        games retain priority values too, even under none. No selection is implicit.
+    save_replays : int, default=0
+        Select the first N scheduled IDs. Must not exceed the schedule length.
+        Nonempty shorthand and explicit replay selections must identify the same
+        set; conflicting selections fail instead of being combined.
+    output_dir : str | Path | None, default=None
+        Parent directory for a newly created run. No path means no files unless
+        writer or resume_from is supplied. In-memory replays remain available.
+    resume_from : str | Path | None, default=None
+        Exact saved run directory. Omitted scientific settings inherit saved
+        values; explicit settings assert equality. Supply exact authored arrays
+        again when only their digest was saved. Completed games are not replayed.
+    writer : RunWriter | None, default=None
+        Optional caller-owned writer. Invalid conditions fail before pass changes.
+        This call flushes its records and leaves the supplied writer open.
+        Supply at most one of writer, output_dir and resume_from.
+    phase, pass_id : str, default='evaluation' / '1'
+        Nonempty identity of this pass. Exact schedules do not infer maps from
+        phase. Resumption selects this saved identity, never the newest pass.
+    chunk_size : int, default=16
+        Positive decisions per compiled chunk. Finished lanes pad until refill.
+        Worker count and chunk size may change on compatible resume.
+    run_id : str | None, default=None
+        Optional in-memory run identity; otherwise generated. A supplied value
+        must equal the writer's identity when saving.
 
     Returns
     -------
     EvaluationResult
-        EvaluationResult from evaluate_episodes. Without a writer, selected
-        metric tables are dicts of one-dimensional NumPy columns ordered by
-        episode ID, ready for pandas.DataFrame. Metric values are float32; NaN
-        means unavailable. Unselected tables are empty. Selected replay objects
-        are also returned in memory. With a writer, tables/replays stay in its
-        files and those in-memory fields are empty; paths names the files.
-        episodes contains results completed by this call; completed_episode_ids
-        also includes earlier durable completions. metadata records the run.
+        Newly completed compact episodes and legacy metric/replay fields, plus
+        uniform status, table and bounded iter_table access. Saved/resumed table
+        views include all durable records in this pass. Disabled optional tables
+        are empty; unavailable historical evidence raises with its reason.
 
     Raises
     ------
-    TypeError
-        A map entry, config, roster or policy input has an unsupported
-        type or dtype.
-    ValueError
-        A controller name, setting, map, config, selection or output
-        combination is invalid, or resumed pass details do not match.
+    ValueError, TypeError
+        A method layout, configuration, selection, schedule, version or explicit
+        resume assertion is invalid. Rejection precedes new output or recovery.
     RuntimeError
-        The writer is closed/failed or execution breaks a required
-        completion or metric contract.
+        Execution or a recording invariant fails. Provider errors propagate;
+        no action is fabricated and external state is not rolled back.
     OSError
-        Run files cannot be opened, locked, read or written.
+        Run files cannot be read, locked, written or synchronized.
 
-    This host function prepares the schedule and calls evaluate_episodes; do not
-    wrap it in jax.jit. JAX policies use compiled batches with dynamic variables
-    and actor memory. Host policies use Python calls and per-step transfers.
-    Both routes copy completion data to the host per chunk. Input configs and
-    policy descriptions are not edited; mutable NumPy policy values are copied
-    at entry. Errors from policy callables propagate. No bank exchange, training,
-    checkpoint selection or tournament ranking is performed here.
+    Notes
+    -----
+    This is a host scheduling call, not an outer jit/vmap/gradient interface.
+    Numerical methods stay compiled and batched. Host methods receive permitted
+    batched inputs; their JAX opponent remains batched. Each method chooses each
+    valid action once. Learning outputs are discarded without host transfer.
+    Validation uses fresh state/RNG/memory and does not edit training carry.
     """
-    count = positive_int(num_episodes, "num_episodes")
-    first = policy(team_a) if isinstance(team_a, str) else team_a
-    second = policy(team_b) if isinstance(team_b, str) else team_b
-    return evaluate_episodes(
-        first,
-        second,
-        normalize_episode_specs(
-            maps, count, team_a_roster, team_b_roster, score_threshold, max_steps
+    saved = read_saved_pass(resume_from, writer, phase, pass_id)
+    details = None if saved is None else saved[1]["details"]
+    previous_contract = None if details is None else details.get("evaluation_contract")
+    saved_options = (
+        None
+        if details is None
+        else (previous_contract["options"] if previous_contract else details)
+    )
+    options = {
+        "seed": option(seed, saved_options, "seed", 0),
+        "metrics": option(metrics, saved_options, "metrics", "priority"),
+        "full_metrics_episodes": option(
+            tuple(full_metrics_episodes)
+            if not isinstance(full_metrics_episodes, Omitted)
+            else OMITTED,
+            saved_options,
+            "full_metrics_episodes",
+            (),
         ),
-        seed=seed,
+        "replay_episodes": option(
+            tuple(replay_episodes)
+            if not isinstance(replay_episodes, Omitted)
+            else OMITTED,
+            saved_options,
+            "replay_episodes",
+            (),
+        ),
+        "save_replays": option(save_replays, saved_options, "save_replays", 0),
+    }
+    specs = tuple(episodes)
+    selected = capture_ids(
+        [s.episode_id for s in specs],
+        options["replay_episodes"],
+        options["save_replays"],
+    )
+    contract: dict[str, object] | None = (
+        None
+        if saved is not None and previous_contract is None
+        else {
+            "version": 1,
+            "schedule_kind": "explicit",
+            "options": options,
+            "episode_ids": [s.episode_id for s in specs],
+            "map_selection": "explicit",
+            "spawn_mode": "explicit",
+        }
+    )
+    return _run_evaluation(
+        system,
+        opponent,
+        specs,
+        seed=options["seed"],
         num_envs=num_envs,
-        metrics=metrics,
-        full_metrics_episodes=full_metrics_episodes,
-        replay_episodes=replay_episodes,
+        metrics=options["metrics"],
+        full_metrics_episodes=options["full_metrics_episodes"],
+        replay_episodes=selected,
         output_dir=output_dir,
         resume_from=resume_from,
         writer=writer,
         phase=phase,
         pass_id=pass_id,
         chunk_size=chunk_size,
+        run_id=run_id,
+        contract=contract,
+        saved=saved,
     )
+
+
+def evaluate(
+    system: System | Policy | str,
+    opponent: System | Policy | str,
+    *,
+    num_episodes: int,
+    maps: Iterable[MapInput] | None = None,
+    spawn_mode: str | Omitted = OMITTED,
+    system_roster: Sequence[AgentClassName] | None | Omitted = OMITTED,
+    opponent_roster: Sequence[AgentClassName] | None | Omitted = OMITTED,
+    seed: int | Omitted = OMITTED,
+    num_envs: int = 128,
+    metrics: MetricMode | Omitted = OMITTED,
+    full_metrics_episodes: Iterable[int] | Omitted = OMITTED,
+    replay_episodes: Iterable[int] | Omitted = OMITTED,
+    save_replays: int | Omitted = OMITTED,
+    output_dir: str | Path | None = None,
+    resume_from: str | Path | None = None,
+    writer: RunWriter | None = None,
+    score_threshold: int | Omitted = OMITTED,
+    max_steps: int | Omitted = OMITTED,
+    phase: str = "evaluation",
+    pass_id: str = "1",
+    chunk_size: int = 16,
+) -> EvaluationResult:
+    """Evaluate a frozen researcher method against an opponent with ready defaults.
+
+    Parameters
+    ----------
+    system, opponent : System | Policy | str
+        Team A and Team B methods, kept on those teams throughout the pass.
+        Accept shared/independent adapters, recurrent JAX methods, host methods
+        and built-in names. Numerical values are snapshotted once; each game gets
+        fresh memory. Opaque provider sessions cannot be numerically frozen.
+    num_episodes : int
+        Positive total game count, excluding bool, within int32 IDs. Paired mode
+        needs an even count. This is not a per-map or per-opponent budget.
+    maps : iterable of int | TDMMapInfo | EnvConfig | None, default=None
+        Ordered map choices, including repeats or exact custom sources. Omission
+        selects validation maps only for phase='validation' and test maps only
+        for phase='evaluation'. Other new phases require explicit maps. Empty
+        selections fail. Resume first uses saved map/config content, not today's
+        catalog. Explicit maps must match the saved scientific conditions.
+    spawn_mode : {'paired', 'default', 'swapped'}, default='paired'
+        Paired games use one source, equal declared seeds and opposite complete
+        spawn banks. Maps cycle by pair. Fixed modes cycle by game and permit odd
+        budgets. Teams, slots, rosters, directions and action meanings never swap.
+        Only requested configurations are validated. Game lengths can differ.
+    system_roster, opponent_roster : sequence of class names | None, default=None
+        Ordered active classes for map construction; None uses canonical 5v5.
+        Exact EnvConfig sources retain their layouts. Explicit conflicting roster
+        or nondefault rule overrides fail. Repeated classes are separate agents.
+    seed : int, default=0
+        uint32 root; scheduled seed IDs and local decisions determine each stream.
+    num_envs : int, default=128
+        Positive maximum execution batch, bounded by pending games. Placement
+        and chunk size do not change schedule identity or episode random streams.
+    metrics : {'priority', 'full', 'none'}, default='priority'
+        Default measurement level. Required lengths, scores and outcomes remain
+        available under none without implying that priority measurements exist.
+    full_metrics_episodes, replay_episodes : iterable of int, default=()
+        Optional scheduled IDs. Selected full records include priority values
+        even under none. Replays are independent of metric mode and file output.
+    save_replays : int, default=0
+        First N scheduled games to capture. Nonempty explicit replay IDs and this
+        shorthand must agree. Zero leaves only the explicit selection active.
+    output_dir, resume_from : str | Path | None, default=None
+        New-run parent or exact existing run, respectively. Use at most one.
+        No output options create no files. Resume skips durable completed games.
+    writer : RunWriter | None, default=None
+        Caller-owned writer, mutually exclusive with both path options. Conditions
+        are checked before pass changes. The writer is flushed but left open.
+    score_threshold, max_steps : int, default=20 / 300
+        Rules for map-built configurations. Explicit custom configurations retain
+        exact values; conflicting nondefault overrides are errors.
+    phase, pass_id : str, default='evaluation' / '1'
+        Nonempty saved pass identity. Exact phase names govern new automatic map
+        selection. Use distinct pass IDs for repeated validation checkpoints.
+    chunk_size : int, default=16
+        Positive steps per execution chunk. Finished lanes remain terminal until
+        refill, and padding is excluded from real transition counts.
+
+    Returns
+    -------
+    EvaluationResult
+        Legacy fields and uniform scoped table access, completion status and replay
+        paths. Saved/resumed views include prior durable games. table allocates
+        the requested table; iter_table reads bounded row chunks.
+
+    Raises
+    ------
+    ValueError, TypeError
+        Conditions, methods, captures or saved assertions conflict. Scientific
+        validation occurs before new files, writer recovery or pass changes.
+    RuntimeError, OSError
+        Execution, provider or recording fails. Earlier durable chunks remain
+        valid; no fake actions, retry or provider rollback is performed.
+
+    Notes
+    -----
+    Only omitted scientific arguments inherit saved values. An explicit default
+    such as seed=0 or metrics='priority' is an equality assertion on resume.
+    The signature uses a private omission marker to preserve this distinction.
+    Numerical parameters stay dynamic under compiled chunk execution. Host methods
+    cross their documented input boundary. This host helper never trains or edits
+    the caller's training state, RNG or memory. Use evaluate_episodes for exact
+    authored starts, including a single condition without any comparison claim.
+    """
+    count = positive_int(num_episodes, "num_episodes")
+    if count > np.iinfo(np.int32).max:
+        raise ValueError("num_episodes must fit positive int32 IDs")
+    saved = read_saved_pass(resume_from, writer, phase, pass_id)
+    details = None if saved is None else saved[1]["details"]
+    old_contract = None if details is None else details.get("evaluation_contract")
+    old = (
+        None
+        if details is None
+        else (old_contract["options"] if old_contract else details)
+    )
+    supplied = {
+        "spawn_mode": spawn_mode,
+        "system_roster": system_roster,
+        "opponent_roster": opponent_roster,
+        "seed": seed,
+        "metrics": metrics,
+        "full_metrics_episodes": tuple(full_metrics_episodes)
+        if not isinstance(full_metrics_episodes, Omitted)
+        else OMITTED,
+        "replay_episodes": tuple(replay_episodes)
+        if not isinstance(replay_episodes, Omitted)
+        else OMITTED,
+        "save_replays": save_replays,
+        "score_threshold": score_threshold,
+        "max_steps": max_steps,
+    }
+    defaults = dict(
+        spawn_mode="paired",
+        system_roster=None,
+        opponent_roster=None,
+        seed=0,
+        metrics="priority",
+        full_metrics_episodes=(),
+        replay_episodes=(),
+        save_replays=0,
+        score_threshold=20,
+        max_steps=300,
+    )
+    options = {
+        name: option(value, old, name, defaults[name])
+        for name, value in supplied.items()
+    }
+    legacy = saved is not None and old_contract is None
+    mode = (
+        "default"
+        if legacy and isinstance(spawn_mode, Omitted)
+        else options["spawn_mode"]
+    )
+    if mode not in ("paired", "default", "swapped"):
+        raise ValueError("spawn_mode must be paired, default or swapped")
+    if mode == "paired" and count % 2:
+        raise ValueError("paired spawn locations require an even total game count")
+    if saved is not None and count != (details or {}).get("num_episodes"):
+        raise ValueError("num_episodes differs from the saved schedule")
+    sources = None
+    if saved is not None and maps is None:
+        specs = saved_specs(saved)
+    else:
+        choices = tuple(default_maps(phase) if maps is None else maps)
+        if not choices:
+            raise ValueError("maps must contain at least one map or configuration")
+        sources = normalize_episode_specs(
+            choices,
+            len(choices),
+            roster_default(options["system_roster"], 0),
+            roster_default(options["opponent_roster"], 1),
+            options["score_threshold"],
+            options["max_steps"],
+        )
+        for source in sources:
+            if source.map_id is None:
+                _check_source_overrides(source.env_config, options)
+        exchanged: dict[int, EnvConfig] = {}
+        schedule_rows: list[EpisodeSpec] = []
+        for index in range(count):
+            source = sources[(index // 2 if mode == "paired" else index) % len(sources)]
+            choice = index % 2 if mode == "paired" else int(mode == "swapped")
+            resolved = source.env_config
+            if choice:
+                key = id(source.env_config)
+                if key not in exchanged:
+                    exchanged[key] = _swap_spawn_banks(source.env_config)
+                resolved = exchanged[key]
+            pads = np.asarray(source.env_config.team_spawn_pad_positions)
+            ambiguous = np.array_equal(pads[0], pads[1])
+            schedule_rows.append(
+                EpisodeSpec(
+                    index + 1,
+                    resolved,
+                    source.map_id,
+                    index // 2 + 1 if mode == "paired" else index + 1,
+                    source_config=None if legacy else source.env_config,
+                    spawn_locations=None if legacy or ambiguous else choice,
+                    paired_comparison_key=f"pair-{index // 2 + 1}"
+                    if mode == "paired"
+                    else None,
+                )
+            )
+        specs = tuple(schedule_rows)
+    selected = capture_ids(
+        [s.episode_id for s in specs],
+        options["replay_episodes"],
+        options["save_replays"],
+    )
+    contract: dict[str, object] | None = (
+        None
+        if legacy
+        else {
+            "version": 1,
+            "schedule_kind": "generated",
+            "options": options,
+            "episode_ids": [s.episode_id for s in specs],
+            "spawn_mode": mode,
+            "map_selection": old_contract["map_selection"]
+            if old_contract
+            else "automatic"
+            if maps is None
+            else "explicit",
+            **(
+                {"source_choices": old_contract["source_choices"]}
+                if old_contract and "source_choices" in old_contract
+                else {}
+            ),
+        }
+    )
+    return _run_evaluation(
+        system,
+        opponent,
+        specs,
+        seed=options["seed"],
+        num_envs=num_envs,
+        metrics=options["metrics"],
+        full_metrics_episodes=options["full_metrics_episodes"],
+        replay_episodes=selected,
+        output_dir=output_dir,
+        resume_from=resume_from,
+        writer=writer,
+        phase=phase,
+        pass_id=pass_id,
+        chunk_size=chunk_size,
+        contract=contract,
+        saved=saved,
+        source_choices=None if legacy else sources,
+    )
+
+
+def _check_source_overrides(config: EnvConfig, options: Mapping[str, object]) -> None:
+    """Reject explicit roster/nondefault rule conflicts with an exact source."""
+    for team, name in enumerate(("system_roster", "opponent_roster")):
+        roster = options[name]
+        if roster is not None:
+            requested = list(
+                _roster_ids(cast(Sequence[AgentClassName], roster), name=name)
+            )
+            actual = np.asarray(config.agent_profile.class_ids)[
+                team * 5 : (team + 1) * 5
+            ]
+            if requested != list(actual):
+                raise ValueError(
+                    f"{name} conflicts with the exact source configuration"
+                )
+    for option_name, field, default in (
+        ("score_threshold", "team_deathmatch_score_threshold", 20),
+        ("max_steps", "max_steps", 300),
+    ):
+        value = options[option_name]
+        if value != default and value != getattr(config, field):
+            raise ValueError(
+                f"{option_name} conflicts with the exact source configuration"
+            )

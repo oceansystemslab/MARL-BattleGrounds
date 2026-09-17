@@ -23,7 +23,11 @@ if TYPE_CHECKING:
         init_episode_tracking,
         track_episode_step,
     )
-    from marl_battlegrounds.evaluation.evaluate import EvaluationResult, evaluate
+    from marl_battlegrounds.evaluation.evaluate import (
+        EpisodeSpec,
+        evaluate,
+        evaluate_episodes,
+    )
     from marl_battlegrounds.evaluation.policy_execution import (
         Policy,
         System,
@@ -38,6 +42,7 @@ if TYPE_CHECKING:
         shared_policy,
         system_step_data,
     )
+    from marl_battlegrounds.evaluation.results import EvaluationResult, load_results
     from marl_battlegrounds.evaluation.run_writer import RunWriter
     from marl_battlegrounds.evaluation.tournament import (
         TournamentResult,
@@ -55,6 +60,7 @@ __all__ = [
     "AutoReset",
     "Environment",
     "EnvironmentState",
+    "EpisodeSpec",
     "EpisodeTrackingState",
     "EvaluationResult",
     "Policy",
@@ -70,11 +76,13 @@ __all__ = [
     "canonical_tournament_rosters",
     "collect_rollout",
     "evaluate",
+    "evaluate_episodes",
     "independent_policies",
     "init_episode_tracking",
     "init_systems",
     "list_tdm_maps",
     "list_tdm_scenarios",
+    "load_results",
     "load_tdm_scenario",
     "make",
     "policy",
@@ -93,7 +101,10 @@ _MODULES = {
     "Environment": "environment",
     "EnvironmentState": "environment",
     "make": "environment",
-    "EvaluationResult": "evaluation.evaluate",
+    "EvaluationResult": "evaluation.results",
+    "EpisodeSpec": "evaluation.evaluate",
+    "evaluate_episodes": "evaluation.evaluate",
+    "load_results": "evaluation.results",
     "evaluate": "evaluation.evaluate",
     "Policy": "evaluation.policy_execution",
     "policy": "evaluation.policy_execution",

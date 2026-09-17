@@ -68,10 +68,11 @@ def test_public_evaluate_cycles_one_total_budget_and_creates_no_files(
         num_envs=2,
         max_steps=2,
         chunk_size=4,
-        team_a_roster=("priest",),
-        team_b_roster=("mage", "mage"),
+        system_roster=("priest",),
+        opponent_roster=("mage", "mage"),
         phase="validation",
         pass_id="2500",
+        spawn_mode="default",
     )
     assert [
         (row.episode_id, row.map_id, row.episode_length) for row in result.episodes
@@ -111,7 +112,12 @@ def test_saved_map_details_are_rejected_before_evaluation_creates_files(
         ValueError, match=r"choose the map again with list_tdm_maps\(\)"
     ):
         evaluate(
-            "random", "random", num_episodes=1, maps=[saved], output_dir=destination
+            "random",
+            "random",
+            num_episodes=1,
+            maps=[saved],
+            output_dir=destination,
+            spawn_mode="default",
         )
     assert not destination.exists()
 
@@ -125,6 +131,7 @@ def test_default_maps_are_canonical_and_metrics_can_be_completely_disabled() -> 
         num_envs=3,
         metrics="none",
         chunk_size=2,
+        spawn_mode="default",
     )
     assert (
         tuple(row.map_id for row in result.episodes) == CANONICAL_TDM_EVALUATION_MAP_IDS
@@ -143,6 +150,7 @@ def test_selected_full_metrics_are_self_contained_with_uncomputed_rows_absent() 
         metrics="none",
         full_metrics_episodes=[2, 2],
         chunk_size=4,
+        spawn_mode="default",
     )
     np.testing.assert_array_equal(result.priority_metrics["episode_id"], [2])
     np.testing.assert_array_equal(result.full_metrics["episode_id"], [2])
@@ -272,6 +280,7 @@ def test_jax_and_host_execution_use_identical_per_actor_random_streams() -> None
         chunk_size=2,
         metrics="full",
         seed=31,
+        spawn_mode="default",
     )
     original = policy("random")
     host = Policy("random-host", original.apply, execution="host")
@@ -284,6 +293,7 @@ def test_jax_and_host_execution_use_identical_per_actor_random_streams() -> None
         chunk_size=2,
         metrics="full",
         seed=31,
+        spawn_mode="default",
     )
     assert result_a.episodes == result_b.episodes
     for name in FULL_METRIC_NAMES:
@@ -323,6 +333,7 @@ def test_numpy_variables_are_frozen_for_whole_pass() -> None:
         num_envs=1,
         chunk_size=2,
         metrics="none",
+        spawn_mode="default",
     )
     assert values == [7] * 20
 
@@ -365,6 +376,7 @@ def test_provider_failures_timeouts_and_cancellation_are_propagated(
             writer=writer,
             output_dir=tmp_path if destination == "output" else None,
             pass_id="provider-failure",
+            spawn_mode="default",
         )
     assert caught.value is failure
     assert "failure" in caught.value.__notes__[0]
@@ -415,6 +427,7 @@ def test_shared_writer_records_reset_failure_before_caller_exits(
                 metrics="none",
                 writer=writer,
                 pass_id="reset-failure",
+                spawn_mode="default",
             )
         assert caught.value is failure
         failures = (writer.run_dir / "failures.jsonl").read_text().splitlines()
@@ -459,9 +472,21 @@ def test_authored_nonzero_initial_epoch_preserves_scores_and_local_length() -> N
 
 def test_invalid_selection_and_schedule_fail_before_policy_execution() -> None:
     with pytest.raises(ValueError, match="outside the schedule"):
-        evaluate("random", "random", num_episodes=1, full_metrics_episodes=[2])
+        evaluate(
+            "random",
+            "random",
+            num_episodes=1,
+            full_metrics_episodes=[2],
+            spawn_mode="default",
+        )
     with pytest.raises(ValueError, match="positive int32"):
-        evaluate("random", "random", num_episodes=1, full_metrics_episodes=[True])
+        evaluate(
+            "random",
+            "random",
+            num_episodes=1,
+            full_metrics_episodes=[True],
+            spawn_mode="default",
+        )
     with pytest.raises(ValueError, match="unique"):
         evaluate_episodes(
             policy("random"),
@@ -484,6 +509,7 @@ def test_selected_replays_in_memory_need_no_metrics_or_files(
         metrics="none",
         replay_episodes=[2],
         chunk_size=2,
+        spawn_mode="default",
     )
     assert result.priority_metrics == result.full_metrics == {}
     assert result.completed_episode_ids == (1, 2, 3)
@@ -513,6 +539,7 @@ def test_persistence_keeps_scalar_tables_and_replays_independently(
         replay_episodes=[2],
         chunk_size=2,
         output_dir=tmp_path,
+        spawn_mode="default",
     )
     assert result.priority_metrics == result.full_metrics == {}
     assert result.replays == ()
@@ -588,6 +615,7 @@ def test_resume_skips_durable_episodes_and_rejects_changed_inputs(
             num_envs=2,
             chunk_size=1,
             output_dir=tmp_path,
+            spawn_mode="default",
         )
     run_dir = next(tmp_path.iterdir())
     manifest = json.loads((run_dir / "run_details.json").read_text())
@@ -604,6 +632,7 @@ def test_resume_skips_durable_episodes_and_rejects_changed_inputs(
         num_envs=3,
         chunk_size=2,
         resume_from=run_dir,
+        spawn_mode="default",
     )
     assert [row.episode_id for row in resumed.episodes] == [3, 4]
     assert resumed.completed_episode_ids == (1, 2, 3, 4)
@@ -618,9 +647,10 @@ def test_resume_skips_durable_episodes_and_rejects_changed_inputs(
         maps=[_config(1)],
         num_envs=1,
         resume_from=run_dir,
+        spawn_mode="default",
     )
     assert repeated.episodes == ()
-    with pytest.raises(ValueError, match="identity differs"):
+    with pytest.raises(ValueError, match="seed differs"):
         evaluate(
             controller,
             "random",
@@ -628,15 +658,28 @@ def test_resume_skips_durable_episodes_and_rejects_changed_inputs(
             maps=[_config(1)],
             resume_from=run_dir,
             seed=1,
+            spawn_mode="default",
         )
-    with pytest.raises(ValueError, match="identity differs"):
+    with pytest.raises(
+        ValueError, match="explicit maps differ from the saved source choices"
+    ):
         evaluate(
-            controller, "random", num_episodes=4, maps=[_config(2)], resume_from=run_dir
+            controller,
+            "random",
+            num_episodes=4,
+            maps=[_config(2)],
+            resume_from=run_dir,
+            spawn_mode="default",
         )
     variable[...] = 1
     with pytest.raises(ValueError, match="identity differs"):
         evaluate(
-            controller, "random", num_episodes=4, maps=[_config(1)], resume_from=run_dir
+            controller,
+            "random",
+            num_episodes=4,
+            maps=[_config(1)],
+            resume_from=run_dir,
+            spawn_mode="default",
         )
 
 
@@ -651,6 +694,7 @@ def test_shared_writer_appends_distinct_validation_passes(tmp_path: Path) -> Non
             phase="validation",
             pass_id="1000",
             chunk_size=1,
+            spawn_mode="default",
         )
         second = evaluate(
             "random",
@@ -661,6 +705,7 @@ def test_shared_writer_appends_distinct_validation_passes(tmp_path: Path) -> Non
             phase="validation",
             pass_id="2000",
             chunk_size=1,
+            spawn_mode="default",
         )
         assert first.paths == second.paths
         assert first.completed_episode_ids == second.completed_episode_ids == (1,)

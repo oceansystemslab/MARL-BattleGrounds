@@ -26,6 +26,8 @@ Use --tracking for only Packet 4: batch 32, rollout 16, manual/tracked reset
 comparisons and optional recording/final-state payload costs.
 Use --collection for bounded collection and recorded restart at batch 32,
 rollout 16. Existing modes and their default workloads stay unchanged.
+Use --evaluation-access --evaluation-case CASE for the bounded Packet 6
+evaluation, raw reference, mixed-provider and saved-result comparisons.
 No mode establishes learning efficiency or proves theoretical optimality.
 """
 
@@ -3793,7 +3795,23 @@ def main() -> int:
         choices=("disabled", "manual", "outcomes", "traces", "replay"),
         help="one collection case; default compares all five",
     )
+    parser.add_argument(
+        "--evaluation-access",
+        action="store_true",
+        help="Packet 6 only: complete B32 evaluation and result-access comparisons",
+    )
+    parser.add_argument(
+        "--evaluation-case",
+        choices=("legacy", "manual", "systems", "mixed", "capture"),
+        help="one required evaluation case; no automatic benchmark campaign",
+    )
     args = parser.parse_args()
+    if args.evaluation_access:
+        from scripts.dev.benchmark_evaluation_access import run
+
+        return run(args)
+    if args.evaluation_case:
+        parser.error("--evaluation-case requires --evaluation-access")
     if args.collection:
         from scripts.dev.benchmark_collection import run
 

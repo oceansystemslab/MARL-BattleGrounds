@@ -14,7 +14,7 @@ import io
 import json
 import os
 from collections import ChainMap
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from functools import cache, partial
@@ -555,6 +555,14 @@ class RunWriter:
         The run lock must already be held. Missing/truncated committed content or
         unsafe replay paths fail recovery; extra table suffix bytes are truncated.
         """
+        headline = "tournament_headline_metrics.csv"
+        if headline in self._details["tables"] or any(
+            entry.get("pass_role") == "tournament_coordinator"
+            for entry in self._details["passes"].values()
+        ):
+            # Only tournament runs own this optional role. Training checkpoint
+            # bundles keep their original exact table set.
+            self._rows.setdefault(headline, [])
         for filename in self._rows:
             path = self._table_path(filename)
             expected = self._details["tables"].get(filename, {}).get("durable_bytes", 0)
@@ -682,6 +690,180 @@ class RunWriter:
             ].items()
             if start["verification"] == "pending"
         }
+
+    def mark_pass_result(
+        self, status: str, *, schedule_digest: str, reason: str | None = None
+    ) -> None:
+        """Save the current evaluator pass's explicit completion state.
+
+        Parameters
+        ----------
+        status : str
+            ``incomplete``, ``failed`` or ``complete``. Flush and close alone
+            never mark an experiment complete.
+        schedule_digest : str
+            Nonempty identity of the resolved scientific schedule. It must
+            match an earlier marker for this pass.
+        reason : str or None, optional
+            Explanation for failed or incomplete work, default None.
+
+        Returns
+        -------
+        None
+            Flushes prior data, checks exact scheduled completion and requested
+            captures when complete, then durably saves the small status marker.
+
+        Raises
+        ------
+        ValueError
+            Status, identity, completion coverage or requested captures differ.
+        RuntimeError
+            The writer is closed or failed.
+        OSError
+            Durable publication fails.
+        """
+        self._check_open()
+        if status not in {"incomplete", "failed", "complete"}:
+            raise ValueError("result status must be incomplete, failed or complete")
+        if not isinstance(cast(object, schedule_digest), str) or not schedule_digest:
+            raise ValueError("result schedule_digest must be nonempty")
+        entry = self._details["passes"][self._pass_key]
+        previous = entry.get("result_state")
+        if previous is not None and previous["schedule_digest"] != schedule_digest:
+            raise ValueError("result schedule identity differs from the saved pass")
+        self.flush()
+        entry = self._details["passes"][self._pass_key]
+        if status == "complete":
+            self._check_result_completion(entry, schedule_digest)
+        entry["result_state"] = {
+            "version": 1,
+            "status": status,
+            "schedule_digest": schedule_digest,
+            "reason": reason,
+        }
+        self.flush()
+
+    def _check_result_completion(
+        self, entry: Mapping[str, Any], schedule_digest: str
+    ) -> None:
+        """Check durable schedule/capture coverage without changing a pass or file."""
+        if entry.get("pass_role") == "tournament_coordinator":
+            marker = self._details.get("tournament_summary", {}).get(
+                "qualification", {}
+            )
+            if (
+                marker.get("status") != "complete"
+                or marker.get("schedule_digest") != schedule_digest
+            ):
+                raise ValueError("tournament completion requires its qualified summary")
+        else:
+            declared = {int(value) for value in entry["episodes"]}
+            completed = set(entry["completed_episode_ids"])
+            if not declared or declared != completed:
+                raise ValueError(
+                    "complete result requires every scheduled episode exactly once"
+                )
+            details = entry["details"]
+            captures = entry["recorded_metrics_by_episode"]
+            for episode_id in details.get("full_metrics_episodes", ()):
+                if captures.get(str(episode_id)) != "full":
+                    raise ValueError(
+                        "complete result is missing requested full metrics"
+                    )
+            for episode_id in details.get("replay_episodes", ()):
+                if str(episode_id) not in entry["replays"]:
+                    raise ValueError("complete result is missing a requested replay")
+            mode = details.get("metrics", "priority")
+            if mode != "none" and any(
+                captures.get(str(value))
+                not in ({"full"} if mode == "full" else {"priority", "full"})
+                for value in declared
+            ):
+                raise ValueError("complete result is missing requested metric coverage")
+
+    def reaffirm_tournament_result(self, schedule_digest: str) -> None:
+        """Finish a resumed attempt whose complete summaries are already durable.
+
+        Parameters
+        ----------
+        schedule_digest : str
+            Existing complete tournament's resolved population identity. The
+            owning runner must first validate the caller's scientific inputs.
+
+        Returns
+        -------
+        None
+            Updates only existing version-1 tournament result states after all
+            pass coverage checks succeed. No game, fit, summary CSV or historical
+            failure entry is changed. Already complete states cause no flush.
+
+        Raises
+        ------
+        ValueError
+            The saved summary, schedule identity, pass status or required
+            completion/capture evidence is missing or incompatible. Historical
+            summaries without new qualification cannot use this method.
+        RuntimeError
+            The writer is closed or failed.
+        OSError
+            Status publication fails; ordinary durable recovery rules apply.
+        """
+        self._check_open()
+        summary = self._details.get("tournament_summary", {})
+        marker = summary.get("qualification", {})
+        if (
+            marker.get("version") != 1
+            or marker.get("status") != "complete"
+            or marker.get("schedule_digest") != schedule_digest
+            or marker.get("summary_digest") != summary.get("digest")
+        ):
+            raise ValueError(
+                "reaffirmation requires the existing complete tournament summary"
+            )
+        updates: list[dict[str, Any]] = []
+        for entry in self._details["passes"].values():
+            if entry["phase"] != "tournament":
+                continue
+            state = entry.get("result_state")
+            if not isinstance(state, dict) or state.get("version") != 1:
+                raise ValueError(
+                    "reaffirmation requires recorded tournament result states"
+                )
+            self._check_result_completion(entry, cast(str, state["schedule_digest"]))
+            if state["status"] != "complete":
+                updates.append(entry)
+        for entry in updates:
+            entry["result_state"] = {
+                **entry["result_state"],
+                "status": "complete",
+                "reason": None,
+            }
+        if updates:
+            self.flush()
+
+    def set_tournament_coordinator(self, schedule_digest: str) -> None:
+        """Mark the current zero-game pass as the tournament's status owner.
+
+        ``schedule_digest`` is the resolved population identity. Existing
+        scientific identity must match. This host call writes the role and an
+        incomplete marker; only complete summary publication can finish it.
+        A closed writer, populated pass or conflicting role fails before change.
+        """
+        self._check_open()
+        entry = self._details["passes"][self._pass_key]
+        if entry["episodes"] or entry["completed_episode_ids"]:
+            raise ValueError("a tournament coordinator must not execute games")
+        if entry.get("pass_role") not in {None, "tournament_coordinator"}:
+            raise ValueError("pass already has a different role")
+        previous = entry.get("result_state")
+        if previous is not None and previous["schedule_digest"] != schedule_digest:
+            raise ValueError("tournament schedule identity differs from the saved pass")
+        entry["pass_role"] = "tournament_coordinator"
+        summary = self._details.get("tournament_summary", {}).get("qualification", {})
+        self.mark_pass_result(
+            "complete" if summary.get("status") == "complete" else "incomplete",
+            schedule_digest=schedule_digest,
+        )
 
     def _prepare_pass(
         self,
@@ -2579,7 +2761,13 @@ class RunWriter:
         cells[~valid] = ""
         return cast(list[object], cells.tolist())
 
-    def write_tournament_results(self, statistics: TournamentStatistics) -> None:
+    def write_tournament_results(
+        self,
+        statistics: TournamentStatistics,
+        *,
+        headline: Sequence[Mapping[str, object]] | None = None,
+        qualification: Mapping[str, object] | None = None,
+    ) -> None:
         """Publish a qualified tournament's summary tables exactly once by content.
 
         Parameters
@@ -2587,6 +2775,13 @@ class RunWriter:
         statistics : TournamentStatistics
             TournamentStatistics from the statistical qualification helper,
             containing nonempty population, matchup and map result tables.
+        headline : tuple of dict or None, optional
+            Already computed complete participant rows, default None. The
+            headline reducer owns their arithmetic. None mode omits this file.
+        qualification : Mapping or None, optional
+            Verified population/schedule evidence, default None for legacy
+            callers. New tournament runners provide version 1, the schedule
+            digest, participant IDs, pairing protocol, metric mode and status.
 
         Returns
         -------
@@ -2610,12 +2805,89 @@ class RunWriter:
             model. Once published, additional tournament match rows are rejected.
         """
         self._check_open()
-        payload = {
+        payload: dict[str, object] = {
             "tournament_results": statistics.tournament_results,
             "matchup_results": statistics.matchup_results,
             "map_results": statistics.map_results,
             "metadata": statistics.metadata,
         }
+        qualified: dict[str, Any] = {}
+        evidence: Mapping[str, Any] = {}
+        if qualification is not None:
+            supplied_evidence = qualification.get("evidence")
+            if not isinstance(supplied_evidence, Mapping):
+                raise ValueError(
+                    "tournament qualification requires prepared game evidence"
+                )
+            evidence = cast(Mapping[str, Any], supplied_evidence)
+            qualified = cast(
+                dict[str, Any],
+                _json_value(
+                    {
+                        key: value
+                        for key, value in qualification.items()
+                        if key != "evidence"
+                    }
+                ),
+            )
+            # The existing run already owns configs, systems and passes. Keep a
+            # compact join identity, not another copy of that entire manifest.
+            qualified["game_evidence_digest"] = sha256(
+                _json_bytes(
+                    _json_value(
+                        {
+                            "games": evidence.get("games"),
+                            "match_digest": evidence.get("match_digest"),
+                            "schedule_digest": evidence.get("schedule_digest"),
+                        }
+                    )
+                )
+            ).hexdigest()
+            population = qualified.get("population_system_ids")
+            if (
+                qualified.get("version") != 1
+                or qualified.get("status") != "complete"
+                or not isinstance(qualified.get("schedule_digest"), str)
+                or not qualified["schedule_digest"]
+                or not isinstance(population, list)
+                or not population
+                or any(
+                    not isinstance(value, str) or not value
+                    for value in cast(list[object], population)
+                )
+                or len(set(cast(list[str], population)))
+                != len(cast(list[str], population))
+                or qualified.get("metrics") not in {"none", "priority", "full"}
+            ):
+                raise ValueError("invalid tournament completion qualification")
+            if qualified["metrics"] == "none" and headline is not None:
+                raise ValueError(
+                    "none-mode tournaments cannot publish headline metrics"
+                )
+            if qualified["metrics"] != "none" and headline is None:
+                raise ValueError(
+                    "measured tournaments require complete headline metrics"
+                )
+            if headline is not None and sorted(
+                str(row.get("system_id")) for row in headline
+            ) != sorted(cast(list[str], population)):
+                raise ValueError(
+                    "headline rows must cover every participant exactly once"
+                )
+            payload["qualification"] = qualified
+            for entry in self._details["passes"].values():
+                if (
+                    entry.get("pass_role") == "tournament_coordinator"
+                    and entry.get("result_state", {}).get("schedule_digest")
+                    != qualified["schedule_digest"]
+                ):
+                    raise ValueError(
+                        "coordinator and tournament schedule identities differ"
+                    )
+        elif headline is not None:
+            raise ValueError("headline metrics require tournament qualification")
+        if headline is not None:
+            payload["tournament_headline_metrics"] = headline
         digest = sha256(_json_bytes(_json_value(payload))).hexdigest()
         previous = self._details.get("tournament_summary")
         if previous is not None:
@@ -2625,14 +2897,52 @@ class RunWriter:
                 )
             return
         tables: dict[str, tuple[tuple[str, ...], list[list[object]]]] = {}
-        for filename in _SUMMARY_TABLES:
+        filenames = _SUMMARY_TABLES
+        if headline is not None:
+            filenames = (*filenames, "tournament_headline_metrics.csv")
+        for filename in filenames:
             rows = cast(tuple[dict[str, object], ...], payload[Path(filename).stem])
             if not rows:
                 raise ValueError("qualified tournament summary tables must be nonempty")
             names = tuple(rows[0])
+            if filename == "tournament_headline_metrics.csv":
+                from marl_battlegrounds.evaluation.tournament_headlines import (
+                    HEADLINE_COLUMNS,
+                )
+
+                if names != HEADLINE_COLUMNS:
+                    raise ValueError("headline columns differ from the shared schema")
             if any(set(row) != set(names) for row in rows):
                 raise ValueError("tournament summary rows must have the same columns")
             tables[filename] = names, [[row[name] for name in names] for row in rows]
+        if qualification is not None:
+            from marl_battlegrounds.evaluation.scalar_reports import iter_scalar_rows
+            from marl_battlegrounds.evaluation.tournament_headlines import (
+                validate_evidence,
+            )
+
+            matches: list[dict[str, object]] = [
+                dict(row)
+                for batch in iter_scalar_rows(
+                    self.run_dir / "match_results.csv",
+                    manifest=self._details,
+                    expected_header=MATCH_COLUMNS,
+                )
+                for row in batch
+            ]
+            matches.extend(
+                dict(zip(MATCH_COLUMNS, row, strict=True))
+                for row in self._rows["match_results.csv"]
+            )
+            validate_evidence(matches, evidence)
+            if evidence.get("schedule_digest") != qualified[
+                "schedule_digest"
+            ] or sorted(
+                cast(list[str], evidence.get("population_system_ids", []))
+            ) != sorted(qualified["population_system_ids"]):
+                raise ValueError(
+                    "tournament summary population differs from prepared evidence"
+                )
         self.flush()
         for filename, (names, rows) in tables.items():
             self._headers[filename] = names
@@ -2641,6 +2951,17 @@ class RunWriter:
             "digest": digest,
             "metadata": _json_value(statistics.metadata),
         }
+        if qualification is not None:
+            marker = {**qualified, "summary_digest": digest}
+            self._details["tournament_summary"]["qualification"] = marker
+            for entry in self._details["passes"].values():
+                if entry.get("pass_role") == "tournament_coordinator":
+                    entry["result_state"] = {
+                        "version": 1,
+                        "status": "complete",
+                        "reason": None,
+                        "schedule_digest": qualified["schedule_digest"],
+                    }
         self.flush()
 
     def checkpoint_recording(self) -> dict[str, object]:
@@ -2801,6 +3122,30 @@ class RunWriter:
         if self._failed is not error:
             self._failed = error
             error.add_note(f"Run directory: {self.run_dir}")
+            # Use the published boundary, never pending rows from a failed
+            # flush. Diagnostics must not accidentally publish undurable data.
+            try:
+                path = self.run_dir / "run_details.json"
+                durable = json.loads(path.read_bytes())
+                changed = False
+                for key, entry in durable.get("passes", {}).items():
+                    if (
+                        key == self._pass_key
+                        or entry.get("pass_role") == "tournament_coordinator"
+                    ):
+                        marker = entry.get("result_state")
+                        if marker is not None:
+                            entry["result_state"] = {
+                                **marker,
+                                "status": "failed",
+                                "reason": f"{type(error).__name__}: {error}",
+                            }
+                            changed = True
+                if changed:
+                    _atomic_json(path, durable)
+                    os.fsync(self._lock)
+            except OSError, ValueError:
+                pass
             try:
                 with (self.run_dir / "failures.jsonl").open("ab") as stream:
                     stream.write(

@@ -6,12 +6,16 @@ MARL-BGs owns environment behavior and the shared measurement/recording rules.
 The [environment example](../../examples/environment.py) and
 [evaluation example](../../examples/evaluation.py) run the public interfaces.
 
-This page describes implemented behavior. Later accepted M8 contracts, including
-phase-specific map defaults, fixed-team spawn-paired evaluation
-and official snapshot reuse, are not all implemented. Raw Systems are available;
-public evaluation and tournament calls still accept the existing Policy route. Do not assume other proposed calls exist until their implementation is
-qualified. In particular, current `evaluate(..., phase="validation")` still needs
-explicit validation maps, and the current generic tournament pairs team roles.
+Public evaluation accepts frozen Systems, Policies and built-in names. It keeps
+Team A/B fixed and exchanges complete spawn locations for paired games. Result
+objects and `load_results` share table access. Official Big 12 snapshot selection,
+reuse and admission remain later work. The runnable
+[evaluation/results example](../../examples/evaluation_results.py) covers the
+implemented evaluation and analysis paths without requiring a learner.
+Run `python examples/evaluation_results.py validation --output-dir runs/checkpoints`
+to save small illustrative numerical checkpoints, select one on validation maps,
+load that file and evaluate it on test maps. The values demonstrate the workflow;
+they are not trained models. Omit the output option to keep validation in memory.
 
 ## Use Your Own Method
 
@@ -81,8 +85,8 @@ requires the experiment's declared training permissions.
 
 Raw traces identify the submitted decision. Pass them to `writer.write(info,
 policy_trace=memory.policy_trace)` to save known component choices alongside the
-same transition. Generic System support in public `evaluate` and tournament calls
-remains later work. Policy identities keep their meanings; new recordings use
+same transition. Public evaluation and generic tournaments use this same method
+application authority. Policy identities keep their meanings; new recordings use
 host run schema 2 and scalar schema 14. Historical reports remain readable.
 
 ## Map ID Change — 2026-09-12
@@ -181,11 +185,11 @@ input contract. This change makes no new learning or slot-fairness claim.
 
 ### Run Evaluation
 
-Run four complete ALPHA/BETA episodes and save full measurements plus two replays:
+Run 32 complete ALPHA/BETA episodes and save full measurements plus two replays:
 
 ```bash
 JAX_PLATFORMS=cuda .venv/bin/python examples/evaluation.py evaluate \
-  --episodes 4 --num-envs 4 --metrics full --save-replays 2 \
+  --episodes 32 --num-envs 32 --metrics full --save-replays 2 \
   --output-dir runs/evaluation
 ```
 
@@ -748,27 +752,102 @@ follows from this check.
 
 ```bash
 JAX_PLATFORMS=cuda .venv/bin/python examples/evaluation.py validation \
-  --episodes 10 --num-envs 4 --metrics full --output-dir runs/validation
+  --episodes 32 --num-envs 32 --metrics full --output-dir runs/validation
 ```
 
-This runnable example explicitly discovers validation maps and shares a writer
-across two differently named passes. The current `phase` label does not choose
-the split for you. Freeze the checkpoint and pass explicit maps; use a new
-`pass_id` for each selection point. A `Policy` carries the apply function,
+This example shares one writer across two named validation passes. Omitted maps
+select validation maps only for exact `phase="validation"`. Exact
+`phase="evaluation"` uses test maps. Any other new phase needs explicit maps.
+Explicit choices are preserved. Use a new `pass_id` for each checkpoint. A `Policy` carries the apply function,
 variables, initial recurrent carry and optional checkpoint identity. Each actor
 receives only its authorized input and mask. Validation results must follow the
 predeclared selection rule and must not train on held-out evaluation evidence.
+
+## Resolve Games and Read Results
+
+```python
+import marl_battlegrounds as marl_bgs
+
+system = marl_bgs.shared_policy(marl_bgs.policy("random"))
+result = marl_bgs.evaluate(
+    system, "random", num_episodes=100, phase="validation", pass_id="checkpoint-1",
+)
+game_scores = result.table("episodes")["system_game_score"]
+print("Mean Validation Score:", game_scores.mean())
+```
+
+The first method always owns Team A. A win scores 1, a draw 0.5 and a loss 0 for
+checkpoint selection. Validation creates fresh environment, RNG and memory; it
+does not advance a training carry. Numerical values are frozen once per pass.
+Host provider sessions remain external mutable objects, so researchers must keep
+their behavior fixed. Learning outputs are discarded without recording them or
+moving them to the host.
+
+The default `spawn_mode="paired"` needs an even **total** game count. Each pair
+uses the same source map and declared seed, with opposite complete ordered spawn
+banks, including respawn locations. Maps cycle by pair. Pair legs may have
+unequal lengths; custom evaluation need not divide its game count evenly over
+maps. Use `spawn_mode="default"` or `"swapped"` for a single choice and odd budgets.
+These choices never swap team identities, observations or action meanings.
+
+`system_roster` and `opponent_roster` replace the old public evaluation roster
+keywords. Classes fill team-local slots in supplied order. Exact `EnvConfig`
+sources retain their other fields. Use `evaluate_episodes` for exact authored
+conditions. A single authored episode is valid without any counterpart. An
+explicit two-condition authored comparison is custom, not a verified spawn pair.
+
+Saving remains optional. Use `output_dir` for a new run, `writer` for a supplied
+writer, or `resume_from` for an exact saved run. Saved-first resume inherits only
+**omitted** scientific settings. Explicit defaults are assertions: `seed=0` does
+not override a saved seed. Worker count and chunk size may change. A changed map
+catalog cannot silently replace recorded configuration content. Replays use the
+actual resolved geometry and retain their verified source-map identity.
+
+```python
+saved = marl_bgs.evaluate(
+    system, "random", num_episodes=2, maps=[12], seed=42, metrics="none",
+    max_steps=2, output_dir="runs/example", save_replays=1,
+)
+resumed = marl_bgs.evaluate(
+    system, "random", num_episodes=2, resume_from=saved.run_dir,
+)
+assert resumed.episodes == ()  # Legacy field: no games were newly executed.
+for rows in resumed.iter_table("episodes", rows=128):
+    print(rows["episode_id"], rows["outcome"])
+```
+
+`table(name)` explicitly allocates a whole table. `iter_table(name, rows=128)`
+reads bounded chunks from committed rows. The common table names are `episodes`,
+`priority_metrics`, `full_metrics`, `matches`, `tournament_results`,
+`tournament_rankings`, `matchup_results`, `map_results` and
+`tournament_headline_metrics`. Applicable disabled tables are empty. Missing
+historical evidence is unavailable with an explanation in `metadata["tables"]`;
+it is never filled with invented zeros. A none-mode outcome's length and score
+are required facts, not evidence that priority metrics were collected.
+
+`load_results(run_dir, phase=None, pass_id=None)` needs no JAX or provider import.
+Without selectors it reads the run; a phase selects its passes, and phase plus
+pass selects one. A pass alone must be unique. Rows retain run/phase/pass identity.
+Loading never recovers or truncates files, finalizes summaries or fits ratings.
+A pending coordinated recording restore must finish before loading. Explicit
+status records distinguish incomplete, failed and complete passes; a successful
+resume can complete a pass whose earlier failure remains in its failure log.
+
+Saved/resumed table views include earlier durable rows. Legacy result fields
+retain their meanings, including only the games executed by the current call.
+`metadata["spawn_balance"]` reports scoped game/step coverage and whether required
+pairs are complete. Completion of a valid fixed-mode pass does not claim a pair.
 
 ## Run a tournament
 
 ```bash
 JAX_PLATFORMS=cuda .venv/bin/python examples/evaluation.py tournament \
-  --episodes 20 --num-envs 8 --output-dir runs/tournament
+  --episodes 40 --num-envs 32 --output-dir runs/tournament
 ```
 
 Here the budget is per unordered policy pair, covering every chosen map and both
-current team assignments. Twenty games across five maps gives two complete
-paired blocks per map. This is a workflow check, not enough evidence for a broad
+spawn locations, with team assignments fixed. Forty games across five maps gives
+four complete paired blocks per map. This is a workflow check, not enough evidence for a broad
 scientific claim. The current generic default of 100 is not the final official
 snapshot budget; that official number remains undecided.
 
@@ -777,10 +856,31 @@ resamples run after complete coverage. Missing matches or failed fits are errors
 insufficient uncertainty evidence stays unavailable. Required outcomes support
 rankings and matchup/map summaries even with optional metrics disabled.
 
+`result.table("tournament_rankings")` gives competition ranks from unrounded Elo:
+exact ties use ranks such as 1, 1, 3. Sorting another table does not change official
+rank. Existing rating and matchup CSV columns keep their meanings. New generic
+schedules keep matchup owners fixed across both spawn games. Old team-swapped
+records retain their own version and are not relabelled as verified spawn pairs.
+
+Priority/full tournaments publish `tournament_headline_metrics.csv` automatically
+from complete, verified games. Each participant receives its actual team's
+measurements; shared team return is counted once. Descriptive values use equal
+game weights, exact medians and population standard deviation. K/D divides total
+kills by total deaths; zero deaths are blank, not infinity. Final scores may
+include an authored starting score, whereas kill measurements count observed
+kills. Adding all participants' step totals counts each game twice. None-mode
+runs skip headline calculation and storage, including when selected full games
+exist. A missing measurement blocks a headline; it never shrinks the sample.
+
+A runner can finish summary publication from complete durable games without
+playing them again. Once summaries are finalized, result access does not refit
+statistics. Whole-population summaries require whole-population scope; a filtered
+matchup cannot appear to be a completed tournament.
+
 The accepted official design is a monthly frozen Big 12 snapshot, optionally
 with one challenger. The wider baseline library can grow independently. Verified
-reuse, uniform budget overrides, promotion rules and the automatic headline
-report require their later implementation/qualification packets. Local generic
+reuse, uniform budget overrides and promotion rules require Step 7. Generic
+tournaments already produce the automatic headline report under priority/full. Local generic
 results do not admit or publish an entrant. See the
 [protocol](protocol.md#big-12-tournament-and-baseline-library) for scientific rules.
 
@@ -1603,3 +1703,69 @@ Before making a commit, finish formatting, stage the complete intended candidate
 and run `scripts/dev/check_before_commit.sh`. This runs both complete local gates
 and verifies that the staged candidate stayed unchanged. It intentionally requires
 a nonempty staged candidate; use the individual checks above on a clean checkout.
+
+## Evaluation and Result Access Measurements — 2026-09-17
+
+The focused Packet 6 comparison used an RTX 5090, JAX/jaxlib 0.10.1, batch 32
+and chunks of 16 decisions. Each complete call finished 64 exact scheduled 5v5
+games with alternating horizons of 3 and 7 ticks: 320 real transitions and
+704 terminal padding lane rounds. Each number below is the median of five
+synchronized warm calls. Setup assets and retained outcomes/priority values match.
+The reference source is `902a07b3d0dcb1d24ab9ee2a0c9332cd48e3f6e8`.
+
+| Complete Call | Time | Real Transitions / Second |
+| --- | ---: | ---: |
+| Committed Policy evaluator | 214 ms | 1,499 |
+| Updated Policy evaluator | 200 ms | 1,600 |
+| Prepared recurrent raw composition | 167 ms | 1,915 |
+| Public recurrent System evaluator | 202 ms | 1,586 |
+| Local host System with JAX opponent | 547 ms | 585 |
+| System evaluation with selected recording | 542 ms | 591 |
+
+The recording call runs all 64 games, writes their results and saves two selected
+full reports and two selected replays. **542 ms is the whole call, not the cost of
+one replay.** It writes 1,408,583 bytes. Loading its result view and 64-row priority
+table takes 6.49 ms. The host method receives 14 calls of 32 lanes each, with no
+extra call for rounds containing only padding. A real provider's network time is
+not represented.
+
+Review and profiling found repeated small configuration conversions. Stacking
+one active batch on the host, then uploading each complete field once, removed
+that work without storing a second numerical copy of the complete schedule.
+Policy timing fell from 228 to 200 ms and recurrent System timing from 238 to
+202 ms in the matched checks. Exact outcomes, lengths, scores and all 16 priority
+measurements agree with the references. Separate CPU action/replay proofs check
+trajectories; terminal-summary equality alone would not establish that.
+
+Compiling each recording family's row selection together removed repeated small
+array operations. The complete saved call fell from 686 to 542 ms; allocator
+events fell from 47,511 to 22,381, with the same live-memory peak. All selected
+full measurements and replay frames/transitions stayed equal. Changed index
+values reuse compiled work; changed selected-row counts can need another compiled
+shape. The five final samples range from 534 to 732 ms, so 542 ms is a median,
+not a latency guarantee.
+
+The public System call still adds about 35 ms over the prepared raw reference for
+validation, identities, refill and result construction. Its first call took
+7.36 seconds including setup and compilation; observed compile/load work was
+5.63 seconds. Warm calls and same-shaped changed-parameter probes reused compiled
+work. Peak live JAX allocations were about 206–210 MB for the public paths, while
+JAX's separately reserved pool was 25.2 GB. Whole-process RAM peaks were
+2.30–2.71 GB, including compilation. These are different measurements; the reserved
+pool is not the live array footprint.
+
+Host fixtures with complete 12/13-entry populations check headline arithmetic
+without running extra games or changing bootstrap settings. Exact medians retain
+participant samples. A separate 256-row full-report fixture checks bounded reads
+of all 11,148 measurements. The fixture numbers and allocation limits are in the
+raw host report below.
+
+These short games stress setup, refill and recording. Padding dominates their
+attempted rounds, so the figures do not measure sustained combat throughput.
+Recording and host synchronization still cost real time. The checks establish no
+learning advantage, geometry result, official tournament qualification or maximum
+possible speed. CPU simulation speed is not an acceptance target.
+
+Evidence: [matched GPU results](../../artifacts/m8-api-evaluation/20260917T105827Z/final_gpu_comparison.json),
+[host fixture costs](../../artifacts/m8-api-evaluation/20260917T105827Z/host-costs.json)
+and [installed workflows](../../artifacts/m8-api-evaluation/20260917T105827Z/installed-examples.json).

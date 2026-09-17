@@ -28,6 +28,11 @@ _TEXT_COLUMNS = frozenset(
         "bootstrap_group",
         "system_id",
         "team",
+        "policy",
+        "opponent",
+        "system_name",
+        "elo_interval_status",
+        "expected_score_interval_status",
     }
 )
 _INTEGER_COLUMNS = frozenset(
@@ -49,6 +54,24 @@ _INTEGER_COLUMNS = frozenset(
     }
 )
 _SUMMARY_COLUMNS = frozenset({"episode_length", "team_a_score", "team_b_score"})
+_AGGREGATE_INTEGERS = frozenset(
+    {
+        "matches",
+        "independent_blocks",
+        "wins",
+        "draws",
+        "losses",
+        "games_played",
+        "completed_pairs",
+        "episode_length_min",
+        "episode_length_max",
+        "total_steps_played",
+        "score_difference_min",
+        "score_difference_max",
+        "total_score_difference",
+        "rank",
+    }
+)
 
 
 class _DurablePrefix(io.RawIOBase):
@@ -86,14 +109,20 @@ def _integer(value: object, *, name: str) -> int:
     return value
 
 
-def _parse_cell(name: str, value: str, *, current: bool) -> ScalarCell:
+def _parse_cell(
+    name: str, value: str, *, current: bool, summary: bool = False
+) -> ScalarCell:
     """Restore one CSV cell, preserving blanks and historical scalar precision."""
     if value == "":
         return None
     if name in _TEXT_COLUMNS:
         return value
     try:
-        if name in _INTEGER_COLUMNS or (current and name in _SUMMARY_COLUMNS):
+        if (
+            name in _INTEGER_COLUMNS
+            or (current and name in _SUMMARY_COLUMNS)
+            or (summary and name in _AGGREGATE_INTEGERS)
+        ):
             return int(value)
         number = float(value)
     except ValueError as error:
@@ -190,6 +219,7 @@ def _iter_rows(
     batch_size: int = 256,
     assignments: bool = False,
     passes: _Passes | None = None,
+    summary: bool = False,
 ) -> Iterator[tuple[dict[str, ScalarCell], ...]]:
     """Parse shared durable rows, admitting unfinished games only for assignments.
 
@@ -212,7 +242,7 @@ def _iter_rows(
     current = host == 2
     if assignments and not current:
         raise ValueError("policy assignments require host schema 2 and scalar 14")
-    if current and expected_header is None:
+    if current and expected_header is None and not summary:
         raise ValueError("current scalar reports require an exact expected header")
     selected = Path(path)
     tables = manifest.get("tables")
@@ -238,7 +268,7 @@ def _iter_rows(
         raise ValueError(
             "durable scalar table is missing, truncated or a symbolic link"
         )
-    if passes is None:
+    if passes is None and not summary:
         passes = _pass_lookup(manifest)
     exact_summaries = current and selected.name in {"episodes.csv", "match_results.csv"}
     with selected.open("rb") as binary:
@@ -264,11 +294,20 @@ def _iter_rows(
                 raise ValueError(
                     "scalar table header names must be nonempty and unique"
                 )
-            if not {"run_id", "phase", "pass_id", "episode_id"}.issubset(header):
+            if not summary and not {
+                "run_id",
+                "phase",
+                "pass_id",
+                "episode_id",
+            }.issubset(header):
                 raise ValueError(
                     "scalar table header is missing required ownership columns"
                 )
-            if current and tuple(header) != tuple(expected_header or ()):
+            if (
+                current
+                and expected_header is not None
+                and tuple(header) != tuple(expected_header)
+            ):
                 raise ValueError("scalar table has an incompatible current header")
             batch: list[dict[str, ScalarCell]] = []
             count = 0
@@ -276,12 +315,16 @@ def _iter_rows(
                 if len(cells) != len(header):
                     raise ValueError("scalar row width differs from its header")
                 row = {
-                    name: _parse_cell(name, value, current=exact_summaries)
+                    name: _parse_cell(
+                        name, value, current=exact_summaries, summary=summary
+                    )
                     for name, value in zip(header, cells, strict=True)
                 }
-                _check_ownership(
-                    row, manifest, passes, require_completion=not assignments
-                )
+                if not summary:
+                    assert passes is not None
+                    _check_ownership(
+                        row, manifest, passes, require_completion=not assignments
+                    )
                 count += 1
                 if count > expected_rows:
                     raise ValueError("scalar table exceeds its durable row count")
@@ -344,6 +387,55 @@ def iter_scalar_rows(
     """
     yield from _iter_rows(
         path, manifest=manifest, expected_header=expected_header, batch_size=batch_size
+    )
+
+
+def iter_summary_rows(
+    path: str | Path,
+    *,
+    manifest: Mapping[str, object],
+    expected_header: Sequence[str] | None = None,
+    batch_size: int = 128,
+) -> Iterator[tuple[dict[str, ScalarCell], ...]]:
+    """Read a durable tournament summary without requiring episode columns.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Saved summary CSV inside the run. Its filename selects the committed
+        byte and row boundary from ``manifest``.
+    manifest : Mapping[str, object]
+        One committed run manifest, with a supported host/scalar schema pair.
+    expected_header : sequence of str or None, optional
+        Exact current header when the caller knows it. Historical headers retain
+        their stored order. None accepts the saved summary's unique header.
+    batch_size : int, optional
+        Positive maximum rows per yielded tuple, default 128. Booleans fail.
+
+    Yields
+    ------
+    tuple of dict
+        Stored rows. Identity/status text stays text, exact aggregate counts
+        remain integers and empty cells become None. No ratings are fitted.
+
+    Raises
+    ------
+    ValueError
+        Versions, headers, values or durable boundaries are invalid.
+    OSError
+        Saved content cannot be read.
+
+    Notes
+    -----
+    The result layer owns whole-population availability. This shared parser
+    reads bounded committed prefixes without JAX, writes or recovery.
+    """
+    yield from _iter_rows(
+        path,
+        manifest=manifest,
+        expected_header=expected_header,
+        batch_size=batch_size,
+        summary=True,
     )
 
 
