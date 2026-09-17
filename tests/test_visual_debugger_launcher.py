@@ -223,7 +223,10 @@ def test_replay_parser_exposes_complete_browser_replay_contract() -> None:
         (("--ranges",), True),
         (("--no-ranges",), False),
     ):
-        assert _resolve_launch_options(parser.parse_args(flags)).ranges is expected
+        assert (
+            _resolve_launch_options(parser.parse_args(flags)).playback.ranges
+            is expected
+        )
     assert "ranges (default: hide)" in " ".join(parser.format_help().split())
     args = parser.parse_args(
         (
@@ -484,7 +487,8 @@ def test_exact_static_replay_dispatches_only_the_stateless_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import scripts.dev.visual_debugger.server as server_module
-    import scripts.dev.visual_debugger.static_renderer as static_module
+
+    import marl_battlegrounds.viewer.static as static_module
 
     observed: dict[str, object] = {}
 
@@ -1275,8 +1279,12 @@ def test_sample_replay_static_uses_the_verified_in_memory_artifact(
     )
 
     def fake_static(options: object, bundle: object) -> int:
-        observed["frame_index"] = object.__getattribute__(options, "frame_index")
-        observed["ranges"] = object.__getattribute__(options, "ranges")
+        observed["frame_index"] = object.__getattribute__(
+            object.__getattribute__(options, "playback"), "frame_index"
+        )
+        observed["ranges"] = object.__getattribute__(
+            object.__getattribute__(options, "playback"), "ranges"
+        )
         observed["bundle"] = bundle
         return 59
 
@@ -1384,7 +1392,7 @@ def test_missing_matplotlib_is_actionable_and_returns_two(tmp_path: Path) -> Non
     assert (
         "error: Matplotlib is required for static Visual Debugger and Analyzer "
         "snapshots. "
-        "Run 'uv sync --extra viz --extra dev'."
+        "Run pip install 'marl-battlegrounds[viz]'."
     ) in result.stderr
 
 
@@ -1905,9 +1913,13 @@ def test_scripted_scenario_static_renders_the_materialized_bundle(
     )
 
     def fake_static(options: object, loaded_bundle: object) -> int:
-        observed["frame_index"] = object.__getattribute__(options, "frame_index")
+        observed["frame_index"] = object.__getattribute__(
+            object.__getattribute__(options, "playback"), "frame_index"
+        )
         observed["seed"] = object.__getattribute__(options, "seed")
-        observed["ranges"] = object.__getattribute__(options, "ranges")
+        observed["ranges"] = object.__getattribute__(
+            object.__getattribute__(options, "playback"), "ranges"
+        )
         observed["bundle"] = loaded_bundle
         return 61
 

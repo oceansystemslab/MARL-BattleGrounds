@@ -40,7 +40,11 @@ def fixture(
         directory / "source", entrants=entrants, full=metrics == "full"
     )
     prepared = prepare_tournament_assets(
-        bundle["config"], roles=("outcomes_priority", "full_report"), download=False
+        bundle["config"],
+        roles=("outcomes_priority", "full_report")
+        if metrics == "full"
+        else ("outcomes_priority",),
+        download=False,
     )
     assert not prepared["missing"]
     result = marl_bgs.run_tournament(
@@ -196,7 +200,9 @@ def main() -> None:
     canonical.add_argument("--games-per-opponent", type=int)
     canonical.add_argument("--metrics", choices=("priority", "full", "none"))
     canonical.add_argument("--save-replays", type=int)
-    canonical.add_argument("--rerun-existing", action="store_true", default=None)
+    canonical.add_argument(
+        "--rerun-existing", action=argparse.BooleanOptionalAction, default=None
+    )
     canonical.add_argument("--output-dir", type=Path)
     canonical.add_argument("--resume-from", type=Path)
     canonical.add_argument("--num-envs", type=int, default=128)

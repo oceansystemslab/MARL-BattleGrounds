@@ -21,7 +21,6 @@ import jax
 import pytest
 import scripts.dev.visual_debugger.control as live_control_module
 import scripts.dev.visual_debugger.replay_service as replay_service_module
-import scripts.dev.visual_debugger.static_renderer as static_renderer_module
 from scripts.dev.visual_debugger.presentation import (
     build_replay_no_shared_obs_authorized_presentation_v1,
     build_replay_shared_obs_authorized_presentation_v1,
@@ -81,6 +80,7 @@ import marl_battlegrounds.evaluation.analysis as analysis_module
 import marl_battlegrounds.evaluation.capture as evaluation_capture_module
 import marl_battlegrounds.evaluation.events as evaluation_events_module
 import marl_battlegrounds.rendering.evaluation_adapter as evaluation_adapter_module
+import marl_battlegrounds.viewer.static as static_renderer_module
 from marl_battlegrounds.evaluation.actor_projection import (
     NO_SHARED_OBS_ACTOR_PROJECTION_V2,
 )

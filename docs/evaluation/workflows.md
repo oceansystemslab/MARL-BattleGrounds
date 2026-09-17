@@ -19,6 +19,110 @@ to save small illustrative numerical checkpoints, select one on validation maps,
 load that file and evaluate it on test maps. The values demonstrate the workflow;
 they are not trained models. Omit the output option to keep validation in memory.
 
+## Use Package Commands
+
+The package commands call the same Python functions shown below. Help reads no
+configuration, imports no researcher method and starts no JAX backend:
+
+```bash
+python -m marl_battlegrounds --help
+python -m marl_battlegrounds evaluate --help
+python -m marl_battlegrounds canonical --help
+python -m marl_battlegrounds tournament --help
+python -m marl_battlegrounds models download --help
+python -m marl_battlegrounds replay --help
+```
+
+No command saves a run unless you ask for `--output-dir`. Before exiting, an
+unsaved evaluation prints up to 32 outcome rows; tournaments print up to 32
+ranking rows. The terminal's Python result does not remain available after exit.
+Use Python for further in-memory analysis, or save the run for later access.
+Selected newly captured replays also need a saved run to have persistent paths.
+
+A bare method name uses the built-in lookup. A trusted `module:factory` imports
+one installed module-level callable, calls it with no arguments and requires a
+System or Policy. The factory owns checkpoint paths, dependencies and model
+formats. It is ordinary trusted Python, not a sandbox; the package neither
+installs dependencies nor downloads method code. It makes no action call to
+inspect the returned method.
+
+The editable [research factory](../../examples/research_methods.py) returns two
+independent Policies in supplied order. Copy it into an importable research
+module or install that module. For the supplied example files, setting
+`PYTHONPATH` explicitly is one simple local route:
+
+```bash
+PYTHONPATH="$PWD/examples" JAX_PLATFORMS=cpu python -m marl_battlegrounds evaluate \
+  --system research_methods:load_custom --opponent tdm-alpha \
+  --system-roster mage,priest --opponent-roster rogue,rogue,priest \
+  --maps 47 --episodes 20 --spawn-mode paired --metrics full \
+  --save-replays 2 --output-dir runs/custom
+```
+
+Here `$PWD/examples` is the directory containing the copied example modules; the
+installed package does not need the checkout. The command keeps Mage/Priest in
+Team A slots 0/1 and Rogue/Rogue/Priest in Team B slots 0/1/2. Twenty means twenty
+games in total, including both spawn legs. CPU is used for this small correctness
+example. Use `--spawn-mode default --episodes 1` for a single fixed-spawn game.
+Authored starting states and exact custom comparisons use Python
+`evaluate_episodes`; no terminal configuration language is needed for them.
+
+Omitted scientific options use normal defaults for new runs and saved values
+on resume. An explicitly supplied default remains a value to check against the
+saved run. For example, omitting `--seed` may inherit a saved seed of 42; writing
+`--seed 0` then rejects that conflict. `--phase` and `--pass-id` select the pass,
+so name a saved nondefault pass explicitly. Evaluation still requires its two
+methods and episode count on resume. Ordered comma-separated lists keep repeats.
+An explicit `--replay-episodes ''` asserts an empty capture selection.
+
+Commands return 0 for success, help or cancellation; 2 for usage errors; 1 for
+handled method, file or API failures; and 130 for interruption. Errors do not
+retry a method or replace its actions. Unexpected programming faults retain their
+traceback. Existing repository launchers keep their own compatibility behavior.
+
+## Follow A Complete Experiment
+
+The examples expose the editable pieces of an experiment without a Trainer:
+
+| Work | Editable Example / Shared Authority |
+| --- | --- |
+| Model and action sampling | [Systems](../../examples/systems.py) and [research factories](../../examples/research_methods.py) |
+| Compiled rollout and curriculum | [Episode tracking](../../examples/episode_tracking.py) |
+| Illustrative update and complete numerical save/load | [Recorded rollout](../../examples/recorded_rollout.py) |
+| Validation and checkpoint selection | [Evaluation results](../../examples/evaluation_results.py) |
+| Custom or canonical testing | [Evaluation](../../examples/evaluation.py) and [canonical tournaments](canonical_tournaments.md) |
+| Stored tables and replay inspection | `load_results`, `table`, `iter_table` and the package replay command |
+
+The update examples demonstrate state ownership and restoration. They are not a
+real optimizer, a trained checkpoint or a learning curve. M10 supplies learner
+work separately. Each independent seed owns its parameters, update state, RNG,
+System memory, environment, tracker, budget, checkpoint and recording identity.
+A shared batched call may process those independent states efficiently; it does
+not combine budgets or authorize sharing private actor inputs. Validate a frozen
+copy using separate keys and memory. Test maps must not choose a checkpoint.
+
+After saving, use the actual returned `run_dir`, not the output parent. The
+[evaluation results example](../../examples/evaluation_results.py) prints a
+complete Viewer command using an actual saved replay path. `python -m
+marl_battlegrounds replay PATH --no-open` starts the existing local Viewer and
+prints its address. It needs no source checkout, Node installation or frontend
+build. Replay analysis remains lazy; requested numerical metrics use their
+existing backend. Static plotting is optional and needs the `viz` extra.
+
+Use the existing tables for these familiar display names:
+
+| Display | Table |
+| --- | --- |
+| Tournament Rankings | `tournament_rankings` |
+| Cross-Play Matrix | `matchup_results` |
+| Headline Metrics | `tournament_headline_metrics` |
+
+Read large tables with `iter_table(name, rows=128)`. Stored-result reading imports
+no simulation backend and performs no recovery or fitting. Rankings use stored,
+unrounded ratings; examples must not fit them again. Headline standard deviation
+means game-to-game spread, not confidence. Missing values remain unavailable;
+none mode does not gain a headline merely because selected full rows exist.
+
 ## Use Your Own Method
 
 The [Systems example](../../examples/systems.py) runs a complete compiled
@@ -440,6 +544,20 @@ owns reset masks, clearing and source checks. An undeclared override clears its
 previous binding. Unknown, ambiguous and authored starts do not earn balance
 credit. Exact supplied configurations remain exact. Keep changing source values
 and method parameters dynamic; do not recreate compiled closures each update.
+
+The runnable tracking example grows pools from the first training map through
+the first twelve, then includes all 42 training maps, in catalog order.
+It keeps one 42-config bank in the tracker and passes a float32 probability vector
+of the same length at every stage. Only values change, so the same compiled
+rollout can be reused. This uniform sampler is an editable example, not an
+approved learning schedule. No validation or test maps enter that bank.
+
+Install new probabilities before the next reset. A game still running keeps its
+old source; a lane ending at the stage boundary uses the new pool when reset.
+Do not reset finished lanes under the old pool first. Stage counts describe the
+transitions played in that stage, including continuing games. They do not promise
+equal episodes or steps per map. The latest returned tracker and environment must
+both be used for the stage check.
 
 `AutoReset(env, include_training_state=False)` calls the same step/reset paths.
 Its returned observations/state belong to the next decision; reward, done and
@@ -1771,3 +1889,34 @@ possible speed. CPU simulation speed is not an acceptance target.
 Evidence: [matched GPU results](../../artifacts/m8-api-evaluation/20260917T105827Z/final_gpu_comparison.json),
 [host fixture costs](../../artifacts/m8-api-evaluation/20260917T105827Z/host-costs.json)
 and [installed workflows](../../artifacts/m8-api-evaluation/20260917T105827Z/installed-examples.json).
+
+### Package Command Costs
+
+The September 17, 2026 command checks separate terminal work from simulation.
+Five fresh processes with a warm operating-system file cache took a median
+22.6 ms for package help and 25.8 ms for evaluation help. The parser used about
+15.5 MiB of peak host memory. Help loaded no JAX runtime or controllers.
+
+Asset inspection and confirmed preparation share one verifier. For a 32 MiB
+local model fixture, five samples had a median 14.7 ms, compared with 29.1 ms
+for two independent preparation calls. Both routes produced the same result.
+The shared route read the model once; its finish step took about 0.18 ms.
+These numbers measure cached local reads, not download speed or model inference.
+
+The installed Viewer served a validated eight-frame replay in a median 0.97 s
+across five fresh processes. Peak host memory was about 101–102 MiB after the
+first frame. Its 43 browser resources occupy 2.34 MB uncompressed. Existing
+requested replay analysis may load numerical code; ordinary help does not.
+These checks run no simulation and do not measure training throughput.
+
+The commands use the existing evaluator and preserve its batching, compiled
+chunks, random keys and recording choices. An installed 20-game comparison
+matched Python and CLI full measurements and replay trajectories across 6,000
+transitions. Core, environment, System execution, collection and writer code
+were unchanged by the command work. Their existing performance evidence still
+applies; this is not a new claim of GPU optimality or learning performance.
+
+Raw checks and workload details are in
+`artifacts/m8-api-commands/20260917-implementation/`. Later changes to numerical
+execution need their own matched measurements. Startup, saving and optional
+analysis remain separate costs and should not be called simulation speed.

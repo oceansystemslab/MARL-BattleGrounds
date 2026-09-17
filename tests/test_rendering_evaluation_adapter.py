@@ -14,7 +14,6 @@ from typing import Any, cast
 import jax.numpy as jnp
 import pytest
 from pydantic import TypeAdapter
-from scripts.dev.visual_debugger import static_renderer
 from tests.evaluation_fixtures import (
     CapturedEvaluationTrajectory,
     captured_evaluation_trajectory,
@@ -95,6 +94,7 @@ from marl_battlegrounds.rendering.scene import (
     StatusSourceEvidenceStateV2,
     VisualEventBatchV2,
 )
+from marl_battlegrounds.viewer import static as static_renderer
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 

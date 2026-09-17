@@ -70,6 +70,7 @@ def test_static_renderer_opens_current_replay_without_a_metric_sidecar(
         _runtime_provenance,  # pyright: ignore[reportPrivateUsage]
     )
 
+    import marl_battlegrounds.viewer.static as static_renderer
     from marl_battlegrounds.evaluation.replay_io import save_replay
     from marl_battlegrounds.evaluation.replay_v3 import build_replay_v3
 

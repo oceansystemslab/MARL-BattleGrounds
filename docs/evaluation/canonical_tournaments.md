@@ -11,6 +11,64 @@ approved rules, qualified controllers and complete supporting records. Until tha
 bundle is installed, a default canonical call gives a missing-bundle error.
 Local execution never admits a challenger or changes the published twelve.
 
+## Use The Package Commands
+
+The command routes call these same Python authorities. Once a qualified snapshot
+and the needed assets are available:
+
+```bash
+python -m marl_battlegrounds canonical
+python -m marl_battlegrounds canonical --system research_methods:load_selected \
+  --output-dir runs/challenge
+python -m marl_battlegrounds canonical --config released-snapshot.json \
+  --rerun-existing --output-dir runs/fresh
+python -m marl_battlegrounds tournament --config custom-tournament.json
+```
+
+The paths above are your selected configuration files; create or prepare them
+before calling the command. The runnable fixture example below creates real
+local paths. It never supplies an official default. A custom command obtains its
+population and scientific settings from its config. Canonical budgets can use
+`--games-per-opponent N`; a different budget is a research override, not admission
+approval. `--rerun-existing` runs the whole resolved field, with no hidden fallback.
+
+Resume with the exact printed saved run path using `--resume-from PATH`. Omit
+scientific options to inherit saved conditions. In particular, omitting `--system`
+on resume preserves the saved challenger; it does not remove it. Explicit
+conflicts fail before recovery changes files. Already complete results are read
+without another fit. Unsaved commands print bounded rankings before exiting;
+use `--output-dir` for later table or replay access.
+
+Inspect assets before preparing them:
+
+```bash
+python -m marl_battlegrounds models download --config released-snapshot.json \
+  --roles outcomes_priority --dry-run
+python -m marl_battlegrounds models download --config released-snapshot.json \
+  --roles outcomes_priority --cache-dir prepared-assets \
+  --output-config prepared-priority.json
+python -m marl_battlegrounds canonical --config prepared-priority.json
+```
+
+Inspection creates no files and makes no network request. The download route
+prints missing bytes and asks once; `--yes` deliberately confirms noninteractive
+use. `models download` alone selects model payloads, not reports or replays.
+Priority reuse needs outcomes/priority records; request `full_report` separately
+for `--metrics full`, and `replay` for selected replay coverage. Required metadata
+follows the existing dependency rules. Tournament execution itself stays offline.
+
+A custom cache requires `--output-config` so the next command can find its verified
+files. The prepared config keeps the same scientific identity and holds absolute
+path hints. Its parent directory must exist; a different existing output file is
+never overwritten. The command prints the next needed preparation or execution
+command. A prepared model does not imply available reports.
+
+Cleanup is explicit: `models clean --sha256 DIGEST --dry-run` previews selected
+content files; remove `--dry-run` to confirm deletion, or use `--yes`. Stop other
+writers or downloads using those entries first. One digest may serve several
+snapshots and saved runs. The command cannot prove an entry is unused and never
+automatically prunes old versions, source bundles or files outside the chosen cache.
+
 ## Try The Workflow With Artificial Records
 
 After installing MARL-BGs, run the complete

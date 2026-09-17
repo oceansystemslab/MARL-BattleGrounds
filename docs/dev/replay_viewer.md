@@ -24,7 +24,40 @@ the view or frame never changes observations, policy assignments, or saved
 bytes. Current NoSharedObs actor exports use POV V2; historical POV V1 is still
 readable.
 
-## Select Exactly One Input
+## Open An Installed Replay
+
+After installing MARL-BattleGrounds, open a saved replay from any directory:
+
+```bash
+python -m marl_battlegrounds replay episode.marlbg-replay.json
+python -m marl_battlegrounds replay "runs/my game.marlbg-replay.json" \
+  --frame-index 12 --view pov --pov-slot 5 --no-open
+```
+
+The installed package includes the existing browser HTML, JavaScript, CSS and
+fonts. It needs no source checkout, Node.js, frontend build or asset download.
+The server stays on loopback and prints its actual URL. The replay is checked
+before serving or opening the browser. `--no-open` leaves browser opening to you.
+The process reads the replay; it does not change that file or run simulator turns.
+
+For a static frame, install the optional plotting extra and choose a frame:
+
+```bash
+pip install 'marl-battlegrounds[viz]'
+python -m marl_battlegrounds replay episode.marlbg-replay.json \
+  --static --frame-index 0
+```
+
+Static display uses Matplotlib. Browser viewing does not import Matplotlib.
+Requested metrics use the same numerical analysis as the repository Viewer;
+viewing is not a promise of zero numerical-backend work. Help and stored-result
+reading remain independent of that analysis.
+
+The package command accepts one replay path. Sample catalogs and scripted
+scenario creation remain repository tools, described below. Both launch routes
+use the same replay service, authorization, playback and browser assets.
+
+## Select Exactly One Repository Input
 
 Run commands from the checkout with `uv` available. Each invocation must choose
 exactly one replay, sample, scripted scenario, or list operation:

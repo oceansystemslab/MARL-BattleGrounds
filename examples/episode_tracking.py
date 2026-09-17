@@ -18,7 +18,7 @@ from jax import Array
 
 import marl_battlegrounds as marl_bgs
 from marl_battlegrounds.policies.random_valid import random_policy
-from marl_battlegrounds.tasks import make_standard_team_deathmatch_config
+from marl_battlegrounds.tasks import list_tdm_maps, make_standard_team_deathmatch_config
 from marl_battlegrounds.types import SystemInput, SystemOutput
 
 type Tree = Any
@@ -60,22 +60,26 @@ _OPPONENT = marl_bgs.shared_policy(marl_bgs.policy("random"))
 
 
 def decision(
-    env: Tree, carry: Tree, stage: Array, weight: Array, *, automatic: bool
+    env: Tree, carry: Tree, probabilities: Array, weight: Array, *, automatic: bool
 ) -> tuple[Any, Any]:
     """Return latest carry and exact transition data from one action call.
 
     env is a dynamic environment handle. carry holds RNG, observations, current
-    environment state, System memory and tracker. stage is a dynamic source index
-    for explicit curricula; weight is the method's dynamic scalar parameter.
+    environment state, System memory and tracker. probabilities is float32 (42,)
+    over the training bank for explicit curricula; weight is a dynamic scalar.
     automatic is a static route choice. Return latest carry plus action/reward
     data, method learning outputs, illustrative terminal values and exact info.
     Fixed AutoReset retains its config. Learning outputs never enter recording.
     """
     key, observations, before, methods, tracker = carry
-    key, action_key, step_key, next_reset_key = jax.random.split(key, 4)
+    key, action_key, step_key, next_reset_key, sample_key = jax.random.split(key, 5)
+    indices = None
     if not automatic:
-        source = jax.tree.map(lambda values: values[stage], tracker.source_configs)
-        prepared = marl_bgs.balanced_spawn_configs(source, num_envs=32)
+        indices = jax.random.choice(
+            sample_key, probabilities.shape[0], shape=(env.num_envs,), p=probabilities
+        )
+        selected = jax.tree.map(lambda values: values[indices], tracker.source_configs)
+        prepared = marl_bgs.balanced_spawn_configs(selected, num_envs=env.num_envs)
         observations, before = env.reset_done(next_reset_key, before, prepared)
     actions, methods, learning = marl_bgs.apply_systems(
         _METHOD,
@@ -91,7 +95,7 @@ def decision(
         tracker,
         before,
         result,
-        source_indices=None if automatic else stage,
+        source_indices=indices,
     )
     observations, after, _, _, info = result
     data = marl_bgs.system_step_data(before, actions, result)
@@ -113,55 +117,81 @@ def decision(
     )
 
 
-@partial(jax.jit, static_argnames=("automatic",))
+@partial(jax.jit, static_argnames=("automatic", "num_steps"))
 def rollout(
-    env: Tree, carry: Tree, stage: Array, weight: Array, *, automatic: bool
+    env: Tree,
+    carry: Tree,
+    probabilities: Array,
+    weight: Array,
+    *,
+    automatic: bool,
+    num_steps: int = 16,
 ) -> tuple[Any, Any]:
-    """Run sixteen decisions with a stable compiled function across seeds/stages.
+    """Run a fixed number of decisions with reusable compiled work.
 
-    env, carry, source stage index and scalar method weight remain dynamic.
-    automatic selects the explicit/automatic reset program structure. Return
+    env, carry, float32 source probabilities and scalar weight remain dynamic.
+    automatic selects the explicit/automatic reset structure. num_steps defaults
+    to 16; a different length selects a separate compiled program. Return
     latest carry and per-decision learning data; discard unrecorded info history.
     """
 
     def scan_step(current: Tree, unused: None) -> tuple[Any, Any]:
         """Keep exact action/learning/final data; discard unrecorded diagnostics."""
         del unused
-        current, data = decision(env, current, stage, weight, automatic=automatic)
+        current, data = decision(
+            env, current, probabilities, weight, automatic=automatic
+        )
         return current, data[:3]
 
-    return jax.lax.scan(scan_step, carry, None, length=16)
+    return jax.lax.scan(scan_step, carry, None, length=num_steps)
+
+
+def curriculum_probabilities(pool_size: int) -> Array:
+    """Return uniform float32 (42,) probabilities for one accepted training pool.
+
+    pool_size is 1 through 12, or 42 for the final pool, in catalog order.
+    This host helper rejects other sizes. Passing its values to rollout keeps
+    one compiled shape; no validation or test map enters the bank.
+    """
+    if type(pool_size) is not int or pool_size not in (*range(1, 13), 42):
+        raise ValueError("Choose a curriculum pool from 1 through 12, or 42")
+    return (jnp.arange(42) < pool_size).astype(jnp.float32) / pool_size
 
 
 def make_context(
-    seed: int, *, automatic: bool, record_starts: bool = False
+    seed: int, *, automatic: bool, record_starts: bool = False, num_envs: int = 32
 ) -> tuple[Tree, Tree]:
-    """Prepare an independent environment and numerical carry without taking actions.
+    """Prepare one independent context without taking actions or writing files.
 
-    seed owns RNG and memory. automatic selects fixed-config automatic resets;
-    otherwise the caller chooses curriculum sources at explicit resets.
-    record_starts defaults to False and enables only compact start production.
-    Return the environment and (RNG, observations, state, System memory, tracker).
-    Host source validation and optional hashing happen here, outside compiled work.
+    seed owns RNG and memory. automatic uses a fixed initial source with AutoReset;
+    otherwise the tracker owns all 42 training configurations in catalog order.
+    record_starts=False skips recording identity preparation. num_envs defaults
+    to 32 and must be positive and even for balanced stages. Smaller CPU batches
+    are useful for correctness. Return env and (RNG, obs, state, memory, tracker).
+    Source validation and optional hashing happen once outside compiled execution.
     """
+    if type(num_envs) is not int or num_envs <= 0 or num_envs % 2:
+        raise ValueError("Balanced stages need a positive even batch")
     roster_a, roster_b = marl_bgs.canonical_tournament_rosters()
+    maps = tuple(item for item in list_tdm_maps() if item.split == "training")
+    if len(maps) != 42 or [item.map_id for item in maps[:12]] != list(range(12)):
+        raise ValueError("The example needs the declared 42-map training catalog")
     sources = [
         make_standard_team_deathmatch_config(
-            map_id=map_id,
-            max_steps=length,
+            map_id=item.map_id,
+            max_steps=3 + index % 3,
             team_a_roster=roster_a,
             team_b_roster=roster_b,
         )
-        for map_id, length in ((0, 3), (1, 5))
+        for index, item in enumerate(maps[:1] if automatic else maps)
     ]
-    # Validate both requested choices once before compiled curriculum selection.
     for source in sources:
-        marl_bgs.balanced_spawn_configs(source, num_envs=32)
+        marl_bgs.balanced_spawn_configs(source, num_envs=num_envs)
     bank = jax.tree.map(lambda *rows: jnp.stack(rows), *sources)
     base = marl_bgs.make(
         "tdm",
-        num_envs=32,
-        env_config=marl_bgs.balanced_spawn_configs(sources[0], num_envs=32),
+        num_envs=num_envs,
+        env_config=marl_bgs.balanced_spawn_configs(sources[0], num_envs=num_envs),
         metrics="priority",
     )
     env = marl_bgs.AutoReset(base) if automatic else base
@@ -169,27 +199,22 @@ def make_context(
     obs, state = env.reset(reset_key)
     memory = marl_bgs.init_systems(_METHOD, _OPPONENT, obs, state, init_key)
     tracking = marl_bgs.init_episode_tracking(
-        env,
-        state,
-        source_configs=bank,
-        source_indices=0,
-        record_starts=record_starts,
+        env, state, source_configs=bank, source_indices=0, record_starts=record_starts
     )
-
     return env, (rng, obs, state, memory, tracking)
 
 
 def run(
     seed: int, *, automatic: bool, output_dir: Path | None = None
 ) -> list[dict[str, Any]]:
-    """Run two balanced stages in one independent 32-game context.
+    """Run the complete growing curriculum or two fixed AutoReset stages.
 
     seed owns this context's RNG, episodes, memory and tracker. automatic chooses
-    fixed-configuration AutoReset; False uses explicit reset_done and alternates
-    source maps by stage. output_dir optionally creates one new recording run,
-    only on the automatic route. Recorded calls use a host loop; otherwise a
-    compiled scan returns the complete numerical carry. Returns two stage
-    summaries. Errors propagate and writers close through a context manager.
+    fixed-configuration AutoReset; False uses explicit reset_done and grows
+    training pools from 1 through 12, then all 42 maps. output_dir optionally
+    creates one new recording run on the automatic route. Recorded calls use a
+    host loop; otherwise a compiled scan returns the complete numerical carry.
+    Return one summary per stage. Errors propagate; writers close on exit.
     """
     from contextlib import nullcontext
 
@@ -210,20 +235,22 @@ def run(
         )
     summaries = []
     with writer_context as writer:
-        for stage_number in range(2):
+        for stage_number, pool_size in enumerate(
+            (1, 1) if automatic else (*range(1, 13), 42)
+        ):
             tracking = tracking.begin_stage(state, total_env_steps=512)
             carry = (rng, obs, state, memory, tracking)
-            stage = jnp.asarray(stage_number, jnp.int32)
+            probabilities = curriculum_probabilities(pool_size)
             weight = jnp.asarray(0.5 + 0.1 * stage_number, jnp.float32)
             if writer is None:
                 carry, learning_data = rollout(
-                    env, carry, stage, weight, automatic=automatic
+                    env, carry, probabilities, weight, automatic=automatic
                 )
                 jax.block_until_ready(learning_data)
             else:
                 for _ in range(16):
                     carry, data = decision(
-                        env, carry, stage, weight, automatic=automatic
+                        env, carry, probabilities, weight, automatic=automatic
                     )
                     info = data[3]
                     writer.register_episodes(
@@ -240,18 +267,20 @@ def run(
 
 
 @jax.jit
-def batched_rollout(env: Tree, carries: Tree, stage: Array, weight: Array) -> Tree:
+def batched_rollout(
+    env: Tree, carries: Tree, probabilities: Array, weight: Array
+) -> Tree:
     """Run independent learner contexts along a separate leading seed axis.
 
     env is the common execution handle; carries has shape (S,B,...) on lane
     leaves and (S,...) on per-context values. Each seed retains its own tracker,
-    memory and RNG. stage and weight are shared dynamic numerical values here.
+    memory and RNG. probabilities and weight are shared dynamic values here.
     Return latest carries and learning data. Stage checks remain host calls.
     """
     return jax.vmap(partial(rollout, automatic=True), in_axes=(None, 0, None, None))(
         env,
         carries,
-        stage,
+        probabilities,
         weight,
     )
 
@@ -273,7 +302,7 @@ def run_batched() -> list[dict[str, Any]]:
     latest, _ = batched_rollout(
         contexts[0][0],
         carries,
-        jnp.asarray(0, jnp.int32),
+        curriculum_probabilities(1),
         jnp.asarray(0.5, jnp.float32),
     )
     summaries = []

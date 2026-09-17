@@ -170,6 +170,23 @@ def saved(output_dir: Path, num_envs: int, max_steps: int) -> None:
     assert resumed.episodes == ()
     print("Run Directory:", resumed.run_dir)
     print("Replay Paths:", resumed.replay_paths)
+    if resumed.replay_paths:
+        import shlex
+        import sys
+
+        print(
+            "Open Replay:",
+            shlex.join(
+                [
+                    sys.executable,
+                    "-m",
+                    "marl_battlegrounds",
+                    "replay",
+                    str(resumed.replay_paths[0]),
+                    "--no-open",
+                ]
+            ),
+        )
     for rows in resumed.iter_table("episodes", rows=1):
         print("Saved Outcome:", rows)
     try:

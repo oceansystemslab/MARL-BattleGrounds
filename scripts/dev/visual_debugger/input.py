@@ -37,6 +37,9 @@ from marl_battlegrounds.rendering.pov_scene import (
     build_actor_pov_analyzer_projection_v1,
 )
 from marl_battlegrounds.rendering.scene import AgentSceneV1, AgentSceneV2
+from marl_battlegrounds.viewer.no_shared_visual import (
+    build_live_no_shared_obs_visual_current_slice_v1,
+)
 from scripts.dev.visual_debugger.control import (
     CombatConfigurationRejectedError,
     DebuggerTransitionFailureV1,
@@ -54,9 +57,6 @@ from scripts.dev.visual_debugger.control import (
     submit_next_script_frame,
 )
 from scripts.dev.visual_debugger.model import DebuggerSession, RawContinuationIdentity
-from scripts.dev.visual_debugger.no_shared_visual import (
-    build_live_no_shared_obs_visual_current_slice_v1,
-)
 from scripts.dev.visual_debugger.protocol import (
     ActorPovTargetActionCommandV1,
     BattlefieldPointerCommandV1,

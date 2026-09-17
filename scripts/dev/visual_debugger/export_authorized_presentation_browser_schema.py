@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from typing import cast
 
-from scripts.dev.visual_debugger.presentation_protocol import (
+from marl_battlegrounds.viewer.presentation_protocol import (
     _AUTHORIZED_PRESENTATION_FRAME_ADAPTER,  # pyright: ignore[reportPrivateUsage]
 )
 

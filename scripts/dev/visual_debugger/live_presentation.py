@@ -66,9 +66,8 @@ from marl_battlegrounds.rendering.scene import (
     ResearcherAnalyzerProjectionV2,
     VisualEventBatchV2,
 )
-from scripts.dev.visual_debugger.match_summary import build_match_summary_v1
-from scripts.dev.visual_debugger.model import PendingAction
-from scripts.dev.visual_debugger.presentation_protocol import (
+from marl_battlegrounds.viewer.match_summary import build_match_summary_v1
+from marl_battlegrounds.viewer.presentation_protocol import (
     AgentPovActionAxisV1,
     LatestTransitionActionRowV1,
     LiveEditableDraftInspectionV1,
@@ -102,6 +101,7 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     build_shared_obs_authorized_current_endpoint_v1,
     build_shared_obs_latest_transition_v1,
 )
+from scripts.dev.visual_debugger.model import PendingAction
 from scripts.dev.visual_debugger.protocol import (
     ActorPovHudFrameV1,
     ActorPovLiveDebuggerFrameV2,
@@ -845,7 +845,7 @@ def build_live_no_shared_obs_authorized_presentation_v1(
     This performs host projection and model validation, with no simulator step
     or file write.
     """
-    from scripts.dev.visual_debugger.local_oracle_corpse_overlay import (
+    from marl_battlegrounds.viewer.local_oracle_corpse_overlay import (
         build_local_oracle_corpse_overlay_v1,
         compose_local_oracle_corpse_scene_v1,
         validate_local_oracle_corpse_overlay_against_source_v1,
@@ -1163,7 +1163,7 @@ def build_live_shared_obs_authorized_presentation_v1(
     This performs host projection and model validation, with no simulator step
     or file write.
     """
-    from scripts.dev.visual_debugger.local_oracle_corpse_overlay import (
+    from marl_battlegrounds.viewer.local_oracle_corpse_overlay import (
         build_local_oracle_corpse_overlay_v1,
         compose_local_oracle_corpse_scene_v1,
         validate_local_oracle_corpse_overlay_against_source_v1,

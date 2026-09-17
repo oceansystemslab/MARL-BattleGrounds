@@ -416,6 +416,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 show_ranges=options.ranges,
             )
 
+        from marl_battlegrounds.viewer.server import (
+            HttpAuthoringBinding,
+            serve_browser_debugger,
+        )
         from scripts.dev.visual_debugger.authoring_service import (
             DevAuthoringCommandRequestV1,
             DevAuthoringCommandResponseV1,
@@ -426,10 +430,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         from scripts.dev.visual_debugger.authoring_store import DevAssetStore
         from scripts.dev.visual_debugger.control import create_session
-        from scripts.dev.visual_debugger.server import (
-            HttpAuthoringBinding,
-            serve_browser_debugger,
-        )
         from scripts.dev.visual_debugger.service import DebuggerService
 
         session = create_session(

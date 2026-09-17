@@ -17,6 +17,14 @@ from typing import Literal, cast
 from marl_battlegrounds.rendering.evaluation_adapter import (
     build_visual_event_batch_v2,
 )
+from marl_battlegrounds.viewer.no_shared_visual import (
+    build_live_no_shared_obs_visual_adjacent_slice_v1,
+    build_live_no_shared_obs_visual_current_slice_v1,
+)
+from marl_battlegrounds.viewer.presentation_protocol import (
+    PresentationResourceResultV1,
+)
+from marl_battlegrounds.viewer.replay_service import ReplayViewerService
 from scripts.dev.visual_debugger.control import (
     DebuggerTransitionFailureStageV1,
     DebuggerTransitionFailureV1,
@@ -35,13 +43,6 @@ from scripts.dev.visual_debugger.live_presentation import (
     build_live_shared_obs_authorized_presentation_v1,
 )
 from scripts.dev.visual_debugger.model import DebuggerScenario, DebuggerSession
-from scripts.dev.visual_debugger.no_shared_visual import (
-    build_live_no_shared_obs_visual_adjacent_slice_v1,
-    build_live_no_shared_obs_visual_current_slice_v1,
-)
-from scripts.dev.visual_debugger.presentation_protocol import (
-    PresentationResourceResultV1,
-)
 from scripts.dev.visual_debugger.protocol import (
     ActorPovLiveDebuggerFrameV2,
     ApiErrorV2,
@@ -68,7 +69,6 @@ from scripts.dev.visual_debugger.recording import (
     DebuggerRecordingCloseCauseV1,
 )
 from scripts.dev.visual_debugger.replay_recorder import DebuggerReplayRecorder
-from scripts.dev.visual_debugger.replay_service import ReplayViewerService
 from scripts.dev.visual_debugger.scenarios import STRESS_SCENARIOS
 
 _COMMAND_RECORD_LIMIT = 256

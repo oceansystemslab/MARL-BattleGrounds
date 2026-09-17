@@ -113,7 +113,7 @@ def step(current: Carry, unused: None) -> tuple[Carry, tuple[Tree, Tree, Tree]]:
         source = jax.tree.map(
             lambda values: values[source_index], tracking.source_configs
         )
-        prepared = marl_bgs.balanced_spawn_configs(source, num_envs=32)
+        prepared = marl_bgs.balanced_spawn_configs(source, num_envs=env.num_envs)
         observations, before = env.reset_done(reset_key, before, prepared)
     actions, memory, learning = marl_bgs.apply_systems(
         _METHOD, _OPPONENT, memory, observations, before, action_key, variables_a=weight
@@ -161,13 +161,16 @@ def direct_scan(carry: Carry) -> tuple[Carry, Tree]:
     return jax.lax.scan(advance, carry, None, length=16)
 
 
-def context(seed: int, *, automatic: bool, recording: bool, metrics: str) -> Carry:
-    """Prepare one independent 32-game experiment and its initial complete carry.
+def context(
+    seed: int, *, automatic: bool, recording: bool, metrics: str, num_envs: int = 32
+) -> Carry:
+    """Prepare one independent batched experiment and its initial complete carry.
 
     seed owns RNG, memory and episode IDs. automatic selects AutoReset; otherwise
     resets use the chosen source index. recording enables starts and selects the
     initial and one continuing episode for replay, and the first for full metrics.
-    metrics is priority/full/none.
+    metrics is priority/full/none. num_envs defaults to 32; use a positive even
+    count for balanced stages, including smaller CPU correctness checks.
     No files or actions are produced here. The two immutable source rows have
     three- and five-transition horizons. All supplied configurations are exact.
     """
@@ -182,14 +185,14 @@ def context(seed: int, *, automatic: bool, recording: bool, metrics: str) -> Car
         for map_id, length in ((0, 3), (1, 5))
     ]
     bank = jax.tree.map(lambda *values: jnp.stack(values), *sources)
-    indices = jnp.arange(32, dtype=jnp.int32) % 2
+    indices = jnp.arange(num_envs, dtype=jnp.int32) % 2
     selected = jax.tree.map(lambda values: values[indices], bank)
     base = marl_bgs.make(
         "tdm",
-        num_envs=32,
-        env_config=marl_bgs.balanced_spawn_configs(selected, num_envs=32),
+        num_envs=num_envs,
+        env_config=marl_bgs.balanced_spawn_configs(selected, num_envs=num_envs),
         metrics=metrics,
-        replay_episodes=(1, 97) if recording else (),
+        replay_episodes=(1, 3 * num_envs + 1) if recording else (),
         full_metrics_episodes=(1,) if recording and metrics == "none" else (),
     )
     env = marl_bgs.AutoReset(base) if automatic else base
@@ -198,7 +201,7 @@ def context(seed: int, *, automatic: bool, recording: bool, metrics: str) -> Car
     memory = marl_bgs.init_systems(_METHOD, _OPPONENT, observations, state, init_key)
     tracking = marl_bgs.init_episode_tracking(
         env, state, source_configs=bank, source_indices=indices, record_starts=recording
-    ).begin_stage(state, total_env_steps=512)
+    ).begin_stage(state, total_env_steps=16 * num_envs)
     return Carry(
         env,
         rng,

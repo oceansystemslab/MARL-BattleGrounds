@@ -19,6 +19,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
+from marl_battlegrounds.viewer.options import (
+    PLAYBACK_OPTION_LABELS,
+    PlaybackOptions,
+    resolve_playback_options,
+    validate_playback_options,
+)
+
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
@@ -44,13 +51,7 @@ class _LaunchOptions:
     list_sample_replays: bool
     include_stress: bool
     seed: int
-    frame_index: int | None
-    pov_slot: int | None
-    static: bool
-    no_open: bool
-    port: int
-    view: _ViewMode
-    ranges: bool
+    playback: PlaybackOptions
     supplied: frozenset[str]
 
 
@@ -254,13 +255,7 @@ def _resolve_launch_options(namespace: argparse.Namespace) -> _LaunchOptions:
         ),
         include_stress=cast(bool, getattr(namespace, "include_stress", False)),
         seed=cast(int, getattr(namespace, "seed", 0)),
-        frame_index=cast(int | None, getattr(namespace, "frame_index", None)),
-        pov_slot=cast(int | None, getattr(namespace, "pov_slot", None)),
-        static=cast(bool, getattr(namespace, "static", False)),
-        no_open=cast(bool, getattr(namespace, "no_open", False)),
-        port=cast(int, getattr(namespace, "port", 0)),
-        view=cast(_ViewMode, getattr(namespace, "view", "researcher")),
-        ranges=cast(bool, getattr(namespace, "ranges", False)),
+        playback=resolve_playback_options(namespace),
         supplied=supplied,
     )
 
@@ -273,13 +268,6 @@ _OPTION_LABELS = (
     ("list_sample_replays", "--list-sample-replays"),
     ("include_stress", "--include-stress"),
     ("seed", "--seed"),
-    ("frame_index", "--frame-index"),
-    ("pov_slot", "--pov-slot"),
-    ("static", "--static"),
-    ("no_open", "--no-open"),
-    ("port", "--port"),
-    ("view", "--view"),
-    ("ranges", "--ranges/--no-ranges"),
 )
 
 
@@ -310,32 +298,26 @@ def _validate_option_matrix(
         allowed = frozenset(("list_sample_replays",))
     elif selector == "list_scenarios":
         allowed = frozenset(("list_scenarios", "include_stress"))
-    elif options.static:
-        if "frame_index" not in options.supplied:
-            parser.error("--frame-index is required with --static.")
-        allowed_values = {selector, "static", "frame_index", "ranges"}
-        if selector == "scenario":
-            allowed_values.update(("seed", "include_stress"))
-        allowed = frozenset(allowed_values)
     else:
-        allowed_values = {
-            selector,
-            "frame_index",
-            "pov_slot",
-            "view",
-            "ranges",
-            "port",
-            "no_open",
-        }
+        allowed_values = {selector}
         if selector == "scenario":
             allowed_values.update(("seed", "include_stress"))
-        allowed = frozenset(allowed_values)
+        allowed = frozenset(allowed_values) | options.playback.supplied
+        try:
+            validate_playback_options(options.playback)
+        except ValueError as exc:
+            context = f"--{selector.replace('_', '-')} --static"
+            parser.error(
+                str(exc).replace(
+                    "unavailable with --static", f"unavailable with {context}"
+                )
+            )
 
     forbidden = options.supplied - allowed
-    for destination, option_label in _OPTION_LABELS:
+    for destination, option_label in (*_OPTION_LABELS, *PLAYBACK_OPTION_LABELS):
         if destination in forbidden:
             selector_context = f"--{selector.replace('_', '-')}"
-            if options.static:
+            if options.playback.static:
                 selector_context += " --static"
             parser.error(f"{option_label} is unavailable with {selector_context}.")
 
@@ -345,63 +327,14 @@ def _run_browser_replay(
     *,
     loaded_bundle: LoadedReplayBundle | None = None,
 ) -> int:
-    """Resolve immutable replay authority before importing the HTTP server."""
-    bundle = loaded_bundle
-    if bundle is None:
-        from marl_battlegrounds.evaluation.replay_io import (
-            ReplayLoadError,
-            load_replay,
-        )
+    """Launch the shared browser using the repository's editable frontend assets."""
+    from marl_battlegrounds.viewer.launch import launch_replay
 
-        assert options.replay is not None
-        try:
-            bundle = load_replay(options.replay)
-        except ReplayLoadError as exc:
-            raise ValueError(f"Replay could not be loaded: {exc}") from exc
-
-    from scripts.dev.visual_debugger.replay_service import ReplayViewerService
-
-    service = ReplayViewerService(
-        bundle,
-        initial_frame_index=(0 if options.frame_index is None else options.frame_index),
-        view_mode=options.view,
-        pov_global_slot=options.pov_slot,
-        preset="analysis",
-        show_ranges=options.ranges,
-        verbose=False,
-    )
-
-    from scripts.dev.visual_debugger.replay_protocol import (
-        ReplayApiErrorV1,
-        ReplayCommandRequestV1,
-    )
-    from scripts.dev.visual_debugger.server import (
-        REPLAY_HTTP_ROUTES,
-        HttpCoordinatorBinding,
-        serve_browser_debugger,
-    )
-
-    coordinator = HttpCoordinatorBinding(
-        mode="replay",
-        initial_show_ranges=options.ranges,
-        routes=REPLAY_HTTP_ROUTES,
-        request_model=ReplayCommandRequestV1,
-        error_factory=ReplayApiErrorV1,
-        current_frame=service.current_frame,
-        apply_command=service.apply_command,
-        current_timeline=service.current_timeline,
-        current_presentation=service.current_presentation,
-        current_metric_report=service.current_metric_report,
-        metric_analysis=service.metric_analysis,
-        metric_catalog=service.metric_catalog,
-        episode_details=service.episode_details,
-    )
-    return serve_browser_debugger(
-        service,
+    return launch_replay(
+        options.replay if loaded_bundle is None else None,
+        options=options.playback,
+        loaded_bundle=loaded_bundle,
         asset_root=_REPOSITORY_ROOT / "web" / "visual_debugger",
-        port=options.port,
-        open_browser=not options.no_open,
-        coordinator=coordinator,
     )
 
 
@@ -409,17 +342,10 @@ def _run_static_loaded_replay(
     options: _LaunchOptions,
     bundle: LoadedReplayBundle,
 ) -> int:
-    """Render one frame from an already-authorized immutable bundle."""
-    from scripts.dev.visual_debugger.static_renderer import (
-        run_static_replay_artifact_renderer,
-    )
+    """Use the shared static launch route without reloading a checked sample."""
+    from marl_battlegrounds.viewer.launch import launch_replay
 
-    assert options.frame_index is not None
-    return run_static_replay_artifact_renderer(
-        replay=bundle.replay,
-        frame_index=options.frame_index,
-        show_ranges=options.ranges,
-    )
+    return launch_replay(None, options=options.playback, loaded_bundle=bundle)
 
 
 def _validate_scripted_scenario(
@@ -644,17 +570,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     try:
-        if options.replay is not None and options.static:
-            from scripts.dev.visual_debugger.static_renderer import (
-                run_static_replay_renderer,
-            )
+        if options.replay is not None and options.playback.static:
+            from marl_battlegrounds.viewer.launch import launch_replay
 
-            assert options.frame_index is not None
-            return run_static_replay_renderer(
-                replay_path=options.replay,
-                frame_index=options.frame_index,
-                show_ranges=options.ranges,
-            )
+            return launch_replay(options.replay, options=options.playback)
 
         if options.replay is not None:
             return _run_browser_replay(options)
@@ -670,13 +589,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             except ValueError as exc:
                 parser.error(str(exc))
             print(f"Sample replay notice: {SAMPLE_REPLAY_DEMO_PROVENANCE_NOTICE}")
-            if options.static:
+            if options.playback.static:
                 return _run_static_loaded_replay(options, bundle)
             return _run_browser_replay(options, loaded_bundle=bundle)
 
         _validate_scripted_scenario(parser, options)
         bundle = _materialize_scripted_bundle(options)
-        if options.static:
+        if options.playback.static:
             return _run_static_loaded_replay(options, bundle)
         return _run_browser_replay(options, loaded_bundle=bundle)
     except ImportError as exc:

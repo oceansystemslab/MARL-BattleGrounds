@@ -9,6 +9,19 @@ The project is under development. Team Deathmatch and the current researcher
 tools are available; later learner, official tournament and manuscript work
 are described below as plans, not completed results.
 
+The installed package also has terminal commands:
+
+```bash
+python -m marl_battlegrounds --help
+python -m marl_battlegrounds evaluate --system random --opponent tdm-alpha --episodes 32
+python -m marl_battlegrounds replay /path/to/saved-replay.json
+```
+
+Evaluation prints a short result preview. Add `--output-dir runs/my-evaluation`
+to keep the complete results. Replay viewing needs an existing replay file; it
+does not require this checkout or Node. See the [complete workflows](docs/evaluation/workflows.md)
+for factories, saved-first resume, explicit asset preparation and analysis.
+
 ## Take a First Step
 
 The package includes 52 Team Deathmatch maps and eight fixed scenarios. Prepare

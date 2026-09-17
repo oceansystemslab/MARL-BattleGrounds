@@ -8,13 +8,12 @@ existing services. This module has no independent CLI or file writer.
 
 from __future__ import annotations
 
-from scripts.dev.visual_debugger.protocol import ApiErrorV2, CommandRequestV1
-from scripts.dev.visual_debugger.replay_protocol import (
+from marl_battlegrounds.viewer.replay_protocol import (
     ReplayApiErrorV1,
     ReplayCommandRequestV1,
 )
-from scripts.dev.visual_debugger.replay_service import ReplayViewerService
-from scripts.dev.visual_debugger.server import (
+from marl_battlegrounds.viewer.replay_service import ReplayViewerService
+from marl_battlegrounds.viewer.server import (
     LIVE_HTTP_ROUTES,
     REPLAY_HTTP_ROUTES,
     GracefulCloseResult,
@@ -23,6 +22,7 @@ from scripts.dev.visual_debugger.server import (
     HttpCoordinatorReplacement,
     HttpCoordinatorRouter,
 )
+from scripts.dev.visual_debugger.protocol import ApiErrorV2, CommandRequestV1
 from scripts.dev.visual_debugger.service import (
     DebuggerService,
     ServiceCommandResult,

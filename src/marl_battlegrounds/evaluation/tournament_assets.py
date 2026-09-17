@@ -9,7 +9,6 @@ this module does not import JAX, providers, model code or the simulator.
 from __future__ import annotations
 
 import copy
-import importlib
 import json
 import math
 import os
@@ -19,6 +18,8 @@ import sys
 import tempfile
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from graphlib import CycleError, TopologicalSorter
 from hashlib import sha256
 from pathlib import Path
@@ -415,16 +416,62 @@ class _HTTPOnlyRedirect(HTTPRedirectHandler):
         )
 
 
-def _download_asset(verifier: AssetVerifier, asset_id: str) -> int:
+@dataclass
+class _DownloadApproval:
+    """Bind one confirmed download to its missing content, sizes and URLs.
+
+    allowed holds the inspected digest/size/URL tuples. attempted stops a second
+    transfer of a digest even if it disappears after its first transfer. This is
+    private CLI consent state; ordinary explicit Python downloads do not need it.
+    """
+
+    allowed: frozenset[tuple[str, int, str | None]]
+    attempted: set[str] = dataclass_field(default_factory=set[str])
+
+    def check(self, descriptor: Mapping[str, Any], *, claim: bool) -> None:
+        """Check permission before any temporary file or network operation.
+
+        claim=True reserves the only allowed attempt for this digest. A later
+        claim=False check confirms unchanged evidence immediately before opening
+        its URL. Changed or previously unconfirmed content raises ValueError.
+        """
+        evidence = (
+            descriptor["sha256"],
+            descriptor["size_bytes"],
+            descriptor.get("url"),
+        )
+        if evidence not in self.allowed:
+            raise ValueError(
+                "Required download changed after preview; run preparation again"
+            )
+        if claim:
+            if evidence[0] in self.attempted:
+                raise ValueError(
+                    "A confirmed asset already had a download attempt; "
+                    "run preparation again"
+                )
+            self.attempted.add(evidence[0])
+
+
+def _download_asset(
+    verifier: AssetVerifier,
+    asset_id: str,
+    *,
+    approval: _DownloadApproval | None = None,
+) -> int:
     """Stream one explicitly requested asset into a durable content-cache file.
 
     Returns downloaded bytes. Hash/length errors leave no complete cache entry.
     Uses bounded reads and only HTTP(S); no archives, code imports or retries.
+    approval, when supplied by the CLI, limits each transfer to its inspected
+    digest, size and URL before creating files and again before the request.
     """
     descriptor = verifier.assets[asset_id]
     url = descriptor.get("url")
     if not isinstance(url, str) or urlparse(url).scheme not in {"http", "https"}:
         raise ValueError(f"Asset {asset_id!r} needs an explicit HTTP(S) download URL")
+    if approval is not None:
+        approval.check(descriptor, claim=True)
     directory = verifier.cache_dir / "sha256"
     _make_cache_directory(directory)
     if not directory.resolve().is_relative_to(verifier.cache_dir):
@@ -436,6 +483,8 @@ def _download_asset(verifier: AssetVerifier, asset_id: str) -> int:
         digest = sha256()
         size = 0
         with os.fdopen(descriptor_fd, "wb") as output:
+            if approval is not None:
+                approval.check(verifier.assets[asset_id], claim=False)
             with build_opener(_HTTPOnlyRedirect()).open(url, timeout=30) as response:
                 while chunk := response.read(_BUFFER_BYTES):
                     size += len(chunk)
@@ -455,6 +504,11 @@ def _download_asset(verifier: AssetVerifier, asset_id: str) -> int:
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, destination)
+        verifier._verified[destination] = (  # pyright: ignore[reportPrivateUsage]
+            _file_stamp(destination),
+            descriptor["sha256"],
+            size,
+        )
         _sync_directory(directory)
         _sync_directory(verifier.cache_dir)
         _sync_directory(verifier.cache_dir.parent)
@@ -502,6 +556,227 @@ def _is_game_list(path: Path) -> bool:
     return isinstance(value, dict) and "logical_game_id" in value
 
 
+class _AssetPreparation:
+    """Keep one verifier and dependency graph through inspection and completion.
+
+    Created only by _inspect_tournament_assets. preview is the ordinary helper
+    result after read-only inspection. expected_config adds expected cache paths
+    so output-file conflicts can fail before downloads. finish rechecks file
+    stamps, reuses unchanged hashes/metadata and optionally downloads. This host
+    object is private to one invocation and is not thread-safe.
+    """
+
+    def __init__(
+        self,
+        config: Mapping[str, Any],
+        *,
+        cache_dir: str | Path | None,
+        roles: Sequence[str],
+    ) -> None:
+        """Inspect copied resolved declarations using the requested payload roles.
+
+        cache_dir has AssetVerifier's meaning. roles also select all required
+        metadata. Invalid assets/dependencies raise before any write; missing
+        files remain in preview. No controller or numerical backend is loaded.
+        """
+        self.verifier = AssetVerifier(config, cache_dir=cache_dir)
+        self._declarations = copy.deepcopy(self.verifier.assets)
+        self._config = copy.deepcopy(dict(config))
+        self._metadata = {
+            key
+            for key, value in self.verifier.assets.items()
+            if value["role"] in _METADATA_ROLES
+        }
+        self._selected = tuple(
+            sorted(
+                self._metadata
+                | {
+                    key
+                    for key, value in self.verifier.assets.items()
+                    if value["role"] in roles
+                }
+            )
+        )
+        sizes: dict[str, int] = {}
+        for key in self._selected:
+            value = self.verifier.assets[key]
+            if (
+                sizes.setdefault(value["sha256"], value["size_bytes"])
+                != value["size_bytes"]
+            ):
+                raise ValueError("Asset aliases declare different sizes for one digest")
+        self._checked_metadata: dict[
+            str, tuple[Path, tuple[int, int, int, int, int]]
+        ] = {}
+        self._graph: dict[str, set[str]] = {}
+        self._graph_changed = False
+        self._game_lists: set[str] = set()
+        self._downloaded = 0
+        self.preview = self._scan(download=False, approval=None)
+        self._approval = _DownloadApproval(
+            frozenset(
+                (
+                    self._declarations[key]["sha256"],
+                    self._declarations[key]["size_bytes"],
+                    self._declarations[key].get("url"),
+                )
+                for key in self.preview["missing"]
+            )
+        )
+
+    @property
+    def expected_config(self) -> dict[str, Any]:
+        """Return path hints expected after completing the inspected preparation.
+
+        This copy changes locations only. It does not assert missing files exist.
+        It lets prepared-file preflight compare full intended bytes before I/O.
+        """
+        result = copy.deepcopy(self.preview["config"])
+        for key in self.preview["missing"]:
+            result["assets"][key]["path"] = str(
+                self.verifier.cache_dir / "sha256" / self._declarations[key]["sha256"]
+            )
+        return result
+
+    def _check_metadata(self, key: str, path: Path) -> None:
+        """Check new metadata once; unchanged verified bytes reuse its references.
+
+        Schedule game lists are bounded first-row checks, never expanded JSONL.
+        Source-run manifests retain their historical dependency interpretation.
+        """
+        stamp = _file_stamp(path)
+        if self._checked_metadata.get(key) == (path, stamp):
+            return
+        self._checked_metadata[key] = path, stamp
+        if self.verifier.assets[key]["role"] == "run_manifest":
+            return
+        if key in self._game_lists or (
+            self.verifier.assets[key]["role"] == "schedule" and _is_game_list(path)
+        ):
+            return
+        value = self.verifier.read_json(key)
+        if isinstance(value, dict):
+            self._game_lists.update(
+                str(cast(dict[str, object], value)[name])
+                for name in ("games_asset", "challenger_games_asset")
+                if value.get(name) is not None
+            )
+        refs = set(_references(cast(object, value)))
+        undeclared = refs - self.verifier.assets.keys()
+        if undeclared:
+            raise ValueError(
+                f"Asset {key!r} references undeclared assets: {sorted(undeclared)}"
+            )
+        self._graph[key] = refs & self._metadata
+        self._graph_changed = True
+
+    def _scan(
+        self,
+        *,
+        download: bool,
+        approval: _DownloadApproval | None,
+    ) -> dict[str, Any]:
+        """Verify selected files and return the public helper's plain mapping.
+
+        Repeated scans inspect file stamps while retaining digests and parsed
+        dependency evidence. Missing physical bytes count once per digest.
+        Downloads use the supplied confirmation bound at their actual I/O site.
+        """
+        if self.verifier.assets != self._declarations:
+            raise ValueError("Asset declarations changed after preview; prepare again")
+        resolved = copy.deepcopy(self._config)
+        verified: list[str] = []
+        missing: list[str] = []
+        missing_sizes: dict[str, int] = {}
+        with self.verifier.verification_scope():
+            for key in self._selected:
+                path = self.verifier.verify(key)
+                if path is None and download:
+                    self._downloaded += _download_asset(
+                        self.verifier, key, approval=approval
+                    )
+                    path = self.verifier.verify(key)
+                if path is None:
+                    missing.append(key)
+                    descriptor = self.verifier.assets[key]
+                    missing_sizes[descriptor["sha256"]] = descriptor["size_bytes"]
+                    continue
+                verified.append(key)
+                resolved["assets"][key]["path"] = str(path)
+                if key in self._metadata:
+                    self._check_metadata(key, path)
+        if self._graph_changed:
+            try:
+                TopologicalSorter(self._graph).prepare()
+            except CycleError as error:
+                raise ValueError(
+                    "Tournament metadata contains a dependency cycle"
+                ) from error
+            self._graph_changed = False
+        return {
+            "config": resolved,
+            "verified": verified,
+            "missing": missing,
+            "bytes_missing": sum(missing_sizes.values()),
+            "bytes_downloaded": self._downloaded,
+            "cache_dir": str(self.verifier.cache_dir),
+        }
+
+    def finish(
+        self,
+        *,
+        download: bool = False,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Recheck inspected assets and optionally prepare their missing files.
+
+        download=False performs no writes or network I/O. confirmed=True binds
+        downloads to the initial preview and allows one attempt per digest. The
+        public explicit-download helper leaves confirmed False. A confirmed
+        completion also rejects remaining missing files, even with no download.
+        Returns the same
+        mapping as preview with current paths and cumulative downloaded bytes.
+        Changed/corrupt content and invalid dependencies raise ValueError;
+        filesystem and network errors propagate. Successful earlier copies stay.
+        """
+        if not isinstance(cast(object, download), bool) or not isinstance(
+            cast(object, confirmed), bool
+        ):
+            raise ValueError("download and confirmed must be Booleans")
+        result = self._scan(
+            download=download,
+            approval=self._approval if confirmed else None,
+        )
+        if confirmed and result["missing"]:
+            raise ValueError(
+                "Required assets are missing after preview; run preparation again"
+            )
+        return result
+
+
+def _inspect_tournament_assets(
+    config: str | Path | Mapping[str, Any] | None = None,
+    *,
+    cache_dir: str | Path | None = None,
+    roles: Sequence[str] = ("model", "outcomes_priority", "full_report"),
+) -> _AssetPreparation:
+    """Resolve and inspect assets for one optional confirmation/completion cycle.
+
+    Arguments follow prepare_tournament_assets. Returns its private preparation
+    context; no file/network mutation occurs. Configuration and integrity errors
+    propagate. Reuse the returned object instead of resolving or hashing twice.
+    """
+    from marl_battlegrounds.evaluation.tournament_config import load_tournament_config
+
+    if isinstance(roles, str) or any(role not in ASSET_ROLES for role in roles):
+        raise ValueError("Unknown tournament asset role")
+    return _AssetPreparation(
+        load_tournament_config(config),
+        cache_dir=cache_dir,
+        roles=roles,
+    )
+
+
 def prepare_tournament_assets(
     config: str | Path | Mapping[str, Any] | None = None,
     *,
@@ -532,7 +807,9 @@ def prepare_tournament_assets(
     dict
         config (copied with verified absolute paths), verified and missing asset
         ID lists, bytes_missing, bytes_downloaded and absolute cache_dir. Missing
-        files remain explicit; corrupt files raise instead of becoming missing.
+        bytes count each physical content digest once, even when several asset
+        IDs name it. Missing files remain explicit; corrupt files raise instead
+        of becoming missing.
 
     Raises
     ------
@@ -547,76 +824,10 @@ def prepare_tournament_assets(
     Downloads use bounded buffers; metadata JSON is read at host setup. A data
     digest verifies bytes, not the safety or eligibility of a controller.
     """
-    from marl_battlegrounds.evaluation.tournament_config import load_tournament_config
-
-    if isinstance(roles, str) or any(role not in ASSET_ROLES for role in roles):
-        raise ValueError("Unknown tournament asset role")
     if not isinstance(cast(object, download), bool):
         raise ValueError("download must be a Boolean")
-    resolved = copy.deepcopy(load_tournament_config(config))
-    verifier = AssetVerifier(resolved, cache_dir=cache_dir)
-    requested = {
-        identifier
-        for identifier, value in verifier.assets.items()
-        if value["role"] in roles
-    }
-    metadata = {
-        identifier
-        for identifier, value in verifier.assets.items()
-        if value["role"] in _METADATA_ROLES
-    }
-    selected = requested | metadata
-    verified: list[str] = []
-    missing: list[str] = []
-    downloaded = 0
-    graph: dict[str, set[str]] = {}
-    game_lists: set[str] = set()
-    for identifier in sorted(selected):
-        path = verifier.verify(identifier)
-        if path is None and download:
-            downloaded += _download_asset(verifier, identifier)
-            path = verifier.verify(identifier)
-        if path is None:
-            missing.append(identifier)
-            continue
-        verified.append(identifier)
-        resolved["assets"][identifier]["path"] = str(path)
-        if identifier not in metadata or identifier in game_lists:
-            continue
-        if verifier.assets[identifier]["role"] == "run_manifest":
-            # A source manifest records its old run, which may itself have used
-            # earlier snapshots. The current source descriptor names the exact
-            # required tables/replays; archived history is not a dependency graph.
-            continue
-        if verifier.assets[identifier]["role"] == "schedule" and _is_game_list(path):
-            continue
-        value = verifier.read_json(identifier)
-        if isinstance(value, dict):
-            game_lists.update(
-                str(cast(dict[str, object], value)[key])
-                for key in ("games_asset", "challenger_games_asset")
-                if value.get(key) is not None
-            )
-        refs = set(_references(cast(object, value)))
-        undeclared = refs - verifier.assets.keys()
-        if undeclared:
-            raise ValueError(
-                f"Asset {identifier!r} references undeclared assets: "
-                f"{sorted(undeclared)}"
-            )
-        graph[identifier] = refs & metadata
-    try:
-        TopologicalSorter(graph).prepare()
-    except CycleError as error:
-        raise ValueError("Tournament metadata contains a dependency cycle") from error
-    return {
-        "config": resolved,
-        "verified": verified,
-        "missing": missing,
-        "bytes_missing": sum(verifier.assets[key]["size_bytes"] for key in missing),
-        "bytes_downloaded": downloaded,
-        "cache_dir": str(verifier.cache_dir),
-    }
+    preparation = _inspect_tournament_assets(config, cache_dir=cache_dir, roles=roles)
+    return preparation.finish(download=True) if download else preparation.preview
 
 
 def _known(value: object) -> bool:
@@ -902,18 +1113,10 @@ def validate_loaded_controller(
 
 
 def _installed_callable(reference: str) -> Callable[..., object]:
-    """Import one explicitly declared trusted installed callable without guessing."""
-    if not isinstance(cast(object, reference), str) or reference.count(":") != 1:
-        raise ValueError("Controller factory/loader must use module:function")
-    module_name, attribute = reference.split(":")
-    if not module_name or not attribute or "." in attribute:
-        raise ValueError(
-            "Controller factory/loader must name one module-level callable"
-        )
-    value = getattr(importlib.import_module(module_name), attribute)
-    if not callable(value):
-        raise ValueError("Controller factory/loader is not callable")
-    return value
+    """Use the shared trusted module:callable importer without invoking it."""
+    from marl_battlegrounds._method_loading import installed_callable
+
+    return installed_callable(reference)
 
 
 def load_tournament_controller(

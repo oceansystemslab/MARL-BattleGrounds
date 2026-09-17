@@ -112,7 +112,7 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
     },
     reserved_costs_by_shard_count={12: (0,) * 11 + (50,)},
     # Keep measured twelve-worker destinations while refreshing source owners
-    # from actual collection after test additions (M8 Packet 7, 2026-09-17).
+    # from actual collection after test additions (M8 Packet 8, 2026-09-17).
     # Source IDs are owners after weighted packing, before these intact moves.
     # Keep the existing split/fixture rules and each unit's collection order.
     relocations_by_shard_count={

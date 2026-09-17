@@ -28,10 +28,10 @@ from marl_battlegrounds.rendering.scene import (
     BattlefieldSceneV2,
     ResearcherAnalyzerProjectionV2,
 )
-from scripts.dev.visual_debugger.model import DebuggerScenario, DebuggerSession
-from scripts.dev.visual_debugger.no_shared_visual import (
+from marl_battlegrounds.viewer.no_shared_visual import (
     build_live_no_shared_obs_visual_current_slice_v1,
 )
+from scripts.dev.visual_debugger.model import DebuggerScenario, DebuggerSession
 from scripts.dev.visual_debugger.protocol import (
     ActionTupleCardV1,
     ActorActionResultV1,
