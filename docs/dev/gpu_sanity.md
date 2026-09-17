@@ -146,16 +146,12 @@ not compare different simulators without matched work. Apply this interpretation
 rule to every packet; reuse unchanged evidence honestly for documentation-only
 work rather than running an unrelated benchmark again.
 
-**Tooling alignment still required before the next GPU run:** the current
-`scripts/dev/benchmark_evaluation.py` defaults and selected tests in
-`scripts/dev/check_gpu.sh` still include older batch sizes. Update their owned
-defaults and GPU test routes to follow this rule; keep CPU edge-case coverage and
-perform the required shard-impact audit. Check the effective batch in each worker
-and evaluator, including direct worker calls; a requested batch can be reduced by
-a shorter episode schedule. Do not merely drop a correctness check
-because its old fixture is small. Preserve historical commands and results with
-their original scope. This documentation update does not itself change the
-scripts, launch a run or establish results at the new sizes.
+The evaluation benchmark defaults use the approved sizes. The focused GPU check
+uses 32 environments in every simulation call, including its reference paths.
+Its replay test schedules 64 games so the evaluator keeps 32 workers and exercises
+refill. Scalar and odd-batch edges remain in the CPU suite. Check effective worker
+sizes when adding GPU cases: a short schedule can reduce a requested batch.
+Historical commands and results keep their original workload sizes.
 
 ## Prepare the Locked Environment
 
@@ -206,14 +202,17 @@ resolves the concrete `cuda` backend and verifies its platform metadata and
 device inventory. It multiplies two 2048-by-2048 float32 matrices with `jit`,
 waits for the result and checks its shape, value and device placement.
 
-The current focused tests cover the following behavior. Their older small-batch
-fixtures need the alignment described above before the next GPU execution:
+The focused tests use 32 environments and cover:
 
-- Core stepping through `jit` and `lax.scan`.
-- Scalar public reset inside external `vmap`.
-- Native selected metrics across chunks and resets.
-- Dynamic policy values, recurrent memory and actor separation.
-- Selected in-memory replays without metric files or output directories.
+- Native reset and compiled scan compared with external `vmap` and explicit steps.
+- Dynamic System values, separate team/lane memory and partial episode resets,
+  with one compiled scan reused across changing weights, keys and memory.
+- Separate Policy actor memory and selected memory resets, with dynamic values
+  passed through the same compiled batched application.
+- Selected full metrics under none/priority modes, compared with full capture
+  across chunks and resets.
+- Selected in-memory replays from the initial and refilled worker batches,
+  without metric files or output directories.
 
 The test list lives in `scripts/dev/check_gpu.sh`. These checks complement the
 complete CPU correctness suite. They do not prove every GPU workload, geometry

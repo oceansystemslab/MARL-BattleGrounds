@@ -414,15 +414,16 @@ def test_gpu_gate_distinguishes_clean_qualification_from_dirty_diagnostic(
     ]
     assert len(pytest_invocations) == 1
     assert set(re.findall(r"tests/\S+::\S+", pytest_invocations[0])) == {
-        "tests/test_core_spine.py::test_that_step_can_be_jit_compiled",
-        "tests/test_core_spine.py::test_step_can_run_in_scanned_rollout",
-        "tests/test_environment.py::test_scalar_reset_remains_valid_under_external_vmap",
-        "tests/test_environment.py::"
-        "test_native_selected_metrics_match_full_across_chunks_and_resets",
-        "tests/test_policy_execution.py::"
-        "test_dynamic_variables_and_recurrent_memory_do_not_retrace_or_share_actors",
-        "tests/test_public_evaluate.py::"
-        "test_selected_replays_in_memory_need_no_metrics_or_files",
+        "tests/test_gpu_workflows.py::"
+        "test_native_and_external_batch_match_through_jit_and_scan",
+        "tests/test_gpu_workflows.py::"
+        "test_dynamic_system_scan_preserves_memory_and_partial_resets",
+        "tests/test_gpu_metrics.py::"
+        "test_selected_metrics_match_full_across_chunks_and_resets",
+        "tests/test_gpu_policy.py::"
+        "test_policy_actor_memory_and_dynamic_values_remain_separate",
+        "tests/test_gpu_workflows.py::"
+        "test_selected_replay_evaluation_needs_no_metrics_or_files",
     }
 
     changed = _run(
