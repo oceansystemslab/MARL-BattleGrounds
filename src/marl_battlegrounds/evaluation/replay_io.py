@@ -1987,6 +1987,162 @@ def publish_prepared_replay(
     return SavedReplay(path, len(prepared.replay_json_bytes))
 
 
+def _publish_staged_replays(  # pyright: ignore[reportUnusedFunction]
+    files: list[tuple[Path, Path, int]],
+) -> None:
+    """Publish a whole checked family of privately staged replay files.
+
+    Parameters
+    ----------
+    files : list of (Path, Path, int)
+        Private source path, final replay path and expected byte length. Every
+        source must already have been validated, serialized and made durable by
+        publish_prepared_replay in a caller-owned directory on the same filesystem.
+        The caller keeps those immutable sources until this function returns.
+
+    Returns
+    -------
+    None
+        All final files exist with the prepared bytes. Identical existing files
+        are reused. No model is rebuilt and no payload is copied into memory.
+
+    Raises
+    ------
+    ReplaySaveError
+        A path is unsafe, staged evidence changed, an existing destination
+        conflicts, or exclusive linking/durability fails. All known conflicts
+        are checked before the first final link. Later filesystem failures can
+        leave earlier files published, as in ordinary replay publication.
+
+    Notes
+    -----
+    Internal writer route only. Existing files compare in 1 MiB blocks. New
+    files use an exclusive hard link to the already durable private inode;
+    linking cannot overwrite another writer's file or serialize a model twice.
+    """
+    if len({target for _, target, _ in files}) != len(files):
+        raise ReplaySaveError(
+            "invalid_argument", path=None, detail="replay destinations must be distinct"
+        )
+    checked: list[tuple[Path, Path, bool, tuple[int, int]]] = []
+    for source, target, size in files:
+        _validate_save_destination(target)
+        source_parent = _open_parent_directory(source, error_type=ReplaySaveError)
+        try:
+            target_parent = _open_parent_directory(target, error_type=ReplaySaveError)
+            try:
+                source_stat = _entry_status_at(
+                    source_parent, source.name, path=source, error_type=ReplaySaveError
+                )
+                if (
+                    source_stat is None
+                    or not stat.S_ISREG(source_stat.st_mode)
+                    or source_stat.st_size != size
+                ):
+                    raise ReplaySaveError(
+                        "replay_publication_verification_failed",
+                        path=source,
+                        detail="private replay bytes changed before publication",
+                    )
+                target_stat = _entry_status_at(
+                    target_parent, target.name, path=target, error_type=ReplaySaveError
+                )
+                if target_stat is not None:
+                    if (
+                        not stat.S_ISREG(target_stat.st_mode)
+                        or target_stat.st_size != size
+                    ):
+                        raise ReplaySaveError(
+                            "replay_target_exists",
+                            path=target,
+                            detail="existing replay differs from prepared data",
+                        )
+                    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+                    with (
+                        os.fdopen(
+                            os.open(source.name, flags, dir_fd=source_parent), "rb"
+                        ) as first,
+                        os.fdopen(
+                            os.open(target.name, flags, dir_fd=target_parent), "rb"
+                        ) as second,
+                    ):
+                        while block := first.read(1024 * 1024):
+                            if second.read(len(block)) != block:
+                                raise ReplaySaveError(
+                                    "replay_target_exists",
+                                    path=target,
+                                    detail="existing replay differs from prepared data",
+                                )
+                        if second.read(1):
+                            raise ReplaySaveError(
+                                "replay_target_exists",
+                                path=target,
+                                detail="existing replay grew during verification",
+                            )
+                        os.fsync(second.fileno())
+                    _fsync_directory(target_parent)
+                checked.append(
+                    (
+                        source,
+                        target,
+                        target_stat is not None,
+                        (source_stat.st_dev, source_stat.st_ino),
+                    )
+                )
+            finally:
+                os.close(target_parent)
+        except OSError as error:
+            raise ReplaySaveError(
+                "file_read_failed",
+                path=target,
+                detail="could not check staged replay destinations",
+            ) from error
+        finally:
+            os.close(source_parent)
+    for source, target, exists, identity in checked:
+        if exists:
+            continue
+        source_parent = _open_parent_directory(source, error_type=ReplaySaveError)
+        try:
+            target_parent = _open_parent_directory(target, error_type=ReplaySaveError)
+            linked = False
+            try:
+                os.link(
+                    source.name,
+                    target.name,
+                    src_dir_fd=source_parent,
+                    dst_dir_fd=target_parent,
+                    follow_symlinks=False,
+                )
+                linked = True
+                result = os.stat(
+                    target.name, dir_fd=target_parent, follow_symlinks=False
+                )
+                if (result.st_dev, result.st_ino) != identity:
+                    raise OSError("published replay differs from its private source")
+                _fsync_directory(target_parent)
+            except OSError as error:
+                if linked:
+                    with suppress(OSError):
+                        result = os.stat(
+                            target.name, dir_fd=target_parent, follow_symlinks=False
+                        )
+                        if (result.st_dev, result.st_ino) == identity:
+                            os.unlink(target.name, dir_fd=target_parent)
+                            _fsync_directory(target_parent)
+                raise ReplaySaveError(
+                    "replay_target_exists"
+                    if isinstance(error, FileExistsError)
+                    else "atomic_publish_failed",
+                    path=target,
+                    detail="staged replay could not be exclusively published",
+                ) from error
+            finally:
+                os.close(target_parent)
+        finally:
+            os.close(source_parent)
+
+
 def save_replay(
     replay: ReplayArtifactV2 | ReplayArtifactV3,
     path: str | os.PathLike[str],

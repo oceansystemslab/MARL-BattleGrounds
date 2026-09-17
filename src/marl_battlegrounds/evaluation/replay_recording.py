@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
+from hashlib import sha256
 from numbers import Integral
 from pathlib import Path
 from tempfile import TemporaryFile
@@ -28,6 +29,31 @@ if TYPE_CHECKING:
 type ContextFactory = Callable[
     [ReplayPackets], tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]
 ]
+
+
+def validate_packet_epoch(
+    episode_id: int,
+    index: int,
+    *,
+    expected: int,
+    initial: bool,
+    has_transition: bool,
+    completed: bool,
+) -> None:
+    """Check one real replay decision using the shared sequence rules.
+
+    All arguments are host scalars already checked for their numerical dtype.
+    ``expected`` is the next zero-based transition index; ``completed`` says the
+    ID has already finished. Raises ValueError for invalid IDs, missing/duplicate
+    steps, an incorrect first-row marker or a packet without a Core transition.
+    This changes no collector state and does not inspect actions or game rules.
+    """
+    if episode_id <= 0 or completed:
+        raise ValueError("replay packet has an invalid or completed episode ID")
+    if index != expected or initial != (index == 0):
+        raise ValueError(f"episode {episode_id} replay packets have a gap or duplicate")
+    if not has_transition:
+        raise ValueError("valid replay packet does not contain a real transition")
 
 
 @dataclass
@@ -122,6 +148,122 @@ class ReplayCollector:
         """Return the immutable set of episode IDs whose replay is still incomplete."""
         return frozenset(self._episodes)
 
+    def checkpoint_streams(self, directory: Path) -> list[dict[str, object]]:
+        """Copy unfinished numeric streams into a new checkpoint directory.
+
+        Parameters
+        ----------
+        directory : Path
+            Existing empty directory owned by the checkpoint publisher. This
+            method creates one ``<episode_id>.npylog`` file per open episode.
+
+        Returns
+        -------
+        list of dict
+            JSON-ready episode IDs, original contexts/runtime, record counts,
+            leaf layouts, file lengths and SHA256 digests. No learner state is
+            included. The checkpoint owner adds configuration identities.
+
+        Notes
+        -----
+        Host-only. Copies in 1 MiB blocks and restores each live stream's cursor.
+        It neither closes streams nor publishes a checkpoint. Only disk-backed
+        collectors support this path. File or validation failures propagate;
+        the caller owns cleanup and marks its writer failed.
+        """
+        from marl_battlegrounds.evaluation.recording_checkpoint import (
+            COPY_BLOCK_BYTES,
+            packet_layout,
+        )
+
+        if self._closed:
+            raise RuntimeError("replay collector is closed")
+        records: list[dict[str, object]] = []
+        for episode_id, episode in sorted(self._episodes.items()):
+            stream = episode.stream
+            if stream is None:
+                raise ValueError(
+                    "recording checkpoints require disk-backed replay streams"
+                )
+            stream.flush()
+            position = stream.tell()
+            digest = sha256()
+            size = 0
+            try:
+                stream.seek(0)
+                first = next(episode.records())
+                layout = packet_layout(first)
+                stream.seek(0)
+                with (directory / f"{episode_id}.npylog").open("xb") as target:
+                    while block := stream.read(COPY_BLOCK_BYTES):
+                        target.write(block)
+                        digest.update(block)
+                        size += len(block)
+                    target.flush()
+                    import os
+
+                    os.fsync(target.fileno())
+            finally:
+                stream.seek(position)
+            records.append(
+                {
+                    "episode_id": episode_id,
+                    "context_id": episode.context.identity.episode_id,
+                    "count": episode.count,
+                    "context": episode.context.model_dump(mode="json"),
+                    "runtime": episode.runtime.model_dump(mode="json"),
+                    "path": f"open_replays/{episode_id}.npylog",
+                    "bytes": size,
+                    "sha256": digest.hexdigest(),
+                    "layout": layout,
+                }
+            )
+        return records
+
+    def restore_stream(
+        self,
+        packet: ReplayPackets,
+        *,
+        context: EvaluationEpisodeContextV3,
+        runtime: RuntimeProvenanceV1,
+        stream: BinaryIO,
+        count: int,
+    ) -> None:
+        """Adopt one already validated replay prefix without calling its factory.
+
+        ``packet`` is its first scalar row and supplies the installed tree layout.
+        ``stream`` must be a caller-owned anonymous binary file at its append end;
+        ``count`` is its positive validated row count. This collector takes stream
+        ownership on success. It rejects duplicate/completed IDs or closed state.
+        The checkpoint reader owns full content, context and order validation.
+        """
+        episode_id = int(packet.episode_id)
+        if (
+            self._closed
+            or episode_id in self._episodes
+            or episode_id in self._completed
+        ):
+            raise ValueError("cannot restore this replay episode into the collector")
+        if count < 1:
+            raise ValueError("an open replay prefix must contain a real transition")
+        self._episodes[episode_id] = _Episode(
+            context, runtime, jax.tree.structure(packet), stream, count
+        )
+
+    def restore_completed(self, episode_ids: Iterable[int]) -> None:
+        """Restore durable completed IDs before admitting later replay packets.
+
+        IDs are positive integers from the validated pass. They must not name an
+        unfinished restored stream. This changes only collector duplicate guards;
+        it does not fabricate replay files for games that were never captured.
+        """
+        values = set(episode_ids)
+        if any(type(value) is not int or value < 1 for value in values):
+            raise ValueError("completed replay IDs must be positive integers")
+        if values & self._episodes.keys():
+            raise ValueError("an open replay also appears completed")
+        self._completed.update(values)
+
     def preflight(
         self,
         packets: ReplayPackets,
@@ -201,21 +343,15 @@ class ReplayCollector:
         for row in np.flatnonzero(valid):
             episode_id = int(arrays["episode_id"][row])
             index = int(arrays["transition_index"][row])
-            if (
-                episode_id <= 0
-                or episode_id in self._completed
-                or episode_id in finished
-            ):
-                raise ValueError("replay packet has an invalid or completed episode ID")
             expected = pending.get(episode_id, 0)
-            if index != expected or bool(arrays["initial"][row]) != (index == 0):
-                raise ValueError(
-                    f"episode {episode_id} replay packets have a gap or duplicate"
-                )
-            if not bool(arrays["has_transition"][row]):
-                raise ValueError(
-                    "valid replay packet does not contain a real transition"
-                )
+            validate_packet_epoch(
+                episode_id,
+                index,
+                expected=expected,
+                initial=bool(arrays["initial"][row]),
+                has_transition=bool(arrays["has_transition"][row]),
+                completed=episode_id in self._completed or episode_id in finished,
+            )
             if bool(arrays["terminated"][row] or arrays["truncated"][row]):
                 pending.pop(episode_id, None)
                 finished.add(episode_id)
@@ -311,6 +447,7 @@ class ReplayCollector:
                 del self._episodes[episode_id]
                 self._completed.add(episode_id)
                 yield artifact
+                del artifact
 
     def close(self) -> None:
         """Release every incomplete spool and mark the collector closed.

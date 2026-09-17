@@ -316,7 +316,7 @@ transitions and exclude reset calls and terminal padding.
 Equal lane counts alone do not prove balanced training. A supported training
 stage must consume equal real advances from each spawn choice; equal completed
 game counts are insufficient. The optional tracker below checks real stage
-coverage. Coordinated learner/writer restart remains later work.
+coverage. Recorded restart uses the dedicated-run route below.
 
 Scalar/native calls compose with `jit`, external `vmap` and `lax.scan`. Reuse a
 callable and pass changing numerical data dynamically; repeatedly making new
@@ -361,9 +361,8 @@ writer.write(info, policy_trace=memory.policy_trace)
 Register the two systems with `RunWriter(..., policies={"team_a": a, "team_b": b})`.
 The trace is optional. Known component choices go to `policy_assignments.csv`;
 unknown choices remain unknown. Learning outputs and recurrent/provider memory
-are never serialized automatically. This is a host recording call. The later
-bounded training collector and coordinated learner/writer restart are separate
-work. Run `python examples/systems.py --output-dir artifacts/system-example`
+are never serialized automatically. This is a host recording call. The bounded
+collector below is optional for compiled training. Run `python examples/systems.py --output-dir artifacts/system-example`
 for a complete raw System recording and saved none-mode evaluation example.
 Omitting that option keeps the example's no-file behavior.
 
@@ -464,6 +463,186 @@ provide bounded compiled collection. Save complete numerical carries to continue
 unrecorded execution; do not treat that as coordinated recorded-training recovery.
 Each independent seed needs its own environment, memory, RNG, tracker, budget and
 recording pass. Validation uses a separate context and leaves training untouched.
+
+### Collect Optional Records Without a Full Info History
+
+Use [the recorded rollout example](../../examples/recorded_rollout.py) for a complete
+compiled workflow. Its default uses direct `lax.scan` and writes no files. Add
+`--output-dir PATH` to collect records and demonstrate a coordinated restart.
+`--explicit-reset` chooses new source configurations when games finish; automatic
+reset is the default. `--metrics none` still saves outcomes and the explicitly
+selected full/replay episodes. Each seed has a separate run and checkpoint.
+
+Your scan callback keeps its normal form:
+
+```python
+# step_fn returns (next_carry, (transition, info, trace)).
+carry, transitions = marl_bgs.collect_rollout(
+    step_fn,
+    carry,
+    num_steps=128,
+    writer=writer,
+    source_configs=tracking.source_configs,
+)
+```
+
+`num_steps` counts callback executions. The collector never adds extra actions to
+replace terminal padding. It returns the same latest carry and learner transition
+tree as direct scan. Keep all changing parameters, keys and source values in the
+carry. After returning, unpack the latest environment and tracker before calling
+`stage_summary(state)` or `begin_stage(state, ...)`.
+
+The collector runs on the host and calls reusable compiled chunks. Do not wrap
+`collect_rollout` itself in `jit`, `vmap` or differentiation. Use direct scan when
+no recording is needed or when applying those transforms to the whole workflow.
+External methods with opaque sessions can keep using immediate host recording.
+
+Starts and completions each default to four environment batches of capacity.
+`record_capacity` can change those capacities, but must fit at least one complete
+batch. Assignment storage holds four decision batches; replay storage holds four
+maximum capture batches. The collector drains before the next whole step would
+exceed a limit. One short game can produce a start and a completion together.
+Learner outputs occupy the requested rollout length; recording storage stays
+bounded. Full measurements are retained only for completed captured episodes.
+
+Starts keep their actual first-transition configurations. Old episode ownership
+survives AutoReset. Traces refer to the same submitted actions. Terminal learning
+inputs remain in the learner output only if you choose them; they do not enter
+writer transfers. A bad record rejects its whole incoming drain before dependent
+output. Earlier successful drains remain valid. Flush or close the writer to make
+all accepted records durable. A failed collection does not return partial success.
+
+### Save Learning and Recording at the Same Point
+
+Use one dedicated `phase="training"` run per independent learner. Validation and
+unrelated work use separate runs. After a successful collection:
+
+1. Call `token = writer.checkpoint_recording()`.
+2. Save that token with the complete numerical carry, model, optimizer, random
+   keys, memory and update progress in your own checkpoint format.
+3. Atomically publish your learner checkpoint. A temporary file followed by
+   replacement and file/directory synchronization is shown in the example.
+
+The recording token is small. The immutable bundle it names keeps the writer's
+saved table boundaries and any unfinished selected replay prefixes. It saves no
+model or optimizer. A zero-progress initial boundary is allowed. Keep every bundle
+while a retained learner checkpoint refers to it; a token without its files is
+not a backup. Retaining many checkpoints can duplicate unfinished replay history.
+
+Restore the learner carry and its token together, then open:
+
+```python
+writer = marl_bgs.RunWriter(
+    resume_from=run_dir,
+    recording_checkpoint=token,
+    phase="training",
+    pass_id=original_pass,
+    policies=original_systems,
+)
+```
+
+Keep the original registered System descriptions. Restored learned weights remain
+in your carry and enter action calls through `variables_a`/`variables_b`. Do not
+rebuild the registration with different weights and label it as the old identity.
+The writer validates the entire selected boundary before changing run files.
+It then makes that boundary authoritative, removes later CSV suffixes and restores
+unfinished replay streams. Later unreferenced replay files remain on disk but do
+not appear as current results. If a recovery marker remains, reopening requires
+the same explicit token; ordinary resume cannot skip it. A late disk error can
+occur after the marker was removed. Retry with the saved token after any restore
+error, rather than assuming the failed call made no changes.
+
+Recording can be ahead of the learner after a crash. The saved learner checkpoint
+is authoritative. Recompute unsaved work from its original numerical state and
+RNG; do not change IDs or silently skip records to hide mismatched progress. Save
+which updates have already happened so a restored run does not apply one twice.
+The example preserves typed random keys and checks restored numerical results
+against uninterrupted execution. It demonstrates update ownership, not a learner.
+
+These snapshots retain CSV boundaries and hashes, not copies of every table.
+Rewinding can remove the prefix required by a later token; that token then fails.
+The system does not provide branch archives or rollback of external provider
+sessions. Ordinary no-token resume still uses the latest durable manifest.
+
+### Collection and Recorded Restart Costs — 2026-09-17
+
+The focused RTX 5090 check used JAX 0.10.1, 32 environments and 16 decisions:
+512 real transitions. Three- and seven-transition horizons deliberately produced
+many short games. The fixed methods, keys and frozen map assets matched between
+references. Each result below is the median of five synchronized warm samples.
+CPU simulation speed was not measured as a performance target.
+
+| Path | Time for 512 Transitions | Real Transitions per Second |
+| --- | ---: | ---: |
+| Direct scan, no writer or collector | 111.9 ms | 4,576 |
+| Fresh writer, collected outcomes and priority measurements | 753.9 ms | 679 |
+| Fresh writer, also recording policy choices | 836.7 ms | 612 |
+| Fresh writer, also selecting two replay episodes | 2,048.5 ms | 250 |
+
+Fresh-writer times include first-source verification. They exclude separately
+measured environment setup, compilation, final flush and checkpoint operations.
+On one continuing writer, five later trace-enabled rollouts took a median
+243.8 ms each, or 2,100 transitions per second. Their state and random streams
+continued across stages. This separate check shows that verified source checks
+are reused; it is not a comparison of identical starting trajectories.
+
+The shared immediate host-recording path improved from 23.112 seconds in commit
+`49cbb3d` to 0.991 seconds on matched inputs. Repeated validation of the same
+configurations caused most of that cost. Bounded caches now reuse successful
+checks keyed by content, tree, shapes and dtypes. Every incoming episode still
+has its actual configuration checked. Profiling found the remaining first-source
+physical validation cost; it does not recur on every episode. Core was unchanged.
+
+Compilation took 6.7 seconds for the trace collector and 8.1 seconds with selected
+replays. Kernel dispatch-cache entries stayed at two across repeated calls.
+Initial NumPy selection arrays and returned device arrays explain two dispatch
+signatures; a focused compile-log check showed that this does not itself mean
+two executable builds. Changing same-shaped numerical values did not grow the
+cache. These observations do not count every nested backend compilation.
+
+Recording buffers used 223,696 bytes for outcomes, 232,016 with traces and
+1,099,448 with selected replay. Caller-selected learner outputs used 93,184 bytes.
+The trace limit caused four drains; outcomes alone used two. Occupied drain
+payloads totalled at most 298,224, 407,152 and 840,868 bytes respectively, excluding
+small control transfers. These are payload bounds, not a driver-level bus trace.
+No learner carry or history was transferred for recording.
+
+Whole-process JAX allocation high water was about 204 MB, including preparation,
+compilation and reference work. The allocator pool was about 25.2 GB; this reserved
+pool is distinct from live arrays. Process peak RAM was about 2.6–3.1 GB. These
+figures do not isolate every CUDA driver allocation or prove long-run peak memory.
+
+The final flush took about 13–21 ms. With one unfinished replay prefix of
+112,397 bytes, checkpoint creation took 34.5 ms and restoration took
+433.2 ms. That bundle used 249,323 bytes; the small saved workflow used 929,481
+bytes in total. Restoration includes replay validation, not only file copying.
+Many retained checkpoints can duplicate unfinished history on disk.
+
+Completed replays are validated and serialized into private temporary files
+before any final replay from their incoming drain is published. Only one replay
+model is retained at a time. Exclusive file links reuse those bytes; they do not
+serialize the replay twice. Invalid later replay values therefore leave no final
+replays from that drain. Storage failures during publication still require normal
+recovery. Checkpoint tokens return only after bundle and directory entries are
+synchronized, including newly created run ancestors.
+
+The practical result is useful bounded recording with a measurable host cost.
+Direct training scans retain their existing path. Select traces and replays for
+the evidence an experiment needs; this short-game stress case is not a typical
+long-training throughput estimate. Installed examples cover all metric modes,
+curriculum resets, separate learner runs and exact restored numerical progress.
+These checks establish no learning result or theoretical speed optimum.
+
+Raw evidence is in `artifacts/m8-api-collection/20260917T083624Z/`, including
+`comparison.json`, per-case samples, the warm profile and independent reviews.
+Reproduce a focused case with:
+
+```bash
+python -m scripts.dev.benchmark_evaluation \
+  --collection --collection-case traces --output PATH
+```
+
+The default benchmark workload is unchanged unless `--collection` is selected.
 
 ### Tracking and AutoReset Costs — 2026-09-16
 
@@ -613,7 +792,7 @@ policies, maps, seeds and capture settings; a changed execution batch/chunk size
 does not change schedule identity. Durable completed episodes are skipped and
 interrupted suffixes recovered under the existing writer contract. Failures name
 the run and are recorded when storage remains usable. This evaluator recovery is
-separate from future coordinated learner-checkpoint/writer restart.
+separate from the dedicated training-run restoration described above.
 
 Episode IDs are local to a pass. Join with `run_id`, `phase`, `pass_id` and
 `episode_id`, plus the recorded participant ownership. Choose means, medians or

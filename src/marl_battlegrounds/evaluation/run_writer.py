@@ -13,12 +13,15 @@ import fcntl
 import io
 import json
 import os
-from collections.abc import Iterable
+from collections import ChainMap
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import ExitStack
 from datetime import UTC, datetime
-from functools import partial
+from functools import cache, partial
 from hashlib import sha256
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from uuid import uuid4
 
 import numpy as np
@@ -95,6 +98,45 @@ _INPUT_PROJECTIONS = {
     "shared_obs": SHARED_OBS_ACTOR_PROJECTION_V2.model_dump(mode="json"),
     "no_shared_obs": NO_SHARED_OBS_ACTOR_PROJECTION_V3.model_dump(mode="json"),
 }
+_VERIFICATION_CACHE_SIZE = 256
+
+type _ConfigValidationKey = tuple[str, object, tuple[tuple[str, tuple[int, ...]], ...]]
+
+
+class _PreparedReplay(NamedTuple):
+    """Hold validated replay inputs until the whole write call can be applied.
+
+    packets are host rows. Contexts and config IDs belong only to new initial
+    packets. provenance is newly discovered metadata, or None when not needed.
+    Preparing this record creates no live spool and changes no writer metadata.
+    """
+
+    packets: ReplayPackets
+    contexts: dict[int, tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]]
+    config_ids: dict[int, str]
+    provenance: dict[str, object] | None
+
+
+class _RecordingRows(NamedTuple):
+    """View one compact host family through shared recording validators.
+
+    IDs, action indices and lengths have one leading row axis. config_indices
+    selects actual configs from the shared evidence table. Only completion
+    families supply outcomes, scores and metric tables. Metric tables keep their
+    own row count; completion references select their rows. This view never
+    expands full metrics beside traces or starts.
+    """
+
+    episode_id: Any
+    decision_step: Any
+    episode_length: Any
+    config: Any
+    config_indices: Any
+    outcome: Any = None
+    team_scores: Any = None
+    priority: Any = None
+    full: Any = None
+    episode_start_records: Any = None
 
 
 def _host_row(value: object, *, index: int) -> np.ndarray[Any, Any]:
@@ -145,6 +187,53 @@ def _atomic_json(path: Path, value: object) -> None:
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, path)
+
+
+def _validation_key(config: EnvConfig, identifier: str) -> _ConfigValidationKey:
+    """Key an already hashed host config by content, exact tree, dtypes and shapes.
+
+    Content identity alone omits numerical dtypes. The additional signature
+    prevents a different dtype or malformed record type borrowing an earlier
+    successful Core validation. No arrays are retained by this key.
+    """
+    import jax
+
+    return (
+        identifier,
+        cast(object, jax.tree.structure(config)),
+        tuple(
+            (np.asarray(leaf).dtype.str, np.asarray(leaf).shape)
+            for leaf in jax.tree.leaves(config)
+        ),
+    )
+
+
+@cache
+def _source_relationship_check() -> Callable[[EnvConfig, EnvConfig], tuple[Any, Any]]:
+    """Compile the existing source comparison once; keep both configs dynamic.
+
+    Only a new verified config/source pair uses this check. A single compiled
+    call avoids dispatching a separate device operation for every config leaf.
+    Import JAX and the numerical authority only when start recording needs them.
+    """
+    import jax
+
+    from marl_battlegrounds.tasks import spawn_locations_for_source
+
+    return jax.jit(spawn_locations_for_source)
+
+
+def _remember_verification[Key, Value](
+    cache: dict[Key, Value], key: Key, value: Value
+) -> None:
+    """Retain one successful immutable fact in a bounded insertion-order cache.
+
+    Cached facts never publish a start or certify a claim. Callers still check
+    each declaration and actual config content. Eviction merely repeats a check.
+    """
+    if key not in cache and len(cache) >= _VERIFICATION_CACHE_SIZE:
+        cache.pop(next(iter(cache)))
+    cache[key] = value
 
 
 def configuration_identity(config: EnvConfig) -> tuple[str, dict[str, object]]:
@@ -228,8 +317,15 @@ class RunWriter:
         Team A/B System, Policy or serialized descriptions. Defaults to empty.
         Raw registration records available identity facts; it does not freeze
         methods. Only explicit frozen-snapshot evidence establishes that status.
+    recording_checkpoint : dict[str, object] or None, default None
+        Explicit earlier recording boundary returned by checkpoint_recording.
+        Requires resume_from and its original System registration. Validate all
+        saved identities and files before rewinding table prefixes. Pair this
+        with the matching full learner checkpoint; no learner data is restored
+        here. Omit it for ordinary latest-manifest recovery.
     checkpoint_id : str, optional
-        Caller-supplied checkpoint identity; absent when unknown.
+        Caller-supplied checkpoint label; unrelated to the recording recovery
+        token and absent when unknown.
     details : dict, optional
         JSON-compatible pass metadata. Source discovery is added only when capture
         needs it. Resume allows runtime_provenance, num_envs and chunk_size to vary.
@@ -270,6 +366,7 @@ class RunWriter:
         output_dir: str | Path | None = None,
         *,
         resume_from: str | Path | None = None,
+        recording_checkpoint: dict[str, object] | None = None,
         phase: str = "evaluation",
         pass_id: str = "1",
         policies: dict[str, object] | None = None,
@@ -281,6 +378,8 @@ class RunWriter:
         """Open and lock a new or resumed run, validate its schema and start the first
         pass.
         """
+        if recording_checkpoint is not None and resume_from is None:
+            raise ValueError("recording_checkpoint requires resume_from")
         if (output_dir is None) == (resume_from is None):
             raise ValueError(
                 "supply output_dir for a new run or resume_from for an existing run"
@@ -320,6 +419,12 @@ class RunWriter:
         self._recording_provenance: dict[str, object] | None = None
         self._assignment_open: dict[tuple[int, int], list[object]] = {}
         self._source_cache: list[tuple[object, tuple[object, ...], str]] = []
+        self._pending_numerical_starts: set[int] = set()
+        self._collection_active = False
+        self._checkpoint_hashes: dict[str, Any] | None = None
+        self._checkpoint_pass: str | None = None
+        self._validated_start_configs: dict[_ConfigValidationKey, None] = {}
+        self._verified_source_choices: dict[tuple[_ConfigValidationKey, str], int] = {}
         self._lock = -1
         if resume_from is None:
             root = Path(cast(str | Path, output_dir))
@@ -349,6 +454,7 @@ class RunWriter:
             }
         else:
             self.run_dir = Path(resume_from)
+        restoration = None
         try:
             self._lock = os.open(self.run_dir, os.O_RDONLY | os.O_DIRECTORY)
             fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -381,8 +487,30 @@ class RunWriter:
                     and self._details["run_id"] != _expected_run_id
                 ):
                     raise ValueError("run_id differs from the recorded run")
-                self._prepare_pass(phase, pass_id, policies, checkpoint_id, details)
-                self._recover_tables()
+                if recording_checkpoint is not None:
+                    from marl_battlegrounds.evaluation.recording_checkpoint import (
+                        begin_restore,
+                        prepare_restore,
+                    )
+
+                    restoration = prepare_restore(
+                        self,
+                        recording_checkpoint,
+                        phase=phase,
+                        pass_id=pass_id,
+                        policies=policies,
+                        checkpoint_id=checkpoint_id,
+                        details=details,
+                    )
+                    begin_restore(self, restoration)
+                else:
+                    if "recording_restore" in self._details:
+                        raise ValueError(
+                            "interrupted recording restore requires its explicit "
+                            "recording_checkpoint token before recovery"
+                        )
+                    self._prepare_pass(phase, pass_id, policies, checkpoint_id, details)
+                    self._recover_tables()
             self.run_id = str(self._details["run_id"])
             self._completed = {
                 (key, int(episode_id))
@@ -396,8 +524,17 @@ class RunWriter:
                 checkpoint_id=checkpoint_id,
                 details=details,
             )
-            self.flush()
+            if restoration is None:
+                self.flush()
+            else:
+                from marl_battlegrounds.evaluation.recording_checkpoint import (
+                    finish_restore,
+                )
+
+                finish_restore(self, restoration)
         except BaseException:
+            if restoration is not None:
+                restoration.close()
             self._release()
             raise
 
@@ -504,6 +641,10 @@ class RunWriter:
         key, identity, systems = self._prepare_pass(
             phase, pass_id, policies, checkpoint_id, details
         )
+        if self._checkpoint_pass is not None and key != self._checkpoint_pass:
+            raise ValueError(
+                "recording checkpoints require one dedicated training pass"
+            )
         if self._collector is not None and self._collector.pending_episode_ids:
             raise ValueError("cannot change pass while selected replays are incomplete")
         if (
@@ -527,11 +668,20 @@ class RunWriter:
                 "episodes": {},
                 "replays": {},
                 "recorded_metrics_by_episode": {},
+                "completed_config_ids": {},
                 "episode_starts": {},
                 "trace_epochs": {},
                 "trace_config_ids": {},
             }
+        self._details["passes"][key].setdefault("completed_config_ids", {})
         self._pass_key = key
+        self._pending_numerical_starts = {
+            int(identifier)
+            for identifier, start in self._details["passes"][key][
+                "episode_starts"
+            ].items()
+            if start["verification"] == "pending"
+        }
 
     def _prepare_pass(
         self,
@@ -695,6 +845,8 @@ class RunWriter:
             if not declarations and not bank_changed:
                 return
             for episode_id, declaration in declarations.items():
+                if episode_id not in entry["episode_starts"]:
+                    self._pending_numerical_starts.add(int(episode_id))
                 entry["episode_starts"].setdefault(
                     episode_id,
                     {
@@ -832,7 +984,7 @@ class RunWriter:
         return identifier, references, contents, cached
 
     def _start_declarations(
-        self, starts: object, banks: dict[str, Any]
+        self, starts: object, banks: Mapping[str, Any]
     ) -> dict[str, dict[str, object]]:
         """Check numerical start shapes, IDs and references, without granting evidence.
 
@@ -888,8 +1040,10 @@ class RunWriter:
             words = arrays["source_table_id"][index]
             table_id = words.astype(">u4").tobytes().hex() if np.any(words) else None
             if known:
-                if table_id not in banks or not 0 <= source_index < len(
-                    banks[table_id]
+                if (
+                    table_id is None
+                    or table_id not in banks
+                    or not 0 <= source_index < len(banks[table_id])
                 ):
                     raise ValueError(
                         "start source bank or source index is missing or invalid"
@@ -916,8 +1070,12 @@ class RunWriter:
 
     def _verify_starts(
         self,
-        records: EpisodeInfo,
+        records: EpisodeInfo | _RecordingRows,
         config_cache: dict[int, tuple[EnvConfig, str, dict[str, object]]],
+        *,
+        entry: dict[str, Any] | None = None,
+        banks: Mapping[str, list[str]] | None = None,
+        configurations: Mapping[str, object] | None = None,
     ) -> list[tuple[int, dict[str, object], str, dict[str, object]]]:
         """Join registered starts to their actual first-transition configurations.
 
@@ -925,18 +1083,29 @@ class RunWriter:
         starts remain custom. Later real rows must keep the recorded binding.
         """
         from marl_battlegrounds.tasks import (
-            prepare_exact_env_config,
-            spawn_locations_for_source,
+            _config_has_batch,  # pyright: ignore[reportPrivateUsage]
+            _validate_config_choices,  # pyright: ignore[reportPrivateUsage]
         )
 
-        entry = self._details["passes"][self._pass_key]
+        entry = cast(
+            dict[str, Any],
+            self._details["passes"][self._pass_key] if entry is None else entry,
+        )
+        banks = cast(
+            Mapping[str, list[str]],
+            self._details["source_banks"] if banks is None else banks,
+        )
+        configurations = cast(
+            Mapping[str, object],
+            (
+                self._details["configurations"]
+                if configurations is None
+                else configurations
+            ),
+        )
         starts = records.episode_start_records
         updates: list[tuple[int, dict[str, object], str, dict[str, object]]] = []
-        declarations = (
-            {}
-            if starts is None
-            else self._start_declarations(starts, self._details["source_banks"])
-        )
+        declarations = {} if starts is None else self._start_declarations(starts, banks)
         pending_bindings: dict[str, str] = {}
         for index in range(np.size(records.episode_id)):
             episode_id = str(int(records.episode_id[index]))
@@ -970,37 +1139,53 @@ class RunWriter:
                     raise ValueError(
                         "first-start evidence was already recorded for this episode"
                     )
-                prepare_exact_env_config(config_tree, num_envs=None)
+                validation_key = _validation_key(config_tree, config_id)
+                if validation_key not in self._validated_start_configs:
+                    batched = _config_has_batch(config_tree, None)
+                    _validate_config_choices(
+                        config_tree, batched=batched, both_spawn_choices=False
+                    )
+                    _remember_verification(
+                        self._validated_start_configs, validation_key, None
+                    )
                 known = bool(declaration["source_known"])
                 if known:
-                    refs = self._details["source_banks"][declaration["source_table_id"]]
-                    source = self._details["configurations"][
-                        refs[cast(int, declaration["source_index"])]
-                    ]
+                    refs = banks[cast(str, declaration["source_table_id"])]
+                    source_id = refs[cast(int, declaration["source_index"])]
+                    relationship_key = (validation_key, source_id)
+                    choice = self._verified_source_choices.get(relationship_key)
+                    if choice is None:
+                        source = configurations[source_id]
 
-                    def restore(template: object, values: object) -> object:
-                        """Restore source data using the actual tuple/dtype tree."""
-                        if isinstance(template, tuple) and hasattr(
-                            cast(object, template), "_fields"
-                        ):
-                            data = cast(dict[str, object], values)
-                            named = cast(Any, template)
-                            return type(named)(
-                                *(
-                                    restore(getattr(named, k), data[k])
-                                    for k in cast(tuple[str, ...], named._fields)
+                        def restore(template: object, values: object) -> object:
+                            """Restore source data using the actual tuple/dtype tree."""
+                            if isinstance(template, tuple) and hasattr(
+                                cast(object, template), "_fields"
+                            ):
+                                data = cast(dict[str, object], values)
+                                named = cast(Any, template)
+                                return type(named)(
+                                    *(
+                                        restore(getattr(named, k), data[k])
+                                        for k in cast(tuple[str, ...], named._fields)
+                                    )
                                 )
-                            )
-                        return np.asarray(values, dtype=np.asarray(template).dtype)
+                            return np.asarray(values, dtype=np.asarray(template).dtype)
 
-                    source_tree = cast("EnvConfig", restore(config_tree, source))
-                    matches, choice = spawn_locations_for_source(
-                        config_tree, source_tree
-                    )
-                    if (
-                        not bool(matches)
-                        or int(choice) != declaration["spawn_locations"]
-                    ):
+                        source_tree = cast("EnvConfig", restore(config_tree, source))
+                        matches, found_choice = _source_relationship_check()(
+                            config_tree, source_tree
+                        )
+                        if not bool(matches):
+                            raise ValueError(
+                                "actual first-start configuration differs from "
+                                "its declared source/spawn choice"
+                            )
+                        choice = int(found_choice)
+                        _remember_verification(
+                            self._verified_source_choices, relationship_key, choice
+                        )
+                    if choice != declaration["spawn_locations"]:
                         raise ValueError(
                             "actual first-start configuration differs from "
                             "its declared source/spawn choice"
@@ -1044,6 +1229,16 @@ class RunWriter:
         return updates
 
     @property
+    def has_pending_numerical_starts(self) -> bool:
+        """Report unresolved numerical starts without scanning episode history.
+
+        A collector must reject this state before choosing an action. Finish the
+        earlier register/write handoff first. Host schedules are not pending
+        numerical starts. This derived set is rebuilt when selecting a pass.
+        """
+        return bool(self._pending_numerical_starts)
+
+    @property
     def completed_episode_ids(self) -> frozenset[int]:
         """Return the current pass's durable episode IDs, excluding buffered
         completions.
@@ -1074,26 +1269,40 @@ class RunWriter:
     def _replay_context(
         self, packet: ReplayPackets
     ) -> tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]:
-        """Join a first packet to registered episode/pass facts and cached
-        provenance.
+        """Consume one context prepared before any replay publication.
+
+        This callback runs only during application. Missing preparation is an
+        internal error; it must not discover identities after preflight ends.
+        """
+        context = self._preflight_contexts.pop(int(packet.episode_id), None)
+        if context is None:
+            raise RuntimeError("replay context was not prepared before application")
+        return context
+
+    def _prepare_replay_context(
+        self, packet: ReplayPackets, provenance: dict[str, object] | None
+    ) -> tuple[
+        EvaluationEpisodeContextV3, RuntimeProvenanceV1, dict[str, object] | None
+    ]:
+        """Resolve initial replay identities without changing writer state.
+
+        provenance holds any discovery already made in this preflight. Return
+        the context, runtime and discovery for the later application boundary.
+        No live collector, spool or recorded metadata is created here.
         """
         from marl_battlegrounds.evaluation.recording_context import (
             build_recording_context,
             capture_recording_provenance,
         )
 
-        cached = self._preflight_contexts.pop(int(packet.episode_id), None)
-        if cached is not None:
-            return cached
         entry = self._details["passes"][self._pass_key]
         details = entry["details"]
         if "runtime_provenance" not in details:
-            if self._recording_provenance is None:
-                self._recording_provenance = capture_recording_provenance()
-            # Discovery is capture provenance, not a caller-declared pass
-            # identity. Keep resume_from usable with the original arguments.
-            entry["recording_provenance"] = self._recording_provenance
-            details = {**details, **self._recording_provenance}
+            if provenance is None:
+                provenance = self._recording_provenance
+            if provenance is None:
+                provenance = capture_recording_provenance()
+            details = {**details, **provenance}
         episode_id = int(packet.episode_id)
         episode: dict[str, object] = {
             "episode_id": episode_id,
@@ -1114,8 +1323,7 @@ class RunWriter:
                 "systems": self._details["systems"],
             },
         )
-        self._replay_ids[context.identity.episode_id] = episode_id
-        return context, runtime
+        return context, runtime, provenance
 
     def write_replay(self, packets: ReplayPackets) -> None:
         """Collect selected transitions and publish complete replay files.
@@ -1158,14 +1366,18 @@ class RunWriter:
             self._record_failure(error)
             raise
 
-    def _consume_replay(self, packets: ReplayPackets) -> None:
+    def _consume_replay(self, prepared: _PreparedReplay) -> None:
         """Publish packets after whole-call checks; retain their summary and config.
 
-        Only the two guarded writer entry points call this host-only method.
-        It consumes preflighted initial contexts and marks publication failures.
+        Direct and compact writer calls share this host-only path. Each completed
+        artifact is validated and serialized once into private temporary storage.
+        Only after the whole family succeeds are final files published. Memory
+        holds one replay at a time. Unfinished episodes keep using their existing
+        numerical spools. File failures keep the usual partial-publication limits.
         """
         from marl_battlegrounds.evaluation.replay_io import (
             PreparedReplay,
+            _publish_staged_replays,  # pyright: ignore[reportPrivateUsage]
             generated_replay_filename,
             preflight_replay_destination,
             publish_prepared_replay,
@@ -1173,47 +1385,76 @@ class RunWriter:
         from marl_battlegrounds.evaluation.replay_recording import ReplayCollector
 
         try:
+            packets = prepared.packets
+            self._preflight_contexts.update(prepared.contexts)
+            self._replay_config_ids.update(prepared.config_ids)
+            self._replay_ids.update(
+                {
+                    context.identity.episode_id: identifier
+                    for identifier, (context, _) in prepared.contexts.items()
+                }
+            )
+            if prepared.provenance is not None:
+                self._recording_provenance = prepared.provenance
+                self._details["passes"][self._pass_key]["recording_provenance"] = (
+                    prepared.provenance
+                )
             if self._collector is None:
                 self._collector = ReplayCollector(
                     self._replay_context, spool_dir=self.run_dir / ".replay_spool"
                 )
             summaries = _replay_summaries(packets)
-            for replay in self._collector.write(packets):
-                episode_id = self._replay_ids[replay.header.context.identity.episode_id]
-                if (self._pass_key, episode_id) in self._completed:
-                    raise ValueError(
-                        f"replay episode {episode_id} was already completed"
-                    )
-                directory = self.run_dir / "replays"
-                directory.mkdir(exist_ok=True)
-                path = directory / generated_replay_filename(
-                    replay.header.context,
-                    replay.canonical_digest_sha256,
-                    episode_id=episode_id,
-                )
-                if path.is_symlink():
-                    raise ValueError("replay destination must not be a symbolic link")
-                if path.exists():
-                    from marl_battlegrounds.evaluation.models import (
-                        canonical_json_bytes,
-                    )
-
-                    if path.read_bytes() != canonical_json_bytes(replay):
+            with ExitStack() as cleanup:
+                staging: Path | None = None
+                staged: list[tuple[Path, Path, int]] = []
+                metadata: dict[str, dict[str, object]] = {}
+                for replay in self._collector.write(packets):
+                    episode_id = self._replay_ids[
+                        replay.header.context.identity.episode_id
+                    ]
+                    if (self._pass_key, episode_id) in self._completed:
                         raise ValueError(
-                            "existing replay differs from its content identity"
+                            f"replay episode {episode_id} was already completed"
                         )
-                else:
-                    publish_prepared_replay(
-                        PreparedReplay._from_capture(replay),  # pyright: ignore[reportPrivateUsage]
-                        preflight_replay_destination(path),
+                    if staging is None:
+                        staging = Path(
+                            cleanup.enter_context(
+                                TemporaryDirectory(
+                                    prefix=".replay_publish-", dir=self.run_dir
+                                )
+                            )
+                        )
+                    path = (
+                        self.run_dir
+                        / "replays"
+                        / generated_replay_filename(
+                            replay.header.context,
+                            replay.canonical_digest_sha256,
+                            episode_id=episode_id,
+                        )
                     )
-                self._pending_replays[str(episode_id)] = {
-                    "path": str(path.relative_to(self.run_dir)),
-                    "canonical_digest_sha256": replay.canonical_digest_sha256,
-                    "bytes": path.stat().st_size,
-                    "summary": summaries[episode_id],
-                    "config_id": self._replay_config_ids.pop(episode_id),
-                }
+                    private_path = staging / f"{episode_id}.marlbg-replay.json"
+                    prepared_replay = PreparedReplay._from_capture(replay)  # pyright: ignore[reportPrivateUsage]
+                    saved = publish_prepared_replay(
+                        prepared_replay, preflight_replay_destination(private_path)
+                    )
+                    staged.append((private_path, path, saved.replay_byte_length))
+                    metadata[str(episode_id)] = {
+                        "path": str(path.relative_to(self.run_dir)),
+                        "canonical_digest_sha256": replay.canonical_digest_sha256,
+                        "bytes": saved.replay_byte_length,
+                        "summary": summaries[episode_id],
+                        "config_id": self._replay_config_ids[episode_id],
+                    }
+                    # Keep one completed model and byte payload at a time. Later
+                    # invalid artifacts must not follow any final publication.
+                    del prepared_replay, replay
+                if staged:
+                    (self.run_dir / "replays").mkdir(exist_ok=True)
+                    _publish_staged_replays(staged)
+                    self._pending_replays.update(metadata)
+                    for episode_id in metadata:
+                        self._replay_config_ids.pop(int(episode_id))
         except BaseException as error:
             self._record_failure(error)
             raise
@@ -1299,6 +1540,7 @@ class RunWriter:
             records = jax.tree.map(flatten, host)
             config_cache: dict[int, tuple[EnvConfig, str, dict[str, object]]] = {}
             starts = self._verify_starts(records, config_cache)
+            self._check_evidence_ownership(records, config_cache)
             traces = self._prepare_traces(records, policy_trace, leading, config_cache)
             prepared: list[
                 tuple[int, str, dict[str, object], list[tuple[str, list[object]]], str]
@@ -1347,48 +1589,438 @@ class RunWriter:
                 for i in np.flatnonzero(completion)
             }
             replay = self._preflight_replays(infos.replay, summaries, bindings)
-            entry = self._details["passes"][self._pass_key]
-            # Every declaration and trace has passed before any dependent output.
-            for episode_id, declaration, config_id, config in starts:
-                entry["episode_starts"][str(episode_id)] = declaration
-                self._details["configurations"].setdefault(config_id, config)
-            if replay is not None:
-                self._consume_replay(replay)
-            for trace in traces:
-                self._append_trace(*trace)
-            for episode_id, config_id, config, rows, coverage in prepared:
-                if (
-                    self._collector is not None
-                    and episode_id in self._collector.pending_episode_ids
-                ):
-                    raise ValueError(
-                        f"episode {episode_id} completed before its replay packets"
-                    )
-                self._details["configurations"].setdefault(config_id, config)
-                for filename, row in rows:
-                    self._rows[filename].append(row)
-                entry = self._details["passes"][self._pass_key]
-                entry["recorded_metrics_by_episode"][str(episode_id)] = coverage
-                key = (self._pass_key, episode_id)
-                self._completed.add(key)
-                self._pending.append(key)
-                if len(self._pending) >= self._buffer_size:
-                    self.flush()
+            self._apply_prepared(starts, traces, prepared, replay)
         except BaseException as error:
             self._record_failure(error)
             raise
+
+    def _check_evidence_ownership(
+        self,
+        records: EpisodeInfo | _RecordingRows,
+        config_cache: dict[int, tuple[EnvConfig, str, dict[str, object]]],
+        *,
+        entry: dict[str, Any] | None = None,
+    ) -> None:
+        """Check actual configs against every existing recorded owner, even on padding.
+
+        An unbound row does not create an identity or durable episode ownership.
+        Known rows use the same per-call config cache as starts and completions.
+        No new manifest entry is published by inspecting evidence alone.
+        """
+        entry = cast(
+            dict[str, Any],
+            self._details["passes"][self._pass_key] if entry is None else entry,
+        )
+        for index, value in enumerate(np.asarray(records.episode_id).reshape(-1)):
+            episode_id = int(value)
+            key = str(episode_id)
+            episode = entry["episodes"].get(key, {})
+            replay = cast(
+                dict[str, object],
+                self._pending_replays.get(key, entry["replays"].get(key, {})),
+            )
+            expected = (
+                episode.get("configuration_digest", episode.get("config_id")),
+                entry["episode_starts"].get(key, {}).get("resolved_config_id"),
+                entry["trace_config_ids"].get(key),
+                entry.get("completed_config_ids", {}).get(key),
+                replay.get("config_id", self._replay_config_ids.get(episode_id)),
+            )
+            if not any(identifier is not None for identifier in expected):
+                continue
+            _, actual, _ = self._config_evidence(records, index, config_cache)
+            if any(
+                identifier is not None and identifier != actual
+                for identifier in expected
+            ):
+                raise ValueError(
+                    "episode configuration differs from recorded episode evidence"
+                )
+
+    def _write_collected(
+        self, batch: object, *, source_configs: EnvConfig | None = None
+    ) -> None:
+        """Validate one bounded drain, then use the ordinary writer transaction.
+
+        Parameters
+        ----------
+        batch : CollectedBatch
+            Private numerical families already sliced to occupied prefixes.
+            Config references are local to its evidence table. No learner
+            output, System memory or final learning input belongs here.
+        source_configs : EnvConfig or None, default None
+            Explicit source bank for new start declarations. Existing immutable
+            cache checks apply; ordinary drains do not repeatedly hash it.
+
+        Notes
+        -----
+        Host-only. Small errors are checked before payload transfer. Every
+        family is checked before metadata or dependent records are admitted.
+        A rejected drain fails this writer; prior durable drains remain valid.
+        Evidence-only drains check ownership without flushing unrelated output.
+        """
+        self._check_open()
+        import jax
+
+        from marl_battlegrounds.evaluation.collection_types import CollectedBatch
+        from marl_battlegrounds.evaluation.recording_types import (
+            validate_recording_errors,
+        )
+
+        try:
+            if not isinstance(batch, CollectedBatch):
+                raise TypeError("collected records must be a CollectedBatch")
+            errors, counts = jax.device_get((batch.errors, batch.counts))
+            validate_recording_errors(errors)
+            for name in errors._fields:
+                value = np.asarray(getattr(errors, name))
+                shape = (
+                    np.shape(errors.lifecycle_error)
+                    if name in ("lifecycle_error", "episode_tracking_error", "code")
+                    else ()
+                )
+                dtype = np.bool_ if name == "lifecycle_error" else np.int32
+                if value.shape != shape or value.dtype != dtype:
+                    raise ValueError(
+                        f"collection error {name} has the wrong shape or dtype"
+                    )
+            if len(np.shape(errors.lifecycle_error)) != 1:
+                raise ValueError("collection errors require one lane axis")
+            if np.any(np.asarray(errors.code)):
+                raise ValueError(
+                    "collection failed at step "
+                    f"{int(errors.step)}, lane {int(errors.lane)}: "
+                    f"codes {np.asarray(errors.code).tolist()}"
+                )
+            if any(
+                np.asarray(value).shape != () or np.asarray(value).dtype != np.int32
+                for value in counts
+            ):
+                raise ValueError("collection counts must be int32 scalars")
+            sizes = {
+                name: self._integer(getattr(counts, name), f"{name} count", minimum=0)
+                for name in counts._fields
+            }
+            buffers = jax.device_get(batch.buffers)
+            for name, count in sizes.items():
+                family = getattr(buffers, name)
+                if family is None:
+                    if count:
+                        raise ValueError(f"absent {name} has a nonzero count")
+                    continue
+                if any(
+                    np.shape(leaf)[:1] != (count,) for leaf in jax.tree.leaves(family)
+                ):
+                    raise ValueError(f"{name} must contain exactly its occupied prefix")
+
+            def integers(
+                value: object, name: str, count: int, trailing: tuple[int, ...] = ()
+            ) -> np.ndarray[Any, Any]:
+                """Check a compact int32 field without coercion or clipping."""
+                result = np.asarray(value)
+                if result.shape != (count, *trailing) or result.dtype != np.int32:
+                    raise ValueError(f"collected {name} has the wrong shape or dtype")
+                return result
+
+            evidence = buffers.evidence
+            ids = integers(evidence.episode_id, "evidence IDs", sizes["evidence"])
+            steps = integers(evidence.decision_step, "evidence decisions", len(ids))
+            if (
+                np.any(ids <= 0)
+                or np.any(steps < -1)
+                or len(set(ids.tolist())) != len(ids)
+            ):
+                raise ValueError(
+                    "evidence needs unique positive IDs and valid decisions"
+                )
+            evidence_rows = _RecordingRows(
+                ids, steps, None, evidence.config, np.arange(len(ids))
+            )
+            evidence_cache: dict[int, tuple[EnvConfig, str, dict[str, object]]] = {}
+
+            def rows_for(
+                row_ids: object,
+                decisions: object,
+                references: object,
+                count: int,
+                *,
+                lengths: object = None,
+            ) -> tuple[
+                _RecordingRows, dict[int, tuple[EnvConfig, str, dict[str, object]]]
+            ]:
+                """Join a compact family to actual evidence without copying configs."""
+                claimed = integers(row_ids, "producing IDs", count)
+                epochs = integers(decisions, "producing decisions", count)
+                refs = integers(references, "config references", count)
+                if np.any(refs < 0) or np.any(refs >= len(ids)):
+                    raise ValueError("config reference is outside the evidence table")
+                if not np.array_equal(ids[refs], claimed):
+                    raise ValueError(
+                        "config evidence ID differs from its producing record"
+                    )
+                if np.any(epochs < -1):
+                    raise ValueError("producing decisions must be -1 or nonnegative")
+                if np.any((epochs >= 0) & ((steps[refs] < 0) | (epochs < steps[refs]))):
+                    raise ValueError(
+                        "real records need same-episode configuration evidence "
+                        "from this decision or an earlier real decision"
+                    )
+                cache: dict[int, tuple[EnvConfig, str, dict[str, object]]] = {}
+                for index, ref in enumerate(refs):
+                    cache[index] = self._config_evidence(
+                        evidence_rows, int(ref), evidence_cache
+                    )
+                return _RecordingRows(
+                    claimed, epochs, lengths, evidence.config, refs
+                ), cache
+
+            entry = self._details["passes"][self._pass_key]
+            bank_id = None
+            bank_refs: list[str] = []
+            contents: dict[str, object] = {}
+            bank_cache = None
+            declarations: dict[str, dict[str, object]] = {}
+            starts: list[tuple[int, dict[str, object], str, dict[str, object]]] = []
+            if buffers.starts is not None and sizes["starts"]:
+                bank_id, bank_refs, contents, bank_cache = self._prepare_source_bank(
+                    source_configs
+                )
+                banks = ChainMap(
+                    {bank_id: bank_refs} if bank_id is not None else {},
+                    self._details["source_banks"],
+                )
+                declarations = self._start_declarations(buffers.starts.records, banks)
+                if len(declarations) != sizes["starts"] or not np.all(
+                    buffers.starts.records.valid
+                ):
+                    raise ValueError(
+                        "collected starts must be distinct valid declarations"
+                    )
+                pending: dict[str, dict[str, object]] = {}
+                for identifier, declaration in declarations.items():
+                    if identifier in entry[
+                        "episode_starts"
+                    ] or self._episode_has_records(int(identifier)):
+                        raise ValueError(
+                            "collected start was already registered or recorded"
+                        )
+                    if (
+                        bank_id is not None
+                        and declaration["source_known"]
+                        and declaration["source_table_id"] != bank_id
+                    ):
+                        raise ValueError(
+                            "supplied bank differs from declared source identity"
+                        )
+                    pending[identifier] = {
+                        **declaration,
+                        "verification": "pending",
+                        "resolved_config_id": None,
+                    }
+                candidate = {
+                    **entry,
+                    "episode_starts": ChainMap(pending, entry["episode_starts"]),
+                }
+                start_rows, cache = rows_for(
+                    buffers.starts.info_episode_id,
+                    buffers.starts.decision_step,
+                    buffers.starts.config_index,
+                    sizes["starts"],
+                )
+                start_rows = start_rows._replace(
+                    episode_start_records=buffers.starts.records
+                )
+                starts = self._verify_starts(
+                    start_rows,
+                    cache,
+                    entry=candidate,
+                    banks=banks,
+                    configurations=ChainMap(contents, self._details["configurations"]),
+                )
+            verified = {
+                str(identifier): declaration for identifier, declaration, _, _ in starts
+            }
+            candidate = {
+                **entry,
+                "episode_starts": ChainMap(verified, entry["episode_starts"]),
+            }
+            self._verify_starts(evidence_rows, evidence_cache, entry=candidate)
+            self._check_evidence_ownership(
+                evidence_rows, evidence_cache, entry=candidate
+            )
+
+            traces: Any = []
+            if buffers.assignments is not None:
+                family = buffers.assignments
+                count = sizes["assignments"]
+                lengths = integers(family.episode_length, "trace lengths", count)
+                trace_rows, cache = rows_for(
+                    family.info_episode_id,
+                    family.decision_step,
+                    family.config_index,
+                    count,
+                    lengths=lengths,
+                )
+                if not np.all(family.trace.valid):
+                    raise ValueError("occupied assignments must all be valid")
+                traces = self._prepare_traces(
+                    trace_rows, family.trace, (count,), cache, entry=candidate
+                )
+
+            family = buffers.completions
+            count = sizes["completions"]
+            lengths = integers(family.episode_length, "completed lengths", count)
+            outcomes = integers(family.outcome, "outcomes", count)
+            scores = integers(family.team_scores, "scores", count, (2,))
+            completion_rows, cache = rows_for(
+                family.episode_id,
+                family.decision_step,
+                family.config_index,
+                count,
+                lengths=lengths,
+            )
+            completion_rows = completion_rows._replace(
+                outcome=outcomes,
+                team_scores=scores,
+                priority=buffers.priority,
+                full=buffers.full,
+            )
+            metric_refs: list[np.ndarray[Any, Any]] = []
+            for name, refs in (
+                ("priority", family.priority_index),
+                ("full", family.full_index),
+            ):
+                values = integers(refs, f"{name} references", count)
+                if np.any(values < -1) or np.any(values >= sizes[name]):
+                    raise ValueError(f"{name} reference is outside its metric table")
+                used = values[values >= 0]
+                if sorted(used.tolist()) != list(range(sizes[name])):
+                    raise ValueError(f"{name} rows need exactly one completion owner")
+                metric_refs.append(values)
+            if len(set(np.asarray(family.episode_id).tolist())) != count:
+                raise ValueError("one episode completed twice in a drain")
+            prepared = [
+                self._prepare_record(
+                    completion_rows,
+                    index,
+                    cache,
+                    entry=candidate,
+                    metric_indices=(
+                        int(metric_refs[0][index]),
+                        int(metric_refs[1][index]),
+                    ),
+                )
+                for index in range(count)
+            ]
+            terminal = dict(
+                zip(
+                    np.asarray(family.episode_id).tolist(),
+                    np.asarray(family.decision_step).tolist(),
+                    strict=True,
+                )
+            )
+            if any(trace[1] > terminal.get(trace[0], trace[1]) for trace in traces):
+                raise ValueError("trace decision follows the supplied completion")
+            bindings = {identifier: config_id for identifier, _, config_id, _ in starts}
+            for trace in traces:
+                if bindings.get(trace[0], trace[5]) != trace[5]:
+                    raise ValueError("trace configuration differs from its start")
+                bindings[trace[0]] = trace[5]
+            for identifier, config_id, _, _, _ in prepared:
+                if bindings.get(identifier, config_id) != config_id:
+                    raise ValueError(
+                        "completion configuration differs from its trace/start"
+                    )
+                bindings[identifier] = config_id
+            summaries = {
+                int(family.episode_id[index]): (
+                    int(outcomes[index]),
+                    int(lengths[index]),
+                    int(scores[index, 0]),
+                    int(scores[index, 1]),
+                )
+                for index in range(count)
+            }
+            replay = self._preflight_replays(buffers.replay, summaries, bindings)
+            # All families passed. Publish touched source metadata once; the
+            # shared apply authority owns ordering and any capacity flush.
+            if bank_id is not None:
+                self._details["source_banks"][bank_id] = bank_refs
+                self._details["configurations"].update(contents)
+                if bank_cache is not None:
+                    self._source_cache = [bank_cache]
+            self._apply_prepared(starts, traces, prepared, replay)
+        except BaseException as error:
+            self._record_failure(error)
+            raise
+
+    def _apply_prepared(
+        self,
+        starts: list[tuple[int, dict[str, object], str, dict[str, object]]],
+        traces: list[
+            tuple[
+                int,
+                int,
+                np.ndarray[Any, Any],
+                np.ndarray[Any, Any],
+                dict[str, str],
+                str,
+                dict[str, object],
+            ]
+        ],
+        completions: list[
+            tuple[int, str, dict[str, object], list[tuple[str, list[object]]], str]
+        ],
+        replay: _PreparedReplay | None,
+    ) -> None:
+        """Publish a fully checked call in start, replay, trace and completion order.
+
+        Both direct and compact writes use this boundary. Recording joins have
+        passed preflight. Replay artifact construction finishes for the entire
+        incoming family before final files or table rows are published. File
+        failures retain normal recovery rules. Capacity flushes cannot precede
+        the complete incoming replay family's validation.
+        """
+        entry = self._details["passes"][self._pass_key]
+        for episode_id, declaration, config_id, config in starts:
+            entry["episode_starts"][str(episode_id)] = declaration
+            self._pending_numerical_starts.discard(episode_id)
+            self._details["configurations"].setdefault(config_id, config)
+        if replay is not None:
+            self._consume_replay(replay)
+        for trace in traces:
+            self._append_trace(*trace)
+        for episode_id, config_id, config, rows, coverage in completions:
+            if (
+                self._collector is not None
+                and episode_id in self._collector.pending_episode_ids
+            ):
+                raise ValueError(
+                    f"episode {episode_id} completed before its replay packets"
+                )
+            self._details["configurations"].setdefault(config_id, config)
+            for filename, row in rows:
+                self._rows[filename].append(row)
+            entry = self._details["passes"][self._pass_key]
+            entry["recorded_metrics_by_episode"][str(episode_id)] = coverage
+            entry["completed_config_ids"][str(episode_id)] = config_id
+            key = (self._pass_key, episode_id)
+            self._completed.add(key)
+            self._pending.append(key)
+            if len(self._pending) >= self._buffer_size:
+                self.flush()
 
     def _preflight_replays(
         self,
         packets: ReplayPackets | None,
         completed: dict[int, tuple[int, int, int, int]],
         bindings: dict[int, str],
-    ) -> ReplayPackets | None:
+    ) -> _PreparedReplay | None:
         """Check replay order, completion joins and initial identities before output.
 
-        ReplayCollector owns packet ordering. Cache each validated initial context
-        until its factory consumes it, avoiding repeated source discovery. Existing
-        bindings and supplied schedule digests must match actual initial configs.
+        ReplayCollector owns packet ordering. Return contexts and config identities
+        for later application, without creating a live collector, spool or writer
+        metadata. Existing bindings and schedule digests must match actual configs.
         """
         import jax
 
@@ -1425,11 +2057,15 @@ class RunWriter:
             ):
                 raise ValueError("episode completed before its replay packets")
             return None
-        if self._collector is None:
-            self._collector = ReplayCollector(
-                self._replay_context, spool_dir=self.run_dir / ".replay_spool"
-            )
-        host = self._collector.preflight(packets, completed_episode_ids=completed)
+        checker = self._collector
+        temporary = checker is None
+        if checker is None:
+            checker = ReplayCollector(self._replay_context)
+        try:
+            host = checker.preflight(packets, completed_episode_ids=completed)
+        finally:
+            if temporary:
+                checker.close()
         for episode_id in np.unique(
             np.asarray(host.episode_id)[np.asarray(host.valid)]
         ):
@@ -1451,6 +2087,7 @@ class RunWriter:
         entry = self._details["passes"][self._pass_key]
         contexts: dict[int, tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]] = {}
         replay_configs: dict[int, str] = {}
+        provenance = None
         for index in np.flatnonzero(np.asarray(rows.valid) & np.asarray(rows.initial)):
             packet = cast(
                 "ReplayPackets",
@@ -1472,15 +2109,16 @@ class RunWriter:
                 raise ValueError(
                     "replay configuration differs from its episode evidence"
                 )
-            contexts[episode_id] = self._replay_context(packet)
+            context, runtime, provenance = self._prepare_replay_context(
+                packet, provenance
+            )
+            contexts[episode_id] = context, runtime
             replay_configs[episode_id] = config_id
-        self._preflight_contexts.update(contexts)
-        self._replay_config_ids.update(replay_configs)
-        return host
+        return _PreparedReplay(host, contexts, replay_configs, provenance)
 
     @staticmethod
     def _config_evidence(
-        records: EpisodeInfo,
+        records: EpisodeInfo | _RecordingRows,
         index: int,
         cache: dict[int, tuple[EnvConfig, str, dict[str, object]]],
     ) -> tuple[EnvConfig, str, dict[str, object]]:
@@ -1494,16 +2132,26 @@ class RunWriter:
         import jax
 
         if index not in cache:
-            config = jax.tree.map(partial(_host_row, index=index), records.config)
+            config_index = (
+                int(records.config_indices[index])
+                if isinstance(records, _RecordingRows)
+                else index
+            )
+            config = jax.tree.map(
+                partial(_host_row, index=config_index), records.config
+            )
             identifier, content = configuration_identity(config)
             cache[index] = config, identifier, content
         return cache[index]
 
     def _prepare_record(
         self,
-        records: EpisodeInfo,
+        records: EpisodeInfo | _RecordingRows,
         index: int,
         config_cache: dict[int, tuple[EnvConfig, str, dict[str, object]]],
+        *,
+        entry: dict[str, Any] | None = None,
+        metric_indices: tuple[int, int] | None = None,
     ) -> tuple[int, str, dict[str, object], list[tuple[str, list[object]]], str]:
         """Validate one completion without mutating buffers or metadata.
 
@@ -1535,7 +2183,10 @@ class RunWriter:
         config_tree, config_id, config = self._config_evidence(
             records, index, config_cache
         )
-        entry = self._details["passes"][self._pass_key]
+        entry = cast(
+            dict[str, Any],
+            self._details["passes"][self._pass_key] if entry is None else entry,
+        )
         episode = entry["episodes"].get(str(episode_id), {})
         if entry["trace_epochs"].get(str(episode_id), -1) > decision:
             raise ValueError("completion precedes an already recorded trace decision")
@@ -1564,8 +2215,12 @@ class RunWriter:
             )
         ):
             raise ValueError("completion lacks verified first-start evidence")
-        active = np.asarray(records.active_mask[index])
-        classes = np.asarray(records.class_ids[index])
+        if isinstance(records, _RecordingRows):
+            active = np.asarray(config_tree.agent_profile.active_mask)
+            classes = np.asarray(config_tree.agent_profile.class_ids)
+        else:
+            active = np.asarray(records.active_mask[index])
+            classes = np.asarray(records.class_ids[index])
         if (
             active.shape != (10,)
             or active.dtype != np.bool_
@@ -1604,14 +2259,17 @@ class RunWriter:
         for slot in range(10):
             identity.extend((int(classes[slot]), int(active[slot])))
         cells_by_mode: dict[str, list[object]] = {}
-        for mode, values, names in (
-            ("priority", records.priority, PRIORITY_METRIC_NAMES),
-            ("full", records.full, FULL_METRIC_NAMES),
+        indices = (index, index) if metric_indices is None else metric_indices
+        for mode, values, names, metric_index in (
+            ("priority", records.priority, PRIORITY_METRIC_NAMES, indices[0]),
+            ("full", records.full, FULL_METRIC_NAMES, indices[1]),
         ):
-            if values is not None:
-                cells = self._metric_cells(values, index, names)
-                if np.any(values.valid[index]):
-                    if not np.all(values.valid[index][: len(PRIORITY_METRIC_NAMES)]):
+            if values is not None and metric_index >= 0:
+                cells = self._metric_cells(values, metric_index, names)
+                if np.any(values.valid[metric_index]):
+                    if not np.all(
+                        values.valid[metric_index][: len(PRIORITY_METRIC_NAMES)]
+                    ):
                         raise ValueError(
                             "completed priority measurements must all be available"
                         )
@@ -1698,10 +2356,12 @@ class RunWriter:
 
     def _prepare_traces(
         self,
-        records: EpisodeInfo,
+        records: EpisodeInfo | _RecordingRows,
         trace: object,
         leading: tuple[int, ...],
         config_cache: dict[int, tuple[EnvConfig, str, dict[str, object]]],
+        *,
+        entry: dict[str, Any] | None = None,
     ) -> list[
         tuple[
             int,
@@ -1743,7 +2403,10 @@ class RunWriter:
             ):
                 raise ValueError(f"policy_trace.{name} has the wrong shape or dtype")
             arrays[name] = value.reshape((-1, 10) if name == "policy_ids" else (-1,))
-        entry = self._details["passes"][self._pass_key]
+        entry = cast(
+            dict[str, Any],
+            self._details["passes"][self._pass_key] if entry is None else entry,
+        )
         epochs: dict[str, int] = {}
         config_ids: dict[str, str] = {}
         result: list[
@@ -1775,13 +2438,18 @@ class RunWriter:
                 previous_epoch = int(entry["trace_epochs"].get(str(episode_id), -1))
             if decision <= previous_epoch:
                 raise ValueError("trace decisions must move forward without duplicates")
-            active = np.asarray(records.active_mask[index])
+            config_tree, config_id, config = self._config_evidence(
+                records, int(index), config_cache
+            )
+            active = np.asarray(
+                config_tree.agent_profile.active_mask
+                if isinstance(records, _RecordingRows)
+                else records.active_mask[index]
+            )
             choices = arrays["policy_ids"][index]
             if active.shape != (10,) or active.dtype != np.bool_:
                 raise ValueError("trace roster must have ten boolean active slots")
-            if not np.array_equal(
-                active, records.config.agent_profile.active_mask[index]
-            ):
+            if not np.array_equal(active, config_tree.agent_profile.active_mask):
                 raise ValueError("trace roster differs from the actual configuration")
             if np.any(choices[~active] != -1):
                 raise ValueError("inactive slots must have policy ID -1")
@@ -1797,9 +2465,6 @@ class RunWriter:
                     raise ValueError(
                         f"policy ID for slot {slot} is outside its component table"
                     )
-            _, config_id, config = self._config_evidence(
-                records, int(index), config_cache
-            )
             start_binding = entry["episode_starts"].get(str(episode_id), {})
             expected = (
                 episode.get("configuration_digest", episode.get("config_id")),
@@ -1978,6 +2643,38 @@ class RunWriter:
         }
         self.flush()
 
+    def checkpoint_recording(self) -> dict[str, object]:
+        """Make the current training recording boundary durable and return its token.
+
+        Returns
+        -------
+        dict[str, object]
+            Versioned recording identity to save atomically with the complete
+            learner carry, parameters, optimizer, RNG and stage progress. This
+            token does not save learning state and is not a backup by itself.
+
+        Raises
+        ------
+        ValueError
+            The run does not contain exactly one training pass, a numerical
+            start still lacks first-transition evidence, or collection is active.
+        RuntimeError
+            The writer is closed or failed.
+        OSError
+            Publication fails. No usable new token is returned; earlier tokens
+            remain valid subject to their retained files and table prefixes.
+
+        Notes
+        -----
+        Host-only. Flushes pending records and snapshots unfinished replay
+        prefixes with bounded copies. Preserve each returned bundle and its
+        referenced replay files while its learner checkpoint is needed. Resume
+        with the explicit token and original registered System descriptions.
+        """
+        from marl_battlegrounds.evaluation.recording_checkpoint import create_checkpoint
+
+        return create_checkpoint(self)
+
     def flush(self) -> None:
         """Make buffered rows, replay references and completion IDs durable together.
 
@@ -2020,6 +2717,13 @@ class RunWriter:
                 for key, entry in self._details["passes"].items()
             },
         }
+        hashes = (
+            None
+            if self._checkpoint_hashes is None
+            else {
+                name: digest.copy() for name, digest in self._checkpoint_hashes.items()
+            }
+        )
         try:
             for filename, rows in self._rows.items():
                 if not rows:
@@ -2035,7 +2739,10 @@ class RunWriter:
                         if previous["durable_bytes"] == 0 and start == 0:
                             writer.writerow(self._headers[filename])
                         writer.writerows(rows[start : start + self._buffer_size])
-                        stream.write(text.getvalue().encode("utf-8"))
+                        data = text.getvalue().encode("utf-8")
+                        stream.write(data)
+                        if hashes is not None:
+                            hashes.setdefault(filename, sha256()).update(data)
                     stream.flush()
                     os.fsync(stream.fileno())
                     candidate["tables"][filename] = {
@@ -2051,6 +2758,7 @@ class RunWriter:
             self._record_failure(error)
             raise
         self._details = candidate
+        self._checkpoint_hashes = hashes
         self._pending.clear()
         self._pending_replays.clear()
         for rows in self._rows.values():

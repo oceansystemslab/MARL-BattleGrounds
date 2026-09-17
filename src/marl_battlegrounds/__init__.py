@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from marl_battlegrounds.autoreset import AutoReset
+    from marl_battlegrounds.collection import collect_rollout
     from marl_battlegrounds.environment import Environment, EnvironmentState, make
     from marl_battlegrounds.episode_tracking import (
         EpisodeTrackingState,
@@ -67,6 +68,7 @@ __all__ = [
     "apply_systems",
     "balanced_spawn_configs",
     "canonical_tournament_rosters",
+    "collect_rollout",
     "evaluate",
     "independent_policies",
     "init_episode_tracking",
@@ -84,6 +86,7 @@ __all__ = [
 
 _MODULES = {
     "AutoReset": "autoreset",
+    "collect_rollout": "collection",
     "EpisodeTrackingState": "episode_tracking",
     "init_episode_tracking": "episode_tracking",
     "track_episode_step": "episode_tracking",

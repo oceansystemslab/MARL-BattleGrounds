@@ -112,7 +112,7 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
     },
     reserved_costs_by_shard_count={12: (0,) * 11 + (50,)},
     # Keep measured twelve-worker destinations while refreshing source owners
-    # from actual collection after test additions (M8 Packet 4, 2026-09-16).
+    # from actual collection after test additions (M8 Packet 5, 2026-09-17).
     # Source IDs are owners after weighted packing, before these intact moves.
     # Keep the existing split/fixture rules and each unit's collection order.
     relocations_by_shard_count={
@@ -122,8 +122,8 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
             ("file:tests/test_combat_ultimate_effects.py", 7, 5),
             ("file:tests/test_combat_effects.py", 8, 11),
             ("file:tests/test_tdm_scenarios.py", 11, 8),
-            ("file:tests/test_combat_ultimate_masks.py", 9, 2),
-            ("file:tests/test_policy_identity_recording.py", 5, 12),
+            ("file:tests/test_combat_ultimate_masks.py", 4, 2),
+            ("file:tests/test_policy_identity_recording.py", 7, 12),
         )
     },
     strict=True,

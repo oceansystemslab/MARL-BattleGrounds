@@ -24,6 +24,8 @@ samples of none/priority/full plus separate host save costs. Set PYTHONPATH to
 the selected --package-root/src when comparing committed and current sources.
 Use --tracking for only Packet 4: batch 32, rollout 16, manual/tracked reset
 comparisons and optional recording/final-state payload costs.
+Use --collection for bounded collection and recorded restart at batch 32,
+rollout 16. Existing modes and their default workloads stay unchanged.
 No mode establishes learning efficiency or proves theoretical optimality.
 """
 
@@ -3781,7 +3783,23 @@ def main() -> int:
         choices=("manual", "tracking", "autoreset", "starts", "training-state"),
         help="one tracking case; default compares all five",
     )
+    parser.add_argument(
+        "--collection",
+        action="store_true",
+        help="Packet 5 only: bounded collection and recorded restart at batch 32",
+    )
+    parser.add_argument(
+        "--collection-case",
+        choices=("disabled", "manual", "outcomes", "traces", "replay"),
+        help="one collection case; default compares all five",
+    )
     args = parser.parse_args()
+    if args.collection:
+        from scripts.dev.benchmark_collection import run
+
+        return run(args)
+    if args.collection_case:
+        parser.error("--collection-case requires --collection")
     if args.tracking:
         from scripts.dev.benchmark_tracking import run
 
