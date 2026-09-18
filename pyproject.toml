@@ -1,3 +1,7 @@
+# Python package, dependency groups and developer-tool configuration.
+# pyproject.toml declares intent; uv.lock records exact resolved versions.
+# Runtime code lives under src. Training/interop extras install dependencies,
+# not a complete learner or every adapter. See docs/dev/dependency_policy.md.
 [project]
 name = "marl-battlegrounds"
 version = "0.0.0"
@@ -11,6 +15,7 @@ authors = [
 dependencies = [
   "jax==0.10.1",
   "numpy",
+  "scipy",
   "chex",
   "omegaconf",
   "hydra-core>=1.3.4",
@@ -50,6 +55,24 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/marl_battlegrounds"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"web/visual_debugger/index.html" = "marl_battlegrounds/viewer/web/index.html"
+"web/visual_debugger/styles.css" = "marl_battlegrounds/viewer/web/styles.css"
+"web/visual_debugger/src" = "marl_battlegrounds/viewer/web/src"
+"web/visual_debugger/assets" = "marl_battlegrounds/viewer/web/assets"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/pyproject.toml",
+  "/README.md",
+  "/LICENSE",
+  "/web/visual_debugger/index.html",
+  "/web/visual_debugger/styles.css",
+  "/web/visual_debugger/src",
+  "/web/visual_debugger/assets",
+]
 
 [tool.uv]
 constraint-dependencies = [

@@ -1,3 +1,7 @@
+/**
+ * @file Check eight nonempty browser profiles, exact disjoint test coverage and safe
+ * deterministic profile environments.
+ */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
@@ -124,9 +128,7 @@ test("CI browser profile environment rejects unsafe or empty settings", () => {
   }
 });
 
-test("CI browser profiles are an exact disjoint cover of collected Playwright tests", {
-  timeout: 60_000,
-}, () => {
+test("CI browser profiles are an exact disjoint cover of collected Playwright tests", () => {
   const manifest = validatedCiManifest();
   const allFiles = [...new Set(manifest.shards.flatMap((shard) => shard.files))]
     .sort()

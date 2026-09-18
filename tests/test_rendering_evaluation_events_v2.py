@@ -1,4 +1,4 @@
-"""Focused proof for canonical V2 researcher events and status evidence."""
+"""Check V2 display events and the status facts that support them."""
 
 from __future__ import annotations
 

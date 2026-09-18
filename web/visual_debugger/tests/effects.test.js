@@ -1,3 +1,7 @@
+/**
+ * @file Check battlefield effect facts, credited death identities and visibility
+ * without granting new information rights.
+ */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -30,8 +34,7 @@ const ALL_VISUAL_FILTERS = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
 const buildChoreographyPlan = (presentation, surface, filters = ALL_VISUAL_FILTERS) =>
   buildPlan(presentation, surface, filters);
 
-/**
- * @typedef {{
+/** @typedef {{
  *   worldToScreen: (point: readonly [number, number] | {x: number, y: number}) =>
  *     {x: number, y: number},
  *   worldLengthToScreen: (length: number) => number,
@@ -51,8 +54,7 @@ const buildChoreographyPlan = (presentation, surface, filters = ALL_VISUAL_FILTE
  *     width: number,
  *     height: number,
  *   }>,
- * }} ProjectionSurface
- */
+ * }} ProjectionSurface */
 
 /** @type {ProjectionSurface} */
 const surface = {
@@ -72,6 +74,254 @@ const surface = {
   },
   protectedRects: [],
 };
+
+test("Death Announcer groups by killing team and preserves every credited identity without changing fog", async () => {
+  const fixture = await authorizedFixture();
+  for (const kind of [
+    "replay_oracle",
+    "replay_no_shared_obs_agent_pov",
+    "replay_shared_obs_agent_pov",
+    "live_shared_obs_agent_pov",
+  ]) {
+    const raw = structuredClone(fixture.pairs[kind].presentation);
+    const endpointBefore = JSON.stringify(raw.current_endpoint);
+    const roster =
+      raw.researcher_space?.roster_agents ?? raw.current_endpoint.scene.agents;
+    const victims = [
+      roster[0],
+      roster.find(
+        (/** @type {Record<string, any>} */ agent) =>
+          agent.team_id !== roster[0].team_id,
+      ),
+    ];
+    raw.match_summary.deaths = victims.map(
+      (/** @type {Record<string, any>} */ agent) => ({
+        public_agent_id: agent.public_agent_id,
+        team_id: agent.team_id,
+        class_id: agent.class_id,
+        killing_team_id: 3 - agent.team_id,
+        contributors: roster
+          .filter(
+            (/** @type {Record<string, any>} */ source) =>
+              source.team_id !== agent.team_id,
+          )
+          .map((/** @type {Record<string, any>} */ source) => ({
+            public_agent_id: source.public_agent_id,
+            team_id: source.team_id,
+            class_id: source.class_id,
+          })),
+      }),
+    );
+    const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+    const disabled = buildPlan(
+      frame,
+      surface,
+      setVisualFilterEnabled(DEFAULT_VISUAL_FILTER_STATE, "death_announcer", false),
+    );
+    assert.ok(disabled);
+    assert.equal(
+      disabled.events.some((event) => event.cueSemantic === "death_announcement"),
+      false,
+    );
+    const enabled = buildPlan(frame, surface, DEFAULT_VISUAL_FILTER_STATE);
+    assert.ok(enabled);
+    const announcements = enabled.events.filter(
+      (event) => event.cueSemantic === "death_announcement",
+    );
+    assert.deepEqual(
+      announcements.map((event) => event.teamId),
+      [1, 2],
+    );
+    assert.equal(
+      announcements.flatMap((event) => event.members).length,
+      victims.length,
+    );
+    for (const announcement of announcements) {
+      assert.ok(announcement.members.length <= 5);
+      assert.ok(
+        announcement.members.every((/** @type {Record<string, string>} */ member) =>
+          /^Agent ID [0-9]$/u.test(member.publicIdentity),
+        ),
+      );
+      assert.equal(announcement.phaseEnd - announcement.phaseStart, 1500);
+      assert.equal(announcement.persistent, false);
+      assert.equal(announcement.teamSide, announcement.teamId === 1 ? "left" : "right");
+      assert.equal(
+        announcement.label,
+        `Team ${announcement.teamId === 1 ? "A" : "B"} Kills`,
+      );
+      const explanation = explainChoreographyEvent(announcement);
+      for (const [index, member] of announcement.members.entries()) {
+        assert.equal(member.teamLabel, announcement.teamId === 1 ? "Team B" : "Team A");
+        assert.equal(
+          member.contributors.length,
+          roster.filter(
+            (/** @type {Record<string, any>} */ agent) =>
+              agent.team_id === announcement.teamId,
+          ).length,
+        );
+        for (const contributor of member.contributors) {
+          assert.equal(
+            contributor.teamLabel,
+            announcement.teamId === 1 ? "Team A" : "Team B",
+          );
+          assert.ok(
+            explanation.sections[index].rows[1].value.includes(contributor.title),
+          );
+        }
+        assert.equal(announcement.textRows[index].lines.join(" "), member.title);
+      }
+      assert.equal(announcement.textRows.length, announcement.members.length);
+      assert.equal(announcement.panelHeight, 30 + announcement.members.length * 20);
+      assert.ok(announcement.anchor.y - announcement.panelHeight / 2 >= 48);
+      const left = announcement.anchor.x - announcement.panelWidth / 2;
+      const right = left + announcement.panelWidth;
+      const top = announcement.anchor.y - announcement.panelHeight / 2;
+      const bottom = top + announcement.panelHeight;
+      for (const event of enabled.events) {
+        const bounds = event.cueBounds;
+        if (bounds)
+          assert.ok(
+            bounds.right <= left ||
+              bounds.left >= right ||
+              bounds.bottom <= top ||
+              bounds.top >= bottom,
+            `${event.eventId} must leave the readable death panel clear`,
+          );
+      }
+    }
+    assert.ok(announcements[0].anchor.x < announcements[1].anchor.x);
+    assert.equal(enabled.phases.reducedTotal, enabled.phases.total);
+    assert.equal(JSON.stringify(raw.current_endpoint), endpointBefore);
+    assert.deepEqual(
+      buildPlan(
+        frame,
+        surface,
+        setVisualFilterEnabled(DEFAULT_VISUAL_FILTER_STATE, "death_announcer", true),
+      ),
+      enabled,
+    );
+  }
+});
+
+test("historical death attribution stays neutral and shares at most two side buckets", async () => {
+  const fixture = await authorizedFixture();
+  const raw = structuredClone(fixture.pairs.replay_oracle.presentation);
+  raw.match_summary.deaths = [
+    {
+      public_agent_id: "agent-slot-0",
+      team_id: 1,
+      class_id: 1,
+      killing_team_id: null,
+      contributors: null,
+    },
+    {
+      public_agent_id: "agent-slot-5",
+      team_id: 2,
+      class_id: 3,
+      killing_team_id: 1,
+      contributors: [{ public_agent_id: "agent-slot-2", team_id: 1, class_id: 5 }],
+    },
+    {
+      public_agent_id: "agent-slot-6",
+      team_id: 2,
+      class_id: 4,
+      killing_team_id: null,
+      contributors: null,
+    },
+  ];
+  const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+  const plan = buildPlan(frame, surface, DEFAULT_VISUAL_FILTER_STATE);
+  assert.ok(plan);
+  const announcements = plan.events.filter(
+    (event) => event.cueSemantic === "death_announcement",
+  );
+  assert.deepEqual(
+    announcements.map((event) => event.sideId),
+    [1, 2],
+  );
+  assert.deepEqual(
+    announcements.map((event) => event.teamId),
+    [null, null],
+  );
+  assert.deepEqual(
+    announcements.map((event) => event.label),
+    ["Agent Deaths", "Agent Deaths"],
+  );
+  assert.deepEqual(
+    announcements.map((event) => event.members.length),
+    [2, 1],
+  );
+  for (const announcement of announcements) {
+    assert.equal(announcement.textRows.length, announcement.members.length);
+    const explanation = explainChoreographyEvent(announcement);
+    assert.equal(explanation.sections[0].rows[0].value, "Unavailable");
+    assert.match(explanation.sections[0].rows[1].value, /not recorded/u);
+  }
+  assert.notEqual(
+    explainChoreographyEvent(announcements[0]).id,
+    explainChoreographyEvent(announcements[1]).id,
+  );
+});
+
+test("strict death attribution rejects partial, empty, unordered, duplicate and false roster identities", async () => {
+  const fixture = await authorizedFixture();
+  const base = {
+    public_agent_id: "agent-slot-5",
+    team_id: 2,
+    class_id: 3,
+    killing_team_id: 1,
+    contributors: [
+      { public_agent_id: "agent-slot-0", team_id: 1, class_id: 1 },
+      { public_agent_id: "agent-slot-2", team_id: 1, class_id: 5 },
+    ],
+  };
+  for (const pair of Object.values(fixture.pairs)) {
+    const raw = structuredClone(pair.presentation);
+    const roster =
+      raw.researcher_space?.roster_agents ?? raw.current_endpoint.scene.agents;
+    const victim = roster.find(
+      (/** @type {Record<string, any>} */ agent) => agent.team_id === 2,
+    );
+    const source = roster[0];
+    raw.match_summary.deaths = [
+      {
+        public_agent_id: victim.public_agent_id,
+        team_id: victim.team_id,
+        class_id: victim.class_id,
+        killing_team_id: source.team_id,
+        contributors: [
+          {
+            public_agent_id: source.public_agent_id,
+            team_id: source.team_id,
+            class_id: source.class_id,
+          },
+        ],
+      },
+    ];
+    await normalizeAuthorizedPresentationFrameV1(raw);
+  }
+  for (const death of [
+    { ...base, killing_team_id: null },
+    { ...base, contributors: null },
+    { ...base, contributors: [] },
+    { ...base, killing_team_id: 2 },
+    { ...base, contributors: [...base.contributors].reverse() },
+    { ...base, contributors: [base.contributors[0], base.contributors[0]] },
+    { ...base, contributors: [{ ...base.contributors[0], class_id: 5 }] },
+    {
+      ...base,
+      contributors: [{ ...base.contributors[0], public_agent_id: "not-in-roster" }],
+    },
+  ]) {
+    const raw = structuredClone(fixture.pairs.replay_oracle.presentation);
+    raw.match_summary.deaths = [death];
+    await assert.rejects(
+      normalizeAuthorizedPresentationFrameV1(raw),
+      /Death (attribution|contributors)|frame\.match_summary/u,
+    );
+  }
+});
 
 /** @type {Promise<Record<string, any>> | undefined} */
 let authorizedFixturePromise;
@@ -569,11 +819,9 @@ test("all registered transient families validate without constructing disabled g
   /** @param {number} classId @param {string} phase */
   const anchor = (classId, phase) =>
     structuredClone(trajectoryForClass(classId)[phase]);
-  /**
-   * @param {string} eventKind
+  /** @param {string} eventKind
    * @param {number} channel
-   * @param {number} [recipientClass]
-   */
+   * @param {number} [recipientClass] */
   const statusEvent = (eventKind, channel, recipientClass = 2) => ({
     event_kind: eventKind,
     recipient_anchor: anchor(recipientClass, "successor"),
@@ -1429,13 +1677,11 @@ test("NET cues follow scrolling battle text while regeneration retains useful gr
   netEvent.health_after_combat_resolution = 190;
   netEvent.realized_net_health_change = -10;
   const netFrame = await normalizeAuthorizedPresentationFrameV1(rawNet);
-  /**
-   * @type {ReadonlyArray<readonly [
+  /** @type {ReadonlyArray<readonly [
    *   string[],
    *   {effect: boolean, battleText: boolean, recipientText: boolean},
    *   boolean,
-   * ]>}
-   */
+   * ]>} */
   const netCases = [
     [[], { effect: true, battleText: true, recipientText: true }, false],
     [
@@ -1481,13 +1727,11 @@ test("NET cues follow scrolling battle text while regeneration retains useful gr
   rawRegeneration.latest_events.ordered_event_kinds = [regenerationEvent.event_kind];
   const regenerationFrame =
     await normalizeAuthorizedPresentationFrameV1(rawRegeneration);
-  /**
-   * @type {ReadonlyArray<readonly [
+  /** @type {ReadonlyArray<readonly [
    *   string[],
    *   {effect: boolean, battleText: boolean},
    *   boolean,
-   * ]>}
-   */
+   * ]>} */
   const regenerationCases = [
     [[], { effect: true, battleText: true }, false],
     [["scrolling_battle_text"], { effect: true, battleText: false }, false],
@@ -1516,7 +1760,7 @@ test("NET cues follow scrolling battle text while regeneration retains useful gr
     );
     assert.deepEqual(
       explanation.rows.map(({ label, value }) => [label, value]),
-      [["Recipient", "Agent ID agent-slot-0 · Mage · Team A"]],
+      [["Recipient", "Agent ID 0 · Mage · Team A"]],
     );
     if (disabled.length === 0) {
       assert.deepEqual(
@@ -1833,14 +2077,14 @@ test("status presentation preserves the valid five-source application maximum", 
       [
         "Sources",
         [
-          "Agent ID agent-slot-0 · Mage · Team A",
-          "Agent ID agent-slot-1 · Warrior · Team A",
-          "Agent ID agent-slot-2 · Priest · Team A",
-          "Agent ID agent-slot-5 · Hunter · Team B",
-          "Agent ID agent-slot-6 · Rogue · Team B",
+          "Agent ID 0 · Mage · Team A",
+          "Agent ID 1 · Warrior · Team A",
+          "Agent ID 2 · Priest · Team A",
+          "Agent ID 5 · Hunter · Team B",
+          "Agent ID 6 · Rogue · Team B",
         ].join("; "),
       ],
-      ["Recipient", "Agent ID agent-slot-1 · Warrior · Team A"],
+      ["Recipient", "Agent ID 1 · Warrior · Team A"],
     ],
   );
 });

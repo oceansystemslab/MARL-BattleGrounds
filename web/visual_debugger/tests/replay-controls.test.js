@@ -1,3 +1,7 @@
+/**
+ * @file Check replay cursor/command validation, keyboard navigation, playback state
+ * and selection behavior.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -38,10 +42,8 @@ async function flushMicrotasks() {
   await Promise.resolve();
 }
 
-/**
- * @param {ReplayPlaybackController} controller
- * @param {ReturnType<typeof cursor>} value
- */
+/** @param {ReplayPlaybackController} controller
+ * @param {ReturnType<typeof cursor>} value */
 function installConnected(controller, value) {
   controller.setConnected(true);
   controller.installCursor(value);
@@ -132,12 +134,10 @@ function controlElements(
   };
 }
 
-/**
- * @param {number} frameIndex
+/** @param {number} frameIndex
  * @param {number} finalFrameIndex
  * @param {{cursor?: number, choreography?: number}} generations
- * @returns {{schema_version: 1, frame_index: number, final_frame_index: number, cursor_generation: number, choreography_generation: number}}
- */
+ * @returns {{schema_version: 1, frame_index: number, final_frame_index: number, cursor_generation: number, choreography_generation: number}} */
 function cursor(frameIndex, finalFrameIndex = 3, generations = {}) {
   return {
     schema_version: 1,

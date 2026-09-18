@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 
-# Shared bounded-process runner for local validation scripts.
-#
-# This file deliberately owns no test inventory. Callers provide labels and
-# argv arrays through marl_validation_start; commands are never reparsed with
-# eval.
+# Run a bounded set of validation commands and print each worker's complete log.
+# Source this file from Bash 5.1 or later; do not execute it as a test suite. Call
+# marl_validation_init, marl_validation_start for each command, then
+# marl_validation_finish and marl_validation_cleanup. Commands run as argv arrays,
+# never through eval. This helper owns processes and temporary logs, not test
+# membership. SIGINT/SIGTERM stop descendants and exit the calling shell.
+# Requires mktemp, date, pgrep and standard shell utilities.
 
 declare -Ag MARL_VALIDATION_TASK_BY_PID=()
 declare -Ag MARL_VALIDATION_LABEL_BY_TASK=()
@@ -20,6 +22,8 @@ MARL_VALIDATION_FAILURES=0
 MARL_VALIDATION_LOG_DIR=""
 MARL_VALIDATION_TRAPS_INSTALLED=0
 
+# Send TERM to descendants, then PID $1. Recursion follows pgrep parent links.
+# Ignore lookup/kill failures for processes that have already exited. No value is printed.
 marl_validation_terminate_process_tree() {
   local parent_pid="$1"
   local child_pid=""
@@ -32,6 +36,8 @@ marl_validation_terminate_process_tree() {
   kill -TERM "${parent_pid}" 2>/dev/null || true
 }
 
+# Handle signal name $1 (INT or TERM), cancel workers, clear temporary logs and
+# exit the calling shell with 130 for INT or 143 otherwise. Signal traps are removed first.
 marl_validation_handle_signal() {
   local signal_name="$1"
   local exit_status=143
@@ -47,6 +53,9 @@ marl_validation_handle_signal() {
   exit "${exit_status}"
 }
 
+# Create one process pool: $1 is a positive decimal concurrency limit; optional
+# $2 names its temporary directory (default validation). Return 2 for invalid limits
+# or repeated initialization. Install INT/TERM traps; call cleanup after finishing.
 marl_validation_init() {
   local max_jobs="${1:-}"
   local suite_name="${2:-validation}"
@@ -67,10 +76,15 @@ marl_validation_init() {
   MARL_VALIDATION_TRAPS_INSTALLED=1
 }
 
+# Print the number of unreaped worker PIDs. This includes workers that finished
+# but whose logs and status have not yet been collected. No arguments are used.
 marl_validation_active_count() {
   printf '%s\n' "${#MARL_VALIDATION_TASK_BY_PID[@]}"
 }
 
+# Wait for one tracked worker, print its log/status and retain its duration.
+# Do nothing if none remain. Record failures in the pool instead of returning a
+# worker failure immediately; finish combines all results. No arguments are used.
 marl_validation_reap_one() {
   local -a active_pids=("${!MARL_VALIDATION_TASK_BY_PID[@]}")
   local completed_pid=""
@@ -137,6 +151,10 @@ marl_validation_reap_one() {
   return 0
 }
 
+# Queue a worker: $1 is its nonempty display label; remaining arguments are the
+# command and its exact arguments. Wait for room when the pool is full. Return 2
+# if uninitialized or missing a label/command. Run the command in a subshell and
+# capture stdout/stderr plus its exit status in the pool temporary directory.
 marl_validation_start() {
   local label="${1:-}"
   shift || true
@@ -185,6 +203,9 @@ marl_validation_start() {
   MARL_VALIDATION_TASK_BY_PID["${child_pid}"]="${task_id}"
 }
 
+# Wait for every worker and print a summary in submission order. Return success
+# only when no collected worker failed. Retain logs and pool state until cleanup.
+# No arguments are used; callers must preserve a failure status before cleanup.
 marl_validation_finish() {
   local task_id=""
 
@@ -203,6 +224,9 @@ marl_validation_finish() {
   (( MARL_VALIDATION_FAILURES == 0 ))
 }
 
+# Send TERM through each active worker tree, wait for workers and clear their
+# PID entries. Ignore process-exit errors. This does not produce a success summary
+# or remove logs; callers use cleanup next. No arguments are used.
 marl_validation_cancel_active() {
   local pid=""
 
@@ -215,6 +239,9 @@ marl_validation_cancel_active() {
   MARL_VALIDATION_TASK_BY_PID=()
 }
 
+# Remove this pool temporary directory, reset all bookkeeping and remove its
+# INT/TERM traps. No arguments are used. Finish or cancel workers first; this
+# function does not stop running commands and does not restore earlier traps.
 marl_validation_cleanup() {
   if [[ -n "${MARL_VALIDATION_LOG_DIR}" && -d "${MARL_VALIDATION_LOG_DIR}" ]]; then
     rm -rf -- "${MARL_VALIDATION_LOG_DIR}"

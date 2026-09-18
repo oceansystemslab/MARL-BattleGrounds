@@ -1,9 +1,10 @@
-"""Strict private contracts for DevClient map and scenario authoring.
+"""Define immutable drafts for the private map and scenario editor.
 
-These models are deliberately host-internal.  They describe editable product
-assets, not simulator or public replay schemas.  The browser may retain local
-mutable copies, while every value accepted by the host is reparsed into one of
-these immutable, extra-forbidding models.
+The browser may edit local copies; the host parses submitted content with these
+strict models before compiling or saving it. Unknown fields and nonfinite values
+are rejected. Use ``new_map_draft`` and ``new_scenario_draft`` for starter content.
+Factories return in-memory drafts and never write files. Geometry and simulator
+validity remain the compiler's responsibility.
 """
 
 from __future__ import annotations
@@ -83,11 +84,18 @@ class DevAuthoringProblemV1(_AuthoringModel):
 
 
 class DevPointV1(_AuthoringModel):
+    """A finite map-space point with x and y coordinates."""
+
     x: float
     y: float
 
 
 class DevWallV1(_AuthoringModel):
+    """An authored rectangular wall with a stable ID, center, size, and rotation.
+
+    Rotation is in degrees. The compiler checks geometry after float32 conversion.
+    """
+
     kind: Literal["wall"] = "wall"
     object_id: ObjectId
     center_x: float
@@ -98,6 +106,8 @@ class DevWallV1(_AuthoringModel):
 
 
 class DevPillarV1(_AuthoringModel):
+    """An authored circular pillar with a stable ID, center, and radius."""
+
     kind: Literal["pillar"] = "pillar"
     object_id: ObjectId
     center_x: float
@@ -150,6 +160,7 @@ class DevMapContentV1(_AuthoringModel):
 
     @model_validator(mode="after")
     def _validate_object_and_pad_identity(self) -> DevMapContentV1:
+        """Require unique object IDs and all ten pads ordered A1-A5 then B1-B5."""
         object_ids = tuple(obstacle.object_id for obstacle in self.obstacles) + tuple(
             pad.object_id for pad in self.spawn_pads
         )
@@ -168,6 +179,11 @@ class DevMapContentV1(_AuthoringModel):
 
 
 class DevMapDraftV1(_AuthoringModel):
+    """An editable map revision containing its stable asset ID and complete content.
+
+    Revision zero describes a draft that has not yet been saved.
+    """
+
     schema_id: Literal["dev-map-draft@1"] = Field(
         default="dev-map-draft@1",
         alias="schema",
@@ -179,16 +195,27 @@ class DevMapDraftV1(_AuthoringModel):
 
 
 class DevSourceMapProvenanceV1(_AuthoringModel):
+    """Optional source-map identity retained after embedding its content in a
+    scenario.
+    """
+
     asset_id: SafeAssetId | None = None
     revision: DevDraftRevision | None = None
 
 
 class DevTeamDeathmatchTaskV1(_AuthoringModel):
+    """Authored Team Deathmatch settings; the compiler validates the score threshold."""
+
     task: Literal["team_deathmatch"] = "team_deathmatch"
     score_threshold: int = 5
 
 
 class DevEpisodeConfigurationV1(_AuthoringModel):
+    """Authored episode limits, spawn shield settings, and team respawn periods.
+
+    Durations are measured in simulator steps. The compiler owns numeric limits.
+    """
+
     max_steps: int = 300
     spawn_shield_duration_steps: int = 3
     spawn_shield_movement_speed: float = 2.0
@@ -197,6 +224,8 @@ class DevEpisodeConfigurationV1(_AuthoringModel):
 
 
 class DevScenarioGlobalStateV1(_AuthoringModel):
+    """Starting step, scores, and respawn countdowns for an authored scenario."""
+
     step_count: int = 0
     team_a_score: int = 0
     team_b_score: int = 0
@@ -205,6 +234,12 @@ class DevScenarioGlobalStateV1(_AuthoringModel):
 
 
 class DevRosterSlotV1(_AuthoringModel):
+    """One fixed A1-A5 or B1-B5 roster position and its selected class.
+
+    Global slots are zero-based; team-local slots are one-based. Inactive positions
+    use ``not_applicable`` rather than removing a row.
+    """
+
     object_id: ObjectId
     team: Literal["A", "B"]
     team_local_slot: Annotated[int, Field(ge=1, le=5)]
@@ -213,6 +248,12 @@ class DevRosterSlotV1(_AuthoringModel):
 
 
 class DevAgentStateV1(_AuthoringModel):
+    """Authored starting state for one agent, joined to its roster row by object ID.
+
+    Position uses map coordinates. Cooldowns and remaining status durations use
+    simulator steps. The compiler checks health, activity, and status consistency.
+    """
+
     object_id: ObjectId
     position: DevPointV1
     alive: bool
@@ -232,6 +273,12 @@ class DevAgentStateV1(_AuthoringModel):
 
 
 class DevScenarioContentV1(_AuthoringModel):
+    """A self-contained scenario with embedded map, task settings, and ten agent rows.
+
+    Roster and state rows share fixed A1-A5 then B1-B5 order. Source-map provenance
+    records where the embedded map came from; it does not resolve mutable content.
+    """
+
     schema_id: Literal["dev-scenario-content@1"] = Field(
         default="dev-scenario-content@1",
         alias="schema",
@@ -271,6 +318,9 @@ class DevScenarioContentV1(_AuthoringModel):
 
     @model_validator(mode="after")
     def _validate_fixed_slot_topology(self) -> DevScenarioContentV1:
+        """Require fixed slot order, matching roster/state IDs, and unique object
+        IDs.
+        """
         expected = tuple(
             ("A" if global_slot < 5 else "B", global_slot % 5 + 1, global_slot)
             for global_slot in range(10)
@@ -299,6 +349,10 @@ class DevScenarioContentV1(_AuthoringModel):
 
 
 class DevScenarioDraftV1(_AuthoringModel):
+    """An editable scenario revision with a stable asset ID and self-contained
+    content.
+    """
+
     schema_id: Literal["dev-scenario-draft@1"] = Field(
         default="dev-scenario-draft@1",
         alias="schema",
@@ -312,7 +366,25 @@ class DevScenarioDraftV1(_AuthoringModel):
 def default_spawn_pads(
     *, width: float = 20.0, height: float = 10.0
 ) -> tuple[DevSpawnPadV1, ...]:
-    """Return the fixed two-team edge formation used for ergonomic new drafts."""
+    """Build the ten fixed team pads used by a new editor draft.
+
+    Parameters
+    ----------
+    width : float, optional
+        Map width, default 20.0. Pads are placed 1.5 units inside each vertical edge.
+    height : float, optional
+        Map height, default 10.0. Each five-pad bank spans the interior vertical range.
+
+    Returns
+    -------
+    tuple of DevSpawnPadV1
+        Ten pads ordered A1-A5 then B1-B5, with stable IDs and map-space positions.
+
+    Notes
+    -----
+    This supplies starter coordinates, not a geometry-validity guarantee. The compiler
+    checks the resulting map and body-radius constraints before use.
+    """
     step = (height - 3.0) / 4.0
     y_coordinates = tuple(1.5 + step * index for index in range(5))
     return tuple(
@@ -331,7 +403,27 @@ def default_spawn_pads(
 
 
 def new_map_draft(asset_id: SafeAssetId = "untitled_map") -> DevMapDraftV1:
-    """Create the minimal ergonomic blank-map draft."""
+    """Create an unsaved blank map with the standard ten spawn pads.
+
+    Parameters
+    ----------
+    asset_id : str, optional
+        Safe lowercase snake_case identity, default ``untitled_map``.
+
+    Returns
+    -------
+    DevMapDraftV1
+        Revision-zero map with default 20 by 10 dimensions and no obstacles.
+
+    Raises
+    ------
+    ValueError
+        If the model rejects the supplied asset identity.
+
+    Notes
+    -----
+    The returned draft stays in memory until the caller explicitly saves it.
+    """
     return DevMapDraftV1(
         asset_id=asset_id,
         content=DevMapContentV1(
@@ -382,7 +474,32 @@ def new_scenario_draft(
     *,
     source_map: DevMapDraftV1 | None = None,
 ) -> DevScenarioDraftV1:
-    """Create the canonical ergonomic blank TDM draft or independent map copy."""
+    """Create an unsaved Team Deathmatch scenario with two complete starter teams.
+
+    Parameters
+    ----------
+    asset_id : str, optional
+        Safe scenario identity, default ``untitled_scenario``.
+    source_map : DevMapDraftV1 or None, optional
+        Map to copy into the scenario. None creates a default blank map. A supplied
+        map is copied deeply and its source identity is retained as provenance.
+
+    Returns
+    -------
+    DevScenarioDraftV1
+        Revision-zero draft with ten living agents at their assigned pads, default
+        class health, and the declared default episode/task settings.
+
+    Raises
+    ------
+    ValueError
+        If strict draft models reject an identity or content field.
+
+    Notes
+    -----
+    Copied maps are independent of later source edits. The compiler must still check
+    geometry and simulator-state validity. No files are written.
+    """
     if source_map is None:
         embedded_map = DevMapContentV1(
             name="Untitled scenario map",
@@ -435,7 +552,29 @@ def duplicate_scenario_draft(
     *,
     asset_id: SafeAssetId,
 ) -> DevScenarioDraftV1:
-    """Return an independent mutable-draft representation of one exact scenario."""
+    """Copy complete scenario content into an independent unsaved identity.
+
+    Parameters
+    ----------
+    source : DevScenarioDraftV1
+        Validated scenario whose embedded content is copied deeply.
+    asset_id : str
+        Safe lowercase snake_case identity for the copy.
+
+    Returns
+    -------
+    DevScenarioDraftV1
+        Revision-zero draft with independent copied content.
+
+    Raises
+    ------
+    ValueError
+        If the destination identity fails strict model validation.
+
+    Notes
+    -----
+    The source is unchanged and no storage operation is performed.
+    """
     return DevScenarioDraftV1(
         asset_id=asset_id,
         revision=0,

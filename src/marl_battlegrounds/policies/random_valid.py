@@ -1,4 +1,9 @@
-"""Uniform random sampling from one actor's exact local action support."""
+"""Sample legal random actions for one actor.
+
+random_policy uses the actor's movement mask and joint target/Ultimate mask.
+It needs no shared observations, memory or model weights. Environment sampling
+routes this same policy over actors; legality remains owned by Core's masks.
+"""
 
 import jax
 import jax.numpy as jnp
@@ -18,12 +23,33 @@ def random_policy(
     action_mask: ActionMask,
     key: Array,
 ) -> ActorAction:
-    """Sample legal movement and combat choices for one NoSharedObs actor.
+    """Choose a random legal movement and a random legal combat pair.
 
-    Movement is sampled from its categorical mask. Target and Ultimate are
-    sampled together from the exact joint mask so legal marginals cannot form
-    an illegal pair. The observation remains in the callable contract even
-    though this policy deliberately uses no observation features.
+    Parameters
+    ----------
+    observation : Observation
+        One actor's current observation, without a leading actor or game axis.
+        Accepted to match the policy interface; this policy does not read it.
+    action_mask : ActionMask
+        That actor's mask for the same decision. Movement has shape (9,);
+        the joint target/Ultimate mask has shape (11, 2). Values are Boolean.
+        Each sampled mask must contain at least one True entry.
+    key : Array
+        One JAX random key. It is split into separate movement and combat keys.
+
+    Returns
+    -------
+    ActorAction
+        Three scalar int32 choices. Movement is uniform over allowed movements.
+        The target/Ultimate pair is uniform over allowed pairs, not over each
+        combat head independently.
+
+    Notes
+    -----
+    Use the exact current mask supplied by Core. This function does not check
+    whether a mask is stale or empty. Core gives inactive and dead actors their
+    allowed no-op choices. Inputs are unchanged. The function supports jit and
+    vmap; provide distinct keys when independent draws are wanted.
     """
 
     del observation

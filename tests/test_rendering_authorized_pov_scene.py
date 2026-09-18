@@ -1,4 +1,4 @@
-"""Focused CP2.1 frozen-decoder and NoSharedObs authority proofs."""
+"""Check NoSharedObs scene decoding and its information limits."""
 
 from __future__ import annotations
 
@@ -187,7 +187,6 @@ def _catalog_with_unrepresented_hunter_damage(
 def _catalog_with_supported_documentation_tuning(
     catalog: StaticMechanicsCatalogV1,
 ) -> StaticMechanicsCatalogV1:
-    """Retune every documented mechanic while preserving authored claims."""
     payload = catalog.model_dump(mode="python")
     payload["global_slow_floor"] = 0.21
 
@@ -251,7 +250,6 @@ def _catalog_with_class_mechanic_values(
 def _valid_documentation_catalog_leaf_mutations(
     catalog: StaticMechanicsCatalogV1,
 ) -> Iterator[tuple[str, StaticMechanicsCatalogV1]]:
-    """Yield every valid historical mutation of a documented mutable leaf."""
     payload = catalog.model_dump(mode="python")
     payload["global_slow_floor"] = catalog.global_slow_floor + 0.01
     yield "global_slow_floor", _catalog_from_payload(payload)
@@ -388,7 +386,6 @@ def _valid_documentation_catalog_leaf_mutations(
 def _invalid_immutable_documentation_catalog_leaf_payloads(
     catalog: StaticMechanicsCatalogV1,
 ) -> Iterator[tuple[str, dict[str, object]]]:
-    """Yield literal-only or fixed-axis facts that have no valid historical peer."""
     for field_name in ("health_unit", "spatial_unit", "duration_unit"):
         payload = catalog.model_dump(mode="python")
         payload[field_name] = "historical_unit"

@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+
+# Run browser-client style, type, unit and browser checks.
+# Usage: scripts/dev/check_frontend.sh --help. With no options, run eight browser
+# profiles plus static/unit checks with at most eight workers. The profile file
+# owns browser membership. --static-only includes unit tests; --style-only does
+# not. --e2e-only and --e2e-shard forward extra Playwright arguments.
+# Requires Node.js 24/npm, installed frontend/browser dependencies and the prepared
+# uv environment for local servers. Python uses CPU; this is a correctness gate.
+# Full runs remove temporary browser outputs on success and retain them on failure.
+# Every failing task makes the full command fail.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -12,6 +22,8 @@ export JAX_PLATFORMS=cpu
 export PYTHONDONTWRITEBYTECODE=1
 export UV_NO_SYNC=1
 
+# Reject backend, JIT or legacy slice/capture environment overrides that would
+# change the canonical browser check. No arguments; return 2 on the first error.
 require_canonical_frontend_environment() {
   local forbidden_variable=""
 
@@ -30,6 +42,7 @@ require_canonical_frontend_environment() {
   done
 }
 
+# Print frontend check options to stderr. No arguments or file changes.
 usage() {
   echo "usage: scripts/dev/check_frontend.sh [--static-only | --style-only | --unit-only | --e2e-only [playwright arguments...] | --e2e-shard N/8 [playwright arguments...] | --help]" >&2
 }
@@ -44,31 +57,44 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 127
 fi
 
+# Run frontend format-check, lint and typecheck in order, without fixes. No
+# arguments. A failed npm command stops this strict-mode script or worker.
 run_style() {
   npm run format:check --prefix "${FRONTEND_ROOT}"
   npm run lint --prefix "${FRONTEND_ROOT}"
   npm run typecheck --prefix "${FRONTEND_ROOT}"
 }
 
+# Run the frontend unit-test npm command. No arguments. Return npm/test status.
 run_unit() {
   npm run test:unit --prefix "${FRONTEND_ROOT}"
 }
 
+# Run style/type checks followed by unit tests. No arguments. Preserve failures
+# through the caller strict-mode script or worker.
 run_static() {
   run_style
   run_unit
 }
 
+# Run Playwright through npm, forwarding every argument unchanged. The test
+# configuration owns server startup, browser outputs and test selection.
 run_e2e() {
   npm run test:e2e --prefix "${FRONTEND_ROOT}" -- "$@"
 }
 
+# Run browser profile $1 through the shared profile runner; pass remaining
+# arguments to it. That runner validates membership and selector syntax.
 run_e2e_shard() {
   local shard="$1"
   shift
   node "${FRONTEND_ROOT}/e2e/support/run-ci-shard.js" "${shard}" "$@"
 }
 
+# Run eight browser profiles plus static/unit checks in an eight-worker pool.
+# No arguments. Set CI=1, reject noncanonical overrides and isolate browser output
+# directories. Remove outputs on success; retain failures for inspection. Return
+# 1 when any task fails. Pool logs are printed before their temporary removal.
 run_complete_frontend_gate() {
   local output_root=""
   local shard_number=""

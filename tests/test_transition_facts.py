@@ -1,4 +1,4 @@
-"""Authoritative fixed-shape transition facts for Milestone 6."""
+"""Check the fixed-shape facts Core reports for each transition."""
 # pyright: reportPrivateUsage=false
 
 from typing import cast
@@ -91,7 +91,6 @@ _HUNTER_TRAP_STATUS_CHANNEL = _STATUS_CHANNEL_INDEX_BY_NAME["hunter-trap-stun"]
 
 
 def _empty_obstacles() -> Array:
-    """Return an inactive fixed-size obstacle table."""
     return jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32)
 
 
@@ -99,7 +98,6 @@ def _requested_roster(
     team_sizes: tuple[int, int],
     *class_rows: tuple[int, int],
 ) -> Array:
-    """Return a padded active roster with selected class overrides."""
     roster = jnp.full((MAX_AGENT_SLOTS,), NEUTRAL_CLASS_ID, dtype=jnp.int32)
     roster = roster.at[: team_sizes[0]].set(HUNTER_CLASS_ID)
     roster = roster.at[MAX_AGENTS_PER_TEAM : MAX_AGENTS_PER_TEAM + team_sizes[1]].set(
@@ -111,7 +109,6 @@ def _requested_roster(
 
 
 def _default_positions(team_sizes: tuple[int, int]) -> Array:
-    """Place active team blocks on clear, non-overlapping vertical lines."""
     positions = jnp.zeros((MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32)
     for local_slot in range(team_sizes[0]):
         positions = positions.at[local_slot].set(
@@ -129,7 +126,6 @@ def _scenario(
     team_sizes: tuple[int, int] = (1, 1),
     positions: Array | None = None,
 ) -> tuple[EnvConfig, EnvState, ActionMask]:
-    """Build one deterministic, stationary, fully observable combat scenario."""
     profile = resolve_agent_profile(
         _requested_roster(team_sizes, *class_rows),
         jnp.asarray(team_sizes, dtype=jnp.int32),
@@ -168,10 +164,6 @@ def _scenario(
 
 
 def _joint_action(*rows: tuple[int, int, int, int]) -> Action:
-    """Return a canonical joint action with selected actor overrides.
-
-    Each row is ``(actor_slot, move, target, use_ultimate)``.
-    """
     move = jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32)
     select_target = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
     use_ultimate = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
@@ -192,7 +184,6 @@ def _take_step(
     action_mask: ActionMask,
     action: Action,
 ) -> tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]:
-    """Advance one deterministic transition with the supplied choosing mask."""
     return step(
         config,
         state,
@@ -203,7 +194,6 @@ def _take_step(
 
 
 def _assert_array_equal(left: object, right: object) -> None:
-    """Assert equality for two identically structured JAX PyTrees."""
     assert jax.tree_util.tree_structure(left) == jax.tree_util.tree_structure(right)
     for left_leaf, right_leaf in zip(
         jax.tree_util.tree_leaves(left),
@@ -214,12 +204,10 @@ def _assert_array_equal(left: object, right: object) -> None:
 
 
 def _single_source_mask(source_slot: int) -> Array:
-    """Return a fixed-slot boolean mask with exactly one source selected."""
     return jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_).at[source_slot].set(True)
 
 
 def _status_durations_by_recipient_and_channel(state: EnvState) -> Array:
-    """Pack state durations in the one canonical lifecycle channel order."""
     return jnp.concatenate(
         (
             state.slow_durations,
@@ -237,7 +225,6 @@ def _replace_status_duration_row(
     recipient_slot: int,
     durations: Array,
 ) -> EnvState:
-    """Replace one recipient's packed status row without duplicating ordering."""
     packed = (
         _status_durations_by_recipient_and_channel(state)
         .at[recipient_slot]
@@ -256,7 +243,6 @@ def _replace_status_duration_row(
 
 
 def _status_row(*durations_by_name: tuple[str, int]) -> Array:
-    """Build one int32 duration row from canonical channel names."""
     row = jnp.zeros((_NUM_STATUS_LIFECYCLE_CHANNELS,), dtype=jnp.int32)
     for name, duration in durations_by_name:
         row = row.at[_STATUS_CHANNEL_INDEX_BY_NAME[name]].set(duration)
@@ -267,7 +253,6 @@ def _status_cause_matrix(
     recipient_slot: int,
     *status_names: str,
 ) -> Array:
-    """Build one exact recipient-aligned lifecycle-cause expectation."""
     matrix = jnp.zeros(
         (MAX_AGENT_SLOTS, _NUM_STATUS_LIFECYCLE_CHANNELS), dtype=jnp.bool_
     )
@@ -286,7 +271,6 @@ def _assert_status_lifecycle_facts_equal(
     broken: Array,
     cleared: Array,
 ) -> None:
-    """Assert all four independent lifecycle causes by their public names."""
     assert bool(
         jnp.array_equal(
             facts.aged_to_zero_by_recipient_and_status_channel,
@@ -316,7 +300,6 @@ def _assert_status_lifecycle_facts_equal(
 def _assert_empty_status_lifecycle_facts(
     facts: StatusLifecycleTransitionFacts,
 ) -> None:
-    """Assert canonical shape, dtype, and neutrality for lifecycle facts."""
     empty = jnp.zeros(
         (MAX_AGENT_SLOTS, _NUM_STATUS_LIFECYCLE_CHANNELS), dtype=jnp.bool_
     )
@@ -333,7 +316,6 @@ def _assert_empty_status_lifecycle_facts(
 
 
 def _assert_empty_physical_facts(facts: PhysicalTransitionFacts) -> None:
-    """Assert canonical shape, dtype, and neutrality for physical facts."""
     for displacement in facts:
         assert displacement.shape == (MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS)
         assert displacement.dtype == jnp.float32
@@ -341,7 +323,6 @@ def _assert_empty_physical_facts(facts: PhysicalTransitionFacts) -> None:
 
 
 def _assert_empty_aura_facts(facts: AuraTransitionFacts) -> None:
-    """Assert canonical shape, dtype, and neutrality for aura facts."""
     for coverage in facts:
         assert coverage.shape == (MAX_AGENT_SLOTS, MAX_AGENT_SLOTS)
         assert coverage.dtype == jnp.bool_
@@ -353,7 +334,6 @@ def _assert_status_application_channels(
     source_slot: int,
     *status_names: str,
 ) -> None:
-    """Assert one source's exact application facts in canonical channel terms."""
     expected_slow = jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.bool_)
     expected_stun = jnp.zeros((MAX_AGENT_SLOTS, NUM_STUN_CHANNELS), dtype=jnp.bool_)
     expected_anti_heal = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
@@ -406,7 +386,6 @@ def _assert_batched_cp1_fact_shapes(
     facts: TransitionFacts,
     batch_size: int,
 ) -> None:
-    """Assert every CP1 addition retains its named shape after JAX stacking."""
     assert (
         facts.combat_transition_facts.health_after_combat_resolution_by_recipient.shape
         == (batch_size, MAX_AGENT_SLOTS)
@@ -445,7 +424,6 @@ def _assert_empty_combat_effect_facts(
     *,
     expected_post_combat_health: Array | None = None,
 ) -> None:
-    """Assert empty effects plus the supplied authoritative health boundary."""
     boolean_vectors = (
         facts.basic_effect_is_activated_by_source,
         facts.ultimate_effect_is_activated_by_source,
@@ -509,7 +487,6 @@ def _assert_empty_combat_effect_facts(
 
 
 def _assert_canonical_empty_death_facts(facts: DeathTransitionFacts) -> None:
-    """Assert the reset/neutral canonical values for every death fact leaf."""
     boolean_vectors = (
         facts.is_newly_dead_by_recipient,
         facts.contributed_to_new_death_by_source,
@@ -527,7 +504,6 @@ def _assert_canonical_empty_death_facts(facts: DeathTransitionFacts) -> None:
 def _assert_canonical_empty_spawn_shield_facts(
     facts: SpawnShieldTransitionFacts,
 ) -> None:
-    """Assert canonical shape, dtype, and neutrality for spawn-shield facts."""
     for vector in (
         facts.was_active_at_transition_start_by_agent,
         facts.expired_at_transition_end_by_agent,
@@ -538,7 +514,6 @@ def _assert_canonical_empty_spawn_shield_facts(
 
 
 def _assert_canonical_empty_respawn_facts(facts: RespawnTransitionFacts) -> None:
-    """Assert canonical shape, dtype, and neutrality for respawn facts."""
     assert facts.respawn_wave_occurred_this_transition_by_team.shape == (NUM_TEAMS,)
     assert facts.respawn_wave_occurred_this_transition_by_team.dtype == jnp.bool_
     assert not bool(jnp.any(facts.respawn_wave_occurred_this_transition_by_team))
@@ -550,7 +525,6 @@ def _assert_canonical_empty_respawn_facts(facts: RespawnTransitionFacts) -> None
 def _assert_canonical_empty_regeneration_facts(
     facts: RegenerationTransitionFacts,
 ) -> None:
-    """Assert canonical shape, dtype, and neutrality for regeneration facts."""
     assert facts.combat_countdown_was_reset_by_agent.shape == (MAX_AGENT_SLOTS,)
     assert facts.combat_countdown_was_reset_by_agent.dtype == jnp.bool_
     assert not bool(jnp.any(facts.combat_countdown_was_reset_by_agent))
@@ -562,7 +536,6 @@ def _assert_canonical_empty_regeneration_facts(
 
 
 def test_reset_scenario_and_real_step_share_the_exact_static_fact_schema() -> None:
-    """Prove initialization neutrality, real-step identity, and payload budget."""
     config, state, action_mask = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -746,7 +719,6 @@ def test_spawn_shield_facts_distinguish_activity_from_surviving_expiry(
     expected_next_duration: int,
     expected_expiry: bool,
 ) -> None:
-    """Report transition-start shielding and only a surviving countdown expiry."""
     config, state, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -793,7 +765,6 @@ def test_spawn_shield_facts_distinguish_activity_from_surviving_expiry(
 def test_expiring_spawn_shield_rejects_current_target_then_reenables_next_mask() -> (
     None
 ):
-    """Keep a counter-one recipient protected until the next policy action."""
     config, state, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -914,7 +885,6 @@ def test_out_of_domain_head_has_exclusive_precedence_before_mask_rejection(
     head_name: str,
     invalid_category: int,
 ) -> None:
-    """Prove every malformed head preserves raw intent and canonicalizes the tuple."""
     config, state, action_mask = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -975,7 +945,6 @@ def test_in_domain_rejections_preserve_independent_action_head_acceptance(
     expected_move_rejection: bool,
     expected_combat_rejection: bool,
 ) -> None:
-    """Prove movement and combat-pair provenance survives canonicalization."""
     config, state, action_mask = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -1048,7 +1017,6 @@ def test_in_domain_rejections_preserve_independent_action_head_acceptance(
 def test_dead_and_inactive_rows_distinguish_canonical_noop_from_rejection(
     nonacting_kind: str,
 ) -> None:
-    """Prove nonactors accept only canonical no-op without ambiguous provenance."""
     config, state, action_mask = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -1154,7 +1122,6 @@ def test_every_relation_local_target_routes_to_the_stable_global_slot(
     target_action: int,
     recipient_slot: int,
 ) -> None:
-    """Prove ally/enemy routing, team symmetry, and the guarded public index."""
     config, state, action_mask = _scenario(
         (actor_slot, actor_class_id),
         team_sizes=(5, 5),
@@ -1188,7 +1155,6 @@ def test_every_relation_local_target_routes_to_the_stable_global_slot(
 
 
 def test_inactive_target_and_target_none_never_decode_as_a_real_recipient() -> None:
-    """Prove rejected padding and accepted target-none both retain sentinel -1."""
     config, state, action_mask = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -1241,7 +1207,6 @@ def test_inactive_target_and_target_none_never_decode_as_a_real_recipient() -> N
 
 
 def test_mage_burst_is_a_real_ultimate_without_a_slot_zero_recipient() -> None:
-    """Prove source-local Mage Burst cannot be decoded as a target event."""
     config, state, action_mask = _scenario(
         (_TEAM_A_FIRST_SLOT, MAGE_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -1314,7 +1279,6 @@ def test_every_class_basic_emits_its_authoritative_effect_lane(
     target_action: int,
     recipient_slot: int,
 ) -> None:
-    """Prove every Basic lane exposes catalog payload and application truth."""
     config, state, action_mask = _scenario(
         (_TEAM_A_FIRST_SLOT, actor_class_id),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -1492,7 +1456,6 @@ def test_every_class_ultimate_emits_health_and_status_application_truth(
     target_action: int,
     recipient_slot: int,
 ) -> None:
-    """Prove all Ultimate lanes, including zero-payload lanes, remain explicit."""
     config, state, action_mask = _scenario(
         (_TEAM_A_FIRST_SLOT, actor_class_id),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -1632,7 +1595,6 @@ def test_every_class_ultimate_emits_health_and_status_application_truth(
 
 
 def test_status_application_remains_explicit_when_it_cannot_extend_duration() -> None:
-    """Keep accepted application truth separate from a non-extending merge."""
     config, state, action_mask = _scenario(
         (_TEAM_A_FIRST_SLOT, MAGE_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -1679,7 +1641,6 @@ def test_all_nine_status_channels_share_the_exact_ordinary_age_boundary(
     expected_next_duration: int,
     expected_aged: bool,
 ) -> None:
-    """Exercise zero, one, and many for every canonical lifecycle channel."""
     config, state, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, MAGE_CLASS_ID),
@@ -1813,7 +1774,6 @@ def test_non_trap_status_applications_preserve_age_and_refresh_cooccurrences(
     refreshed_statuses: tuple[str, ...],
     applied_statuses: tuple[str, ...],
 ) -> None:
-    """Prove all eight non-Trap application channels retain independent causes."""
     config, state, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, actor_class_id),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -1874,7 +1834,6 @@ def test_hunter_trap_break_and_reapplication_keep_independent_causes(
     expected_aged: bool,
     expected_broken: bool,
 ) -> None:
-    """Pin Trap break to combined column four across all damage boundaries."""
     config, state, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -1940,7 +1899,6 @@ def test_hunter_trap_break_and_reapplication_keep_independent_causes(
 
 
 def test_new_death_can_clear_all_nine_statuses_after_trap_break_and_reapply() -> None:
-    """Preserve break and death-clear edges even when every status disappears."""
     config, state, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -1998,7 +1956,6 @@ def test_new_death_can_clear_all_nine_statuses_after_trap_break_and_reapply() ->
 
 
 def test_refresh_and_fresh_application_can_both_precede_new_death_clear() -> None:
-    """Retain independent refresh, application, and clear edges on one recipient."""
     config, state, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, MAGE_CLASS_ID),
@@ -2057,7 +2014,6 @@ def test_refresh_and_fresh_application_can_both_precede_new_death_clear() -> Non
 
 
 def test_hunter_slow_public_apply_observe_choose_effect_expire_trajectory() -> None:
-    """Prove a one-tick slow is seen before it controls exactly one decision."""
     config, state, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -2160,7 +2116,6 @@ def test_hunter_slow_public_apply_observe_choose_effect_expire_trajectory() -> N
 
 
 def test_focus_fire_reconciles_source_and_recipient_modifier_stages() -> None:
-    """Prove amplified sources and mitigated recipients reconcile to core totals."""
     positions = _default_positions((3, 2))
     positions = positions.at[0].set(jnp.asarray((2.0, 2.0), dtype=jnp.float32))
     positions = positions.at[1].set(jnp.asarray((2.0, 3.0), dtype=jnp.float32))
@@ -2261,7 +2216,6 @@ def test_focus_fire_reconciles_source_and_recipient_modifier_stages() -> None:
 
 
 def test_anti_heal_reconciles_source_healing_to_authoritative_recipient_total() -> None:
-    """Prove recipient anti-heal remains distinct from source healing output."""
     config, state, action_mask = _scenario(
         (0, PRIEST_CLASS_ID),
         (1, PRIEST_CLASS_ID),
@@ -2358,7 +2312,6 @@ def test_anti_heal_reconciles_source_healing_to_authoritative_recipient_total() 
 
 
 def test_health_clamps_do_not_rewrite_gross_damage_or_healing_facts() -> None:
-    """Prove overkill and overheal retain pre-net, pre-clamp transition amounts."""
     damage_config, damage_state, damage_mask = _scenario(
         (0, ROGUE_CLASS_ID),
         (5, HUNTER_CLASS_ID),
@@ -2441,7 +2394,6 @@ def test_health_clamps_do_not_rewrite_gross_damage_or_healing_facts() -> None:
 def test_post_combat_health_precedes_respawn_and_physical_facts_ignore_overwrite() -> (
     None
 ):
-    """Keep pre-respawn health and phase displacement despite final state overwrite."""
     config, state, _ = _scenario(
         (_TEAM_A_FIRST_SLOT, HUNTER_CLASS_ID),
         (_TEAM_B_FIRST_SLOT, HUNTER_CLASS_ID),
@@ -2494,7 +2446,6 @@ def test_post_combat_health_precedes_respawn_and_physical_facts_ignore_overwrite
 
 
 def test_simultaneous_damage_and_healing_remain_separate_gross_totals() -> None:
-    """Prove health netting does not collapse authoritative damage/healing facts."""
     config, state, action_mask = _scenario(
         (0, HUNTER_CLASS_ID),
         (5, HUNTER_CLASS_ID),
@@ -2537,7 +2488,6 @@ def test_simultaneous_damage_and_healing_remain_separate_gross_totals() -> None:
 
 
 def test_transition_facts_compose_under_eager_jit_vmap_and_scan() -> None:
-    """Prove public transition PyTrees remain static across JAX execution modes."""
     config, state, action_mask = _scenario(
         (0, HUNTER_CLASS_ID),
         (5, HUNTER_CLASS_ID),
@@ -2573,7 +2523,6 @@ def test_transition_facts_compose_under_eager_jit_vmap_and_scan() -> None:
     def consume_public_transition(
         action: Action,
     ) -> tuple[Observation, ActionMask, TransitionFacts]:
-        """Return policy outputs and facts from one shared-config transition."""
         _, observation, _, _, next_mask, info = step(
             config,
             state,
@@ -2653,7 +2602,6 @@ def test_transition_facts_compose_under_eager_jit_vmap_and_scan() -> None:
     assert not bool(jnp.any(batched_shield_facts.expired_at_transition_end_by_agent))
 
     def repeat_action_head(head: Array) -> Array:
-        """Repeat one fixed-slot action head along the scan time axis."""
         return jnp.repeat(head[None, :], repeats=3, axis=0)
 
     scan_actions = jax.tree.map(repeat_action_head, neutral_action)
@@ -2666,7 +2614,6 @@ def test_transition_facts_compose_under_eager_jit_vmap_and_scan() -> None:
         tuple[EnvState, ActionMask],
         tuple[Observation, ActionMask, TransitionFacts],
     ]:
-        """Carry state/mask and stack every public transition structure."""
         current_state, current_mask = carry
         action, key = inputs
         next_state, observation, _, _, next_mask, info = step(
@@ -2756,7 +2703,6 @@ def test_transition_facts_compose_under_eager_jit_vmap_and_scan() -> None:
         initial_state: EnvState,
         initial_mask: ActionMask,
     ) -> tuple[EnvState, ActionMask]:
-        """Model a training adapter that intentionally retains no Info payload."""
 
         def discard_body(
             carry: tuple[EnvState, ActionMask],

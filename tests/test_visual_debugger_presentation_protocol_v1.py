@@ -1,4 +1,4 @@
-"""Focused CP2.5-B presentation protocol, integrity, and privacy proofs."""
+"""Check V1 presentation messages, record agreement and privacy limits."""
 # pyright: reportPrivateUsage=false
 
 from __future__ import annotations
@@ -1700,6 +1700,34 @@ def test_recursive_schema_is_closed_required_and_key_catalog_is_exhaustive() -> 
     }
     encountered_key_fields: set[str] = set()
     one_of_count = 0
+    # Additive researcher HUD metadata remains absent in historical presentations.
+    # Only these named compatibility fields may omit a recursive requirement.
+    optional_fields = {
+        "root.$defs.MatchSummaryV1": {
+            "deaths",
+            "map",
+            "observation_mode",
+            "episode_limit",
+            "root_seed",
+            "episode_seed",
+        },
+        "root.$defs.MatchDeathV1": {"killing_team_id", "contributors"},
+    }
+    death_properties = cast(
+        dict[str, object], definitions["MatchDeathV1"]["properties"]
+    )
+    assert set(death_properties) == {
+        "public_agent_id",
+        "team_id",
+        "class_id",
+        "killing_team_id",
+        "contributors",
+    }
+    summary_properties = cast(
+        dict[str, dict[str, object]], definitions["MatchSummaryV1"]["properties"]
+    )
+    assert summary_properties["deaths"]["items"] == {"$ref": "#/$defs/MatchDeathV1"}
+    assert summary_properties["deaths"]["maxItems"] == 10
 
     def visit(value: object, *, path: str) -> None:
         nonlocal one_of_count
@@ -1713,9 +1741,11 @@ def test_recursive_schema_is_closed_required_and_key_catalog_is_exhaustive() -> 
         properties = node.get("properties")
         if type(properties) is dict:
             property_names = set(cast(dict[str, object], properties))
-            assert set(cast(list[str], node.get("required", []))) == property_names, (
-                path
-            )
+            optional = optional_fields.get(path, set())
+            assert optional <= property_names, path
+            assert set(cast(list[str], node.get("required", []))) == (
+                property_names - optional
+            ), path
             assert node.get("additionalProperties") is False, path
             for name in property_names:
                 if name == "presentation_key" or name.endswith("_presentation_key"):
@@ -1973,7 +2003,7 @@ def test_agent_endpoint_factories_derive_exact_axis_from_accepted_mapping(
         authority="cp2-5-b-axis-factory",
     )
     mapping = index.content.axis_mapping
-    mapping_before = TypeAdapter(ActorPovAxisMappingV1).dump_json(mapping)
+    mapping_before = TypeAdapter(type(mapping)).dump_json(mapping)
     parts_before = TypeAdapter(type(current)).dump_json(current)
     endpoint = build_no_shared_obs_authorized_current_endpoint_v1(
         parts=current,
@@ -1998,7 +2028,7 @@ def test_agent_endpoint_factories_derive_exact_axis_from_accepted_mapping(
         )
         == ("same_team",) * 5 + ("opponent",) * 5
     )
-    assert TypeAdapter(ActorPovAxisMappingV1).dump_json(mapping) == mapping_before
+    assert TypeAdapter(type(mapping)).dump_json(mapping) == mapping_before
     assert TypeAdapter(type(current)).dump_json(current) == parts_before
 
     visible_ids = {row.public_agent_id for row in current.scene.agents}
@@ -2050,7 +2080,7 @@ def test_agent_endpoint_factories_derive_exact_axis_from_accepted_mapping(
         frame_index=1,
         authority="cp2-5-b-shared-axis-factory",
     )
-    shared_mapping_before = TypeAdapter(ActorPovAxisMappingV1).dump_json(
+    shared_mapping_before = TypeAdapter(type(shared_source.axis_mapping)).dump_json(
         shared_source.axis_mapping
     )
     shared_endpoint = build_shared_obs_authorized_current_endpoint_v1(
@@ -2061,7 +2091,9 @@ def test_agent_endpoint_factories_derive_exact_axis_from_accepted_mapping(
         shared_source.axis_mapping.target_action_recipient_public_agent_id_by_id
     )
     assert (
-        TypeAdapter(ActorPovAxisMappingV1).dump_json(shared_source.axis_mapping)
+        TypeAdapter(type(shared_source.axis_mapping)).dump_json(
+            shared_source.axis_mapping
+        )
         == shared_mapping_before
     )
 
@@ -2153,7 +2185,7 @@ def test_oracle_scene_wrapper_and_endpoint_factory_own_authority_inputs(
             ),
             authority_session_id=session_a,
         )
-    with pytest.raises(TypeError, match="exact EvaluationEpisodeContextV1"):
+    with pytest.raises(TypeError, match="exact supported episode-context root"):
         build_oracle_authorized_scene_v1(
             _PoisonEvaluationEpisodeContextV1.model_construct(
                 **{

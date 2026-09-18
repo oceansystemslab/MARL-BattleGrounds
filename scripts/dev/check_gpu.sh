@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
+
+# Qualify a clean committed checkout on JAX's concrete CUDA backend.
+# Usage: scripts/dev/check_gpu.sh [--allow-dirty | --help]. The default rejects
+# staged, unstaged and nonignored untracked changes. --allow-dirty runs diagnostics
+# only; it cannot qualify publication. Requires a working NVIDIA driver,
+# nvidia-smi and the prepared CUDA uv environment. The script disables JAX memory
+# preallocation, verifies synchronized GPU matrix work, then runs 32-lane tests.
+# It rechecks the committed source identity and cleanliness before qualification.
+# This is a correctness check, not a throughput benchmark. It never commits.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
 
+# Print qualification/diagnostic options and their meaning to stderr. No arguments.
 usage() {
   cat >&2 <<'EOF'
 usage: scripts/dev/check_gpu.sh [--allow-dirty | --help]
@@ -14,6 +24,8 @@ commit for publication or release.
 EOF
 }
 
+# Return success only when tracked, staged and nonignored untracked changes are
+# absent. No arguments. Ignore private ignored files; do not change Git state.
 repository_is_clean() {
   local untracked=""
 
@@ -23,6 +35,8 @@ repository_is_clean() {
   [[ -z "${untracked}" ]]
 }
 
+# Print the current committed HEAD:tree identity. No arguments. Fail if either
+# Git revision is unavailable. This reads the committed tree, not dirty worktree bytes.
 candidate_fingerprint() {
   local head_revision=""
   local tree_revision=""
@@ -108,6 +122,8 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 cd -- "${REPO_ROOT}"
 nvidia-smi
 uv run --no-sync python - <<'PY'
+"""Verify CUDA is the only active backend and complete one checked GPU workload."""
+
 from __future__ import annotations
 
 import jax
@@ -146,6 +162,11 @@ if "cuda" not in str(cuda_backend.platform_version).lower():
 
 @jax.jit
 def accelerator_matmul(left: jax.Array, right: jax.Array) -> jax.Array:
+    """Multiply compatible float32 matrices on their device and return the result.
+
+    The caller supplies two (2048, 2048) arrays, then synchronizes and checks
+    the returned array. This function performs no host copy or validation.
+    """
     return left @ right
 
 
@@ -171,9 +192,14 @@ if float(result[0, 0]) != 2048.0:
 print("result", result.shape, result.dtype, result_devices)
 PY
 
+# All environment calls in these tests, including their references, use 32 lanes.
+# Keep scalar and odd-batch edge checks in the full CPU suite.
 uv run --no-sync pytest \
-  tests/test_core_spine.py::test_that_step_can_be_jit_compiled \
-  tests/test_core_spine.py::test_step_can_run_in_scanned_rollout \
+  tests/test_gpu_workflows.py::test_native_and_external_batch_match_through_jit_and_scan \
+  tests/test_gpu_workflows.py::test_dynamic_system_scan_preserves_memory_and_partial_resets \
+  tests/test_gpu_metrics.py::test_selected_metrics_match_full_across_chunks_and_resets \
+  tests/test_gpu_policy.py::test_policy_actor_memory_and_dynamic_values_remain_separate \
+  tests/test_gpu_workflows.py::test_selected_replay_evaluation_needs_no_metrics_or_files \
   -q \
   --maxfail=1
 

@@ -1,7 +1,10 @@
-"""Approved eight-scenario definitions joined to the existing V2 evidence contract.
+"""Bind the eight packaged TDM scenarios to reproducible evaluation records.
 
-The endpoint is observed terminal Team A reward, not an inferred tactical skill.
-The small qualification schedule is plumbing evidence, not manuscript sampling.
+These host helpers record the approved layout, exact initial state, fixed opposing
+controller, and seed schedule. The measured endpoint is terminal Team A reward.
+A win supports that endpoint; it does not by itself prove the proposed tactical
+skill was learned. The two-coordinate qualification schedule checks recording
+plumbing and is not a manuscript sampling plan.
 """
 
 from __future__ import annotations
@@ -9,27 +12,23 @@ from __future__ import annotations
 from marl_battlegrounds._tdm_assets import scenario_content
 from marl_battlegrounds.evaluation.catalog import build_roster_v1
 from marl_battlegrounds.evaluation.models import (
-    AssignedPolicySlotV1,
     ContentAddressedIdentityV1,
-    EvaluationFrameV1,
-    EvaluationSeedProtocolV1,
+    EvaluationFrame,
+    EvaluationSeedProtocolV2,
     VersionedIdentityV1,
     canonical_digest_sha256,
 )
-from marl_battlegrounds.evaluation.replay import (
-    EvaluationMetricReportArtifactV1,
-    ReplayArtifactV1,
-)
+from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
 from marl_battlegrounds.evaluation.scenario import (
-    ResolvedScenarioSpecificationV2,
-    ScenarioEvaluationRecordV2,
+    ResolvedScenarioSpecificationV3,
+    ScenarioEvaluationRecordV4,
     ScenarioMeasurementDefinitionV1,
     ScenarioMeasurementResultV1,
     ScenarioPredicateResultV1,
     ScenarioScalarValueV1,
-    ScenarioSeedScheduleV2,
-    build_scenario_evaluation_record_v2,
-    resolved_initial_state_digest_sha256_v2,
+    ScenarioSeedScheduleV3,
+    build_scenario_evaluation_record_v4,
+    resolved_initial_state_digest_sha256,
 )
 from marl_battlegrounds.policies.reactive_tdm_alpha import (
     reactive_tdm_alpha_controller_descriptor,
@@ -56,7 +55,29 @@ _HYPOTHESES = (
 
 
 def tdm_scenario_pressure_identity(scenario_id: int) -> ContentAddressedIdentityV1:
-    """Freeze the current ALPHA/BETA rule descriptor selected by approved Notes."""
+    """Identify the fixed opposing controller for one packaged scenario.
+
+    Parameters
+    ----------
+    scenario_id : int
+        Packaged scenario number, 1 through 8.
+
+    Returns
+    -------
+    ContentAddressedIdentityV1
+        Controller identifier, version, and SHA-256 digest of its complete current
+        rule descriptor. Scenarios 3, 5, and 8 use BETA; the others use ALPHA.
+
+    Raises
+    ------
+    ValueError
+        The scenario number is not supported or its packaged content is invalid.
+
+    Notes
+    -----
+    Loads and validates scenario content on the host. The identity describes
+    controller rules, not learned weights or a claim about their performance.
+    """
     load_tdm_scenario(scenario_id)
     descriptor = (
         reactive_tdm_beta_controller_descriptor()
@@ -72,52 +93,87 @@ def tdm_scenario_pressure_identity(scenario_id: int) -> ContentAddressedIdentity
     )
 
 
-def build_tdm_qualification_seed_schedule() -> ScenarioSeedScheduleV2:
-    """Two fixed coordinates for deterministic retry and matched plumbing checks.
+def build_tdm_qualification_seed_schedule() -> ScenarioSeedScheduleV3:
+    """Build the small seed schedule used to check scenario recording.
 
-    The reference rollout consumes environment_seed as its root and splits epoch
-    environment/actor keys internally. Both diagnostic controllers ignore actor
-    keys; the policy seed fields identify that same rollout root, not independent
-    streams that were never consumed. There is no cooperative-partner role.
+    Returns
+    -------
+    ScenarioSeedScheduleV3
+        Version 3 schedule named tdm-closeout-plumbing, schedule version 2,
+        with root seed 0 and episode coordinates 0 and 1. Its digest includes the
+        complete schedule payload.
+
+    Notes
+    -----
+    The executor derives named substream keys through episode-fold-in-v1.
+    These keys are not separate scalar seeds, so those seed fields remain
+    unrecorded. Team A is focal; there is no cooperative-partner role.
+    The two coordinates test execution and artifact joins, not statistical power.
     """
     rows = tuple(
-        EvaluationSeedProtocolV1(
+        EvaluationSeedProtocolV2(
             seed_protocol=VersionedIdentityV1(
-                identifier="tdm-qualification-reference-rollout", version=1
+                identifier="episode-fold-in-v1", version=1
             ),
-            root_seed=seed,
-            episode_seed=seed,
-            layout_seed=seed,
-            environment_seed=seed,
-            focal_policy_seed=seed,
-            evaluation_seed=seed,
+            root_seed=0,
+            episode_seed=coordinate,
             cooperative_partner_seed="not_applicable",
-            adversarial_opponent_seed=seed,
-            scenario_seed=seed,
         )
-        for seed in (0, 1)
+        for coordinate in (0, 1)
     )
     payload: dict[str, object] = {
         "schema_id": "marl_battlegrounds.evaluation.scenario_seed_schedule",
-        "schema_version": 2,
+        "schema_version": 3,
         "schedule_id": "tdm-closeout-plumbing",
-        "schedule_version": 1,
+        "schedule_version": 2,
         "realized_seed_protocols": rows,
     }
-    return ScenarioSeedScheduleV2.model_validate(
+    return ScenarioSeedScheduleV3.model_validate(
         {**payload, "canonical_digest_sha256": canonical_digest_sha256(payload)}
     )
 
 
 def build_tdm_scenario_specification(
     scenario_id: int,
-    initial_frame: EvaluationFrameV1,
-    seed_schedule: ScenarioSeedScheduleV2,
-) -> ResolvedScenarioSpecificationV2:
-    """Bind approved content to an explicit matched schedule and exact frame zero."""
+    seed_schedule: ScenarioSeedScheduleV3,
+    *,
+    initial_frame: EvaluationFrame | None = None,
+) -> ResolvedScenarioSpecificationV3:
+    """Describe one approved scenario and the exact experiment to record.
+
+    Parameters
+    ----------
+    scenario_id : int
+        Packaged scenario number, 1 through 8.
+    seed_schedule : ScenarioSeedScheduleV3
+        Explicit version 3 matched schedule, including its content digest.
+    initial_frame : EvaluationFrame | None
+        Optional captured frame zero. If supplied, its simulator tick
+        and snapshot must exactly equal the packaged initial state. Defaults to None.
+
+    Returns
+    -------
+    ResolvedScenarioSpecificationV3
+        Version 3 official specification with ten global roster slots, Team A focal
+        roles, Team B opposing roles, approved source/configuration identities,
+        initial-state digest, horizon, controller identity, and terminal-reward
+        endpoint.
+
+    Raises
+    ------
+    ValueError
+        The scenario is invalid or the supplied initial frame disagrees
+        with its packaged state; model validation can also reject malformed metadata.
+
+    Notes
+    -----
+    Inactive slots have no scenario role. Partial episodes leave the endpoint
+    unavailable. The success predicate means terminal Team A reward equals 1;
+    it does not infer a tactical explanation. This host helper performs no rollout.
+    """
     scenario = load_tdm_scenario(scenario_id)
     content = scenario_content(scenario.info)
-    if (
+    if initial_frame is not None and (
         initial_frame.frame_index != 0
         or initial_frame.simulator_step_count != content.step_count
         or initial_frame.snapshot != content.initial_snapshot
@@ -128,7 +184,7 @@ def build_tdm_scenario_specification(
     roster = build_roster_v1(scenario.config, TDM_SCENARIO_PUBLIC_AGENT_IDS)
     payload: dict[str, object] = {
         "schema_id": "marl_battlegrounds.evaluation.resolved_scenario_specification",
-        "schema_version": 2,
+        "schema_version": 3,
         "scenario_id": f"tdm-scenario-{scenario_id}",
         "scenario_version": 1,
         "classification": "official",
@@ -144,7 +200,9 @@ def build_tdm_scenario_specification(
             canonical_digest=scenario.info.source.semantic_digest,
         ),
         "resolved_initial_state_digest_sha256": (
-            resolved_initial_state_digest_sha256_v2(initial_frame)
+            resolved_initial_state_digest_sha256(
+                content.step_count, content.initial_snapshot
+            )
         ),
         "resolved_config_digest_sha256": scenario.info.resolved_configuration_digest,
         "roster_template": roster,
@@ -178,24 +236,55 @@ def build_tdm_scenario_specification(
             identifier="tdm.incomplete_endpoint_unavailable", version=1
         ),
     }
-    # Include defaults in the content digest, as required by the V2 authority.
+    # Include defaults in the content digest, as required by the scenario authority.
     payload.update(parameters=(), secondary_measurements=(), violations=())
-    return ResolvedScenarioSpecificationV2.model_validate(
+    return ResolvedScenarioSpecificationV3.model_validate(
         {**payload, "canonical_digest_sha256": canonical_digest_sha256(payload)}
     )
 
 
 def build_tdm_scenario_evaluation_record(
     scenario_id: int,
-    specification: ResolvedScenarioSpecificationV2,
-    replay: ReplayArtifactV1,
-    metric_report: EvaluationMetricReportArtifactV1,
+    specification: ResolvedScenarioSpecificationV3,
+    replay: ReplayArtifactV3,
     *,
     schedule_coordinate: int,
-) -> ScenarioEvaluationRecordV2:
-    """Materialize the frozen reward endpoint and require all official V2 joins."""
+) -> ScenarioEvaluationRecordV4:
+    """Join one scenario replay to its declared terminal-reward endpoint.
+
+    Parameters
+    ----------
+    scenario_id : int
+        Packaged scenario number, 1 through 8.
+    specification : ResolvedScenarioSpecificationV3
+        Exact current official specification for this scenario.
+    replay : ReplayArtifactV3
+        Version 3 replay with the approved frame zero and recorded Team B
+        controller identity.
+    schedule_coordinate : int
+        Zero-based index into the specification's matched schedule.
+
+    Returns
+    -------
+    ScenarioEvaluationRecordV4
+        Version 4 record joining specification, replay, and schedule coordinate.
+        A complete replay ending with terminated or truncated reports Team A reward
+        and whether it equals 1. Other replays report an unavailable endpoint.
+
+    Raises
+    ------
+    ValueError
+        The specification, initial frame, opposing controller, schedule
+        join, or terminal reward is inconsistent. Active Team A rewards must
+        agree on one value from -1, 0, and 1.
+
+    Notes
+    -----
+    Uses recorded rewards and the shared scenario-record validator. It does not
+    rerun physics, infer success from visual behavior, or write a file.
+    """
     expected = build_tdm_scenario_specification(
-        scenario_id, replay.frames[0], specification.seed_schedule
+        scenario_id, specification.seed_schedule, initial_frame=replay.frames[0]
     )
     if expected != specification:
         raise ValueError(
@@ -203,16 +292,13 @@ def build_tdm_scenario_evaluation_record(
         )
     pressure = expected.pressure_protocol
     assert pressure is not None
-    for assignment in replay.header.context.policy_assignments:
-        if (
-            isinstance(assignment, AssignedPolicySlotV1)
-            and assignment.evaluation_role == "adversarial_opponent"
-            and (
-                assignment.policy_content_digest != pressure.canonical_digest
-                or assignment.algorithm_id != pressure.identifier
-            )
-        ):
-            raise ValueError("scenario opponent must match its frozen pressure rules")
+    identities = {row.name: row.value for row in replay.header.context.aggregation_keys}
+    recorded_pressure = identities.get("team_b_controller_identity")
+    if (
+        recorded_pressure is None
+        or ContentAddressedIdentityV1.model_validate_json(recorded_pressure) != pressure
+    ):
+        raise ValueError("scenario opponent must match its frozen pressure rules")
     complete = replay.completion.completion_state == "complete"
     terminal = replay.transitions[-1] if replay.transitions else None
     available = (
@@ -254,10 +340,9 @@ def build_tdm_scenario_evaluation_record(
         if reward is not None
         else "Complete terminal TDM reward unavailable.",
     )
-    return build_scenario_evaluation_record_v2(
+    return build_scenario_evaluation_record_v4(
         specification,
         replay,
-        metric_report,
         schedule_coordinate=schedule_coordinate,
         measurement_results=(measurement,),
         violation_results=(),

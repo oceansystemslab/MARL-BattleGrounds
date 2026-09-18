@@ -1,3 +1,7 @@
+/**
+ * @file Check that standalone launchers install the intended live/replay product and
+ * follow server lifecycle rules.
+ */
 import { expect, test } from "@playwright/test";
 
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";

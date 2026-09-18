@@ -1,8 +1,14 @@
-"""Explicit builders for versioned evaluation context and static catalogs."""
+"""Build durable episode metadata from explicit runner and Core authorities.
+
+Runtime arrays are copied to strict host records with stable global-slot order
+and canonical content digests. Call these helpers at setup or recording
+boundaries, outside JAX transformations. Reconstruction restores recorded values;
+it does not silently substitute current class defaults or reset the simulator.
+"""
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -78,16 +84,18 @@ from marl_battlegrounds.core.types import (
     OBSTACLE_FEATURE_Y,
     OBSTACLE_FEATURES,
     EnvConfig,
-    EnvState,
     ResolvedAgentProfile,
 )
 from marl_battlegrounds.evaluation.actor_projection import (
     SHARED_OBS_ACTOR_PROJECTION_V1,
+    SHARED_OBS_ACTOR_PROJECTION_V2,
 )
 from marl_battlegrounds.evaluation.models import (
     CATALOG_SCHEMA_ID,
     CATALOG_SCHEMA_VERSION,
     REQUIRED_SCHEMA_BINDINGS_V1,
+    REQUIRED_SCHEMA_BINDINGS_V2,
+    REQUIRED_SCHEMA_BINDINGS_V3,
     RESOLVED_ENV_CONFIG_SCHEMA_ID,
     RESOLVED_ENV_CONFIG_SCHEMA_VERSION,
     AggregationKeyV1,
@@ -95,18 +103,28 @@ from marl_battlegrounds.evaluation.models import (
     CaptureProfile,
     ClassMechanicsV1,
     CodeRevisionV1,
+    CodeRevisionV2,
     ContentAddressedIdentityV1,
+    EvaluationEpisodeContext,
     EvaluationEpisodeContextV1,
+    EvaluationEpisodeContextV2,
+    EvaluationEpisodeContextV3,
     EvaluationEpisodeIdentityV1,
+    EvaluationFrame,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     EvaluationSeedProtocolV1,
+    EvaluationSeedProtocolV2,
     ExecutionInformationMode,
     PolicyAssignmentSlotV1,
+    PolicyAssignmentSlotV2,
     ResolvedEnvConfigV1,
     ResolvedObstacleV1,
     ResolvedSlotMechanicsV1,
     RosterSlotV1,
     SchemaVersionEntryV1,
+    SchemaVersionEntryV2,
+    SchemaVersionEntryV3,
     StaticMechanicsCatalogV1,
     StatusMechanicV1,
     VersionedIdentityV1,
@@ -115,12 +133,22 @@ from marl_battlegrounds.evaluation.models import (
 
 
 def _python_float_tuple(values: object) -> tuple[float, ...]:
-    """Project one float32 catalog array without changing its exact values."""
+    """Copy a one-dimensional catalog array to exact float32-valued Python floats.
+
+    This host conversion can synchronize a device array. The float32 narrowing is
+    intentional because the source mechanics tables use float32.
+    """
     host = np.asarray(values, dtype=np.float32)
     return tuple(float(value) for value in host)
 
 
 def _class_mechanics() -> tuple[ClassMechanicsV1, ...]:
+    """Project current Core class tables in class-ID order, including neutral class 0.
+
+    Record health, world-unit distances, per-tick movement, targeting modes, cooldown
+    ticks, and recovery settings. Return six strict host rows; do not infer values
+    from a particular roster or modify the source tables.
+    """
     class_names = ("Neutral", "Mage", "Warrior", "Hunter", "Rogue", "Priest")
     basic_target_modes: tuple[Literal["unavailable", "ally", "enemy"], ...] = (
         "unavailable",
@@ -179,6 +207,11 @@ def _class_mechanics() -> tuple[ClassMechanicsV1, ...]:
 
 
 def _status_channels() -> tuple[StatusMechanicV1, ...]:
+    """Describe the nine recorded status channels in their fixed wire order.
+
+    Use current Core durations and multipliers, including Trap's damage-break rule.
+    Return validated host records; this catalog describes rules without applying them.
+    """
     rows: tuple[dict[str, object], ...] = (
         {
             "status_channel_id": 0,
@@ -284,6 +317,11 @@ def _status_channels() -> tuple[StatusMechanicV1, ...]:
 
 
 def _aura_mechanics() -> tuple[AuraMechanicV1, AuraMechanicV1]:
+    """Describe Mage amplification and Warrior mitigation from current Core constants.
+
+    Return those two host records in that order, including world-unit radius,
+    per-emitter multiplier, and the ceiling or floor applied to combined effects.
+    """
     return (
         AuraMechanicV1(
             aura_id="mage_damage_amplification",
@@ -305,7 +343,21 @@ def _aura_mechanics() -> tuple[AuraMechanicV1, AuraMechanicV1]:
 
 
 def build_static_mechanics_catalog_v1() -> StaticMechanicsCatalogV1:
-    """Project the supported V1 catalog from explicit public authorities."""
+    """Capture the current mechanics and action vocabularies in one durable catalog.
+
+    Returns
+    -------
+    StaticMechanicsCatalogV1
+        Validated V1 catalog with fixed axes, six class rows including neutral,
+        nine status rows, two aura rows, action mappings, units, and a canonical
+        SHA-256 digest over all other fields.
+
+    Notes
+    -----
+    Reads current Core constants and copies arrays to the host. Use this during
+    recording setup, outside JIT. It performs no simulation and does not assert
+    that a historical catalog matches the current code.
+    """
     payload: dict[str, object] = {
         "schema_id": CATALOG_SCHEMA_ID,
         "schema_version": CATALOG_SCHEMA_VERSION,
@@ -374,6 +426,11 @@ def build_static_mechanics_catalog_v1() -> StaticMechanicsCatalogV1:
 
 
 def _resolved_obstacles(config: EnvConfig) -> tuple[ResolvedObstacleV1, ...]:
+    """Copy all fixed obstacle slots from one scalar config to ordered host rows.
+
+    Preserve inactive rows as well as active geometry. Coordinates and sizes use
+    world units; theta uses the recorded angular value. The caller validates config.
+    """
     host = np.asarray(config.obstacles, dtype=np.float32)
     return tuple(
         ResolvedObstacleV1(
@@ -394,6 +451,11 @@ def _resolved_obstacles(config: EnvConfig) -> tuple[ResolvedObstacleV1, ...]:
 def _resolved_slot_mechanics(
     config: EnvConfig,
 ) -> tuple[ResolvedSlotMechanicsV1, ...]:
+    """Copy resolved profile values for all ten global slots into host records.
+
+    Use config-specific values, including overrides and inactive padding, rather
+    than looking up class defaults. The caller validates the scalar config.
+    """
     profile = config.agent_profile
     radii = np.asarray(profile.agent_radii, dtype=np.float32)
     speeds = np.asarray(profile.base_movement_speeds, dtype=np.float32)
@@ -425,7 +487,33 @@ def _resolved_slot_mechanics(
 
 
 def build_resolved_env_config_v1(config: EnvConfig) -> ResolvedEnvConfigV1:
-    """Validate and project one runtime configuration to strict host data."""
+    """Validate one scalar runtime config and record its exact resolved values.
+
+    Parameters
+    ----------
+    config : EnvConfig
+        Unbatched EnvConfig accepted by Core's host validator: Python scalar
+        settings and fixed-shape JAX profile, obstacle, spawn-pad, and team arrays.
+
+    Returns
+    -------
+    ResolvedEnvConfigV1
+        Strict V1 host record containing geometry, ten resolved slot profiles,
+        task rules, spawn settings, and a digest of all other fields.
+
+    Raises
+    ------
+    TypeError
+        A config field has an unsupported host type or array dtype.
+    ValueError
+        Core configuration validation or strict record validation fails.
+
+    Notes
+    -----
+    Array conversion can synchronize device data. This is a host boundary,
+    not a JIT operation. The record stores resolved mechanics separately from
+    roster identity; use build_roster_v1 for class/team membership.
+    """
     validate_env_config(config)
     pads = np.asarray(config.team_spawn_pad_positions, dtype=np.float32)
     periods = np.asarray(config.team_respawn_wave_period_step_count, dtype=np.int32)
@@ -461,7 +549,34 @@ def build_roster_v1(
     config: EnvConfig,
     public_agent_id_by_global_slot: tuple[str, ...],
 ) -> tuple[RosterSlotV1, ...]:
-    """Project fixed-slot identity and immutable roster topology."""
+    """Record public names and configured membership for all ten global slots.
+
+    Parameters
+    ----------
+    config : EnvConfig
+        Scalar runtime config with a resolved ten-slot agent profile.
+    public_agent_id_by_global_slot : tuple[str, ...]
+        Exactly ten nonempty valid public identifiers,
+        ordered Team A slots 0-4 then Team B slots 5-9, including inactive slots.
+
+    Returns
+    -------
+    tuple[RosterSlotV1, ...]
+        Ten strict roster rows preserving slot order, team-local slot, public ID,
+        configured team, class, and active flag.
+
+    Raises
+    ------
+    ValueError
+        The public-ID tuple does not have ten entries or a row fails
+        model validation.
+
+    Notes
+    -----
+    Copies profile arrays to the host and does not validate the entire config.
+    Row construction alone does not check public-ID uniqueness across rows;
+    episode-context validation owns that join.
+    """
     if len(public_agent_id_by_global_slot) != MAX_AGENT_SLOTS:
         raise ValueError("public_agent_id_by_global_slot must have length 10")
     profile = config.agent_profile
@@ -494,7 +609,47 @@ def build_evaluation_seed_protocol_v1(
     adversarial_opponent_seed: int | Literal["not_applicable"],
     scenario_seed: int | Literal["not_applicable"],
 ) -> EvaluationSeedProtocolV1:
-    """Build seed provenance from runner-owned realized seed values."""
+    """Record the runner's complete legacy named-seed provenance.
+
+    Parameters
+    ----------
+    seed_protocol : VersionedIdentityV1
+        Identifier and version of the rule that assigns these seeds.
+    root_seed : int
+        Realized root seed, a nonnegative integer.
+    episode_seed : int
+        Realized episode seed, a nonnegative integer.
+    layout_seed : int
+        Realized layout seed, a nonnegative integer.
+    environment_seed : int
+        Realized simulator seed, a nonnegative integer.
+    focal_policy_seed : int
+        Realized focal-policy seed, a nonnegative integer.
+    evaluation_seed : int
+        Realized evaluation seed, a nonnegative integer.
+    cooperative_partner_seed : int | Literal['not_applicable']
+        Nonnegative seed, or "not_applicable" when that role is absent.
+    adversarial_opponent_seed : int | Literal['not_applicable']
+        Nonnegative seed, or "not_applicable" when that role is absent.
+    scenario_seed : int | Literal['not_applicable']
+        Nonnegative seed, or "not_applicable" when no scenario seed applies.
+
+    Returns
+    -------
+    EvaluationSeedProtocolV1
+        Strict V1 seed record. Every argument is required; no seed is generated.
+
+    Raises
+    ------
+    ValueError
+        A seed or identity fails model validation.
+
+    Notes
+    -----
+    Each numeric seed must fit uint32: 0 through 2**32 - 1. This helper records
+    scalar seed provenance, not JAX key arrays. Use the V2
+    seed model where facts are unknown; do not invent V1 values for missing data.
+    """
     return EvaluationSeedProtocolV1(
         seed_protocol=seed_protocol,
         root_seed=root_seed,
@@ -517,7 +672,37 @@ def build_code_revision_v1(
     source_tree_digest: str,
     dirty_patch_digest: str | None,
 ) -> CodeRevisionV1:
-    """Build explicit revision provenance without inspecting local paths."""
+    """Record explicitly supplied legacy source and Git identities.
+
+    Parameters
+    ----------
+    package_version : str
+        Nonempty package version identifier.
+    commit_sha : str
+        Full lowercase hexadecimal Git commit identity.
+    is_dirty : bool
+        Whether the recorded source differs from the commit.
+    source_tree_digest : str
+        Lowercase SHA-256 digest of the source tree.
+    dirty_patch_digest : str | None
+        Lowercase SHA-256 patch digest for dirty source, or None
+        for clean source. Required as an argument even when None.
+
+    Returns
+    -------
+    CodeRevisionV1
+        Strict V1 revision record with exactly the supplied provenance.
+
+    Raises
+    ------
+    ValueError
+        An identity is malformed or dirty state and patch presence disagree.
+
+    Notes
+    -----
+    Does not inspect Git, the filesystem, or an installed package. Call revision
+    discovery helpers when facts must be discovered rather than supplied.
+    """
     return CodeRevisionV1(
         package_version=package_version,
         commit_sha=commit_sha,
@@ -528,7 +713,18 @@ def build_code_revision_v1(
 
 
 def default_schema_versions_v1() -> tuple[SchemaVersionEntryV1, ...]:
-    """Return exact IDs and versions for the eight serialized CP2 roots."""
+    """Return the exact ordered schema bindings for a historical V1 context.
+
+    Returns
+    -------
+    tuple[SchemaVersionEntryV1, ...]
+        Tuple of V1 schema entries for REQUIRED_SCHEMA_BINDINGS_V1.
+
+    Notes
+    -----
+    These bindings describe the legacy serialized roots. They are not the
+    current context V3/frame V2 bindings.
+    """
     return tuple(
         SchemaVersionEntryV1(schema_id=schema_id)
         for schema_id, _schema_version in REQUIRED_SCHEMA_BINDINGS_V1
@@ -552,7 +748,63 @@ def build_evaluation_episode_context_v1(
     shaping_configuration: ContentAddressedIdentityV1,
     code_revision: CodeRevisionV1,
 ) -> EvaluationEpisodeContextV1:
-    """Build one context without inventing runner-owned provenance."""
+    """Build a historical version 1 episode context from explicit experiment facts.
+
+    Parameters
+    ----------
+    identity : EvaluationEpisodeIdentityV1
+        Runner-owned stable episode, run, evaluation, matchup, and task identities.
+    aggregation_keys : tuple[AggregationKeyV1, ...]
+        Immutable named experiment coordinates; names must be unique.
+    expected_horizon : int
+        Positive number of artifact transitions expected from frame zero.
+    config : EnvConfig
+        Unbatched EnvConfig accepted by Core's host configuration validator.
+    public_agent_id_by_global_slot : tuple[str, ...]
+        Ten unique public IDs in global-slot order,
+        including inactive slots.
+    policy_assignments : tuple[PolicyAssignmentSlotV1, ...]
+        Ten assignment rows in global-slot order. Active slots
+        have policy provenance; inactive slots are marked not applicable.
+    seed_protocol : EvaluationSeedProtocolV1
+        Realized seed provenance; this builder generates no seeds.
+    capture_profile : CaptureProfile
+        One of training_light, evaluation_metric_complete,
+        scenario_metric_complete, or debug.
+    execution_information_mode : ExecutionInformationMode
+        "shared_obs" or "no_shared_obs".
+    actor_projection : VersionedIdentityV1
+        Supported projection identity matching the information mode
+        and this context version.
+    critic_information_regime : VersionedIdentityV1
+        Explicit identifier/version of permitted critic input.
+    canonical_reward_mode : VersionedIdentityV1
+        Explicit identifier/version of the task reward contract.
+    shaping_configuration : ContentAddressedIdentityV1
+        Named/versioned content identity for the declared shaping setup.
+    code_revision : CodeRevisionV1
+        Supplied package/source provenance; no repository discovery occurs.
+
+    Returns
+    -------
+    EvaluationEpisodeContextV1
+        Validated context V1 with its exact schema bindings, resolved config,
+        current static mechanics catalog, and ordered roster. It pairs with frame V1.
+
+    Raises
+    ------
+    TypeError
+        The runtime config has an unsupported field type or dtype.
+    ValueError
+        Config validity, ten-slot assignments, metadata, roster joins,
+        schema bindings, or information-projection consistency fail validation.
+
+    Notes
+    -----
+    Copies runtime arrays to host records during setup, outside JIT. It does not
+    invent policy, seed, reward, or revision provenance. This legacy builder requires V1
+    assignments, seeds, and revision facts.
+    """
     validate_env_config(config)
     if len(policy_assignments) != MAX_AGENT_SLOTS:
         raise ValueError("policy_assignments must have length 10")
@@ -576,12 +828,225 @@ def build_evaluation_episode_context_v1(
     )
 
 
+def build_evaluation_episode_context_v2(
+    *,
+    identity: EvaluationEpisodeIdentityV1,
+    aggregation_keys: tuple[AggregationKeyV1, ...],
+    expected_horizon: int,
+    config: EnvConfig,
+    public_agent_id_by_global_slot: tuple[str, ...],
+    policy_assignments: tuple[PolicyAssignmentSlotV2, ...],
+    seed_protocol: EvaluationSeedProtocolV1 | EvaluationSeedProtocolV2,
+    capture_profile: CaptureProfile,
+    execution_information_mode: ExecutionInformationMode,
+    actor_projection: VersionedIdentityV1,
+    critic_information_regime: VersionedIdentityV1,
+    canonical_reward_mode: VersionedIdentityV1,
+    shaping_configuration: ContentAddressedIdentityV1,
+    code_revision: CodeRevisionV1 | CodeRevisionV2,
+    scenario_name: str | None = None,
+) -> EvaluationEpisodeContextV2:
+    """Build a historical version 2 episode context from explicit experiment facts.
+
+    Parameters
+    ----------
+    identity : EvaluationEpisodeIdentityV1
+        Runner-owned stable episode, run, evaluation, matchup, and task identities.
+    aggregation_keys : tuple[AggregationKeyV1, ...]
+        Immutable named experiment coordinates; names must be unique.
+    expected_horizon : int
+        Positive number of artifact transitions expected from frame zero.
+    config : EnvConfig
+        Unbatched EnvConfig accepted by Core's host configuration validator.
+    public_agent_id_by_global_slot : tuple[str, ...]
+        Ten unique public IDs in global-slot order,
+        including inactive slots.
+    policy_assignments : tuple[PolicyAssignmentSlotV2, ...]
+        Ten assignment rows in global-slot order. Active slots
+        have policy provenance; inactive slots are marked not applicable.
+    seed_protocol : EvaluationSeedProtocolV1 | EvaluationSeedProtocolV2
+        Realized seed provenance; this builder generates no seeds.
+    capture_profile : CaptureProfile
+        One of training_light, evaluation_metric_complete,
+        scenario_metric_complete, or debug.
+    execution_information_mode : ExecutionInformationMode
+        "shared_obs" or "no_shared_obs".
+    actor_projection : VersionedIdentityV1
+        Supported projection identity matching the information mode
+        and this context version.
+    critic_information_regime : VersionedIdentityV1
+        Explicit identifier/version of permitted critic input.
+    canonical_reward_mode : VersionedIdentityV1
+        Explicit identifier/version of the task reward contract.
+    shaping_configuration : ContentAddressedIdentityV1
+        Named/versioned content identity for the declared shaping setup.
+    code_revision : CodeRevisionV1 | CodeRevisionV2
+        Supplied package/source provenance; no repository discovery occurs.
+    scenario_name : str | None
+        Optional human-readable scenario name. Defaults to None.
+
+    Returns
+    -------
+    EvaluationEpisodeContextV2
+        Validated context V2 with its exact schema bindings, resolved config,
+        current static mechanics catalog, and ordered roster. It pairs with frame V1.
+
+    Raises
+    ------
+    TypeError
+        The runtime config has an unsupported field type or dtype.
+    ValueError
+        Config validity, ten-slot assignments, metadata, roster joins,
+        schema bindings, or information-projection consistency fail validation.
+
+    Notes
+    -----
+    Copies runtime arrays to host records during setup, outside JIT. It does not
+    invent policy, seed, reward, or revision provenance. V2 assignments allow explicitly
+    unknown policy facts; seed and revision records may use V1 or V2.
+    """
+    validate_env_config(config)
+    if len(policy_assignments) != MAX_AGENT_SLOTS:
+        raise ValueError("policy_assignments must have length 10")
+    return EvaluationEpisodeContextV2(
+        identity=identity,
+        schema_versions=tuple(
+            SchemaVersionEntryV2(schema_id=name, schema_version=version)
+            for name, version in REQUIRED_SCHEMA_BINDINGS_V2
+        ),
+        aggregation_keys=aggregation_keys,
+        expected_horizon=expected_horizon,
+        resolved_env_config=build_resolved_env_config_v1(config),
+        static_mechanics_catalog=build_static_mechanics_catalog_v1(),
+        roster=build_roster_v1(config, public_agent_id_by_global_slot),
+        policy_assignments=policy_assignments,
+        seed_protocol=seed_protocol,
+        capture_profile=capture_profile,
+        execution_information_mode=execution_information_mode,
+        actor_projection=actor_projection,
+        critic_information_regime=critic_information_regime,
+        canonical_reward_mode=canonical_reward_mode,
+        shaping_configuration=shaping_configuration,
+        code_revision=code_revision,
+        scenario_name=scenario_name,
+    )
+
+
+def build_evaluation_episode_context_v3(
+    *,
+    identity: EvaluationEpisodeIdentityV1,
+    aggregation_keys: tuple[AggregationKeyV1, ...],
+    expected_horizon: int,
+    config: EnvConfig,
+    public_agent_id_by_global_slot: tuple[str, ...],
+    policy_assignments: tuple[PolicyAssignmentSlotV2, ...],
+    seed_protocol: EvaluationSeedProtocolV1 | EvaluationSeedProtocolV2,
+    capture_profile: CaptureProfile,
+    execution_information_mode: ExecutionInformationMode,
+    actor_projection: VersionedIdentityV1,
+    critic_information_regime: VersionedIdentityV1,
+    canonical_reward_mode: VersionedIdentityV1,
+    shaping_configuration: ContentAddressedIdentityV1,
+    code_revision: CodeRevisionV1 | CodeRevisionV2,
+    scenario_name: str | None = None,
+) -> EvaluationEpisodeContextV3:
+    """Build the current version 3 episode context from explicit experiment facts.
+
+    Parameters
+    ----------
+    identity : EvaluationEpisodeIdentityV1
+        Runner-owned stable episode, run, evaluation, matchup, and task identities.
+    aggregation_keys : tuple[AggregationKeyV1, ...]
+        Immutable named experiment coordinates; names must be unique.
+    expected_horizon : int
+        Positive number of artifact transitions expected from frame zero.
+    config : EnvConfig
+        Unbatched EnvConfig accepted by Core's host configuration validator.
+    public_agent_id_by_global_slot : tuple[str, ...]
+        Ten unique public IDs in global-slot order,
+        including inactive slots.
+    policy_assignments : tuple[PolicyAssignmentSlotV2, ...]
+        Ten assignment rows in global-slot order. Active slots
+        have policy provenance; inactive slots are marked not applicable.
+    seed_protocol : EvaluationSeedProtocolV1 | EvaluationSeedProtocolV2
+        Realized seed provenance; this builder generates no seeds.
+    capture_profile : CaptureProfile
+        One of training_light, evaluation_metric_complete,
+        scenario_metric_complete, or debug.
+    execution_information_mode : ExecutionInformationMode
+        "shared_obs" or "no_shared_obs".
+    actor_projection : VersionedIdentityV1
+        Supported projection identity matching the information mode
+        and this context version.
+    critic_information_regime : VersionedIdentityV1
+        Explicit identifier/version of permitted critic input.
+    canonical_reward_mode : VersionedIdentityV1
+        Explicit identifier/version of the task reward contract.
+    shaping_configuration : ContentAddressedIdentityV1
+        Named/versioned content identity for the declared shaping setup.
+    code_revision : CodeRevisionV1 | CodeRevisionV2
+        Supplied package/source provenance; no repository discovery occurs.
+    scenario_name : str | None
+        Optional human-readable scenario name. Defaults to None.
+
+    Returns
+    -------
+    EvaluationEpisodeContextV3
+        Validated context V3 with its exact schema bindings, resolved config,
+        current static mechanics catalog, and ordered roster. It pairs with frame V2.
+
+    Raises
+    ------
+    TypeError
+        The runtime config has an unsupported field type or dtype.
+    ValueError
+        Config validity, ten-slot assignments, metadata, roster joins,
+        schema bindings, or information-projection consistency fail validation.
+
+    Notes
+    -----
+    Copies runtime arrays to host records during setup, outside JIT. It does not
+    invent policy, seed, reward, or revision provenance. V2 assignments allow explicitly
+    unknown policy facts; seed and revision records may use V1 or V2.
+    """
+    validate_env_config(config)
+    if len(policy_assignments) != MAX_AGENT_SLOTS:
+        raise ValueError("policy_assignments must have length 10")
+    return EvaluationEpisodeContextV3(
+        identity=identity,
+        schema_versions=tuple(
+            SchemaVersionEntryV3(schema_id=name, schema_version=version)
+            for name, version in REQUIRED_SCHEMA_BINDINGS_V3
+        ),
+        aggregation_keys=aggregation_keys,
+        expected_horizon=expected_horizon,
+        resolved_env_config=build_resolved_env_config_v1(config),
+        static_mechanics_catalog=build_static_mechanics_catalog_v1(),
+        roster=build_roster_v1(config, public_agent_id_by_global_slot),
+        policy_assignments=policy_assignments,
+        seed_protocol=seed_protocol,
+        capture_profile=capture_profile,
+        execution_information_mode=execution_information_mode,
+        actor_projection=actor_projection,
+        critic_information_regime=critic_information_regime,
+        canonical_reward_mode=canonical_reward_mode,
+        shaping_configuration=shaping_configuration,
+        code_revision=code_revision,
+        scenario_name=scenario_name,
+    )
+
+
 _INT32_MIN = int(np.iinfo(np.int32).min)
 _INT32_MAX = int(np.iinfo(np.int32).max)
 
 
-def _wire_int32_array(value: object, *, field_name: str) -> Array:
-    """Build one explicit JAX int32 array without silently narrowing wire data."""
+def _wire_int32_array(value: object, *, field_name: str, host: bool = False) -> Array:
+    """Convert exact Python integers without overflow or boolean coercion.
+
+    Preserve shape and raise TypeError for non-int elements or ValueError outside
+    int32 range. By default return a JAX int32 array; host=True returns a NumPy int32
+    array despite the shared Array annotation. This host-only check cannot trace.
+    """
     object_values = np.asarray(value, dtype=object)
     for item in object_values.flat:
         if type(item) is not int:
@@ -589,11 +1054,17 @@ def _wire_int32_array(value: object, *, field_name: str) -> Array:
         integer = int(item)
         if not _INT32_MIN <= integer <= _INT32_MAX:
             raise ValueError(f"{field_name} must be representable as int32")
-    return jnp.asarray(np.asarray(value, dtype=np.int32), dtype=jnp.int32)
+    array = np.asarray(value, dtype=np.int32)
+    return cast(Array, array) if host else jnp.asarray(array, dtype=jnp.int32)
 
 
-def _wire_float32_array(value: object, *, field_name: str) -> Array:
-    """Build one explicit JAX float32 array after a lossless narrowing check."""
+def _wire_float32_array(value: object, *, field_name: str, host: bool = False) -> Array:
+    """Convert finite numeric wire values only when float32 preserves every value.
+
+    Preserve shape and raise ValueError for nonfinite values or lossy narrowing.
+    By default return a JAX float32 array; host=True returns a NumPy array despite
+    the shared Array annotation. This host-only check cannot trace.
+    """
     host_values = np.asarray(value, dtype=np.float64)
     if not bool(np.all(np.isfinite(host_values))):
         raise ValueError(f"{field_name} must contain only finite values")
@@ -604,40 +1075,38 @@ def _wire_float32_array(value: object, *, field_name: str) -> Array:
         narrowed.astype(np.float64),
     ):
         raise ValueError(f"{field_name} must be losslessly representable as float32")
-    return jnp.asarray(narrowed, dtype=jnp.float32)
+    return cast(Array, narrowed) if host else jnp.asarray(narrowed, dtype=jnp.float32)
 
 
-def _validate_official_scenario_context_v2(  # pyright: ignore[reportUnusedFunction]
-    context: EvaluationEpisodeContextV1,
-    initial_frame: EvaluationFrameV1,
-) -> None:
-    """Enforce live product/config/state parity for one loaded V2 scenario."""
-    if type(context) is not EvaluationEpisodeContextV1:
-        raise TypeError(
-            "context must be an EvaluationEpisodeContextV1, not "
-            f"{type(context).__name__}"
-        )
-    if type(initial_frame) is not EvaluationFrameV1:
-        raise TypeError(
-            "initial_frame must be an EvaluationFrameV1, not "
-            f"{type(initial_frame).__name__}"
-        )
-    if context.execution_information_mode != "shared_obs":
-        raise ValueError("official scenario evaluation requires shared_obs execution")
-    if context.actor_projection != SHARED_OBS_ACTOR_PROJECTION_V1:
-        raise ValueError(
-            "official scenario evaluation requires "
-            "base-observation-plus-authorized-sensor-source-bank version 1"
-        )
-    if initial_frame.episode_id != context.identity.episode_id:
-        raise ValueError("initial frame episode identity must match context")
-    if initial_frame.frame_index != 0:
-        raise ValueError("official scenario initial_frame must have frame_index zero")
+def reconstruct_env_config_v1(context: EvaluationEpisodeContext) -> EnvConfig:
+    """Restore one scalar runtime config from recorded context values.
 
-    live_catalog = build_static_mechanics_catalog_v1()
-    if context.static_mechanics_catalog != live_catalog:
-        raise ValueError("loaded context mechanics catalog disagrees with live catalog")
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Supported, already validated episode context containing resolved
+        configuration and ten ordered roster rows.
 
+    Returns
+    -------
+    EnvConfig
+        Unbatched EnvConfig with Python scalar rules and JAX int32, float32, and bool
+        arrays. Recorded profile overrides, geometry, and spawn settings are retained.
+
+    Raises
+    ------
+    TypeError
+        An integer wire field contains a non-integer value.
+    ValueError
+        An integer overflows int32 or a numeric array cannot be represented
+        exactly as finite float32.
+
+    Notes
+    -----
+    Runs on the host and may allocate arrays on JAX's default device. It does not
+    reset state, rederive class defaults, validate the whole context, or run Core
+    config validation. Admission and official-scenario checks own those checks.
+    """
     resolved = context.resolved_env_config
     roster = context.roster
     mechanics = resolved.slot_mechanics
@@ -759,6 +1228,100 @@ def _validate_official_scenario_context_v2(  # pyright: ignore[reportUnusedFunct
             field_name="resolved_env_config.team_respawn_wave_period_steps",
         ),
     )
+    return config
+
+
+def _validate_official_scenario_context_v2(  # pyright: ignore[reportUnusedFunction]
+    context: EvaluationEpisodeContextV1,
+    initial_frame: EvaluationFrameV1,
+) -> None:
+    """Admit a legacy scenario V2 context only as exact context V1 and frame V1.
+
+    Raise TypeError for a different context type, then apply the shared official
+    catalog, product-config, SharedObs, and initial-state checks.
+    """
+    if type(context) is not EvaluationEpisodeContextV1:
+        raise TypeError(
+            "context must be an EvaluationEpisodeContextV1, not "
+            f"{type(context).__name__}"
+        )
+    _validate_official_scenario_context(context, initial_frame)
+
+
+def _validate_official_scenario_context_v3(  # pyright: ignore[reportUnusedFunction]
+    context: EvaluationEpisodeContextV2,
+    initial_frame: EvaluationFrameV1,
+) -> None:
+    """Admit a scenario V3 context only as exact context V2 and frame V1.
+
+    Raise TypeError for a different context type, then apply the shared official
+    catalog, product-config, SharedObs, and initial-state checks.
+    """
+    if type(context) is not EvaluationEpisodeContextV2:
+        raise TypeError("context must be an EvaluationEpisodeContextV2")
+    _validate_official_scenario_context(context, initial_frame)
+
+
+def _validate_official_scenario_context_v4(  # pyright: ignore[reportUnusedFunction]
+    context: EvaluationEpisodeContextV3,
+    initial_frame: EvaluationFrameV2,
+) -> None:
+    """Admit a scenario V4 context only as exact context V3 and frame V2.
+
+    Raise TypeError for a different context type, then apply the shared official
+    catalog, product-config, SharedObs, and initial-state checks.
+    """
+    if type(context) is not EvaluationEpisodeContextV3:
+        raise TypeError("context must be an EvaluationEpisodeContextV3")
+    _validate_official_scenario_context(context, initial_frame)
+
+
+def _validate_official_scenario_context(
+    context: EvaluationEpisodeContext,
+    initial_frame: EvaluationFrame,
+) -> None:
+    """Check that an official scenario can be interpreted under current product rules.
+
+    Require matching frame type/episode, frame zero, SharedObs and the context's
+    projection version, exact current mechanics catalog, and lossless config/roster
+    reconstruction. Delegate product-config and scenario-state validity to Core.
+    Raise TypeError or ValueError on disagreement. This host check imports capture
+    only when initial-state reconstruction is needed and never steps the simulator.
+    """
+    expected_frame = (
+        EvaluationFrameV2
+        if type(context) is EvaluationEpisodeContextV3
+        else EvaluationFrameV1
+    )
+    if type(initial_frame) is not expected_frame:
+        raise TypeError(
+            "initial_frame must be an EvaluationFrameV1, not "
+            f"{type(initial_frame).__name__}"
+        )
+    if context.execution_information_mode != "shared_obs":
+        raise ValueError("official scenario evaluation requires shared_obs execution")
+    expected_projection = (
+        SHARED_OBS_ACTOR_PROJECTION_V2
+        if type(context) is EvaluationEpisodeContextV3
+        else SHARED_OBS_ACTOR_PROJECTION_V1
+    )
+    if context.actor_projection != expected_projection:
+        raise ValueError(
+            "official scenario evaluation requires "
+            "base-observation-plus-authorized-sensor-source-bank version 1"
+        )
+    if initial_frame.episode_id != context.identity.episode_id:
+        raise ValueError("initial frame episode identity must match context")
+    if initial_frame.frame_index != 0:
+        raise ValueError("official scenario initial_frame must have frame_index zero")
+
+    live_catalog = build_static_mechanics_catalog_v1()
+    if context.static_mechanics_catalog != live_catalog:
+        raise ValueError("loaded context mechanics catalog disagrees with live catalog")
+
+    config = reconstruct_env_config_v1(context)
+    resolved = context.resolved_env_config
+    roster = context.roster
     validate_product_env_config(config)
 
     reprojected_config = build_resolved_env_config_v1(config)
@@ -768,98 +1331,21 @@ def _validate_official_scenario_context_v2(  # pyright: ignore[reportUnusedFunct
     if build_roster_v1(config, public_agent_ids) != roster:
         raise ValueError("loaded roster does not exactly reproject")
 
-    snapshot = initial_frame.snapshot
-    initial_state = EnvState(
-        team_deathmatch_scores=_wire_int32_array(
-            snapshot.team_deathmatch_scores,
-            field_name="initial_frame.snapshot.team_deathmatch_scores",
-        ),
-        step_count=_wire_int32_array(
-            initial_frame.simulator_step_count,
-            field_name="initial_frame.simulator_step_count",
-        ),
-        agent_positions=_wire_float32_array(
-            snapshot.agent_positions,
-            field_name="initial_frame.snapshot.agent_positions",
-        ),
-        alive_mask=jnp.asarray(
-            np.asarray(snapshot.alive_mask, dtype=np.bool_),
-            dtype=jnp.bool_,
-        ),
-        current_health=_wire_float32_array(
-            snapshot.current_health,
-            field_name="initial_frame.snapshot.current_health",
-        ),
-        ultimate_cooldowns=_wire_int32_array(
-            snapshot.ultimate_cooldowns,
-            field_name="initial_frame.snapshot.ultimate_cooldowns",
-        ),
-        slow_durations=_wire_int32_array(
-            snapshot.slow_durations,
-            field_name="initial_frame.snapshot.slow_durations",
-        ),
-        stun_durations=_wire_int32_array(
-            snapshot.stun_durations,
-            field_name="initial_frame.snapshot.stun_durations",
-        ),
-        rogue_poison_anti_heal_durations=_wire_int32_array(
-            snapshot.rogue_poison_anti_heal_durations,
-            field_name="initial_frame.snapshot.rogue_poison_anti_heal_durations",
-        ),
-        mage_burst_damage_amplification_durations=_wire_int32_array(
-            snapshot.mage_burst_damage_amplification_durations,
-            field_name=(
-                "initial_frame.snapshot.mage_burst_damage_amplification_durations"
-            ),
-        ),
-        priest_blessing_of_freedom_slow_floor_durations=_wire_int32_array(
-            snapshot.priest_blessing_of_freedom_slow_floor_durations,
-            field_name=(
-                "initial_frame.snapshot.priest_blessing_of_freedom_slow_floor_durations"
-            ),
-        ),
-        team_respawn_wave_countdowns=_wire_int32_array(
-            snapshot.team_respawn_wave_countdowns,
-            field_name="initial_frame.snapshot.team_respawn_wave_countdowns",
-        ),
-        spawn_shield_durations=_wire_int32_array(
-            snapshot.spawn_shield_durations,
-            field_name="initial_frame.snapshot.spawn_shield_durations",
-        ),
-        steps_until_out_of_combat=_wire_int32_array(
-            snapshot.steps_until_out_of_combat,
-            field_name="initial_frame.snapshot.steps_until_out_of_combat",
-        ),
-        previous_timestep_move_actions=_wire_int32_array(
-            snapshot.previous_timestep_move_actions,
-            field_name="initial_frame.snapshot.previous_timestep_move_actions",
-        ),
-        previous_timestep_select_target_actions=_wire_int32_array(
-            snapshot.previous_timestep_select_target_actions,
-            field_name=(
-                "initial_frame.snapshot.previous_timestep_select_target_actions"
-            ),
-        ),
-        previous_timestep_use_ultimate_actions=_wire_int32_array(
-            snapshot.previous_timestep_use_ultimate_actions,
-            field_name=(
-                "initial_frame.snapshot.previous_timestep_use_ultimate_actions"
-            ),
-        ),
-        has_previous_timestep_joint_action=jnp.asarray(
-            snapshot.has_previous_timestep_joint_action,
-            dtype=jnp.bool_,
-        ),
-    )
+    from marl_battlegrounds.evaluation.capture import reconstruct_env_state_v1
+
+    initial_state = reconstruct_env_state_v1(initial_frame)
     validate_scenario_initial_state(config, initial_state)
 
 
 __all__ = [
     "build_code_revision_v1",
     "build_evaluation_episode_context_v1",
+    "build_evaluation_episode_context_v2",
+    "build_evaluation_episode_context_v3",
     "build_evaluation_seed_protocol_v1",
     "build_resolved_env_config_v1",
     "build_roster_v1",
     "build_static_mechanics_catalog_v1",
     "default_schema_versions_v1",
+    "reconstruct_env_config_v1",
 ]

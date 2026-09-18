@@ -1,4 +1,16 @@
-"""Independent renderer-neutral projection of recipient-sliced POV content."""
+"""Build renderer-neutral scenes from already recipient-sliced POV records.
+
+build_actor_pov_analyzer_projection_v1 reads a validated replay index, raw
+POV replay or current slice. It copies self, visible bodies, public map and
+lifecycle data into a scene, then attaches the exact next-decision mask and
+incoming POV-local cues. build_actor_pov_projection_index_v1 validates a
+captured prefix once for repeated frame selection.
+
+No researcher snapshot, simulator state or hidden body row is accepted.
+V1 preserves historical physical-team feature columns; V2 decodes current
+actor-relative relation flags using explicit public identity mappings.
+All work is on host records, with no JAX execution, file I/O or input mutation.
+"""
 
 from dataclasses import dataclass
 from math import isfinite
@@ -6,13 +18,21 @@ from typing import Literal, cast
 
 from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
+    ActorPovAxisMapping,
     ActorPovAxisMappingV1,
+    ActorPovAxisMappingV2,
+    ActorPovCurrentSlice,
     ActorPovCurrentSliceV1,
+    ActorPovCurrentSliceV2,
+    ActorPovFrame,
     ActorPovFrameV1,
+    ActorPovFrameV2,
     ActorPovPresentationCueV1,
+    ActorPovReplayContent,
     ActorPovReplayContentV1,
+    ActorPovReplayContentV2,
     ActorPovTransitionV1,
-    validate_actor_pov_replay_content_v1,
+    validate_actor_pov_replay_content,
 )
 from marl_battlegrounds.rendering.evaluation_wire_features import (
     AGENT_FEATURE_ACTIVE_V1,
@@ -23,7 +43,6 @@ from marl_battlegrounds.rendering.evaluation_wire_features import (
     AGENT_FEATURE_MAX_HEALTH_V1,
     AGENT_FEATURE_RADIUS_V1,
     AGENT_FEATURE_STEPS_UNTIL_OUT_OF_COMBAT_V1,
-    AGENT_FEATURE_TEAM_ID_V1,
     AGENT_FEATURE_ULTIMATE_COOLDOWN_REMAINING_V1,
     AGENT_FEATURE_X_V1,
     AGENT_FEATURE_Y_V1,
@@ -39,6 +58,7 @@ from marl_battlegrounds.rendering.evaluation_wire_features import (
     OBSTACLE_FEATURE_WIDTH_V1,
     OBSTACLE_FEATURE_X_V1,
     OBSTACLE_FEATURE_Y_V1,
+    decode_agent_feature_row,
 )
 from marl_battlegrounds.rendering.scene import MapSceneV1, ObstacleSceneV1, Point2D
 
@@ -49,21 +69,41 @@ _WALL_OBSTACLE_TYPE_ID_V1 = 2
 
 
 def _require_text(value: str, *, name: str) -> None:
+    """Require value to be a nonblank exact Python string.
+
+    name labels ValueError. Return None without trimming, copying or coercing
+    valid text.
+    """
     if type(value) is not str or not value.strip():
         raise ValueError(f"{name} must be a non-empty Python string.")
 
 
 def _require_int(value: int, *, name: str, minimum: int = 0) -> None:
+    """Require value to be a Python int at least minimum, default zero.
+
+    Bool and array scalars are rejected. name labels ValueError; no upper bound
+    is imposed. Return None without converting valid values.
+    """
     if type(value) is not int or value < minimum:
         raise ValueError(f"{name} must be a Python int at least {minimum}.")
 
 
 def _require_float(value: float, *, name: str, minimum: float = 0.0) -> None:
+    """Require value to be a finite Python float at least minimum.
+
+    minimum defaults to 0.0. Integer and array scalar inputs are rejected.
+    name labels ValueError; return None without conversion.
+    """
     if type(value) is not float or not isfinite(value) or value < minimum:
         raise ValueError(f"{name} must be a finite Python float at least {minimum}.")
 
 
 def _require_point(value: Point2D, *, name: str) -> None:
+    """Check a finite Python (x, y) tuple in world coordinates.
+
+    value must have exactly two float entries; negative coordinates are allowed.
+    name labels ValueError. Return None without checking geometry or map bounds.
+    """
     if type(value) is not tuple or len(value) != 2:
         raise ValueError(f"{name} must be a two-coordinate Python tuple.")
     for coordinate in value:
@@ -71,6 +111,11 @@ def _require_point(value: Point2D, *, name: str) -> None:
 
 
 def _decode_wire_bool(value: float, *, name: str) -> bool:
+    """Decode exact Python float 0.0/1.0 into False/True.
+
+    name labels ValueError for another type/value. No truthiness coercion is
+    performed.
+    """
     if type(value) is not float or value not in (0.0, 1.0):
         raise ValueError(f"{name} must be the exact wire float 0.0 or 1.0.")
     return value == 1.0
@@ -83,6 +128,12 @@ def _decode_wire_int(
     minimum: int = 0,
     maximum: int | None = None,
 ) -> int:
+    """Decode a finite integral Python float within inclusive bounds.
+
+    value must have no fractional part. minimum defaults to zero; maximum=None
+    leaves the upper end unbounded. Return a Python int, or raise ValueError
+    labelled by name for an invalid type/value.
+    """
     if type(value) is not float or not isfinite(value) or not value.is_integer():
         raise ValueError(f"{name} must be an integer-valued finite wire float.")
     decoded = int(value)
@@ -93,25 +144,100 @@ def _decode_wire_int(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ActorPovSelfSceneV1:
-    """The selected actor's exact self row and public export identity."""
+    """Describe the selected actor's exact self row and export identity.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    global_slot : int
+        Nonnegative Python global slot supplied by the export; this record does
+        not impose the upper bound of 9.
+    public_agent_id : str
+        Nonblank public ID from the authorized export mapping.
+    team_local_slot : int
+        Python own-team roster index in 0..4.
+    team_id : int
+        Python physical team ID 1 or 2, decoded according to the wire version.
+    class_id : int
+        Python real class ID in 1..5.
+    position : Point2D
+        Finite Python world (x, y) float tuple; no map-containment check here.
+    radius : float
+        Positive finite Python body radius in world units.
+    alive : bool
+        Exact Python current-life boolean.
+    current_health : float
+        Nonnegative finite Python health in health units.
+    max_health : float
+        Positive finite Python maximum health; current_health must not exceed it.
+    effective_movement_speed : float
+        Nonnegative finite Python current speed in world units per step.
+    ultimate_cooldown_remaining : int
+        Nonnegative Python remaining Ultimate cooldown in steps.
+    steps_until_out_of_combat : int
+        Nonnegative Python remaining recovery countdown in steps.
+    spawn_shield_remaining : int
+        Nonnegative Python remaining shield duration from the own-team lifecycle row.
+    status_feature_values : tuple[float, ...]
+        Exact tuple of 14 nonnegative finite Python floats from wire columns
+        15..28, retaining status duration/strength order.
+
+    Raises
+    ------
+    ValueError
+        Identity types/ranges, scalar/tuple values, positive radius/max health,
+        current-health upper bound or the life boolean is invalid.
+
+    Notes
+    -----
+    Self remains in its roster position. These are already authorized facts;
+    constructing the record does not grant access to an export.
+    """
 
     global_slot: int
+    """Nonnegative Python global slot supplied by the export; this record does not
+    impose the upper bound of 9.
+    """
     public_agent_id: str
+    """Nonblank public ID from the authorized export mapping."""
     team_local_slot: int
+    """Python own-team roster index in 0..4."""
     team_id: int
+    """Python physical team ID 1 or 2, decoded according to the wire version."""
     class_id: int
+    """Python real class ID in 1..5."""
     position: Point2D
+    """Finite Python world (x, y) float tuple; no map-containment check here."""
     radius: float
+    """Positive finite Python body radius in world units."""
     alive: bool
+    """Exact Python current-life boolean."""
     current_health: float
+    """Nonnegative finite Python health in health units."""
     max_health: float
+    """Positive finite Python maximum health; current_health must not exceed it."""
     effective_movement_speed: float
+    """Nonnegative finite Python current speed in world units per step."""
     ultimate_cooldown_remaining: int
+    """Nonnegative Python remaining Ultimate cooldown in steps."""
     steps_until_out_of_combat: int
+    """Nonnegative Python remaining recovery countdown in steps."""
     spawn_shield_remaining: int
+    """Nonnegative Python remaining shield duration from the own-team lifecycle row."""
     status_feature_values: tuple[float, ...]
+    """Exact tuple of 14 nonnegative finite Python floats from wire columns 15..28,
+    retaining status duration/strength order.
+    """
 
     def __post_init__(self) -> None:
+        """Check ActorPovSelfSceneV1 during host construction.
+
+        Raise ValueError if identity types/ranges, scalar/tuple values, positive
+        radius/max health, current-health upper bound or the life boolean is
+        invalid.
+        Return None without changing valid fields.
+        """
         _require_int(self.global_slot, name="global_slot")
         _require_text(self.public_agent_id, name="public_agent_id")
         _require_int(self.team_local_slot, name="team_local_slot")
@@ -153,24 +279,93 @@ class ActorPovSelfSceneV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ActorPovVisibleBodySceneV1:
-    """One visible ally/enemy observation row without a guessed global identity."""
+    """Describe one visible observation row without guessing a global slot.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    relation : Literal['ally', 'enemy']
+        ally or enemy in this recipient's base sensor axes.
+    observation_row : int
+        Python row index in 0..4 on the named relation axis.
+    public_agent_id : str
+        Nonblank public ID from the authorized export mapping.
+    position : Point2D
+        Finite Python world (x, y) float tuple; no map-containment check here.
+    radius : float
+        Nonnegative finite Python body radius in world units.
+    team_id : int
+        Python physical team ID 1 or 2, decoded according to the wire version.
+    class_id : int
+        Python real class ID in 1..5.
+    alive : bool
+        Exact Python current-life boolean.
+    current_health : float
+        Nonnegative finite Python health in health units.
+    max_health : float
+        Nonnegative finite Python maximum health in health units.
+    effective_movement_speed : float
+        Nonnegative finite Python current speed in world units per step.
+    ultimate_cooldown_remaining : int
+        Nonnegative Python remaining Ultimate cooldown in steps.
+    steps_until_out_of_combat : int
+        Nonnegative Python remaining recovery countdown in steps.
+    status_feature_values : tuple[float, ...]
+        Exact tuple of 14 nonnegative finite Python floats from wire columns
+        15..28, retaining status duration/strength order.
+
+    Raises
+    ------
+    ValueError
+        Relation/row, public identity, team/class IDs, nonnegative
+        scalar/counter values or 14-column status tuple is invalid.
+
+    Notes
+    -----
+    This record has no global-slot field. Unlike the self-row constructor, it
+    allows zero radius/max health and does not separately check current_health
+    <= max_health. The validated source and decoder own those stronger joins.
+    """
 
     relation: Literal["ally", "enemy"]
+    """ally or enemy in this recipient's base sensor axes."""
     observation_row: int
+    """Python row index in 0..4 on the named relation axis."""
     public_agent_id: str
+    """Nonblank public ID from the authorized export mapping."""
     position: Point2D
+    """Finite Python world (x, y) float tuple; no map-containment check here."""
     radius: float
+    """Nonnegative finite Python body radius in world units."""
     team_id: int
+    """Python physical team ID 1 or 2, decoded according to the wire version."""
     class_id: int
+    """Python real class ID in 1..5."""
     alive: bool
+    """Exact Python current-life boolean."""
     current_health: float
+    """Nonnegative finite Python health in health units."""
     max_health: float
+    """Nonnegative finite Python maximum health in health units."""
     effective_movement_speed: float
+    """Nonnegative finite Python current speed in world units per step."""
     ultimate_cooldown_remaining: int
+    """Nonnegative Python remaining Ultimate cooldown in steps."""
     steps_until_out_of_combat: int
+    """Nonnegative Python remaining recovery countdown in steps."""
     status_feature_values: tuple[float, ...]
+    """Exact tuple of 14 nonnegative finite Python floats from wire columns 15..28,
+    retaining status duration/strength order.
+    """
 
     def __post_init__(self) -> None:
+        """Check ActorPovVisibleBodySceneV1 during host construction.
+
+        Raise ValueError if relation/row, public identity, team/class IDs,
+        nonnegative scalar/counter values or 14-column status tuple is invalid.
+        Return None without changing valid fields.
+        """
         if self.relation not in ("ally", "enemy"):
             raise ValueError("relation must be ally or enemy.")
         _require_int(self.observation_row, name="observation_row")
@@ -209,18 +404,65 @@ class ActorPovVisibleBodySceneV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ActorPovSpawnPadSceneV1:
-    """One pad row explicitly present in the recipient's lifecycle input."""
+    """Describe one spawn pad explicitly present in the recipient input.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    actor_relative_team_index : int
+        Python team index 0 for own team or 1 for opponent team.
+    team_relation : Literal['own', 'opponent']
+        own or opponent, matching actor_relative_team_index.
+    team_label : str
+        Exact serialized label Own Team or Opponent Team, matching the index.
+    team_local_slot : int
+        Python team-local roster index in 0..4.
+    position : Point2D
+        Finite Python world (x, y) float tuple.
+    configured_active : bool
+        Exact Python configured-membership flag for this team/local slot.
+    currently_alive : bool
+        Exact Python current-life flag from the recipient lifecycle input.
+    spawn_shield_remaining : int
+        Nonnegative Python shield counter in steps.
+
+    Raises
+    ------
+    ValueError
+        Team/slot indices, exact relation/label, world point, membership/life
+        booleans or shield counter is invalid.
+
+    Notes
+    -----
+    Padding remains on the public lifecycle axes. This record does not infer a
+    hidden body position from its spawn pad.
+    """
 
     actor_relative_team_index: int
+    """Python team index 0 for own team or 1 for opponent team."""
     team_relation: Literal["own", "opponent"]
+    """own or opponent, matching actor_relative_team_index."""
     team_label: str
+    """Exact serialized label Own Team or Opponent Team, matching the index."""
     team_local_slot: int
+    """Python team-local roster index in 0..4."""
     position: Point2D
+    """Finite Python world (x, y) float tuple."""
     configured_active: bool
+    """Exact Python configured-membership flag for this team/local slot."""
     currently_alive: bool
+    """Exact Python current-life flag from the recipient lifecycle input."""
     spawn_shield_remaining: int
+    """Nonnegative Python shield counter in steps."""
 
     def __post_init__(self) -> None:
+        """Check ActorPovSpawnPadSceneV1 during host construction.
+
+        Raise ValueError if team/slot indices, exact relation/label, world
+        point, membership/life booleans or shield counter is invalid.
+        Return None without changing valid fields.
+        """
         _require_int(
             self.actor_relative_team_index,
             name="actor_relative_team_index",
@@ -247,15 +489,51 @@ class ActorPovSpawnPadSceneV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ActorPovRespawnWaveSceneV1:
-    """One team wave row copied from the selected actor's authorized input."""
+    """Describe a team wave clock copied from the actor's input.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    actor_relative_team_index : int
+        Python team index 0 for own team or 1 for opponent team.
+    team_relation : Literal['own', 'opponent']
+        own or opponent, matching actor_relative_team_index.
+    team_label : str
+        Exact serialized label Own Team or Opponent Team, matching the index.
+    period_steps : int
+        Positive Python configured period in steps.
+    countdown_steps : int
+        Nonnegative Python current countdown in steps; this record does not
+        check it against period_steps.
+
+    Raises
+    ------
+    ValueError
+        Team index, exact relation/label, period or countdown type/lower bound
+        is invalid.
+    """
 
     actor_relative_team_index: int
+    """Python team index 0 for own team or 1 for opponent team."""
     team_relation: Literal["own", "opponent"]
+    """own or opponent, matching actor_relative_team_index."""
     team_label: str
+    """Exact serialized label Own Team or Opponent Team, matching the index."""
     period_steps: int
+    """Positive Python configured period in steps."""
     countdown_steps: int
+    """Nonnegative Python current countdown in steps; this record does not check it
+    against period_steps.
+    """
 
     def __post_init__(self) -> None:
+        """Check ActorPovRespawnWaveSceneV1 during host construction.
+
+        Raise ValueError if team index, exact relation/label, period or
+        countdown type/lower bound is invalid.
+        Return None without changing valid fields.
+        """
         _require_int(
             self.actor_relative_team_index,
             name="actor_relative_team_index",
@@ -276,23 +554,96 @@ class ActorPovRespawnWaveSceneV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ActorPovBattlefieldSceneV1:
-    """One recipient-authorized POV battlefield with no researcher snapshot."""
+    """Collect a recipient-authorized battlefield without researcher state.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    schema_version : int
+        Exact Python int 1; this scene version accepts both supported POV source
+        versions.
+    audience_badge : str
+        Nonblank text containing AGENT POV.
+    observation_materialization : Literal['exact_no_shared_obs_actor_input']
+        The literal exact_no_shared_obs_actor_input.
+    episode_id : str
+        Nonblank source episode ID.
+    frame_index : int
+        Nonnegative Python recorded frame index.
+    pov_frame_id : str
+        Nonblank source POV-frame ID; this record does not check its canonical pattern.
+    source_frame_id : str
+        Nonblank underlying evaluation-frame ID.
+    simulator_step_count : int
+        Nonnegative Python simulator count, separate from recorded frame index.
+    map : MapSceneV1
+        Exact MapSceneV1 copied from the authorized observation.
+    self_actor : ActorPovSelfSceneV1
+        Exact ActorPovSelfSceneV1 for the selected recipient.
+    visible_bodies : tuple[ActorPovVisibleBodySceneV1, ...]
+        Exact tuple of body rows with unique sorted (relation, row) keys; hidden
+        rows are absent.
+    spawn_pads : tuple[ActorPovSpawnPadSceneV1, ...]
+        Exact tuple of public lifecycle pad rows with unique sorted (team index,
+        local slot) keys.
+    respawn_waves : tuple[ActorPovRespawnWaveSceneV1, ...]
+        Tuple of own/opponent wave rows ordered by actor-relative indices (0, 1).
+
+    Raises
+    ------
+    ValueError
+        Version/materialization/badge, identity/counter types, nested roots or
+        body/pad/wave ordering is invalid.
+
+    Notes
+    -----
+    The producer must already validate and restrict source content. The scene
+    constructor does not sanitize an arbitrary researcher snapshot.
+    """
 
     schema_version: int
+    """Exact Python int 1; this scene version accepts both supported POV source
+    versions.
+    """
     audience_badge: str
+    """Nonblank text containing AGENT POV."""
     observation_materialization: Literal["exact_no_shared_obs_actor_input"]
+    """The literal exact_no_shared_obs_actor_input."""
     episode_id: str
+    """Nonblank source episode ID."""
     frame_index: int
+    """Nonnegative Python recorded frame index."""
     pov_frame_id: str
+    """Nonblank source POV-frame ID; this record does not check its canonical
+    pattern.
+    """
     source_frame_id: str
+    """Nonblank underlying evaluation-frame ID."""
     simulator_step_count: int
+    """Nonnegative Python simulator count, separate from recorded frame index."""
     map: MapSceneV1
+    """Exact MapSceneV1 copied from the authorized observation."""
     self_actor: ActorPovSelfSceneV1
+    """Exact ActorPovSelfSceneV1 for the selected recipient."""
     visible_bodies: tuple[ActorPovVisibleBodySceneV1, ...]
+    """Exact tuple of body rows with unique sorted (relation, row) keys; hidden
+    rows are absent.
+    """
     spawn_pads: tuple[ActorPovSpawnPadSceneV1, ...]
+    """Exact tuple of public lifecycle pad rows with unique sorted (team index,
+    local slot) keys.
+    """
     respawn_waves: tuple[ActorPovRespawnWaveSceneV1, ...]
+    """Tuple of own/opponent wave rows ordered by actor-relative indices (0, 1)."""
 
     def __post_init__(self) -> None:
+        """Check ActorPovBattlefieldSceneV1 during host construction.
+
+        Raise ValueError if version/materialization/badge, identity/counter
+        types, nested roots or body/pad/wave ordering is invalid.
+        Return None without changing valid fields.
+        """
         if type(self.schema_version) is not int or (
             self.schema_version != ACTOR_POV_SCENE_SCHEMA_VERSION
         ):
@@ -345,14 +696,54 @@ class ActorPovBattlefieldSceneV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ActorPovAnalyzerProjectionV1:
-    """POV scene, next-decision mask, and incoming POV-local cue batch."""
+    """Join a POV scene, next-decision mask and incoming local cues.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    scene : ActorPovBattlefieldSceneV1
+        Exact ActorPovBattlefieldSceneV1 for the selected frame.
+    next_decision_action_mask : ActorPovActionMaskV1
+        Exact ActorPovActionMaskV1 from the same current frame.
+    incoming_transition_id : str | None
+        None at frame zero; otherwise the canonical actor-POV transition entering scene.
+    incoming_cues : tuple[ActorPovPresentationCueV1, ...]
+        Python tuple of recipient-local cues with matching transition ID and
+        ordinals 0..N-1; empty at frame zero.
+
+    Raises
+    ------
+    ValueError
+        Scene/mask root types, incoming transition identity or cue
+        ordering/joins are invalid.
+
+    Notes
+    -----
+    Incoming cues describe the completed transition. The mask describes the next
+    decision. This envelope does not compare the mask with an independent frame.
+    """
 
     scene: ActorPovBattlefieldSceneV1
+    """Exact ActorPovBattlefieldSceneV1 for the selected frame."""
     next_decision_action_mask: ActorPovActionMaskV1
+    """Exact ActorPovActionMaskV1 from the same current frame."""
     incoming_transition_id: str | None
+    """None at frame zero; otherwise the canonical actor-POV transition entering
+    scene.
+    """
     incoming_cues: tuple[ActorPovPresentationCueV1, ...]
+    """Python tuple of recipient-local cues with matching transition ID and
+    ordinals 0..N-1; empty at frame zero.
+    """
 
     def __post_init__(self) -> None:
+        """Check ActorPovAnalyzerProjectionV1 during host construction.
+
+        Raise ValueError if scene/mask root types, incoming transition identity
+        or cue ordering/joins are invalid.
+        Return None without changing valid fields.
+        """
         if type(self.scene) is not ActorPovBattlefieldSceneV1:
             raise ValueError("scene must be ActorPovBattlefieldSceneV1.")
         if type(self.next_decision_action_mask) is not ActorPovActionMaskV1:
@@ -384,16 +775,33 @@ class ActorPovAnalyzerProjectionV1:
 
 
 def _point(row: tuple[float, ...]) -> Point2D:
+    """Read world (x, y) from one authorized 58-column feature row.
+
+    row is already validated host data. Return the two stored Python floats
+    without inferring hidden coordinates or changing their frame of reference.
+    """
     return (row[AGENT_FEATURE_X_V1], row[AGENT_FEATURE_Y_V1])
 
 
 def _status_values(row: tuple[float, ...]) -> tuple[float, ...]:
+    """Slice the 14 status duration/strength columns from row.
+
+    row is a validated 58-column Python float tuple. Return columns 15..28 in
+    wire order without assigning source identity or interpreting a new effect.
+    """
     return row[AGENT_STATUS_FEATURE_START_V1:AGENT_STATUS_FEATURE_STOP_V1]
 
 
 def _map_scene(
     frame_rows: tuple[tuple[float, ...], ...], context: tuple[float, ...]
 ) -> MapSceneV1:
+    """Decode map geometry from recipient-visible obstacle and context rows.
+
+    frame_rows is the (32, 8) obstacle tuple and context is the 19-column context
+    tuple. Ignore inactive obstacle padding; build circles/walls from supplied
+    world values and return MapSceneV1. Raise ValueError for malformed wire
+    values or unsupported active obstacle types. No privileged map is read.
+    """
     obstacles: list[ObstacleSceneV1] = []
     for obstacle_slot, row in enumerate(frame_rows):
         if not _decode_wire_bool(
@@ -441,7 +849,18 @@ def _visible_bodies(
     rows: tuple[tuple[float, ...], ...],
     visibility: tuple[bool, ...],
     public_agent_ids: tuple[str, ...],
+    *,
+    schema_version: int,
+    configured_team_id: int,
 ) -> tuple[ActorPovVisibleBodySceneV1, ...]:
+    """Decode only relation rows marked visible for the recipient.
+
+    relation is ally/enemy; rows is a (5, 58) float tuple, visibility is bool
+    (5,), and public_agent_ids maps its five rows. schema_version selects wire
+    team/relation decoding; configured_team_id is recipient team 1/2. Return
+    body rows in observation order. Visible inactive rows and invalid wire
+    values raise ValueError. Hidden rows yield no position or body record.
+    """
     bodies: list[ActorPovVisibleBodySceneV1] = []
     for observation_row, (row, visible) in enumerate(
         zip(rows, visibility, strict=True)
@@ -460,12 +879,14 @@ def _visible_bodies(
                 public_agent_id=public_agent_ids[observation_row],
                 position=_point(row),
                 radius=row[AGENT_FEATURE_RADIUS_V1],
-                team_id=_decode_wire_int(
-                    row[AGENT_FEATURE_TEAM_ID_V1],
-                    name=f"{relation} row {observation_row} team",
-                    minimum=1,
-                    maximum=2,
-                ),
+                team_id=decode_agent_feature_row(
+                    row,
+                    schema_version=schema_version,
+                    team_id=configured_team_id
+                    if relation == "ally"
+                    else 3 - configured_team_id,
+                    is_enemy=relation == "enemy",
+                ).team_id,
                 class_id=_decode_wire_int(
                     row[AGENT_FEATURE_CLASS_ID_V1],
                     name=f"{relation} row {observation_row} class",
@@ -495,25 +916,79 @@ def _visible_bodies(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ActorPovProjectionIndexV1:
-    """Once-validated POV content supporting O(1) frame projection."""
+    """Validate POV replay content once for repeated frame selection.
 
-    content: ActorPovReplayContentV1
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    content : ActorPovReplayContent
+        Exact ActorPovReplayContentV1 or V2 containing a coherent recorded prefix.
+
+    Raises
+    ------
+    TypeError
+        content is not an exact supported replay-content root.
+    ValueError
+        Replay content fails its owned structural or temporal validation.
+
+    Notes
+    -----
+    The immutable index retains the existing content object. Frame lookup uses
+    direct tuple indexing; scene decoding still performs fixed-size work for the
+    selected frame.
+    """
+
+    content: ActorPovReplayContent
+    """Exact ActorPovReplayContentV1 or V2 containing a coherent recorded prefix."""
 
     def __post_init__(self) -> None:
-        if type(self.content) is not ActorPovReplayContentV1:
+        """Validate the complete recipient replay before index use.
+
+        Raise TypeError for a nonexact replay-content root and ValueError for a
+        malformed trajectory through validate_actor_pov_replay_content. Retain the
+        same immutable content and return None; no index file is written.
+        """
+        if (
+            type(self.content) is not ActorPovReplayContentV1
+            and type(self.content) is not ActorPovReplayContentV2
+        ):
             raise TypeError("content must be the exact ActorPovReplayContentV1 root.")
-        validate_actor_pov_replay_content_v1(self.content)
+        validate_actor_pov_replay_content(self.content)
 
 
 def build_actor_pov_projection_index_v1(
-    content: ActorPovReplayContentV1,
+    content: ActorPovReplayContent,
 ) -> ActorPovProjectionIndexV1:
-    """Validate recipient content once before interactive frame selection."""
+    """Validate a captured POV prefix for repeated interactive frame selection.
+
+    Parameters
+    ----------
+    content : ActorPovReplayContentV1 or ActorPovReplayContentV2
+        Exact recipient-sliced replay content to validate and retain.
+
+    Returns
+    -------
+    ActorPovProjectionIndexV1
+        Frozen index retaining the same content object. Pass it to the analyzer
+        builder with a concrete frame_index to avoid revalidating the full prefix.
+
+    Raises
+    ------
+    TypeError
+        content is not an exact supported replay-content root.
+    ValueError
+        The captured POV content fails its structural or trajectory checks.
+
+    Notes
+    -----
+    This host helper reads no file and never uses full researcher frames.
+    """
     return ActorPovProjectionIndexV1(content=content)
 
 
 def _build_actor_pov_battlefield_scene_v1(
-    frame: ActorPovFrameV1,
+    frame: ActorPovFrame,
     *,
     episode_id: str,
     selected_global_slot: int,
@@ -522,12 +997,25 @@ def _build_actor_pov_battlefield_scene_v1(
     configured_team_id: int,
     class_id: int,
     observation_materialization: Literal["exact_no_shared_obs_actor_input"],
-    axis_mapping: ActorPovAxisMappingV1,
+    axis_mapping: ActorPovAxisMapping,
 ) -> ActorPovBattlefieldSceneV1:
-    """Decode one already-authorized recipient frame into battlefield facts."""
-    if type(frame) is not ActorPovFrameV1:
+    """Decode an already authorized recipient frame into battlefield facts.
+
+    frame and axis_mapping must be exact supported versioned POV roots.
+    episode_id/public_agent_id and selected_global_slot/selected_team_local_slot
+    identify the recipient; configured_team_id/class_id must match its self row.
+    observation_materialization is exact_no_shared_obs_actor_input. Return a
+    new scene using only self, visible rows, public map/lifecycle and supplied
+    axis labels. Raise TypeError for wrong roots and ValueError for an inactive
+    self row, identity mismatch or invalid decoded record. No Oracle data is
+    accepted and no new information is inferred.
+    """
+    if type(frame) is not ActorPovFrameV1 and type(frame) is not ActorPovFrameV2:
         raise TypeError("selected POV frame must be the exact V1 root.")
-    if type(axis_mapping) is not ActorPovAxisMappingV1:
+    if (
+        type(axis_mapping) is not ActorPovAxisMappingV1
+        and type(axis_mapping) is not ActorPovAxisMappingV2
+    ):
         raise TypeError("POV axis mapping must be the exact V1 root.")
     self_row = frame.self_features
     if not _decode_wire_bool(
@@ -536,12 +1024,12 @@ def _build_actor_pov_battlefield_scene_v1(
     ):
         raise ValueError("selected POV self row must remain configured active.")
     if (
-        _decode_wire_int(
-            self_row[AGENT_FEATURE_TEAM_ID_V1],
-            name="selected actor team",
-            minimum=1,
-            maximum=2,
-        )
+        decode_agent_feature_row(
+            self_row,
+            schema_version=frame.schema_version,
+            team_id=configured_team_id,
+            is_enemy=False,
+        ).team_id
         != configured_team_id
         or _decode_wire_int(
             self_row[AGENT_FEATURE_CLASS_ID_V1],
@@ -632,12 +1120,16 @@ def _build_actor_pov_battlefield_scene_v1(
                 frame.ally_unit_features,
                 frame.ally_visibility_mask,
                 axis_mapping.ally_observation_row_public_agent_id_by_id,
+                schema_version=frame.schema_version,
+                configured_team_id=configured_team_id,
             ),
             *_visible_bodies(
                 "enemy",
                 frame.enemy_unit_features,
                 frame.enemy_visibility_mask,
                 axis_mapping.enemy_observation_row_public_agent_id_by_id,
+                schema_version=frame.schema_version,
+                configured_team_id=configured_team_id,
             ),
         ),
         spawn_pads=spawn_pads,
@@ -646,13 +1138,45 @@ def _build_actor_pov_battlefield_scene_v1(
 
 
 def build_actor_pov_analyzer_projection_v1(
-    source: (
-        ActorPovProjectionIndexV1 | ActorPovReplayContentV1 | ActorPovCurrentSliceV1
-    ),
+    source: (ActorPovProjectionIndexV1 | ActorPovReplayContent | ActorPovCurrentSlice),
     *,
     frame_index: int | None = None,
 ) -> ActorPovAnalyzerProjectionV1:
-    """Build one projection exclusively from recipient-authorized POV content."""
+    """Build one scene and cue envelope from recipient-authorized POV data.
+
+    Parameters
+    ----------
+    source : ActorPovProjectionIndexV1, ActorPovReplayContent or ActorPovCurrentSlice
+        Exact supported root. An index reuses prior whole-prefix validation;
+        raw replay content creates an index for this call. A live slice supplies
+        its own current frame and incoming cues. V1 and V2 sources are supported.
+    frame_index : int or None, optional
+        Required Python frame index for an index or replay, in its captured range.
+        For a current slice, None selects its own frame; a supplied value must
+        equal that frame's index.
+
+    Returns
+    -------
+    ActorPovAnalyzerProjectionV1
+        New scene, the frame's exact next-decision mask, and its incoming POV
+        cues. Frame zero has no incoming transition and an empty cue tuple.
+
+    Raises
+    ------
+    TypeError
+        Source or a required nested root is not an exact supported record type.
+    IndexError
+        Replay/index frame_index is missing, not a Python int or outside range.
+    ValueError
+        A current-slice index differs, or source validation/decoding/joins fail.
+
+    Notes
+    -----
+    The builder uses only recipient-authorized content and public axis labels.
+    It neither reads an episode snapshot nor reconstructs hidden bodies. Input
+    records are unchanged. Use the reusable index for repeated replay selection;
+    passing raw content repeats whole-prefix validation each call.
+    """
     if type(source) is ActorPovProjectionIndexV1:
         content = source.content
         if type(frame_index) is not int or not 0 <= frame_index < len(content.frames):
@@ -667,12 +1191,17 @@ def build_actor_pov_analyzer_projection_v1(
         class_id = content.class_id
         observation_materialization = content.observation_materialization
         axis_mapping = content.axis_mapping
-    elif type(source) is ActorPovReplayContentV1:
+    elif (
+        type(source) is ActorPovReplayContentV1
+        or type(source) is ActorPovReplayContentV2
+    ):
         return build_actor_pov_analyzer_projection_v1(
             build_actor_pov_projection_index_v1(source),
             frame_index=frame_index,
         )
-    elif type(source) is ActorPovCurrentSliceV1:
+    elif (
+        type(source) is ActorPovCurrentSliceV1 or type(source) is ActorPovCurrentSliceV2
+    ):
         if frame_index is not None and frame_index != source.frame.frame_index:
             raise ValueError(
                 "a live current slice accepts only its own canonical frame index."

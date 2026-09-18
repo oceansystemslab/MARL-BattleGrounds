@@ -1,4 +1,4 @@
-"""Semantic proofs for accepted basic combat effects in Milestone 5 Step 5."""
+"""Check accepted Basic attacks and healing through combat transitions."""
 # pyright: reportPrivateUsage=false
 
 from collections.abc import Sequence
@@ -96,12 +96,10 @@ _FIRST_ENEMY_TARGET = 1 + MAX_AGENTS_PER_TEAM
 
 
 def _empty_obstacles() -> Array:
-    """Return an inactive fixed-size obstacle table."""
     return jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32)
 
 
 def _blocking_pillar(*, x: float, y: float, radius: float = 0.75) -> Array:
-    """Return one active pillar at the supplied center."""
     obstacles = _empty_obstacles()
     obstacles = obstacles.at[0, OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_PILLAR)
     obstacles = obstacles.at[0, OBSTACLE_FEATURE_X].set(x)
@@ -111,7 +109,6 @@ def _blocking_pillar(*, x: float, y: float, radius: float = 0.75) -> Array:
 
 
 def _requested_roster(*class_rows: tuple[int, int]) -> Array:
-    """Return a padded class roster with selected slot overrides."""
     roster = jnp.full((MAX_AGENT_SLOTS,), NEUTRAL_CLASS_ID, dtype=jnp.int32)
     for slot, class_id in class_rows:
         roster = roster.at[slot].set(class_id)
@@ -119,7 +116,6 @@ def _requested_roster(*class_rows: tuple[int, int]) -> Array:
 
 
 def _default_positions(team_sizes: tuple[int, int]) -> Array:
-    """Place active team blocks on two clear, non-overlapping vertical lines."""
     positions = jnp.zeros((MAX_AGENT_SLOTS, ENVIRONMENT_DIMENSIONS), dtype=jnp.float32)
     for local_slot in range(team_sizes[0]):
         positions = positions.at[local_slot].set(
@@ -141,7 +137,6 @@ def _scenario(
     basic_radius: float = 10.0,
     ultimate_radius: float = 10.0,
 ) -> tuple[EnvConfig, EnvState]:
-    """Build a deterministic fixed-slot combat scenario."""
     profile = resolve_agent_profile(
         _requested_roster(*class_rows),
         jnp.asarray(team_sizes, dtype=jnp.int32),
@@ -207,7 +202,6 @@ def _scenario(
 
 
 def _with_active_agents_in_combat(config: EnvConfig, state: EnvState) -> EnvState:
-    """Keep combat-effect tests independent from out-of-combat regeneration."""
     return state._replace(
         steps_until_out_of_combat=jnp.where(
             config.agent_profile.active_mask,
@@ -220,10 +214,6 @@ def _with_active_agents_in_combat(config: EnvConfig, state: EnvState) -> EnvStat
 def _joint_action(
     *rows: tuple[int, int, int, int],
 ) -> Action:
-    """Return a canonical joint action with selected actor overrides.
-
-    Each row is ``(actor_slot, move, target, use_ultimate)``.
-    """
     move = jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32)
     target = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
     ultimate = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
@@ -235,7 +225,6 @@ def _joint_action(
 
 
 def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
-    """Return the authoritative action mask paired with a test state."""
     _, action_mask = _build_observation_and_action_mask(state, config)
     return action_mask
 
@@ -245,7 +234,6 @@ def _step(
     state: EnvState,
     action: Action,
 ) -> tuple[EnvState, Observation, ActionMask]:
-    """Advance one transition and return the state-facing public outputs."""
     next_state, observation, _, _, next_action_mask, _ = step(
         config,
         state,
@@ -257,7 +245,6 @@ def _step(
 
 
 def _aura_result(config: EnvConfig, state: EnvState) -> _CombatAuraAggregationResult:
-    """Derive the named aura result from a test scenario's current snapshot."""
     distances = _compute_global_pairwise_distances_from_agent_positions(
         state.agent_positions
     )
@@ -274,7 +261,6 @@ def _assert_health_resolution_and_lifecycle(
     after: EnvState,
     expected_health: Array,
 ) -> None:
-    """Assert health resolution and its resolve-then-die lifecycle consequences."""
     assert bool(jnp.array_equal(after.current_health, expected_health))
     assert int(after.step_count) == int(before.step_count) + 1
     assert bool(jnp.array_equal(after.agent_positions, before.agent_positions))
@@ -312,7 +298,6 @@ def _assert_observer_rows_equal(
     right: Observation,
     observer_slot: int,
 ) -> None:
-    """Assert equality of every public observation leaf for one observer."""
     assert jax.tree_util.tree_structure(left) == jax.tree_util.tree_structure(right)
     for left_leaf, right_leaf in zip(
         jax.tree_util.tree_leaves(left),
@@ -328,7 +313,6 @@ def _assert_observer_rows_equal(
 
 
 def test_aura_derivation_is_neutral_without_an_emitter() -> None:
-    """Prove ordinary damage classes do not create passive modifiers."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, HUNTER_CLASS_ID),
         (_TEAM_B_ACTOR, ROGUE_CLASS_ID),
@@ -345,7 +329,6 @@ def test_aura_derivation_is_neutral_without_an_emitter() -> None:
 
 
 def test_mage_aura_includes_self_and_boundary_ally_but_excludes_others() -> None:
-    """Prove inclusive range, team ownership, and self-benefit semantics."""
     positions = _default_positions((3, 1))
     positions = positions.at[0].set(jnp.asarray((4.0, 4.0), dtype=jnp.float32))
     positions = positions.at[1].set(
@@ -385,7 +368,6 @@ def test_mage_aura_includes_self_and_boundary_ally_but_excludes_others() -> None
 def test_aura_coverage_preserves_exact_eligible_emitter_beneficiary_pairs(
     aura_kind: str,
 ) -> None:
-    """Prove exact pre-collapse relations across every eligibility boundary."""
     emitter_class_id = MAGE_CLASS_ID if aura_kind == "mage" else WARRIOR_CLASS_ID
     aura_radius = (
         MAGE_DAMAGE_AMPLIFICATION_AURA_RADIUS
@@ -497,7 +479,6 @@ def test_aura_coverage_preserves_exact_eligible_emitter_beneficiary_pairs(
     ],
 )
 def test_nonparticipating_mage_does_not_emit_an_aura(emitter_state: str) -> None:
-    """Prove both liveness and configured activity gate aura emission."""
     config, state = _scenario(
         (0, MAGE_CLASS_ID),
         (1, HUNTER_CLASS_ID),
@@ -530,7 +511,6 @@ def test_nonparticipating_mage_does_not_emit_an_aura(emitter_state: str) -> None
 
 
 def test_low_health_living_mage_still_emits_an_aura() -> None:
-    """Prove every positive-health living Mage retains aura participation."""
     config, state = _scenario(
         (0, MAGE_CLASS_ID),
         (1, HUNTER_CLASS_ID),
@@ -548,7 +528,6 @@ def test_low_health_living_mage_still_emits_an_aura() -> None:
 
 
 def test_duplicate_auras_stack_multiplicatively_and_ignore_emitter_order() -> None:
-    """Prove duplicate Mage and Warrior emitters multiply deterministically."""
     class_rows = (
         (0, MAGE_CLASS_ID),
         (1, WARRIOR_CLASS_ID),
@@ -607,7 +586,6 @@ def test_duplicate_auras_stack_multiplicatively_and_ignore_emitter_order() -> No
 
 
 def test_aura_derivation_is_independent_of_los_and_observation_radius() -> None:
-    """Prove aura attachment depends only on spatial range and participation."""
     positions = _default_positions((2, 1))
     positions = positions.at[0].set(jnp.asarray((2.0, 2.0), dtype=jnp.float32))
     positions = positions.at[1].set(jnp.asarray((3.0, 2.0), dtype=jnp.float32))
@@ -629,7 +607,6 @@ def test_aura_derivation_is_independent_of_los_and_observation_radius() -> None:
 
 
 def test_aura_derivation_matches_jit() -> None:
-    """Prove fixed-shape aura reduction is stable under compilation."""
     config, state = _scenario(
         (0, MAGE_CLASS_ID),
         (1, WARRIOR_CLASS_ID),
@@ -696,7 +673,6 @@ def test_spawn_shield_excludes_aura_emitters_and_beneficiaries(
     aura_kind: str,
     excluded_role: str,
 ) -> None:
-    """Keep shared physical and observed aura truth neutral for shielded roles."""
     emitter_class_id = MAGE_CLASS_ID if aura_kind == "mage" else WARRIOR_CLASS_ID
     aura_feature = (
         AGENT_FEATURE_DAMAGE_AMPLIFICATION_MAGE_AURA_MULTIPLIER
@@ -781,7 +757,6 @@ def test_spawn_shield_excludes_aura_emitters_and_beneficiaries(
 
 
 def test_expiring_spawn_shield_restores_aura_for_the_next_action() -> None:
-    """Resume ordinary aura observation and effects only after shield expiry."""
     config, state = _scenario(
         (0, MAGE_CLASS_ID),
         (1, HUNTER_CLASS_ID),
@@ -830,7 +805,6 @@ def test_expiring_spawn_shield_restores_aura_for_the_next_action() -> None:
 
 
 def test_mage_aura_amplifies_allied_damage_but_not_healing() -> None:
-    """Prove the outgoing aura modifies damage contributions exclusively."""
     config, state = _scenario(
         (0, MAGE_CLASS_ID),
         (1, HUNTER_CLASS_ID),
@@ -857,7 +831,6 @@ def test_mage_aura_amplifies_allied_damage_but_not_healing() -> None:
 
 
 def test_mage_burst_applies_only_to_its_owner_and_stacks_with_aura() -> None:
-    """Prove the duration-derived buff is actor-local and multiplicative."""
     config, state = _scenario(
         (0, MAGE_CLASS_ID),
         (1, HUNTER_CLASS_ID),
@@ -888,7 +861,6 @@ def test_mage_burst_applies_only_to_its_owner_and_stacks_with_aura() -> None:
 
 
 def test_warrior_aura_mitigates_allied_incoming_damage() -> None:
-    """Prove mitigation is selected by the final global recipient slot."""
     config, state = _scenario(
         (0, WARRIOR_CLASS_ID),
         (1, HUNTER_CLASS_ID),
@@ -909,7 +881,6 @@ def test_warrior_aura_mitigates_allied_incoming_damage() -> None:
 
 
 def test_rogue_anti_heal_reduces_healing_without_reducing_damage() -> None:
-    """Prove anti-heal is a recipient-side healing modifier only."""
     config, state = _scenario(
         (0, PRIEST_CLASS_ID),
         (1, HUNTER_CLASS_ID),
@@ -937,7 +908,6 @@ def test_rogue_anti_heal_reduces_healing_without_reducing_damage() -> None:
 
 
 def test_outgoing_amplification_and_incoming_mitigation_compose() -> None:
-    """Prove actor-side and recipient-side aura modifiers both apply once."""
     config, state = _scenario(
         (0, MAGE_CLASS_ID),
         (1, HUNTER_CLASS_ID),
@@ -960,7 +930,6 @@ def test_outgoing_amplification_and_incoming_mitigation_compose() -> None:
 
 
 def test_hunter_basic_slow_is_observed_before_its_affected_decision() -> None:
-    """Prove a duration-one Hunter slow governs one later decision window."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, HUNTER_CLASS_ID),
         (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
@@ -1032,7 +1001,6 @@ def test_hunter_basic_slow_is_observed_before_its_affected_decision() -> None:
 def test_fresh_charge_stun_preserves_precommitted_movement_then_becomes_public() -> (
     None
 ):
-    """Prove fresh control cannot cancel an action chosen before it was visible."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, WARRIOR_CLASS_ID),
         (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
@@ -1117,7 +1085,6 @@ def test_priest_freedom_is_observed_before_its_affected_decision(
     has_existing_slows: bool,
     expected_speed_multiplier: float,
 ) -> None:
-    """Prove full-health healing grants a floor for one later decision."""
     config, state = _scenario(
         (0, PRIEST_CLASS_ID),
         (1, HUNTER_CLASS_ID),
@@ -1202,7 +1169,6 @@ def test_priest_freedom_is_observed_before_its_affected_decision(
 
 
 def test_passive_refresh_restores_owned_channels_and_ticks_the_rest() -> None:
-    """Prove passive refresh from a catalog-valid public duration state."""
     recipient = _TEAM_B_ACTOR + 1
     config, state = _scenario(
         (_TEAM_A_ACTOR, HUNTER_CLASS_ID),
@@ -1299,7 +1265,6 @@ def test_passive_refresh_restores_owned_channels_and_ticks_the_rest() -> None:
 def test_invalid_hunter_basic_does_not_slow_independent_movement(
     invalidity: str,
 ) -> None:
-    """Prove rejected or ultimate-lane interactions cannot trigger the passive."""
     team_sizes = (2, 1) if invalidity == "wrong-relation" else (1, 1)
     obstacles = _blocking_pillar(x=4.5, y=2.0) if invalidity == "blocked-los" else None
     config, state = _scenario(
@@ -1351,7 +1316,6 @@ def test_invalid_hunter_basic_does_not_slow_independent_movement(
 def test_invalid_priest_basic_does_not_grant_freedom(
     invalidity: str,
 ) -> None:
-    """Prove Priest Freedom requires an accepted no-ultimate healing basic."""
     basic_radius = 0.5 if invalidity == "out-of-range" else 10.0
     config, state = _scenario(
         (0, PRIEST_CLASS_ID),
@@ -1389,7 +1353,6 @@ def test_invalid_priest_basic_does_not_grant_freedom(
 
 
 def test_fresh_hunter_slow_does_not_retroactively_change_boundary_projection() -> None:
-    """Prove geometry consumes current rather than newly applied slow truth."""
     positions = _default_positions((1, 1))
     positions = positions.at[_TEAM_A_ACTOR].set(
         jnp.asarray((13.2, 2.0), dtype=jnp.float32)
@@ -1417,7 +1380,6 @@ def test_fresh_hunter_slow_does_not_retroactively_change_boundary_projection() -
 
 
 def test_duplicate_hunter_applications_refresh_once_without_stacking_strength() -> None:
-    """Prove simultaneous same-source applications remain order-independent."""
     config, state = _scenario(
         (0, HUNTER_CLASS_ID),
         (1, HUNTER_CLASS_ID),
@@ -1446,7 +1408,6 @@ def test_duplicate_hunter_applications_refresh_once_without_stacking_strength() 
 
 
 def test_duplicate_priest_applications_refresh_one_freedom_floor() -> None:
-    """Prove simultaneous Priest basics grant one non-stacking movement floor."""
     config, state = _scenario(
         (0, PRIEST_CLASS_ID),
         (1, PRIEST_CLASS_ID),
@@ -1490,7 +1451,6 @@ def test_duplicate_priest_applications_refresh_one_freedom_floor() -> None:
 
 
 def test_jitted_step_matches_eager_decision_epoch_passive_semantics() -> None:
-    """Prove decision-epoch passive timing remains JIT-stable."""
     config, state = _scenario(
         (0, HUNTER_CLASS_ID),
         (_TEAM_B_ACTOR, PRIEST_CLASS_ID),
@@ -1525,7 +1485,6 @@ def test_jitted_step_matches_eager_decision_epoch_passive_semantics() -> None:
 
 
 def test_scanned_repeated_hunter_hits_refresh_for_each_next_movement() -> None:
-    """Prove repeated duration-one applications govern each later scan step."""
     horizon = 3
     config, state = _scenario(
         (_TEAM_A_ACTOR, HUNTER_CLASS_ID),
@@ -1560,7 +1519,6 @@ def test_scanned_repeated_hunter_hits_refresh_for_each_next_movement() -> None:
         initial_mask: ActionMask,
         scan_keys: Array,
     ) -> tuple[tuple[EnvState, ActionMask], tuple[Array, Array, Array]]:
-        """Run the repeated-passive scenario in one fixed-shape scan."""
         return jax.lax.scan(
             _scan_step,
             (initial_state, initial_mask),
@@ -1616,7 +1574,6 @@ def test_scanned_repeated_hunter_hits_refresh_for_each_next_movement() -> None:
     ],
 )
 def test_each_damage_class_applies_its_catalog_payload(actor_class_id: int) -> None:
-    """Prove every offensive basic starts from its class catalog damage."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, actor_class_id),
         (_TEAM_B_ACTOR, MAGE_CLASS_ID),
@@ -1652,7 +1609,6 @@ def test_priest_basic_heals_self_and_allies(
     target_action: int,
     recipient_slot: int,
 ) -> None:
-    """Prove Priest healing uses the same stable allied candidate mapping."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, PRIEST_CLASS_ID),
         (_TEAM_A_ALLY, MAGE_CLASS_ID),
@@ -1705,7 +1661,6 @@ def test_relation_local_targets_route_to_stable_global_slots(
     target_action: int,
     recipient_slot: int,
 ) -> None:
-    """Prove all ally/enemy candidate categories preserve fixed roster identity."""
     class_rows = [(slot, HUNTER_CLASS_ID) for slot in range(MAX_AGENT_SLOTS)]
     class_rows[actor_slot] = (actor_slot, actor_class_id)
     config, state = _scenario(*class_rows, team_sizes=(5, 5))
@@ -1737,7 +1692,6 @@ def test_relation_local_targets_route_to_stable_global_slots(
 def test_focus_fire_is_independent_of_contributor_slots(
     actor_slots: tuple[int, int],
 ) -> None:
-    """Prove multiple offensive basics reduce once by their aggregate payload."""
     first_actor, second_actor = actor_slots
     config, state = _scenario(
         (first_actor, HUNTER_CLASS_ID),
@@ -1760,7 +1714,6 @@ def test_focus_fire_is_independent_of_contributor_slots(
 
 
 def test_duplicate_priest_healing_aggregates_on_one_recipient() -> None:
-    """Prove multiple Priest basics add before the single health clamp."""
     config, state = _scenario(
         (0, PRIEST_CLASS_ID),
         (1, PRIEST_CLASS_ID),
@@ -1784,7 +1737,6 @@ def test_duplicate_priest_healing_aggregates_on_one_recipient() -> None:
 
 
 def test_mixed_damage_and_healing_aggregate_before_lower_clamp() -> None:
-    """Distinguish aggregate-then-clamp from ordered per-actor mutation."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, ROGUE_CLASS_ID),
         (_TEAM_B_ACTOR, HUNTER_CLASS_ID),
@@ -1806,7 +1758,6 @@ def test_mixed_damage_and_healing_aggregate_before_lower_clamp() -> None:
 
 
 def test_healing_clamps_once_at_resolved_max_health() -> None:
-    """Prove accepted healing cannot exceed the recipient's resolved bound."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, PRIEST_CLASS_ID),
         (_TEAM_B_ACTOR, MAGE_CLASS_ID),
@@ -1828,7 +1779,6 @@ def test_healing_clamps_once_at_resolved_max_health() -> None:
 def test_lethal_damage_clamps_health_and_updates_liveness_without_task_signals() -> (
     None
 ):
-    """Prove lethal combat changes lifecycle state but not M6 rewards or dones."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, MAGE_CLASS_ID),
         (_TEAM_B_ACTOR, MAGE_CLASS_ID),
@@ -1868,7 +1818,6 @@ def test_lethal_damage_clamps_health_and_updates_liveness_without_task_signals()
 
 
 def test_legal_movement_survives_an_invalid_combat_pair() -> None:
-    """Prove combat rejection cannot discard independently legal movement."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, MAGE_CLASS_ID),
         (_TEAM_A_ALLY, MAGE_CLASS_ID),
@@ -1889,7 +1838,6 @@ def test_legal_movement_survives_an_invalid_combat_pair() -> None:
 
 
 def test_invalid_ultimate_pair_cannot_fall_back_to_a_valid_basic() -> None:
-    """Prove target and ultimate heads are rejected as one authoritative pair."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, MAGE_CLASS_ID),
         (_TEAM_B_ACTOR, MAGE_CLASS_ID),
@@ -1909,7 +1857,6 @@ def test_invalid_ultimate_pair_cannot_fall_back_to_a_valid_basic() -> None:
 
 
 def test_accepted_ultimate_lane_does_not_also_apply_a_basic() -> None:
-    """Prove an ultimate applies its own payload without also applying a basic."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, WARRIOR_CLASS_ID),
         (_TEAM_B_ACTOR, MAGE_CLASS_ID),
@@ -1938,7 +1885,6 @@ def test_accepted_ultimate_lane_does_not_also_apply_a_basic() -> None:
 
 
 def test_target_none_no_ultimate_is_effect_inert() -> None:
-    """Prove the canonical combat no-op creates no contribution."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, MAGE_CLASS_ID),
         (_TEAM_B_ACTOR, MAGE_CLASS_ID),
@@ -1961,7 +1907,6 @@ def test_target_none_no_ultimate_is_effect_inert() -> None:
     ],
 )
 def test_nonacting_actor_submissions_remain_physically_inert(actor_state: str) -> None:
-    """Prove canonical mask fallback never grants dead or padded slots agency."""
     if actor_state == "dead":
         actor_slot = _TEAM_A_ACTOR
         config, state = _scenario(
@@ -2005,7 +1950,6 @@ def test_nonacting_actor_submissions_remain_physically_inert(actor_state: str) -
     ],
 )
 def test_invalid_basic_attempts_create_no_health_effect(invalidity: str) -> None:
-    """Prove every established legality gate reaches the same accepted no-op."""
     team_sizes = (2, 1) if invalidity == "wrong-relation" else (1, 1)
     obstacles = _blocking_pillar(x=4.5, y=2.0) if invalidity == "blocked-los" else None
     basic_radius = 2.0 if invalidity == "out-of-range" else 10.0
@@ -2061,7 +2005,6 @@ def test_basic_legality_uses_pre_movement_state(
     expects_damage: bool,
     next_target_is_legal: bool,
 ) -> None:
-    """Prove same-tick movement cannot change pre-state combat acceptance."""
     positions = _default_positions((1, 1))
     actor_x = 2.0 if starts_in_range else 1.0
     positions = positions.at[_TEAM_A_ACTOR].set(
@@ -2099,7 +2042,6 @@ def test_basic_legality_uses_pre_movement_state(
 
 
 def test_post_state_observation_projects_updated_health() -> None:
-    """Prove returned observations are built from the packaged next state."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, MAGE_CLASS_ID),
         (_TEAM_B_ACTOR, MAGE_CLASS_ID),
@@ -2118,7 +2060,6 @@ def test_post_state_observation_projects_updated_health() -> None:
 
 
 def test_jitted_step_matches_eager_accepted_effects() -> None:
-    """Prove accepted routing, aggregation, and clamping are JIT-stable."""
     config, state = _scenario(
         (_TEAM_A_ACTOR, MAGE_CLASS_ID),
         (_TEAM_B_ACTOR, MAGE_CLASS_ID),
@@ -2161,7 +2102,6 @@ def test_jitted_step_matches_eager_accepted_effects() -> None:
 
 
 def test_scanned_rollout_reuses_each_post_state_mask_for_repeated_basics() -> None:
-    """Prove accepted basic effects remain stable in a compiled temporal carry."""
     horizon = 3
     config, state = _scenario(
         (_TEAM_A_ACTOR, MAGE_CLASS_ID),
@@ -2191,7 +2131,6 @@ def test_scanned_rollout_reuses_each_post_state_mask_for_repeated_basics() -> No
         initial_mask: ActionMask,
         scan_keys: Array,
     ) -> tuple[tuple[EnvState, ActionMask], Array]:
-        """Run one fixed-horizon rollout under ``jax.lax.scan``."""
         return jax.lax.scan(_scan_step, (initial_state, initial_mask), scan_keys)
 
     (final_state, _), health_history = cast(

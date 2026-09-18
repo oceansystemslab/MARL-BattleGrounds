@@ -1,4 +1,4 @@
-"""Canonical replay persistence, hostile-input, and loaded-parity proofs."""
+"""Check replay reads and writes, including malformed and hostile input."""
 
 from __future__ import annotations
 
@@ -58,8 +58,6 @@ from marl_battlegrounds.evaluation.replay_io import (
 
 @dataclass(frozen=True, slots=True)
 class _ReplayIoCase:
-    """One live CP2/CP3 trajectory and its immutable Step 6 bundle."""
-
     trajectory: CapturedEvaluationTrajectory
     observer: EvaluationEpisodeObserverV1
     report: EvaluationMetricReportV1
@@ -119,7 +117,6 @@ def _build_io_case(
 
 @pytest.fixture(scope="module")
 def replay_io_case() -> _ReplayIoCase:
-    """Build one real public-core trajectory for every persistence proof."""
     return _build_io_case()
 
 
@@ -181,7 +178,6 @@ def test_canonical_bytes_are_exact_and_save_load_save_is_stable(
     replay_io_case: _ReplayIoCase,
     tmp_path: Path,
 ) -> None:
-    """Both sidecars persist exactly once and survive a byte-identical cycle."""
     replay_bytes = canonical_replay_json_bytes_v1(replay_io_case.bundle.replay)
     metric_bytes = canonical_metric_report_artifact_json_bytes_v1(
         replay_io_case.bundle.metric_report_artifact
@@ -677,7 +673,6 @@ def test_loaded_views_report_and_constant_time_cursor_equal_live_inputs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One load validates once; cursor reads never repeat the O(T) pass."""
     replay_path = _replay_path(tmp_path)
     save_replay_bundle_v1(replay_io_case.bundle, replay_path)
     validation_count = 0
@@ -720,7 +715,6 @@ def test_loading_in_a_fresh_process_imports_no_array_core_policy_or_capture_code
     replay_io_case: _ReplayIoCase,
     tmp_path: Path,
 ) -> None:
-    """Artifact reading stays a host-only operation without backend discovery."""
     replay_path = _replay_path(tmp_path)
     replay_path.write_bytes(
         canonical_replay_json_bytes_v1(replay_io_case.bundle.replay)
@@ -875,7 +869,6 @@ def test_nonregular_existing_metric_target_is_a_typed_save_conflict(
     replay_io_case: _ReplayIoCase,
     tmp_path: Path,
 ) -> None:
-    """Save never leaks a loader exception for an occupied sidecar target."""
     _metric_path(tmp_path).mkdir()
 
     with pytest.raises(ReplaySaveError) as caught:
@@ -959,7 +952,6 @@ def test_replay_directory_fsync_failure_rolls_back_target_and_allows_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed durability barrier cannot leave a falsely failed replay link."""
     real_fsync_directory = replay_io._fsync_directory  # pyright: ignore[reportPrivateUsage]
     fsync_call_count = 0
 
@@ -1082,7 +1074,6 @@ def test_loader_is_bound_to_the_opened_parent_during_ancestor_swap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A checked parent cannot be swapped to redirect the final file open."""
     source_directory = tmp_path / "source"
     moved_source_directory = tmp_path / "source-opened"
     attacker_directory = tmp_path / "attacker"
@@ -1135,7 +1126,6 @@ def test_bundle_loader_reads_report_from_the_same_parent_after_swap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Replay and sidecar resolution share one descriptor-bound directory."""
     source_directory = tmp_path / "source"
     moved_source_directory = tmp_path / "source-opened"
     attacker_directory = tmp_path / "attacker"
@@ -1291,7 +1281,6 @@ def test_saver_keeps_report_and_replay_on_one_bound_parent_during_swap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An ancestor swap cannot redirect either half of bundle publication."""
     destination_directory = tmp_path / "destination"
     moved_destination_directory = tmp_path / "destination-opened"
     attacker_directory = tmp_path / "attacker"

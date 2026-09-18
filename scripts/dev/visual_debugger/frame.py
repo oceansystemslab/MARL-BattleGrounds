@@ -1,12 +1,16 @@
-"""Canonical CP2/CP3 projections for live debugger browser frames."""
+"""Build live debugger transport frames from recorded evaluation endpoints.
+
+The live service calls ``build_debugger_frame`` for researcher, NoSharedObs or
+SharedObs view mode. Helpers format draft actions, recorded acceptance, exact mask
+values and current episode metadata. Actor views use their authorized identities;
+SharedObs transport leaves detailed presentation to its separate builder. This
+module neither advances the simulator nor writes files or sends HTTP responses.
+"""
 
 from typing import Literal
 
-from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV1
-from marl_battlegrounds.evaluation.pov import (
-    ActorPovAxisMappingV1,
-    ActorPovCurrentSliceV1,
-)
+from marl_battlegrounds.evaluation.models import EvaluationEpisodeContext
+from marl_battlegrounds.evaluation.pov import ActorPovAxisMapping, ActorPovCurrentSlice
 from marl_battlegrounds.evaluation.wire_shapes import (
     NUM_MOVE_ACTIONS_V1,
     NUM_TARGET_ACTIONS_V1,
@@ -24,10 +28,10 @@ from marl_battlegrounds.rendering.scene import (
     BattlefieldSceneV2,
     ResearcherAnalyzerProjectionV2,
 )
-from scripts.dev.visual_debugger.model import DebuggerScenario, DebuggerSession
-from scripts.dev.visual_debugger.no_shared_visual import (
+from marl_battlegrounds.viewer.no_shared_visual import (
     build_live_no_shared_obs_visual_current_slice_v1,
 )
+from scripts.dev.visual_debugger.model import DebuggerScenario, DebuggerSession
 from scripts.dev.visual_debugger.protocol import (
     ActionTupleCardV1,
     ActorActionResultV1,
@@ -81,6 +85,9 @@ def _actor_pov_recording_status(
 
 
 def _scenario_option(scenario: DebuggerScenario) -> ScenarioOptionV1:
+    """Copy stable scenario discovery text without constructing another initial
+    state.
+    """
     return ScenarioOptionV1(
         name=scenario.name,
         title=scenario.title,
@@ -91,6 +98,7 @@ def _scenario_option(scenario: DebuggerScenario) -> ScenarioOptionV1:
 
 
 def _scenario_metadata(session: DebuggerSession) -> ScenarioMetadataV1:
+    """Report the current fixed movement setting and truthful optional script cursor."""
     scenario = session.scenario
     effective_scale = (
         session.evaluation_context.resolved_env_config.ordinary_movement_distance_scale
@@ -123,6 +131,9 @@ def _scenario_metadata(session: DebuggerSession) -> ScenarioMetadataV1:
 
 
 def _terminal_state(session: DebuggerSession) -> TerminalStateV2:
+    """Package termination, truncation and declared-horizon facts with one matching
+    reason.
+    """
     terminated = session.terminated
     truncated = session.truncated
     horizon = session.reached_declared_horizon
@@ -156,10 +167,13 @@ def _combat_configuration(session: DebuggerSession) -> CombatConfigurationV1:
 
 
 def _target_action_for_slot(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     actor_global_slot: int,
     target_global_slot: int | None,
 ) -> int:
+    """Resolve a global target through the recorded actor-specific target-action
+    mapping.
+    """
     if target_global_slot is None:
         return 0
     catalog = context.static_mechanics_catalog
@@ -175,11 +189,14 @@ def _target_action_for_slot(
 
 
 def _researcher_target_reference(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     *,
     actor_global_slot: int,
     target_action: int,
 ) -> TargetReferenceV1:
+    """Describe target-none, in-domain public identity or an invalid submitted
+    target.
+    """
     if not 0 <= target_action < NUM_TARGET_ACTIONS_V1:
         return TargetReferenceV1(disclosure="invalid", global_slot=None)
     catalog = context.static_mechanics_catalog
@@ -194,13 +211,16 @@ def _researcher_target_reference(
 
 
 def _researcher_action_card(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     *,
     actor_global_slot: int,
     move_action: int,
     target_action: int,
     use_ultimate_action: int,
 ) -> ActionTupleCardV1:
+    """Format one exact submitted/accepted action with its researcher target
+    disclosure.
+    """
     target = _researcher_target_reference(
         context,
         actor_global_slot=actor_global_slot,
@@ -246,6 +266,9 @@ def _researcher_pending_card(
     actor_global_slot: int,
     inspection_only: bool,
 ) -> PendingActionCardV1:
+    """Format one authorized draft row and its exact current movement/pair-mask
+    values.
+    """
     pending = session.pending_actions[actor_global_slot]
     target_action = _target_action_for_slot(
         session.evaluation_context,
@@ -294,6 +317,9 @@ def _researcher_pending_card(
 def _researcher_latest_transition(
     session: DebuggerSession,
 ) -> LatestTransitionCardV2 | None:
+    """Read recorded action acceptance for the latest submitted actors, or None at
+    reset.
+    """
     view = session.incoming_evaluation_view
     if view is None:
         return None
@@ -383,6 +409,7 @@ def _researcher_latest_transition(
 def _movement_legalities(
     mask_row: tuple[bool, ...],
 ) -> tuple[MovementLegalityCardV1, ...]:
+    """Label every Boolean movement-mask entry in fixed action-category order."""
     return tuple(
         MovementLegalityCardV1(move_action=move_action, available=available)
         for move_action, available in enumerate(mask_row)
@@ -392,6 +419,9 @@ def _movement_legalities(
 def _researcher_candidates(
     session: DebuggerSession,
 ) -> tuple[CandidateLegalityCardV1, ...]:
+    """Expose the controlled actor's exact current target/Basic/Ultimate
+    availability.
+    """
     controlled = session.controlled_global_slot
     mask = session.current_evaluation_frame.action_mask
     joint = mask.select_target_use_ultimate_joint_mask[controlled]
@@ -423,6 +453,9 @@ def _diagnostics(
     revision: int,
     include_episode_id: bool,
 ) -> tuple[DiagnosticFactV1, ...]:
+    """Format allowed technical identity/count facts without constructing new
+    simulator truth.
+    """
     frame = session.current_evaluation_frame
     facts = [
         DiagnosticFactV1(
@@ -468,6 +501,9 @@ def _build_researcher_hud(
     *,
     revision: int,
 ) -> ResearcherHudFrameV2:
+    """Join authorized roster, selection, drafts, mask rows and recorded latest
+    result.
+    """
     scene = projection.scene
     selection = scene.selection
     if selection is None:
@@ -513,9 +549,10 @@ def _build_researcher_hud(
 
 
 def _pov_target_reference(
-    axis: ActorPovAxisMappingV1,
+    axis: ActorPovAxisMapping,
     target_action: int,
 ) -> ActorPovTargetReferenceV1:
+    """Map an actor-relative target category to its allowed public identity only."""
     public_id = (
         axis.target_action_recipient_public_agent_id_by_id[target_action]
         if 0 <= target_action < NUM_TARGET_ACTIONS_V1
@@ -528,12 +565,13 @@ def _pov_target_reference(
 
 
 def _pov_action_card(
-    axis: ActorPovAxisMappingV1,
+    axis: ActorPovAxisMapping,
     *,
     move_action: int,
     target_action: int,
     use_ultimate_action: int,
 ) -> ActorPovActionTupleCardV1:
+    """Format an exact actor action without adding global-slot target disclosure."""
     target = _pov_target_reference(axis, target_action)
     move_name = (
         axis.movement_action_name_by_id[move_action]
@@ -567,8 +605,11 @@ def _pov_action_card(
 
 def _pov_latest_transition(
     session: DebuggerSession,
-    slice_: ActorPovCurrentSliceV1,
+    slice_: ActorPovCurrentSlice,
 ) -> ActorPovLatestTransitionCardV1 | None:
+    """Describe only the selected actor's recorded incoming action and rejection
+    facts.
+    """
     incoming = slice_.incoming_transition
     if incoming is None:
         return None
@@ -620,10 +661,13 @@ def _pov_latest_transition(
 
 def _build_pov_hud(
     session: DebuggerSession,
-    slice_: ActorPovCurrentSliceV1,
+    slice_: ActorPovCurrentSlice,
     *,
     revision: int,
 ) -> ActorPovHudFrameV1:
+    """Join selected-actor draft, exact masks and latest action through its
+    authorized slice.
+    """
     pending = session.pending_actions[session.controlled_global_slot]
     target_action = _target_action_for_slot(
         session.evaluation_context,
@@ -693,7 +737,42 @@ def build_debugger_frame(
     include_stress: bool,
     recording_status: RecordingStatusV1 | None = None,
 ) -> LiveDebuggerFrame:
-    """Build one audience-exact frame from canonical evaluation records."""
+    """Build one validated live frame for the selected audience and current endpoint.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Immutable session whose evaluation frame and incoming transition already match.
+    session_id : str
+        Nonempty host viewer-session identity.
+    revision : int
+        Nonnegative live-service revision for stale-command detection.
+    view_mode : ViewMode
+        Researcher or actor view. Actor mode follows the episode's recorded information
+        contract and selected controlled actor.
+    preset : Preset
+        Supported presentation choice retained in the transport model.
+    include_stress : bool
+        Whether researcher scenario discovery includes stress demonstrations.
+    recording_status : RecordingStatusV1 or None, optional
+        Current recorder progress. None means recording is not enabled.
+
+    Returns
+    -------
+    LiveDebuggerFrame
+        Matching researcher, NoSharedObs actor, or SharedObs recipient transport root.
+        No actor view gains researcher projection data through this choice.
+
+    Raises
+    ------
+    ValueError
+        If required actor activity, frame joins or strict output-model contracts fail.
+
+    Notes
+    -----
+    Reads existing evaluation evidence and builds the selected projection/HUD. It does
+    not choose new actions, change the session, or save/serve the resulting frame.
+    """
     context = session.evaluation_context
     frame = session.current_evaluation_frame
     terminal = _terminal_state(session)

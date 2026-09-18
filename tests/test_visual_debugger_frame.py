@@ -1,4 +1,4 @@
-"""Focused allowlisting tests for canonical live-debugger browser frames."""
+"""Check which live-debugger frame fields may cross the browser boundary."""
 
 import json
 from dataclasses import replace
@@ -36,12 +36,12 @@ from scripts.dev.visual_debugger.scenarios import (
     STRESS_SCENARIOS,
     get_scenario,
 )
-from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
+from marl_battlegrounds.core.axis_mappings import global_slot_to_target_action
 from marl_battlegrounds.core.types import MOVE_EAST, MOVE_NORTH, NUM_MOVE_ACTIONS
 from marl_battlegrounds.evaluation.actor_projection import (
-    NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+    NO_SHARED_OBS_ACTOR_PROJECTION_V3,
 )
 
 
@@ -115,10 +115,10 @@ def test_shared_obs_pov_frame_is_projection_free_and_identity_bound() -> None:
     assert "information_availability" not in _recursive_keys(payload)
 
 
-def test_no_shared_policy_projection_stays_v2_across_visual_v1_adapter() -> None:
+def test_current_no_shared_visual_slice_keeps_exact_policy_projection() -> None:
     session = _session()
     context = session.evaluation_context
-    assert context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V2
+    assert context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V3
 
     visual = build_live_no_shared_obs_visual_current_slice_v1(
         context,
@@ -127,10 +127,10 @@ def test_no_shared_policy_projection_stays_v2_across_visual_v1_adapter() -> None
     )
     frame = _frame(session, view_mode="pov")
 
-    assert visual.axis_mapping.actor_projection_version == 1
+    assert visual.axis_mapping.actor_projection_version == 3
     assert session.evaluation_context is context
     assert (
-        session.evaluation_context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V2
+        session.evaluation_context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V3
     )
     assert type(frame) is ActorPovLiveDebuggerFrameV2
     assert frame.combat_configuration.team_a_controller == "manual"
@@ -623,7 +623,6 @@ def test_researcher_envelope_rejects_hud_scene_selection_mismatch() -> None:
 
 
 def test_joint_action_test_inputs_keep_exact_int32_heads() -> None:
-    """Keep the custom-action regression independent of NumPy coercion."""
     action = make_neutral_joint_action()
     assert action.move.dtype == jnp.int32
     assert action.select_target.dtype == jnp.int32

@@ -1,4 +1,4 @@
-"""Test-only visual-debugger scenarios that intentionally exercise rejection."""
+"""Build debugger test scenarios, including deliberately rejected actions."""
 
 from collections.abc import Sequence
 
@@ -43,7 +43,6 @@ _TEST_DIGEST = "a" * 64
 def debugger_test_launch_specification(
     seed: int = 0,
 ) -> DebuggerEvaluationLaunchSpecificationV1:
-    """Return stable path-free provenance for focused debugger host tests."""
     return build_debugger_evaluation_launch_specification_v1(
         root_seed=seed,
         code_revision=build_code_revision_v1(
@@ -57,7 +56,6 @@ def debugger_test_launch_specification(
 
 
 def _spawn_pad_positions(map_width: float, map_height: float) -> jax.Array:
-    """Return valid fixed pads independent of the authored combat layout."""
     y_coordinates = jnp.linspace(
         1.5,
         map_height - 1.5,
@@ -83,7 +81,6 @@ def _spawn_pad_positions(map_width: float, map_height: float) -> jax.Array:
 
 
 def rejection_lane_scenario() -> DebuggerScenario:
-    """Return an unregistered boundary fixture with one rejection then acceptance."""
     roster = jnp.full((MAX_AGENT_SLOTS,), NEUTRAL_CLASS_ID, dtype=jnp.int32)
     roster = roster.at[0].set(HUNTER_CLASS_ID)
     roster = roster.at[5].set(MAGE_CLASS_ID)
@@ -142,7 +139,6 @@ def submit_fixture_frame(
     session: DebuggerSession,
     frame: ScenarioFrame,
 ) -> DebuggerSession:
-    """Submit one test-only frame without consulting the user scenario registry."""
     action = build_scripted_joint_action(session.evaluation_context, frame)
     report_slots: Sequence[int] = sorted(
         command.actor_global_slot for command in frame.commands

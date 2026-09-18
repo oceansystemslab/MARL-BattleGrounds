@@ -1,3 +1,10 @@
+/**
+ * @file Validate replay commands and own browser playback/navigation state.
+ * The controller sends at most one request at a time and advances playback after
+ * the current presentation completes. Frame indices select captured states;
+ * simulator ticks come from the joined timeline. DOM helpers bind controls and
+ * render availability without changing recorded replay data.
+ */
 /** @type {Readonly<Record<string, string>>} */
 const REPLAY_NAVIGATION_COMMAND_TYPES = Object.freeze({
   first: "first_frame",
@@ -32,8 +39,9 @@ export const REPLAY_TRANSPORT_STATES = Object.freeze({
 });
 
 /**
- * Resolve one simulator tick from the joined timeline without ever treating a
- * transport frame index as scientific time.
+ * Resolve frameIndex through elements.tickForFrameIndex when provided. Return a
+ * nonnegative integer simulator tick or null. The frame index is never substituted
+ * for missing scientific time; callback errors propagate.
  *
  * @param {{tickForFrameIndex?: (frameIndex: number) => unknown}} elements
  * @param {number} frameIndex
@@ -47,6 +55,10 @@ function simulatorTickForFrameIndex(elements, frameIndex) {
 }
 
 /**
+ * Build frozen accessible and visible tick labels for current and final frame indices.
+ * Use the optional timeline resolver in elements; missing ticks display an em dash.
+ * This formats text only and changes no DOM.
+ *
  * @param {{tickForFrameIndex?: (frameIndex: number) => unknown}} elements
  * @param {number} frameIndex
  * @param {number} finalFrameIndex
@@ -61,6 +73,9 @@ function replayTickText(elements, frameIndex, finalFrameIndex) {
 }
 
 /**
+ * Return value as a number only when it is already a nonnegative integer.
+ * Throw TypeError naming the field otherwise; numeric strings are not accepted.
+ *
  * @param {unknown} value
  * @param {string} name
  */
@@ -71,7 +86,12 @@ function nonNegativeInteger(value, name) {
   return Number(value);
 }
 
-/** @param {unknown} value */
+/**
+ * Require a finite numeric playback rate from the eight supported quarter-step values
+ * between 0.25 and 2. Return it unchanged or throw RangeError.
+ *
+ * @param {unknown} value
+ */
 function replayPlaybackRate(value) {
   if (
     typeof value !== "number" ||
@@ -86,6 +106,8 @@ function replayPlaybackRate(value) {
 }
 
 /**
+ * Return whether value is a nonnull, nonarray object. Field validation is separate.
+ *
  * @param {unknown} value
  * @returns {value is Record<string, any>}
  */
@@ -94,8 +116,10 @@ function isRecord(value) {
 }
 
 /**
- * Join a transport frame index to its authoritative simulator step. Timeline
- * order remains transport authority; the returned value is display-only time.
+ * Look up rawFrameIndex in rawTimeline.rows and return its matching simulator step.
+ * The index is converted with Number, then required to be a nonnegative integer.
+ * Missing rows, mismatched indices, or invalid steps return null. This does not
+ * claim that a frame index and simulator tick are the same value.
  *
  * @param {unknown} rawTimeline
  * @param {unknown} rawFrameIndex
@@ -123,6 +147,9 @@ export function replayTimelineSimulatorStep(rawTimeline, rawFrameIndex) {
 }
 
 /**
+ * Require value to have exactly the expected own enumerable field names.
+ * Throw TypeError naming label on missing or extra keys; neither input is changed.
+ *
  * @param {Record<string, any>} value
  * @param {readonly string[]} expected
  * @param {string} label
@@ -138,7 +165,12 @@ function exactKeys(value, expected, label) {
   }
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Require a 1..128 character string of letters, digits, underscores, or hyphens.
+ * Return the identity or throw TypeError using label.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function opaqueIdentifier(value, label) {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,128}$/u.test(value)) {
     throw new TypeError(`${label} must be a canonical opaque identifier.`);
@@ -146,7 +178,12 @@ function opaqueIdentifier(value, label) {
   return value;
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Require an integer simulator slot from 0 through 9. Return it, throwing TypeError
+ * for a noninteger or negative value and RangeError when it exceeds the slot axis.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function replayGlobalSlot(value, label) {
   const slot = nonNegativeInteger(value, label);
   if (slot >= 10) {
@@ -155,7 +192,12 @@ function replayGlobalSlot(value, label) {
   return slot;
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Require the opaque actor display-key form pov_ followed by 64 lowercase hex digits.
+ * Return the key or throw TypeError using label; no global slot is inferred.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function povPresentationKey(value, label) {
   if (typeof value !== "string" || !/^pov_[0-9a-f]{64}$/u.test(value)) {
     throw new TypeError(`${label} must be an opaque Agent POV presentation key.`);
@@ -164,8 +206,10 @@ function povPresentationKey(value, label) {
 }
 
 /**
- * Normalize the complete outbound replay command union. The browser never
- * emits compatibility aliases or audience-dependent extra fields.
+ * Validate value against the complete outbound replay command union and return a
+ * frozen normalized command. Require exact fields and supported IDs/categories.
+ * Preset aliases become analysis and verbosity becomes false; other invalid input
+ * throws TypeError or RangeError. This sends no request.
  *
  * @param {unknown} value
  */
@@ -261,6 +305,11 @@ export function normalizeReplayCommand(value) {
 }
 
 /**
+ * Validate the exact version-1 cursor fields and return a frozen copy. Indices and
+ * generations must be nonnegative integers; the frame cannot exceed the final frame
+ * and choreography generation cannot exceed cursor generation. Invalid fields
+ * throw TypeError; out-of-range relationships throw RangeError.
+ *
  * @param {unknown} value
  */
 export function normalizeReplayCursor(value) {
@@ -308,6 +357,9 @@ export function normalizeReplayCursor(value) {
 }
 
 /**
+ * Convert first, previous, next, or last intent to a frozen replay command.
+ * Unknown intents throw RangeError. No request or cursor mutation occurs.
+ *
  * @param {unknown} intent
  */
 export function replayNavigationCommand(intent) {
@@ -321,6 +373,9 @@ export function replayNavigationCommand(intent) {
 }
 
 /**
+ * Build a frozen absolute-seek command for nonnegative integer frameIndex.
+ * TypeError rejects invalid indices; the server or controller checks final bounds.
+ *
  * @param {unknown} frameIndex
  */
 export function replaySeekCommand(frameIndex) {
@@ -331,6 +386,11 @@ export function replaySeekCommand(frameIndex) {
 }
 
 /**
+ * Build a frozen version-1 request from clientId, commandId, baseRevision, and command.
+ * IDs must be canonical opaque strings and revision a nonnegative integer. The
+ * command is normalized through the shared union; invalid input throws TypeError
+ * or RangeError. The caller owns assigning a new command ID and sending the result.
+ *
  * @param {{
  *   clientId: string,
  *   commandId: string,
@@ -355,6 +415,9 @@ export function replayCommandRequest({ clientId, commandId, baseRevision, comman
 }
 
 /**
+ * Read and normalize the cursor from result.frame or a direct result frame.
+ * Throw TypeError or RangeError for an absent or invalid cursor; mutate no input.
+ *
  * @param {unknown} result
  */
 function cursorFromResult(result) {
@@ -366,8 +429,9 @@ function cursorFromResult(result) {
 }
 
 /**
- * Verify the service-owned durable cursor and choreography epochs for one
- * accepted navigation. Only exact next-frame motion advances choreography.
+ * Require next to represent the exact navigation command applied to previous.
+ * The final frame stays fixed; cursor generation rises once, and only next_frame
+ * raises choreography generation. Return next or throw Error on mismatch.
  *
  * @param {Readonly<Record<string, any>>} command
  * @param {ReturnType<typeof normalizeReplayCursor>} previous
@@ -401,8 +465,9 @@ export function validateReplayCursorTransition(command, previous, next) {
 }
 
 /**
- * Animation intent belongs only to the response to an exact next-frame
- * command. The durable frame and every other command remain settled.
+ * Require animation only for an applied next_frame response. Return result unchanged
+ * when valid. Nonobjects throw TypeError; inconsistent animation intent throws Error.
+ * This checks response intent, not the animation renderer.
  *
  * @param {Readonly<Record<string, any>>} command
  * @param {unknown} result
@@ -429,8 +494,10 @@ export function validateReplayAnimationIntent(command, result) {
 }
 
 /**
- * Validate one complete authoritative command outcome before any caller-owned
- * frame, timeline, or cursor reference may be replaced.
+ * Validate result before replacing a caller-owned cursor. Applied navigation must
+ * move exactly as commanded; duplicate outcomes may move forward without regressing
+ * generations; other outcomes keep the cursor unchanged. Return the normalized next
+ * cursor. Invalid shape or intent throws TypeError, RangeError, or Error.
  *
  * @param {Readonly<Record<string, any>>} command
  * @param {unknown} result
@@ -483,12 +550,19 @@ export function validateReplayCommandOutcome(command, result, previous) {
 }
 
 /**
- * Serialized replay playback. The four transport states are the only mutable
- * state-machine authority; compatibility booleans in `snapshot()` are derived
- * from them and the one active request transaction.
+ * Serialize replay requests and track OFFLINE, SETTLED, PLAYING, or ADVANCING state.
+ * A cursor belongs to one installed authority generation. Late callbacks cannot
+ * replace newer authority. Snapshot booleans derive from the transport state and
+ * active request, so they are not independent state-machine authorities.
  */
 export class ReplayPlaybackController {
   /**
+   * Create an offline controller using options.request to send replay commands.
+   * waitForPresentation defaults to an already-resolved promise; state/error callbacks
+   * default to no-ops; playbackRate defaults to 1. getMotionMode is a retained unused
+   * compatibility option. Missing request throws TypeError and an unsupported rate
+   * throws RangeError. Construction starts no request or timer.
+   *
    * @param {{
    *   request: (command: Readonly<Record<string, any>>) => Promise<unknown>,
    *   waitForPresentation?: () => Promise<unknown>,
@@ -526,6 +600,11 @@ export class ReplayPlaybackController {
     this.disposed = false;
   }
 
+  /**
+   * Return a frozen view of cursor, connection, playback, pause reason, and derived
+   * control flags. No request or state change occurs; retained cursor and presentation
+   * intent are already immutable.
+   */
   snapshot() {
     const playing = this.#playbackIsActive();
     const requestPending = this.transportState === REPLAY_TRANSPORT_STATES.ADVANCING;
@@ -548,7 +627,14 @@ export class ReplayPlaybackController {
     });
   }
 
-  /** @param {unknown} value */
+  /**
+   * Invalidate previous request ownership and install a normalized authoritative cursor.
+   * Set static presentation and settle when connected, otherwise remain offline.
+   * Return the published snapshot. Invalid cursor input throws TypeError or RangeError;
+   * generation invalidation occurs before cursor validation.
+   *
+   * @param {unknown} value
+   */
   installCursor(value) {
     this.authorityGeneration += 1;
     this.generation += 1;
@@ -563,7 +649,13 @@ export class ReplayPlaybackController {
     return this.snapshot();
   }
 
-  /** @param {boolean} connected */
+  /**
+   * Set connection availability and publish a snapshot. False clears old authority
+   * through setAuthorityPending; true settles only if a cursor is installed. Return
+   * the current snapshot without starting playback.
+   *
+   * @param {boolean} connected
+   */
   setConnected(connected) {
     if (!connected) {
       return this.setAuthorityPending("disconnect");
@@ -582,9 +674,9 @@ export class ReplayPlaybackController {
   }
 
   /**
-   * Fence every callback owned by the old joined authority and remove its
-   * cursor immediately. A later connection signal cannot settle transport
-   * until a coherent cursor has also been installed.
+   * Invalidate old callbacks, clear the cursor and request owner, and go offline.
+   * reason defaults to presentation_pending. Clear presentation intent, notify the
+   * state callback, and return the new snapshot. Existing network work is not aborted.
    *
    * @param {string} reason
    */
@@ -601,7 +693,12 @@ export class ReplayPlaybackController {
     return this.snapshot();
   }
 
-  /** @param {boolean} hidden */
+  /**
+   * Store the boolean hidden state. Hidden pages pause playback with reason hidden;
+   * showing the page publishes state without resuming playback. Return the snapshot.
+   *
+   * @param {boolean} hidden
+   */
   setHidden(hidden) {
     this.hidden = Boolean(hidden);
     if (this.hidden) {
@@ -613,8 +710,9 @@ export class ReplayPlaybackController {
   }
 
   /**
-   * Change presentation speed without changing transport authority, cursor,
-   * request ownership, or the active presentation intent.
+   * Validate and store a supported presentation speed. Return the snapshot and publish
+   * only if the rate changes. Throw RangeError for unsupported values. Cursor, request
+   * ownership, and presentation intent remain unchanged.
    *
    * @param {unknown} rate
    */
@@ -628,7 +726,15 @@ export class ReplayPlaybackController {
     return this.snapshot();
   }
 
-  /** @param {{restartCurrent?: boolean}} [options] */
+  /**
+   * Start or continue playback if connected, visible, undisposed, and holding a cursor.
+   * restartCurrent defaults to true and restarts the current incoming animation when
+   * already past frame zero. Frame zero first requests next_frame. Return whether
+   * playback was accepted; unavailable or empty replays return false. Later request
+   * errors are handled by the controller callback, not retried automatically.
+   *
+   * @param {{restartCurrent?: boolean}} [options]
+   */
   play({ restartCurrent = true } = {}) {
     if (
       this.disposed ||
@@ -670,6 +776,10 @@ export class ReplayPlaybackController {
     return true;
   }
 
+  /**
+   * Pause active playback and return false, otherwise call play and return whether
+   * playback starts. State changes notify the configured callback.
+   */
   toggle() {
     if (this.#playbackIsActive()) {
       this.pause("user_pause");
@@ -678,7 +788,13 @@ export class ReplayPlaybackController {
     return this.play();
   }
 
-  /** @param {string} reason */
+  /**
+   * Invalidate playback continuation and request static presentation. reason defaults
+   * to user_pause. An in-flight command still owns its transaction and may finish,
+   * but its completion cannot restart the paused playback generation. Return snapshot.
+   *
+   * @param {string} reason
+   */
   pause(reason = "user_pause") {
     this.generation += 1;
     this.pauseReason = reason;
@@ -694,25 +810,44 @@ export class ReplayPlaybackController {
     return this.snapshot();
   }
 
+  /**
+   * Request one clamped absolute seek to the first captured frame. Return a promise
+   * for whether it was accepted; unavailable navigation resolves false.
+   */
   first() {
     return this.#userNavigation("first");
   }
 
+  /**
+   * Request one clamped absolute seek to the preceding captured frame. Return a
+   * promise for acceptance; this is a frame offset, not a recomputed simulator step.
+   */
   previous() {
     return this.#userNavigation("previous");
   }
 
+  /**
+   * Request one clamped absolute seek to the next captured frame for manual navigation.
+   * Return a promise for acceptance. Manual navigation remains static; autoplay uses
+   * the distinct next_frame command to request incoming animation.
+   */
   next() {
     return this.#userNavigation("next");
   }
 
+  /**
+   * Request one absolute seek to the final captured frame. Return a promise for
+   * acceptance; unavailable navigation resolves false.
+   */
   last() {
     return this.#userNavigation("last");
   }
 
   /**
-   * Seek by a signed number of ticks with one clamped absolute-seek request.
-   * This deliberately does not expand a jump into repeated next/previous calls.
+   * Move by the nonzero integer tickDelta using one clamped absolute-seek request.
+   * Despite the retained argument name, the offset counts captured frame indices.
+   * Return a promise for acceptance; invalid offsets reject with TypeError. No
+   * sequence of repeated next/previous requests is created.
    *
    * @param {unknown} tickDelta
    */
@@ -726,18 +861,33 @@ export class ReplayPlaybackController {
     );
   }
 
-  /** @param {unknown} frameIndex */
+  /**
+   * Request a clamped absolute seek to nonnegative integer frameIndex. Invalid input
+   * throws TypeError before a promise is returned; unavailable navigation resolves
+   * false. Navigation publishes ADVANCING and a static presentation intent.
+   *
+   * @param {unknown} frameIndex
+   */
   seek(frameIndex) {
     const index = nonNegativeInteger(frameIndex, "frame_index");
     return this.#navigateTo(index);
   }
 
+  /**
+   * Mark the controller disposed, clear authority, and notify an offline snapshot.
+   * Future playback/navigation is fenced; an already sent network request is not aborted.
+   */
   dispose() {
     this.disposed = true;
     this.setAuthorityPending("disposed");
   }
 
-  /** @param {"first" | "previous" | "next" | "last"} intent */
+  /**
+   * Resolve the named first/previous/next/last destination from the current cursor
+   * and delegate to the single absolute-seek route. Return its acceptance promise.
+   *
+   * @param {"first" | "previous" | "next" | "last"} intent
+   */
   #userNavigation(intent) {
     const frameIndex = this.cursor?.frame_index;
     const destination =
@@ -755,7 +905,14 @@ export class ReplayPlaybackController {
     return this.#navigateTo(destination);
   }
 
-  /** @param {unknown} destination */
+  /**
+   * Reject unavailable navigation with a resolved false promise. Otherwise convert
+   * and clamp destination to a retained integer frame, pause autoplay, publish
+   * ADVANCING, and send one static absolute-seek command. Nonfinite destinations
+   * resolve false; input conversion errors can propagate.
+   *
+   * @param {unknown} destination
+   */
   #navigateTo(destination) {
     if (
       this.disposed ||
@@ -784,8 +941,10 @@ export class ReplayPlaybackController {
   }
 
   /**
-   * Continue only from the choreography completion signal for the exact
-   * presentation generation that entered PLAYING.
+   * Await presentation completion for the exact generation and cursor that began playing.
+   * Ignore stale completion, hidden/disconnected state, or changed cursor. At the end
+   * settle playback; otherwise send one next_frame request. Current-generation errors
+   * pause and call onError. Return whether further navigation was accepted.
    *
    * @param {number} generation
    * @param {ReturnType<typeof normalizeReplayCursor>} cursor
@@ -830,6 +989,12 @@ export class ReplayPlaybackController {
   }
 
   /**
+   * Own one command transaction and await its checked result. Ignore callbacks after
+   * authority replacement. Successful current playback continues only after its
+   * presentation completes; duplicates or handled resync settle without replaying.
+   * Return true for an accepted ordinary result or false for stale/rejected work.
+   * Current errors clear request ownership, publish a pause, and call onError.
+   *
    * @param {Readonly<Record<string, any>>} command
    * @param {number} generation
    * @param {boolean} playback
@@ -917,6 +1082,9 @@ export class ReplayPlaybackController {
     }
   }
 
+  /**
+   * Return whether transport is playing or an animated playback request is advancing.
+   */
   #playbackIsActive() {
     return (
       this.transportState === REPLAY_TRANSPORT_STATES.PLAYING ||
@@ -926,6 +1094,9 @@ export class ReplayPlaybackController {
   }
 
   /**
+   * Increase presentation generation and store a frozen renderPolicy/restartAnimated
+   * request. This changes local render intent only and does not publish by itself.
+   *
    * @param {"replay_static" | "replay_animated"} renderPolicy
    * @param {boolean} restartAnimated
    */
@@ -938,12 +1109,19 @@ export class ReplayPlaybackController {
     });
   }
 
+  /**
+   * Call onStateChange with the current frozen snapshot. Callback exceptions propagate.
+   */
   #publish() {
     this.onStateChange(this.snapshot());
   }
 }
 
 /**
+ * Map unmodified arrow keys to navigation, fresh Space to toggle, and fresh Escape
+ * to clear_selection. Repeated arrows are allowed; modifiers and other keys return
+ * null. This only classifies input and does not prevent browser defaults.
+ *
  * @param {{key?: string, repeat?: boolean, shiftKey?: boolean, ctrlKey?: boolean, altKey?: boolean, metaKey?: boolean}} event
  */
 export function replayKeyboardIntent(event) {
@@ -965,6 +1143,12 @@ export function replayKeyboardIntent(event) {
 }
 
 /**
+ * Attach timeline buttons, slider, rate, and keyboard handlers to controller.
+ * elements supplies required DOM controls plus current authority/keyboard checks.
+ * clock defaults to globalThis but is retained unused; slider input previews locally
+ * and change commits one seek. Return a cleanup function removing every installed
+ * listener. No simulator data or replay file is changed.
+ *
  * @param {{
  *   root: HTMLElement,
  *   keyboardTarget: EventTarget,
@@ -990,12 +1174,18 @@ export function replayKeyboardIntent(event) {
  */
 export function bindReplayTimelineControls(elements, controller, clock = globalThis) {
   void clock;
+  /**
+   * Read the slider value and send one seek only when it converts to an integer.
+   */
   const seekSlider = () => {
     const intendedIndex = Number(elements.slider.value);
     if (Number.isInteger(intendedIndex)) {
       void controller.seek(intendedIndex);
     }
   };
+  /**
+   * Preview the slider's current/final tick labels and accessible text without a request.
+   */
   const onSliderInput = () => {
     const previewIndex = Number(elements.slider.value);
     elements.slider.value = String(previewIndex);
@@ -1008,11 +1198,23 @@ export function bindReplayTimelineControls(elements, controller, clock = globalT
     elements.position.value = tickText.visible;
     elements.position.textContent = elements.position.value;
   };
+  /**
+   * Commit the slider's chosen frame through the shared seek helper.
+   */
   const onSliderChange = () => seekSlider();
+  /**
+   * Read the rate selector and apply the controller's supported-speed validation.
+   */
   const onRateChange = () => {
     controller.setPlaybackRate(Number(elements.rateSelect.value));
   };
-  /** @param {Event} event */
+  /**
+   * Handle replay shortcuts only when this visible control set owns installed authority.
+   * Respect editable controls and dialog focus. Prevent scrolling defaults for owned
+   * Space/arrows even while navigation is fenced; dispatch only when keyboardEnabled.
+   *
+   * @param {Event} event
+   */
   const onKeyDown = (event) => {
     if (elements.root.hidden) {
       return;
@@ -1102,6 +1304,11 @@ export function bindReplayTimelineControls(elements, controller, clock = globalT
 }
 
 /**
+ * Render cursor, tick labels, rate, transport status, and button availability from state.
+ * elements supplies DOM controls and optional authoritative tick/transition resolvers.
+ * Pending navigation disables seek buttons; speed can remain editable. Return
+ * undefined and perform no network work. Missing scientific ticks display an em dash.
+ *
  * @param {{
  *   firstButton: HTMLButtonElement,
  *   backTenButton: HTMLButtonElement,

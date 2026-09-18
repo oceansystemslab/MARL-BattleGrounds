@@ -5,35 +5,51 @@
 > **NORMATIVE CONTRACT — ACTIVATED 2026-08-10.** This is the controlling public
 > evaluation protocol.
 
-This document is the normative protocol for evaluating MARL-BattleGrounds
-policies. It owns evaluation populations, cells, frozen
-weights, aggregation,
-uncertainty, checkpoint selection, canonical actor-information provenance,
-cross-play, controlled scenarios, runtime measurement, and failure/censoring
-treatment.
+This document sets the rules for evaluating MARL-BattleGrounds policies. It
+says which policies and conditions a result covers, how to combine results,
+how to report uncertainty, and how to select checkpoints. It also owns actor
+information records, cross-play, controlled scenarios, runtime measurements,
+and the treatment of failures and unobserved endpoints.
+
+**Current reading rule, 2026-09-17:** a protocol requirement is not proof of
+scientific qualification. The package implements native reset/step and Systems,
+evaluation, custom and canonical tournaments, verified game reuse, headlines,
+recording, recorded restart, result reading, commands and portable replay viewing.
+Separate maintainer admission and release machinery is tested with fixtures.
+There is no qualified official Big 12 bundle or trained baseline population.
+Official numerical game/resource budgets and the remaining approval gates stay open. This update
+supersedes the older weekly review and fixed 100-game official budget; it does
+not change old records or the current custom runner's default of 100.
 Current milestone numbers follow
 [A36's executive roadmap mapping](../design/specification_amendments.md#a36-submission-roadmap-approved-tdm-content-and-m7-closeout).
-Older numeric references below retain their historical aliases.
+Historical amendment titles and anchors retain their original milestone numbers.
+Gymnasium/PettingZoo adapters are deferred until a specific learner integration
+shows a need. Optional dependencies do not implement those adapters. M9 owns
+training distributions and curricula; M10 owns learners and learning experiments.
+The growing-pool example checks API integration, not an approved M9 curriculum.
 The companion [metric specification](metric_specification.md) owns stable
 metric meanings, sufficient components, eligibility, attribution, and allowed
 interpretations. Accepted departures from the original design PDF are recorded
 in the [specification amendments](../design/specification_amendments.md).
 
-The protocol does not prescribe one universal experiment. It prescribes the
-information every evaluation suite and experiment manifest must freeze so that
-a reported result is reproducible and scientifically interpretable.
+Researchers choose their experiments. Each evaluation suite and experiment
+manifest must record its choices before the locked evaluation starts. A reader
+must be able to reproduce the result and see exactly what it supports.
 
 ## Protocol objects
 
-The conceptual public contract has four layers. These names do not require a
-production registry during Milestone 6.
+Four kinds of record separate a measurement's meaning from the experiment
+that uses it. These are contract roles; they do not imply that every named
+record is a public Python class or that a universal registry exists.
 
 ### Metric definition
 
-A versioned metric definition is invariant across studies. It identifies the
-question, subject, data authority, units and amount stage, opportunity,
-sufficient components, reduction, zero-opportunity behavior, attribution,
-allowed claim, gameability companions, and validation state.
+A versioned metric definition keeps the same meaning across studies. It names
+the question, who or what is measured, which recorded facts it uses, and its
+units. It states when an opportunity counts, which raw values must be kept,
+how to combine them, and what a zero denominator means. It also limits credit
+and causal claims, names checks against misleading results, and records whether
+the metric is ready to use.
 
 Changing a formula, denominator, eligibility rule, amount stage, attribution,
 or semantic scope creates a new metric version. Changing an opponent pool,
@@ -41,7 +57,7 @@ cell weight, confidence interval, or checkpoint does not.
 
 ### Evaluation suite
 
-An `EvaluationSuiteV1`-equivalent declaration freezes:
+An evaluation-suite declaration, conceptually `EvaluationSuiteV1`, fixes:
 
 - suite ID, version, canonical digest, ownership classification as `official`
   or `custom`, separate canonical-condition status, and intended scientific
@@ -75,8 +91,7 @@ population is the canonical condition.
 
 ### Experiment manifest
 
-An experiment manifest freezes study-specific choices before locked-test
-evaluation:
+An experiment manifest fixes the study's choices before locked-test evaluation:
 
 - algorithms, policy architectures, training configurations, and code/artifact
   revisions;
@@ -97,7 +112,7 @@ uses a new manifest revision and records the reason.
 
 ### Metric result
 
-A `MetricResultV1`-equivalent row carries:
+A metric-result row, conceptually `MetricResultV1`, carries:
 
 - metric, suite, and manifest IDs, versions, and digests;
 - training-run and evaluation-seed identities;
@@ -122,20 +137,21 @@ ineligible prefix with an observed zero denominator is `insufficient_data`,
 not `zero_opportunity`; zero opportunity is available only after artifact,
 subject, completion, and endpoint eligibility pass.
 
-Milestone 6 CP3 realizes the generic host-side portion of this contract without
-activating a universal metric registry. An opt-in `EvaluationEpisodeObserverV1`
-passes each reducer one already validated coherent view consisting of the
-episode context, transition-start frame, transition, and successor frame.
-Reducers are deterministic, immutable, copy-on-write consumers; they never
-receive unresolved frame references or permission to reconstruct simulator
-rules. `EvaluationMetricReportV1` stores its episode context once and joins raw
-statistic rows back to that context rather than repeating policy, seed, task,
-scenario, information-regime, reward, and shaping provenance on every row.
+The historical M6 CP3 host path implements the generic record contract without
+a universal metric registry. When enabled, `EvaluationEpisodeObserverV1` gives
+each reducer one validated set: the episode context, frame before the step,
+transition, and frame after the step. A reducer returns new state from those
+facts. It must be deterministic, leave prior state unchanged, and use recorded
+facts rather than recreate simulator rules. `EvaluationMetricReportV1` stores
+the episode context once. Its statistic rows refer back to that context, so
+policy, seed, task, scenario, information, reward, and shaping records are not
+copied onto every row. New scalar TDM runs use the numerical path described in
+the [current metric contract](metric_specification.md#current-scalar-tdm-contract).
 
-The observer distinguishes validated transition count from successfully
-processed transition count. A failed append or reducer operation poisons the
-observer, preserves the last validated gap-free prefix, and cannot publish a
-partially updated statistic set. `EvaluationProcessingStatusV1` reports that
+The observer counts validated transitions separately from processed transitions.
+If append or reduction fails, the observer cannot continue as though it
+succeeded. It keeps the last validated consecutive prefix and cannot publish
+only some of the updated statistics. `EvaluationProcessingStatusV1` reports that
 failure independently of `EvaluationEpisodeCompletionV1`; a processing failure
 after a completed rollout never rewrites the rollout as failed. There is no
 logging sink, file writer, replay envelope, runner framework, or core callback
@@ -143,15 +159,15 @@ in CP3.
 
 ## Episode, training, evaluation, and scenario ownership
 
-An episode configuration resolves the fixed simulator inputs for one rollout.
-It is selected by a training distribution or fixed by an evaluation suite or
-scenario. It is not itself a training distribution, evaluation population, or
-scenario. [Amendment A15](../design/specification_amendments.md#a15-episode-configuration-and-experiment-distribution-ownership)
+An episode configuration gives the fixed simulator inputs for one rollout.
+Training chooses it from a declared distribution; evaluation or a scenario
+fixes it in advance. The configuration alone does not say which training or
+evaluation population it belongs to. [Amendment A15](../design/specification_amendments.md#a15-episode-configuration-and-experiment-distribution-ownership)
 defines structural validity and the permissive Team Deathmatch roster
 contract.
 
-Milestone 11 owns all training selection. Default direct Team Deathmatch
-training uses the canonical mirrored five-class 5v5 roster and the same task
+Milestone 9 owns the planned training-selection layer. The default direct Team
+Deathmatch training contract uses the canonical mirrored five-class 5v5 roster and the same task
 mechanics, lifecycle rules, score threshold `K`, horizon `H`, and canonical
 reward as official evaluation, but it samples from the separately approved
 training-map distribution and training seed schedule. Researchers may replace
@@ -160,13 +176,12 @@ configurations. An optional curriculum is a checkpointable, stateful selector
 over the same contract; its benchmark 1v1–5v5 path uses explicitly approved,
 handpicked rosters rather than an exhaustive composition grid. Map identities
 selected into the training distribution and the exact curriculum roster, map,
-weight, retention, opponent, and transition choices remain future Milestone 11
+weight, retention, opponent, and transition choices remain future Milestone 9
 decisions.
 
-An evaluation suite owns a frozen population of resolved configurations and
-assignments. A scenario owns its resolved episode configuration, explicit
-fixed-slot roster, initial state, role template, horizon, matched seed schedule,
-and quantitative endpoints. The schedule is a stable multi-attempt definition;
+An evaluation suite fixes its configuration population and policy assignments.
+A scenario fixes its episode configuration, slot-by-slot roster, initial state,
+roles, horizon, matched seeds, and measured endpoints. The schedule is a stable multi-attempt definition;
 each episode's realized seed record joins to exactly one declared schedule
 coordinate. Binding policy A to Team A and policy B to Team B, or binding
 policies per slot, fills the scenario's frozen roles; it cannot replace the
@@ -175,11 +190,11 @@ not the saved DevClient scenario, binds the behavioral claim, the compared full
 method and matched ablation, and any deterministic pressure-controller
 protocol. Saved scenarios remain controller-independent.
 
-DevClient scene-authoring assets are design inputs, not evaluation artifacts.
-A future evaluation owner may import an exact saved asset revision, but must
-independently reopen, normalize, validate, approve, and bind its
-content-addressed layout and authored-initial-condition identities to the
-resolved configuration and realized initial state. Those scientific lifecycle
+A saved DevClient scene is an authoring input. To use it as evaluation evidence,
+the evaluation owner must load one exact saved revision, normalize and validate
+it, and approve it. The owner then binds the layout and authored initial
+condition by content digest to the resolved configuration and actual initial
+state. Those scientific lifecycle
 steps belong to the owning suite, scenario, or manifest rather than to the
 DevClient. A filename, moving latest-revision alias, mutable browser buffer, or
 successful preview is not an admissible identity or validity proof.
@@ -199,8 +214,8 @@ configuration, roster, configured-active slots, role template, schedule, or
 realized coordinate. Scenario identity plus a subset check over role names is
 insufficient.
 
-The M7 V2 companion keeps semantic authored-content identity, compiled initial
-state, and attempt replay evidence distinct. The specification digest binds the
+The M7 V2 companion records three separate things: the authored content's
+identity, the prepared initial state, and the evidence for one recorded attempt. The specification digest binds the
 independently approved, content-addressed authored-initial-condition identity
 to a stable digest of simulator step count plus the dynamic global snapshot.
 Each record separately binds the complete frame-zero digest, including attempt
@@ -223,14 +238,14 @@ ineligible for official training and validation populations.
 ## Common policy and evaluation lifecycle
 
 [Amendment A12](../design/specification_amendments.md#a12-common-milestone-1012-policy-pipeline-spine)
-requires Milestones 10–12 to extend one common pipeline spine. Episode
-specifications selected by direct/custom training distributions or curricula,
-and episode specifications fixed by evaluation suites or scenarios, enter the
-same versioned policy-assignment and seed protocol. Official execution uses
+requires shared episode and policy contracts across the current Milestones
+8–10 (historically 10–12, under A36). Direct training, custom training,
+curricula, evaluation suites, and scenarios all use the same versioned policy
+assignment and seed rules. Official execution uses
 SharedObs throughout the same reset, base-observation, exact-mask,
 legal-action-realization, joint-action-assembly, core-step, transition,
 completion, capture/replay, and metric lifecycle. Evaluation/scenario episodes
-use M10's host adapter; M11-selected training episodes use M12's JAX
+use M8's host adapter; M9-selected training episodes use M10's JAX
 rollout/update/checkpoint adapter. Training selection does not create a runner
 or trainer, and training does not route through the evaluation/scenario host
 adapter.
@@ -238,11 +253,12 @@ adapter.
 [Amendment A25](../design/specification_amendments.md#a25-sharedobs-only-canonical-benchmark-execution)
 supersedes the earlier forward dual-regime benchmark plan. Official baseline
 training and evaluation, controlled scenarios, tournament and cross-play
-cells, ratings, leaderboards, and Paper 1 reports require:
+cells, ratings, leaderboards, and Paper 1 reports require the current relative
+input projection introduced by A37:
 
 ```text
 execution_information_mode = shared_obs
-actor_projection = base-observation-plus-authorized-sensor-source-bank@1
+actor_projection = base-observation-plus-authorized-sensor-source-bank@2
 ```
 
 Every official replay frame must carry exactly the availability matrix derived
@@ -264,15 +280,15 @@ current roadmap contains no mixed-regime V2 work. The immutable V1 wire
 contract remains homogeneous and dual-mode-compatible; it must never encode
 mixed execution by overloading policy identity or availability.
 
-Milestone 10 owns the common host-runner and evidence integration work that is
-not superseded by A25. Milestone 11 selects independently approved,
+Milestone 8 owns the common host-runner and evidence integration work that is
+not superseded by A25. Milestone 9 selects independently approved,
 content-addressed partition-neutral maps into training populations. Milestone
-12 consumes those selections through one SharedObs JAX rollout/update path and
+10 consumes those selections through one SharedObs JAX rollout/update path and
 owns compatible learned actor front ends, checkpoints, and a benchmark
 reference encoder. It freezes categorical identities, domains, sentinel
 meanings, shapes, masks, slot/source identities, provenance, and
 reference-encoder conventions—not researchers' choice of one-hot, embedding,
-attention, or other neural representation. M12 rejects held-out
+attention, or other neural representation. M10 rejects held-out
 evaluation/scenario assets before training execution.
 
 Centralized training remains separate from actor execution. An explicitly
@@ -310,9 +326,12 @@ deterministic controller through `pressure_protocol`, identically for the full
 method and matched ablation. Merely selecting a controller in the DevClient or
 passing its physical regression does not qualify official scenario evidence.
 [Amendment A27](../design/specification_amendments.md#a27-rolling-big-12-and-baseline-library-governance)
-defines the planned rolling Big 12 and cumulative Baseline Library. These
-amendments do not change the simulator, the generic cross-play contract, or the
-existing fixed-slot focal/cooperative/adversarial role vocabulary.
+records the earlier rolling Big 12 and cumulative Baseline Library direction.
+The accepted monthly snapshot, optional challenger, and admission rules in
+[Big 12 tournament and Baseline Library](#big-12-tournament-and-baseline-library)
+supersede its earlier weekly/fixed-budget details. These governance changes do
+not alter the simulator, generic cross-play rules, or the slot-based focal,
+partner, and opponent roles.
 
 ## Experimental units and terminology
 
@@ -337,10 +356,10 @@ battleground identity/version x layout/map
      x side/role x roster/composition
 ```
 
-Use a declared not-applicable sentinel when the evaluated setting has no
-separable cooperative partner or no adversarial opponent. Never collapse these
-axes into one “other policy” coordinate: varying a partner while also varying
-the opponent confounds cooperative generalization with adversarial robustness.
+Use an explicit not-applicable value when there is no separate partner or
+opponent. Keep partner and opponent as separate coordinates. If both change
+at once, a score change cannot by itself tell us whether partner cooperation
+or opponent difficulty caused it.
 
 Resolved episode configuration, scenario version, policy IDs,
 critic-information regime, reward mode, shaping configuration, code revision,
@@ -357,10 +376,10 @@ Each suite declares a finite set of cells and nonnegative target weights
 default. A task-declared target distribution is allowed when it is motivated
 and frozen before evaluation.
 
-Weights express the target population, not the number of episodes that happened
-to finish. A failed cell, zero-opportunity cell, or missing artifact does not
-cause the remaining weights to be silently renormalized. The result instead
-uses the suite's declared failure/missingness rule and exposes coverage.
+Weights describe the intended population. They do not depend on how many
+episodes finish. If a cell fails, has no opportunities, or lacks an artifact,
+keep its declared weight. Apply the suite's missingness rule and report coverage;
+do not silently increase the weights of the remaining cells.
 
 Layouts, sides, rosters, opponents, partners, and scenarios must not be sampled
 from an undocumented changing distribution. Joint partner/opponent weights are
@@ -414,9 +433,10 @@ q_run[r] = (sum_c w[c] * n_bar[r,c])
            / (sum_c w[c] * d_bar[r,c])
 ```
 
-Do not average cell rates. Do not pool opportunities across training runs. Do
-not renormalize weights around cells with zero realized opportunities. Preserve
-each `n_bar`, `d_bar`, and defined cell rate for audit.
+Use the weighted raw components above, rather than an average of cell rates.
+Keep independent training runs separate and keep the declared cell weights,
+including cells with zero opportunities. Save every `n_bar`, `d_bar`, and defined
+cell rate so another reader can check the calculation.
 
 If the weighted denominator is zero for a training run, the run result is
 `zero_opportunity`, not zero. Report the incidence of zero-opportunity runs.
@@ -432,11 +452,11 @@ agent with zero output has a defined zero volume. A share is
 
 ### Durations and distributions
 
-Uptime-like quantities preserve qualifying and eligible agent-steps. Event and
-episode distributions remain long-form, with cell/run identities attached.
-Default summaries are the median and interquartile range; tail quantiles are
-used when scientifically motivated. Min/max is not a default robustness or
-quality statistic.
+For time-based rates, keep both qualifying and eligible agent-steps. Store
+event and episode observations with their cell and training-run IDs. Use the
+median and interquartile range by default; use tail quantiles when the research
+question needs them. A minimum or maximum alone does not establish robustness
+or quality.
 
 ### Across independent training runs
 
@@ -462,11 +482,11 @@ Every confirmatory comparison predeclares:
 - the endpoint family and multiplicity adjustment; and
 - how undefined, failed, and insufficient runs affect the claim.
 
-Independent training runs—not an arbitrary universal number—determine
-inferential strength. Each manifest declares a seed budget and a precision or
-stopping rule before evaluation. When too few independent runs support a
-defensible uncertainty estimate, label the result descriptive; do not disguise
-episode replication as additional seeds.
+Uncertainty depends on independent training runs, so there is no universal
+seed count that makes every claim reliable. Before evaluation, record the seed
+budget and the precision target or stopping rule. If there are too few runs
+for a defensible uncertainty estimate, label the result descriptive. More
+episodes from the same run do not create more independent training seeds.
 
 For multi-task or multi-suite comparisons, report task-level results first.
 Interquartile mean, optimality-gap, and performance-profile summaries with
@@ -512,7 +532,7 @@ or any other adaptive decision.
 Training, validation, and evaluation manifests identify content by immutable
 digest and fail closed when their declared content closures intersect where
 disjointness is required. They never resolve a mutable latest-revision or
-`latest_big_12` alias. M11/M12 owns enforcement before training begins; full
+`latest_big_12` alias. M9/M10 owns enforcement before training begins; full
 training, checkpoint, selection, and population provenance must remain
 available for maintainer reproduction.
 
@@ -539,18 +559,18 @@ protocol, but non-reproduction alone is not proof of fraud.
 
 ## Completion, failure, missingness, and censoring
 
-Artifact validity, observer processing, rollout completion, and per-statistic
-endpoint observation are separate dimensions. None may be inferred from or
-collapsed into another.
+Check four things separately: whether the artifact is valid, whether metric
+processing succeeded, whether the rollout finished, and whether each scientific
+endpoint was observed. Success or failure in one does not answer the others.
 
 ### Artifact validity
 
-An artifact is valid only when schemas and catalog versions are recognized,
-digests match, identities and adjacent indices are gap-free, payloads are
-finite and shape-correct, catalog axis mappings are complete/aligned and join
-every fixed global slot through the episode roster, and completion metadata is
-internally consistent. Invalid artifacts contribute to failure/QC reporting
-but no tactical metric.
+A valid artifact uses recognized schema/catalog versions, matching digests,
+consecutive indices, and consistent identities. Arrays have the required shapes
+and finite values. Catalog mappings cover every fixed slot and agree with the
+episode roster. Completion fields must agree with one another. Report invalid
+artifacts as failures or quality-control evidence; do not use them for tactical
+metrics.
 
 ### Rollout completion
 
@@ -602,8 +622,9 @@ are frozen. A retry never silently erases its failed predecessor.
 
 ### Scientific censoring
 
-Censoring means a valid endpoint was not observed within a declared scientific
-window; it is not an episode completion state or a synonym for corrupted data.
+Censoring means the record is valid but the scientific observation window ended
+before the endpoint was seen. It does not mean the artifact is corrupt, and it
+does not replace the episode's completion state.
 Each statistic records one endpoint-observation status from `not_applicable`,
 `observed`, `right_censored`, `competing_event`, or `unavailable`. For
 time-to-success:
@@ -623,9 +644,9 @@ different endpoint-observation statuses. A prefix-valid descriptive statistic
 may remain defined on a partial rollout while a complete-only outcome is
 `insufficient_data`; neither case turns missing future opportunity into zero.
 
-Missingness policies state whether a claim targets all scheduled runs,
-successfully trained runs, or valid completed evaluations. The distinction is
-part of the estimand and cannot be chosen after seeing failures.
+The missingness rule must say which population the claim describes: all
+scheduled runs, successfully trained runs, or valid completed evaluations.
+Choose that population before seeing failures.
 
 ## Symmetry, sides, and common conditions
 
@@ -655,10 +676,10 @@ components remain exportable.
 
 ## Controlled-scenario protocol
 
-Context-sensitive tactical claims use controlled quantitative scenarios rather
-than episode-wide proxies. Their primary purpose is matched behavioral-ablation
-evaluation: a full method is compared with one declared ablation under the same
-frozen conditions. Each versioned evaluation definition freezes:
+Use controlled scenarios to test a tactical claim whose meaning depends on
+context. Compare a full method with one declared ablation under the same fixed
+conditions, and measure the claimed behavior directly. Each versioned scenario
+evaluation fixes:
 
 - one bounded behavioral hypothesis and the eligible policy roles;
 - the full-method and matched-ablation identities;
@@ -706,9 +727,9 @@ then prove that the episode's realized seed record is exactly one member of the
 scenario's stable matched schedule. A set/subset comparison of role labels or
 a digest of one realized seed record does not establish those identities.
 
-“Single-shot” prohibits learning or adaptation across attempts. It does not
-reduce a stochastic evaluation to one episode. Policies are compared over the
-same frozen scenario seeds when possible.
+“Single-shot” means no learning or adaptation across attempts. It does not mean
+one episode is enough for a stochastic method. Compare policies using the same
+fixed scenario seeds when possible.
 
 The approved TDM suite contains exactly eight scenarios. Scenarios 1, 2 and
 4–8 have five-transition horizons; approved Scenario 3 r24 alone has a
@@ -716,7 +737,7 @@ ten-transition horizon for sustained body blocking, with the canonical
 five-transition respawn-wave period. Scenario/map design approval is complete
 under A36; remaining identity, transport and evidence checks do not reopen it.
 These horizons are properties of this suite, not a global scenario-schema limit.
-The packaged Scenario 3 r25 changes only the accepted r24 Notes; its physical
+The packaged Scenario 3 r26 changes only the accepted r24 Notes; its physical
 state, map and configuration are identical. The package manifest retains both
 the approved source and distributed revision identities.
 
@@ -724,20 +745,38 @@ the approved source and distributed revision identities.
 `make_standard_team_deathmatch_config` for explicit approved maps and independently
 ordered rosters, and `make_canonical_team_deathmatch_evaluation_config` for the
 five canonical evaluation maps
-(17, 20, 25, 35 and 39) with mirrored Mage/Warrior/Hunter/Rogue/Priest slots.
+(47–51) with mirrored Mage/Warrior/Hunter/Rogue/Priest slots.
 These constructors select immutable packaged content without importing the
 mutable DevClient draft store. Canonical evaluation retains paired side
 assignments as well as the approved geometric symmetry.
 
+The [2026-09-16 map publication approval](../design/specification_amendments.md#approved-map-publication-on-2026-09-16)
+selects audited revisions for new games: 39 physical map updates, Map 3's
+obstacle-ID cleanup and 12 unchanged maps. A36 owns the exact clearance limits
+and exceptions. Publication and focused replay compatibility checks passed.
+The packaged manifest records the exact selected sources; prior identities
+remain in one immutable history resource so old recordings keep their original
+map version. New runs use the current catalog. Restart long-running clients
+and Python processes after the package update to refresh cached map records.
+The eight scenarios carry their own saved configurations and winning sequences;
+this map publication does not replace them. Earlier solver results, timings and
+replays describe their recorded map versions, not the revised layouts.
+
 `python -m scripts.dev.qualify_tdm_scenarios <new-directory>` exercises all
-eight packaged definitions at two fixed schedule coordinates through the
-existing rollout, replay, metric and V2 scenario-record contracts. Team A uses
-ALPHA as a pipeline control; Team B uses the approved ALPHA/BETA pressure
-binding. The suite index retains source/configuration/controller identities,
-completion and processing status, quantitative terminal Team A reward, and
-every failure. This qualification establishes reproducible integration; the
-learned-policy, matched-ablation and manuscript campaigns belong to the later
-milestones. It introduces no additional scenario-design approval gate.
+eight packaged definitions at two fixed schedule coordinates through the shared
+`evaluate_episodes` executor, current scalar metrics, replay V3 and scenario
+record V4. One RunWriter run retains one full scalar CSV row per episode. Team A
+uses ALPHA as a pipeline control; Team B uses the approved ALPHA/BETA pressure
+binding. Before capture, the context binds the actual built-in callable's
+versioned controller descriptor separately from its frozen variables digest,
+together with the approved scenario identity, fixed roles and public slot IDs.
+The recorded RNG protocol and root/episode coordinates are those actually
+consumed by the shared evaluator; derived named streams remain unrecorded.
+The suite index retains source/configuration/controller identities, completion,
+quantitative terminal Team A reward and every failure. A retained partial prefix
+has no completed scalar row and no available terminal endpoint. This establishes
+reproducible integration; learned-policy, matched-ablation and manuscript
+campaigns belong to later milestones. It introduces no new scenario approval gate.
 
 Each treatment/control arm uses multiple independently trained, deliberately
 paired runs. The training run is the replication unit; agents, ticks, episodes,
@@ -760,9 +799,9 @@ claims.
 
 ## Cross-play and population evaluation
 
-Cross-play applies a frozen population protocol to a selected base task
-endpoint. It does not duplicate every tactical metric. Cooperative partners and
-adversarial opponents are separate experimental axes.
+Cross-play measures a task endpoint across a fixed set of policy combinations.
+Keep cooperative partners separate from adversarial opponents. Cross-play does
+not need a separate copy of every tactical metric.
 
 Every official cross-play episode uses canonical SharedObs. Information regime
 is therefore constant provenance, not another tensor axis or assignment
@@ -810,15 +849,16 @@ full-team policy without separable partner assignments.
 
 ## Big 12 tournament and Baseline Library
 
-The planned Big 12 is one fixed-panel instantiation of the generic cross-play
-contract above. It always contains exactly twelve method-level entrants, each
-represented by one fixed executable system and one Elo value. Each numbered,
-versioned method/configuration row is one entrant, so distinct variants of a
-broad algorithm may occupy separate rows. Independent training runs and
-checkpoint histories provide selection, training-stability, and reproducibility
-evidence; they are not additional entrants or separately rated policies.
+**Canonical execution, reuse and separate maintainer admission machinery are
+implemented. Official rules, trained controllers and a qualified released bundle
+are still required.** A released Big 12 snapshot contains exactly
+twelve method-level entrants. Each has one fixed executable system and one Elo
+value. An ordinary canonical call evaluates those twelve alone, or adds one
+challenger to make thirteen. A system may contain several internal policies;
+those components do not become extra entrants. Larger or edited populations
+use the custom tournament route.
 
-The tentative Paper 1 roster is:
+The tentative Paper 1 roster remains:
 
 1. RNN-IPPO with parameter sharing.
 2. RNN-MAPPO with parameter sharing.
@@ -833,59 +873,183 @@ The tentative Paper 1 roster is:
 11. `S*-Curriculum-Shaped`.
 12. Qwen-Five.
 
-For rows 1–11, three independently initialized runs retain their full eligible
-checkpoint histories. Within each run, one checkpoint is selected by a
-validation-only rule frozen before training. The validation-highest eligible
-checkpoint across those three runs becomes the method's one tournament system.
-The validation metric, evaluation cadence, checkpoint eligibility, and all
-tie-breaking are frozen in the manifest before training; scenario or
-tournament results may not influence selection. All run-level and selection
-evidence remains reportable even though only one system enters the tournament.
+For rows 1–11, retain three independently initialized training runs and their
+eligible checkpoint histories. A rule fixed before training selects one
+checkpoint from each run using validation only, then selects the best eligible
+validation checkpoint of the three as that method's tournament system. Record
+the validation metric, cadence, eligibility, and every tie-break rule in the
+manifest. Scenario or tournament results cannot select the checkpoint. Keep
+all training-run and selection evidence even though only one system enters.
 
-Qwen-Five contributes one fixed system only after a measured throughput,
-latency, resource, reproducibility, and protocol-compatibility gate. It is a
-tentative cost-gated entrant, not an assumed fit for the JAX training loop. If
-it does not qualify, its roster position remains unresolved until an explicit
-governance decision; no substitute is invented silently.
+Qwen-Five remains tentative. It must pass measured throughput, latency,
+resource, reproducibility, and protocol-compatibility checks. It is not assumed
+to fit a JAX training loop. If it fails, its place stays unresolved until an
+explicit governance decision chooses what happens next.
 
-One frozen Big 12 tournament therefore contains:
+An immutable monthly configuration names the exact twelve controller
+versions, approved maps and mirrored rosters, SharedObs input contract, game
+budget, seed schedule, memory/rating settings, and artifact references with
+hashes and sizes. Resolve it once. Resume must use the saved resolved version;
+a newer installed default must not change an existing run. Missing official
+assets must produce a clear error, never substitute ALPHA, BETA, or another
+library member. Models and reports remain separate from the small configuration.
 
-```text
-12 method entrants
-12 fixed tournament systems
-66 unordered pairings
-100 episodes per pairing
-6,600 tournament episodes
-1 Elo per method
-```
+The resolved field has 66 unordered matchups for twelve entrants and 78 for
+thirteen. Every matchup uses the same game budget, equal coverage across the
+five test maps, and complete default/swapped spawn pairs. The challenger stays
+Team A; incumbent games keep their recorded A/B assignments. Exchange complete
+ordered spawn banks, including respawns. Keep roster order, world directions,
+action meanings, map/seed pairing, and fresh per-game memory fixed.
 
-Each pairing uses five maps, ten evaluation coordinates, and both side
-assignments. The complete win/draw/loss matrix is the authoritative result.
-The planned compact rating is one jointly fitted, draw-aware
-Bradley–Terry–Davidson model centred at 1000; it remains secondary to the raw
-matrix. Exact estimator parameterization, uncertainty, convergence and failure
-handling, software identity, and report rounding must pass explicit activation
-gates before the first tournament. No result may be labelled Elo merely because
-it applies an ad hoc pairwise update.
+**The official numerical game budget is not yet approved.** An omitted
+`games_per_opponent` inherits the snapshot's positive integer budget. An
+explicit budget must be positive, nonboolean, and divisible by ten for five
+maps. It applies to every incumbent and challenger matchup. A different budget
+is a declared research override and cannot qualify promotion; an explicit equal
+budget remains compatible with the official rule. These argument rules are
+implemented; they do not settle the official numerical budget.
 
-Tournament-rating uncertainty is conditional on the twelve selected fixed
-systems and belongs to that separately qualified estimator. Across-run
-variability describes training stability and is reported separately; it does
-not become uncertainty for a tournament system that was never entered.
+By default, the canonical runner verifies and reuses all 66 incumbent matchups.
+With a challenger, it runs twelve more matchups and fits all thirteen systems
+together. Reuse raw games, never old Elo as rating credit. Check controller,
+protocol, environment/schema, map, roster, assignment, spawn, budget, and random
+stream identities before reuse. Preserve original game IDs and seeds when an
+entrant is added or reordered. Required outcome and requested metric/replay
+coverage must be present before starting new games.
 
-After Paper 1, the active Big 12 is reviewed weekly. Each review publishes one
-immutable dated snapshot. A peer-reviewed, published method may challenge only
-after its compatible implementation, reproduction, qualification, and fixed
-system have passed the same gates. Promotion and relegation occur at method
-level, never checkpoint level; if no challenger qualifies, the roster does not
-change. The exact challenge schedule, multiple-challenger ordering, ties, and
-weekly rating refit are pre-launch governance decisions. Ratings centred within
-different weekly pools are not directly comparable over time without a
-separately specified longitudinal model. The Paper 1 snapshot and results
-remain permanently frozen.
+Select any smaller reused set in the snapshot's declared order without looking
+at outcomes. Keep whole spawn pairs and larger declared seed groups together.
+If compatible coverage is insufficient, reject and explain the explicit
+`rerun_existing=True` route. That route runs the entire resolved tournament
+again; it does not silently fill only missing games. Report planned, reused,
+and new game counts. Incomplete or failed runs keep valid raw records but cannot
+claim a finished tournament or headline result.
 
-The cumulative Baseline Library is monotonic even when the active Big 12
-changes. It retains every current and former member's implementation, official
+**Implemented custom behavior:** `run_tournament` accepts an explicit System or
+Policy population, or an immutable configuration. Its programmatic default is
+`episodes_per_pair=100`, with fixed Team A/B ownership and opposite complete
+spawn banks. There is no twelve-entry limit on custom fields. Canonical calls
+use the same execution, statistics and result authorities, with verified reuse
+and one optional challenger. See [Canonical Tournaments](canonical_tournaments.md).
+A qualified official bundle and its numerical budget remain separate release
+gates. Historical team-swapped records keep their original meaning. The earlier
+6,600-game workload had ten seed blocks per map with opposite policy-side
+assignments; that historical workload is not an official game budget.
+
+The compact report is **Policy | Elo with uncertainty | Expected Score with
+uncertainty | Win % | Draw % | Loss %**, with the matchup matrix and per-map
+breakdowns available beside it. Outcomes are always required. Tactical metrics
+and replays are independent choices and are not needed to fit ratings. A
+finished canonical result requires all scheduled outcomes; it must not silently
+drop a failed matchup.
+
+### Frozen rating and uncertainty contract
+
+Let `s` be centered log strengths with `sum(s) = 0`, and `z` the log draw
+parameter. For policies i/j use logits `[(s_i-s_j)/2, z, -(s_i-s_j)/2]` for
+win/draw/loss. Thus draw weight is `exp(z)` without an extra factor of two.
+Fit summed negative log likelihood plus
+`(sum(s²) + z²) / (2 ln(10)²)`. Elo is `1200 + 400s / ln(10)`; a rating difference
+describes decisive win/loss odds, with draws modelled separately. The symmetric
+regularizer stabilizes separated/constant results; it does not create new evidence.
+
+Use existing BFGS with a fixed absolute gradient tolerance of `1e-4` and at most
+1,000 iterations. Parameters, objective and gradient must be finite and convergence
+must succeed for the point fit and every bootstrap replicate. The optimizer may
+subtract the parameter-independent saturated-model likelihood to reduce numerical
+cancellation; this does not change the objective's minimizer or gradient. Report
+the full negative log likelihood plus penalty in estimator metadata.
+
+The implemented rating fit uses the qualified SciPy CPU path once after the
+tournament. Historical evidence: a controlled 6,600-match, 5,000-resample
+comparison took about 10.5 seconds on CPU with all fits passing; the faster JAX
+GPU prototype failed convergence qualification. This is retained estimator
+history, not a current CPU speed target or a new qualification result. Numerical
+per-episode metrics stay on JAX and can run on GPU. The 1,200 display center
+changes neither fitted strengths nor rating gaps.
+
+Use 5,000 deterministic bootstrap replicates, resampling independent seed blocks
+within pair/map cells while retaining each complete paired block. Current
+schedules preserve fixed-team default/swapped spawn pairs through the versioned
+schedule-to-statistics join. Historical team-swapped schedules retain their
+original interpretation. Existing records must not be relabelled. Intervals are approximate 95%
+percentile intervals conditional on the frozen systems and map panel. They do not
+represent training-run variation. Failed fits are errors and are never discarded.
+Constant samples and inadequate independent variation produce an explicit
+**Insufficient Variation** or insufficient-block result rather than zero-width
+certainty.
+
+Joint Elo intervals additionally require a strongly connected directed graph of
+observed decisive wins: every group must have some observed reversal path against
+its complement. Without it, resampling cannot create missing decisive evidence,
+and regularization alone cannot justify uncertainty bounds. Point ratings remain
+reportable; expected-score interval availability is assessed separately. This is
+a conservative availability rule, not a guarantee of exact nominal coverage near
+population boundaries. Report interval availability and the approximation limits.
+
+Expected score uses win=1, draw=0.5 and loss=0, with equal map weighting and declared
+opponent weights. W/D/L proportions use those same population weights. Persist
+`match_results.csv`, `matchup_results.csv`, `map_results.csv` and
+`tournament_results.csv`; the matrix is a view of matchup rows. Secondary lower-tail
+robustness is the mean expected score over the worst-performing 20% of weighted
+opponent × map cells. For a twelve-system field with five equally weighted
+maps, this is the lowest eleven of fifty-five cell means. A thirteen-system
+field has sixty such cells and uses its lowest twelve. The same worst-20% rule
+applies; it remains outside the compact main report.
+
+### One-day training claim
+
+The predeclared target is a frozen learned policy trained within 24 hours on one
+RTX 5090 that beats **both ALPHA and BETA** and has the highest jointly fitted Elo
+in their three-way tournament, exclusively on held-out maps. For each baseline,
+the lower 95% confidence bound on expected score must exceed 0.5. Confirm the
+result across multiple predeclared independent training seeds.
+
+Held-out maps never guide training, hyperparameter choices or checkpoint selection;
+validation maps serve those purposes. Freeze the checkpoint before the held-out
+tournament. Declare its evaluation budget before seeing outcomes. Include compilation,
+rollout, learning and requested logging in the training-time budget; report tournament
+qualification time separately. Runtime/VRAM measurements without learner trials do
+not establish competence or sample efficiency. Report learning curves, environment
+transitions, peak memory, hardware/software identity and the result for every
+predeclared training seed, including failures.
+
+The accepted post-Paper-1 process publishes one immutable twelve-system
+snapshot at **00:00 Europe/London on the first of each month**. The submission
+cutoff is **72 elapsed hours** before that instant. Publish both local and UTC
+times; three local calendar dates are not always 72 elapsed hours.
+
+Maintainers process complete, qualified submissions in arrival order against
+a provisional Big 12. Each admission freezes that provisional population. The
+published twelve stay unchanged until monthly release. Failed or unfinished
+work leaves membership unchanged and rolls forward without losing queue order.
+A local researcher call neither promotes a challenger nor publishes a snapshot.
+
+Use the complete joint thirteen-system Elo fit for promotion. A challenger
+strictly above the lowest incumbent replaces it; an exact cutoff tie does not
+promote. After promotion, retain the surviving twelve's 66 matchups: 55 among
+old incumbents plus eleven involving the new member. Refit those twelve from
+those games before evaluating the next challenger. Do not carry the old Elo
+numbers forward as evidence. Apply each admission once and preserve removed
+members and their historical games.
+
+Admission requests full metrics from the first transition of every challenger
+game. Publication requires complete outcomes, priority data, and full reports
+for every retained game; selected replays remain separate. A prior priority-only
+run cannot manufacture missing full data. Resource or write failures cannot
+become invented wins, losses, or draws to meet a release date.
+
+**Remaining gates:** approve and qualify the official numerical game and
+resource limits, timing definitions, the eviction rule when several incumbents
+tie for last, revised-method admission/replacement, episode-local adaptation,
+and remaining eligibility, reproduction, and public-test-feedback rules. The
+monthly cadence and 12-or-13 population are settled design choices; these open
+gates still block official launch. Ratings from different snapshot populations
+are not directly comparable without a separate model for changes over time.
+Paper 1's frozen snapshot and results remain permanent.
+
+The Baseline Library keeps growing as the active Big 12 changes; removing a
+member from the active twelve does not remove its historical record. It retains every current and former member's implementation, official
 configuration, provenance, designated retained checkpoints, selected final
 system, compatibility metadata, and historical membership and results. A
 legitimate training workflow may consume compatible library material only
@@ -903,12 +1067,14 @@ fraud finding.
 
 ## Learning and sample efficiency
 
-Training curves are evaluated through frozen periodic held-out evaluations.
-Ordinary curriculum rollouts do not run the full evaluation suite.
+Measure learning curves at fixed evaluation checkpoints using conditions held
+out from training. Validation may guide the declared selection rule; locked-test
+results may not. Ordinary curriculum rollouts do not run the full evaluation
+suite.
 
-Default direct training, researcher-defined benchmark training distributions,
-and curriculum training share one canonical SharedObs rollout, batch,
-optimizer, update, and checkpoint lifecycle. The curriculum differs only by
+The planned learner contract uses the same canonical SharedObs rollout,
+batching, update, and checkpoint lifecycle for direct training, researcher-defined
+benchmark distributions, and curricula. The curriculum differs only by
 retaining selector state and emitting the next ordinary episode specification.
 Roster selection does not create a separate trainer. A benchmark checkpoint is
 emitted for the canonical projection/front-end contract, and the learner
@@ -937,27 +1103,38 @@ for canonical held-out evaluation outcomes.
 
 ## Runtime and resource protocol
 
-Runtime results declare device model, driver/runtime and library versions,
-precision, batch/vectorization shape, environment count, horizon, policy
-inclusion, capture profile, and repetition count.
+Runtime results name the device, driver/runtime and library versions, numeric
+precision, batch shapes, environment count, horizon, included policy work,
+recording profile, and repetition count.
+
+For the current foundations work, **GPU speed and efficiency are the performance
+qualification target**. CPU checks establish correctness and compatibility; they
+do not impose a separate CPU speed target. Preserve historical CPU measurements
+with their workload and date. Host work still counts when it is part of the
+complete GPU workflow, including setup, transfers, output, and rating analysis.
 
 Report separately:
 
-- first compile time;
+- setup and first-call time, separating compilation where the measurement can;
 - warmed steady-state environment throughput;
 - policy inference throughput/latency;
 - optional communication-model time and cost;
 - host capture/event/metric overhead when enabled; and
-- peak device and host memory where relevant.
+- peak device and host memory where relevant; and
+- host/device transfers and output bytes where those costs are affected.
 
 Canonical SharedObs composition, projection, and compiled actor-front-end cost
 are included in the declared runtime boundary. A separately labelled custom
 diagnostic may measure NoSharedObs compatibility, but it is not an official
 benchmark stratum or evidence for a separate runner or evaluation stack.
 
-Warm-up iterations and timed repetitions are fixed in the manifest. Evaluation
-capture must not be included in a claimed ordinary-training throughput number
-unless the label explicitly says so. A disabled evaluation path performs no
+Fix warm-up and timed repetition counts in the manifest. Synchronize GPU work
+before reading elapsed time. Compare equal inputs, policy work, retained outputs,
+and source/asset identities; otherwise a faster run may simply do less work.
+Check compilation reuse when ordinary values change without changing shapes or
+dtypes. Do not call first-call time pure compilation without a way to separate it.
+Label capture costs explicitly when they are included in a training-throughput
+number. A disabled evaluation path performs no
 host transfer, model validation, event decoding, logging, or trajectory
 retention. In CP3, disabled means that no observer or evaluation context is
 constructed and the caller never invokes capture. An explicitly constructed
@@ -993,9 +1170,10 @@ and both bundle publications bound to one opened directory inode.
 Scenario and actor-POV companions use the same finite canonical JSON,
 descriptor-bound nonsymlink path walk, size/depth limits, and atomic no-clobber
 publication. A POV save must validate its completed replay reference. A
-scenario save or load must validate both its replay and metric-report evidence
-joins; a structurally valid but foreign record is not accepted as a local
-scenario result.
+historical V1/V2 scenario save or load validates both its replay and metric-report
+evidence joins. Historical V3 scenario records join replay V2 directly. Current
+V4 scenario records join replay V3. Neither family has a metric-report field. A structurally valid but foreign record is not accepted as
+a local scenario result.
 
 Canonical V2 scenario loading and saving remain JAX-free and establish artifact
 and evidence validity, not official product acceptance. An official consumer
@@ -1004,8 +1182,11 @@ That separately named host gate rehydrates the exact carried configuration and
 initial state, applies the current core product and curated-state validators,
 requires the canonical SharedObs mode and projection, and checks the exact
 configured-roster availability topology on every replay frame.
-No mutable draft, filename, or successful transport round trip can substitute
-for that gate.
+Historical V3 readers preserve this separation:
+`validate_official_scenario_evaluation_record_v3` applies the same product,
+initial-state and all-frame SharedObs checks to replay V2. Current V4 scenario
+records join replay V3 and use the corresponding V4 official gate. No mutable draft, filename, or successful transport round trip can
+substitute for the explicit official gate.
 
 Rollout completion, evaluation-processing validity, and per-statistic endpoint
 observation remain independent in both live and replay-loaded analysis. A
@@ -1050,12 +1231,16 @@ Evaluation frames store base observations and masks once. They do not duplicate
 materialized SharedObs. SharedObs actor inputs remain reproducible from the
 same-epoch base sensor projections, source-axis/provenance mapping, required
 recipient-by-source availability inputs, and recorded actor-input projection
-version. A19's structured source bank may be reconstructed on demand from
-those authorities, using the recorded source/global-slot mappings rather than
-the current code's mapping constants. Reference-rollout capture consumes the
-exact availability returned with the rollout result; it does not independently
-recompute the executed topology. Learned encoder tensors remain a separate
-Milestone 12 contract.
+version. Historical source banks use their recorded source/global-slot mappings
+rather than current code constants. Current banks use five own-team sources and
+ten relative candidates: five allies, then five enemies. Their feature shape is
+`(5, 10, 58)`, visibility shape is `(5, 10)`, objective shape is `(5, 8, 12)`,
+and source-availability shape is `(5,)`. The selected actor's own observation
+arrives separately; its own source row is unavailable. Current replay capture derives availability
+from the captured active mask and team IDs through the same canonical topology
+helper used by policy input construction. Saved availability matrices remain the
+authority when reading historical artifacts. Learned encoder tensors remain a
+separate Milestone 10 contract.
 World-state critic inputs and privileged evaluation snapshots are separate
 contracts and never leak into actor inputs.
 
@@ -1077,11 +1262,27 @@ it for `no_shared_obs`. Diagonal, cross-team, inactive-recipient, and
 inactive-source entries are false. Neither regime stores a materialized
 SharedObs actor-input projection in the evaluation frame.
 
-This V1 mode and its compatible actor projection are episode-wide context
-authorities, not per-assignment fields. All configured active policy
-assignments must therefore be homogeneous. The current V1 context, replay, and
-metric-report family is immutable and rejects implicit mixed execution. A25
-removes mixed-regime V2 from the current roadmap without changing V1.
+The recorded availability matrix is routing metadata. A policy receives only
+its five own-team source entries, with every unavailable source cleared. Global
+slots, hard team IDs, roster ownership and catalog mappings stay outside the
+current policy input. Feature column 3 means `is_enemy`: self and allies are
+zero, visible enemies are one, and unseen rows remain zero. Existing visibility
+and activity masks distinguish hidden enemies from allies and unused padding.
+`self_ally_index` is a scalar own-team row number from 0 to 4; inactive actors
+receive zero. Shared networks normally condition on `self_features`.
+
+The current contract uses base observation/frame V2, episode context V3,
+SharedObs projection V2, NoSharedObs projection V3 and replay V3. Historical
+records keep their original team-number feature and projection meaning. A run
+cannot resume with a different input contract. See
+[A37](../design/specification_amendments.md#a37-relative-policy-identity-and-versioned-recordings)
+and the [policy input guide](workflows.md#policy-inputs).
+
+Execution mode and compatible projection remain episode-wide context
+authorities, not per-assignment fields. All configured active policy assignments
+must therefore be homogeneous. The historical V1 context, replay and metric
+report families remain immutable. Their version numbers do not authorize mixed
+execution.
 
 Milestone 6 evaluation records use a single normalized authority for submitted
 and accepted actions inside `TransitionFactsV1.action_acceptance_facts`; the
@@ -1180,16 +1381,19 @@ Before a suite is used for an official claim, verify:
     trained paired runs as the replication unit;
 16. the complete public scenario closure is digest-disjoint from training and
     validation manifests and has not influenced any adaptive decision;
-17. a frozen Big 12 snapshot contains exactly twelve methods, twelve fixed
-    systems, 66 unordered pairings, 100 episodes per pairing, and one Elo value
-    per method, while preserving outcome and failure accounting for all 6,600
-    scheduled episode coordinates alongside the raw win/draw/loss matrix;
+17. a frozen Big 12 snapshot contains exactly twelve fixed systems and one
+    Elo value per method; a canonical run covers those twelve alone or adds
+    one challenger, with 66 or 78 matchups respectively, one approved uniform
+    budget, complete paired coverage, stable origin identities, and the full
+    raw outcome/failure matrix; any research budget override is labelled and
+    cannot qualify promotion;
 18. rows 1–11 retain three independent training runs and select one tournament
     system using only the predeclared validation rule; Qwen-Five has separately
     passed its measured cost and compatibility gate;
-19. the rating estimator, uncertainty, convergence/failure behavior, weekly
-    challenger rules, and immutable snapshot identities have passed their
-    explicit pre-activation gates; and
+19. the rating estimator, uncertainty, convergence/failure behavior, verified
+    reuse, monthly admission/publication, and immutable snapshot identities
+    have passed their explicit gates; all remaining official launch decisions
+    named above are approved and qualified; and
 20. every admitted system is reproducible from immutable implementation,
     configuration, checkpoint, population, and selection provenance, and no
     training consumer resolves a mutable `latest_big_12` alias.

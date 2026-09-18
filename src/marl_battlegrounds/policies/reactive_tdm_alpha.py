@@ -1,4 +1,13 @@
-"""Deterministic five-class reactive TDM decisions from current SharedObs."""
+"""Choose deterministic TDM actions from current permitted SharedObs inputs.
+
+ALPHA supports all five classes. Priests follow and heal allies; the other
+classes approach or keep a class-specific distance from enemies. Exact action
+masks limit combat choices, and shared movement helpers handle static walls.
+The controller uses no recurrent memory or random draws.
+
+reactive_tdm_alpha_policy chooses actions. The descriptor function returns the
+versioned rule data used to identify this diagnostic controller in recordings.
+"""
 
 import jax.numpy as jnp
 from jax import Array
@@ -28,7 +37,7 @@ from marl_battlegrounds.policies.reactive_common import (
     refine_movement,
 )
 from marl_battlegrounds.policies.shared_obs import (
-    SharedObsSensorSourceBankV1,
+    SharedObsSensorSourceBankV2,
     compose_shared_obs_unit_features,
 )
 
@@ -44,7 +53,19 @@ WARRIOR_CHARGE_HEALTH = 40.0
 
 
 def reactive_tdm_alpha_controller_descriptor() -> dict[str, object]:
-    """Return fresh canonical rule data for launch-bound controller provenance."""
+    """Return fresh versioned rule data describing the ALPHA controller.
+
+    Returns
+    -------
+    dict[str, object]
+        Policy identity, version, class rules, thresholds, tie-breaks and movement
+        assumptions. Nested containers are created for this call.
+
+    Notes
+    -----
+    Recording code uses this data as part of controller identity. It is descriptive
+    data, not a configurable controller or a claim of learned-policy performance.
+    """
     return {
         "policy_id": "reactive-team-deathmatch-controller",
         "version": 2,
@@ -139,12 +160,41 @@ def _priest_direction(
     ally_living: Array,
     enemies: Array,
     enemy_living: Array,
-    recipient_global_slot: Array,
+    self_ally_index: Array,
     center_direction: Array,
 ) -> tuple[Array, Array]:
-    """Keep healing-oriented retreat separate from peaceful nearest-ally spacing."""
+    """Choose a Priest's movement intent from permitted ally and enemy rows.
+
+    Parameters
+    ----------
+    self_features : Array
+        Priest feature row, shape (58,).
+    allies, enemies : Array
+        Ally and enemy feature arrays, each shape (5, 58).
+    ally_living, enemy_living : Array
+        Boolean (5,) masks of permitted living candidates.
+    self_ally_index : Array
+        Scalar index locating this Priest in the ally rows.
+    center_direction : Array
+        Direction toward the map center, shape (2,), used when no ally is available
+        and no enemy is visible.
+
+    Returns
+    -------
+    direction : Array
+        World-space (2,) movement intent. With visible enemies, approach the
+        selected lowest-health ally when far enough away; otherwise retreat from the
+        nearest enemy. Without enemies, keep the configured nearest-ally spacing.
+    approach : Array
+        Scalar Boolean identifying approach movement for later wall steering.
+
+    Notes
+    -----
+    This returns intent only. refine_movement applies the current movement mask
+    and static geometry. Equal-health selection follows lowest_health_row.
+    """
     origin = centers(self_features)
-    self_row = recipient_global_slot % MAX_AGENTS_PER_TEAM
+    self_row = self_ally_index
     ally_row = lowest_health_row(allies, ally_living, break_ties_by_max_health=True)
     ally_delta = centers(allies[ally_row]) - origin
     ally_distance = jnp.sqrt(jnp.sum(jnp.square(ally_delta)))
@@ -185,17 +235,45 @@ def reactive_tdm_alpha_policy(
     recipient_observation: Observation,
     recipient_action_mask: ActionMask,
     actor_key: Array,
-    source_bank: SharedObsSensorSourceBankV1,
+    source_bank: SharedObsSensorSourceBankV2,
     recipient_source_availability: Array,
-    recipient_global_slot: Array,
 ) -> ActorAction:
-    """Choose one complete team-agnostic action; no RNG or history is consumed."""
+    """Choose one ALPHA action from the actor's current allowed inputs.
+
+    Parameters
+    ----------
+    recipient_observation : Observation
+        One actor's current observation, without an actor or game batch axis.
+    recipient_action_mask : ActionMask
+        Exact action mask for the same actor and decision.
+    actor_key : Array
+        JAX random key accepted for the common policy interface. Ignored because
+        this controller makes deterministic choices.
+    source_bank : SharedObsSensorSourceBankV2
+        Own-team bank with five sources. Unavailable source rows must already be
+        cleared by the policy executor.
+    recipient_source_availability : Array
+        Boolean (5,) permission mask in the bank's source order.
+
+    Returns
+    -------
+    ActorAction
+        Scalar int32 movement, target and Ultimate choices. Dead or inactive
+        actors return the no-op action. Combat choices use the current joint mask.
+
+    Notes
+    -----
+    The controller uses permitted shared unit sightings and its own exact masks.
+    It has no history, global actor-ID input or access to hidden state. Class
+    thresholds are defined by this module's constants; the descriptor records
+    their current values. Core still decides the physical result of the submitted
+    action. Use the shared executor or vmap for teams and games.
+    """
     del actor_key
     allies, enemies, ally_visible, enemy_visible = compose_shared_obs_unit_features(
         recipient_observation,
         source_bank,
         recipient_source_availability,
-        recipient_global_slot,
     )
     ally_living = living_candidates(allies, ally_visible)
     enemy_living = living_candidates(enemies, enemy_visible)
@@ -236,7 +314,7 @@ def reactive_tdm_alpha_policy(
         ally_living,
         enemies,
         enemy_living,
-        recipient_global_slot,
+        recipient_observation.self_ally_index,
         center_direction,
     )
     direction = jnp.where(is_priest, priest_direction, attack_direction)

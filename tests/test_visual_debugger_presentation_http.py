@@ -1,4 +1,4 @@
-"""Actual-service HTTP proofs for the live authorized presentation resource."""
+"""Check the live presentation HTTP route through the actual service."""
 
 from __future__ import annotations
 

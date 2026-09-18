@@ -1,4 +1,4 @@
-"""Opt-in CP3 evaluation streaming and sufficient-statistic tests."""
+"""Check optional streamed metrics and the counters used to aggregate them."""
 
 from __future__ import annotations
 
@@ -47,7 +47,6 @@ from marl_battlegrounds.evaluation.metrics import (
     RatioComponentV1,
     RawSufficientStatisticV1,
     StatisticDimensionV1,
-    SufficientStatisticAccumulatorV1,
     SufficientStatisticDraftV1,
     SumComponentV1,
     TeamClassStatisticSubjectV1,
@@ -145,8 +144,6 @@ def _component_cases() -> tuple[EvaluationModel, ...]:
 
 
 class _ReducerState(EvaluationMetricReducerStateV1):
-    """Immutable test reducer state exposing exactly processed semantic views."""
-
     initial_frame_id: str
     transition_ids: tuple[str, ...] = ()
     start_frame_ids: tuple[str, ...] = ()
@@ -155,26 +152,18 @@ class _ReducerState(EvaluationMetricReducerStateV1):
 
 
 class _AlternateReducerState(EvaluationMetricReducerStateV1):
-    """Deliberately incompatible replacement type for negative tests."""
-
     marker: int = 0
 
 
 class _MutablePayloadReducerState(EvaluationMetricReducerStateV1):
-    """Malicious frozen model whose nested payload is still mutable."""
-
     values: list[int]
 
 
 class _PrivateMutableReducerState(EvaluationMetricReducerStateV1):
-    """Malicious state hiding mutable data from dumps and equality."""
-
     _values: list[int] = PrivateAttr(default_factory=lambda: [1])
 
 
 class _UnfrozenReducerState(EvaluationMetricReducerStateV1):
-    """Malicious state weakening the inherited replacement-state contract."""
-
     model_config = ConfigDict(
         allow_inf_nan=False,
         extra="forbid",
@@ -184,8 +173,6 @@ class _UnfrozenReducerState(EvaluationMetricReducerStateV1):
 
 
 class _UnfrozenCountComponent(CountComponentV1):
-    """Malicious nested record weakening its inherited frozen contract."""
-
     model_config = ConfigDict(
         allow_inf_nan=False,
         extra="forbid",
@@ -195,14 +182,10 @@ class _UnfrozenCountComponent(CountComponentV1):
 
 
 class _PrivateCountComponent(CountComponentV1):
-    """Malicious nested record hiding mutable data outside public fields."""
-
     _values: list[int] = PrivateAttr(default_factory=lambda: [1])
 
 
 class _UnfrozenEvaluationFrame(EvaluationFrameV1):
-    """Malicious public-root subtype weakening frame immutability."""
-
     model_config = ConfigDict(
         allow_inf_nan=False,
         extra="forbid",
@@ -212,14 +195,10 @@ class _UnfrozenEvaluationFrame(EvaluationFrameV1):
 
 
 class _PrivateEvaluationFrame(EvaluationFrameV1):
-    """Malicious public-root subtype hiding mutable frame state."""
-
     _values: list[int] = PrivateAttr(default_factory=lambda: [1])
 
 
 class _UnfrozenEvaluationTransition(EvaluationTransitionV1):
-    """Malicious public-root subtype weakening transition immutability."""
-
     model_config = ConfigDict(
         allow_inf_nan=False,
         extra="forbid",
@@ -229,14 +208,10 @@ class _UnfrozenEvaluationTransition(EvaluationTransitionV1):
 
 
 class _PrivateEvaluationTransition(EvaluationTransitionV1):
-    """Malicious public-root subtype hiding mutable transition state."""
-
     _values: list[int] = PrivateAttr(default_factory=lambda: [1])
 
 
 class _AdversarialEvaluationContext(EvaluationEpisodeContextV1):
-    """Mutable context subtype that lies about equality with the public root."""
-
     model_config = ConfigDict(
         allow_inf_nan=False,
         extra="forbid",
@@ -255,8 +230,6 @@ class _AdversarialEvaluationContext(EvaluationEpisodeContextV1):
 
 
 class _AdversarialEpisodeIdentity(EvaluationEpisodeIdentityV1):
-    """Mutable nested context identity that lies about equality."""
-
     model_config = ConfigDict(
         allow_inf_nan=False,
         extra="forbid",
@@ -275,8 +248,6 @@ class _AdversarialEpisodeIdentity(EvaluationEpisodeIdentityV1):
 
 
 class _AdversarialSnapshot(GlobalAnalysisSnapshotV1):
-    """Mutable nested frame snapshot that lies about equality."""
-
     model_config = ConfigDict(
         allow_inf_nan=False,
         extra="forbid",
@@ -295,8 +266,6 @@ class _AdversarialSnapshot(GlobalAnalysisSnapshotV1):
 
 
 class _AdversarialTransitionFacts(TransitionFactsV1):
-    """Mutable nested transition facts that lie about equality."""
-
     model_config = ConfigDict(
         allow_inf_nan=False,
         extra="forbid",
@@ -315,15 +284,11 @@ class _AdversarialTransitionFacts(TransitionFactsV1):
 
 
 class _UnprintableError(RuntimeError):
-    """Hostile reducer exception whose string conversion also raises."""
-
     def __str__(self) -> str:
         raise RuntimeError("intentional stringification failure")
 
 
 class _UnreadableTransition:
-    """Malformed append input that raises during attempted-index inspection."""
-
     def __getattribute__(self, name: str) -> object:
         raise RuntimeError(f"cannot inspect {name}")
 
@@ -340,8 +305,6 @@ type _DraftBuilder = Callable[
 
 @dataclass(slots=True)
 class _Reducer:
-    """Trusted pure replacement-state reducer used only to prove CP3 plumbing."""
-
     reducer_id: str = "test.reducer"
     reducer_version: int = 1
     draft_builder: _DraftBuilder | None = None
@@ -566,7 +529,6 @@ def _single_draft_builder(
     ),
     **updates: object,
 ) -> _DraftBuilder:
-    """Return a reducer-bound builder for one declarative draft."""
 
     def build(
         state: _ReducerState,
@@ -594,7 +556,6 @@ def _single_draft_builder(
 def test_each_raw_component_family_round_trips_without_derived_values(
     component: EvaluationModel,
 ) -> None:
-    """Every raw family survives strict JSON without a ratio or mean field."""
     draft = _draft(component)  # type: ignore[arg-type]
 
     restored = SufficientStatisticDraftV1.model_validate_json(draft.model_dump_json())
@@ -602,259 +563,6 @@ def test_each_raw_component_family_round_trips_without_derived_values(
     assert restored == draft
     assert "mean" not in restored.model_dump()
     assert "computed_value" not in restored.model_dump()
-
-
-@pytest.mark.parametrize(
-    ("left", "right", "expected"),
-    (
-        (
-            CountComponentV1(count=2, eligible_episode_count=1),
-            CountComponentV1(count=3, eligible_episode_count=1),
-            CountComponentV1(count=5, eligible_episode_count=1),
-        ),
-        (
-            SumComponentV1(
-                value=4.5,
-                observation_count=2,
-                eligible_episode_count=1,
-            ),
-            SumComponentV1(
-                value=-1.25,
-                observation_count=1,
-                eligible_episode_count=1,
-            ),
-            SumComponentV1(
-                value=3.25,
-                observation_count=3,
-                eligible_episode_count=1,
-            ),
-        ),
-        (
-            RatioComponentV1(
-                numerator=2.0,
-                denominator=4.0,
-                zero_opportunity_occurrence=0,
-                eligible_episode_count=1,
-            ),
-            RatioComponentV1(
-                numerator=-1.0,
-                denominator=3.0,
-                zero_opportunity_occurrence=0,
-                eligible_episode_count=1,
-            ),
-            RatioComponentV1(
-                numerator=1.0,
-                denominator=7.0,
-                zero_opportunity_occurrence=0,
-                eligible_episode_count=1,
-            ),
-        ),
-        (
-            DurationComponentV1(
-                qualifying_steps=2,
-                eligible_steps=5,
-                eligible_episode_count=1,
-            ),
-            DurationComponentV1(
-                qualifying_steps=3,
-                eligible_steps=7,
-                eligible_episode_count=1,
-            ),
-            DurationComponentV1(
-                qualifying_steps=5,
-                eligible_steps=12,
-                eligible_episode_count=1,
-            ),
-        ),
-        (
-            OpportunityComponentV1(
-                opportunity_count=2,
-                eligible_episode_count=1,
-            ),
-            OpportunityComponentV1(
-                opportunity_count=5,
-                eligible_episode_count=1,
-            ),
-            OpportunityComponentV1(
-                opportunity_count=7,
-                eligible_episode_count=1,
-            ),
-        ),
-    ),
-    ids=("count", "sum", "ratio", "duration", "opportunity"),
-)
-def test_accumulator_adds_each_scalar_component_family_immutably(
-    left: EvaluationModel,
-    right: EvaluationModel,
-    expected: EvaluationModel,
-) -> None:
-    """Adding compatible drafts returns a new accumulator with raw totals."""
-    first = SufficientStatisticAccumulatorV1().add(_draft(left))  # type: ignore[arg-type]
-    first_snapshot = first.model_dump_json()
-
-    merged = first.add(_draft(right))  # type: ignore[arg-type]
-
-    assert first.model_dump_json() == first_snapshot
-    assert first.entries[0].component == left
-    assert merged.entries[0].component == expected
-
-
-def test_ratio_merge_recomputes_one_episode_zero_opportunity_incidence() -> None:
-    """Local contributions preserve a final per-episode 0/1 incidence value."""
-    zero = RatioComponentV1(
-        numerator=0.0,
-        denominator=0.0,
-        zero_opportunity_occurrence=1,
-        eligible_episode_count=1,
-    )
-    positive = RatioComponentV1(
-        numerator=1.0,
-        denominator=2.0,
-        zero_opportunity_occurrence=0,
-        eligible_episode_count=1,
-    )
-
-    all_zero = SufficientStatisticAccumulatorV1().add(_draft(zero)).add(_draft(zero))
-    mixed = SufficientStatisticAccumulatorV1().add(_draft(zero)).add(_draft(positive))
-
-    assert all_zero.entries[0].component == RatioComponentV1(
-        numerator=0.0,
-        denominator=0.0,
-        zero_opportunity_occurrence=1,
-        eligible_episode_count=1,
-    )
-    assert mixed.entries[0].component == RatioComponentV1(
-        numerator=1.0,
-        denominator=2.0,
-        zero_opportunity_occurrence=0,
-        eligible_episode_count=1,
-    )
-
-
-def test_accumulator_concatenates_long_form_distribution_with_stable_links() -> None:
-    """Distribution merge keeps every observation and assigns gap-free ordinals."""
-    left = DistributionComponentV1(
-        observations=(
-            DistributionObservationV1(
-                source_observation_id="transition-0:event-2",
-                ordinal=0,
-                value=1.5,
-            ),
-        ),
-        eligible_episode_count=1,
-    )
-    right = DistributionComponentV1(
-        observations=(
-            DistributionObservationV1(
-                source_observation_id="transition-1:event-0",
-                ordinal=0,
-                value=1.5,
-            ),
-            DistributionObservationV1(
-                source_observation_id="transition-1:event-3",
-                ordinal=1,
-                value=-2.0,
-            ),
-        ),
-        eligible_episode_count=1,
-    )
-
-    merged = SufficientStatisticAccumulatorV1().add(_draft(left)).add(_draft(right))
-    component = merged.entries[0].component
-
-    assert isinstance(component, DistributionComponentV1)
-    assert tuple(row.ordinal for row in component.observations) == (0, 1, 2)
-    assert tuple(row.source_observation_id for row in component.observations) == (
-        "transition-0:event-2",
-        "transition-1:event-0",
-        "transition-1:event-3",
-    )
-    assert tuple(row.value for row in component.observations) == (1.5, 1.5, -2.0)
-    assert component.eligible_episode_count == 1
-
-
-def test_accumulator_rejects_duplicate_distribution_observation_links() -> None:
-    """One linked source observation cannot enter a statistic row twice."""
-    component = DistributionComponentV1(
-        observations=(
-            DistributionObservationV1(
-                source_observation_id="event-duplicate",
-                ordinal=0,
-                value=1.0,
-            ),
-        ),
-        eligible_episode_count=1,
-    )
-    accumulator = SufficientStatisticAccumulatorV1().add(_draft(component))
-
-    with pytest.raises(ValueError, match="duplicate observation IDs"):
-        accumulator.add(_draft(component))
-
-
-def test_accumulator_canonicalizes_distinct_keys_and_preserves_subjects() -> None:
-    """Insertion order never controls output order or collapse distinct subjects."""
-    team_draft = _draft(
-        CountComponentV1(count=1, eligible_episode_count=1),
-        metric_id="marlbg.test.zeta.v1",
-        subject=TeamStatisticSubjectV1(team_id=2),
-    )
-    agent_draft = _draft(
-        CountComponentV1(count=2, eligible_episode_count=1),
-        metric_id="marlbg.test.alpha.v1",
-        subject=AgentStatisticSubjectV1(global_slot=0),
-    )
-
-    accumulator = SufficientStatisticAccumulatorV1().add(team_draft).add(agent_draft)
-
-    assert tuple(row.metric_id for row in accumulator.entries) == (
-        "marlbg.test.alpha.v1",
-        "marlbg.test.zeta.v1",
-    )
-    assert accumulator.entries[0].subject == agent_draft.subject
-    assert accumulator.entries[1].subject == team_draft.subject
-
-
-def test_accumulator_rejects_metadata_drift_for_one_semantic_row() -> None:
-    """The same row key cannot silently change units or reducer authority."""
-    initial = _draft(
-        CountComponentV1(count=1, eligible_episode_count=1),
-        units="transition_ticks",
-    )
-    conflicting = _draft(
-        CountComponentV1(count=1, eligible_episode_count=1),
-        units="hit_points",
-    )
-    accumulator = SufficientStatisticAccumulatorV1().add(initial)
-
-    with pytest.raises(ValueError, match="metadata conflicts"):
-        accumulator.add(conflicting)
-
-
-def test_accumulator_merge_is_copy_on_write_and_matches_repeated_add() -> None:
-    """Accumulator merge uses the same strict algebra without mutating either side."""
-    left = SufficientStatisticAccumulatorV1().add(
-        _draft(
-            CountComponentV1(count=2, eligible_episode_count=1),
-            metric_id="marlbg.test.left.v1",
-        )
-    )
-    right = SufficientStatisticAccumulatorV1().add(
-        _draft(
-            OpportunityComponentV1(
-                opportunity_count=3,
-                eligible_episode_count=1,
-            ),
-            metric_id="marlbg.test.right.v1",
-        )
-    )
-    left_snapshot = left.model_dump_json()
-    right_snapshot = right.model_dump_json()
-
-    merged = left.merge(right)
-
-    assert left.model_dump_json() == left_snapshot
-    assert right.model_dump_json() == right_snapshot
-    assert merged == left.add(right.entries[0])
 
 
 @pytest.mark.parametrize(
@@ -971,13 +679,11 @@ def test_accumulator_merge_is_copy_on_write_and_matches_repeated_add() -> None:
 def test_component_models_reject_malformed_raw_values(
     factory: Callable[[], object],
 ) -> None:
-    """Strict raw records reject coercion, nonfinite data, and broken invariants."""
     with pytest.raises((ValidationError, ValueError)):
         factory()
 
 
 def test_draft_rejects_unknown_fields_lists_and_component_discriminators() -> None:
-    """Draft construction remains strict, tuple-backed, and version-aware."""
     valid = _draft(CountComponentV1(count=1, eligible_episode_count=1))
     payload = valid.model_dump(mode="python")
 
@@ -992,7 +698,6 @@ def test_draft_rejects_unknown_fields_lists_and_component_discriminators() -> No
 
 
 def test_nested_model_copy_escapes_are_structurally_revalidated() -> None:
-    """Frozen outer models cannot bless unchecked invalid nested model copies."""
     valid_component = RatioComponentV1(
         numerator=1.0,
         denominator=1.0,
@@ -1006,12 +711,6 @@ def test_nested_model_copy_escapes_are_structurally_revalidated() -> None:
     with pytest.raises(ValidationError, match="zero denominator"):
         SufficientStatisticDraftV1.model_validate(draft_payload)
 
-    unsafe_draft = _draft(valid_component).model_copy(
-        update={"component": unsafe_component}
-    )
-    with pytest.raises(ValidationError, match="statistic component"):
-        SufficientStatisticAccumulatorV1(entries=(unsafe_draft,))
-
 
 @pytest.mark.parametrize(
     "component",
@@ -1024,7 +723,6 @@ def test_nested_model_copy_escapes_are_structurally_revalidated() -> None:
 def test_draft_rejects_mutable_nested_schema_subtypes(
     component: CountComponentV1,
 ) -> None:
-    """Declared nested unions never retain a mutable schema subtype."""
     payload = _draft(CountComponentV1(count=1, eligible_episode_count=1)).model_dump(
         mode="python"
     )
@@ -1068,7 +766,6 @@ def test_draft_rejects_mutable_nested_schema_subtypes(
 def test_draft_rejects_inconsistent_semantic_metadata(
     updates: dict[str, object],
 ) -> None:
-    """Eligibility and endpoint metadata cannot contradict raw evidence."""
     payload_updates = dict(updates)
     component = payload_updates.pop(
         "component",
@@ -1111,7 +808,6 @@ def test_draft_rejects_inconsistent_semantic_metadata(
 def test_each_component_family_can_represent_zero_opportunity(
     component: EvaluationModel,
 ) -> None:
-    """Zero opportunity is explicit raw evidence, never an implicit zero result."""
     draft = _draft(
         component,  # type: ignore[arg-type]
         result_status="zero_opportunity",
@@ -1123,7 +819,6 @@ def test_each_component_family_can_represent_zero_opportunity(
 
 
 def test_count_cannot_claim_zero_opportunity_without_exposure_evidence() -> None:
-    """A count has no denominator or exposure field proving zero opportunity."""
     with pytest.raises(ValueError, match="zero-opportunity"):
         _draft(
             CountComponentV1(count=0, eligible_episode_count=1),
@@ -1133,7 +828,6 @@ def test_count_cannot_claim_zero_opportunity_without_exposure_evidence() -> None
 
 
 def test_zero_opportunity_requires_an_eligible_episode() -> None:
-    """An empty neutral aggregate is not evidence of a genuine zero opportunity."""
     with pytest.raises(ValueError, match="zero-opportunity evidence"):
         _draft(
             SumComponentV1(
@@ -1147,7 +841,6 @@ def test_zero_opportunity_requires_an_eligible_episode() -> None:
 
 
 def test_dimensions_are_sorted_unique_and_cannot_shadow_context_truth() -> None:
-    """Metric dimensions supplement rather than overwrite episode provenance."""
     alpha = StatisticDimensionV1(name="ability", value="basic")
     zeta = StatisticDimensionV1(name="target_class", value="mage")
 
@@ -1173,7 +866,6 @@ def test_dimensions_are_sorted_unique_and_cannot_shadow_context_truth() -> None:
 
 
 def test_subject_union_preserves_episode_team_agent_class_and_ordered_pair() -> None:
-    """Every supported subject kind is discriminated and round-trippable."""
     subjects = (
         EpisodeStatisticSubjectV1(),
         TeamStatisticSubjectV1(team_id=1),
@@ -1206,18 +898,7 @@ def test_subject_union_preserves_episode_team_agent_class_and_ordered_pair() -> 
         AgentStatisticSubjectV1(global_slot=10)
 
 
-def test_accumulator_rejects_mutable_or_duplicate_entry_storage() -> None:
-    """The aggregate itself remains tuple-backed with one row per semantic key."""
-    draft = _draft(CountComponentV1(count=1, eligible_episode_count=1))
-
-    with pytest.raises(ValidationError):
-        SufficientStatisticAccumulatorV1.model_validate({"entries": [draft]})
-    with pytest.raises(ValueError, match="unique statistic keys"):
-        SufficientStatisticAccumulatorV1(entries=(draft, draft))
-
-
 def test_observer_rejects_adversarial_mutable_context_subtype() -> None:
-    """Constructor equality cannot bless a mutable undeclared context root."""
     trajectory = captured_evaluation_trajectory(transition_count=0)
     unsafe_context = _AdversarialEvaluationContext.model_validate(
         trajectory.context.model_dump(mode="python")
@@ -1228,7 +909,6 @@ def test_observer_rejects_adversarial_mutable_context_subtype() -> None:
 
 
 def test_initial_validator_accepts_public_capture_at_nonzero_simulator_epoch() -> None:
-    """Artifact frame zero is independent of the simulator's starting epoch."""
     trajectory = captured_evaluation_trajectory(transition_count=0)
     context_rows = [
         list(row) for row in trajectory.frames[0].base_observation.context_features
@@ -1250,7 +930,6 @@ def test_initial_validator_accepts_public_capture_at_nonzero_simulator_epoch() -
 
 
 def test_initial_frame_validator_rejects_nonzero_artifact_index() -> None:
-    """Every observer starts from artifact frame zero, even for resumed state."""
     trajectory = captured_evaluation_trajectory(transition_count=0)
     episode_id = trajectory.context.identity.episode_id
     noninitial_frame = trajectory.frames[0].model_copy(
@@ -1265,7 +944,6 @@ def test_initial_frame_validator_rejects_nonzero_artifact_index() -> None:
 
 
 def test_initial_frame_validator_rejects_context_episode_mismatch() -> None:
-    """A structurally valid frame cannot silently join another episode."""
     trajectory = captured_evaluation_trajectory(transition_count=0)
     other_episode_frame = trajectory.frames[0].model_copy(
         update={
@@ -1282,7 +960,6 @@ def test_initial_frame_validator_rejects_context_episode_mismatch() -> None:
 
 
 def test_initial_frame_validator_revalidates_unchecked_nested_payloads() -> None:
-    """Pydantic escape hatches cannot insert mutable payloads into a frame."""
     trajectory = captured_evaluation_trajectory(transition_count=0)
     initial_frame = trajectory.frames[0]
     unchecked_snapshot = initial_frame.snapshot.model_copy(
@@ -1309,7 +986,6 @@ def test_initial_frame_validator_revalidates_unchecked_nested_payloads() -> None
 def test_observer_rejects_undeclared_initial_frame_subtypes(
     frame_type: type[EvaluationFrameV1],
 ) -> None:
-    """Frame-zero validation accepts only the exact frozen public root type."""
     trajectory = captured_evaluation_trajectory(transition_count=0)
     unsafe_frame = frame_type.model_validate(
         trajectory.frames[0].model_dump(mode="python")
@@ -1324,7 +1000,6 @@ def test_observer_rejects_undeclared_initial_frame_subtypes(
 
 
 def test_observer_rejects_undeclared_nested_initial_frame_model() -> None:
-    """An exact frame root cannot hide a mutable snapshot subtype."""
     trajectory = captured_evaluation_trajectory(transition_count=0)
     initial_frame = trajectory.frames[0]
     unsafe_snapshot = _AdversarialSnapshot.model_validate(
@@ -1341,7 +1016,6 @@ def test_observer_rejects_undeclared_nested_initial_frame_model() -> None:
 
 
 def test_observer_rejects_hidden_private_state_on_exact_frame_root() -> None:
-    """Exact public root types cannot smuggle undeclared Pydantic private data."""
     trajectory = captured_evaluation_trajectory(transition_count=0)
     unsafe_frame = EvaluationFrameV1.model_validate(
         trajectory.frames[0].model_dump(mode="python")
@@ -1361,7 +1035,6 @@ def test_observer_rejects_hidden_private_state_on_exact_frame_root() -> None:
 
 
 def test_initial_frame_validator_enforces_inactive_slot_padding() -> None:
-    """A context-inactive slot remains neutral in the accepted frame-zero prefix."""
     trajectory = captured_evaluation_trajectory(transition_count=0)
     initial_frame = trajectory.frames[0]
     inactive_slot = next(
@@ -1388,7 +1061,6 @@ def test_initial_frame_validator_enforces_inactive_slot_padding() -> None:
 
 @pytest.fixture(scope="module")
 def two_transition_trajectory() -> CapturedEvaluationTrajectory:
-    """Share one deterministic public trajectory across observer-only tests."""
     return captured_evaluation_trajectory(
         transition_count=2,
         expected_horizon=2,
@@ -1397,7 +1069,6 @@ def two_transition_trajectory() -> CapturedEvaluationTrajectory:
 
 @pytest.fixture(scope="module")
 def one_transition_trajectory() -> CapturedEvaluationTrajectory:
-    """Share one exact-horizon transition across adversarial observer tests."""
     return captured_evaluation_trajectory(
         transition_count=1,
         expected_horizon=1,
@@ -1407,7 +1078,6 @@ def one_transition_trajectory() -> CapturedEvaluationTrajectory:
 def test_observer_streams_coherent_views_and_finalizes_all_six_families(
     two_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """One valid stream advances immutable state and yields a joined report."""
     trajectory = two_transition_trajectory
     reducer = _Reducer(draft_builder=_six_family_drafts)
     observer = build_evaluation_observer_v1(
@@ -1504,7 +1174,6 @@ def test_capture_profiles_share_semantic_stream_but_control_retention(
     with_scenario: bool,
     retains_trajectory: bool,
 ) -> None:
-    """Every enabled profile reduces views; only metric-complete profiles retain."""
     trajectory = captured_evaluation_trajectory(
         transition_count=1,
         capture_profile=capture_profile,
@@ -1536,7 +1205,6 @@ def test_capture_profiles_share_semantic_stream_but_control_retention(
 def test_invalid_append_poisons_only_the_last_valid_prefix(
     two_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """A gap is rejected before artifact or reducer progress can advance."""
     trajectory = two_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -1582,7 +1250,6 @@ def test_observer_rejects_undeclared_successor_frame_subtypes(
     one_transition_trajectory: CapturedEvaluationTrajectory,
     frame_type: type[EvaluationFrameV1],
 ) -> None:
-    """A mutable successor root cannot enter validated or retained progress."""
     trajectory = one_transition_trajectory
     unsafe_successor = frame_type.model_validate(
         trajectory.frames[1].model_dump(mode="python")
@@ -1614,7 +1281,6 @@ def test_observer_rejects_undeclared_transition_subtypes(
     one_transition_trajectory: CapturedEvaluationTrajectory,
     transition_type: type[EvaluationTransitionV1],
 ) -> None:
-    """A mutable transition root cannot enter validated or retained progress."""
     trajectory = one_transition_trajectory
     unsafe_transition = transition_type.model_validate(
         trajectory.transitions[0].model_dump(mode="python")
@@ -1640,7 +1306,6 @@ def test_observer_rejects_undeclared_transition_subtypes(
 def test_observer_rejects_undeclared_nested_transition_model(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """An exact transition root cannot hide a mutable facts subtype."""
     trajectory = one_transition_trajectory
     transition = trajectory.transitions[0]
     unsafe_facts = _AdversarialTransitionFacts.model_validate(
@@ -1669,7 +1334,6 @@ def test_observer_retains_canonical_copies_not_caller_owned_roots(
     one_transition_trajectory: CapturedEvaluationTrajectory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Post-validation caller mutation cannot rewrite the observer prefix."""
     trajectory = one_transition_trajectory
     context = EvaluationEpisodeContextV1.model_validate(
         trajectory.context.model_dump(mode="python")
@@ -1781,7 +1445,6 @@ def test_reducer_failure_detail_is_always_printable_and_cannot_mask_poisoning(
     error: Exception,
     expected_detail: str,
 ) -> None:
-    """Failure-envelope construction cannot fail behind a hostile exception."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -1806,7 +1469,6 @@ def test_reducer_failure_detail_is_always_printable_and_cannot_mask_poisoning(
 def test_malformed_append_attribute_access_is_captured_before_validation(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Attempted-index inspection is part of the poisoning transaction."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -1836,7 +1498,6 @@ def test_malformed_append_attribute_access_is_captured_before_validation(
 def test_reducer_failure_commits_artifact_progress_but_no_reducer_state(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Reducer replacement is all-or-none while physical completion stays true."""
     trajectory = one_transition_trajectory
     reducers = (
         _Reducer(reducer_id="a.reducer"),
@@ -1890,7 +1551,6 @@ def test_reducer_replacement_contract_failure_preserves_previous_state(
     one_transition_trajectory: CapturedEvaluationTrajectory,
     reducer: _Reducer,
 ) -> None:
-    """Replacement state identity and exact type are part of atomic advance."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -1915,7 +1575,6 @@ def test_reducer_replacement_contract_failure_preserves_previous_state(
 def test_reducer_initialization_is_atomic_after_valid_frame_zero(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Initialization failure preserves a reportable T=0 valid artifact prefix."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -1950,7 +1609,6 @@ def test_reducer_initialization_is_atomic_after_valid_frame_zero(
 def test_illegal_lifecycle_call_poisoning_does_not_rewrite_rollout_truth(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """A post-seal host misuse fails processing without falsifying completion."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -1996,7 +1654,6 @@ def test_valid_frame_zero_can_finalize_every_noncomplete_rollout_state(
     completion_state: str,
     failure_origin: str | None,
 ) -> None:
-    """T=0 remains a reportable artifact prefix for every noncomplete outcome."""
     trajectory = captured_evaluation_trajectory(
         transition_count=0,
         expected_horizon=2,
@@ -2025,7 +1682,6 @@ def test_valid_frame_zero_can_finalize_every_noncomplete_rollout_state(
 
 
 def test_complete_rollout_rejects_valid_t_zero_without_terminal_or_horizon() -> None:
-    """A valid initial frame alone is not physical evidence of completion."""
     trajectory = captured_evaluation_trajectory(
         transition_count=0,
         expected_horizon=2,
@@ -2057,7 +1713,6 @@ def test_noncomplete_rollout_metadata_is_not_invented_or_contradictory(
     failure_origin: str | None,
     message: str,
 ) -> None:
-    """Callers must explicitly and consistently classify incomplete rollouts."""
     trajectory = captured_evaluation_trajectory(
         transition_count=0,
         expected_horizon=2,
@@ -2084,7 +1739,6 @@ def test_task_terminal_completion_preserves_authoritative_reason_and_bases(
     at_horizon: bool,
     expected_bases: tuple[str, ...],
 ) -> None:
-    """Terminal evidence and horizon evidence remain independent and canonical."""
     trajectory = captured_team_deathmatch_threshold_trajectory(at_horizon=at_horizon)
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -2108,7 +1762,6 @@ def test_task_terminal_completion_preserves_authoritative_reason_and_bases(
 
 
 def test_neutral_horizon_truncation_is_complete_and_fully_processed() -> None:
-    """Neutral truncation is valid exactly at its resolved episode horizon."""
     trajectory = captured_evaluation_trajectory(
         transition_count=1,
         expected_horizon=1,
@@ -2144,7 +1797,6 @@ def test_final_reducer_failure_does_not_falsify_complete_rollout(
     one_transition_trajectory: CapturedEvaluationTrajectory,
     reducer: _Reducer,
 ) -> None:
-    """Final processing failure is recorded independently from physical truth."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -2167,7 +1819,6 @@ def test_final_reducer_failure_does_not_falsify_complete_rollout(
 def test_secondary_finalization_failure_preserves_the_first_processing_failure(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """One failure record keeps the poison cause while disclosing later failure."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -2190,7 +1841,6 @@ def test_secondary_finalization_failure_preserves_the_first_processing_failure(
 def test_public_roots_reject_rows_from_atomic_finalization_failures(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Model revalidation cannot reintroduce rows that were never published."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -2221,7 +1871,6 @@ def test_public_roots_reject_rows_from_atomic_finalization_failures(
 def test_public_roots_reject_impossible_failure_stage_progress(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Failure stage determines the only valid processed-prefix boundary."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -2268,7 +1917,6 @@ def test_public_roots_reject_impossible_failure_stage_progress(
 
 
 def test_completion_and_processing_records_are_strict_and_round_trip() -> None:
-    """Lifecycle records remain immutable, versioned, and independently serializable."""
     completion = EvaluationEpisodeCompletionV1(
         episode_id="episode-001",
         completion_state="partial",
@@ -2318,7 +1966,6 @@ def test_completion_and_processing_records_are_strict_and_round_trip() -> None:
 def test_zero_transition_completion_rejects_unowned_done_flags(
     done_field: str,
 ) -> None:
-    """A public completion root cannot claim done without a transition."""
     payload: dict[str, object] = {
         "episode_id": "episode-001",
         "completion_state": "complete",
@@ -2375,7 +2022,6 @@ def test_non_ratio_zero_values_do_not_invent_metric_opportunity_semantics(
     one_transition_trajectory: CapturedEvaluationTrajectory,
     component: EvaluationModel,
 ) -> None:
-    """Generic zero values remain defined unless their component owns exposure."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -2401,7 +2047,6 @@ def test_non_ratio_zero_values_do_not_invent_metric_opportunity_semantics(
 def test_ratio_zero_opportunity_is_classified_only_at_final_materialization(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """A provisional ratio draft becomes N/A once episode eligibility is known."""
     component = RatioComponentV1(
         numerator=0.0,
         denominator=0.0,
@@ -2436,7 +2081,6 @@ def test_ratio_zero_opportunity_is_classified_only_at_final_materialization(
 def test_defined_final_statistic_requires_an_eligible_episode(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Reducer-local neutral exposure cannot become a defined finalized row."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -2462,7 +2106,6 @@ def test_defined_final_statistic_requires_an_eligible_episode(
 def test_complete_episode_statistic_downgrades_on_valid_partial_prefix(
     two_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Scientific eligibility changes the row, not physical rollout completion."""
     trajectory = two_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -2522,7 +2165,6 @@ def test_complete_episode_downgrade_respects_status_precedence(
     two_transition_trajectory: CapturedEvaluationTrajectory,
     result_status: str,
 ) -> None:
-    """Eligibility cannot overwrite a more authoritative reducer declaration."""
     trajectory = two_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -2564,7 +2206,6 @@ def test_all_endpoint_statuses_materialize_when_their_evidence_is_valid(
     endpoint_status: str,
     supports_right_censoring: bool,
 ) -> None:
-    """Endpoint status is reducer evidence constrained by final completion truth."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -2598,7 +2239,6 @@ def test_endpoint_claim_requiring_completion_fails_on_partial_rollout(
     endpoint_status: str,
     supports_right_censoring: bool,
 ) -> None:
-    """A reducer cannot upgrade a partial artifact into observed endpoint truth."""
     trajectory = two_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -2628,7 +2268,6 @@ def test_endpoint_claim_requiring_completion_fails_on_partial_rollout(
 
 
 def test_authoritative_transition_end_reason_rejects_completion_disagreement() -> None:
-    """CP3 may preserve but never rewrite a CP2 owning-task end reason."""
     trajectory = captured_team_deathmatch_threshold_trajectory()
     observer = build_evaluation_observer_v1(trajectory.context)
     observer.start(trajectory.frames[0])
@@ -2644,10 +2283,6 @@ def test_authoritative_transition_end_reason_rejects_completion_disagreement() -
 def test_report_subject_rows_join_active_context_entities_and_sort_canonically(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Every supported subject resolves through context.
-
-    Canonical report order is independent of reducer return order.
-    """
     trajectory = one_transition_trajectory
 
     def subject_drafts(
@@ -2724,7 +2359,6 @@ def test_defined_subject_that_does_not_join_context_fails_the_report(
     one_transition_trajectory: CapturedEvaluationTrajectory,
     subject: EvaluationModel,
 ) -> None:
-    """Reducers cannot create defined rows for inactive or absent subjects."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -2756,7 +2390,6 @@ def test_absent_team_class_preserves_stronger_status_precedence(
     one_transition_trajectory: CapturedEvaluationTrajectory,
     result_status: str,
 ) -> None:
-    """Artifact invalidity outranks structural absence for the same stratum."""
     trajectory = one_transition_trajectory
     absent_subject = TeamClassStatisticSubjectV1(team_id=1, class_id=4)
     observer = build_evaluation_observer_v1(
@@ -2784,7 +2417,6 @@ def test_absent_team_class_preserves_stronger_status_precedence(
 def test_duplicate_statistic_key_across_reducers_fails_atomically(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Reducer identity does not permit duplicate semantic rows in one report."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -2817,7 +2449,6 @@ def test_duplicate_statistic_key_across_reducers_fails_atomically(
 
 
 def test_report_rows_preserve_context_owned_aggregation_keys_exactly() -> None:
-    """Aggregation strata are joined from context rather than reducer dimensions."""
     aggregation_keys = (
         AggregationKeyV1(name="fold", value="validation"),
         AggregationKeyV1(name="information_regime", value="no_shared_obs"),
@@ -2853,7 +2484,6 @@ def test_report_rows_preserve_context_owned_aggregation_keys_exactly() -> None:
 def test_observer_registration_requires_immutable_unique_valid_reducers(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Reducer registration is deterministic before any frame is consumed."""
     context = one_transition_trajectory.context
 
     with pytest.raises(TypeError, match="immutable tuple"):
@@ -2881,7 +2511,6 @@ def test_observer_registration_requires_immutable_unique_valid_reducers(
 def test_observer_rejects_invalid_start_before_initializing_reducers(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Invalid frame zero cannot become retained or reducer-visible evidence."""
     trajectory = one_transition_trajectory
     initial_frame = trajectory.frames[0]
     invalid_frame = initial_frame.model_copy(
@@ -2914,7 +2543,6 @@ def test_observer_rejects_invalid_start_before_initializing_reducers(
 def test_start_is_single_use_and_report_finalization_is_explicit(
     two_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """The observer never restarts or implicitly finalizes its valid prefix."""
     trajectory = two_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -2944,7 +2572,6 @@ def test_start_is_single_use_and_report_finalization_is_explicit(
 
 
 def test_live_and_json_rehydrated_trajectories_produce_identical_reports() -> None:
-    """Metric reduction depends only on serialized CP2 semantic records."""
     trajectory = captured_evaluation_trajectory(
         transition_count=2,
         expected_horizon=2,
@@ -2997,7 +2624,6 @@ def test_live_and_json_rehydrated_trajectories_produce_identical_reports() -> No
 def test_metric_report_contains_only_frozen_host_records_and_no_trajectory(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """The final report is a logging seam, not a replay or device-array container."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -3029,7 +2655,6 @@ def test_metric_report_contains_only_frozen_host_records_and_no_trajectory(
 def test_disabled_observer_is_absence_before_any_evaluation_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Library-level caller gating performs no context, capture, or metric work."""
     calls: list[str] = []
 
     def forbidden(*args: object, **kwargs: object) -> None:
@@ -3091,7 +2716,6 @@ def test_disabled_observer_is_absence_before_any_evaluation_work(
 def test_metrics_module_dependency_boundary_excludes_execution_and_persistence() -> (
     None
 ):
-    """CP3 remains host plumbing with no core, device, replay, or logging dependency."""
     module_tree = ast.parse(inspect.getsource(metrics_module))
     imported_modules: set[str] = set()
     called_names: set[str] = set()
@@ -3123,7 +2747,6 @@ def test_metrics_module_dependency_boundary_excludes_execution_and_persistence()
 def test_cp3_public_roots_reject_unknown_versions_and_context_keeps_cp2_bindings(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """CP3 roots version independently while context retains the eight CP2 roots."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -3194,7 +2817,6 @@ def test_raw_statistic_rejects_mutable_nested_schema_subtypes(
     one_transition_trajectory: CapturedEvaluationTrajectory,
     component: CountComponentV1,
 ) -> None:
-    """Raw-root revalidation cannot retain an undeclared mutable component."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -3212,7 +2834,6 @@ def test_raw_statistic_rejects_mutable_nested_schema_subtypes(
 def test_metric_report_rejects_undeclared_nested_context_model(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Direct report revalidation cannot retain a mutable nested identity."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -3232,7 +2853,6 @@ def test_metric_report_rejects_undeclared_nested_context_model(
 
 
 def test_package_exports_the_complete_cp3_public_seam() -> None:
-    """Consumers can import CP3 contracts from the evaluation package boundary."""
     expected_exports = {
         "CountComponentV1",
         "SumComponentV1",
@@ -3259,7 +2879,6 @@ def test_package_exports_the_complete_cp3_public_seam() -> None:
 
 
 def test_simultaneous_terminal_truncation_at_horizon_preserves_all_truth() -> None:
-    """Done flags and completion bases are recorded without collapsing evidence."""
     trajectory = captured_team_deathmatch_threshold_trajectory(at_horizon=True)
     observer = build_evaluation_observer_v1(trajectory.context)
     observer.start(trajectory.frames[0])
@@ -3282,7 +2901,6 @@ def test_simultaneous_terminal_truncation_at_horizon_preserves_all_truth() -> No
 def test_processing_gap_downgrades_complete_only_statistic_not_completion(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """A complete artifact with a reducer gap yields insufficient metric evidence."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -3313,7 +2931,6 @@ def test_processing_gap_downgrades_complete_only_statistic_not_completion(
 def test_context_driven_opportunity_excludes_inactive_padded_slots(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Padding is roster truth, not an observer-inferred zero opportunity."""
     trajectory = one_transition_trajectory
     active_slots = tuple(
         row.global_slot for row in trajectory.context.roster if row.configured_active
@@ -3352,7 +2969,6 @@ def test_context_driven_opportunity_excludes_inactive_padded_slots(
 def test_reducer_state_rejects_nested_mutable_payload_even_in_frozen_model(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Pydantic freezing alone cannot make a nested list valid reducer state."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -3376,7 +2992,6 @@ def test_reducer_state_rejects_nested_mutable_payload_even_in_frozen_model(
 def test_reducer_state_rejects_hidden_mutable_private_attributes(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Private attributes cannot evade replacement-state immutability checks."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -3400,7 +3015,6 @@ def test_reducer_state_rejects_hidden_mutable_private_attributes(
 def test_reducer_state_subclass_cannot_weaken_strict_frozen_configuration(
     one_transition_trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """Reducer subclasses must preserve the base model's immutable contract."""
     trajectory = one_transition_trajectory
     observer = build_evaluation_observer_v1(
         trajectory.context,
@@ -3423,7 +3037,6 @@ def test_reducer_state_subclass_cannot_weaken_strict_frozen_configuration(
 def test_core_reset_and_step_have_no_static_or_runtime_cp3_hook(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ordinary simulator execution remains unaware of opt-in evaluation plumbing."""
     core_directory = Path(core_env_module.__file__).parent
     for source_path in core_directory.glob("*.py"):
         assert "marl_battlegrounds.evaluation" not in source_path.read_text(

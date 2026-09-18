@@ -1,4 +1,4 @@
-"""Renderer-independent input dispatch and authorization tests."""
+"""Check input handling and authorization independently of drawing."""
 
 from dataclasses import replace
 from unittest.mock import Mock
@@ -40,9 +40,9 @@ from scripts.dev.visual_debugger.protocol import (
     SetViewCommandV1,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
-from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
+from marl_battlegrounds.core.axis_mappings import global_slot_to_target_action
 from marl_battlegrounds.core.types import (
     MAX_AGENT_SLOTS,
     MOVE_EAST,
@@ -888,7 +888,7 @@ def test_terminal_pov_submit_retains_draft_without_reusing_incoming_transition(
     monkeypatch.setattr(control_module, "step", step_spy)
     monkeypatch.setattr(
         control_module,
-        "capture_evaluation_transition_unit_v1",
+        "capture_evaluation_transition_unit_v2",
         capture_spy,
     )
 

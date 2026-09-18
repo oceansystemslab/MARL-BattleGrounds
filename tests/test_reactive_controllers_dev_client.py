@@ -1,4 +1,4 @@
-"""Reactive host eligibility, coherent execution, and diagnostic provenance."""
+"""Check DevClient controller selection, execution and recorded identities."""
 
 import json
 from dataclasses import replace
@@ -34,31 +34,39 @@ from scripts.dev.visual_debugger.model import (
 )
 from scripts.dev.visual_debugger.protocol import CombatConfigurationV1
 from scripts.dev.visual_debugger.recording import (
-    DebuggerReplayRecorderV1,
     build_debugger_recording_specification_v1,
 )
+from scripts.dev.visual_debugger.replay_recorder import DebuggerReplayRecorder
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.service import DebuggerService
 from tests.scenario_controller_fixtures import load_scenario_1
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
-from marl_battlegrounds.core.types import TEAM_A_ID, TEAM_B_ID, EnvConfig, EnvState
-from marl_battlegrounds.evaluation.metrics import build_evaluation_observer_v1
+from marl_battlegrounds.core.types import TEAM_B_ID, EnvConfig, EnvState
+from marl_battlegrounds.evaluation import policy_execution
 from marl_battlegrounds.evaluation.models import (
-    AssignedPolicySlotV1,
-    EvaluationEpisodeContextV1,
+    AssignedPolicySlotV2,
+    EvaluationEpisodeContextV3,
+    EvaluationFrameV2,
     canonical_digest_sha256,
 )
+from marl_battlegrounds.evaluation.policy_execution import Policy, policy
 from marl_battlegrounds.evaluation.replay import (
     RuntimeProvenanceV1,
-    build_replay_bundle_v1,
 )
 from marl_battlegrounds.evaluation.replay_io import (
-    load_replay_bundle_v1,
-    preflight_replay_bundle_destination_v1,
-    save_replay_bundle_v1,
+    load_replay,
+    preflight_replay_destination,
+    save_replay,
 )
+from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3, build_replay_v3
 from marl_battlegrounds.policies.actor import ActorAction
+from marl_battlegrounds.policies.input import ActorInput, Observations
+from marl_battlegrounds.policies.reactive_tdm_alpha import reactive_tdm_alpha_policy
+from marl_battlegrounds.policies.shared_obs import (
+    build_shared_obs_sensor_source_bank,
+    execute_shared_obs_team_policy,
+)
 
 
 def _scenario(
@@ -145,16 +153,16 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
 ) -> None:
     session = _session(team_a=team_a, team_b=scenario_controller)
     calls = {"bank": 0, "assembler": 0, "step": 0}
-    real_bank = control.build_shared_obs_sensor_source_bank
-    real_assembler = control.build_joint_action_from_actor_actions
+    real_bank = policy_execution.build_team_actor_input
+    real_assembler = policy_execution.build_joint_action_from_actor_actions
     real_step = control.step
-    real_executor = control.execute_shared_obs_team_policy
+    real_executor = control.apply_policies
     input_epochs: list[tuple[object, object, object]] = []
 
-    def bank(observation: object) -> object:
+    def bank(observations: Observations, team: int) -> ActorInput:
         calls["bank"] += 1
-        assert observation is session.observation
-        return real_bank(observation)  # type: ignore[arg-type]
+        assert observations.observation is session.observation
+        return real_bank(observations, team)
 
     def assembler(*args: object) -> object:
         calls["assembler"] += 1
@@ -165,30 +173,27 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
         return real_step(*args)  # type: ignore[arg-type]
 
     def executor(*args: object, **kwargs: object) -> object:
-        input_epochs.append((args[0], args[1], args[3]))
-        if kwargs["team_identity"] == TEAM_B_ID:
-            assert kwargs["policy"] is control.reactive_tdm_beta_policy
-        else:
-            assert kwargs["team_identity"] == TEAM_A_ID
-            expected_policy = (
-                control.reactive_tdm_alpha_policy
-                if team_a == "reactive_tdm"
-                else control._random_shared_obs_policy  # pyright: ignore[reportPrivateUsage]
-            )
-            assert kwargs["policy"] is expected_policy
+        input_epochs.append((args[6], args[7], args[8]))
+        assert args[1] is policy("tdm-beta").apply
+        if team_a != "manual":
+            expected = "tdm-alpha" if team_a == "reactive_tdm" else "random"
+            assert args[0] is policy(expected).apply
         return real_executor(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(control, "build_shared_obs_sensor_source_bank", bank)
-    monkeypatch.setattr(control, "build_joint_action_from_actor_actions", assembler)
+    monkeypatch.setattr(policy_execution, "build_team_actor_input", bank)
+    monkeypatch.setattr(
+        policy_execution, "build_joint_action_from_actor_actions", assembler
+    )
     monkeypatch.setattr(control, "step", step)
-    monkeypatch.setattr(control, "execute_shared_obs_team_policy", executor)
+    monkeypatch.setattr(control, "apply_policies", executor)
     advanced = control.submit_interactive(session)
-    assert calls == {"bank": 1, "assembler": 1, "step": 1}
-    assert len(input_epochs) == (1 if team_a == "manual" else 2)
-    for observation, mask, source_bank in input_epochs:
-        assert observation is session.observation
-        assert mask is session.action_mask
-        assert source_bank is input_epochs[0][2]
+    assert calls == {"bank": 2, "assembler": 1, "step": 1}
+    assert len(input_epochs) == 1
+    observations, mask, keys = input_epochs[0]
+    assert isinstance(observations, Observations)
+    assert observations.observation is session.observation
+    assert mask is session.action_mask
+    assert isinstance(keys, jax.Array) and keys.shape == (10,)
     assert int(advanced.state.step_count) == int(session.state.step_count) + 1
     assert advanced.incoming_evaluation_view is not None
     acceptance = (
@@ -210,7 +215,7 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
             != aggregation["pressure_protocol_digest"]
         )
         for row in context.policy_assignments[:5]:
-            assert isinstance(row, AssignedPolicySlotV1)
+            assert isinstance(row, AssignedPolicySlotV2)
             assert row.algorithm_id == "reactive-team-deathmatch-controller"
             assert row.execution_mode == "deterministic"
             assert (
@@ -218,7 +223,7 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
                 == aggregation["reactive_tdm_controller_digest"]
             )
     for row in context.policy_assignments[5:]:
-        assert isinstance(row, AssignedPolicySlotV1)
+        assert isinstance(row, AssignedPolicySlotV2)
         assert row.policy_kind == scenario_controller
         assert row.algorithm_id == algorithm
         assert row.execution_mode == "deterministic"
@@ -249,16 +254,16 @@ def test_scenario_controller_keeps_live_and_reviving_classes_reactive(
     for _ in range(2):
         baseline = cast(
             ActorAction,
-            control.execute_shared_obs_team_policy(
+            execute_shared_obs_team_policy(
                 session.observation,
                 session.action_mask,
                 control._policy_keys(session),  # pyright: ignore[reportPrivateUsage]
-                control.build_shared_obs_sensor_source_bank(session.observation),
+                build_shared_obs_sensor_source_bank(session.observation),
                 control.build_default_shared_obs_information_availability(
                     session.config.agent_profile.active_mask,
                     session.config.agent_profile.team_ids,
                 ),
-                policy=control.reactive_tdm_alpha_policy,
+                policy=reactive_tdm_alpha_policy,
                 team_identity=TEAM_B_ID,
             ),
         )
@@ -481,7 +486,13 @@ def test_scenario_controller_failure_is_atomic_and_policy_labelled(
         del args
         raise RuntimeError("injected scenario controller failure")
 
-    monkeypatch.setattr(control, "reactive_tdm_beta_policy", failed_policy)
+    def injected_policy(name: str) -> Policy:
+        original = policy(name)
+        return (
+            replace(original, apply=failed_policy) if name == "tdm-beta" else original
+        )
+
+    monkeypatch.setattr(control, "policy", injected_policy)
     with pytest.raises(control.DebuggerTransitionFailureV1) as raised:
         control.submit_interactive(session)
     assert raised.value.stable_code == "policy_action_build_failed"
@@ -530,10 +541,10 @@ def test_pressure_identity_is_independent_of_scenario_name_and_generation(
         original, replace(original.scenario, name="another_copy", title="Renamed")
     )
     original_row = cast(
-        AssignedPolicySlotV1, original.evaluation_context.policy_assignments[5]
+        AssignedPolicySlotV2, original.evaluation_context.policy_assignments[5]
     )
     renamed_row = cast(
-        AssignedPolicySlotV1, renamed.evaluation_context.policy_assignments[5]
+        AssignedPolicySlotV2, renamed.evaluation_context.policy_assignments[5]
     )
     assert original_row.policy_content_digest == renamed_row.policy_content_digest
     assert (
@@ -548,7 +559,7 @@ def test_pressure_identity_binds_descriptor_version_and_launch_revision(
 ) -> None:
     session = _session(team_b=scenario_controller)
     original_row = cast(
-        AssignedPolicySlotV1,
+        AssignedPolicySlotV2,
         session.evaluation_context.policy_assignments[5],
     )
     descriptor_name = "reactive_tdm_beta_controller_descriptor"
@@ -568,7 +579,7 @@ def test_pressure_identity_binds_descriptor_version_and_launch_revision(
     )
     changed = control.reset_session(session)
     changed_row = cast(
-        AssignedPolicySlotV1,
+        AssignedPolicySlotV2,
         changed.evaluation_context.policy_assignments[5],
     )
     assert changed_row.policy_content_digest != original_row.policy_content_digest
@@ -579,7 +590,7 @@ def test_pressure_identity_binds_descriptor_version_and_launch_revision(
     descriptor["pursuit"] = "injected alternative pursuit rule"
     changed = control.reset_session(session)
     changed_row = cast(
-        AssignedPolicySlotV1,
+        AssignedPolicySlotV2,
         changed.evaluation_context.policy_assignments[5],
     )
     assert changed_row.policy_content_digest != original_row.policy_content_digest
@@ -606,7 +617,7 @@ def test_pressure_identity_binds_descriptor_version_and_launch_revision(
         execution_information_mode="shared_obs",
     )
     changed_row = cast(
-        AssignedPolicySlotV1,
+        AssignedPolicySlotV2,
         changed.evaluation_context.policy_assignments[5],
     )
     assert changed_row.policy_content_digest != original_row.policy_content_digest
@@ -638,10 +649,10 @@ def test_reactive_controller_recording_reopens_without_replay_changes(
         batch_shape=(1,),
         policy_execution_included=True,
     )
-    destination = preflight_replay_bundle_destination_v1(
+    destination = preflight_replay_destination(
         tmp_path / "reactive-controller.marlbg-replay.json"
     )
-    recorder = DebuggerReplayRecorderV1(
+    recorder = DebuggerReplayRecorder(
         specification=build_debugger_recording_specification_v1(
             action_source_kind="mixed",
             runtime_provenance=runtime,
@@ -652,6 +663,9 @@ def test_reactive_controller_recording_reopens_without_replay_changes(
     )
     advanced = control.submit_interactive(session)
     assert advanced.incoming_evaluation_view is not None
+    assert isinstance(
+        advanced.incoming_evaluation_view.successor_frame, EvaluationFrameV2
+    )
     recorder.append(
         advanced.incoming_evaluation_view.transition,
         advanced.incoming_evaluation_view.successor_frame,
@@ -661,7 +675,8 @@ def test_reactive_controller_recording_reopens_without_replay_changes(
     assert loaded.replay.header.context == session.evaluation_context
     assert loaded.replay.header.runtime_provenance.policy_execution_included
     assert recorder.saved_bundle is not None
-    reopened = load_replay_bundle_v1(recorder.saved_bundle.replay_path)
+    reopened = load_replay(recorder.saved_bundle.replay_path)
+    assert isinstance(reopened.replay, ReplayArtifactV3)
     assert reopened.replay.header.context == loaded.replay.header.context
     context = reopened.replay.header.context
     descriptor = (
@@ -683,14 +698,14 @@ def test_reactive_controller_recording_reopens_without_replay_changes(
     )
     assert aggregation[f"{identity_key}_digest"] == expected_digest
     for row in context.policy_assignments[5:]:
-        assert isinstance(row, AssignedPolicySlotV1)
+        assert isinstance(row, AssignedPolicySlotV2)
         assert row.policy_kind == team_b
         assert row.algorithm_id == descriptor["policy_id"]
         assert row.policy_content_digest == expected_digest
 
     if historical:
-        # Synthetic historical provenance exercises the generic reader without
-        # importing, reconstructing, or claiming to execute the retired policy.
+        # A retired controller name remains valid provenance in a current record.
+        # This does not claim that the retired controller generated these actions.
         legacy_payload = context.model_dump(mode="json")
         for row in legacy_payload["policy_assignments"]:
             if row.get("policy_kind") == "scenario_5":
@@ -710,22 +725,21 @@ def test_reactive_controller_recording_reopens_without_replay_changes(
                 row["value"] = "scenario-3-pressure-controller@1"
             elif row["name"] == "pressure_protocol_digest":
                 row["value"] = "3" * 64
-        legacy_context = EvaluationEpisodeContextV1.model_validate_json(
+        legacy_context = EvaluationEpisodeContextV3.model_validate_json(
             json.dumps(legacy_payload)
         )
-        observer = build_evaluation_observer_v1(legacy_context)
-        observer.start(reopened.replay.frames[0])
-        observer.append(reopened.replay.transitions[0], reopened.replay.frames[1])
-        report = observer.finalize(
-            completion_state="partial", end_or_failure_reason="user_finish_and_review"
+        replay = build_replay_v3(
+            legacy_context,
+            reopened.replay.frames,
+            reopened.replay.transitions,
+            runtime_provenance=runtime,
+            completion_state="partial",
+            end_or_failure_reason="user_finish_and_review",
         )
-        bundle = build_replay_bundle_v1(observer, report, runtime_provenance=runtime)
-        saved = save_replay_bundle_v1(
-            bundle, tmp_path / "retired-controller.marlbg-replay.json"
-        )
-        legacy_reopened = load_replay_bundle_v1(saved.replay_path)
+        saved = save_replay(replay, tmp_path / "retired-controller.marlbg-replay.json")
+        legacy_reopened = load_replay(saved.replay_path)
         assert legacy_reopened.replay.header.context == legacy_context
         for row in legacy_reopened.replay.header.context.policy_assignments[5:]:
-            assert isinstance(row, AssignedPolicySlotV1)
+            assert isinstance(row, AssignedPolicySlotV2)
             assert row.policy_kind == "scenario_3"
             assert row.algorithm_id == "scenario-3-pressure-controller"

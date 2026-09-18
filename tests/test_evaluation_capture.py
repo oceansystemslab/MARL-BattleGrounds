@@ -1,5 +1,5 @@
 # pyright: reportPrivateUsage=false
-"""Host-boundary tests for CP2 evaluation frame and fact capture."""
+"""Check conversion of game frames and transition facts into evaluation records."""
 
 from __future__ import annotations
 
@@ -14,9 +14,10 @@ import pytest
 from numpy.typing import NDArray
 from pydantic import ValidationError
 from tests.evaluation_fixtures import evaluation_context, evaluation_env_config
+from tests.evaluation_fixtures import historical_reset as reset
+from tests.evaluation_fixtures import historical_step as step
 
 import marl_battlegrounds.evaluation.capture as capture_module
-from marl_battlegrounds.core.env import reset, step
 from marl_battlegrounds.core.types import (
     CONTEXT_FEATURE_CURRENT_TIMESTEP,
     CONTEXT_FEATURE_EPISODE_HORIZON,
@@ -209,6 +210,8 @@ def _assert_frame_copies_every_dynamic_leaf(
         )
 
     for field_name in Observation._fields:
+        if field_name == "self_ally_index":
+            continue  # The old observation contract did not contain this leaf.
         source_value = getattr(host_observation, field_name)
         model_value = getattr(frame.base_observation, field_name)
         if field_name in ("previous_timestep_actions", "spawn_lifecycle"):
@@ -252,7 +255,6 @@ def _replace_submitted_move(
 def _team_a_threshold_payload(
     sources: _StepSources,
 ) -> tuple[EnvState, Observation, TransitionFacts, Reward, DoneFlags]:
-    """Author one internally coherent TDM threshold transition for host tests."""
     team_b_recipient = 5
     successor_state = sources.successor_state._replace(
         team_deathmatch_scores=jnp.asarray((1, 0), dtype=jnp.int32),
@@ -382,7 +384,6 @@ def test_initial_frame_contains_full_immutable_payload_and_json_roundtrip() -> N
 
 
 def test_projection_v2_capture_validates_classes_without_changing_v1_bytes() -> None:
-    """Validate the reconstructible class map while preserving immutable V1 output."""
     config = evaluation_env_config()
     v1_context = evaluation_context(config=config)
     v2_context = v1_context.model_copy(
@@ -425,7 +426,6 @@ def test_projection_v2_capture_validates_classes_without_changing_v1_bytes() -> 
 
 
 def test_capture_rejects_live_class_ids_that_disagree_with_context() -> None:
-    """A V1 omission cannot silently pair one roster context with another leaf."""
     config = evaluation_env_config()
     context = evaluation_context(config=config).model_copy(
         update={"actor_projection": NO_SHARED_OBS_ACTOR_PROJECTION_V2}

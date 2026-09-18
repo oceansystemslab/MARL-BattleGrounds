@@ -1,4 +1,8 @@
-"""Reusable strict host-model fixtures for evaluation tests."""
+"""Build shared configurations, transitions and recording records for tests.
+
+Fixtures include explicit historical observation layouts for old file versions.
+Using an old layout is a test choice; it does not change the live input contract.
+"""
 
 from dataclasses import dataclass
 
@@ -7,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from marl_battlegrounds.core.config import resolve_agent_profile
-from marl_battlegrounds.core.env import reset, step
+from marl_battlegrounds.core.env import initialize_scenario_state, reset, step
 from marl_battlegrounds.core.types import (
     CONTEXT_FEATURE_TDM_ALLY_SCORE,
     CONTEXT_FEATURE_TDM_ENEMY_SCORE,
@@ -24,13 +28,23 @@ from marl_battlegrounds.core.types import (
     TASK_MODE_TDM,
     WARRIOR_CLASS_ID,
     Action,
+    ActionMask,
     DoneFlags,
     EnvConfig,
+    EnvState,
+    Info,
+    Observation,
     Reward,
+)
+from marl_battlegrounds.evaluation.actor_projection import (
+    NO_SHARED_OBS_ACTOR_PROJECTION_V3,
+    SHARED_OBS_ACTOR_PROJECTION_V2,
 )
 from marl_battlegrounds.evaluation.capture import (
     capture_evaluation_transition_unit_v1,
+    capture_evaluation_transition_unit_v2,
     capture_initial_evaluation_frame_v1,
+    capture_initial_evaluation_frame_v2,
 )
 from marl_battlegrounds.evaluation.catalog import (
     build_code_revision_v1,
@@ -38,13 +52,17 @@ from marl_battlegrounds.evaluation.catalog import (
     build_evaluation_seed_protocol_v1,
 )
 from marl_battlegrounds.evaluation.models import (
+    REQUIRED_SCHEMA_BINDINGS_V3,
     AggregationKeyV1,
     AssignedPolicySlotV1,
     CaptureProfile,
     ContentAddressedIdentityV1,
+    EvaluationEpisodeContext,
     EvaluationEpisodeContextV1,
+    EvaluationEpisodeContextV3,
     EvaluationEpisodeIdentityV1,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     EvaluationRole,
     EvaluationSeedProtocolV1,
     EvaluationTransitionV1,
@@ -53,10 +71,47 @@ from marl_battlegrounds.evaluation.models import (
     PolicyAssignmentSlotV1,
     VersionedIdentityV1,
 )
+from marl_battlegrounds.evaluation.replay_v2 import context_v2
 
 _DIGEST_A = "1" * 64
 _DIGEST_B = "2" * 64
 _DIGEST_C = "3" * 64
+
+
+def historical_observation(config: EnvConfig, observation: Observation) -> Observation:
+    team_ids = config.agent_profile.team_ids.astype(jnp.float32)
+    return observation._replace(
+        self_features=observation.self_features.at[:, 3].set(team_ids),
+        ally_unit_features=observation.ally_unit_features.at[:, :, 3].set(
+            jnp.where(observation.ally_visibility_mask, team_ids[:, None], 0.0)
+        ),
+        enemy_unit_features=observation.enemy_unit_features.at[:, :, 3].set(
+            jnp.where(observation.enemy_visibility_mask, 3.0 - team_ids[:, None], 0.0)
+        ),
+    )
+
+
+def historical_reset(
+    config: EnvConfig, key: jax.Array
+) -> tuple[EnvState, Observation, ActionMask, Info]:
+    state, observation, mask, info = reset(config, key)
+    return state, historical_observation(config, observation), mask, info
+
+
+def historical_step(
+    config: EnvConfig, state: EnvState, mask: ActionMask, action: Action, key: jax.Array
+) -> tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]:
+    state, observation, reward, done, mask, info = step(
+        config, state, mask, action, key
+    )
+    return state, historical_observation(config, observation), reward, done, mask, info
+
+
+def historical_initialize_scenario_state(
+    state: EnvState, config: EnvConfig
+) -> tuple[EnvState, Observation, ActionMask, Info]:
+    state, observation, mask, info = initialize_scenario_state(state, config)
+    return state, historical_observation(config, observation), mask, info
 
 
 def evaluation_env_config(
@@ -66,7 +121,6 @@ def evaluation_env_config(
     team_deathmatch_score_threshold: int = 0,
     max_steps: int = 100,
 ) -> EnvConfig:
-    """Return one asymmetric, padded, duplicate-class-valid configuration."""
     requested_classes = jnp.asarray(
         (
             MAGE_CLASS_ID,
@@ -126,7 +180,6 @@ def content_identity(
     *,
     digest: str = _DIGEST_A,
 ) -> ContentAddressedIdentityV1:
-    """Return one deterministic content-addressed identity."""
     return ContentAddressedIdentityV1(
         identifier=name,
         version=1,
@@ -139,7 +192,6 @@ def evaluation_episode_identity(
     with_scenario: bool = False,
     episode_id: str = "episode-001",
 ) -> EvaluationEpisodeIdentityV1:
-    """Return deterministic runner-owned episode identity."""
     return EvaluationEpisodeIdentityV1(
         run_id="run-001",
         evaluation_id="evaluation-001",
@@ -161,7 +213,6 @@ def evaluation_episode_identity(
 def policy_assignments(
     config: EnvConfig,
 ) -> tuple[PolicyAssignmentSlotV1, ...]:
-    """Return exactly ten policy rows aligned with the resolved active roster."""
     active = tuple(
         bool(value) for value in np.asarray(config.agent_profile.active_mask)
     )
@@ -209,7 +260,6 @@ def evaluation_seed_protocol(
     *,
     with_scenario: bool = False,
 ) -> EvaluationSeedProtocolV1:
-    """Return named realized seeds consistent with the policy fixture."""
     return build_evaluation_seed_protocol_v1(
         seed_protocol=VersionedIdentityV1(identifier="split-v1", version=1),
         root_seed=1,
@@ -236,7 +286,6 @@ def evaluation_context(
     episode_id: str = "episode-001",
     config: EnvConfig | None = None,
 ) -> EvaluationEpisodeContextV1:
-    """Build a complete valid episode context through the public constructor."""
     resolved_config = evaluation_env_config() if config is None else config
     active_mask = tuple(
         bool(value) for value in np.asarray(resolved_config.agent_profile.active_mask)
@@ -311,21 +360,17 @@ def evaluation_context(
 
 @dataclass(frozen=True, slots=True)
 class CapturedEvaluationTrajectory:
-    """One public reset/step trajectory normalized through the CP2 seam."""
-
     context: EvaluationEpisodeContextV1
     frames: tuple[EvaluationFrameV1, ...]
     transitions: tuple[EvaluationTransitionV1, ...]
 
 
 def neutral_action() -> Action:
-    """Return the canonical all-Stay/no-target/no-Ultimate joint action."""
     zeros = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
     return Action(move=zeros, select_target=zeros, use_ultimate=zeros)
 
 
 def mage_target_none_ultimate_action() -> Action:
-    """Return an action that activates slot-zero Mage Ultimate at target-none."""
     action = neutral_action()
     return Action(
         move=action.move,
@@ -335,9 +380,8 @@ def mage_target_none_ultimate_action() -> Action:
 
 
 def valid_shared_availability(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
 ) -> jax.Array:
-    """Return a valid same-team off-diagonal SharedObs availability matrix."""
     availability = np.zeros(
         (MAX_AGENT_SLOTS, MAX_AGENT_SLOTS),
         dtype=np.bool_,
@@ -366,7 +410,6 @@ def captured_evaluation_trajectory(
     actions: tuple[Action, ...] | None = None,
     config: EnvConfig | None = None,
 ) -> CapturedEvaluationTrajectory:
-    """Capture a deterministic trajectory through public reset, step, and CP2 APIs."""
     if transition_count < 0:
         raise ValueError("transition_count must be nonnegative")
     resolved_config = evaluation_env_config() if config is None else config
@@ -397,7 +440,7 @@ def captured_evaluation_trajectory(
     current_frame = capture_initial_evaluation_frame_v1(
         context,
         state,
-        observation,
+        historical_observation(resolved_config, observation),
         action_mask,
         availability,
     )
@@ -422,7 +465,7 @@ def captured_evaluation_trajectory(
             context,
             current_frame,
             state,
-            observation,
+            historical_observation(resolved_config, observation),
             action_mask,
             info.transition_facts,
             canonical_reward,
@@ -450,7 +493,6 @@ def captured_team_deathmatch_threshold_trajectory(
     actor_projection: VersionedIdentityV1 | None = None,
     with_scenario: bool = False,
 ) -> CapturedEvaluationTrajectory:
-    """Capture one authoritative Team A threshold win for host-side tests."""
     maximum_episode_steps = 1 if at_horizon else 100
     config = evaluation_env_config(
         task_mode=TASK_MODE_TDM,
@@ -478,7 +520,7 @@ def captured_team_deathmatch_threshold_trajectory(
     start_frame = capture_initial_evaluation_frame_v1(
         context,
         start_state,
-        start_observation,
+        historical_observation(config, start_observation),
         start_action_mask,
         availability,
     )
@@ -560,7 +602,7 @@ def captured_team_deathmatch_threshold_trajectory(
         context,
         start_frame,
         successor_state,
-        successor_observation,
+        historical_observation(config, successor_observation),
         successor_action_mask,
         transition_facts,
         reward,
@@ -579,7 +621,6 @@ def captured_team_deathmatch_threshold_trajectory(
 def captured_resumed_team_deathmatch_horizon_trajectory() -> (
     CapturedEvaluationTrajectory
 ):
-    """Capture a resumed unequal-score TDM prefix through its horizon draw."""
     config = evaluation_env_config(
         task_mode=TASK_MODE_TDM,
         team_deathmatch_score_threshold=10,
@@ -628,7 +669,7 @@ def captured_resumed_team_deathmatch_horizon_trajectory() -> (
     current_frame = capture_initial_evaluation_frame_v1(
         context,
         state,
-        observation,
+        historical_observation(config, observation),
         action_mask,
     )
     frames = [current_frame]
@@ -645,7 +686,7 @@ def captured_resumed_team_deathmatch_horizon_trajectory() -> (
             context,
             current_frame,
             state,
-            observation,
+            historical_observation(config, observation),
             action_mask,
             info.transition_facts,
             reward,
@@ -675,3 +716,90 @@ __all__ = [
     "policy_assignments",
     "valid_shared_availability",
 ]
+
+
+@dataclass(frozen=True)
+class CurrentCapturedEvaluationTrajectory:
+    context: EvaluationEpisodeContextV3
+    frames: tuple[EvaluationFrameV2, ...]
+    transitions: tuple[EvaluationTransitionV1, ...]
+    observations: tuple[Observation, ...]
+
+
+def current_evaluation_context(
+    config: EnvConfig,
+    *,
+    execution_information_mode: ExecutionInformationMode = "no_shared_obs",
+    aggregation_keys: tuple[AggregationKeyV1, ...] | None = None,
+) -> EvaluationEpisodeContextV3:
+    legacy = evaluation_context(
+        config=config,
+        expected_horizon=config.max_steps,
+        execution_information_mode=execution_information_mode,
+        aggregation_keys=aggregation_keys,
+    )
+    payload = context_v2(legacy).model_dump(mode="python")
+    payload.update(
+        schema_version=3,
+        schema_versions=tuple(
+            {"schema_id": name, "schema_version": version}
+            for name, version in REQUIRED_SCHEMA_BINDINGS_V3
+        ),
+        actor_projection=(
+            SHARED_OBS_ACTOR_PROJECTION_V2
+            if execution_information_mode == "shared_obs"
+            else NO_SHARED_OBS_ACTOR_PROJECTION_V3
+        ),
+    )
+    return EvaluationEpisodeContextV3.model_validate(payload)
+
+
+def current_captured_evaluation_trajectory(
+    *,
+    transition_count: int = 1,
+    execution_information_mode: ExecutionInformationMode = "no_shared_obs",
+    aggregation_keys: tuple[AggregationKeyV1, ...] | None = None,
+    config: EnvConfig | None = None,
+) -> CurrentCapturedEvaluationTrajectory:
+    config = (
+        evaluation_env_config(max_steps=transition_count) if config is None else config
+    )
+    context = current_evaluation_context(
+        config,
+        execution_information_mode=execution_information_mode,
+        aggregation_keys=aggregation_keys,
+    )
+    state, observation, mask, _ = reset(config, jax.random.PRNGKey(0))
+    availability = (
+        valid_shared_availability(context)
+        if execution_information_mode == "shared_obs"
+        else None
+    )
+    frames = [
+        capture_initial_evaluation_frame_v2(
+            context, state, observation, mask, availability
+        )
+    ]
+    observations = [observation]
+    transitions: list[EvaluationTransitionV1] = []
+    for index in range(transition_count):
+        state, observation, reward, done, mask, info = step(
+            config, state, mask, neutral_action(), jax.random.PRNGKey(index + 1)
+        )
+        transition, frame = capture_evaluation_transition_unit_v2(
+            context,
+            frames[-1],
+            state,
+            observation,
+            mask,
+            info.transition_facts,
+            reward,
+            done,
+            successor_shared_obs_information_availability_by_recipient_and_sensor_source=availability,
+        )
+        frames.append(frame)
+        observations.append(observation)
+        transitions.append(transition)
+    return CurrentCapturedEvaluationTrajectory(
+        context, tuple(frames), tuple(transitions), tuple(observations)
+    )

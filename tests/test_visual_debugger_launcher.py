@@ -1,4 +1,4 @@
-"""CLI and shell-launcher regression tests, including dependency isolation."""
+"""Check Python and shell launch commands, including dependency isolation."""
 
 import argparse
 import os
@@ -102,7 +102,6 @@ def test_recording_launch_rejects_retired_team_b_controller() -> None:
 
 
 def _write_valid_replay(tmp_path: Path) -> Path:
-    """Write one small canonical replay for launcher-boundary integration tests."""
     from tests.evaluation_fixtures import captured_evaluation_trajectory
 
     from marl_battlegrounds.evaluation.metrics import build_evaluation_observer_v1
@@ -149,7 +148,18 @@ def _write_valid_replay(tmp_path: Path) -> Path:
 
 
 def test_debugger_parser_exposes_live_arena_contract_and_hidden_compatibility() -> None:
+    from scripts.dev.debug_renderer import (
+        _resolve_launch_options,  # pyright: ignore[reportPrivateUsage]
+    )
+
     parser = build_debugger_parser()
+    for flags, expected in (
+        ((), False),
+        (("--ranges",), True),
+        (("--no-ranges",), False),
+    ):
+        assert _resolve_launch_options(parser.parse_args(flags)).ranges is expected
+    assert "ranges (default: hide)" in " ".join(parser.format_help().split())
     args = parser.parse_args(
         (
             "--seed",
@@ -203,7 +213,21 @@ def test_replay_parser_exposes_narrow_static_replay_contract() -> None:
 
 
 def test_replay_parser_exposes_complete_browser_replay_contract() -> None:
+    from scripts.dev.replay_viewer import (
+        _resolve_launch_options,  # pyright: ignore[reportPrivateUsage]
+    )
+
     parser = build_parser()
+    for flags, expected in (
+        ((), False),
+        (("--ranges",), True),
+        (("--no-ranges",), False),
+    ):
+        assert (
+            _resolve_launch_options(parser.parse_args(flags)).playback.ranges
+            is expected
+        )
+    assert "ranges (default: hide)" in " ".join(parser.format_help().split())
     args = parser.parse_args(
         (
             "--replay",
@@ -463,7 +487,8 @@ def test_exact_static_replay_dispatches_only_the_stateless_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import scripts.dev.visual_debugger.server as server_module
-    import scripts.dev.visual_debugger.static_renderer as static_module
+
+    import marl_battlegrounds.viewer.static as static_module
 
     observed: dict[str, object] = {}
 
@@ -554,6 +579,14 @@ def test_browser_replay_loads_resolves_then_injects_exact_server_binding(
                 "server should not request metric analysis in this test"
             )
 
+        def metric_catalog(self) -> bytes:
+            raise AssertionError("server should not request the catalog in this test")
+
+        def episode_details(self) -> tuple[bytes, str]:
+            raise AssertionError(
+                "server should not request episode details in this test"
+            )
+
         def apply_command(self, request: object) -> object:
             del request
             raise AssertionError("server should not apply a command in this test")
@@ -589,7 +622,7 @@ def test_browser_replay_loads_resolves_then_injects_exact_server_binding(
         )
         return 31
 
-    monkeypatch.setattr(replay_io_module, "load_replay_bundle_v1", fake_load)
+    monkeypatch.setattr(replay_io_module, "load_replay", fake_load)
     monkeypatch.setattr(
         replay_service_module,
         "ReplayViewerService",
@@ -642,6 +675,7 @@ def test_browser_replay_loads_resolves_then_injects_exact_server_binding(
     assert coordinator.current_presentation == service.current_presentation
     assert coordinator.current_metric_report == service.current_metric_report
     assert coordinator.metric_analysis == service.metric_analysis
+    assert coordinator.metric_catalog == service.metric_catalog
     assert coordinator.apply_command == service.apply_command
 
 
@@ -755,7 +789,8 @@ forbidden = (
     'scripts.dev.visual_debugger.control',
     'scripts.dev.visual_debugger.evaluation_bridge',
     'scripts.dev.visual_debugger.protocol',
-    'scripts.dev.visual_debugger.revision',
+    'marl_battlegrounds.evaluation.revision',
+    'marl_battlegrounds.evaluation.runtime_provenance',
     'scripts.dev.visual_debugger.scenarios',
     'scripts.dev.visual_debugger.service',
 )
@@ -806,7 +841,8 @@ forbidden = (
     'scripts.dev.visual_debugger.control',
     'scripts.dev.visual_debugger.evaluation_bridge',
     'scripts.dev.visual_debugger.protocol',
-    'scripts.dev.visual_debugger.revision',
+    'marl_battlegrounds.evaluation.revision',
+    'marl_battlegrounds.evaluation.runtime_provenance',
     'scripts.dev.visual_debugger.scenarios',
     'scripts.dev.visual_debugger.service',
 )
@@ -961,8 +997,10 @@ def test_replay_help_is_read_only_and_hides_live_and_legacy_tokens() -> None:
         "unmodified document shortcuts: previous / next /",
         "play or pause",
         "Export PNG",
-        "Download Metrics",
-        "canonical metric-report download in every visual POV",
+        "Download Metrics CSV",
+        "selected-boundary scalar metrics in every visual POV",
+        "Episode Details",
+        "recorded episode, policy and runtime provenance",
         "Tick current / final",
     ):
         assert replay_control in result.stdout
@@ -1157,6 +1195,14 @@ def test_sample_replay_injects_verified_bundle_without_reopening_source_path(
                 "server should not request metric analysis in this test"
             )
 
+        def metric_catalog(self) -> bytes:
+            raise AssertionError("server should not request the catalog in this test")
+
+        def episode_details(self) -> tuple[bytes, str]:
+            raise AssertionError(
+                "server should not request episode details in this test"
+            )
+
         def apply_command(self, request: object) -> object:
             del request
             raise AssertionError("server should not apply a command in this test")
@@ -1193,7 +1239,7 @@ def test_sample_replay_injects_verified_bundle_without_reopening_source_path(
         return 47
 
     monkeypatch.setattr(samples_module, "load_verified_sample_replay", fake_sample_load)
-    monkeypatch.setattr(replay_io_module, "load_replay_bundle_v1", fail_path_reopen)
+    monkeypatch.setattr(replay_io_module, "load_replay", fail_path_reopen)
     monkeypatch.setattr(
         replay_service_module,
         "ReplayViewerService",
@@ -1210,6 +1256,7 @@ def test_sample_replay_injects_verified_bundle_without_reopening_source_path(
     assert observed["open_browser"] is False
     coordinator = cast(HttpCoordinatorBinding, observed["coordinator"])
     assert coordinator.metric_analysis == service.metric_analysis
+    assert coordinator.metric_catalog == service.metric_catalog
 
 
 def test_sample_replay_static_uses_the_verified_in_memory_artifact(
@@ -1232,8 +1279,12 @@ def test_sample_replay_static_uses_the_verified_in_memory_artifact(
     )
 
     def fake_static(options: object, bundle: object) -> int:
-        observed["frame_index"] = object.__getattribute__(options, "frame_index")
-        observed["ranges"] = object.__getattribute__(options, "ranges")
+        observed["frame_index"] = object.__getattribute__(
+            object.__getattribute__(options, "playback"), "frame_index"
+        )
+        observed["ranges"] = object.__getattribute__(
+            object.__getattribute__(options, "playback"), "ranges"
+        )
         observed["bundle"] = bundle
         return 59
 
@@ -1298,7 +1349,6 @@ def test_lazy_rendering_and_debugger_models_are_backend_free() -> None:
         "import sys; "
         "import marl_battlegrounds.rendering; "
         "import scripts.dev.visual_debugger.model; "
-        "import scripts.dev.visual_debugger.targeting; "
         "forbidden=('jax','jaxlib','numpy','marl_battlegrounds.core','matplotlib'); "
         "loaded=sorted(n for n in sys.modules if any(n == p or n.startswith(p + '.') "
         "for p in forbidden)); "
@@ -1342,7 +1392,7 @@ def test_missing_matplotlib_is_actionable_and_returns_two(tmp_path: Path) -> Non
     assert (
         "error: Matplotlib is required for static Visual Debugger and Analyzer "
         "snapshots. "
-        "Run 'uv sync --extra viz --extra dev'."
+        "Run pip install 'marl-battlegrounds[viz]'."
     ) in result.stderr
 
 
@@ -1441,13 +1491,13 @@ def test_recording_preflights_before_scenario_provenance_session_or_server(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from scripts.dev.visual_debugger import revision as revision_module
-    from scripts.dev.visual_debugger import runtime_provenance as runtime_module
     from scripts.dev.visual_debugger import scenarios as scenarios_module
     from scripts.dev.visual_debugger import server as server_module
     from scripts.dev.visual_debugger import service as service_module
 
     from marl_battlegrounds.evaluation import replay_io as replay_io_module
+    from marl_battlegrounds.evaluation import revision as revision_module
+    from marl_battlegrounds.evaluation import runtime_provenance as runtime_module
     from marl_battlegrounds.evaluation.replay_io import ReplaySaveError
 
     target = tmp_path / "missing" / "episode.marlbg-replay.json"
@@ -1464,13 +1514,13 @@ def test_recording_preflights_before_scenario_provenance_session_or_server(
 
     monkeypatch.setattr(
         replay_io_module,
-        "preflight_replay_bundle_destination_v1",
+        "preflight_replay_destination",
         fail_preflight,
     )
     monkeypatch.setattr(scenarios_module, "get_scenario", forbidden)
     monkeypatch.setattr(
         revision_module,
-        "discover_debugger_code_revision_v1",
+        "discover_code_revision_v1",
         forbidden,
     )
     monkeypatch.setattr(
@@ -1495,12 +1545,13 @@ def test_recording_runtime_provenance_failure_exits_before_router_or_browser(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from scripts.dev.visual_debugger import recording as recording_module
     from scripts.dev.visual_debugger import (
         recording_coordinator as coordinator_module,
     )
-    from scripts.dev.visual_debugger import runtime_provenance as runtime_module
+    from scripts.dev.visual_debugger import replay_recorder as recording_module
     from scripts.dev.visual_debugger import server as server_module
+
+    from marl_battlegrounds.evaluation import runtime_provenance as runtime_module
 
     def fail_provenance(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("private device discovery detail")
@@ -1513,7 +1564,7 @@ def test_recording_runtime_provenance_failure_exits_before_router_or_browser(
         "capture_debugger_runtime_provenance_v1",
         fail_provenance,
     )
-    monkeypatch.setattr(recording_module, "DebuggerReplayRecorderV1", forbidden)
+    monkeypatch.setattr(recording_module, "DebuggerReplayRecorder", forbidden)
     monkeypatch.setattr(coordinator_module, "RecordingDebuggerCoordinator", forbidden)
     monkeypatch.setattr(server_module, "serve_browser_debugger", forbidden)
     monkeypatch.setattr(server_module.webbrowser, "open", forbidden)
@@ -1536,13 +1587,13 @@ def test_recording_launch_injects_retaining_recorder_router_and_graceful_close(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from scripts.dev.visual_debugger import runtime_provenance as runtime_module
     from scripts.dev.visual_debugger import server as server_module
     from scripts.dev.visual_debugger.recording_coordinator import (
         RecordingDebuggerCoordinator,
     )
     from scripts.dev.visual_debugger.server import HttpCoordinatorRouter
 
+    from marl_battlegrounds.evaluation import runtime_provenance as runtime_module
     from marl_battlegrounds.evaluation.models import CodeRevisionV1
     from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 
@@ -1778,7 +1829,7 @@ def test_scripted_scenario_materializes_in_an_isolated_cpu_child(
         return 53
 
     monkeypatch.setattr(launcher_module.subprocess, "run", fake_subprocess_run)
-    monkeypatch.setattr(replay_io_module, "load_replay_bundle_v1", fake_load)
+    monkeypatch.setattr(replay_io_module, "load_replay", fake_load)
     monkeypatch.setattr(launcher_module, "_run_browser_replay", fake_browser)
 
     assert main(("--scenario", "basic_support", "--seed", "17", "--no-open")) == 53
@@ -1797,14 +1848,16 @@ def test_scripted_scenario_materializes_in_an_isolated_cpu_child(
     assert observed["check"] is False
     assert observed["capture_output"] is True
     assert observed["text"] is True
-    assert observed["require_metric_report"] is True
+    assert observed["require_metric_report"] is False
     assert observed["loaded_bundle"] is bundle
 
 
 def test_real_scripted_materializer_publishes_a_publicly_loadable_bundle(
     tmp_path: Path,
 ) -> None:
-    from marl_battlegrounds.evaluation.replay_io import load_replay_bundle_v1
+    from marl_battlegrounds.evaluation.analysis import analyze_replay
+    from marl_battlegrounds.evaluation.replay_io import load_replay
+    from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactV2
 
     destination = tmp_path / "basic-support.marlbg-replay.json"
     result = subprocess.run(
@@ -1826,11 +1879,19 @@ def test_real_scripted_materializer_publishes_a_publicly_loadable_bundle(
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
-    bundle = load_replay_bundle_v1(destination, require_metric_report=True)
-    assert bundle.status == "complete"
-    assert bundle.metric_report_artifact is not None
+    bundle = load_replay(destination)
+    assert bundle.status == "not_recorded"
+    assert isinstance(bundle.replay, ReplayArtifactV2)
+    assert bundle.metric_report_artifact is None
+    assert tuple(tmp_path.iterdir()) == (destination,)
+    assert bundle.replay.header.context.scenario_name == "basic_support"
+    assert bundle.replay.completion.completion_state == "complete"
     assert len(bundle.replay.transitions) == 2
     assert len(bundle.replay.frames) == 3
+    summary = analyze_replay(bundle).summary(2)
+    assert summary["frame_index"] == 2
+    assert summary["original_metric_status"] == "not_recorded"
+    assert summary["statistics"]
 
 
 def test_scripted_scenario_static_renders_the_materialized_bundle(
@@ -1852,9 +1913,13 @@ def test_scripted_scenario_static_renders_the_materialized_bundle(
     )
 
     def fake_static(options: object, loaded_bundle: object) -> int:
-        observed["frame_index"] = object.__getattribute__(options, "frame_index")
+        observed["frame_index"] = object.__getattribute__(
+            object.__getattribute__(options, "playback"), "frame_index"
+        )
         observed["seed"] = object.__getattribute__(options, "seed")
-        observed["ranges"] = object.__getattribute__(options, "ranges")
+        observed["ranges"] = object.__getattribute__(
+            object.__getattribute__(options, "playback"), "ranges"
+        )
         observed["bundle"] = loaded_bundle
         return 61
 

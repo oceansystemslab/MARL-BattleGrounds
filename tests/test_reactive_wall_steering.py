@@ -1,4 +1,4 @@
-"""Bounded wall-end steering and real paired-agent clearance regressions."""
+"""Check movement around wall ends and clearance in real paired-agent steps."""
 
 from collections.abc import Callable
 from typing import cast

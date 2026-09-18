@@ -1,4 +1,13 @@
-"""Deterministic authored-state scenarios for the visual debugger."""
+"""Build deterministic live scenarios for the local visual debugger.
+
+The registry joins import-light catalog labels to configuration/state factories
+and scripted command sequences. ``get_scenario`` selects a definition;
+``list_scenarios`` and ``cycle_scenario_name`` support launcher navigation.
+Factories reset through Core with a fixed key, then install authored positions
+or lifecycle state for demonstration. These are debugger scenes, not the
+packaged TDM benchmark tasks. Calling a factory creates JAX arrays but writes
+no files or replay records.
+"""
 
 from collections.abc import Callable
 
@@ -77,6 +86,9 @@ def _registered_scenario(
 
 
 def _empty_obstacles() -> Array:
+    """Return an inactive float32 obstacle table of shape (MAX_OBSTACLE_SLOTS,
+    OBSTACLE_FEATURES).
+    """
     return jnp.zeros(
         (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
         dtype=jnp.float32,
@@ -84,6 +96,11 @@ def _empty_obstacles() -> Array:
 
 
 def _pillar(x: float, y: float, radius: float) -> Array:
+    """Build one active float32 pillar row from center and radius in map units.
+
+    The result has shape (OBSTACLE_FEATURES,). Configuration validation owns
+    geometric validity; this helper only fills the declared obstacle fields.
+    """
     obstacle = jnp.zeros((OBSTACLE_FEATURES,), dtype=jnp.float32)
     obstacle = obstacle.at[OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_PILLAR)
     obstacle = obstacle.at[OBSTACLE_FEATURE_X].set(x)
@@ -99,6 +116,11 @@ def _wall(
     height: float,
     theta: float,
 ) -> Array:
+    """Build one active float32 wall row from center, dimensions, and angle.
+
+    Position, width, and height use map units; theta uses radians. The result has
+    shape (OBSTACLE_FEATURES,). Configuration validation owns geometric validity.
+    """
     obstacle = jnp.zeros((OBSTACLE_FEATURES,), dtype=jnp.float32)
     obstacle = obstacle.at[OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_WALL)
     obstacle = obstacle.at[OBSTACLE_FEATURE_X].set(x)
@@ -137,7 +159,37 @@ def _scenario(
     active_positions: dict[int, tuple[float, float]],
     obstacles: Array | None = None,
 ) -> tuple[EnvConfig, EnvState]:
-    """Build a validated respawn configuration and authored debugger state."""
+    """Build Core reset state, then install the declared debugger positions.
+
+    Parameters
+    ----------
+    map_width, map_height : float
+        Arena dimensions in map units.
+    team_sizes : tuple of int
+        Active counts for Team A and Team B.
+    class_ids : tuple of int
+        Exactly MAX_AGENT_SLOTS class IDs in simulator slot order.
+    active_positions : dict of int to tuple of float
+        Slot-to-(x, y) positions in map units to install after reset.
+    obstacles : Array or None, optional
+        Fixed float32 obstacle table. None creates an inactive table.
+
+    Returns
+    -------
+    tuple of EnvConfig and EnvState
+        A 300-step TDM config with the canonical movement scale, edge spawn pads,
+        five-step respawn waves, and the authored starting state.
+
+    Raises
+    ------
+    ValueError
+        The class count or Core profile/reset configuration is invalid.
+
+    Notes
+    -----
+    This creates JAX arrays and resets with key zero. The later authored position
+    replacement is not itself a second Core reset or a gameplay transition.
+    """
     if len(class_ids) != MAX_AGENT_SLOTS:
         msg = f"class_ids must contain {MAX_AGENT_SLOTS} fixed-slot values."
         raise ValueError(msg)
@@ -174,6 +226,11 @@ def _scenario(
 
 
 def _arena_5v5_scenario() -> tuple[EnvConfig, EnvState]:
+    """Build two five-class teams across a pillar and an angled wall.
+
+    Returns the fixed configuration and authored initial state; scripted frames
+    in the registry choose the later actions.
+    """
     obstacles = _empty_obstacles()
     obstacles = obstacles.at[0].set(_pillar(10.0, 3.0, 0.9))
     obstacles = obstacles.at[1].set(_wall(10.0, 7.8, 3.0, 0.5, 0.45))
@@ -212,6 +269,11 @@ def _arena_5v5_scenario() -> tuple[EnvConfig, EnvState]:
 
 
 def _basic_support_scenario() -> tuple[EnvConfig, EnvState]:
+    """Build a three-versus-three formation for Basic and support actions.
+
+    Returns the fixed configuration and authored initial state; scripted frames
+    in the registry choose the later actions.
+    """
     roster = (
         MAGE_CLASS_ID,
         HUNTER_CLASS_ID,
@@ -241,6 +303,11 @@ def _basic_support_scenario() -> tuple[EnvConfig, EnvState]:
 
 
 def _ultimate_showcase_scenario() -> tuple[EnvConfig, EnvState]:
+    """Build two five-class teams placed for Ultimate demonstrations.
+
+    Returns the fixed configuration and authored initial state; scripted frames
+    in the registry choose the later actions.
+    """
     roster = (
         MAGE_CLASS_ID,
         WARRIOR_CLASS_ID,
@@ -274,6 +341,11 @@ def _ultimate_showcase_scenario() -> tuple[EnvConfig, EnvState]:
 
 
 def _aura_crossfire_scenario() -> tuple[EnvConfig, EnvState]:
+    """Build opposed three-agent groups for aura and crossfire display.
+
+    Returns the fixed configuration and authored initial state; scripted frames
+    in the registry choose the later actions.
+    """
     roster = (
         MAGE_CLASS_ID,
         WARRIOR_CLASS_ID,
@@ -303,6 +375,11 @@ def _aura_crossfire_scenario() -> tuple[EnvConfig, EnvState]:
 
 
 def _stacked_team_auras_scenario() -> tuple[EnvConfig, EnvState]:
+    """Build duplicate Mage and Warrior sources on each five-agent team.
+
+    Returns the fixed configuration and authored initial state; scripted frames
+    in the registry choose the later actions.
+    """
     roster = (
         MAGE_CLASS_ID,
         MAGE_CLASS_ID,
@@ -336,6 +413,11 @@ def _stacked_team_auras_scenario() -> tuple[EnvConfig, EnvState]:
 
 
 def _status_stack_scenario() -> tuple[EnvConfig, EnvState]:
+    """Build a three-versus-two formation for interacting status demonstrations.
+
+    Returns the fixed configuration and authored initial state; scripted frames
+    in the registry choose the later actions.
+    """
     roster = (
         WARRIOR_CLASS_ID,
         HUNTER_CLASS_ID,
@@ -364,6 +446,11 @@ def _status_stack_scenario() -> tuple[EnvConfig, EnvState]:
 
 
 def _team_focus_crossfire_scenario() -> tuple[EnvConfig, EnvState]:
+    """Build four attackers opposite a Warrior with three Priests.
+
+    Returns the fixed configuration and authored initial state; scripted frames
+    in the registry choose the later actions.
+    """
     roster = (
         MAGE_CLASS_ID,
         WARRIOR_CLASS_ID,
@@ -427,6 +514,11 @@ def _moving_focus_crossfire_scenario() -> tuple[EnvConfig, EnvState]:
 
 
 def _mirrored_ultimates_scenario() -> tuple[EnvConfig, EnvState]:
+    """Build two five-class teams in separated reciprocal Ultimate positions.
+
+    Returns the fixed configuration and authored initial state; scripted frames
+    in the registry choose the later actions.
+    """
     roster = (
         MAGE_CLASS_ID,
         WARRIOR_CLASS_ID,
@@ -460,6 +552,11 @@ def _mirrored_ultimates_scenario() -> tuple[EnvConfig, EnvState]:
 
 
 def _moving_basic_crossfire_scenario() -> tuple[EnvConfig, EnvState]:
+    """Build two five-class teams positioned for movement and Basic crossfire.
+
+    Returns the fixed configuration and authored initial state; scripted frames
+    in the registry choose the later actions.
+    """
     roster = (
         MAGE_CLASS_ID,
         WARRIOR_CLASS_ID,
@@ -493,6 +590,11 @@ def _moving_basic_crossfire_scenario() -> tuple[EnvConfig, EnvState]:
 
 
 def _charge_convergence_scenario() -> tuple[EnvConfig, EnvState]:
+    """Build two Warriors aimed toward one opposing Warrior.
+
+    Returns the fixed configuration and authored initial state; scripted frames
+    in the registry choose the later actions.
+    """
     roster = (
         WARRIOR_CLASS_ID,
         WARRIOR_CLASS_ID,
@@ -519,6 +621,11 @@ def _charge_convergence_scenario() -> tuple[EnvConfig, EnvState]:
 
 
 def _trap_lifecycle_scenario() -> tuple[EnvConfig, EnvState]:
+    """Build five Hunters opposite five Warriors for trap demonstrations.
+
+    Returns the fixed configuration and authored initial state; scripted frames
+    in the registry choose the later actions.
+    """
     roster = (
         HUNTER_CLASS_ID,
         HUNTER_CLASS_ID,
@@ -552,6 +659,11 @@ def _trap_lifecycle_scenario() -> tuple[EnvConfig, EnvState]:
 
 
 def _max_status_stack_scenario() -> tuple[EnvConfig, EnvState]:
+    """Build a Mage and Priest opposite four status-producing opponents.
+
+    Returns the fixed configuration and authored initial state; scripted frames
+    in the registry choose the later actions.
+    """
     roster = (
         MAGE_CLASS_ID,
         PRIEST_CLASS_ID,
@@ -1288,7 +1400,24 @@ SCENARIOS: dict[str, DebuggerScenario] = {
 
 
 def get_scenario(name: str) -> DebuggerScenario:
-    """Return a registered scenario or raise a user-facing value error."""
+    """Find one registered live debugger scenario.
+
+    Parameters
+    ----------
+    name : str
+        Exact registry name.
+
+    Returns
+    -------
+    DebuggerScenario
+        Definition with a state factory and optional scripted frames. Lookup
+        alone does not call the factory.
+
+    Raises
+    ------
+    ValueError
+        The name is unknown; the error lists available names.
+    """
     try:
         return SCENARIOS[name]
     except KeyError as exc:
@@ -1301,7 +1430,18 @@ def list_scenarios(
     *,
     include_stress: bool = False,
 ) -> tuple[DebuggerScenario, ...]:
-    """Return scenarios in stable launcher order, optionally including stress cases."""
+    """List scenario definitions in stable launcher order.
+
+    Parameters
+    ----------
+    include_stress : bool, optional
+        Include dense stress demonstrations when True. Defaults to False.
+
+    Returns
+    -------
+    tuple of DebuggerScenario
+        Registered definitions without constructing their JAX states.
+    """
     registry = SCENARIOS if include_stress else RESEARCHER_SCENARIOS
     return tuple(registry.values())
 
@@ -1312,7 +1452,28 @@ def cycle_scenario_name(
     *,
     include_stress: bool = False,
 ) -> str:
-    """Return the adjacent allowed scenario name in stable cyclic order."""
+    """Choose the previous or next allowed scenario, wrapping at either end.
+
+    Parameters
+    ----------
+    current_name : str
+        Registered current scenario.
+    direction : int
+        Minus one for previous or one for next.
+    include_stress : bool, optional
+        Whether navigation includes stress scenes. Defaults to False. A current
+        stress scene also selects the complete registry so navigation remains valid.
+
+    Returns
+    -------
+    str
+        Adjacent registry name in stable launcher order.
+
+    Raises
+    ------
+    ValueError
+        The direction or current name is unknown.
+    """
     if direction not in (-1, 1):
         msg = f"scenario direction must be -1 or 1; got {direction}."
         raise ValueError(msg)

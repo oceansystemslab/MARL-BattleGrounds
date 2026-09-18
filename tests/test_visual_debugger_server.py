@@ -1,4 +1,4 @@
-"""Focused HTTP security, routing, and lifecycle tests for the debugger."""
+"""Check debugger HTTP routing, security boundaries and server lifetime."""
 
 import json
 import socket
@@ -148,7 +148,6 @@ def _command_body(
 
 
 def _complete_runtime_asset_root(tmp_path: Path) -> Path:
-    """Copy the validated runtime allowlist into one isolated test root."""
     asset_root = tmp_path / "web"
     for route, asset in build_static_manifest(_ASSET_ROOT).items():
         if route == "/":
@@ -233,7 +232,8 @@ def test_bootstrap_exposes_only_the_live_product_identity(
     assert response.getheader("Cache-Control") == "no-store"
     assert body == (
         b"globalThis.__MARL_DEBUGGER_BOOTSTRAP__ = Object.freeze("
-        b'{"authoring_available":false,"product_kind":"combat_debugger",'
+        b'{"authoring_available":false,"initial_show_ranges":true,'
+        b'"product_kind":"combat_debugger",'
         b'"schema_version":1});\n'
     )
 
@@ -352,7 +352,8 @@ def test_live_authoring_route_strictly_parses_and_applies_one_command(
     assert bootstrap.status == HTTPStatus.OK
     assert bootstrap_body == (
         b"globalThis.__MARL_DEBUGGER_BOOTSTRAP__ = Object.freeze("
-        b'{"authoring_available":true,"product_kind":"combat_debugger",'
+        b'{"authoring_available":true,"initial_show_ranges":true,'
+        b'"product_kind":"combat_debugger",'
         b'"schema_version":1});\n'
     )
     accepted_payload = json.loads(accepted_body)

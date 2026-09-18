@@ -1,3 +1,12 @@
+/**
+ * @file Build immutable, deterministic SVG route geometry from disclosed endpoints.
+ * Route clipping, curve spacing and marker poses are presentation conventions.
+ * They never describe simulator trajectories or grant access to a hidden body.
+ * Call createRouteGeometry, createPolylineRouteGeometry or layoutRouteSet, then
+ * routeMarkerPose. All lengths use the caller's common coordinate unit (normally
+ * screen pixels); angles returned for ports are radians and marker angles degrees.
+ * No DOM, storage, network or random state is used.
+ */
 const MIN_VISIBLE_SEGMENT_FRACTION = 0.2;
 const DEFAULT_ROUTE_MARKER_PADDING = 14;
 
@@ -68,11 +77,19 @@ const DEFAULT_ROUTE_MARKER_PADDING = 14;
  */
 
 /**
- * Clip a source-target segment toward two circular body boundaries.
+ * Shorten a directed segment toward two circular body boundaries.
  *
- * When the requested body extents overlap, compress both clips proportionally
- * by default. Dense convergence may instead preserve recipient clearance first;
- * either policy leaves a visible segment on the ordered source-target bearing.
+ * source and target are finite point objects or arrays with at least two entries.
+ * sourceRadius/targetRadius and endpoint gaps are nonnegative finite lengths in
+ * one shared unit. endpointGap defaults to zero; targetEndpointGap defaults to it.
+ * prioritizeTargetClearance defaults to false. Overlapping requested clips normally
+ * shrink proportionally; true spends the clipping budget on the target first.
+ * At least 20% of nonzero center distance stays visible.
+ *
+ * Return frozen start/end points, original center distance and forward unit vector.
+ * Coincident centers return coincident endpoints and unit (1, 0), without inventing
+ * a direction. Invalid numbers/points throw TypeError and negative extents throw
+ * RangeError. Inputs are not changed; this is drawing geometry, not collision logic.
  *
  * @param {RoutePoint | ReadonlyArray<number>} source
  * @param {RoutePoint | ReadonlyArray<number>} target
@@ -141,7 +158,21 @@ export function clipRouteEndpoints(
 }
 
 /**
- * Construct one presentation-only clipped curve or local arc.
+ * Construct one clipped curve or a local arc for coincident endpoints.
+ *
+ * input supplies nonblank eventId, finite source/target points, optional nonnegative
+ * body radii (zero), optional endpoint gaps and finite offset (zero). Explicit source
+ * or target gaps override options.endpointGap (3). prioritizeTargetClearance defaults
+ * to false. options.localArcPadding defaults to 8, routeMarkerPadding to 14, and
+ * viewportBounds to absent. markerProgress is in [0, 1]; default is 0.5 for close/local
+ * routes and 0.76 otherwise. All lengths share the endpoint coordinate unit.
+ *
+ * Return frozen geometry with an SVG path and radian port angles. Viewport bounds
+ * try to fit a curve and its marker; if no common feasible interval exists, retain
+ * the preferred offset. They do not constrain coincident-center arcs. Invalid
+ * objects, IDs or finite values throw TypeError; negative lengths, invalid rectangles
+ * or out-of-range progress throw RangeError. Inputs remain unchanged. Curvature
+ * separates explanations and is not a recorded movement path.
  *
  * @param {{
  *   eventId: string,
@@ -259,7 +290,14 @@ export function createRouteGeometry(input, options = {}) {
 }
 
 /**
- * Construct one immutable directed polyline from allocator-owned waypoints.
+ * Copy allocator-owned waypoints into immutable directed SVG geometry.
+ *
+ * input.points is an array of at least two finite point objects/coordinate arrays;
+ * adjacent points must differ. input.offset defaults to zero, close to false, and
+ * markerProgress to 0.5 when close or 0.76 otherwise. Progress must be in [0, 1].
+ * Return a frozen polyline with copied frozen points, SVG path and radian port angles.
+ * Bad shapes/types throw TypeError; too few/repeated neighboring points or invalid
+ * progress throw RangeError. No obstacle or authority validation is performed.
  *
  * @param {{
  *   points: ReadonlyArray<RoutePoint | ReadonlyArray<number>>,
@@ -320,10 +358,15 @@ export function createPolylineRouteGeometry(input) {
 }
 
 /**
- * Return a deterministic point and forward tangent on presentation geometry.
+ * Return a route point and its forward tangent for a direction marker.
  *
- * Direction markers deliberately sit on the route instead of at its impact
- * endpoint, where bodies and consequence glyphs would obscure them.
+ * route is curve, local_arc or polyline geometry. progress is a finite fraction in
+ * [0, 1]; omission uses route.markerProgress, then 0.5 for close or 0.76 otherwise.
+ * Curve progress is its quadratic parameter; polyline progress is traveled length;
+ * arc progress follows its sweep. Return a frozen {x, y, degrees}; a zero tangent
+ * uses zero degrees. Invalid route/point/numeric types throw TypeError; invalid
+ * progress, arc radius or degenerate polyline length throws RangeError. No mutation
+ * or simulator-path inference occurs.
  *
  * @param {RouteGeometry} route
  * @param {number} [progress]
@@ -431,10 +474,19 @@ export function routeMarkerPose(route, progress) {
 }
 
 /**
- * Assign stable curve offsets to a set of accepted/presentation routes.
+ * Assign deterministic separation curves to a set of disclosed routes.
  *
- * Grouping uses only public source/target identity. The returned curvature is
- * a collision-separation convention and never a simulator trajectory.
+ * records is an array with unique nonblank eventId values, nonnegative integer
+ * sourceGlobalSlot/targetGlobalSlot identities, finite endpoints and optional radii
+ * or gaps. options.spacing defaults to 18 and must be positive; remaining options
+ * use createRouteGeometry's defaults. Identities are grouping keys and are not
+ * restricted to the simulator's ten-slot capacity by this helper.
+ *
+ * Return a frozen array of frozen route records sorted by event ID. Same-direction
+ * routes center their offsets; reciprocal groups use positive local offsets on each
+ * direction. Empty input returns an empty array. Invalid records throw TypeError or
+ * RangeError; duplicate IDs throw RangeError. Inputs are unchanged. Grouping and
+ * curvature are display rules, never simulator trajectories.
  *
  * @param {ReadonlyArray<RouteRecord>} records
  * @param {RouteLayoutOptions} [options]
@@ -515,6 +567,13 @@ export function layoutRouteSet(records, options = {}) {
 }
 
 /**
+ * Validate and copy one route's identity, endpoints and optional geometry inputs.
+ *
+ * record must be an object with a trimmed nonblank event ID, nonnegative integer
+ * slot keys and finite points. Radii default to zero; missing per-endpoint gaps and
+ * priority flag remain undefined for later defaults. Return a frozen normalized
+ * record with copied points. Invalid type/value checks throw TypeError or RangeError.
+ *
  * @param {RouteRecord} record
  */
 function normalizeRouteRecord(record) {
@@ -545,6 +604,11 @@ function normalizeRouteRecord(record) {
 }
 
 /**
+ * Return an order-independent string key for sourceSlot and targetSlot.
+ *
+ * Both are validated integer grouping identities. The lower ID is written first;
+ * self routes repeat the same ID. No scene or simulator data is consulted.
+ *
  * @param {number} sourceSlot
  * @param {number} targetSlot
  */
@@ -555,6 +619,11 @@ function pairKey(sourceSlot, targetSlot) {
 }
 
 /**
+ * Return a frozen array of count offsets centered around zero.
+ *
+ * count is the validated group size and spacing is a positive shared-unit distance.
+ * Even groups straddle zero; odd groups include zero. No input is changed.
+ *
  * @param {number} count
  * @param {number} spacing
  */
@@ -565,15 +634,18 @@ function centeredOffsets(count, spacing) {
 }
 
 /**
- * Keep a directed quadratic curve and its presentation arrow inside the
- * battlefield rectangle without changing ordered source/recipient endpoints.
+ * Choose a curve offset that fits its control point and direction marker.
  *
- * A quadratic Bézier stays inside the convex hull of its two endpoints and
- * control point. Constraining the control point therefore contains the curve.
- * A second interval reserves an inset rectangle for the marker at its actual
- * presentation progress. Close routes with no assigned offset select the side
- * with more usable room; assigned signs are never flipped, preserving stable
- * same-direction and reciprocal separation.
+ * input supplies validated clipped start/end, midpoint and perpendicular normal;
+ * requestedOffset preserves assigned separation, preferredOffset includes close-body
+ * clearance, and close selects the zero-offset side choice. viewportBounds and
+ * routeMarkerPadding define the marker inset; markerProgress is its curve parameter.
+ *
+ * Return a numeric offset. Close routes with no assigned sign choose the roomier
+ * side; assigned signs are not flipped. If control and marker constraints have no
+ * common interval, return preferredOffset, so this helper does not promise universal
+ * containment. It changes neither endpoints nor inputs. A quadratic remains within
+ * the convex hull of its endpoints and control point when those are contained.
  *
  * @param {{
  *   start: RoutePoint,
@@ -634,6 +706,12 @@ function containedCurveOffset(input) {
 }
 
 /**
+ * Find offsets keeping origin + offset * direction inside bounds.
+ *
+ * Inputs are validated points and rectangle. Return a frozen {minimum, maximum},
+ * possibly with infinite limits, or null if no offset fits. A near-zero direction
+ * component requires its original coordinate already to lie within that axis.
+ *
  * @param {RoutePoint} origin
  * @param {RoutePoint} direction
  * @param {RouteViewportBounds} bounds
@@ -660,6 +738,11 @@ function offsetRangeForPoint(origin, direction, bounds) {
 }
 
 /**
+ * Return the frozen intersection of two offset intervals, or null.
+ *
+ * left/right may already be null; touching endpoints form a valid zero-width
+ * intersection. Inputs remain unchanged.
+ *
  * @param {Readonly<{minimum: number, maximum: number}> | null} left
  * @param {Readonly<{minimum: number, maximum: number}> | null} right
  */
@@ -673,6 +756,11 @@ function intersectOffsetRanges(left, right) {
 }
 
 /**
+ * Return a frozen rectangle inset by a safe common padding.
+ *
+ * bounds is valid and requestedPadding is nonnegative. Cap padding at half the
+ * smaller dimension so an inset axis may collapse but never reverses.
+ *
  * @param {RouteViewportBounds} bounds
  * @param {number} requestedPadding
  */
@@ -689,6 +777,13 @@ function insetViewportBounds(bounds, requestedPadding) {
 }
 
 /**
+ * Draw a small directed arc when both route endpoints have the same center.
+ *
+ * input supplies validated eventId, center, radius, offset and markerProgress.
+ * The event ID deterministically chooses orientation; offset sign chooses sweep
+ * and its magnitude enlarges the radius. Return frozen local_arc geometry with
+ * SVG path and radian ports. This display loop is not a movement path or random draw.
+ *
  * @param {{
  *   eventId: string,
  *   center: RoutePoint,
@@ -730,6 +825,11 @@ function localArc(input) {
 }
 
 /**
+ * Validate an optional finite rectangle and return a frozen copy.
+ *
+ * undefined returns null. A nonobject/nonfinite coordinate throws TypeError;
+ * nonpositive width or height throws RangeError. No clipping is performed here.
+ *
  * @param {RouteViewportBounds | undefined} value
  * @returns {Readonly<RouteViewportBounds> | null}
  */
@@ -751,6 +851,11 @@ function optionalViewportBounds(value) {
 }
 
 /**
+ * Map string value deterministically to a fraction in [0, 1).
+ *
+ * The unsigned 32-bit hash chooses a display orientation. It is not a random key,
+ * cryptographic hash or authority check.
+ *
  * @param {string} value
  */
 function hashFraction(value) {
@@ -763,6 +868,10 @@ function hashFraction(value) {
 }
 
 /**
+ * Return trimmed value when it is a nonblank string.
+ *
+ * name labels TypeError for another type or blank text. The original is unchanged.
+ *
  * @param {unknown} value
  * @param {string} name
  */
@@ -774,6 +883,11 @@ function identifier(value, name) {
 }
 
 /**
+ * Return value when it is a nonnegative integer number.
+ *
+ * name labels RangeError otherwise. This grouping-key check has no upper slot
+ * limit and makes no safe-integer or roster-membership guarantee.
+ *
  * @param {unknown} value
  * @param {string} name
  */
@@ -785,6 +899,11 @@ function slot(value, name) {
 }
 
 /**
+ * Copy finite x/y coordinates into a frozen point.
+ *
+ * value is an object with x/y or an array of at least two entries (extras ignored).
+ * name labels TypeError for invalid coordinates; numeric strings are not converted.
+ *
  * @param {unknown} value
  * @param {string} name
  */
@@ -800,6 +919,10 @@ function point(value, name) {
 }
 
 /**
+ * Return value unchanged when it is a finite number.
+ *
+ * name labels TypeError for another type, NaN or infinity; no coercion occurs.
+ *
  * @param {unknown} value
  * @param {string} name
  */
@@ -811,6 +934,10 @@ function finite(value, name) {
 }
 
 /**
+ * Return value unchanged when it is a Boolean.
+ *
+ * name labels TypeError for another type; truthy values are not converted.
+ *
  * @param {unknown} value
  * @param {string} name
  */
@@ -822,6 +949,11 @@ function boolean(value, name) {
 }
 
 /**
+ * Return a finite number at least zero.
+ *
+ * value is checked without coercion. name labels TypeError for a nonfinite/nonnumber
+ * value or RangeError for a negative number.
+ *
  * @param {unknown} value
  * @param {string} name
  */
@@ -834,6 +966,11 @@ function nonNegative(value, name) {
 }
 
 /**
+ * Return a finite numeric fraction in [0, 1].
+ *
+ * name labels TypeError for invalid numeric type/finiteness and RangeError for
+ * values outside the closed interval. No clamping is performed.
+ *
  * @param {unknown} value
  * @param {string} name
  */
@@ -846,6 +983,11 @@ function unitInterval(value, name) {
 }
 
 /**
+ * Return a finite number greater than zero.
+ *
+ * name labels TypeError for invalid numeric type/finiteness and RangeError for
+ * zero or negative values. No coercion is performed.
+ *
  * @param {unknown} value
  * @param {string} name
  */
@@ -858,6 +1000,10 @@ function positive(value, name) {
 }
 
 /**
+ * Return a frozen {x, y} record from already validated numeric coordinates.
+ *
+ * No further validation or rounding is applied; inputs are not modified.
+ *
  * @param {number} x
  * @param {number} y
  * @returns {RoutePoint}
@@ -867,6 +1013,10 @@ function frozenPoint(x, y) {
 }
 
 /**
+ * Wrap an already finite angle in radians into [0, 2*pi).
+ *
+ * Return the equivalent nonnegative angle without changing any geometry.
+ *
  * @param {number} angle
  */
 function normalizeAngle(angle) {
@@ -875,6 +1025,10 @@ function normalizeAngle(angle) {
 }
 
 /**
+ * Return the forward angular distance from from to to in [0, 2*pi).
+ *
+ * Both arguments are finite radians; equal angles give zero, not a full turn.
+ *
  * @param {number} from
  * @param {number} to
  */
@@ -883,6 +1037,10 @@ function positiveAngularDistance(from, to) {
 }
 
 /**
+ * Return a frozen vector from start to end.
+ *
+ * Both points are already validated and share a coordinate unit; neither is changed.
+ *
  * @param {RoutePoint} end
  * @param {RoutePoint} start
  */
@@ -891,6 +1049,11 @@ function subtractPoints(end, start) {
 }
 
 /**
+ * Return a frozen position and tangent heading in degrees.
+ *
+ * x/y are validated position coordinates; tangentX/tangentY give a direction. A
+ * zero tangent uses the positive x direction. No further validation is performed.
+ *
  * @param {number} x
  * @param {number} y
  * @param {number} tangentX
@@ -908,7 +1071,10 @@ function frozenPose(x, y, tangentX, tangentY) {
 }
 
 /**
- * Keep path strings stable while retaining sub-pixel precision.
+ * Round a finite coordinate to four decimal places for stable SVG paths.
+ *
+ * Return a number, not a padded string. This retains sub-pixel drawing precision
+ * without changing the stored route geometry.
  *
  * @param {number} value
  */

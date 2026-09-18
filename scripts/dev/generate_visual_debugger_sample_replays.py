@@ -30,14 +30,21 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
-from marl_battlegrounds.evaluation.models import CodeRevisionV1
+from marl_battlegrounds.evaluation.models import (
+    CodeRevisionV1,
+    CodeRevisionV2,
+    canonical_json_bytes,
+)
 from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 from marl_battlegrounds.evaluation.replay_io import (
+    LoadedReplay,
     LoadedReplayBundleV1,
-    canonical_metric_report_artifact_json_bytes_v1,
-    canonical_replay_json_bytes_v1,
-    load_replay_bundle_v1,
-    preflight_replay_bundle_destination_v1,
+    load_replay,
+    preflight_replay_destination,
+)
+from marl_battlegrounds.evaluation.revision import discover_code_revision_v1
+from marl_battlegrounds.evaluation.runtime_provenance import (
+    capture_debugger_runtime_provenance_v1,
 )
 from scripts.dev.visual_debugger.control import create_session
 from scripts.dev.visual_debugger.evaluation_bridge import (
@@ -49,29 +56,26 @@ from scripts.dev.visual_debugger.protocol import (
     KeyboardCommandV1,
 )
 from scripts.dev.visual_debugger.recording import (
-    DebuggerReplayRecorderV1,
     build_debugger_recording_specification_v1,
 )
 from scripts.dev.visual_debugger.recording_coordinator import (
     RecordingDebuggerCoordinator,
 )
-from scripts.dev.visual_debugger.revision import discover_debugger_code_revision_v1
-from scripts.dev.visual_debugger.runtime_provenance import (
-    capture_debugger_runtime_provenance_v1,
-)
+from scripts.dev.visual_debugger.replay_recorder import DebuggerReplayRecorder
 from scripts.dev.visual_debugger.sample_replays import (
+    CURRENT_SAMPLE_REPLAY_DIRECTORY,
+    CURRENT_SAMPLE_REPLAY_GENERATOR_ID,
+    CURRENT_SAMPLE_REPLAY_MANIFEST_SCHEMA_VERSION,
     SAMPLE_REPLAY_DEMO_PROVENANCE_NOTICE,
     SAMPLE_REPLAY_DIRECTORY,
-    SAMPLE_REPLAY_GENERATOR_ID,
     SAMPLE_REPLAY_MANIFEST_PATH,
     SAMPLE_REPLAY_MANIFEST_SCHEMA_ID,
-    SAMPLE_REPLAY_MANIFEST_SCHEMA_VERSION,
     SAMPLE_REPLAY_MAX_MEMBER_SIZE_BYTES,
     SAMPLE_REPLAYS,
     SampleReplayDefinition,
     SampleReplayVerificationError,
     canonical_sample_replay_manifest_json_bytes_v1,
-    load_verified_sample_replay_set_v1,
+    load_verified_sample_replay_set,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.service import DebuggerService
@@ -159,6 +163,7 @@ def _require_cpu_backend() -> None:
 
 
 def _sha256(payload: bytes) -> str:
+    """Return the hexadecimal SHA-256 identity of the exact supplied bytes."""
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -167,6 +172,7 @@ def _artifact_member(
     file_name: str,
     payload: bytes,
 ) -> dict[str, object]:
+    """Describe one replay file using its name, exact byte length, and digest."""
     return {
         "file": file_name,
         "byte_length": len(payload),
@@ -174,7 +180,8 @@ def _artifact_member(
     }
 
 
-def _scenario_name_from_replay(loaded: LoadedReplayBundleV1) -> str:
+def _scenario_name_from_replay(loaded: LoadedReplay | LoadedReplayBundleV1) -> str:
+    """Require exactly one scenario identity in the replay aggregation keys."""
     replay = loaded.replay
     rows = tuple(
         row.value
@@ -195,6 +202,11 @@ def _record_one_sample(
     code_revision: CodeRevisionV1,
     runtime_provenance: RuntimeProvenanceV1,
 ) -> dict[str, object]:
+    """Record and verify one scripted researcher demo through the normal live path.
+
+    Save into the private output directory with the supplied code and runtime
+    identities. Return its manifest row only after replay data has been checked.
+    """
     scenario = get_scenario(sample.source_scenario)
     if scenario.mode != "scripted" or scenario.audience != "researcher":
         raise ValueError("sample replay sources must be scripted researcher scenarios")
@@ -216,14 +228,12 @@ def _record_one_sample(
         show_ranges=True,
         verbose_logging=False,
     )
-    recorder = DebuggerReplayRecorderV1(
+    recorder = DebuggerReplayRecorder(
         specification=build_debugger_recording_specification_v1(
             action_source_kind="scripted",
             runtime_provenance=runtime_provenance,
         ),
-        destination=preflight_replay_bundle_destination_v1(
-            sample.replay_path(output_directory)
-        ),
+        destination=preflight_replay_destination(sample.replay_path(output_directory)),
         context=session.evaluation_context,
         initial_frame=session.current_evaluation_frame,
     )
@@ -266,19 +276,19 @@ def _record_one_sample(
         )
     saved = recorder.saved_bundle
     if saved is None:
-        raise RuntimeError(f"sample {sample.name!r} has no saved artifact pair")
-    if saved.replay_path != sample.replay_path(
-        output_directory
-    ) or saved.metric_report_path != sample.metric_report_path(output_directory):
+        raise RuntimeError(f"sample {sample.name!r} has no saved replay")
+    if saved.replay_path != sample.replay_path(output_directory):
         raise RuntimeError("recording publisher returned an unexpected sample path")
 
-    loaded = load_replay_bundle_v1(
+    loaded = load_replay(
         saved.replay_path,
-        require_metric_report=True,
         max_file_size_bytes=SAMPLE_REPLAY_MAX_MEMBER_SIZE_BYTES,
     )
-    if loaded.status != "complete" or loaded.metric_report_artifact is None:
-        raise RuntimeError("public sample reload did not resolve a complete pair")
+    if (
+        loaded.replay.schema_version != 3
+        or loaded.replay.completion.completion_state != "complete"
+    ):
+        raise RuntimeError("public sample reload did not resolve a complete V3 replay")
     replay = loaded.replay
     transition_count = len(replay.transitions)
     if transition_count != len(scenario.frames):
@@ -286,10 +296,7 @@ def _record_one_sample(
     if _scenario_name_from_replay(loaded) != sample.source_scenario:
         raise RuntimeError("sample replay lost its source-scenario identity")
 
-    replay_payload = canonical_replay_json_bytes_v1(replay)
-    metric_payload = canonical_metric_report_artifact_json_bytes_v1(
-        loaded.metric_report_artifact
-    )
+    replay_payload = canonical_json_bytes(replay)
     event_kinds = sorted(
         {
             event.event_type
@@ -310,10 +317,6 @@ def _record_one_sample(
             file_name=sample.replay_file_name,
             payload=replay_payload,
         ),
-        "metric_report": _artifact_member(
-            file_name=sample.metric_report_file_name,
-            payload=metric_payload,
-        ),
     }
 
 
@@ -323,10 +326,11 @@ def _manifest_payload(
     runtime_provenance: RuntimeProvenanceV1,
     samples: list[dict[str, object]],
 ) -> dict[str, object]:
+    """Describe the sample set and preserve its explicit non-benchmark provenance."""
     return {
         "schema_id": SAMPLE_REPLAY_MANIFEST_SCHEMA_ID,
-        "schema_version": SAMPLE_REPLAY_MANIFEST_SCHEMA_VERSION,
-        "generator_id": SAMPLE_REPLAY_GENERATOR_ID,
+        "schema_version": CURRENT_SAMPLE_REPLAY_MANIFEST_SCHEMA_VERSION,
+        "generator_id": CURRENT_SAMPLE_REPLAY_GENERATOR_ID,
         "demo_provenance": {
             "official": False,
             "benchmark_eligible": False,
@@ -334,7 +338,9 @@ def _manifest_payload(
             "host_attestation": False,
             "policy_execution_included": False,
             "notice": SAMPLE_REPLAY_DEMO_PROVENANCE_NOTICE,
-            "code_revision": code_revision.model_dump(mode="json"),
+            "code_revision": CodeRevisionV2.model_validate(
+                code_revision.model_dump(mode="python")
+            ).model_dump(mode="json"),
             "runtime_provenance": runtime_provenance.model_dump(mode="json"),
         },
         "samples": samples,
@@ -344,7 +350,38 @@ def _manifest_payload(
 def generate_sample_replays(
     output_directory: Path,
 ) -> dict[str, object]:
-    """Atomically publish one new sample set, refusing every existing target."""
+    """Generate and verify a new demonstration replay directory before publishing it.
+
+    Parameters
+    ----------
+    output_directory : pathlib.Path
+        New target directory. Every existing target, including a symlink, is refused.
+
+    Returns
+    -------
+    dict of str to object
+        Manifest for the complete newly published sample set.
+
+    Raises
+    ------
+    TypeError
+        The destination is not a pathlib.Path.
+    FileExistsError
+        The target already exists or appears before publication.
+    RuntimeError
+        The backend is not CPU or runtime provenance is inconsistent.
+    ValueError
+        Capture or sample verification fails.
+    OSError
+        Temporary creation, writes, or atomic no-replace publication fails.
+
+    Notes
+    -----
+    This runs fixed scripted scenarios, writes version-3 replay files and a
+    manifest in a temporary sibling, then verifies them. Failure removes the
+    unpublished staging directory. Demo provenance is not a benchmark or current
+    source-tree attestation.
+    """
     if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
         output_directory,
         Path,
@@ -352,7 +389,7 @@ def generate_sample_replays(
         raise TypeError("output_directory must be pathlib.Path")
     _refuse_existing_output(output_directory)
     _require_cpu_backend()
-    resolved_revision = discover_debugger_code_revision_v1(
+    resolved_revision = discover_code_revision_v1(
         _REPOSITORY_ROOT,
         package_version="0.0.0",
     )
@@ -405,13 +442,37 @@ def generate_sample_replays(
 def verify_sample_replays(
     directory: Path = SAMPLE_REPLAY_DIRECTORY,
 ) -> dict[str, object]:
-    """Verify manifest hashes, canonical bytes, semantic joins, and provenance."""
+    """Check a complete registered sample directory without regenerating its scenarios.
+
+    Parameters
+    ----------
+    directory : pathlib.Path, optional
+        Directory to verify. Defaults to historical examples/replays/v1.
+
+    Returns
+    -------
+    dict of str to object
+        Checked manifest content.
+
+    Raises
+    ------
+    TypeError
+        The directory is not a pathlib.Path.
+    SampleReplayVerificationError
+        Files, hashes, canonical bytes, semantic facts, provenance, or the exact
+        directory membership differ from the registered manifest contract.
+
+    Notes
+    -----
+    Verification uses bounded reads and temporary private copies through the
+    public loader. It does not change source samples or run their simulator steps.
+    """
     if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
         directory,
         Path,
     ):
         raise TypeError("directory must be pathlib.Path")
-    verified_set = load_verified_sample_replay_set_v1(directory)
+    verified_set = load_verified_sample_replay_set(directory)
     manifest = verified_set.manifest
     sample_rows = verified_set.sample_rows
 
@@ -422,7 +483,9 @@ def verify_sample_replays(
         verified_set.bundles,
         strict=True,
     ):
-        expected_files.update((sample.replay_file_name, sample.metric_report_file_name))
+        expected_files.add(sample.replay_file_name)
+        if manifest["schema_version"] == 1:
+            expected_files.add(sample.metric_report_file_name)
         replay = loaded.replay
         transition_count = len(replay.transitions)
         event_kinds = sorted(
@@ -469,21 +532,50 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-directory",
         type=Path,
-        default=SAMPLE_REPLAY_DIRECTORY,
-        help="sample directory (default: examples/replays/v1)",
+        default=None,
+        help=(
+            "sample directory (generate: artifacts/visual-debugger-samples/v3; "
+            "check: examples/replays/v1)"
+        ),
     )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run generation or verification with concise command-line diagnostics."""
+    """Run sample generation or verification from command-line arguments.
+
+    Parameters
+    ----------
+    argv : Sequence of str or None, optional
+        Arguments excluding the program name. None reads the process arguments.
+
+    Returns
+    -------
+    int
+        Zero on success or one after a handled filesystem, runtime, or validation
+        failure. Prints a short status or error message.
+
+    Raises
+    ------
+    SystemExit
+        Argument parsing requests help or rejects invalid arguments.
+
+    Notes
+    -----
+    Generation runs CPU scenarios and publishes a new directory. Check mode
+    validates existing files. The parsed command chooses which side effects occur.
+    """
     options = build_parser().parse_args(argv)
     try:
         if options.generate:
-            manifest = generate_sample_replays(options.output_directory)
+            manifest = generate_sample_replays(
+                options.output_directory or CURRENT_SAMPLE_REPLAY_DIRECTORY
+            )
             action = "generated"
         else:
-            manifest = verify_sample_replays(options.output_directory)
+            manifest = verify_sample_replays(
+                options.output_directory or SAMPLE_REPLAY_DIRECTORY
+            )
             action = "verified"
     except (FileExistsError, OSError, RuntimeError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)

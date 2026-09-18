@@ -1,4 +1,4 @@
-"""Legality, determinism, and core-integration proof for random-valid policy."""
+"""Check random-action legality, repeatability and use with Core."""
 
 from typing import cast
 
@@ -31,7 +31,6 @@ from marl_battlegrounds.policies.random_valid import random_policy
 
 
 def _assert_tree_arrays_exact(actual: object, expected: object) -> None:
-    """Require identical PyTree structures, dtypes, shapes, and values."""
     assert jax.tree_util.tree_structure(actual) == jax.tree_util.tree_structure(
         expected
     )
@@ -52,7 +51,6 @@ def _local_action_mask(
     move_support: tuple[int, ...],
     combat_support: tuple[tuple[int, int], ...],
 ) -> ActionMask:
-    """Build one exact local support and derive only its marginal conveniences."""
     move_mask = jnp.zeros((NUM_MOVE_ACTIONS,), dtype=jnp.bool_)
     for move_action in move_support:
         move_mask = move_mask.at[move_action].set(True)
@@ -70,13 +68,11 @@ def _local_action_mask(
 
 
 def _first_recipient_row(leaf: jax.Array) -> jax.Array:
-    """Remove only the public recipient axis from one observation leaf."""
     return leaf[0]
 
 
 @pytest.fixture(scope="module")
 def actor_observation() -> Observation:
-    """Return one complete rank-reduced actor observation from the public reset."""
     config = evaluation_env_config(team_sizes=(1, 1))
     _, observation, _, _ = reset(config, jax.random.key(0))
     return cast(Observation, jax.tree.map(_first_recipient_row, observation))
@@ -85,7 +81,6 @@ def actor_observation() -> Observation:
 def test_random_policy_samples_only_the_exact_non_cartesian_support(
     actor_observation: Observation,
 ) -> None:
-    """Bounded seeds never produce a movement or combat pair outside its mask."""
     action_mask = _local_action_mask(
         move_support=(MOVE_STAY, 3, 8),
         combat_support=((1, 0), (6, 1)),
@@ -131,7 +126,6 @@ def test_singleton_and_nonacting_supports_return_the_only_legal_action(
     combat_support: tuple[tuple[int, int], ...],
     expected_action: tuple[int, int, int],
 ) -> None:
-    """Singleton supports are deterministic, including dead/inactive no-op rows."""
     action_mask = _local_action_mask(
         move_support=move_support,
         combat_support=combat_support,
@@ -151,7 +145,6 @@ def test_singleton_and_nonacting_supports_return_the_only_legal_action(
 def test_random_policy_repeats_under_eager_jit_and_legacy_key_forms(
     actor_observation: Observation,
 ) -> None:
-    """A fixed input/key is pure across supported execution and key layouts."""
     action_mask = _local_action_mask(
         move_support=(0, 2, 4, 6, 8),
         combat_support=((0, 0), (2, 0), (7, 1)),
@@ -176,7 +169,6 @@ def test_random_policy_preserves_float32_sampling_and_int32_action_abi_with_x64(
     actor_observation: Observation,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Global x64 mode must not widen policy sampling or submitted actions."""
     action_mask = _local_action_mask(
         move_support=(0, 2, 4, 6, 8),
         combat_support=((0, 0), (2, 0), (7, 1)),
@@ -200,7 +192,6 @@ def test_random_policy_preserves_float32_sampling_and_int32_action_abi_with_x64(
 
 
 def test_random_policy_fixed_team_execution_is_mask_legal_and_core_accepted() -> None:
-    """One public observe-choose-assemble-step path accepts every submitted head."""
     config = evaluation_env_config(team_sizes=(1, 1), max_steps=10)
     state, observation, action_mask, _ = reset(config, jax.random.key(43))
     actor_keys = jax.random.split(jax.random.key(47), MAX_AGENT_SLOTS)

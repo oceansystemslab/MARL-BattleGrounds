@@ -1,84 +1,81 @@
-"""All-eight package-to-replay joins for the approved TDM scenario suite."""
+"""Check exact TDM scenario starts, witness identities and replay round trips.
+
+Single authored qualifications retain their scenario/seed correlation without
+claiming a two-game spawn comparison. Existing scenario content stays unchanged.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterator
 from pathlib import Path
 
+import numpy as np
 import pytest
-from scripts.dev.qualify_tdm_scenarios import capture_tdm_qualification_episode
-from scripts.dev.visual_debugger.revision import discover_debugger_code_revision_v1
-from scripts.dev.visual_debugger.runtime_provenance import (
-    capture_debugger_runtime_provenance_v1,
+from scripts.dev.qualify_tdm_scenarios import (
+    QualificationEpisode,
+    capture_tdm_qualification_episode,
 )
 
-from marl_battlegrounds.evaluation.metrics import build_evaluation_observer_v1
+from marl_battlegrounds.evaluation import recording_context
+from marl_battlegrounds.evaluation.metric_catalog import FULL_METRIC_NAMES
 from marl_battlegrounds.evaluation.models import (
-    AssignedPolicySlotV1,
-    CodeRevisionV1,
-    EvaluationEpisodeContextV1,
+    AggregationKeyV1,
+    AssignedPolicySlotV2,
+    ContentAddressedIdentityV1,
+    EvaluationEpisodeContextV3,
     canonical_digest_sha256,
-)
-from marl_battlegrounds.evaluation.replay import (
-    ReplayBundleV1,
-    RuntimeProvenanceV1,
-    build_replay_bundle_v1,
+    canonical_json_bytes,
 )
 from marl_battlegrounds.evaluation.replay_io import (
-    load_replay_bundle_v1,
-    load_scenario_evaluation_record_v2,
-    save_replay_bundle_v1,
-    save_scenario_evaluation_record_v2,
+    load_replay,
+    load_scenario_evaluation_record_v4,
+    save_replay,
+    save_scenario_evaluation_record_v4,
 )
-from marl_battlegrounds.evaluation.scenario import (
-    ResolvedScenarioSpecificationV2,
-    ScenarioEvaluationRecordV2,
-)
+from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3, build_replay_v3
+from marl_battlegrounds.evaluation.run_writer import IDENTITY_COLUMNS
+from marl_battlegrounds.evaluation.scenario import ResolvedScenarioSpecificationV3
 from marl_battlegrounds.evaluation.tdm_scenarios import (
+    TDM_SCENARIO_PUBLIC_AGENT_IDS,
     build_tdm_qualification_seed_schedule,
     build_tdm_scenario_evaluation_record,
     tdm_scenario_pressure_identity,
 )
 from marl_battlegrounds.tasks import list_tdm_scenarios
 
-type _Evidence = tuple[
-    ResolvedScenarioSpecificationV2, ReplayBundleV1, ScenarioEvaluationRecordV2
-]
-
-
-@dataclass(frozen=True)
-class _Suite:
-    revision: CodeRevisionV1
-    runtime: RuntimeProvenanceV1
-    evidence: tuple[_Evidence, ...]
-
 
 @pytest.fixture(scope="module")
-def suite() -> _Suite:
-    revision = discover_debugger_code_revision_v1(Path(__file__).resolve().parents[1])
-    runtime = capture_debugger_runtime_provenance_v1(
-        revision, policy_execution_included=True
-    )
-    return _Suite(
-        revision,
-        runtime,
-        tuple(
-            capture_tdm_qualification_episode(
-                scenario_id,
-                0,
-                code_revision=revision,
-                runtime_provenance=runtime,
-            )
+def suite() -> Iterator[tuple[QualificationEpisode, ...]]:
+    # Freeze actual discovered provenance to represent a fixed candidate even
+    # while another developer edits unrelated files during the test process.
+    import importlib
+
+    execution = importlib.import_module("marl_battlegrounds.evaluation.evaluate")
+    provenance = recording_context.capture_recording_provenance(num_envs=1)
+
+    def fixed_provenance(**_: object) -> dict[str, object]:
+        return provenance
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(execution, "capture_recording_provenance", fixed_provenance)
+        yield tuple(
+            capture_tdm_qualification_episode(scenario_id, 0)
             for scenario_id in range(1, 9)
-        ),
-    )
+        )
 
 
 @pytest.mark.parametrize("scenario_id", range(1, 9))
 def test_all_eight_scenarios_join_packaged_content_and_roundtrip_evidence(
-    suite: _Suite, scenario_id: int, tmp_path: Path
+    suite: tuple[QualificationEpisode, ...],
+    scenario_id: int,
+    tmp_path: Path,
 ) -> None:
-    specification, bundle, record = suite.evidence[scenario_id - 1]
+    evidence = suite[scenario_id - 1]
+    specification, replay, record = (
+        evidence.specification,
+        evidence.replay,
+        evidence.record,
+    )
     source = list_tdm_scenarios()[scenario_id - 1]
     assert (
         specification.resolved_config_digest_sha256
@@ -97,147 +94,210 @@ def test_all_eight_scenarios_join_packaged_content_and_roundtrip_evidence(
     assert specification.pressure_protocol.version == (
         4 if scenario_id in (3, 5, 8) else 2
     )
-    assert bundle.replay.completion.completion_state == "complete"
-    assert bundle.metric_report_artifact.report.statistics
+    assert replay.completion.completion_state == "complete"
+    assert replay.header.context.identity.paired_comparison_key is None
+    assert {row.name: row.value for row in replay.header.context.aggregation_keys}[
+        "scenario_qualification_key"
+    ] == f"tdm-scenario-{scenario_id}-coordinate-0"
+    assert tuple(evidence.full_metrics) == (*IDENTITY_COLUMNS, *FULL_METRIC_NAMES)
+    assert all(value.shape == (1,) for value in evidence.full_metrics.values())
     assert record.measurement_results[0].result_status == "defined"
     assert record.measurement_results[0].endpoint_observation_status == "observed"
+    assert (
+        tuple(row.public_agent_id for row in replay.header.context.roster)
+        == TDM_SCENARIO_PUBLIC_AGENT_IDS
+    )
+    assert all(
+        isinstance(row, AssignedPolicySlotV2)
+        and row.callable_name is not None
+        and row.policy_content_digest is not None
+        for row in replay.header.context.policy_assignments
+    )
     replay_path = tmp_path / "episode.marlbg-replay.json"
     record_path = tmp_path / "episode.marlbg-scenario.json"
-    save_replay_bundle_v1(bundle, replay_path)
-    save_scenario_evaluation_record_v2(
-        record, bundle.replay, bundle.metric_report_artifact, record_path
-    )
-    reloaded = load_replay_bundle_v1(replay_path, require_metric_report=True)
-    assert reloaded.metric_report_artifact is not None
+    save_replay(replay, replay_path)
+    save_scenario_evaluation_record_v4(record, replay, record_path)
+    reloaded = load_replay(replay_path).replay
+    assert isinstance(reloaded, ReplayArtifactV3)
+    assert reloaded == replay
     assert (
-        load_scenario_evaluation_record_v2(
-            record_path,
-            source_replay=reloaded.replay,
-            metric_report_artifact=reloaded.metric_report_artifact,
-        )
+        load_scenario_evaluation_record_v4(record_path, source_replay=reloaded)
         == record
     )
+    assert not list(tmp_path.glob("*.marlbg-metrics.json"))
+    assert "metric_report_reference" not in record.model_dump()
 
 
 def test_schedule_coordinates_are_unique_and_retry_reproduces_exact_evidence(
-    suite: _Suite,
+    suite: tuple[QualificationEpisode, ...],
 ) -> None:
     schedule = build_tdm_qualification_seed_schedule()
-    digests = tuple(
-        canonical_digest_sha256(row) for row in schedule.realized_seed_protocols
-    )
-    assert len(set(digests)) == 2
-    retried = capture_tdm_qualification_episode(
-        1, 0, code_revision=suite.revision, runtime_provenance=suite.runtime
-    )
-    assert retried == suite.evidence[0]
-    other_coordinate = capture_tdm_qualification_episode(
-        1, 1, code_revision=suite.revision, runtime_provenance=suite.runtime
-    )
-    assert other_coordinate[0] == retried[0]
-    assert other_coordinate[2].schedule_coordinate == 1
     assert (
-        other_coordinate[2].canonical_digest_sha256
-        != retried[2].canonical_digest_sha256
+        len({canonical_digest_sha256(row) for row in schedule.realized_seed_protocols})
+        == 2
     )
+    retried = capture_tdm_qualification_episode(1, 0)
+    original = suite[0]
+    assert retried.specification == original.specification
+    assert canonical_json_bytes(retried.replay) == canonical_json_bytes(original.replay)
+    assert canonical_json_bytes(retried.record) == canonical_json_bytes(original.record)
+    for name, values in retried.full_metrics.items():
+        np.testing.assert_array_equal(values, original.full_metrics[name])
+    other = capture_tdm_qualification_episode(1, 1)
+    assert other.specification == retried.specification
+    assert other.record.schedule_coordinate == 1
+    assert {
+        row.name: row.value for row in other.replay.header.context.aggregation_keys
+    }["scenario_qualification_key"] == "tdm-scenario-1-coordinate-1"
+    assert other.replay.header.context.identity.paired_comparison_key is None
+    assert (
+        other.record.canonical_digest_sha256 != retried.record.canonical_digest_sha256
+    )
+    seeds = retried.replay.header.context.seed_protocol
+    assert seeds.seed_protocol.identifier == "episode-fold-in-v1"
+    assert seeds.root_seed == 0 and seeds.episode_seed == 0
+    assert seeds.environment_seed is seeds.focal_policy_seed is None
 
 
 @pytest.mark.parametrize("stop_after", (0, 1))
 def test_interrupted_capture_cannot_become_draw_or_right_censored_success(
-    suite: _Suite, stop_after: int
+    suite: tuple[QualificationEpisode, ...],
+    stop_after: int,
 ) -> None:
-    _, bundle, record = capture_tdm_qualification_episode(
-        1,
-        0,
-        code_revision=suite.revision,
-        runtime_provenance=suite.runtime,
-        stop_after=stop_after,
-    )
-    assert bundle.replay.completion.completion_state == "partial"
-    assert len(bundle.replay.transitions) == stop_after
-    endpoint = record.measurement_results[0]
+    evidence = capture_tdm_qualification_episode(1, 0, stop_after=stop_after)
+    assert evidence.replay.completion.completion_state == "partial"
+    assert len(evidence.replay.transitions) == stop_after
+    assert evidence.replay.frames == suite[0].replay.frames[: stop_after + 1]
+    assert evidence.replay.transitions == suite[0].replay.transitions[:stop_after]
+    assert evidence.full_metrics == {}
+    endpoint = evidence.record.measurement_results[0]
     assert endpoint.result_status == "unavailable"
     assert endpoint.endpoint_observation_status == "unavailable"
     assert endpoint.value is None
-    assert record.predicate_result.status == "unavailable"
+    assert evidence.record.predicate_result.status == "unavailable"
 
 
 @pytest.mark.parametrize(
     "field", ("resolved_config_digest_sha256", "horizon", "hypothesis")
 )
 def test_resealed_changed_definition_cannot_enter_official_tdm_results(
-    suite: _Suite, field: str
+    suite: tuple[QualificationEpisode, ...],
+    field: str,
 ) -> None:
-    specification, bundle, _ = suite.evidence[0]
-    payload = specification.model_dump(
+    evidence = suite[0]
+    payload = evidence.specification.model_dump(
         mode="python", exclude={"canonical_digest_sha256"}
     )
-    if field == "horizon":
-        payload[field] = 6
-    elif field == "hypothesis":
-        payload[field] = "A different scientific claim."
-    else:
-        payload[field] = "0" * 64
-    changed = ResolvedScenarioSpecificationV2.model_validate(
+    payload[field] = (
+        6
+        if field == "horizon"
+        else "A different scientific claim."
+        if field == "hypothesis"
+        else "0" * 64
+    )
+    changed = ResolvedScenarioSpecificationV3.model_validate(
         {**payload, "canonical_digest_sha256": canonical_digest_sha256(payload)}
     )
     with pytest.raises(ValueError, match="approved TDM definition"):
         build_tdm_scenario_evaluation_record(
-            1,
-            changed,
-            bundle.replay,
-            bundle.metric_report_artifact,
-            schedule_coordinate=0,
+            1, changed, evidence.replay, schedule_coordinate=0
         )
 
 
 def _replace_context(
-    bundle: ReplayBundleV1, context: EvaluationEpisodeContextV1
-) -> ReplayBundleV1:
-    observer = build_evaluation_observer_v1(context)
-    observer.start(bundle.replay.frames[0])
-    for transition, frame in zip(
-        bundle.replay.transitions, bundle.replay.frames[1:], strict=True
-    ):
-        observer.append(transition, frame)
-    report = observer.finalize(completion_state="complete")
-    return build_replay_bundle_v1(
-        observer, report, runtime_provenance=bundle.replay.header.runtime_provenance
+    replay: ReplayArtifactV3, context: EvaluationEpisodeContextV3
+) -> ReplayArtifactV3:
+    return build_replay_v3(
+        context,
+        replay.frames,
+        replay.transitions,
+        runtime_provenance=replay.header.runtime_provenance,
+        wrapper_stack=replay.header.wrapper_stack,
+        completion_state="complete",
     )
 
 
 def test_changed_opponent_content_is_rejected_even_with_valid_replay_joins(
-    suite: _Suite,
+    suite: tuple[QualificationEpisode, ...],
 ) -> None:
-    specification, bundle, _ = suite.evidence[0]
-    context = bundle.replay.header.context
-    assignments = list(context.policy_assignments)
-    assignment = assignments[5]
-    assert isinstance(assignment, AssignedPolicySlotV1)
-    assignments[5] = AssignedPolicySlotV1.model_validate(
-        {**assignment.model_dump(mode="python"), "policy_content_digest": "0" * 64}
+    evidence = suite[0]
+    context = evidence.replay.header.context
+    keys = list(context.aggregation_keys)
+    for index, row in enumerate(keys):
+        if row.name == "team_b_controller_identity":
+            pressure = ContentAddressedIdentityV1.model_validate_json(row.value)
+            changed_pressure = pressure.model_copy(
+                update={"canonical_digest": "0" * 64}
+            )
+            keys[index] = AggregationKeyV1(
+                name=row.name,
+                value=canonical_json_bytes(changed_pressure).decode("ascii"),
+            )
+    changed_context = EvaluationEpisodeContextV3.model_validate(
+        {**context.model_dump(mode="python"), "aggregation_keys": tuple(keys)}
     )
-    context = EvaluationEpisodeContextV1.model_validate(
-        {**context.model_dump(mode="python"), "policy_assignments": tuple(assignments)}
-    )
-    changed = _replace_context(bundle, context)
+    changed = _replace_context(evidence.replay, changed_context)
     with pytest.raises(ValueError, match="frozen pressure rules"):
         build_tdm_scenario_evaluation_record(
-            1,
-            specification,
-            changed.replay,
-            changed.metric_report_artifact,
-            schedule_coordinate=0,
+            1, evidence.specification, changed, schedule_coordinate=0
         )
 
 
-def test_wrong_seed_coordinate_is_rejected(suite: _Suite) -> None:
-    specification, bundle, _ = suite.evidence[0]
+def test_wrong_seed_coordinate_is_rejected(
+    suite: tuple[QualificationEpisode, ...],
+) -> None:
+    evidence = suite[0]
     with pytest.raises(ValueError, match="schedule coordinate"):
         build_tdm_scenario_evaluation_record(
-            1,
-            specification,
-            bundle.replay,
-            bundle.metric_report_artifact,
-            schedule_coordinate=1,
+            1, evidence.specification, evidence.replay, schedule_coordinate=1
+        )
+
+
+@pytest.mark.parametrize("envelope", ("schedule", "specification", "record"))
+def test_current_evidence_versions_reject_coercion_and_historical_mixing(
+    suite: tuple[QualificationEpisode, ...],
+    envelope: str,
+) -> None:
+    evidence = suite[0]
+    original = (
+        evidence.specification.seed_schedule
+        if envelope == "schedule"
+        else evidence.specification
+        if envelope == "specification"
+        else evidence.record
+    )
+    expected = original.schema_version
+    for version in (True, str(expected), float(expected), expected - 1):
+        payload = original.model_dump(
+            mode="python", exclude={"canonical_digest_sha256"}
+        )
+        payload["schema_version"] = version
+        payload["canonical_digest_sha256"] = canonical_digest_sha256(payload)
+        with pytest.raises(ValueError, match=f"exact integer {expected}"):
+            type(original).model_validate(payload)
+
+
+def test_changed_policy_role_cannot_join_frozen_scenario() -> None:
+    evidence = capture_tdm_qualification_episode(1, 0)
+    context = evidence.replay.header.context
+    assignments = list(context.policy_assignments)
+    assignment = assignments[1]
+    assert isinstance(assignment, AssignedPolicySlotV2)
+    assignments[1] = assignment.model_copy(
+        update={"evaluation_role": "cooperative_partner"}
+    )
+    changed_context = EvaluationEpisodeContextV3.model_validate(
+        {
+            **context.model_dump(mode="python"),
+            "policy_assignments": tuple(assignments),
+            "seed_protocol": {
+                **context.seed_protocol.model_dump(mode="python"),
+                "cooperative_partner_seed": None,
+            },
+        }
+    )
+    changed = _replace_context(evidence.replay, changed_context)
+    with pytest.raises(ValueError, match="assigned policy role"):
+        build_tdm_scenario_evaluation_record(
+            1, evidence.specification, changed, schedule_coordinate=0
         )

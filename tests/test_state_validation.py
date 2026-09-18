@@ -1,4 +1,4 @@
-"""Host-only validation for runtime snapshots and curated scenario starts."""
+"""Check host validation of live snapshots and authored scenario starts."""
 # pyright: reportUnknownArgumentType=false
 # pyright: reportPrivateUsage=false
 
@@ -128,12 +128,10 @@ _STATE_ARRAY_FIELDS = (
 
 
 def _empty_obstacles() -> Array:
-    """Return a canonical inactive obstacle table."""
     return jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32)
 
 
 def _pillar(*, x: float = 15.0, y: float = 10.0, radius: float = 1.0) -> Array:
-    """Return one active circular obstacle row."""
     obstacle = jnp.zeros((OBSTACLE_FEATURES,), dtype=jnp.float32)
     obstacle = obstacle.at[OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_PILLAR)
     obstacle = obstacle.at[OBSTACLE_FEATURE_X].set(x)
@@ -149,7 +147,6 @@ def _wall(
     width: float = 2.0,
     height: float = 1.0,
 ) -> Array:
-    """Return one active axis-aligned wall obstacle row."""
     obstacle = jnp.zeros((OBSTACLE_FEATURES,), dtype=jnp.float32)
     obstacle = obstacle.at[OBSTACLE_FEATURE_TYPE].set(OBSTACLE_TYPE_WALL)
     obstacle = obstacle.at[OBSTACLE_FEATURE_X].set(x)
@@ -166,7 +163,6 @@ def _valid_config(
     team_deathmatch_score_threshold: int = 0,
     obstacles: Array | None = None,
 ) -> EnvConfig:
-    """Build a deterministic catalog-valid config for state validation."""
     requested_classes = jnp.asarray(
         _CANONICAL_TEAM_CLASSES + _CANONICAL_TEAM_CLASSES,
         dtype=jnp.int32,
@@ -214,7 +210,6 @@ def _valid_state(
     team_sizes: tuple[int, int] = (5, 5),
     obstacles: Array | None = None,
 ) -> tuple[EnvConfig, EnvState]:
-    """Return a reset-produced official config/state pair."""
     config = _valid_config(team_sizes=team_sizes, obstacles=obstacles)
     state, _, _, _ = reset(config, jax.random.key(0))
     return config, state
@@ -228,7 +223,6 @@ def _replace_slot_value(
     value: int | float | bool,
     channel: int | None = None,
 ) -> EnvState:
-    """Replace one vector or matrix entry in a state field."""
     field = cast(Array, getattr(state, field_name))
     if channel is None:
         updated = field.at[slot].set(value)
@@ -238,7 +232,6 @@ def _replace_slot_value(
 
 
 def _assert_pytrees_equal(left: object, right: object) -> None:
-    """Assert exact equality without relying on container identity."""
     left_leaves = jax.tree_util.tree_leaves(left)
     right_leaves = jax.tree_util.tree_leaves(right)
     assert len(left_leaves) == len(right_leaves)
@@ -247,7 +240,6 @@ def _assert_pytrees_equal(left: object, right: object) -> None:
 
 
 def test_valid_living_and_dead_states_return_none_without_mutation() -> None:
-    """Accept official states while preserving every input leaf."""
     config, living_state = _valid_state()
     shielded_living_state = living_state._replace(
         spawn_shield_durations=living_state.spawn_shield_durations.at[0].set(
@@ -282,7 +274,6 @@ def test_valid_living_and_dead_states_return_none_without_mutation() -> None:
 
 
 def test_validator_rejects_wrong_top_level_types() -> None:
-    """Reject non-contract config and state containers before field access."""
     config, state = _valid_state()
     with pytest.raises(TypeError, match="config"):
         validate_env_state(cast(Any, object()), state)
@@ -299,7 +290,6 @@ def test_every_state_leaf_rejects_nonarray_shape_and_dtype_drift(
     expected_shape: tuple[int, ...],
     expected_dtype: object,
 ) -> None:
-    """Enforce exact JAX storage for every public EnvState leaf."""
     config, state = _valid_state()
 
     with pytest.raises(TypeError, match=field_name):
@@ -337,7 +327,6 @@ def test_float_state_fields_reject_nonfinite_values(
     field_name: str,
     nonfinite_value: float,
 ) -> None:
-    """Reject nonfinite geometry and health before simulator entry."""
     config, state = _valid_state()
     field = cast(Array, getattr(state, field_name))
     invalid_field = (
@@ -351,7 +340,6 @@ def test_float_state_fields_reject_nonfinite_values(
 
 
 def test_step_count_must_be_nonnegative() -> None:
-    """Reject a transition-start step count outside the nonnegative domain."""
     config, state = _valid_state()
     with pytest.raises(ValueError, match="step_count"):
         validate_env_state(
@@ -470,7 +458,6 @@ def test_team_deathmatch_scenario_step_count_must_precede_horizon() -> None:
 
 
 def test_liveness_must_be_a_subset_of_configured_activity() -> None:
-    """Reject a live flag on canonical inactive padding."""
     config, state = _valid_state(team_sizes=(1, 1))
     invalid_state = state._replace(
         alive_mask=state.alive_mask.at[1].set(True),
@@ -481,7 +468,6 @@ def test_liveness_must_be_a_subset_of_configured_activity() -> None:
 
 
 def test_reset_respawn_wave_countdowns_match_each_team_period() -> None:
-    """Accept the official reset state at each period's inclusive upper bound."""
     config, state = _valid_state()
 
     assert bool(
@@ -510,7 +496,6 @@ def test_respawn_wave_countdowns_accept_each_team_domain(
     period_step_counts: tuple[int, int],
     countdowns: tuple[int, int],
 ) -> None:
-    """Accept independent countdowns in each team's half-open period domain."""
     config, state = _valid_state()
     config = config._replace(
         team_respawn_wave_period_step_count=jnp.asarray(
@@ -561,7 +546,6 @@ def test_respawn_wave_countdowns_reject_values_outside_each_team_period(
     countdowns: tuple[int, int],
     message: str,
 ) -> None:
-    """Reject underflow and elementwise values outside the half-open domain."""
     config, state = _valid_state()
     config = config._replace(
         team_respawn_wave_period_step_count=jnp.asarray(
@@ -590,7 +574,6 @@ def test_spawn_shield_counter_accepts_configured_living_domain(
     duration: int,
     counter: int,
 ) -> None:
-    """Accept any living counter in the closed configured duration range."""
     config, state = _valid_state()
     config = config._replace(spawn_shield_duration_steps=duration)
     state = state._replace(
@@ -611,7 +594,6 @@ def test_spawn_shield_counter_rejects_values_outside_configured_domain(
     counter: int,
     message: str,
 ) -> None:
-    """Reject underflow and counters exceeding the public config authority."""
     config, state = _valid_state()
     invalid_state = state._replace(
         spawn_shield_durations=state.spawn_shield_durations.at[0].set(counter)
@@ -622,7 +604,6 @@ def test_spawn_shield_counter_rejects_values_outside_configured_domain(
 
 
 def test_spawn_shield_counter_must_be_zero_for_dead_and_inactive_slots() -> None:
-    """Prevent protection memory from surviving death or entering padding."""
     config, state = _valid_state(team_sizes=(1, 1))
     dead_state = state._replace(
         alive_mask=state.alive_mask.at[0].set(False),
@@ -640,7 +621,6 @@ def test_spawn_shield_counter_must_be_zero_for_dead_and_inactive_slots() -> None
 
 
 def test_disabled_spawn_shield_requires_all_counter_rows_to_be_zero() -> None:
-    """Make duration zero a complete ablation rather than a partial state."""
     config, state = _valid_state()
     disabled_config = config._replace(spawn_shield_duration_steps=0)
     invalid_state = state._replace(
@@ -671,7 +651,6 @@ def test_spawn_shield_and_stun_cannot_coexist_on_one_living_slot(
     stun_channels: tuple[int, ...],
     spawn_shield_duration: int,
 ) -> None:
-    """Reject lifecycle states that combine shielding with any active stun."""
     config, state = _valid_state()
     stun_durations = state.stun_durations
     for channel in stun_channels:
@@ -691,7 +670,6 @@ def test_spawn_shield_and_stun_cannot_coexist_on_one_living_slot(
 
 
 def test_spawn_shield_stun_exclusion_preserves_each_independent_state() -> None:
-    """Accept shielding without stun and stun without shielding."""
     config, state = _valid_state()
     shielded_state = state._replace(
         spawn_shield_durations=state.spawn_shield_durations.at[0].set(
@@ -709,7 +687,6 @@ def test_spawn_shield_stun_exclusion_preserves_each_independent_state() -> None:
 
 
 def test_out_of_combat_countdown_accepts_each_resolved_delay_inclusively() -> None:
-    """Accept every living slot at its class-resolved closed upper bound."""
     config, state = _valid_state()
     bounded_state = state._replace(
         steps_until_out_of_combat=config.agent_profile.out_of_combat_delay_steps
@@ -730,7 +707,6 @@ def test_out_of_combat_countdown_rejects_values_outside_resolved_slot_domain(
     countdown: int,
     message: str,
 ) -> None:
-    """Reject underflow and row-wise overflow against the resolved profile."""
     config, state = _valid_state()
     invalid_state = state._replace(
         steps_until_out_of_combat=state.steps_until_out_of_combat.at[slot].set(
@@ -743,7 +719,6 @@ def test_out_of_combat_countdown_rejects_values_outside_resolved_slot_domain(
 
 
 def test_out_of_combat_countdown_must_be_zero_for_dead_and_inactive_slots() -> None:
-    """Prevent recovery memory from surviving death or entering padding."""
     config, state = _valid_state(team_sizes=(1, 1))
     dead_state = state._replace(
         alive_mask=state.alive_mask.at[0].set(False),
@@ -777,7 +752,6 @@ def test_out_of_combat_countdown_must_be_zero_for_dead_and_inactive_slots() -> N
 def test_living_health_must_be_strictly_positive_and_bounded(
     health_case: str,
 ) -> None:
-    """Enforce the official living-health half of the lifecycle invariant."""
     config, state = _valid_state()
     if health_case == "zero":
         invalid_health = 0.0
@@ -797,7 +771,6 @@ def test_living_health_must_be_strictly_positive_and_bounded(
 
 
 def test_dead_health_must_be_exactly_zero() -> None:
-    """Reject an active corpse carrying positive health."""
     config, state = _valid_state()
     invalid_state = state._replace(alive_mask=state.alive_mask.at[0].set(False))
     with pytest.raises(ValueError, match="dead current_health"):
@@ -830,7 +803,6 @@ def test_dead_transient_statuses_must_be_zero(
     field_name: str,
     channel: int | None,
 ) -> None:
-    """Reject every transient status family on an active corpse."""
     config, state = _valid_state()
     dead_state = state._replace(
         alive_mask=state.alive_mask.at[0].set(False),
@@ -875,7 +847,6 @@ def test_cooldown_and_status_durations_must_be_nonnegative(
     field_name: str,
     channel: int | None,
 ) -> None:
-    """Reject negative tick counters in every lifecycle family."""
     config, state = _valid_state()
     invalid_state = _replace_slot_value(
         state,
@@ -897,7 +868,6 @@ def test_each_class_cooldown_rejects_values_above_its_catalog_maximum(
     slot: int,
     class_id: int,
 ) -> None:
-    """Use the configured actor class, not one global cooldown ceiling."""
     config, state = _valid_state()
     assert int(config.agent_profile.class_ids[slot]) == class_id
     maximum = int(
@@ -922,7 +892,6 @@ def test_each_class_cooldown_catalog_maximum_is_inclusive(
     slot: int,
     class_id: int,
 ) -> None:
-    """Accept the full cooldown value that an Ultimate starts with."""
     config, state = _valid_state()
     assert int(config.agent_profile.class_ids[slot]) == class_id
     maximum = get_ultimate_cooldown_by_class_ids(config.agent_profile.class_ids[slot])
@@ -999,7 +968,6 @@ def test_each_status_channel_rejects_values_above_its_catalog_maximum(
     channel: int | None,
     maximum: int,
 ) -> None:
-    """Enforce every independent public duration ceiling."""
     config, state = _valid_state()
     invalid_state = _replace_slot_value(
         state,
@@ -1014,7 +982,6 @@ def test_each_status_channel_rejects_values_above_its_catalog_maximum(
 
 
 def test_catalog_duration_maxima_are_inclusive_for_living_agents() -> None:
-    """Accept fresh full durations rather than treating maxima as overflow."""
     config, state = _valid_state()
     valid_state = state._replace(
         slow_durations=state.slow_durations.at[0].set(
@@ -1057,7 +1024,6 @@ def test_catalog_duration_maxima_are_inclusive_for_living_agents() -> None:
 
 
 def test_mage_burst_duration_is_owned_only_by_configured_mages() -> None:
-    """Reject source-local Burst memory on a class that cannot create it."""
     config, state = _valid_state()
     non_mage_slot = 1
     assert int(config.agent_profile.class_ids[non_mage_slot]) != MAGE_CLASS_ID
@@ -1119,7 +1085,6 @@ def test_inactive_dynamic_rows_must_remain_canonical_zero(
     field_name: str,
     channel: int | None,
 ) -> None:
-    """Reject nonzero dynamic memory in configured padding."""
     config, state = _valid_state(team_sizes=(1, 1))
     inactive_slot = 1
     invalid_state = _replace_slot_value(
@@ -1135,7 +1100,6 @@ def test_inactive_dynamic_rows_must_remain_canonical_zero(
 
 
 def test_inactive_positions_must_remain_canonical_zero() -> None:
-    """Reject hidden geometry in a configured padding row."""
     config, state = _valid_state(team_sizes=(1, 1))
     invalid_state = state._replace(
         agent_positions=state.agent_positions.at[1].set(
@@ -1172,7 +1136,6 @@ def test_previous_action_categories_must_remain_in_domain(
     category_count: int,
     boundary: str,
 ) -> None:
-    """Reject malformed accepted-action history at either domain boundary."""
     config, state = _valid_state()
     invalid_category = -1 if boundary == "below" else category_count
     state = state._replace(has_previous_timestep_joint_action=jnp.asarray(True))
@@ -1196,7 +1159,6 @@ def test_previous_action_categories_must_remain_in_domain(
     ),
 )
 def test_absent_previous_action_requires_zero_history(field_name: str) -> None:
-    """Keep reset's scalar validity flag coherent with every history head."""
     config, state = _valid_state()
     invalid_state = _replace_slot_value(
         state,
@@ -1222,7 +1184,6 @@ def test_absent_previous_action_requires_zero_history(field_name: str) -> None:
 def test_curated_scenario_rejects_shielded_source_combat_history(
     combat_head: str,
 ) -> None:
-    """Keep authored shielded-source history movement-only."""
     config, state = _valid_state()
     previous_targets = state.previous_timestep_select_target_actions
     previous_ultimates = state.previous_timestep_use_ultimate_actions
@@ -1256,7 +1217,6 @@ def test_curated_scenario_rejects_history_targeting_shielded_recipient(
     target_action: int,
     shielded_recipient_slot: int,
 ) -> None:
-    """Reject impossible authored target provenance for either team relation."""
     config, state = _valid_state()
     inconsistent_state = state._replace(
         spawn_shield_durations=state.spawn_shield_durations.at[
@@ -1286,7 +1246,6 @@ def test_curated_scenario_rejects_history_targeting_shielded_recipient(
 def test_curated_scenario_preserves_nonshielded_historical_target_identity(
     recipient_condition: str,
 ) -> None:
-    """Do not reinterpret accepted target history from current observability."""
     obstacles = None
     if recipient_condition == "hidden":
         obstacles = (
@@ -1327,7 +1286,6 @@ def test_active_living_and_dead_positions_obey_map_bounds(
     side: str,
     is_dead: bool,
 ) -> None:
-    """Apply the same hard static bounds to living agents and preserved corpses."""
     config, state = _valid_state()
     if is_dead:
         state = state._replace(
@@ -1362,7 +1320,6 @@ def test_map_bound_roundoff_within_geometry_tolerance_is_accepted(
     axis: int,
     side: str,
 ) -> None:
-    """Do not reject the documented float32 residual around hard boundaries."""
     config, state = _valid_state()
     radius = float(config.agent_profile.agent_radii[0])
     map_extent = config.map_width if axis == 0 else config.map_height
@@ -1390,7 +1347,6 @@ def test_active_living_and_dead_positions_must_clear_static_obstacles(
     overlapping_center: tuple[float, float],
     is_dead: bool,
 ) -> None:
-    """Reject obstacle overlap for living agents and preserved corpses."""
     obstacles = _empty_obstacles().at[0].set(obstacle)
     config, state = _valid_state(obstacles=obstacles)
     if is_dead:
@@ -1409,7 +1365,6 @@ def test_active_living_and_dead_positions_must_clear_static_obstacles(
 
 
 def test_static_obstacle_tangency_is_accepted() -> None:
-    """Reuse the authoritative positive-overlap predicate where tangency is legal."""
     obstacle = _pillar()
     obstacles = _empty_obstacles().at[0].set(obstacle)
     config, state = _valid_state(obstacles=obstacles)
@@ -1430,7 +1385,6 @@ def test_static_obstacle_tangency_is_accepted() -> None:
 
 
 def test_runtime_snapshot_accepts_residual_while_curated_start_rejects_it() -> None:
-    """Separate runtime snapshot validity from strict curated-start validity."""
     config, state = _valid_state()
     residual_positions = (
         state.agent_positions.at[0]
@@ -1455,7 +1409,6 @@ def test_runtime_snapshot_accepts_residual_while_curated_start_rejects_it() -> N
 
 
 def test_curated_scenario_living_body_tangency_is_accepted() -> None:
-    """Treat exact living-body tangency as a legal authored start."""
     config, state = _valid_state()
     radius_sum = float(
         config.agent_profile.agent_radii[0] + config.agent_profile.agent_radii[1]
@@ -1472,7 +1425,6 @@ def test_curated_scenario_living_body_tangency_is_accepted() -> None:
 
 
 def test_preserved_corpse_may_overlap_a_living_body() -> None:
-    """Treat preserved corpses as nonphysical for pairwise state validity."""
     config, state = _valid_state()
     dead_slot = 0
     living_slot = 1
@@ -1488,7 +1440,6 @@ def test_preserved_corpse_may_overlap_a_living_body() -> None:
 
 
 def test_runtime_validator_accepts_public_death_and_corpse_successors() -> None:
-    """Validate actual public successor states without entering traced execution."""
     config = _valid_config(team_sizes=(1, 1))
     spawn_pad_positions = (
         config.team_spawn_pad_positions.at[0, 0]
@@ -1534,8 +1485,7 @@ def test_runtime_validator_accepts_public_death_and_corpse_successors() -> None:
     assert validate_env_state(config, corpse_state) is None
 
 
-def test_runtime_validator_accepts_an_actual_boundary_residual_successor() -> None:
-    """Accept fixed-pass overlap only at the runtime/replay snapshot boundary."""
+def test_runtime_validator_accepts_an_actual_boundary_contact_successor() -> None:
     config = _valid_config(team_sizes=(1, 1))
     moving_slot = MAX_AGENTS_PER_TEAM
     spawn_pad_positions = (
@@ -1574,7 +1524,6 @@ def test_runtime_validator_accepts_an_actual_boundary_residual_successor() -> No
         + config.agent_profile.agent_radii[moving_slot]
     )
 
-    assert center_distance < radius_sum
+    assert abs(center_distance - radius_sum) <= GEOMETRY_TOLERANCE
     assert validate_env_state(config, next_state) is None
-    with pytest.raises(ValueError, match="curated scenario living bodies overlap"):
-        validate_scenario_initial_state(config, next_state)
+    # The separate residual-snapshot test covers curated-start rejection.

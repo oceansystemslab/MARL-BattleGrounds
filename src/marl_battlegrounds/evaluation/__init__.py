@@ -1,4 +1,10 @@
-"""Versioned host-side evaluation contracts and explicit lazy exports."""
+"""Expose versioned evaluation APIs without importing their runtimes eagerly.
+
+Readers, capture tools and analysis use this namespace to find explicit schema
+versions and their helpers. Each exported symbol loads its owning module only
+when requested; successful lookups are cached. Importing this package alone
+does not select a numerical backend or start a replay writer.
+"""
 
 from importlib import import_module
 from typing import TYPE_CHECKING
@@ -7,23 +13,37 @@ if TYPE_CHECKING:
     from marl_battlegrounds.evaluation.actor_projection import (
         NO_SHARED_OBS_ACTOR_PROJECTION_ID,
         NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+        NO_SHARED_OBS_ACTOR_PROJECTION_V3,
         NO_SHARED_OBS_ACTOR_PROJECTION_VERSION,
         SHARED_OBS_ACTOR_PROJECTION_ID,
         SHARED_OBS_ACTOR_PROJECTION_V1,
+        SHARED_OBS_ACTOR_PROJECTION_V2,
         SHARED_OBS_ACTOR_PROJECTION_VERSION,
         reconstruct_actor_class_ids_by_team_v2,
+        reconstruct_actor_class_ids_by_team_v3,
         reconstruct_class_ids_by_agent_by_team_v2,
+        reconstruct_class_ids_by_agent_by_team_v3,
         reconstruct_shared_obs_sensor_source_bank_v1,
+        reconstruct_shared_obs_sensor_source_bank_v2,
         validate_class_ids_by_agent_by_team_against_context_v1,
     )
     from marl_battlegrounds.evaluation.capture import (
         capture_evaluation_transition_unit_v1,
+        capture_evaluation_transition_unit_v2,
         capture_initial_evaluation_frame_v1,
+        capture_initial_evaluation_frame_v2,
         normalize_transition_facts_v1,
     )
     from marl_battlegrounds.evaluation.catalog import (
         build_evaluation_episode_context_v1,
+        build_evaluation_episode_context_v2,
+        build_evaluation_episode_context_v3,
         build_static_mechanics_catalog_v1,
+    )
+    from marl_battlegrounds.evaluation.evaluate import (
+        EpisodeSpec,
+        evaluate,
+        evaluate_episodes,
     )
     from marl_battlegrounds.evaluation.events import decode_evaluation_events_v1
     from marl_battlegrounds.evaluation.metrics import (
@@ -47,7 +67,6 @@ if TYPE_CHECKING:
         RawSufficientStatisticV1,
         StatisticDimensionV1,
         StatisticSubjectV1,
-        SufficientStatisticAccumulatorV1,
         SufficientStatisticComponentV1,
         SufficientStatisticDraftV1,
         SumComponentV1,
@@ -66,13 +85,16 @@ if TYPE_CHECKING:
         AgentRespawnedEventV1,
         AggregationKeyV1,
         AssignedPolicySlotV1,
+        AssignedPolicySlotV2,
         AuraMechanicV1,
         AuraTransitionFactsV1,
         BaseObservationV1,
+        BaseObservationV2,
         CaptureProfile,
         ChargePhaseDisplacementEventV1,
         ClassMechanicsV1,
         CodeRevisionV1,
+        CodeRevisionV2,
         CombatCountdownResetEventV1,
         CombatTransitionFactsV1,
         ContentAddressedIdentityV1,
@@ -80,11 +102,15 @@ if TYPE_CHECKING:
         CooldownStartedEventV1,
         DeathTransitionFactsV1,
         EvaluationEpisodeContextV1,
+        EvaluationEpisodeContextV2,
+        EvaluationEpisodeContextV3,
         EvaluationEpisodeIdentityV1,
         EvaluationEventV1,
         EvaluationFrameV1,
+        EvaluationFrameV2,
         EvaluationRole,
         EvaluationSeedProtocolV1,
+        EvaluationSeedProtocolV2,
         EvaluationTransitionV1,
         ExecutionInformationMode,
         GlobalAnalysisSnapshotV1,
@@ -95,6 +121,7 @@ if TYPE_CHECKING:
         OrdinaryMovementPhaseDisplacementEventV1,
         PhysicalTransitionFactsV1,
         PolicyAssignmentSlotV1,
+        PolicyAssignmentSlotV2,
         PreviousTimestepActionObservationV1,
         RecipientHealthResolutionEventV1,
         RegenerationTransitionFactsV1,
@@ -105,6 +132,8 @@ if TYPE_CHECKING:
         RespawnWaveOccurredEventV1,
         RosterSlotV1,
         SchemaVersionEntryV1,
+        SchemaVersionEntryV2,
+        SchemaVersionEntryV3,
         SourceDamageOutputEventV1,
         SourceHealingOutputEventV1,
         SpawnLifecycleObservationV1,
@@ -129,12 +158,21 @@ if TYPE_CHECKING:
         ACTOR_POV_AXIS_MAPPING_SCHEMA_ID,
         ACTOR_POV_CONTENT_SCHEMA_ID,
         ACTOR_POV_SCHEMA_VERSION,
+        ACTOR_POV_SCHEMA_VERSION_V2,
         ActorPovAcceptedActionV1,
         ActorPovActionMaskV1,
+        ActorPovAdjacentTransitionSlice,
+        ActorPovAdjacentTransitionSliceV2,
+        ActorPovAxisMapping,
         ActorPovAxisMappingV1,
+        ActorPovAxisMappingV2,
+        ActorPovCurrentSlice,
+        ActorPovCurrentSliceV2,
         ActorPovEpisodeCompletionV1,
         ActorPovEpisodeEndedCueV1,
+        ActorPovFrame,
         ActorPovFrameV1,
+        ActorPovFrameV2,
         ActorPovOwnActionOutcomeCueV1,
         ActorPovOwnCooldownChangedCueV1,
         ActorPovOwnHealthChangedCueV1,
@@ -143,17 +181,26 @@ if TYPE_CHECKING:
         ActorPovOwnStatusChangedCueV1,
         ActorPovPresentationCueV1,
         ActorPovPreviousTimestepActionsV1,
+        ActorPovReplayArtifact,
         ActorPovReplayArtifactV1,
+        ActorPovReplayArtifactV2,
+        ActorPovReplayContent,
         ActorPovReplayContentV1,
+        ActorPovReplayContentV2,
         ActorPovSpawnLifecycleV1,
         ActorPovSubmittedActionV1,
         ActorPovTransitionV1,
         ActorPovVisibleBodyObservationChangedCueV1,
         canonical_actor_pov_content_json_bytes_v1,
         canonical_actor_pov_replay_json_bytes_v1,
+        canonical_actor_pov_replay_json_bytes_v2,
         export_actor_pov_replay_v1,
+        export_actor_pov_replay_v2,
         validate_actor_pov_replay_against_replay_v1,
+        validate_actor_pov_replay_against_replay_v2,
         validate_actor_pov_replay_artifact_v1,
+        validate_actor_pov_replay_artifact_v2,
+        validate_actor_pov_replay_content,
         validate_actor_pov_replay_content_v1,
     )
     from marl_battlegrounds.evaluation.replay import (
@@ -180,6 +227,7 @@ if TYPE_CHECKING:
         METRIC_REPORT_FILE_SUFFIX_V1,
         REPLAY_FILE_SUFFIX_V1,
         SCENARIO_FILE_SUFFIX_V1,
+        LoadedReplay,
         LoadedReplayBundleV1,
         ReplayBundleLoadStatusV1,
         ReplayIOError,
@@ -187,45 +235,88 @@ if TYPE_CHECKING:
         ReplayLoadError,
         ReplaySaveError,
         SavedCompanionArtifactV1,
+        SavedReplay,
         SavedReplayBundleV1,
         canonical_metric_report_artifact_json_bytes_v1,
         canonical_replay_json_bytes_v1,
         canonical_scenario_evaluation_record_json_bytes_v1,
         canonical_scenario_evaluation_record_json_bytes_v2,
         load_actor_pov_replay_artifact_v1,
+        load_actor_pov_replay_artifact_v2,
+        load_replay,
         load_replay_artifact_v1,
         load_replay_bundle_v1,
         load_scenario_evaluation_record_v1,
         load_scenario_evaluation_record_v2,
+        load_scenario_evaluation_record_v3,
+        load_scenario_evaluation_record_v4,
         save_actor_pov_replay_artifact_v1,
+        save_actor_pov_replay_artifact_v2,
+        save_replay,
         save_replay_bundle_v1,
         save_scenario_evaluation_record_v1,
         save_scenario_evaluation_record_v2,
+        save_scenario_evaluation_record_v3,
+        save_scenario_evaluation_record_v4,
+    )
+    from marl_battlegrounds.evaluation.replay_v2 import (
+        ReplayArtifactHeaderV2,
+        ReplayArtifactReferenceV2,
+        ReplayArtifactV2,
+        build_replay_v2,
+    )
+    from marl_battlegrounds.evaluation.replay_v3 import (
+        ReplayArtifactHeaderV3,
+        ReplayArtifactReferenceV3,
+        ReplayArtifactV3,
+        build_replay_v3,
+        replay_from_packets,
+        replay_reference_v3,
+        validate_replay_artifact_v3,
+    )
+    from marl_battlegrounds.evaluation.results import (
+        CanonicalTournamentResult,
+        EpisodeResult,
+        EvaluationResult,
+        TournamentResult,
+        load_results,
     )
     from marl_battlegrounds.evaluation.scenario import (
         ResolvedScenarioSpecificationV1,
         ResolvedScenarioSpecificationV2,
+        ResolvedScenarioSpecificationV3,
         ScenarioBooleanValueV1,
         ScenarioCountValueV1,
         ScenarioEvaluationRecordV1,
         ScenarioEvaluationRecordV2,
+        ScenarioEvaluationRecordV3,
+        ScenarioEvaluationRecordV4,
         ScenarioMeasurementDefinitionV1,
         ScenarioMeasurementResultV1,
         ScenarioParameterV1,
         ScenarioPredicateResultV1,
         ScenarioScalarValueV1,
         ScenarioSeedScheduleV2,
+        ScenarioSeedScheduleV3,
         ScenarioViolationDefinitionV1,
         ScenarioViolationResultV1,
         build_scenario_evaluation_record_v1,
         build_scenario_evaluation_record_v2,
+        build_scenario_evaluation_record_v3,
+        build_scenario_evaluation_record_v4,
         resolved_initial_state_digest_sha256_v2,
         validate_official_scenario_evaluation_record_v2,
+        validate_official_scenario_evaluation_record_v3,
+        validate_official_scenario_evaluation_record_v4,
         validate_scenario_evaluation_record_v1,
         validate_scenario_evaluation_record_v2,
+        validate_scenario_evaluation_record_v3,
+        validate_scenario_evaluation_record_v4,
     )
     from marl_battlegrounds.evaluation.validation import (
+        validate_evaluation_transition_unit,
         validate_evaluation_transition_unit_v1,
+        validate_initial_evaluation_frame,
         validate_initial_evaluation_frame_v1,
     )
 
@@ -233,6 +324,9 @@ _LAZY_EXPORT_MODULE_BY_NAME: dict[str, str] = {}
 
 
 def _register_lazy_exports(module_name: str, names: tuple[str, ...]) -> None:
+    """Register one owning module per public name, rejecting duplicate export
+    ownership.
+    """
     for name in names:
         if name in _LAZY_EXPORT_MODULE_BY_NAME:
             raise RuntimeError(f"duplicate lazy evaluation export: {name}")
@@ -244,13 +338,18 @@ _register_lazy_exports(
     (
         "NO_SHARED_OBS_ACTOR_PROJECTION_ID",
         "NO_SHARED_OBS_ACTOR_PROJECTION_V2",
+        "NO_SHARED_OBS_ACTOR_PROJECTION_V3",
         "NO_SHARED_OBS_ACTOR_PROJECTION_VERSION",
         "SHARED_OBS_ACTOR_PROJECTION_ID",
         "SHARED_OBS_ACTOR_PROJECTION_V1",
+        "SHARED_OBS_ACTOR_PROJECTION_V2",
         "SHARED_OBS_ACTOR_PROJECTION_VERSION",
         "reconstruct_actor_class_ids_by_team_v2",
+        "reconstruct_actor_class_ids_by_team_v3",
         "reconstruct_class_ids_by_agent_by_team_v2",
+        "reconstruct_class_ids_by_agent_by_team_v3",
         "reconstruct_shared_obs_sensor_source_bank_v1",
+        "reconstruct_shared_obs_sensor_source_bank_v2",
         "validate_class_ids_by_agent_by_team_against_context_v1",
     ),
 )
@@ -258,7 +357,9 @@ _register_lazy_exports(
     "marl_battlegrounds.evaluation.capture",
     (
         "capture_evaluation_transition_unit_v1",
+        "capture_evaluation_transition_unit_v2",
         "capture_initial_evaluation_frame_v1",
+        "capture_initial_evaluation_frame_v2",
         "normalize_transition_facts_v1",
     ),
 )
@@ -296,7 +397,6 @@ _register_lazy_exports(
         "RawSufficientStatisticV1",
         "StatisticDimensionV1",
         "StatisticSubjectV1",
-        "SufficientStatisticAccumulatorV1",
         "SufficientStatisticComponentV1",
         "SufficientStatisticDraftV1",
         "SumComponentV1",
@@ -321,6 +421,7 @@ _register_lazy_exports(
         "AuraMechanicV1",
         "AuraTransitionFactsV1",
         "BaseObservationV1",
+        "BaseObservationV2",
         "CaptureProfile",
         "ChargePhaseDisplacementEventV1",
         "ClassMechanicsV1",
@@ -335,6 +436,7 @@ _register_lazy_exports(
         "EvaluationEpisodeIdentityV1",
         "EvaluationEventV1",
         "EvaluationFrameV1",
+        "EvaluationFrameV2",
         "EvaluationRole",
         "EvaluationSeedProtocolV1",
         "EvaluationTransitionV1",
@@ -454,14 +556,20 @@ _register_lazy_exports(
         "canonical_scenario_evaluation_record_json_bytes_v1",
         "canonical_scenario_evaluation_record_json_bytes_v2",
         "load_actor_pov_replay_artifact_v1",
+        "load_actor_pov_replay_artifact_v2",
         "load_replay_artifact_v1",
         "load_replay_bundle_v1",
         "load_scenario_evaluation_record_v1",
         "load_scenario_evaluation_record_v2",
+        "load_scenario_evaluation_record_v3",
+        "load_scenario_evaluation_record_v4",
         "save_actor_pov_replay_artifact_v1",
+        "save_actor_pov_replay_artifact_v2",
         "save_replay_bundle_v1",
         "save_scenario_evaluation_record_v1",
         "save_scenario_evaluation_record_v2",
+        "save_scenario_evaluation_record_v3",
+        "save_scenario_evaluation_record_v4",
     ),
 )
 _register_lazy_exports(
@@ -469,31 +577,43 @@ _register_lazy_exports(
     (
         "ResolvedScenarioSpecificationV1",
         "ResolvedScenarioSpecificationV2",
+        "ResolvedScenarioSpecificationV3",
         "ScenarioBooleanValueV1",
         "ScenarioCountValueV1",
         "ScenarioEvaluationRecordV1",
         "ScenarioEvaluationRecordV2",
+        "ScenarioEvaluationRecordV3",
+        "ScenarioEvaluationRecordV4",
         "ScenarioMeasurementDefinitionV1",
         "ScenarioMeasurementResultV1",
         "ScenarioParameterV1",
         "ScenarioPredicateResultV1",
         "ScenarioScalarValueV1",
         "ScenarioSeedScheduleV2",
+        "ScenarioSeedScheduleV3",
         "ScenarioViolationDefinitionV1",
         "ScenarioViolationResultV1",
         "build_scenario_evaluation_record_v1",
         "build_scenario_evaluation_record_v2",
+        "build_scenario_evaluation_record_v3",
+        "build_scenario_evaluation_record_v4",
         "resolved_initial_state_digest_sha256_v2",
         "validate_official_scenario_evaluation_record_v2",
+        "validate_official_scenario_evaluation_record_v3",
+        "validate_official_scenario_evaluation_record_v4",
         "validate_scenario_evaluation_record_v1",
         "validate_scenario_evaluation_record_v2",
+        "validate_scenario_evaluation_record_v3",
+        "validate_scenario_evaluation_record_v4",
     ),
 )
 _register_lazy_exports(
     "marl_battlegrounds.evaluation.validation",
     (
         "validate_evaluation_transition_unit_v1",
+        "validate_evaluation_transition_unit",
         "validate_initial_evaluation_frame_v1",
+        "validate_initial_evaluation_frame",
     ),
 )
 
@@ -503,16 +623,19 @@ __all__ = [
     "ACTOR_POV_CONTENT_SCHEMA_ID",
     "ACTOR_POV_FILE_SUFFIX_V1",
     "ACTOR_POV_SCHEMA_VERSION",
+    "ACTOR_POV_SCHEMA_VERSION_V2",
     "DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1",
     "DEFAULT_MAX_REPLAY_JSON_DEPTH_V1",
     "METRIC_REPORT_FILE_SUFFIX_V1",
     "NO_SHARED_OBS_ACTOR_PROJECTION_ID",
     "NO_SHARED_OBS_ACTOR_PROJECTION_V2",
+    "NO_SHARED_OBS_ACTOR_PROJECTION_V3",
     "NO_SHARED_OBS_ACTOR_PROJECTION_VERSION",
     "REPLAY_FILE_SUFFIX_V1",
     "SCENARIO_FILE_SUFFIX_V1",
     "SHARED_OBS_ACTOR_PROJECTION_ID",
     "SHARED_OBS_ACTOR_PROJECTION_V1",
+    "SHARED_OBS_ACTOR_PROJECTION_V2",
     "SHARED_OBS_ACTOR_PROJECTION_VERSION",
     "AbilityActivatedEventV1",
     "ActionAcceptanceFactsV1",
@@ -520,10 +643,18 @@ __all__ = [
     "ActionRejectedEventV1",
     "ActorPovAcceptedActionV1",
     "ActorPovActionMaskV1",
+    "ActorPovAdjacentTransitionSlice",
+    "ActorPovAdjacentTransitionSliceV2",
+    "ActorPovAxisMapping",
     "ActorPovAxisMappingV1",
+    "ActorPovAxisMappingV2",
+    "ActorPovCurrentSlice",
+    "ActorPovCurrentSliceV2",
     "ActorPovEpisodeCompletionV1",
     "ActorPovEpisodeEndedCueV1",
+    "ActorPovFrame",
     "ActorPovFrameV1",
+    "ActorPovFrameV2",
     "ActorPovOwnActionOutcomeCueV1",
     "ActorPovOwnCooldownChangedCueV1",
     "ActorPovOwnHealthChangedCueV1",
@@ -532,8 +663,12 @@ __all__ = [
     "ActorPovOwnStatusChangedCueV1",
     "ActorPovPresentationCueV1",
     "ActorPovPreviousTimestepActionsV1",
+    "ActorPovReplayArtifact",
     "ActorPovReplayArtifactV1",
+    "ActorPovReplayArtifactV2",
+    "ActorPovReplayContent",
     "ActorPovReplayContentV1",
+    "ActorPovReplayContentV2",
     "ActorPovSpawnLifecycleV1",
     "ActorPovSubmittedActionV1",
     "ActorPovTransitionV1",
@@ -545,13 +680,17 @@ __all__ = [
     "AgentStatisticSubjectV1",
     "AggregationKeyV1",
     "AssignedPolicySlotV1",
+    "AssignedPolicySlotV2",
     "AuraMechanicV1",
     "AuraTransitionFactsV1",
     "BaseObservationV1",
+    "BaseObservationV2",
+    "CanonicalTournamentResult",
     "CaptureProfile",
     "ChargePhaseDisplacementEventV1",
     "ClassMechanicsV1",
     "CodeRevisionV1",
+    "CodeRevisionV2",
     "CombatCountdownResetEventV1",
     "CombatTransitionFactsV1",
     "ContentAddressedIdentityV1",
@@ -562,21 +701,28 @@ __all__ = [
     "DistributionComponentV1",
     "DistributionObservationV1",
     "DurationComponentV1",
+    "EpisodeResult",
+    "EpisodeSpec",
     "EpisodeStatisticSubjectV1",
     "EvaluationEpisodeCompletionV1",
     "EvaluationEpisodeContextV1",
+    "EvaluationEpisodeContextV2",
+    "EvaluationEpisodeContextV3",
     "EvaluationEpisodeIdentityV1",
     "EvaluationEpisodeObserverV1",
     "EvaluationEventV1",
     "EvaluationFrameV1",
+    "EvaluationFrameV2",
     "EvaluationMetricReducerStateV1",
     "EvaluationMetricReducerV1",
     "EvaluationMetricReportArtifactV1",
     "EvaluationMetricReportV1",
     "EvaluationProcessingFailureV1",
     "EvaluationProcessingStatusV1",
+    "EvaluationResult",
     "EvaluationRole",
     "EvaluationSeedProtocolV1",
+    "EvaluationSeedProtocolV2",
     "EvaluationTransitionV1",
     "EvaluationTransitionViewV1",
     "ExecutionInformationMode",
@@ -584,6 +730,7 @@ __all__ = [
     "HealthRegeneratedEventV1",
     "JointActionV1",
     "LethalDamageContributionEventV1",
+    "LoadedReplay",
     "LoadedReplayBundleV1",
     "MetricReportReferenceV1",
     "NotApplicablePolicySlotV1",
@@ -591,14 +738,21 @@ __all__ = [
     "OrdinaryMovementPhaseDisplacementEventV1",
     "PhysicalTransitionFactsV1",
     "PolicyAssignmentSlotV1",
+    "PolicyAssignmentSlotV2",
     "PreviousTimestepActionObservationV1",
     "RatioComponentV1",
     "RawSufficientStatisticV1",
     "RecipientHealthResolutionEventV1",
     "RegenerationTransitionFactsV1",
     "ReplayArtifactHeaderV1",
+    "ReplayArtifactHeaderV2",
+    "ReplayArtifactHeaderV3",
     "ReplayArtifactReferenceV1",
+    "ReplayArtifactReferenceV2",
+    "ReplayArtifactReferenceV3",
     "ReplayArtifactV1",
+    "ReplayArtifactV2",
+    "ReplayArtifactV3",
     "ReplayBundleLoadStatusV1",
     "ReplayBundleV1",
     "ReplayIOError",
@@ -611,26 +765,33 @@ __all__ = [
     "ResolvedObstacleV1",
     "ResolvedScenarioSpecificationV1",
     "ResolvedScenarioSpecificationV2",
+    "ResolvedScenarioSpecificationV3",
     "ResolvedSlotMechanicsV1",
     "RespawnTransitionFactsV1",
     "RespawnWaveOccurredEventV1",
     "RosterSlotV1",
     "RuntimeProvenanceV1",
     "SavedCompanionArtifactV1",
+    "SavedReplay",
     "SavedReplayBundleV1",
     "ScenarioBooleanValueV1",
     "ScenarioCountValueV1",
     "ScenarioEvaluationRecordV1",
     "ScenarioEvaluationRecordV2",
+    "ScenarioEvaluationRecordV3",
+    "ScenarioEvaluationRecordV4",
     "ScenarioMeasurementDefinitionV1",
     "ScenarioMeasurementResultV1",
     "ScenarioParameterV1",
     "ScenarioPredicateResultV1",
     "ScenarioScalarValueV1",
     "ScenarioSeedScheduleV2",
+    "ScenarioSeedScheduleV3",
     "ScenarioViolationDefinitionV1",
     "ScenarioViolationResultV1",
     "SchemaVersionEntryV1",
+    "SchemaVersionEntryV2",
+    "SchemaVersionEntryV3",
     "SourceDamageOutputEventV1",
     "SourceHealingOutputEventV1",
     "SpawnLifecycleObservationV1",
@@ -646,7 +807,6 @@ __all__ = [
     "StatusLifecycleTransitionFactsV1",
     "StatusMechanicV1",
     "StatusRefreshedOrExtendedEventV1",
-    "SufficientStatisticAccumulatorV1",
     "SufficientStatisticComponentV1",
     "SufficientStatisticDraftV1",
     "SumComponentV1",
@@ -655,54 +815,175 @@ __all__ = [
     "TeamDeathmatchScoreChangedEventV1",
     "TeamDeathmatchTransitionFactsV1",
     "TeamStatisticSubjectV1",
+    "TournamentResult",
     "TransitionFactsV1",
     "VersionedIdentityV1",
     "build_evaluation_episode_context_v1",
+    "build_evaluation_episode_context_v2",
+    "build_evaluation_episode_context_v3",
     "build_evaluation_observer_v1",
     "build_replay_artifact_reference_v1",
     "build_replay_artifact_v1",
     "build_replay_bundle_v1",
+    "build_replay_v2",
+    "build_replay_v3",
     "build_scenario_evaluation_record_v1",
     "build_scenario_evaluation_record_v2",
+    "build_scenario_evaluation_record_v3",
+    "build_scenario_evaluation_record_v4",
     "build_static_mechanics_catalog_v1",
     "canonical_actor_pov_content_json_bytes_v1",
     "canonical_actor_pov_replay_json_bytes_v1",
+    "canonical_actor_pov_replay_json_bytes_v2",
     "canonical_metric_report_artifact_json_bytes_v1",
     "canonical_replay_json_bytes_v1",
     "canonical_scenario_evaluation_record_json_bytes_v1",
     "canonical_scenario_evaluation_record_json_bytes_v2",
     "capture_evaluation_transition_unit_v1",
+    "capture_evaluation_transition_unit_v2",
     "capture_initial_evaluation_frame_v1",
+    "capture_initial_evaluation_frame_v2",
     "decode_evaluation_events_v1",
+    "evaluate",
+    "evaluate_episodes",
     "export_actor_pov_replay_v1",
+    "export_actor_pov_replay_v2",
     "iter_replay_transition_views_v1",
     "load_actor_pov_replay_artifact_v1",
+    "load_actor_pov_replay_artifact_v2",
+    "load_replay",
     "load_replay_artifact_v1",
     "load_replay_bundle_v1",
+    "load_results",
     "load_scenario_evaluation_record_v1",
     "load_scenario_evaluation_record_v2",
+    "load_scenario_evaluation_record_v3",
+    "load_scenario_evaluation_record_v4",
     "normalize_transition_facts_v1",
     "reconstruct_actor_class_ids_by_team_v2",
+    "reconstruct_actor_class_ids_by_team_v3",
     "reconstruct_class_ids_by_agent_by_team_v2",
+    "reconstruct_class_ids_by_agent_by_team_v3",
     "reconstruct_shared_obs_sensor_source_bank_v1",
+    "reconstruct_shared_obs_sensor_source_bank_v2",
+    "replay_from_packets",
+    "replay_reference_v3",
     "resolved_initial_state_digest_sha256_v2",
     "save_actor_pov_replay_artifact_v1",
+    "save_actor_pov_replay_artifact_v2",
+    "save_replay",
     "save_replay_bundle_v1",
     "save_scenario_evaluation_record_v1",
     "save_scenario_evaluation_record_v2",
+    "save_scenario_evaluation_record_v3",
+    "save_scenario_evaluation_record_v4",
     "validate_actor_pov_replay_against_replay_v1",
+    "validate_actor_pov_replay_against_replay_v2",
     "validate_actor_pov_replay_artifact_v1",
+    "validate_actor_pov_replay_artifact_v2",
+    "validate_actor_pov_replay_content",
     "validate_actor_pov_replay_content_v1",
     "validate_class_ids_by_agent_by_team_against_context_v1",
     "validate_evaluation_processing_progress_v1",
+    "validate_evaluation_transition_unit",
     "validate_evaluation_transition_unit_v1",
+    "validate_initial_evaluation_frame",
     "validate_initial_evaluation_frame_v1",
     "validate_metric_report_artifact_against_replay_v1",
     "validate_official_scenario_evaluation_record_v2",
+    "validate_official_scenario_evaluation_record_v3",
+    "validate_official_scenario_evaluation_record_v4",
     "validate_replay_artifact_v1",
+    "validate_replay_artifact_v3",
     "validate_scenario_evaluation_record_v1",
     "validate_scenario_evaluation_record_v2",
+    "validate_scenario_evaluation_record_v3",
+    "validate_scenario_evaluation_record_v4",
 ]
+
+_register_lazy_exports(
+    "marl_battlegrounds.evaluation.models",
+    (
+        "AssignedPolicySlotV2",
+        "CodeRevisionV2",
+        "EvaluationEpisodeContextV2",
+        "EvaluationEpisodeContextV3",
+        "EvaluationSeedProtocolV2",
+        "PolicyAssignmentSlotV2",
+        "SchemaVersionEntryV2",
+        "SchemaVersionEntryV3",
+    ),
+)
+_register_lazy_exports(
+    "marl_battlegrounds.evaluation.catalog",
+    ("build_evaluation_episode_context_v2", "build_evaluation_episode_context_v3"),
+)
+_register_lazy_exports(
+    "marl_battlegrounds.evaluation.replay_v2",
+    (
+        "ReplayArtifactHeaderV2",
+        "ReplayArtifactV2",
+        "ReplayArtifactReferenceV2",
+        "build_replay_v2",
+    ),
+)
+_register_lazy_exports(
+    "marl_battlegrounds.evaluation.replay_io",
+    ("LoadedReplay", "SavedReplay", "load_replay", "save_replay"),
+)
+
+_register_lazy_exports(
+    "marl_battlegrounds.evaluation.replay_v3",
+    (
+        "ReplayArtifactHeaderV3",
+        "ReplayArtifactReferenceV3",
+        "ReplayArtifactV3",
+        "build_replay_v3",
+        "replay_from_packets",
+        "replay_reference_v3",
+        "validate_replay_artifact_v3",
+    ),
+)
+
+_register_lazy_exports(
+    "marl_battlegrounds.evaluation.pov",
+    (
+        "ACTOR_POV_SCHEMA_VERSION_V2",
+        "ActorPovAdjacentTransitionSlice",
+        "ActorPovAdjacentTransitionSliceV2",
+        "ActorPovAxisMapping",
+        "ActorPovAxisMappingV2",
+        "ActorPovCurrentSlice",
+        "ActorPovCurrentSliceV2",
+        "ActorPovFrame",
+        "ActorPovFrameV2",
+        "ActorPovReplayArtifact",
+        "ActorPovReplayArtifactV2",
+        "ActorPovReplayContent",
+        "ActorPovReplayContentV2",
+        "canonical_actor_pov_replay_json_bytes_v2",
+        "export_actor_pov_replay_v2",
+        "validate_actor_pov_replay_against_replay_v2",
+        "validate_actor_pov_replay_artifact_v2",
+        "validate_actor_pov_replay_content",
+    ),
+)
+
+_register_lazy_exports(
+    "marl_battlegrounds.evaluation.evaluate",
+    ("EpisodeSpec", "evaluate", "evaluate_episodes"),
+)
+_register_lazy_exports(
+    "marl_battlegrounds.evaluation.results",
+    (
+        "EpisodeResult",
+        "EvaluationResult",
+        "TournamentResult",
+        "CanonicalTournamentResult",
+        "load_results",
+    ),
+)
+
 
 if len(__all__) != len(set(__all__)) or set(__all__) != set(
     _LAZY_EXPORT_MODULE_BY_NAME
@@ -711,7 +992,28 @@ if len(__all__) != len(set(__all__)) or set(__all__) != set(
 
 
 def __getattr__(name: str) -> object:
-    """Load one public evaluation export only when it is first requested."""
+    """Load and cache a declared public evaluation symbol.
+
+    Parameters
+    ----------
+    name : str
+        Attribute name requested from this module.
+
+    Returns
+    -------
+    object
+        The exact object from its registered owning module, cached in globals.
+
+    Raises
+    ------
+    AttributeError
+        name is not a declared evaluation export.
+
+    Notes
+    -----
+    Import errors from the owning module propagate. Its normal import effects
+    occur only at first lookup. This does not create a second API implementation.
+    """
     module_name = _LAZY_EXPORT_MODULE_BY_NAME.get(name)
     if module_name is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -721,5 +1023,11 @@ def __getattr__(name: str) -> object:
 
 
 def __dir__() -> list[str]:
-    """Include unresolved lazy exports in interactive discovery."""
+    """List ordinary attributes and unresolved public exports for discovery.
+
+    Returns
+    -------
+    list[str]
+        Sorted unique attribute names. No lazy module is imported by listing them.
+    """
     return sorted(set(globals()) | set(__all__))

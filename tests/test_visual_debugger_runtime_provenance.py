@@ -1,4 +1,4 @@
-"""Launch-boundary proofs for debugger recording runtime provenance."""
+"""Check runtime metadata recorded at debugger launch."""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ from typing import cast
 
 import jax
 import pytest
-import scripts.dev.visual_debugger.runtime_provenance as provenance_module
-from scripts.dev.visual_debugger.runtime_provenance import (
+
+import marl_battlegrounds.evaluation.runtime_provenance as provenance_module
+from marl_battlegrounds.evaluation.models import CodeRevisionV1
+from marl_battlegrounds.evaluation.runtime_provenance import (
     capture_debugger_runtime_provenance_v1,
 )
-
-from marl_battlegrounds.evaluation.models import CodeRevisionV1
 
 
 def _revision() -> CodeRevisionV1:

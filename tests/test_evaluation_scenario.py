@@ -1,4 +1,4 @@
-"""Focused contract tests for versioned controlled-scenario records."""
+"""Check the versioned records used for controlled scenario evaluations."""
 
 from __future__ import annotations
 

@@ -1,3 +1,7 @@
+/**
+ * @file Check finite/unknown number labels, decimal limits, negative zero and compact
+ * display formatting.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 

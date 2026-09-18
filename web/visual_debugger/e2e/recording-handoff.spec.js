@@ -1,3 +1,7 @@
+/**
+ * @file Check live recording finish/discard/exit, saved interrupted prefixes and
+ * multi-tab handoff to replay.
+ */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -70,10 +74,8 @@ function collectBrowserErrors(page) {
   });
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} url
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} url */
 async function openRecording(page, url) {
   collectBrowserErrors(page);
   await page.goto(url);
@@ -101,26 +103,24 @@ function expectNoBrowserErrors(page) {
 }
 
 /** @param {import("@playwright/test").Page} page */
-async function expectMetricPreparation(page) {
+async function expectReplaySaving(page) {
   const progress = page.getByRole("progressbar", {
-    name: "Preparing recorded-game metrics",
+    name: "Saving replay",
   });
   await expect(progress).toBeVisible();
   expect(await progress.getAttribute("value")).toBeNull();
   await expect(progress).toHaveAttribute("aria-describedby", "recording-status-note");
   await expect(page.locator("#recording-status-note")).toContainText(
-    "Preparing metrics. Longer replays can take longer.",
+    "Saving replay. Longer recordings can take longer.",
   );
   await expect(page.locator("#recording-metrics-help")).toBeVisible();
   await expect(page.locator("#recording-metrics-help")).toContainText(
-    "Metrics summarize the captured game.",
+    "Saving captured frames and provenance.",
   );
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} path
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} path */
 async function authenticatedGet(page, path) {
   return page.evaluate(async (requestPath) => {
     const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
@@ -150,13 +150,8 @@ function currentTimeline(page) {
   return authenticatedGet(page, "/api/replay/timeline");
 }
 
-/**
- * Prove the real wire status uses the exact path-free root shared by both live
- * audiences, not merely the subset rendered by the page.
- *
- * @param {Record<string, any>} frame
- * @param {number} count
- */
+/** @param {Record<string, any>} frame
+ * @param {number} count */
 function expectExactWireRecording(frame, count) {
   expect(frame.recording).not.toBeNull();
   expect(Object.keys(frame.recording).sort()).toEqual(RECORDING_STATUS_KEYS);
@@ -180,10 +175,8 @@ function expectExactWireRecording(frame, count) {
   }
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {number} count
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {number} count */
 async function expectRecordingCount(page, count) {
   await expect(page.locator("#recording-progress")).toHaveText(
     new RegExp(`^${count} / [1-9]\\d* transitions$`),
@@ -195,13 +188,8 @@ async function expectRecordingCount(page, count) {
   return frame;
 }
 
-/**
- * Submit one live joint turn and settle its local presentation without adding
- * a second simulator command.
- *
- * @param {import("@playwright/test").Page} page
- * @param {number} expectedCount
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {number} expectedCount */
 async function captureNextTransition(page, expectedCount) {
   const responsePromise = page.waitForResponse(
     (response) =>
@@ -228,11 +216,9 @@ function captureOneTransition(page) {
   return captureNextTransition(page, 1);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {"researcher" | "pov"} audience
- * @param {"shared_obs" | "no_shared_obs"} informationMode
- */
+ * @param {"shared_obs" | "no_shared_obs"} informationMode */
 async function expectSettledReplayHandoff(
   page,
   audience = "researcher",
@@ -367,23 +353,16 @@ async function expectSettledReplayHandoff(
   return { frame, timeline };
 }
 
-/**
- * Assert the two path-independent artifacts materialized by the real recorder.
- *
- * @param {string} replayPath
+/** @param {string} replayPath
  * @param {string} metricPath
- * @param {number} transitionCount
- */
+ * @param {number} transitionCount */
 async function expectSavedArtifacts(replayPath, metricPath, transitionCount) {
-  const [replay, metric] = await Promise.all([
-    readJsonArtifact(replayPath),
-    readJsonArtifact(metricPath),
-  ]);
+  const replay = await readJsonArtifact(replayPath);
+  await expect(readFile(metricPath)).rejects.toMatchObject({ code: "ENOENT" });
   expect(replay.bytes.byteLength).toBeGreaterThan(0);
-  expect(metric.bytes.byteLength).toBeGreaterThan(0);
   expect(replay.value).toMatchObject({
     schema_id: "marl_battlegrounds.evaluation.replay_artifact",
-    schema_version: 1,
+    schema_version: 3,
     header: {
       recorded_transition_count: transitionCount,
       recorded_frame_count: transitionCount + 1,
@@ -392,16 +371,9 @@ async function expectSavedArtifacts(replayPath, metricPath, transitionCount) {
   });
   expect(replay.value.frames).toHaveLength(transitionCount + 1);
   expect(replay.value.transitions).toHaveLength(transitionCount);
-  expect(metric.value).toMatchObject({
-    schema_id: "marl_battlegrounds.evaluation.metric_report_artifact",
-    schema_version: 1,
-    report: { completion: { validated_transition_count: transitionCount } },
-  });
-  expect(metric.value.report.completion).toEqual(replay.value.completion);
-  expect(metric.value.source_trajectory.episode_id).toBe(
-    replay.value.header.context.identity.episode_id,
-  );
-  return { replay, metric };
+  expect(replay.value).not.toHaveProperty("metric_report_reference");
+  expect(replay.value).not.toHaveProperty("processing_status");
+  return { replay };
 }
 
 test("confirmed prefix discard restarts capture and Finish opens settled frame-zero replay", async ({
@@ -516,7 +488,7 @@ test("confirmed prefix discard restarts capture and Finish opens settled frame-z
   );
   try {
     await page.locator("#recording-finish-button").click();
-    await expectMetricPreparation(page);
+    await expectReplaySaving(page);
   } finally {
     releaseFinish();
   }
@@ -663,14 +635,14 @@ test("actor POV handoff retains battlefield fog and artifact-wide facts", async 
     artifact_facts: {
       schema_version: 1,
       artifact_summary: {
-        metric_report_availability: "available",
+        metric_report_availability: "not_recorded",
         recorded_transition_count: 1,
         recorded_frame_count: 2,
       },
       completion: { validated_transition_count: 1 },
       processing: {
-        status: "succeeded",
-        processed_transition_count: 1,
+        status: "not_requested",
+        processed_transition_count: 0,
       },
     },
   });
@@ -957,7 +929,7 @@ test("Reconnect completes a lost Finish response without retrying publication", 
 
   try {
     await page.locator("#recording-finish-button").click();
-    await expectMetricPreparation(page);
+    await expectReplaySaving(page);
   } finally {
     releaseResponse();
   }

@@ -1,3 +1,7 @@
+/**
+ * @file Check keyboard and pointer command routing, native browser shortcuts and
+ * submission state labels.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -14,10 +18,8 @@ import {
   targetSelectionCommand,
 } from "../src/controls.js";
 
-/**
- * @param {string} key
- * @param {{repeat?: boolean, ctrlKey?: boolean}} [options]
- */
+/** @param {string} key
+ * @param {{repeat?: boolean, ctrlKey?: boolean}} [options] */
 function cancelableKeydown(key, { repeat = false, ctrlKey = false } = {}) {
   const event = new Event("keydown", { bubbles: true, cancelable: true });
   Object.defineProperties(event, {
@@ -31,10 +33,8 @@ function cancelableKeydown(key, { repeat = false, ctrlKey = false } = {}) {
   return event;
 }
 
-/**
- * @param {"pointerdown" | "contextmenu"} type
- * @param {number} [button]
- */
+/** @param {"pointerdown" | "contextmenu"} type
+ * @param {number} [button] */
 function cancelablePointerEvent(type, button = 2) {
   const event = new Event(type, { bubbles: true, cancelable: true });
   Object.defineProperties(event, {

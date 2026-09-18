@@ -1,15 +1,17 @@
+/**
+ * @file Check direct and multiple-source labels, stable duplicate removal and
+ * rejection of unauthorized or conflicting joins.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import { exactAuthorizedAgentIdentityV1 } from "../src/agent-identity.js";
 import { authorizedSourceAttributionV1 } from "../src/source-attribution.js";
 
-/**
- * @param {string} presentationKey
+/** @param {string} presentationKey
  * @param {string} publicAgentId
  * @param {1 | 2 | 3 | 4 | 5} classId
- * @param {1 | 2} teamId
- */
+ * @param {1 | 2} teamId */
 function agent(presentationKey, publicAgentId, classId, teamId) {
   const className = {
     1: "Mage",
@@ -38,14 +40,12 @@ function source(presentationKey, publicAgentId) {
   };
 }
 
-/**
- * @param {Partial<{
+/** @param {Partial<{
  *   attribution_kind: "direct" | "aggregate_aura" | "spawn_shield",
  *   audience: "researcher" | "agent_pov",
  *   direct_sources: unknown,
  *   authorized_agents: unknown,
- * }>} [overrides]
- */
+ * }>} [overrides] */
 function options(overrides = {}) {
   return {
     attribution_kind: "direct",

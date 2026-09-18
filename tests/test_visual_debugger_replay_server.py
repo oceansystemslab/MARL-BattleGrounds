@@ -1,4 +1,4 @@
-"""Core-free replay-mode HTTP coordinator tests with an injected fake service."""
+"""Check read-only replay HTTP handling with an injected test service."""
 
 from __future__ import annotations
 
@@ -198,8 +198,6 @@ class _FakeMetricReportResult:
 
 
 class _FakeReplayService:
-    """Small transport fake; no production replay or simulator imports."""
-
     def __init__(self) -> None:
         self.revision = 0
         self.frame_index = 0
@@ -207,6 +205,9 @@ class _FakeReplayService:
         self.timeline_calls = 0
         self.presentation_calls = 0
         self.metric_report_calls = 0
+        self.metric_catalog_calls = 0
+        self.metric_catalog_started: Event | None = None
+        self.metric_catalog_release: Event | None = None
         self.analysis_calls: list[tuple[int, str, str]] = []
         self.command_calls = 0
         self.cursor_mutations = 0
@@ -267,6 +268,17 @@ class _FakeReplayService:
         self.metric_report_calls += 1
         return cast(_FakeMetricReportResult, self.metric_report_result)
 
+    def episode_details(self) -> tuple[bytes, str]:
+        return b'{"schema_id":"marlbg.replay.episode_details"}', "episode-details.json"
+
+    def metric_catalog(self) -> bytes:
+        self.metric_catalog_calls += 1
+        if self.metric_catalog_started is not None:
+            self.metric_catalog_started.set()
+        if self.metric_catalog_release is not None:
+            assert self.metric_catalog_release.wait(timeout=5)
+        return b'{"measurements":[{"name":"example","applicable":false}]}'
+
     def metric_analysis(
         self, frame: int, scope: str, format_: str
     ) -> tuple[bytes, str | None]:
@@ -277,7 +289,7 @@ class _FakeReplayService:
             selected = 2 if scope == "final" else frame
             return (
                 b"metric_id,value\nexample,1\n",
-                f"tdm-metrics-{scope}-frame-{selected}.csv",
+                f"tdm-metrics__episode-001__schema-3__{scope}__frame-{selected}.csv",
             )
         return json.dumps({"frame_index": frame, "scope": scope}).encode(), None
 
@@ -356,8 +368,6 @@ class _FakeReplayService:
 
 
 class _BlockingLiveService:
-    """Transport fake whose selected operation remains inside one request."""
-
     def __init__(
         self,
         *,
@@ -454,6 +464,8 @@ def _coordinator(
             service.current_metric_report if mode == "replay" else None
         ),
         metric_analysis=service.metric_analysis if mode == "replay" else None,
+        metric_catalog=service.metric_catalog if mode == "replay" else None,
+        episode_details=service.episode_details if mode == "replay" else None,
     )
 
 
@@ -2263,7 +2275,8 @@ def test_metric_analysis_http_preserves_explicit_scope_and_format(
         assert response.getheader("Content-Type") == "text/csv; charset=utf-8"
         assert (
             response.getheader("Content-Disposition")
-            == 'attachment; filename="tdm-metrics-cursor-frame-1.csv"'
+            == 'attachment; filename="tdm-metrics__episode-001'
+            '__schema-3__cursor__frame-1.csv"'
         )
         assert payload == b"metric_id,value\nexample,1\n"
     else:
@@ -2286,4 +2299,66 @@ def test_metric_analysis_http_auth_and_cursor_fail_without_mutation(
     )
     assert response.status == HTTPStatus.UNPROCESSABLE_ENTITY
     assert json.loads(payload)["error_code"] == "invalid_cursor"
+    assert service.cursor_mutations == 0
+
+
+def test_metric_catalog_http_is_authenticated_and_keeps_playback_available(
+    running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
+) -> None:
+    server, service, _ = running_replay_server
+    route = "/api/replay/metrics/catalog.json"
+    response, _ = _exchange(server, "GET", route)
+    assert response.status == HTTPStatus.UNAUTHORIZED
+    assert service.metric_catalog_calls == 0
+    service.metric_catalog_started = Event()
+    service.metric_catalog_release = Event()
+    results: list[tuple[HTTPResponse, bytes]] = []
+    worker = Thread(
+        target=lambda: results.append(
+            _exchange(server, "GET", route, headers={_TOKEN_HEADER: _TOKEN})
+        ),
+        daemon=True,
+    )
+    worker.start()
+    try:
+        assert service.metric_catalog_started.wait(timeout=2)
+        # The catalog may still be preparing while ordinary replay reads run.
+        frame_response, _ = _exchange(
+            server, "GET", REPLAY_HTTP_ROUTES.frame, headers={_TOKEN_HEADER: _TOKEN}
+        )
+        assert frame_response.status == HTTPStatus.OK
+        assert worker.is_alive()
+    finally:
+        service.metric_catalog_release.set()
+        worker.join(timeout=2)
+    assert not worker.is_alive()
+    response, payload = results[0]
+    assert response.status == HTTPStatus.OK
+    assert response.getheader("Content-Type") == "application/json; charset=utf-8"
+    assert response.getheader("Cache-Control") == "no-store"
+    assert response.getheader("Content-Disposition") is None
+    assert json.loads(payload)["measurements"][0]["applicable"] is False
+    assert service.metric_catalog_calls == 1
+    assert service.cursor_mutations == 0
+    assert not service.analysis_calls
+
+
+def test_episode_details_http_is_authenticated_read_only_attachment(
+    running_replay_server: tuple[DebuggerHTTPServer, _FakeReplayService, Thread],
+) -> None:
+    server, service, _ = running_replay_server
+    response, _ = _exchange(server, "GET", "/api/replay/details")
+    assert response.status == HTTPStatus.UNAUTHORIZED
+    response, payload = _exchange(
+        server, "GET", "/api/replay/details", headers={_TOKEN_HEADER: _TOKEN}
+    )
+    assert response.status == HTTPStatus.OK
+    assert response.getheader("Content-Type") == "application/json; charset=utf-8"
+    assert response.getheader("Cache-Control") == "no-store"
+    assert (
+        response.getheader("Content-Disposition")
+        == 'attachment; filename="episode-details.json"'
+    )
+    assert payload == service.episode_details()[0]
+    assert not service.analysis_calls
     assert service.cursor_mutations == 0

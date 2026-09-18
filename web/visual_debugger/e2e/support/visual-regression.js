@@ -1,3 +1,7 @@
+/**
+ * @file Provide stable screenshot and layout-check helpers for browser visual
+ * regression tests.
+ */
 import { fileURLToPath } from "node:url";
 
 import { expect } from "@playwright/test";
@@ -22,17 +26,7 @@ export const POV_HEALTH_EVENT_TYPE = "own_health_changed";
 // every other snapshot and admit only that narrow reviewed raster tail here.
 export const DENSE_BASELINE_MAX_DIFF_PIXEL_RATIO = 0.00105;
 
-/**
- * Fail closed when a visible native interaction surface has not been enrolled
- * in the delegated semantic-help registry. Hidden mode/dialog controls are
- * intentionally audited only when their owning surface becomes visible. A
- * registered local ancestor may own an SVG focus child; battlefield/timeline
- * composites never excuse an otherwise unregistered descendant control. A
- * focusable surface may instead use `aria-describedby` when at least one
- * referenced element exists and contains nonempty text.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 export async function expectVisibleInteractiveHelpInventory(page) {
   const inventory = await page
     .locator('button, select, input, summary, [tabindex]:not([tabindex="-1"])')
@@ -155,16 +149,10 @@ const SNAPSHOT_STYLE_PATH = fileURLToPath(
   new URL("./visual-snapshot.css", import.meta.url),
 );
 
-/**
- * @typedef {{count: () => number}} CommandPostCounter
- */
+/** @typedef {{count: () => number}} CommandPostCounter */
 
-/**
- * Count authoritative command requests without intercepting them.
- *
- * @param {import("@playwright/test").Page} page
- * @returns {CommandPostCounter}
- */
+/** @param {import("@playwright/test").Page} page
+ * @returns {CommandPostCounter} */
 export function trackCommandPosts(page) {
   let count = 0;
   page.on("request", (request) => {
@@ -175,10 +163,8 @@ export function trackCommandPosts(page) {
   return Object.freeze({ count: () => count });
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {() => Promise<unknown>} activate
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {() => Promise<unknown>} activate */
 async function activateAndWaitForJoinedLiveAuthority(page, activate) {
   const commandResponse = page.waitForResponse(
     (response) =>
@@ -202,11 +188,9 @@ async function activateAndWaitForJoinedLiveAuthority(page, activate) {
   await expect(page.locator("#connection-status")).toHaveText("Online");
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} selector
- * @param {string} value
- */
+ * @param {string} value */
 async function selectAuthoritativeValue(page, selector, value) {
   const control = page.locator(selector);
   if ((await control.inputValue()) === value) {
@@ -216,11 +200,7 @@ async function selectAuthoritativeValue(page, selector, value) {
   await expect(control).toHaveValue(value);
 }
 
-/**
- * Install a deterministic browser page and reset or switch the shared live
- * service to one exact visual case.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} debuggerUrl
  * @param {{
  *   scenario: string,
@@ -228,8 +208,7 @@ async function selectAuthoritativeValue(page, selector, value) {
  *   preset?: "presentation" | "analysis" | "debug",
  *   viewport?: {width: number, height: number},
  * }} options
- * @returns {Promise<CommandPostCounter>}
- */
+ * @returns {Promise<CommandPostCounter>} */
 export async function loadLiveVisualCase(
   page,
   debuggerUrl,
@@ -260,14 +239,8 @@ export async function loadLiveVisualCase(
   return commandPosts;
 }
 
-/**
- * Advance from a freshly reset scripted scenario to one exact transition.
- * Intermediate explanations are skipped locally; the requested transition is
- * left installed for deterministic seeking by captureBaseline.
- *
- * @param {import("@playwright/test").Page} page
- * @param {number} targetTransition
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {number} targetTransition */
 export async function advanceScriptTo(page, targetTransition) {
   if (!Number.isInteger(targetTransition) || targetTransition < 1) {
     throw new RangeError("targetTransition must be a positive integer.");
@@ -296,16 +269,11 @@ export async function advanceScriptTo(page, targetTransition) {
   }
 }
 
-/**
- * Install an explicitly synthetic renderer-only frame. No live command may
- * mutate or replace it.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} debuggerUrl
  * @param {Record<string, any>} frame
  * @param {{viewport?: {width: number, height: number}}} [options]
- * @returns {Promise<CommandPostCounter>}
- */
+ * @returns {Promise<CommandPostCounter>} */
 export async function installSyntheticVisualCase(
   page,
   debuggerUrl,
@@ -330,8 +298,7 @@ export async function installSyntheticVisualCase(
   return commandPosts;
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {{
  *   scenario: string | null,
  *   simulatorStep: number,
@@ -339,8 +306,7 @@ export async function installSyntheticVisualCase(
  *   view: "researcher" | "pov",
  *   preset: "presentation" | "analysis" | "debug",
  *   badge: string | RegExp,
- * }} expected
- */
+ * }} expected */
 export async function assertFrameIdentity(page, expected) {
   const scenario = page.locator("#scenario-select");
   if (expected.scenario === null) {
@@ -365,10 +331,8 @@ export async function assertFrameIdentity(page, expected) {
   await expect(page.locator("html")).toHaveAttribute("data-preset", expected.preset);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {number[]} expectedSlots
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {number[]} expectedSlots */
 export async function expectRosterSlots(page, expectedSlots) {
   const rawSlots = await page
     .locator("#roster .roster-row")
@@ -383,11 +347,9 @@ export async function expectRosterSlots(page, expectedSlots) {
   expect(slots).toEqual([...expectedSlots].sort((left, right) => left - right));
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {number} slot
- * @param {Array<{tokenId: string, duration: number}>} expectedStatuses
- */
+ * @param {Array<{tokenId: string, duration: number}>} expectedStatuses */
 export async function expectRosterStatuses(page, slot, expectedStatuses) {
   const statuses = await page
     .locator(`#roster .roster-row[data-slot="${slot}"] .roster-fact-token--status`)
@@ -400,10 +362,8 @@ export async function expectRosterStatuses(page, slot, expectedStatuses) {
   expect(statuses).toEqual(expectedStatuses);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {Array<{tokenId: string, source: number, target: number | null}>} expected
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {Array<{tokenId: string, source: number, target: number | null}>} expected */
 export async function expectActivationPairs(page, expected) {
   const rawActivations = await page
     .locator(`${CHOREOGRAPHY_ROOT} .combat-effect--activation`)
@@ -442,12 +402,7 @@ export async function expectActivationPairs(page, expected) {
   expect(activations).toEqual(normalizedExpected);
 }
 
-/**
- * Every durable dock that survived the deterministic suppression policy must
- * explicitly report collision-free placement.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 export async function assertDurableDockFlags(page) {
   const flags = await page
     .locator(
@@ -463,12 +418,7 @@ export async function assertDurableDockFlags(page) {
   expect(flags.filter(({ collisionFree }) => collisionFree !== "true")).toEqual([]);
 }
 
-/**
- * Wait until the actual captured geometry, not merely elapsed RAF count, is
- * unchanged across two consecutive frame-to-frame comparisons.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 export async function waitForStablePresentation(page) {
   await page.evaluate(async () => {
     await document.fonts.ready;
@@ -489,9 +439,7 @@ export async function waitForStablePresentation(page) {
       document.activeElement.blur();
     }
 
-    /**
-     * @param {Element} element
-     */
+    /** @param {Element} element */
     const elementFingerprint = (element) => {
       const bounds = element.getBoundingClientRect();
       const identity = [
@@ -593,15 +541,8 @@ export async function waitForStablePresentation(page) {
   });
 }
 
-/**
- * Prove every transient recipient-labelled NET cue stays inside the
- * battlefield and outside the protected visual zones. Leader lines are
- * association cues, not protected geometry; only their ownership and finite
- * endpoints are validated.
- *
- * @param {import("@playwright/test").Page} page
- * @param {number} expectedCount
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {number} expectedCount */
 export async function assertTransientNumberLayout(page, expectedCount) {
   const result = await page.evaluate(() => {
     const tolerance = 0.75;
@@ -614,36 +555,28 @@ export async function assertTransientNumberLayout(page, expectedCount) {
       throw new Error("Battlefield map boundary is unavailable.");
     }
 
-    /**
-     * @typedef {{
+    /** @typedef {{
      *   bottom: number,
      *   left: number,
      *   right: number,
      *   top: number,
-     * }} Bounds
-     */
-    /**
-     * @param {DOMRect} rect
+     * }} Bounds */
+    /** @param {DOMRect} rect
      * @param {number} padding
-     * @returns {Bounds}
-     */
+     * @returns {Bounds} */
     const expand = (rect, padding) => ({
       bottom: rect.bottom + padding,
       left: rect.left - padding,
       right: rect.right + padding,
       top: rect.top - padding,
     });
-    /**
-     * @param {Bounds} first
-     * @param {Bounds} second
-     */
+    /** @param {Bounds} first
+     * @param {Bounds} second */
     const overlap = (first, second) => ({
       x: Math.min(first.right, second.right) - Math.max(first.left, second.left),
       y: Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top),
     });
-    /**
-     * @param {Element} element
-     */
+    /** @param {Element} element */
     const isPainted = (element) => {
       const bounds = element.getBoundingClientRect();
       if (bounds.width <= 0 || bounds.height <= 0) {
@@ -903,14 +836,8 @@ export async function assertTransientNumberLayout(page, expectedCount) {
   ).toHaveCount(0);
 }
 
-/**
- * Collision suppression remains explicit, retained, and hidden. Curated cases
- * default to no suppressed lifecycle effects; NET suppression is never allowed
- * in an accepted visual baseline.
- *
- * @param {import("@playwright/test").Page} page
- * @param {{lifecycle?: number, lifecycleIds?: string[] | null, net?: number}} [expected]
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {{lifecycle?: number, lifecycleIds?: string[] | null, net?: number}} [expected] */
 export async function assertOutcomeSuppression(
   page,
   { lifecycle = 0, lifecycleIds = null, net = 0 } = {},
@@ -941,12 +868,7 @@ export async function assertOutcomeSuppression(
   expect(visibleSuppressions).toEqual([]);
 }
 
-/**
- * Human-facing floating-point labels are capped at two decimal places.
- * Collapsed technical JSON remains outside this presentation assertion.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 export async function assertVisibleDecimalPrecision(page) {
   const overPrecise = await page.locator("body").evaluate((body) => {
     const text = /** @type {HTMLElement} */ (body).innerText;
@@ -957,11 +879,7 @@ export async function assertVisibleDecimalPrecision(page) {
   expect(overPrecise).toEqual([]);
 }
 
-/**
- * Seek or settle one case, prove presentation-only work sent no command, wait
- * for observable geometry stability, and run the shared presentation checks.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {{
  *   commandPosts: CommandPostCounter,
  *   expectedTransientCount: number,
@@ -971,8 +889,7 @@ export async function assertVisibleDecimalPrecision(page) {
  *   settle?: boolean,
  *   afterSettle?: () => Promise<void>,
  * }} options
- * @returns {Promise<number>}
- */
+ * @returns {Promise<number>} */
 export async function assertStablePresentationFrame(
   page,
   {
@@ -1020,17 +937,10 @@ export async function assertStablePresentationFrame(
   return commandCountBeforePresentation;
 }
 
-/**
- * Run the shared presentation checks and compare an explicitly synthetic or
- * UI-only viewport against its reviewed fixed baseline. Real simulator
- * trajectories use `assertStablePresentationFrame` directly because catalog
- * tuning may truthfully alter their geometry, topology, and durable facts.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} snapshotName
  * @param {Parameters<typeof assertStablePresentationFrame>[1]} options
- * @param {{maxDiffPixelRatio?: number}} [snapshotPolicy]
- */
+ * @param {{maxDiffPixelRatio?: number}} [snapshotPolicy] */
 export async function captureBaseline(
   page,
   snapshotName,

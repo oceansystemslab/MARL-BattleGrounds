@@ -1,8 +1,10 @@
-"""Read-only replay-service authority, privacy, and cursor proofs."""
+"""Check read-only replay navigation, authority and privacy limits."""
 
 from __future__ import annotations
 
 import copy
+import csv
+import io
 import json
 import subprocess
 import sys
@@ -19,7 +21,6 @@ import jax
 import pytest
 import scripts.dev.visual_debugger.control as live_control_module
 import scripts.dev.visual_debugger.replay_service as replay_service_module
-import scripts.dev.visual_debugger.static_renderer as static_renderer_module
 from scripts.dev.visual_debugger.presentation import (
     build_replay_no_shared_obs_authorized_presentation_v1,
     build_replay_shared_obs_authorized_presentation_v1,
@@ -75,9 +76,11 @@ from tests.export_visual_debugger_replay_artifacts import build_corpse_overlay_b
 
 import marl_battlegrounds.core.env as core_env_module
 import marl_battlegrounds.core.geometry as core_geometry_module
+import marl_battlegrounds.evaluation.analysis as analysis_module
 import marl_battlegrounds.evaluation.capture as evaluation_capture_module
 import marl_battlegrounds.evaluation.events as evaluation_events_module
 import marl_battlegrounds.rendering.evaluation_adapter as evaluation_adapter_module
+import marl_battlegrounds.viewer.static as static_renderer_module
 from marl_battlegrounds.evaluation.actor_projection import (
     NO_SHARED_OBS_ACTOR_PROJECTION_V2,
 )
@@ -95,6 +98,7 @@ from marl_battlegrounds.evaluation.metrics import (
     build_evaluation_observer_v1,
 )
 from marl_battlegrounds.evaluation.models import (
+    AgentDiedEventV1,
     AssignedPolicySlotV1,
     EvaluationEpisodeContextV1,
     EvaluationFrameV1,
@@ -136,13 +140,11 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class _FinalizeFailureState(EvaluationMetricReducerStateV1):
-    """Valid immutable state used before an intentional finalization failure."""
+    pass
 
 
 @dataclass(slots=True)
 class _FinalizeFailureReducer:
-    """Fail only while materializing metrics, after every unit was processed."""
-
     reducer_id: str = "test.replay_service.finalize_failure"
     reducer_version: int = 1
 
@@ -177,8 +179,6 @@ class _FinalizeFailureReducer:
 
 @dataclass(frozen=True, slots=True)
 class _ServiceCase:
-    """One canonical loaded bundle plus its source report."""
-
     bundle: LoadedReplayBundleV1
     report: EvaluationMetricReportV1
 
@@ -214,15 +214,15 @@ type _ReplayAgentViewerFrame = (
 
 
 class _PoisonActorPovAnalyzerProjectionV1(ActorPovAnalyzerProjectionV1):
-    """Exact-field subtype used to prove the selective projection fence."""
+    pass
 
 
 class _PoisonReplayCursorV1(ReplayCursorV1):
-    """No-extra subtype used to prove exact cursor ownership."""
+    pass
 
 
 class _PoisonActorPovReplayViewerFrameV1(ActorPovReplayViewerFrameV1):
-    """No-extra subtype used to prove the exact raw-frame boundary."""
+    pass
 
 
 def _runtime_provenance() -> RuntimeProvenanceV1:
@@ -320,7 +320,6 @@ def _with_movement_scale(
     *,
     movement_scale: float,
 ) -> CapturedEvaluationTrajectory:
-    """Replace only recorded experimental movement-scale provenance."""
     experimental_config = evaluation_env_config()._replace(
         ordinary_movement_distance_scale=movement_scale
     )
@@ -667,6 +666,7 @@ def _presentation_service(
         view_mode="researcher" if audience == "oracle" else "pov",
         pov_global_slot=0,
         viewer_session_id=viewer_session_id,
+        show_ranges=True,
     )
 
 
@@ -788,6 +788,8 @@ def test_current_metric_report_returns_exact_canonical_bytes_without_mutation(
     raw = service.current_frame()
     timeline = service.current_timeline()
     presentation = service.current_presentation()
+    assert isinstance(raw, ResearcherReplayViewerFrameV1)
+    assert raw.show_ranges is False
     before = (
         service.revision,
         service.command_cache_size,
@@ -1004,19 +1006,19 @@ def test_current_presentation_uses_committed_oracle_epochs_only(
     assert source.source_cursor_generation == raw.cursor.cursor_generation
     assert source.source_choreography_generation == raw.cursor.choreography_generation
     if expected_incoming_index is None:
-        assert presentation.incoming_summary is None
+        assert presentation.latest_events is None
     else:
-        assert presentation.incoming_summary is not None
+        assert presentation.latest_events is not None
         assert (
-            presentation.incoming_summary.incoming_transition_index
+            presentation.latest_events.incoming_transition_index
             == expected_incoming_index
         )
     if expected_inspection_index is None:
-        assert presentation.outgoing_inspection is None
+        assert presentation.replay_inspection is None
     else:
-        assert presentation.outgoing_inspection is not None
+        assert presentation.replay_inspection is not None
         assert (
-            presentation.outgoing_inspection.outgoing_transition_index
+            presentation.replay_inspection.outgoing_transition_index
             == expected_inspection_index
         )
     if expected_upcoming_index is None:
@@ -1241,7 +1243,7 @@ def test_oracle_presentation_rejects_projection_state_drift_without_mutation(
         donor = ReplayViewerService(
             service_cases.complete.bundle,
             initial_frame_index=1,
-            show_ranges=False,
+            show_ranges=True,
             viewer_session_id=session_id,
         )
     elif projection_drift == "reference":
@@ -2874,8 +2876,8 @@ def test_agent_presentations_exclude_privileged_fields_and_canonical_values(
     researcher_strings = _recursive_string_values(researcher_space)
     replay = case.bundle.replay
     metric = replay.metric_report_reference
-    # Match metadata has one root envelope; actor and spatial payloads retain
-    # their original digest restrictions below.
+    # Global match metadata and non-spatial deaths have one root envelope;
+    # actor and spatial payloads retain their original restrictions below.
     assert set(match_summary) == {
         "schema_version",
         "episode_id",
@@ -2886,14 +2888,41 @@ def test_agent_presentations_exclude_privileged_fields_and_canonical_values(
         "scores",
         "outcome",
         "teams",
+        "deaths",
+        "map",
+        "observation_mode",
+        "episode_limit",
+        "root_seed",
+        "episode_seed",
     }
     context = replay.header.context
     frame = replay.frames[raw.cursor.frame_index]
     assert match_summary["episode_id"] == context.identity.episode_id
     assert match_summary["source_frame_index"] == frame.frame_index
     assert match_summary["simulator_step_count"] == frame.simulator_step_count
+    assert match_summary["observation_mode"] == context.execution_information_mode
+    assert match_summary["episode_limit"] == context.expected_horizon
+    assert match_summary["root_seed"] == context.seed_protocol.root_seed
+    assert match_summary["episode_seed"] == context.seed_protocol.episode_seed
+    assert match_summary["map"] == {
+        "map_id": None,
+        "technical_name": context.identity.layout.identifier,
+        "display_name": "Map name unavailable",
+        "split": None,
+    }
     assert match_summary["task_mode"] == context.resolved_env_config.task_mode
     assert match_summary["scores"] == list(frame.snapshot.team_deathmatch_scores)
+    assert match_summary["deaths"] == [
+        {
+            "public_agent_id": context.roster[
+                event.recipient_global_slot
+            ].public_agent_id,
+            "team_id": context.roster[event.recipient_global_slot].configured_team_id,
+            "class_id": context.roster[event.recipient_global_slot].class_id,
+        }
+        for event in replay.transitions[raw.cursor.frame_index - 1].events
+        if isinstance(event, AgentDiedEventV1)
+    ]
     teams = cast(list[dict[str, object]], match_summary["teams"])
     assert [team["team_id"] for team in teams] == [1, 2]
     for team in teams:
@@ -3513,6 +3542,7 @@ def test_nonzero_focal_actor_is_stable_reference_and_selection_is_independent(
     service = ReplayViewerService(
         service_cases.nonzero_focal.bundle,
         viewer_session_id="nonzero-focal",
+        show_ranges=True,
     )
     initial = cast(ResearcherReplayViewerFrameV1, service.current_frame())
 
@@ -4691,7 +4721,6 @@ def test_loaded_commands_and_static_render_never_enter_scientific_factories(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Loaded replay consumers cannot become a second simulator or event source."""
     source = service_cases.complete.bundle
     assert source.metric_report_artifact is not None
     replay_path = tmp_path / "scientific-authority-sentinel.marlbg-replay.json"
@@ -4737,8 +4766,8 @@ def test_loaded_commands_and_static_render_never_enter_scientific_factories(
                 "build_interactive_joint_action",
                 "build_scripted_joint_action",
                 "step",
-                "capture_initial_evaluation_frame_v1",
-                "capture_evaluation_transition_unit_v1",
+                "capture_initial_evaluation_frame_v2",
+                "capture_evaluation_transition_unit_v2",
             ),
         ),
         (jax.random, ("key", "split")),
@@ -4934,30 +4963,64 @@ def test_metric_analysis_is_cached_across_scopes_cursors_and_pov(
     service_cases: _ServiceCases,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original = replay_service_module.analyze_replay
+    original = analysis_module.analyze_replay
     calls: list[LoadedReplayBundleV1] = []
 
     def analyze(
         bundle: LoadedReplayBundleV1, *, full: bool = False
-    ) -> replay_service_module.ReplayAnalysis:
+    ) -> analysis_module.ReplayAnalysis:
         assert full is True
         calls.append(bundle)
         return original(bundle, full=full)
 
-    monkeypatch.setattr(replay_service_module, "analyze_replay", analyze)
+    monkeypatch.setattr(analysis_module, "analyze_replay", analyze)
     service = ReplayViewerService(service_cases.shared.bundle)
     sidecar = service.current_metric_report()
+    catalog_bytes = service.metric_catalog()
+    catalog = json.loads(catalog_bytes)
+    assert len(catalog["measurements"]) == 11148
+    assert any(not row["applicable"] for row in catalog["measurements"])
+    assert all(
+        "value" not in row and "valid" not in row for row in catalog["measurements"]
+    )
+    assert all(
+        (row["not_applicable_reason"] is None) == row["applicable"]
+        for row in catalog["measurements"]
+    )
     initial, filename = service.metric_analysis(0, "cursor", "json")
     assert filename is None
-    assert json.loads(initial)["completion"] is None
+    initial_summary = json.loads(initial)
+    assert initial_summary["completion"] is None
+    assert initial_summary["statistics"]
+    assert all(row["applicable"] for row in initial_summary["statistics"])
+    # Scope filtering reduces transport only. Reachable undefined values remain
+    # in the UI response and the download retains the full fixed scalar schema.
+    assert any(not row["valid"] for row in initial_summary["statistics"])
     _apply(
         service, ReplayAbsoluteSeekCommandV1(frame_index=1), command_id="analysis-seek"
     )
     _apply(service, ReplaySetViewCommandV1(view_mode="pov"), command_id="analysis-pov")
     final, filename = service.metric_analysis(1, "final", "csv")
-    assert filename == "tdm-metrics-final-frame-2.csv"
-    assert b"metric_id" in final
+    assert filename is not None
+    assert filename.startswith("tdm-metrics__episode-")
+    assert f"__schema-{replay_service_module.METRIC_SCHEMA_VERSION}__" in filename
+    assert filename.endswith("__final__frame-2.csv")
+    assert b"metric_schema_id" in final
+    for row in initial_summary["statistics"]:
+        assert row["name"].encode() in final.splitlines()[0]
     assert service.metric_analysis(0, "cursor", "json")[0] == initial
+    assert service.metric_catalog() is catalog_bytes
+    catalog_names = [row["name"] for row in catalog["measurements"]]
+    catalog_name_set = set(catalog_names)
+    assert catalog_names == [
+        name
+        for name in next(csv.reader(io.StringIO(final.decode())))
+        if name in catalog_name_set
+    ]
+    assert catalog["source_replay_digest"] == initial_summary["source_replay_digest"]
+    assert (
+        catalog["analysis_source_digest"] == initial_summary["analysis_source_digest"]
+    )
     assert len(calls) == 1
     assert service.current_frame().cursor.frame_index == 1
     assert service.current_metric_report() == sidecar
@@ -4970,14 +5033,16 @@ def test_metric_analysis_failure_does_not_fault_replay_or_change_sidecar(
 ) -> None:
     def fail(
         _bundle: LoadedReplayBundleV1, *, full: bool = False
-    ) -> replay_service_module.ReplayAnalysis:
+    ) -> analysis_module.ReplayAnalysis:
         assert full is True
         raise RuntimeError("injected offline analysis failure")
 
-    monkeypatch.setattr(replay_service_module, "analyze_replay", fail)
+    monkeypatch.setattr(analysis_module, "analyze_replay", fail)
     service = ReplayViewerService(service_cases.metric_missing.bundle)
     frame = service.current_frame()
     original = service.current_metric_report()
+    with pytest.raises(RuntimeError, match="injected offline"):
+        service.metric_catalog()
     with pytest.raises(RuntimeError, match="injected offline"):
         service.metric_analysis(0, "cursor", "json")
     assert service.current_frame() == frame

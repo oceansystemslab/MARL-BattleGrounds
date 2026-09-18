@@ -1,13 +1,15 @@
+/**
+ * @file Check one-time transition animation, resized layouts and changes in which
+ * facts a view may show.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import { CombatChoreographer, ConsumedTransitionLedger } from "../src/choreography.js";
 
 class FakeAnimation {
-  /**
-   * @param {string} id
-   * @param {KeyframeAnimationOptions} [timing]
-   */
+  /** @param {string} id
+   * @param {KeyframeAnimationOptions} [timing] */
   constructor(id, timing = {}) {
     this.id = id;
     this.currentTime = 0;
@@ -30,9 +32,7 @@ class FakeAnimation {
     this.playState = "running";
   }
 
-  /**
-   * @param {number} rate
-   */
+  /** @param {number} rate */
   updatePlaybackRate(rate) {
     this.playbackRate = rate;
   }
@@ -55,29 +55,23 @@ class FakeAnimationFactory {
     this.created = [];
   }
 
-  /**
-   * @param {{id: string, options: KeyframeAnimationOptions}} spec
-   */
+  /** @param {{id: string, options: KeyframeAnimationOptions}} spec */
   create(spec) {
     const animation = new FakeAnimation(spec.id, spec.options);
     this.created.push(animation);
     return animation;
   }
 
-  /**
-   * @param {Element} _element
+  /** @param {Element} _element
    * @param {number} duration
-   * @param {string} id
-   */
+   * @param {string} id */
   createClock(_element, duration, id) {
     const animation = new FakeAnimation(id, { duration });
     this.created.push(animation);
     return animation;
   }
 
-  /**
-   * @param {string} suffix
-   */
+  /** @param {string} suffix */
   find(suffix) {
     return this.created.find(({ id }) => id.endsWith(suffix));
   }
@@ -89,8 +83,7 @@ class FakePainter {
     this.calls = [];
   }
 
-  /**
-   * @param {Record<string, any>} plan
+  /** @param {Record<string, any>} plan
    * @param {Record<string, any>} surface
    * @param {{
    *   settled: boolean,
@@ -98,8 +91,7 @@ class FakePainter {
    *   retainTransientOnSettle?: boolean,
    *   motionMode: "normal" | "reduced" | "off",
    *   renderPolicy: "live_once" | "replay_animated" | "replay_static",
-   * }} options
-   */
+   * }} options */
   install(plan, surface, options) {
     this.calls.push(["install", plan.epochKey, surface.viewportKey, options]);
     return {
@@ -129,26 +121,20 @@ class FakePainter {
     };
   }
 
-  /**
-   * @param {unknown} _installation
-   * @param {string} reason
-   */
+  /** @param {unknown} _installation
+   * @param {string} reason */
   clear(_installation, reason) {
     this.calls.push(["clear", reason]);
   }
 
-  /**
-   * @param {unknown} _installation
-   */
+  /** @param {unknown} _installation */
   settle(_installation) {
     this.calls.push(["settle"]);
   }
 
-  /**
-   * @param {unknown} _installation
+  /** @param {unknown} _installation
    * @param {Record<string, any>} plan
-   * @param {Record<string, any>} surface
-   */
+   * @param {Record<string, any>} surface */
   reproject(_installation, plan, surface) {
     this.calls.push(["reproject", plan.epochKey, surface.viewportKey]);
   }
@@ -159,29 +145,23 @@ class FakeStorage {
     this.values = new Map();
   }
 
-  /**
-   * @param {string} key
-   */
+  /** @param {string} key */
   getItem(key) {
     return this.values.get(key) ?? null;
   }
 
-  /**
-   * @param {string} key
-   * @param {string} value
-   */
+  /** @param {string} key
+   * @param {string} value */
   setItem(key, value) {
     this.values.set(key, value);
   }
 }
 
-/**
- * @param {string} epoch
+/** @param {string} epoch
  * @param {string} [authorization]
  * @param {string} [fingerprint]
  * @param {string} [paintKey]
- * @returns {Record<string, any>}
- */
+ * @returns {Record<string, any>} */
 function plan(
   epoch,
   authorization = "researcher",
@@ -207,14 +187,12 @@ function plan(
   };
 }
 
-/**
- * @param {{
+/** @param {{
  *   ledger?: ConsumedTransitionLedger,
  *   storage?: FakeStorage | null,
  *   motionMode?: "normal" | "reduced" | "off",
  *   playbackRate?: number,
- * }} [options]
- */
+ * }} [options] */
 function harness(options = {}) {
   const painter = new FakePainter();
   const animationFactory = new FakeAnimationFactory();

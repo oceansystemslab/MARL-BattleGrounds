@@ -1,10 +1,12 @@
-"""Frozen dimensions owned by the version-1 evaluation wire contract.
+"""Keep the fixed dimensions of version-1 evaluation records.
 
-These values describe the refrozen pre-alpha V1 evaluation records. They
-intentionally do not import the live simulator type module. Amendment A18 is
-the one approved in-place exception that expanded the obstacle axis from 16 to
-32 before alpha; every later incompatible shape change requires an explicit
-schema migration rather than silently changing V1 artifact validation.
+Model validators and historical replay readers use these constants without
+importing live simulator types. Ten agent slots, five slots per team and all
+feature/action axes describe the recorded wire layout, not a mutable runtime
+configuration. Amendment A18 allowed the pre-alpha obstacle axis to grow from
+16 to 32; later incompatible dimensions need an explicit schema migration.
+Changing these values would change historical validation, so documentation
+work must preserve them.
 """
 
 from typing import Final

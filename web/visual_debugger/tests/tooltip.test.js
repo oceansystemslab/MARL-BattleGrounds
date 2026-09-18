@@ -1,3 +1,7 @@
+/**
+ * @file Check tooltip record validation, accessible rendering, field visibility and
+ * interaction lifecycle.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -12,11 +16,9 @@ import {
   semanticDescriptorText,
 } from "../src/tooltip.js";
 
-/**
- * @param {string} kind
+/** @param {string} kind
  * @param {string} id
- * @param {{title?: string, summary?: string | null, anchor?: "element" | "pointer", tone?: string, accent?: string, rows?: unknown[], sections?: unknown[]}} [overrides]
- */
+ * @param {{title?: string, summary?: string | null, anchor?: "element" | "pointer", tone?: string, accent?: string, rows?: unknown[], sections?: unknown[]}} [overrides] */
 function semanticDescriptor(kind, id, overrides = {}) {
   return createSemanticDescriptor({
     kind,
@@ -32,11 +34,9 @@ function semanticDescriptor(kind, id, overrides = {}) {
   });
 }
 
-/**
- * @param {string} kind
+/** @param {string} kind
  * @param {string} id
- * @param {number} paintOrder
- */
+ * @param {number} paintOrder */
 function candidate(kind, id, paintOrder) {
   return Object.freeze({
     descriptor: Object.freeze({
@@ -46,12 +46,10 @@ function candidate(kind, id, paintOrder) {
   });
 }
 
-/**
- * @param {Document} ownerDocument
+/** @param {Document} ownerDocument
  * @param {{left: number, top: number, right: number, bottom: number, width: number, height: number}} bounds
  * @param {string} [id]
- * @param {Element | null} [parentElement]
- */
+ * @param {Element | null} [parentElement] */
 function fakeElement(ownerDocument, bounds, id = "", parentElement = null) {
   /** @type {Map<string, string>} */
   const attributes = new Map();
@@ -62,10 +60,8 @@ function fakeElement(ownerDocument, bounds, id = "", parentElement = null) {
     pointerEvents: "",
     top: "",
     visibility: "",
-    /**
-     * @param {string} _name
-     * @param {string | null} _value
-     */
+    /** @param {string} _name
+     * @param {string | null} _value */
     setProperty(_name, _value) {},
   };
   const element = {
@@ -102,10 +98,8 @@ function fakeElement(ownerDocument, bounds, id = "", parentElement = null) {
     getAttribute(name) {
       return attributes.get(name) ?? null;
     },
-    /**
-     * @param {string} name
-     * @param {string} value
-     */
+    /** @param {string} name
+     * @param {string} value */
     setAttribute(name, value) {
       attributes.set(name, value);
     },
@@ -120,11 +114,9 @@ function fakeElement(ownerDocument, bounds, id = "", parentElement = null) {
   });
 }
 
-/**
- * @param {EventTarget} root
+/** @param {EventTarget} root
  * @param {number} x
- * @param {number} y
- */
+ * @param {number} y */
 function dispatchPointerMove(root, x, y) {
   const event = new Event("pointermove");
   Object.defineProperties(event, {
@@ -134,12 +126,10 @@ function dispatchPointerMove(root, x, y) {
   root.dispatchEvent(event);
 }
 
-/**
- * @param {EventTarget} root
+/** @param {EventTarget} root
  * @param {string} type
  * @param {Element} target
- * @param {Element | null} [relatedTarget]
- */
+ * @param {Element | null} [relatedTarget] */
 function dispatchFocus(root, type, target, relatedTarget = null) {
   const event = new Event(type);
   Object.defineProperties(event, {
@@ -149,12 +139,10 @@ function dispatchFocus(root, type, target, relatedTarget = null) {
   root.dispatchEvent(event);
 }
 
-/**
- * @param {EventTarget} root
+/** @param {EventTarget} root
  * @param {string} type
  * @param {Element} target
- * @param {string | null} [key]
- */
+ * @param {string | null} [key] */
 function dispatchAction(root, type, target, key = null) {
   const event = new Event(type, { cancelable: true });
   Object.defineProperty(event, "target", { value: target });
@@ -237,9 +225,7 @@ function fakeDom() {
   return { createdTags, node, ownerDocument, textTree };
 }
 
-/**
- * @param {{width?: number, height?: number, tooltipWidth?: number, tooltipHeight?: number}} [options]
- */
+/** @param {{width?: number, height?: number, tooltipWidth?: number, tooltipHeight?: number}} [options] */
 function controllerHarness(options = {}) {
   const width = options.width ?? 640;
   const height = options.height ?? 480;
@@ -814,10 +800,8 @@ test("registration stores a defensive descriptor and exposes no prose in markup"
     getAttribute(name) {
       return attributes.get(name) ?? null;
     },
-    /**
-     * @param {string} name
-     * @param {string} value
-     */
+    /** @param {string} name
+     * @param {string} value */
     setAttribute(name, value) {
       attributes.set(name, value);
     },

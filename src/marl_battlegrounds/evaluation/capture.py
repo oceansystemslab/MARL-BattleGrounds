@@ -1,4 +1,11 @@
-"""Single-transfer host capture and lossless core-fact normalization."""
+"""Copy simulator outputs into durable host records and restore recorded arrays.
+
+Capture transfers the complete input bundle with one jax.device_get call, then
+checks exact NumPy shapes/dtypes before building strict models. This is a host
+recording boundary, outside JIT; one bundled call is not a claim about physical
+transfer count. Reconstruction reads recorded values without running physics.
+Current context V3 uses frame V2; historical contexts keep frame V1.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +14,7 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import DTypeLike, NDArray
 
 from marl_battlegrounds.core.types import (
     CONTEXT_FEATURES,
@@ -55,10 +62,15 @@ from marl_battlegrounds.evaluation.models import (
     ActionMaskV1,
     AuraTransitionFactsV1,
     BaseObservationV1,
+    BaseObservationV2,
     CombatTransitionFactsV1,
     DeathTransitionFactsV1,
+    EvaluationEpisodeContext,
     EvaluationEpisodeContextV1,
+    EvaluationEpisodeContextV3,
+    EvaluationFrame,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     EvaluationTransitionV1,
     GlobalAnalysisSnapshotV1,
     JointActionV1,
@@ -71,6 +83,8 @@ from marl_battlegrounds.evaluation.models import (
     StatusLifecycleTransitionFactsV1,
     TeamDeathmatchTransitionFactsV1,
     TransitionFactsV1,
+    evaluation_context_type,
+    evaluation_frame_type,
 )
 from marl_battlegrounds.evaluation.validation import (
     _derive_and_validate_team_deathmatch_authority_v1,  # pyright: ignore[reportPrivateUsage]
@@ -91,6 +105,10 @@ def _require_exact_type(
     *,
     name: str,
 ) -> None:
+    """Reject a source whose concrete type differs from the required Core record.
+
+    Raise TypeError with the supplied field name; subclasses are not accepted.
+    """
     if type(value) is not expected_type:
         raise TypeError(
             f"{name} must be exactly {expected_type.__name__}, "
@@ -107,7 +125,13 @@ def _require_host_array(
     finite: bool = False,
     category_count: int | None = None,
 ) -> NDArray[np.generic]:
-    """Validate one already-transferred NumPy leaf without coercing it."""
+    """Check an already-transferred NumPy leaf without converting or copying it.
+
+    Require exact ndarray type, declared shape and dtype. Optional finite=False
+    and category_count=None skip those checks; a category bound means integers from
+    zero inclusive to that bound exclusive. Return the same array. Reject JAX leaves
+    and wrong types with TypeError, and invalid values/shapes with ValueError.
+    """
     if isinstance(value, jax.Array):
         raise TypeError(
             f"{name} is still a JAX/device array; transfer the complete source "
@@ -136,7 +160,11 @@ def _require_host_array(
 
 
 def _freeze_payload(value: object) -> object:
-    """Turn a NumPy ``tolist`` result into immutable native-Python values."""
+    """Convert nested lists from ndarray.tolist into tuples and native scalars.
+
+    Accept only exact bool, int, and float leaves. Raise TypeError for any other
+    scalar; this helper never accepts or transfers device arrays.
+    """
     if isinstance(value, list):
         return tuple(_freeze_payload(item) for item in cast(list[object], value))
     if type(value) in (bool, int, float):
@@ -153,6 +181,11 @@ def _array_payload(
     finite: bool = False,
     category_count: int | None = None,
 ) -> object:
+    """Validate one host leaf and return its immutable Python scalar/tuple payload.
+
+    Use the declared exact shape/dtype plus optional finite/category checks.
+    Delegates errors to _require_host_array and performs no device transfer.
+    """
     array = _require_host_array(
         value,
         name=name,
@@ -165,6 +198,12 @@ def _array_payload(
 
 
 def _normalize_snapshot_v1(state: EnvState) -> tuple[int, GlobalAnalysisSnapshotV1]:
+    """Convert one unbatched host EnvState into simulator tick and V1 snapshot.
+
+    Require exact Core type, fixed global/team axes, int32 counters/actions, float32
+    positions/health, and bool flags. Reject negative tick, nonfinite floats, or
+    out-of-range previous actions. Values remain recorded snapshot facts.
+    """
     _require_exact_type(state, EnvState, name="state")
     step_count = cast(
         int,
@@ -293,6 +332,13 @@ def _normalize_snapshot_v1(state: EnvState) -> tuple[int, GlobalAnalysisSnapshot
 def _normalize_previous_action_observation_v1(
     source: PreviousTimestepActionObservation,
 ) -> PreviousTimestepActionObservationV1:
+    """Freeze the six ally/enemy previous-action tensors for ten observers.
+
+    Require finite float32 arrays shaped (10, 5, head_categories), preserving actor
+    and relation-row order. Producers supply one-hot or neutral rows; strict wire
+    models check finite values and shapes.
+    The Core source must already contain NumPy leaves.
+    """
     _require_exact_type(
         source,
         PreviousTimestepActionObservation,
@@ -339,8 +385,15 @@ def _normalize_previous_action_observation_v1(
 
 def _normalize_spawn_lifecycle_observation_v1(
     source: SpawnLifecycleObservation,
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
 ) -> SpawnLifecycleObservationV1:
+    """Freeze host spawn observations after checking class rows against the roster.
+
+    Require fixed (observer, own/opponent team, local slot) axes, world-unit pad
+    positions, int32 tick fields, float32 speed, and bool masks. The validated class
+    map is omitted from the historical V1 wire subtree and reconstructed from
+    context by the actor projection; it is not silently dropped without checking.
+    """
     _require_exact_type(
         source,
         SpawnLifecycleObservation,
@@ -419,10 +472,17 @@ def _normalize_spawn_lifecycle_observation_v1(
     return SpawnLifecycleObservationV1.model_validate(payload)
 
 
-def _normalize_base_observation_v1(
+def _normalize_base_observation(
     source: Observation,
-    context: EvaluationEpisodeContextV1,
-) -> BaseObservationV1:
+    context: EvaluationEpisodeContext,
+) -> BaseObservationV1 | BaseObservationV2:
+    """Freeze one host observation using the context's declared wire version.
+
+    Check exact shapes, bool masks, finite float32 features, previous-action rows,
+    and spawn data. Context V3 records int32 self_ally_index in BaseObservationV2.
+    Legacy capture requires historical Team ID self features and returns V1;
+    current identity-blind observations cannot be relabeled as legacy data.
+    """
     _require_exact_type(source, Observation, name="observation")
     specs = (
         ("self_features", (MAX_AGENT_SLOTS, SELF_FEATURES), _FLOAT32_DTYPE, True),
@@ -486,10 +546,30 @@ def _normalize_base_observation_v1(
         source.spawn_lifecycle,
         context,
     )
+    if type(context) is EvaluationEpisodeContextV3:
+        payload["self_ally_index"] = _array_payload(
+            source.self_ally_index,
+            name="observation.self_ally_index",
+            shape=(MAX_AGENT_SLOTS,),
+            dtype=_INT32_DTYPE,
+            category_count=MAX_AGENTS_PER_TEAM,
+        )
+        return BaseObservationV2.model_validate(payload)
+    for slot, row in enumerate(context.roster):
+        if source.self_features[slot, 3] != float(row.configured_team_id):
+            raise ValueError(
+                "legacy capture requires historical Team ID observations; "
+                "use current capture V2"
+            )
     return BaseObservationV1.model_validate(payload)
 
 
 def _normalize_action_mask_v1(source: ActionMask) -> ActionMaskV1:
+    """Freeze host boolean masks with fixed actor/head axes.
+
+    Require shapes (10, 9), (10, 11), (10, 2), and (10, 11, 2) for movement,
+    target, Ultimate, and their joint combat mask. No legality is recomputed.
+    """
     _require_exact_type(source, ActionMask, name="action_mask")
     specs = (
         ("move_mask", (MAX_AGENT_SLOTS, NUM_MOVE_ACTIONS)),
@@ -518,6 +598,12 @@ def _normalize_joint_action_v1(
     name: str,
     require_accepted_domains: bool,
 ) -> JointActionV1:
+    """Freeze three int32 action vectors while preserving submitted invalid intent.
+
+    Require shape (10,) for every head. When require_accepted_domains is true,
+    enforce each head's category range; otherwise retain any int32 submission for
+    rejection analysis. The supplied name identifies errors.
+    """
     _require_exact_type(source, Action, name=name)
     categories = (
         ("move", NUM_MOVE_ACTIONS),
@@ -540,6 +626,11 @@ def _normalize_joint_action_v1(
 def _normalize_action_acceptance_facts_v1(
     source: ActionAcceptanceFacts,
 ) -> ActionAcceptanceFactsV1:
+    """Freeze submitted/accepted actions and three independent rejection-flag rows.
+
+    Only accepted actions require category bounds. All rejection flags are bool
+    vectors of length ten. Source leaves must already be on the host.
+    """
     _require_exact_type(source, ActionAcceptanceFacts, name="action_acceptance_facts")
     payload: dict[str, object] = {
         "submitted_joint_action": _normalize_joint_action_v1(
@@ -570,6 +661,12 @@ def _normalize_action_acceptance_facts_v1(
 def _normalize_combat_transition_facts_v1(
     source: CombatTransitionFacts,
 ) -> CombatTransitionFactsV1:
+    """Freeze combat facts and translate absent recipient routes from -1 to None.
+
+    Require fixed source/recipient axes, finite float32 amounts/modifiers, and bool
+    application flags. A present recipient must be a global slot 0-9; an absent
+    recipient must carry Core's exact -1 sentinel. Invalid route joins raise ValueError.
+    """
     _require_exact_type(source, CombatTransitionFacts, name="combat_transition_facts")
     bool_vectors = (
         "basic_effect_is_activated_by_source",
@@ -679,6 +776,12 @@ def _normalize_simple_fact_model(
     | StatusLifecycleTransitionFactsV1
     | TeamDeathmatchTransitionFactsV1
 ):
+    """Build one fact subtree from explicit host field/shape/dtype specifications.
+
+    Require the exact source record type and validate every named NumPy leaf before
+    constructing model_type. The specs boolean controls finite-value checking.
+    This shared adapter copies facts without deriving domain rules.
+    """
     _require_exact_type(source, source_type, name=source_name)
     payload = {
         field_name: _array_payload(
@@ -694,12 +797,35 @@ def _normalize_simple_fact_model(
 
 
 def normalize_transition_facts_v1(source: TransitionFacts) -> TransitionFactsV1:
-    """Normalize an already-host core fact tree without performing a transfer.
+    """Convert an already-host Core fact tree into its strict V1 wire record.
 
-    The caller must pass the exact ``TransitionFacts`` returned by an outer
-    bundled :func:`jax.device_get`. Live JAX/device leaves are rejected so a
-    future transition-capture function cannot accidentally perform 47 implicit
-    transfers while walking this tree.
+    Parameters
+    ----------
+    source : TransitionFacts
+        Exact unbatched TransitionFacts returned by a bundled jax.device_get.
+        Every leaf must be an exact NumPy array with Core's fixed shape and
+        bool, int32, or float32 dtype.
+
+    Returns
+    -------
+    TransitionFactsV1
+        Strict V1 fact tree with immutable Python values. Missing recipient routes
+        become None; valid numeric values and all independent cause flags are retained.
+
+    Raises
+    ------
+    TypeError
+        A record type/dtype is wrong, or a leaf is still a JAX array.
+    ValueError
+        A shape, finite-value check, accepted action category, recipient
+        route, or initialization/transition tick is invalid.
+
+    Notes
+    -----
+    Performs no transfer. This prevents a tree walk from causing repeated
+    implicit device-to-host copies. Initialization facts are allowed with
+    has_transition false and start tick -1; actual transitions require a
+    nonnegative start tick. Transition capture separately rejects initialization.
     """
     _require_exact_type(source, TransitionFacts, name="transition_facts")
     has_transition = cast(
@@ -897,17 +1023,23 @@ def normalize_transition_facts_v1(source: TransitionFacts) -> TransitionFactsV1:
     )
 
 
-def _build_evaluation_frame_v1_from_host(
-    context: EvaluationEpisodeContextV1,
+def _build_evaluation_frame_from_host(
+    context: EvaluationEpisodeContext,
     *,
     frame_index: int,
     state: EnvState,
     observation: Observation,
     action_mask: ActionMask,
     shared_obs_information_availability_by_recipient_and_sensor_source: (object | None),
-) -> EvaluationFrameV1:
-    """Build one frame from an already-host bundle without transferring again."""
-    _require_exact_type(context, EvaluationEpisodeContextV1, name="context")
+) -> EvaluationFrame:
+    """Build a canonical indexed frame from a bundle already copied to NumPy.
+
+    Require a nonnegative exact Python frame_index. Choose frame V2 for context V3,
+    otherwise V1; normalize snapshot, observation, masks, and optional (10, 10)
+    SharedObs availability, then check information sharing. No second transfer
+    occurs. Full cross-record validation is owned by replay admission.
+    """
+    evaluation_context_type(context)
     if type(frame_index) is not int or frame_index < 0:
         raise ValueError("frame_index must be a nonnegative exact integer")
     simulator_step_count, snapshot = _normalize_snapshot_v1(state)
@@ -921,14 +1053,19 @@ def _build_evaluation_frame_v1_from_host(
         )
 
     episode_id = context.identity.episode_id
-    frame = EvaluationFrameV1.model_validate(
+    frame_model = (
+        EvaluationFrameV2
+        if type(context) is EvaluationEpisodeContextV3
+        else EvaluationFrameV1
+    )
+    frame = frame_model.model_validate(
         {
             "episode_id": episode_id,
             "frame_index": frame_index,
             "frame_id": f"{episode_id}:frame:{frame_index}",
             "simulator_step_count": simulator_step_count,
             "snapshot": snapshot,
-            "base_observation": _normalize_base_observation_v1(observation, context),
+            "base_observation": _normalize_base_observation(observation, context),
             "action_mask": _normalize_action_mask_v1(action_mask),
             "shared_obs_information_availability_by_recipient_and_sensor_source": (
                 availability_payload
@@ -939,17 +1076,22 @@ def _build_evaluation_frame_v1_from_host(
     return frame
 
 
-def capture_initial_evaluation_frame_v1(
-    context: EvaluationEpisodeContextV1,
+def _capture_initial_evaluation_frame(
+    context: EvaluationEpisodeContext,
     state: EnvState,
     observation: Observation,
     action_mask: ActionMask,
     shared_obs_information_availability_by_recipient_and_sensor_source: (
         object | None
     ) = None,
-) -> EvaluationFrameV1:
-    """Capture frame zero through exactly one bundled device-to-host transfer."""
-    _require_exact_type(context, EvaluationEpisodeContextV1, name="context")
+) -> EvaluationFrame:
+    """Copy one complete initial bundle, then build artifact frame zero.
+
+    Use one jax.device_get call for state, observation, masks, and optional
+    availability. Context V1 also receives full initial-frame validation here;
+    later contexts are fully checked by the enclosing replay admission path.
+    """
+    evaluation_context_type(context)
     host_state, host_observation, host_action_mask, host_availability = cast(
         tuple[EnvState, Observation, ActionMask, object | None],
         jax.device_get(
@@ -961,7 +1103,7 @@ def capture_initial_evaluation_frame_v1(
             )
         ),
     )
-    frame = _build_evaluation_frame_v1_from_host(
+    frame = _build_evaluation_frame_from_host(
         context,
         frame_index=0,
         state=host_state,
@@ -971,11 +1113,17 @@ def capture_initial_evaluation_frame_v1(
             host_availability
         ),
     )
-    validate_initial_evaluation_frame_v1(context, frame)
+    if type(context) is EvaluationEpisodeContextV1:
+        validate_initial_evaluation_frame_v1(context, frame)
     return frame
 
 
 def _normalize_reward_v1(source: Reward) -> object:
+    """Freeze ten finite float32 canonical rewards from an exact host Reward.
+
+    Return a Python tuple in global-slot order; task consistency is checked after
+    joining these values to the transition's task facts.
+    """
     _require_exact_type(source, Reward, name="canonical_reward")
     return _array_payload(
         source.rewards,
@@ -987,6 +1135,11 @@ def _normalize_reward_v1(source: Reward) -> object:
 
 
 def _normalize_done_flags_v1(source: DoneFlags) -> tuple[bool, bool]:
+    """Return terminated and truncated from exact host scalar bool arrays.
+
+    Require an exact DoneFlags record. Keep the two flags independent because both
+    may be true on the same transition.
+    """
     _require_exact_type(source, DoneFlags, name="done_flags")
     terminated = cast(
         bool,
@@ -1009,9 +1162,9 @@ def _normalize_done_flags_v1(source: DoneFlags) -> tuple[bool, bool]:
     return terminated, truncated
 
 
-def capture_evaluation_transition_unit_v1(
-    context: EvaluationEpisodeContextV1,
-    start_frame: EvaluationFrameV1,
+def _capture_evaluation_transition_unit(
+    context: EvaluationEpisodeContext,
+    start_frame: EvaluationFrame,
     successor_state: EnvState,
     successor_observation: Observation,
     successor_action_mask: ActionMask,
@@ -1022,10 +1175,17 @@ def capture_evaluation_transition_unit_v1(
     successor_shared_obs_information_availability_by_recipient_and_sensor_source: (
         object | None
     ) = None,
-) -> tuple[EvaluationTransitionV1, EvaluationFrameV1]:
-    """Capture one adjacent transition unit through one bundled device transfer."""
-    _require_exact_type(context, EvaluationEpisodeContextV1, name="context")
-    _require_exact_type(start_frame, EvaluationFrameV1, name="start_frame")
+) -> tuple[EvaluationTransitionV1, EvaluationFrame]:
+    """Copy a successor/facts/reward bundle and build its joined transition record.
+
+    One jax.device_get call transfers all supplied outputs. Normalize the successor,
+    require actual transition facts, check task rewards/completion, and decode
+    canonical events. Context V1 additionally gets full transition-unit validation
+    here; replay admission validates later context versions. Return transition then
+    successor frame without modifying the previous frame.
+    """
+    evaluation_context_type(context)
+    evaluation_frame_type(start_frame)
     (
         host_successor_state,
         host_successor_observation,
@@ -1057,7 +1217,7 @@ def capture_evaluation_transition_unit_v1(
         ),
     )
 
-    successor_frame = _build_evaluation_frame_v1_from_host(
+    successor_frame = _build_evaluation_frame_from_host(
         context,
         frame_index=start_frame.frame_index + 1,
         state=host_successor_state,
@@ -1111,41 +1271,143 @@ def capture_evaluation_transition_unit_v1(
             "owning_task_end_reason": owning_task_end_reason,
         }
     )
-    validate_evaluation_transition_unit_v1(
-        context,
-        start_frame,
-        transition,
-        successor_frame,
-    )
+    if type(context) is EvaluationEpisodeContextV1:
+        validate_evaluation_transition_unit_v1(
+            context,
+            start_frame,
+            transition,
+            successor_frame,
+        )
     return transition, successor_frame
 
 
-def _reconstruct_transition_facts(  # pyright: ignore[reportUnusedFunction]
+def reconstruct_env_state_v1(frame: EvaluationFrame, *, host: bool = False) -> EnvState:
+    """Restore the simulator state recorded in one captured frame.
+
+    Parameters
+    ----------
+    frame : EvaluationFrame
+        Supported, validated frame containing the full analysis snapshot.
+    host : bool
+        If false, return JAX leaves on the default device. If true, return
+        NumPy leaves so callers can batch them before a later transfer. Defaults to
+        false.
+
+    Returns
+    -------
+    EnvState
+        Unbatched EnvState with the recorded simulator tick, ten global slots,
+        two team rows, float32 position/health, int32 counters/actions, and bool flags.
+
+    Raises
+    ------
+    TypeError
+        A recorded integer field contains a non-integer value.
+    ValueError
+        Integers exceed int32 or floating values cannot be represented
+        exactly as finite float32.
+
+    Notes
+    -----
+    This host function restores values without resetting, stepping, or inferring
+    state from observations. Core NamedTuples preserve the PyTree structure;
+    host=True leaves are NumPy arrays despite the runtime type annotations.
+    """
+    from marl_battlegrounds.evaluation.catalog import (
+        _wire_float32_array,  # pyright: ignore[reportPrivateUsage]
+        _wire_int32_array,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    values = frame.snapshot.model_dump(exclude={"schema_id", "schema_version"})
+    values["step_count"] = frame.simulator_step_count
+    arrays: dict[str, jax.Array] = {}
+    for name in EnvState._fields:
+        value = values[name]
+        if name in ("alive_mask", "has_previous_timestep_joint_action"):
+            array = np.asarray(value, dtype=np.bool_)
+            arrays[name] = cast(jax.Array, array) if host else jnp.asarray(array)
+        else:
+            convert = (
+                _wire_float32_array
+                if name in ("agent_positions", "current_health")
+                else _wire_int32_array
+            )
+            arrays[name] = convert(
+                value, field_name=f"frame.snapshot.{name}", host=host
+            )
+    return EnvState(**arrays)
+
+
+def _reconstruct_transition_facts(
     source: TransitionFactsV1,
+    *,
+    host: bool = False,
 ) -> TransitionFacts:
-    """Reconstruct the exact core fact PyTree for losslessness tests."""
+    """Restore Core fact arrays from one already validated wire record.
+
+    Parameters
+    ----------
+    source : TransitionFactsV1
+        Exact TransitionFactsV1 with fixed global-slot and channel axes.
+    host : bool
+        If false, construct JAX arrays on the default device. If true, return
+        NumPy arrays for later batched transfer. Defaults to false.
+
+    Returns
+    -------
+    TransitionFacts
+        Unbatched Core TransitionFacts with bool, int32, and float32 leaves.
+        Absent recipient routes are restored from None to Core's -1 sentinel.
+
+    Raises
+    ------
+    TypeError
+        source is not the exact declared V1 record type.
+
+    Notes
+    -----
+    Exported as reconstruct_transition_facts_v1. It does not revalidate the whole
+    wire tree, check lossless numeric narrowing, or simulate effects. Admission
+    must validate records before reconstruction. host=True avoids per-field
+    device dispatch while preserving the Core NamedTuple structure.
+    """
+
+    def array(value: object, *, dtype: DTypeLike) -> jax.Array:
+        """Construct a NumPy or JAX leaf according to the enclosing host flag.
+
+        Use the explicitly supplied dtype. Source values have already passed wire
+        admission; this conversion does not repeat semantic validation.
+        """
+        if host:
+            return cast(jax.Array, np.asarray(value, dtype=dtype))
+        return jnp.asarray(value, dtype=np.dtype(dtype))
+
     _require_exact_type(source, TransitionFactsV1, name="transition_facts_v1")
 
     def action(model: JointActionV1) -> Action:
+        """Restore the three recorded action heads as length-ten int32 arrays.
+
+        Use the enclosing host/device conversion choice and preserve submitted values.
+        """
         return Action(
-            move=jnp.asarray(model.move, dtype=jnp.int32),
-            select_target=jnp.asarray(model.select_target, dtype=jnp.int32),
-            use_ultimate=jnp.asarray(model.use_ultimate, dtype=jnp.int32),
+            move=array(model.move, dtype=jnp.int32),
+            select_target=array(model.select_target, dtype=jnp.int32),
+            use_ultimate=array(model.use_ultimate, dtype=jnp.int32),
         )
 
     acceptance = source.action_acceptance_facts
     action_acceptance_facts = ActionAcceptanceFacts(
         submitted_joint_action=action(acceptance.submitted_joint_action),
         accepted_joint_action=action(acceptance.accepted_joint_action),
-        submitted_action_tuple_is_out_of_domain_by_actor=jnp.asarray(
+        submitted_action_tuple_is_out_of_domain_by_actor=array(
             acceptance.submitted_action_tuple_is_out_of_domain_by_actor,
             dtype=jnp.bool_,
         ),
-        in_domain_move_action_is_rejected_by_actor=jnp.asarray(
+        in_domain_move_action_is_rejected_by_actor=array(
             acceptance.in_domain_move_action_is_rejected_by_actor,
             dtype=jnp.bool_,
         ),
-        in_domain_combat_action_pair_is_rejected_by_actor=jnp.asarray(
+        in_domain_combat_action_pair_is_rejected_by_actor=array(
             acceptance.in_domain_combat_action_pair_is_rejected_by_actor,
             dtype=jnp.bool_,
         ),
@@ -1157,59 +1419,59 @@ def _reconstruct_transition_facts(  # pyright: ignore[reportUnusedFunction]
         for recipient in combat.combat_effect_recipient_global_slot_by_source
     )
     combat_transition_facts = CombatTransitionFacts(
-        basic_effect_is_activated_by_source=jnp.asarray(
+        basic_effect_is_activated_by_source=array(
             combat.basic_effect_is_activated_by_source, dtype=jnp.bool_
         ),
-        ultimate_effect_is_activated_by_source=jnp.asarray(
+        ultimate_effect_is_activated_by_source=array(
             combat.ultimate_effect_is_activated_by_source, dtype=jnp.bool_
         ),
-        combat_effect_has_recipient_by_source=jnp.asarray(
+        combat_effect_has_recipient_by_source=array(
             combat.combat_effect_has_recipient_by_source, dtype=jnp.bool_
         ),
-        combat_effect_recipient_global_slot_by_source=jnp.asarray(
+        combat_effect_recipient_global_slot_by_source=array(
             recipient_slots, dtype=jnp.int32
         ),
-        raw_damage_output_by_source=jnp.asarray(
+        raw_damage_output_by_source=array(
             combat.raw_damage_output_by_source, dtype=jnp.float32
         ),
-        source_modified_damage_output_by_source=jnp.asarray(
+        source_modified_damage_output_by_source=array(
             combat.source_modified_damage_output_by_source, dtype=jnp.float32
         ),
-        recipient_damage_modifier_by_source=jnp.asarray(
+        recipient_damage_modifier_by_source=array(
             combat.recipient_damage_modifier_by_source, dtype=jnp.float32
         ),
-        total_effective_damage_by_recipient=jnp.asarray(
+        total_effective_damage_by_recipient=array(
             combat.total_effective_damage_by_recipient, dtype=jnp.float32
         ),
-        raw_healing_output_by_source=jnp.asarray(
+        raw_healing_output_by_source=array(
             combat.raw_healing_output_by_source, dtype=jnp.float32
         ),
-        source_modified_healing_output_by_source=jnp.asarray(
+        source_modified_healing_output_by_source=array(
             combat.source_modified_healing_output_by_source, dtype=jnp.float32
         ),
-        recipient_healing_modifier_by_source=jnp.asarray(
+        recipient_healing_modifier_by_source=array(
             combat.recipient_healing_modifier_by_source, dtype=jnp.float32
         ),
-        total_effective_healing_by_recipient=jnp.asarray(
+        total_effective_healing_by_recipient=array(
             combat.total_effective_healing_by_recipient, dtype=jnp.float32
         ),
-        health_after_combat_resolution_by_recipient=jnp.asarray(
+        health_after_combat_resolution_by_recipient=array(
             combat.health_after_combat_resolution_by_recipient, dtype=jnp.float32
         ),
-        slow_is_applied_by_source_and_channel=jnp.asarray(
+        slow_is_applied_by_source_and_channel=array(
             combat.slow_is_applied_by_source_and_channel, dtype=jnp.bool_
         ),
-        stun_is_applied_by_source_and_channel=jnp.asarray(
+        stun_is_applied_by_source_and_channel=array(
             combat.stun_is_applied_by_source_and_channel, dtype=jnp.bool_
         ),
-        rogue_poison_anti_heal_is_applied_by_source=jnp.asarray(
+        rogue_poison_anti_heal_is_applied_by_source=array(
             combat.rogue_poison_anti_heal_is_applied_by_source, dtype=jnp.bool_
         ),
-        mage_burst_damage_amplification_is_applied_by_source=jnp.asarray(
+        mage_burst_damage_amplification_is_applied_by_source=array(
             combat.mage_burst_damage_amplification_is_applied_by_source,
             dtype=jnp.bool_,
         ),
-        priest_blessing_of_freedom_is_applied_by_source=jnp.asarray(
+        priest_blessing_of_freedom_is_applied_by_source=array(
             combat.priest_blessing_of_freedom_is_applied_by_source,
             dtype=jnp.bool_,
         ),
@@ -1223,85 +1485,370 @@ def _reconstruct_transition_facts(  # pyright: ignore[reportUnusedFunction]
     lifecycle = source.status_lifecycle_facts
     team_deathmatch = source.team_deathmatch_facts
     return TransitionFacts(
-        has_transition=jnp.asarray(source.has_transition, dtype=jnp.bool_),
-        transition_start_step_count=jnp.asarray(
+        has_transition=array(source.has_transition, dtype=jnp.bool_),
+        transition_start_step_count=array(
             source.transition_start_step_count, dtype=jnp.int32
         ),
         action_acceptance_facts=action_acceptance_facts,
         combat_transition_facts=combat_transition_facts,
         death_facts=DeathTransitionFacts(
-            jnp.asarray(death.is_newly_dead_by_recipient, dtype=jnp.bool_),
-            jnp.asarray(death.contributed_to_new_death_by_source, dtype=jnp.bool_),
-            jnp.asarray(death.attributed_death_damage_by_source, dtype=jnp.float32),
+            array(death.is_newly_dead_by_recipient, dtype=jnp.bool_),
+            array(death.contributed_to_new_death_by_source, dtype=jnp.bool_),
+            array(death.attributed_death_damage_by_source, dtype=jnp.float32),
         ),
         spawn_shield_facts=SpawnShieldTransitionFacts(
-            jnp.asarray(
-                shield.was_active_at_transition_start_by_agent, dtype=jnp.bool_
-            ),
-            jnp.asarray(shield.expired_at_transition_end_by_agent, dtype=jnp.bool_),
+            array(shield.was_active_at_transition_start_by_agent, dtype=jnp.bool_),
+            array(shield.expired_at_transition_end_by_agent, dtype=jnp.bool_),
         ),
         respawn_facts=RespawnTransitionFacts(
-            jnp.asarray(
+            array(
                 respawn.respawn_wave_occurred_this_transition_by_team,
                 dtype=jnp.bool_,
             ),
-            jnp.asarray(
+            array(
                 respawn.was_respawned_this_transition_by_agent,
                 dtype=jnp.bool_,
             ),
         ),
         regeneration_facts=RegenerationTransitionFacts(
-            jnp.asarray(
-                regeneration.combat_countdown_was_reset_by_agent, dtype=jnp.bool_
-            ),
-            jnp.asarray(
+            array(regeneration.combat_countdown_was_reset_by_agent, dtype=jnp.bool_),
+            array(
                 regeneration.actual_health_regenerated_this_step_by_agent,
                 dtype=jnp.float32,
             ),
         ),
         physical_facts=PhysicalTransitionFacts(
-            jnp.asarray(physical.charge_phase_displacement_by_agent, dtype=jnp.float32),
-            jnp.asarray(
+            array(physical.charge_phase_displacement_by_agent, dtype=jnp.float32),
+            array(
                 physical.ordinary_movement_phase_displacement_by_agent,
                 dtype=jnp.float32,
             ),
         ),
         aura_facts=AuraTransitionFacts(
-            jnp.asarray(
+            array(
                 aura.is_covered_by_mage_damage_aura_by_emitter_and_beneficiary,
                 dtype=jnp.bool_,
             ),
-            jnp.asarray(
+            array(
                 aura.is_covered_by_warrior_mitigation_aura_by_emitter_and_beneficiary,
                 dtype=jnp.bool_,
             ),
         ),
         status_lifecycle_facts=StatusLifecycleTransitionFacts(
-            jnp.asarray(
+            array(
                 lifecycle.aged_to_zero_by_recipient_and_status_channel,
                 dtype=jnp.bool_,
             ),
-            jnp.asarray(
+            array(
                 lifecycle.refreshed_or_extended_by_recipient_and_status_channel,
                 dtype=jnp.bool_,
             ),
-            jnp.asarray(
+            array(
                 lifecycle.broken_by_damage_by_recipient_and_status_channel,
                 dtype=jnp.bool_,
             ),
-            jnp.asarray(
+            array(
                 lifecycle.cleared_by_new_death_by_recipient_and_status_channel,
                 dtype=jnp.bool_,
             ),
         ),
         team_deathmatch_facts=TeamDeathmatchTransitionFacts(
-            outcome=jnp.asarray(team_deathmatch.outcome, dtype=jnp.int32),
+            outcome=array(team_deathmatch.outcome, dtype=jnp.int32),
         ),
     )
 
 
+reconstruct_transition_facts_v1 = _reconstruct_transition_facts
+
+
 __all__ = [
     "capture_evaluation_transition_unit_v1",
+    "capture_evaluation_transition_unit_v2",
     "capture_initial_evaluation_frame_v1",
+    "capture_initial_evaluation_frame_v2",
     "normalize_transition_facts_v1",
+    "reconstruct_env_state_v1",
+    "reconstruct_transition_facts_v1",
 ]
+
+
+def capture_initial_evaluation_frame_v1(
+    context: EvaluationEpisodeContext,
+    state: EnvState,
+    observation: Observation,
+    action_mask: ActionMask,
+    shared_obs_information_availability_by_recipient_and_sensor_source: (
+        object | None
+    ) = None,
+) -> EvaluationFrameV1:
+    """Capture historical artifact frame zero from simulator outputs.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact context V1 or V2 for historical frame V1.
+    state : EnvState
+        Unbatched EnvState at the captured decision epoch. Its simulator tick
+        may be nonzero.
+    observation : Observation
+        Matching unbatched Core Observation for all ten global slots.
+    action_mask : ActionMask
+        Matching unbatched Core ActionMask with boolean leaves.
+    shared_obs_information_availability_by_recipient_and_sensor_source : object | None
+        Optional
+        bool array shaped (10, 10), recipient then sensor source. Required for
+        SharedObs and omitted for NoSharedObs. Defaults to None.
+
+    Returns
+    -------
+    EvaluationFrameV1
+        Immutable frame V1 with artifact index zero and canonical episode/frame ID.
+
+    Raises
+    ------
+    TypeError
+        Core records or leaf dtypes are wrong after host transfer.
+    ValueError
+        Context version, shapes, feature values, class/roster mapping,
+        or information availability is inconsistent.
+
+    Notes
+    -----
+    Runs outside JIT and synchronizes a complete bundle through one device_get
+    call. It does not step or reset the environment. Legacy observations retain
+    historical Team ID features; current observations must use V2 capture.
+    """
+    if type(context) is EvaluationEpisodeContextV3:
+        raise ValueError("capture V1 requires matching episode context")
+    return cast(
+        EvaluationFrameV1,
+        _capture_initial_evaluation_frame(
+            context,
+            state,
+            observation,
+            action_mask,
+            shared_obs_information_availability_by_recipient_and_sensor_source,
+        ),
+    )
+
+
+def capture_initial_evaluation_frame_v2(
+    context: EvaluationEpisodeContext,
+    state: EnvState,
+    observation: Observation,
+    action_mask: ActionMask,
+    shared_obs_information_availability_by_recipient_and_sensor_source: (
+        object | None
+    ) = None,
+) -> EvaluationFrameV2:
+    """Capture current artifact frame zero from simulator outputs.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact context V3 for current frame V2.
+    state : EnvState
+        Unbatched EnvState at the captured decision epoch. Its simulator tick
+        may be nonzero.
+    observation : Observation
+        Matching unbatched Core Observation for all ten global slots.
+    action_mask : ActionMask
+        Matching unbatched Core ActionMask with boolean leaves.
+    shared_obs_information_availability_by_recipient_and_sensor_source : object | None
+        Optional
+        bool array shaped (10, 10), recipient then sensor source. Required for
+        SharedObs and omitted for NoSharedObs. Defaults to None.
+
+    Returns
+    -------
+    EvaluationFrameV2
+        Immutable frame V2 with artifact index zero and canonical episode/frame ID.
+
+    Raises
+    ------
+    TypeError
+        Core records or leaf dtypes are wrong after host transfer.
+    ValueError
+        Context version, shapes, feature values, class/roster mapping,
+        or information availability is inconsistent.
+
+    Notes
+    -----
+    Runs outside JIT and synchronizes a complete bundle through one device_get
+    call. It does not step or reset the environment. Full initial-frame/context
+    revalidation is performed by replay admission.
+    """
+    if type(context) is not EvaluationEpisodeContextV3:
+        raise ValueError("capture V2 requires matching episode context")
+    return cast(
+        EvaluationFrameV2,
+        _capture_initial_evaluation_frame(
+            context,
+            state,
+            observation,
+            action_mask,
+            shared_obs_information_availability_by_recipient_and_sensor_source,
+        ),
+    )
+
+
+def capture_evaluation_transition_unit_v1(
+    context: EvaluationEpisodeContext,
+    start_frame: EvaluationFrameV1,
+    successor_state: EnvState,
+    successor_observation: Observation,
+    successor_action_mask: ActionMask,
+    transition_facts: TransitionFacts,
+    canonical_reward: Reward,
+    done_flags: DoneFlags,
+    *,
+    successor_shared_obs_information_availability_by_recipient_and_sensor_source: (
+        object | None
+    ) = None,
+) -> tuple[EvaluationTransitionV1, EvaluationFrameV1]:
+    """Capture a transition and historical successor frame from simulator outputs.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact context V1 or V2 for frame V1.
+    start_frame : EvaluationFrameV1
+        Matching frame V1 already captured for the transition's decision epoch.
+    successor_state : EnvState
+        Unbatched EnvState after exactly one simulator tick.
+    successor_observation : Observation
+        Matching successor Core Observation for ten global slots.
+    successor_action_mask : ActionMask
+        Matching successor Core ActionMask.
+    transition_facts : TransitionFacts
+        Actual unbatched Core TransitionFacts from this step;
+        initialization facts are rejected.
+    canonical_reward : Reward
+        Unbatched Reward with ten finite float32 task rewards.
+    done_flags : DoneFlags
+        Scalar bool terminated and truncated flags from this same step.
+    successor_shared_obs_information_availability_by_recipient_and_sensor_source : Array
+        Optional successor bool array shaped (10, 10), recipient then sensor
+        source. Required for SharedObs, omitted for NoSharedObs; defaults to None.
+
+    Returns
+    -------
+    tuple[EvaluationTransitionV1, EvaluationFrameV1]
+        Pair of EvaluationTransitionV1 and EvaluationFrameV1. The transition uses
+        start_frame's artifact index and the successor uses the next index.
+
+    Raises
+    ------
+    TypeError
+        Core record types or leaf dtypes are wrong after host transfer.
+    ValueError
+        Versions, adjacency, facts, rewards, completion, event joins,
+        or successor information availability are inconsistent.
+
+    Notes
+    -----
+    One host device_get call handles the complete supplied output bundle.
+    start_frame is reused without transfer or mutation. This does not step the
+    simulator. Full strict-tree admission is also performed when building or
+    reading the complete replay; capture alone is not an artifact integrity audit.
+    """
+    if (
+        type(context) is EvaluationEpisodeContextV3
+        or type(start_frame) is not EvaluationFrameV1
+    ):
+        raise ValueError("capture V1 requires matching episode context and frame")
+    return cast(
+        tuple[EvaluationTransitionV1, EvaluationFrameV1],
+        _capture_evaluation_transition_unit(
+            context,
+            start_frame,
+            successor_state,
+            successor_observation,
+            successor_action_mask,
+            transition_facts,
+            canonical_reward,
+            done_flags,
+            successor_shared_obs_information_availability_by_recipient_and_sensor_source=successor_shared_obs_information_availability_by_recipient_and_sensor_source,
+        ),
+    )
+
+
+def capture_evaluation_transition_unit_v2(
+    context: EvaluationEpisodeContext,
+    start_frame: EvaluationFrameV2,
+    successor_state: EnvState,
+    successor_observation: Observation,
+    successor_action_mask: ActionMask,
+    transition_facts: TransitionFacts,
+    canonical_reward: Reward,
+    done_flags: DoneFlags,
+    *,
+    successor_shared_obs_information_availability_by_recipient_and_sensor_source: (
+        object | None
+    ) = None,
+) -> tuple[EvaluationTransitionV1, EvaluationFrameV2]:
+    """Capture a transition and current successor frame from simulator outputs.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact context V3 for frame V2.
+    start_frame : EvaluationFrameV2
+        Matching frame V2 already captured for the transition's decision epoch.
+    successor_state : EnvState
+        Unbatched EnvState after exactly one simulator tick.
+    successor_observation : Observation
+        Matching successor Core Observation for ten global slots.
+    successor_action_mask : ActionMask
+        Matching successor Core ActionMask.
+    transition_facts : TransitionFacts
+        Actual unbatched Core TransitionFacts from this step;
+        initialization facts are rejected.
+    canonical_reward : Reward
+        Unbatched Reward with ten finite float32 task rewards.
+    done_flags : DoneFlags
+        Scalar bool terminated and truncated flags from this same step.
+    successor_shared_obs_information_availability_by_recipient_and_sensor_source : Array
+        Optional successor bool array shaped (10, 10), recipient then sensor
+        source. Required for SharedObs, omitted for NoSharedObs; defaults to None.
+
+    Returns
+    -------
+    tuple[EvaluationTransitionV1, EvaluationFrameV2]
+        Pair of EvaluationTransitionV1 and EvaluationFrameV2. The transition uses
+        start_frame's artifact index and the successor uses the next index.
+
+    Raises
+    ------
+    TypeError
+        Core record types or leaf dtypes are wrong after host transfer.
+    ValueError
+        Versions, adjacency, facts, rewards, completion, event joins,
+        or successor information availability are inconsistent.
+
+    Notes
+    -----
+    One host device_get call handles the complete supplied output bundle.
+    start_frame is reused without transfer or mutation. This does not step the
+    simulator. Full strict-tree admission is also performed when building or
+    reading the complete replay; capture alone is not an artifact integrity audit.
+    """
+    if (
+        type(context) is not EvaluationEpisodeContextV3
+        or type(start_frame) is not EvaluationFrameV2
+    ):
+        raise ValueError("capture V2 requires matching episode context and frame")
+    return cast(
+        tuple[EvaluationTransitionV1, EvaluationFrameV2],
+        _capture_evaluation_transition_unit(
+            context,
+            start_frame,
+            successor_state,
+            successor_observation,
+            successor_action_mask,
+            transition_facts,
+            canonical_reward,
+            done_flags,
+            successor_shared_obs_information_availability_by_recipient_and_sensor_source=successor_shared_obs_information_availability_by_recipient_and_sensor_source,
+        ),
+    )

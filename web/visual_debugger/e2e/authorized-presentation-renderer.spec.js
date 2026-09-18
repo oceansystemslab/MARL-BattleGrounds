@@ -1,3 +1,7 @@
+/**
+ * @file Check real rendered authority boundaries, agent identity, range preferences
+ * and the debugger grid.
+ */
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -72,11 +76,9 @@ test.afterAll(async () => {
   });
 });
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {Record<string, any>} rawPresentation
- * @param {boolean} showRanges
- */
+ * @param {boolean} showRanges */
 async function renderPresentation(page, rawPresentation, showRanges) {
   await page.goto(origin);
   return await page.evaluate(
@@ -540,9 +542,7 @@ test("durable visual filters remove owned paint and restore stable battlefield i
         ".agent-dead-mark",
         ".agent-selection",
       ];
-      /**
-       * @param {{left: number, top: number, right: number, bottom: number}} bounds
-       */
+      /** @param {{left: number, top: number, right: number, bottom: number}} bounds */
       const protectedRectangleKey = ({ left, top, right, bottom }) =>
         [left, top, right, bottom].map((value) => value.toFixed(3)).join(",");
       const protectedKey = () =>
@@ -1115,8 +1115,17 @@ test("all three Agent leaves enrich visible status tooltips from researcher spac
       if (!localStatusRecipient) {
         throw new TypeError("Agent status recipient is unavailable.");
       }
-      const canonical = (/** @type {Record<string, any>} */ agent) =>
-        `Agent ID ${agent.public_agent_id} · ${agent.class_name} · Team ${agent.team_id === 1 ? "A" : "B"}`;
+      const canonical = (/** @type {Record<string, any>} */ agent) => {
+        const identity =
+          rawPresentation.researcher_space.identity_directory.identities.find(
+            (/** @type {Record<string, any>} */ row) =>
+              row.public_agent_id === agent.public_agent_id,
+          );
+        if (!identity)
+          throw new Error("Tooltip identity is absent from the recorded directory.");
+        const slot = (identity.team_id - 1) * 5 + identity.team_local_slot;
+        return `Agent ID ${slot} · ${agent.class_name} · Team ${agent.team_id === 1 ? "A" : "B"}`;
+      };
       const producerSelectors = {
         durable: ".status-cell[data-tooltip-owner]",
         overflow: ".status-overflow[data-tooltip-owner]",
@@ -1358,7 +1367,7 @@ test("Oracle aura attribution remains exact in the tooltip and absent from aura 
   expect(result.auraMarkup.join("\n")).not.toContain("data-source-presentation-key");
   const sourceIndex = result.labels.indexOf("Source");
   expect(sourceIndex).toBeGreaterThanOrEqual(0);
-  expect(result.values[sourceIndex]).toBe("Agent ID agent-slot-0 · Mage · Team A");
+  expect(result.values[sourceIndex]).toBe("Agent ID 0 · Mage · Team A");
 });
 
 test("incoming choreography paints presentation-key metadata and no slots", async ({
@@ -2990,8 +2999,7 @@ test("authorized multi-application status paints one route-free lifecycle", asyn
   ]);
   expect(result.tooltipRows).toContainEqual({
     label: "Sources",
-    value:
-      "Agent ID agent-slot-0 · Mage · Team A; Agent ID agent-slot-2 · Priest · Team A",
+    value: "Agent ID 0 · Mage · Team A; Agent ID 2 · Priest · Team A",
   });
 });
 
@@ -3304,13 +3312,13 @@ test("remote cooldown placement preserves the canonical badge in the shared rend
   expect(result.remoteDetails.ticks).toBe("29");
   expect(result.remoteDetails.tokenId).toBe("mage_burst");
   expect(result.remoteDetails.className).toBe("mage");
-  expect(result.remoteDetails.ownerLabel).toBe("Agent ID agent-slot-0");
+  expect(result.remoteDetails.ownerLabel).toBe("Agent ID 0");
   expect(result.remoteDetails.ariaLabel).toContain("29 ticks remaining");
   expect(result.remoteDetails.ariaLabel).toContain(result.remoteDetails.ownerLabel);
   expect(result.remoteDetails.tabIndex).toBe("0");
   expect(result.remoteDetails.tooltipHidden).toBe(false);
   expect(result.remoteDetails.tooltipTitle).toContain("Cooldown");
   expect(result.remoteDetails.tooltipTitle).toContain(result.remoteDetails.ownerLabel);
-  expect(result.remoteDetails.tooltipDetails).toContain("29 Ticks");
+  expect(result.remoteDetails.tooltipDetails).toContain("29 ticks");
   expect(result.restored).toEqual(result.ordinary);
 });

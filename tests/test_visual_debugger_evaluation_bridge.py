@@ -1,4 +1,4 @@
-"""Truthful debugger launch/context bridge contracts."""
+"""Check the recorded context created when the debugger starts an episode."""
 
 from __future__ import annotations
 
@@ -25,14 +25,14 @@ from scripts.dev.visual_debugger.scenarios import get_scenario
 
 from marl_battlegrounds.core.env import initialize_scenario_state
 from marl_battlegrounds.evaluation.capture import (
-    capture_initial_evaluation_frame_v1,
+    capture_initial_evaluation_frame_v2,
 )
 from marl_battlegrounds.evaluation.models import (
-    REQUIRED_SCHEMA_BINDINGS_V1,
-    AssignedPolicySlotV1,
+    REQUIRED_SCHEMA_BINDINGS_V3,
+    AssignedPolicySlotV2,
     CodeRevisionV1,
     ContentAddressedIdentityV1,
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContextV3,
     ExecutionInformationMode,
     NotApplicablePolicySlotV1,
     canonical_json_bytes,
@@ -71,7 +71,7 @@ def _context(
     team_b_controller: TeamBController = "manual",
     execution_information_mode: ExecutionInformationMode | None = None,
     scenario_name: str = "arena_5v5",
-) -> EvaluationEpisodeContextV1:
+) -> EvaluationEpisodeContextV3:
     scenario = get_scenario(scenario_name)
     config, _state = scenario.build_scenario()
     return build_debugger_evaluation_context_v1(
@@ -171,7 +171,7 @@ def test_context_is_custom_debug_no_shared_and_keeps_exact_cp2_bindings() -> Non
     )
     assert (
         tuple((row.schema_id, row.schema_version) for row in context.schema_versions)
-        == REQUIRED_SCHEMA_BINDINGS_V1
+        == REQUIRED_SCHEMA_BINDINGS_V3
     )
     assert tuple(row.name for row in context.aggregation_keys) == tuple(
         sorted(row.name for row in context.aggregation_keys)
@@ -179,6 +179,7 @@ def test_context_is_custom_debug_no_shared_and_keeps_exact_cp2_bindings() -> Non
     assert dict((row.name, row.value) for row in context.aggregation_keys) == {
         "action_source": "manual",
         "information_regime": "no_shared_obs",
+        "map_origin": "custom",
         "scenario": "arena_5v5",
         "scenario_kind": "custom",
         "team_a_controller": "manual",
@@ -195,7 +196,7 @@ def test_mixed_action_source_assigns_manual_team_a_and_reactive_tdm_team_b() -> 
     assigned = tuple(
         row
         for row in context.policy_assignments
-        if isinstance(row, AssignedPolicySlotV1)
+        if isinstance(row, AssignedPolicySlotV2)
     )
     inactive = tuple(
         row
@@ -307,7 +308,7 @@ def test_interactive_controller_pairs_have_truthful_per_slot_provenance(
     assigned = tuple(
         row
         for row in context.policy_assignments
-        if isinstance(row, AssignedPolicySlotV1)
+        if isinstance(row, AssignedPolicySlotV2)
     )
     aggregation = {row.name: row.value for row in context.aggregation_keys}
 
@@ -365,7 +366,7 @@ def test_interactive_v4_and_fixed_frame_v1_recording_contracts_are_truthful() ->
         team_b_controller="manual",
     )
     manual_context = _context()
-    policy_execution_included = debugger_recording._context_policy_execution_included  # pyright: ignore[reportPrivateUsage]
+    policy_execution_included = debugger_recording.recording_policy_execution_included  # pyright: ignore[reportPrivateUsage]
     assert policy_execution_included(random_context)
     assert not policy_execution_included(manual_context)
     fixed_frame_payload = evaluation_bridge._action_source_contract_payload(  # pyright: ignore[reportPrivateUsage]
@@ -447,7 +448,7 @@ def test_only_scenario_5_adds_v5_execution_and_keeps_distinct_controller_identit
         team_b_controller="scenario_5",
         action_source_kind="mixed" if team_a == "manual" else "policy",
     )
-    assert debugger_recording._context_policy_execution_included(context)  # pyright: ignore[reportPrivateUsage]
+    assert debugger_recording.recording_policy_execution_included(context)  # pyright: ignore[reportPrivateUsage]
     assert {row.name: row.value for row in context.aggregation_keys}[
         "pressure_protocol"
     ] == "scenario-5-pressure-controller@4"
@@ -556,8 +557,8 @@ def test_context_identities_join_config_scenario_action_code_and_generation() ->
     assert first.identity.scenario != other.identity.scenario
     first_policy = first.policy_assignments[0]
     manual_policy = manual.policy_assignments[0]
-    assert isinstance(first_policy, AssignedPolicySlotV1)
-    assert isinstance(manual_policy, AssignedPolicySlotV1)
+    assert isinstance(first_policy, AssignedPolicySlotV2)
+    assert isinstance(manual_policy, AssignedPolicySlotV2)
     assert first_policy.policy_content_digest != manual_policy.policy_content_digest
 
 
@@ -590,8 +591,8 @@ def test_information_mode_changes_projection_and_identity_but_not_named_seeds() 
     assert shared.actor_projection.identifier == (
         "base-observation-plus-authorized-sensor-source-bank"
     )
-    assert shared.actor_projection.version == 1
-    assert no_shared.actor_projection.version == 2
+    assert shared.actor_projection.version == 2
+    assert no_shared.actor_projection.version == 3
     assert shared.identity.episode_id != no_shared.identity.episode_id
     assert shared.identity.evaluation_id != no_shared.identity.evaluation_id
     assert shared.seed_protocol == no_shared.seed_protocol
@@ -656,7 +657,7 @@ def test_context_captures_the_authored_initial_frame_through_public_cp2_api() ->
         config,
     )
 
-    frame = capture_initial_evaluation_frame_v1(
+    frame = capture_initial_evaluation_frame_v2(
         context,
         state,
         observation,

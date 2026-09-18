@@ -1,11 +1,11 @@
-"""Versioned loopback protocol models for the live visual debugger.
+"""Define strict HTTP commands and live debugger response models.
 
-Command and request roots are strict Pydantic-validated inbound contracts. Live
-frame response roots are outbound typed envelopes over exact renderer
-dataclasses: they are serialized once for the browser's strict V2 normalizer,
-not accepted as replay or artifact input. Canonical replay/artifact loaders
-independently validate their evaluation-record inputs before the renderer
-adapters construct these outbound Scene/Event projections.
+The server parses incoming commands and validates outgoing audience-specific
+frames with these immutable models. Researcher frames may carry global slot
+identities; actor views use authorized public identities and their action axes.
+Validators keep frame/transition IDs, pending drafts, action acceptance and
+recording progress on the same decision epoch. Model construction performs checks
+only; command execution, simulator steps and file writes belong to services.
 """
 
 from typing import Annotated, Literal, Self
@@ -144,12 +144,22 @@ class _ModifiedInputV1(_ProtocolModel):
 
 
 class KeyboardCommandV1(_ModifiedInputV1):
+    """One browser key event with its modifier and repeat state.
+
+    The input dispatcher interprets the key against the current mode and focus.
+    """
+
     command_type: Literal["keyboard"] = "keyboard"
     key: _KeyName
     repeat: bool = False
 
 
 class BattlefieldPointerCommandV1(_ModifiedInputV1):
+    """One primary or secondary pointer event at finite map-space x/y coordinates.
+
+    Modifier keys travel with the event; host hit testing decides its meaning.
+    """
+
     command_type: Literal["battlefield_pointer"] = "battlefield_pointer"
     world_x: _FiniteFloat
     world_y: _FiniteFloat
@@ -157,6 +167,8 @@ class BattlefieldPointerCommandV1(_ModifiedInputV1):
 
 
 class RosterSelectionCommandV1(_ProtocolModel):
+    """Select a global roster slot for control or targeting in the researcher view."""
+
     command_type: Literal["roster_selection"] = "roster_selection"
     role: Literal["control", "target"]
     global_slot: _GlobalSlot
@@ -170,20 +182,28 @@ class ActorPovTargetActionCommandV1(_ProtocolModel):
 
 
 class ScenarioSwitchCommandV1(_ProtocolModel):
+    """Request a registered scenario by its stable launcher name."""
+
     command_type: Literal["scenario_switch"] = "scenario_switch"
     scenario_name: _ScenarioName
 
 
 class ResetCommandV1(_ProtocolModel):
+    """Request a fresh endpoint for the currently loaded scenario."""
+
     command_type: Literal["reset"] = "reset"
 
 
 class SetViewCommandV1(_ProtocolModel):
+    """Switch the displayed audience between researcher and authorized actor view."""
+
     command_type: Literal["set_view"] = "set_view"
     view_mode: ViewMode
 
 
 class SetPresetCommandV1(_ProtocolModel):
+    """Select a presentation preset while accepting historical compatibility names."""
+
     command_type: Literal["set_preset"] = "set_preset"
     preset: Preset
 
@@ -193,6 +213,7 @@ class SetPresetCommandV1(_ProtocolModel):
         cls,
         value: object,
     ) -> object:
+        """Map supported legacy preset names to the current Analysis presentation."""
         return (
             "analysis"
             if value in ("presentation", "analysis", "technical", "debug")
@@ -209,6 +230,9 @@ class CombatConfigurationV1(_ProtocolModel):
 
     @model_validator(mode="after")
     def _validate_reactive_controller_mode(self) -> Self:
+        """Require SharedObs when either selected controller needs that input
+        contract.
+        """
         if (
             any(
                 controller in ("reactive_tdm", "scenario_5")
@@ -221,26 +245,44 @@ class CombatConfigurationV1(_ProtocolModel):
 
 
 class SetCombatConfigurationCommandV1(CombatConfigurationV1):
+    """Request new team controllers and execution information mode for a replacement
+    episode.
+    """
+
     command_type: Literal["set_combat_configuration"] = "set_combat_configuration"
 
 
 class ExitCommandV1(_ProtocolModel):
+    """Request that the local product close through its normal lifecycle checks."""
+
     command_type: Literal["exit"] = "exit"
 
 
 class FinishAndReviewCommandV1(_ProtocolModel):
+    """Request recording finalization, saving and transition to replay review."""
+
     command_type: Literal["finish_and_review"] = "finish_and_review"
 
 
 class ReviewReplayCommandV1(_ProtocolModel):
+    """Open the already prepared saved replay for review when lifecycle rules permit."""
+
     command_type: Literal["review_replay"] = "review_replay"
 
 
 class RetrySaveCommandV1(_ProtocolModel):
+    """Retry publication of retained recording data after a persistence failure."""
+
     command_type: Literal["retry_save"] = "retry_save"
 
 
 class SaveAsCommandV1(_ProtocolModel):
+    """Request a new replay filename inside the existing allowed recording directory.
+
+    The value is a filename, not an arbitrary path, and must end in
+    ``.marlbg-replay.json``. Destination checks remain owned by persistence.
+    """
+
     command_type: Literal["save_as"] = "save_as"
     file_name: Annotated[
         str,
@@ -259,6 +301,10 @@ type RecordingReplacementCommandV1 = Annotated[
 
 
 class ConfirmDiscardAndReplaceCommandV1(_ProtocolModel):
+    """Explicitly confirm dropping the current recording before a replacement
+    command.
+    """
+
     command_type: Literal["confirm_discard_and_replace"] = "confirm_discard_and_replace"
     replacement: RecordingReplacementCommandV1
 
@@ -284,6 +330,13 @@ type DebuggerCommandV1 = Annotated[
 
 
 class CommandRequestV1(_ProtocolModel):
+    """One versioned live command with client identity, command ID and expected
+    revision.
+
+    The service uses IDs for retries and base_revision to reject stale edits.
+    This model validates structure; it does not itself execute or deduplicate.
+    """
+
     schema_version: Literal[1] = PROTOCOL_SCHEMA_VERSION
     client_id: _OpaqueId
     command_id: _OpaqueId
@@ -292,11 +345,20 @@ class CommandRequestV1(_ProtocolModel):
 
 
 class TargetReferenceV1(_ProtocolModel):
+    """A researcher-view target reference with explicit disclosure state.
+
+    Only public references include a global slot. Target-none and redacted values
+    must omit the slot so missing authorization cannot be mistaken for a target.
+    """
+
     disclosure: TargetDisclosure
     global_slot: _GlobalSlot | None = None
 
     @model_validator(mode="after")
     def _validate_disclosure(self) -> Self:
+        """Require a slot for public targets and omit it for every nonpublic
+        disclosure kind.
+        """
         if self.disclosure == "public":
             if self.global_slot is None:
                 raise ValueError("public target references require global_slot.")
@@ -308,6 +370,10 @@ class TargetReferenceV1(_ProtocolModel):
 
 
 class ActionTupleCardV1(_ProtocolModel):
+    """Readable submitted or accepted action with its target disclosure and exact
+    categories.
+    """
+
     move_action: int
     target_action: int | None
     use_ultimate_action: int
@@ -316,6 +382,9 @@ class ActionTupleCardV1(_ProtocolModel):
 
     @model_validator(mode="after")
     def _validate_target_action_disclosure(self) -> Self:
+        """Keep public, target-none, redacted and invalid target-action
+        representations distinct.
+        """
         if self.target.disclosure == "public":
             if self.target_action is None or self.target_action <= 0:
                 raise ValueError(
@@ -333,6 +402,12 @@ class ActionTupleCardV1(_ProtocolModel):
 
 
 class PendingActionCardV1(_ProtocolModel):
+    """One researcher-authorized editable or playback-only action row.
+
+    Records movement, target, selected Basic/Ultimate lane and exact current mask
+    values. Redacted targets omit both the target action and pair-mask value.
+    """
+
     label: Literal[
         "PENDING / WILL SUBMIT",
         "PLAYBACK / INSPECTION ONLY",
@@ -349,6 +424,9 @@ class PendingActionCardV1(_ProtocolModel):
 
     @model_validator(mode="after")
     def _validate_pending_disclosure(self) -> Self:
+        """Require valid pending target disclosure and omit unauthorized pair-mask
+        values.
+        """
         if self.target.disclosure == "public":
             if self.target_action is None or self.target_action <= 0:
                 raise ValueError(
@@ -370,6 +448,10 @@ class PendingActionCardV1(_ProtocolModel):
 
 
 class ActorActionResultV1(_ProtocolModel):
+    """Compare one actor's recorded submitted and accepted actions with rejection
+    facts.
+    """
+
     actor_global_slot: _GlobalSlot
     submitted: ActionTupleCardV1
     accepted: ActionTupleCardV1
@@ -385,6 +467,10 @@ class ActorActionResultV1(_ProtocolModel):
 
 
 class LatestTransitionCardV1(_ProtocolModel):
+    """Historical latest-action result using the original numeric transition
+    identity.
+    """
+
     label: Literal["LATEST ACCEPTED RESULT"] = "LATEST ACCEPTED RESULT"
     transition_id: _NonNegativeInt
     submission_kind: Literal["interactive", "scripted"]
@@ -392,6 +478,8 @@ class LatestTransitionCardV1(_ProtocolModel):
 
 
 class LatestTransitionCardV2(_ProtocolModel):
+    """Latest-action result using a canonical transition ID and zero-based index."""
+
     label: Literal["LATEST ACCEPTED RESULT"] = "LATEST ACCEPTED RESULT"
     transition_index: _NonNegativeInt
     transition_id: _CanonicalScientificId
@@ -400,6 +488,10 @@ class LatestTransitionCardV2(_ProtocolModel):
 
 
 class DiagnosticFactV1(_ProtocolModel):
+    """One labeled diagnostic value with a stable ID and optional technical-only
+    flag.
+    """
+
     fact_id: _OpaqueId
     label: str
     value: str
@@ -418,6 +510,9 @@ class CandidateLegalityCardV1(_ProtocolModel):
 
     @model_validator(mode="after")
     def _validate_target(self) -> Self:
+        """Keep target-none semantics distinct from Basic availability and preserve
+        lane-one truth.
+        """
         if self.target_action == 0:
             if self.target.disclosure != "target_none":
                 raise ValueError("target action zero requires a target-none reference.")
@@ -445,6 +540,13 @@ class MovementLegalityCardV1(_ProtocolModel):
 
 
 class HudFrameV1(_ProtocolModel):
+    """Historical researcher control panel with roster, draft, masks and latest
+    result.
+
+    Pending rows must match the declared submission scope; all public slot references
+    join the authorized roster and legality rows use canonical action order.
+    """
+
     roster_global_slots: tuple[_GlobalSlot, ...]
     controlled_global_slot: _GlobalSlot
     selected_global_slot: _GlobalSlot | None
@@ -458,6 +560,9 @@ class HudFrameV1(_ProtocolModel):
 
     @model_validator(mode="after")
     def _validate_slot_references(self) -> Self:
+        """Join roster, selection, pending rows, mask axes and latest results without
+        duplicates.
+        """
         if len(self.roster_global_slots) != len(set(self.roster_global_slots)):
             raise ValueError("roster_global_slots must be unique.")
         roster = set(self.roster_global_slots)
@@ -580,6 +685,9 @@ class ResearcherHudFrameV2(_ProtocolModel):
 
     @model_validator(mode="after")
     def _validate_researcher_hud(self) -> Self:
+        """Preserve the historical HUD checks with canonical latest-transition
+        identities.
+        """
         HudFrameV1(
             roster_global_slots=self.roster_global_slots,
             controlled_global_slot=self.controlled_global_slot,
@@ -620,6 +728,9 @@ class ActorPovTargetReferenceV1(_ProtocolModel):
 
     @model_validator(mode="after")
     def _validate_target(self) -> Self:
+        """Require public identity only for a valid positive actor-relative target
+        action.
+        """
         in_domain = 0 <= self.target_action < NUM_TARGET_ACTIONS
         if not in_domain:
             if self.public_agent_id is not None:
@@ -633,6 +744,10 @@ class ActorPovTargetReferenceV1(_ProtocolModel):
 
 
 class ActorPovActionTupleCardV1(_ProtocolModel):
+    """One actor-safe action tuple with its authorized target reference and readable
+    summary.
+    """
+
     move_action: int
     target: ActorPovTargetReferenceV1
     use_ultimate_action: int
@@ -640,6 +755,12 @@ class ActorPovActionTupleCardV1(_ProtocolModel):
 
 
 class ActorPovPendingActionCardV1(_ProtocolModel):
+    """The selected actor's draft or playback action, using only public actor identity.
+
+    Movement and Basic/Ultimate pair-mask values describe the current action choice.
+    No global target slot is disclosed through this row.
+    """
+
     label: Literal[
         "PENDING / WILL SUBMIT",
         "PLAYBACK / INSPECTION ONLY",
@@ -655,6 +776,12 @@ class ActorPovPendingActionCardV1(_ProtocolModel):
 
 
 class ActorPovActionResultV1(_ProtocolModel):
+    """One actor's recorded action acceptance and explicit rejection facts.
+
+    Submitted and accepted tuples stay separate. Outcome labels must agree with
+    recorded movement and combat-pair rejection flags.
+    """
+
     actor_public_agent_id: _CanonicalScientificId
     submitted: ActorPovActionTupleCardV1
     accepted: ActorPovActionTupleCardV1
@@ -666,6 +793,9 @@ class ActorPovActionResultV1(_ProtocolModel):
 
     @model_validator(mode="after")
     def _validate_outcomes(self) -> Self:
+        """Require readable movement/combat results to match the recorded rejection
+        flags.
+        """
         expected_movement = not (
             self.submitted_tuple_is_out_of_domain or self.movement_rejected
         )
@@ -692,6 +822,10 @@ class ActorPovActionResultV1(_ProtocolModel):
 
 
 class ActorPovLatestTransitionCardV1(_ProtocolModel):
+    """The selected actor's latest result joined by its authorized transition
+    identity.
+    """
+
     label: Literal["LATEST ACCEPTED RESULT"] = "LATEST ACCEPTED RESULT"
     transition_index: _NonNegativeInt
     pov_transition_id: _CanonicalScientificId
@@ -700,6 +834,8 @@ class ActorPovLatestTransitionCardV1(_ProtocolModel):
 
 
 class ActorPovCandidateLegalityCardV1(_ProtocolModel):
+    """Basic/Ultimate availability for one authorized actor-relative target category."""
+
     target: ActorPovTargetReferenceV1
     lane_0_available: bool
     lane_1_available: bool
@@ -708,6 +844,9 @@ class ActorPovCandidateLegalityCardV1(_ProtocolModel):
 
     @model_validator(mode="after")
     def _validate_availability(self) -> Self:
+        """Exclude target-none from Basic use and preserve the exact Ultimate lane
+        mask.
+        """
         expected_basic = self.target.target_action > 0 and self.lane_0_available
         if self.basic_available != expected_basic:
             raise ValueError("POV Basic availability must exclude target-none.")
@@ -729,6 +868,9 @@ class ActorPovHudFrameV1(_ProtocolModel):
 
     @model_validator(mode="after")
     def _validate_actor_hud(self) -> Self:
+        """Join pending/latest rows to the controlled actor and require complete
+        canonical mask axes.
+        """
         if self.pending_action.actor_public_agent_id != self.controlled_public_agent_id:
             raise ValueError("POV pending action must belong to the controlled actor.")
         if self.latest_transition is not None and (
@@ -748,6 +890,10 @@ class ActorPovHudFrameV1(_ProtocolModel):
 
 
 class ScenarioOptionV1(_ProtocolModel):
+    """A discoverable scenario name, display text, playback mode and audience
+    category.
+    """
+
     name: _ScenarioName
     title: str
     description: str
@@ -756,6 +902,12 @@ class ScenarioOptionV1(_ProtocolModel):
 
 
 class ScenarioMetadataV1(ScenarioOptionV1):
+    """Current scenario playback cursor and fixed product movement setting.
+
+    Next-frame index, label and description appear together. Interactive scenarios
+    have no scripted cursor; completed counts cannot exceed the script length.
+    """
+
     ordinary_movement_distance_scale: _PositiveUnitFloat
     completed_frame_count: _NonNegativeInt
     frame_count: _NonNegativeInt
@@ -766,6 +918,7 @@ class ScenarioMetadataV1(ScenarioOptionV1):
 
     @model_validator(mode="after")
     def _validate_frame_cursor(self) -> Self:
+        """Keep script counts, next-frame metadata and completion flags consistent."""
         if self.ordinary_movement_distance_scale != 1.0:
             raise ValueError("live product movement scale must remain exactly 1.0.")
         if self.completed_frame_count > self.frame_count:
@@ -799,6 +952,8 @@ class ScenarioMetadataV1(ScenarioOptionV1):
 
 
 class TerminalStateV1(_ProtocolModel):
+    """Historical terminal flags with a matching terminated or truncated reason."""
+
     is_terminal: bool
     terminated: bool
     truncated: bool
@@ -806,6 +961,9 @@ class TerminalStateV1(_ProtocolModel):
 
     @model_validator(mode="after")
     def _validate_terminal_reason(self) -> Self:
+        """Require terminal flags and the optional reason to describe the same
+        endpoint.
+        """
         expected = (
             "terminated" if self.terminated else "truncated" if self.truncated else None
         )
@@ -815,6 +973,12 @@ class TerminalStateV1(_ProtocolModel):
 
 
 class TerminalStateV2(_ProtocolModel):
+    """Current sealed-endpoint state including the declared recording horizon.
+
+    Termination, truncation and horizon exhaustion are reported distinctly; the
+    selected reason must agree with the endpoint flags.
+    """
+
     is_sealed: bool
     terminated: bool
     truncated: bool
@@ -823,6 +987,9 @@ class TerminalStateV2(_ProtocolModel):
 
     @model_validator(mode="after")
     def _validate_terminal_reason(self) -> Self:
+        """Match the sealed flag and reason to termination, truncation or declared
+        horizon.
+        """
         expected = (
             "terminated"
             if self.terminated
@@ -862,6 +1029,9 @@ class RecordingStatusV1(_ProtocolModel):
 
     @model_validator(mode="after")
     def _validate_recording_lifecycle(self) -> Self:
+        """Require truthful recording counts, completion, action availability and
+        error exposure.
+        """
         if self.captured_transition_count > self.expected_transition_count:
             raise ValueError("recording progress cannot exceed the declared horizon.")
         finalized = self.lifecycle in (
@@ -930,6 +1100,9 @@ class _LiveDebuggerEnvelopeV2(_ProtocolModel):
 
     @model_validator(mode="after")
     def _validate_common_epoch(self) -> Self:
+        """Keep the canonical frame identity and recording count on the current live
+        epoch.
+        """
         if self.frame_id != f"{self.episode_id}:frame:{self.frame_index}":
             raise ValueError("live frame ID must remain canonical.")
         if (
@@ -956,6 +1129,9 @@ class ResearcherLiveDebuggerFrameV2(_LiveDebuggerEnvelopeV2):
 
     @model_validator(mode="after")
     def _validate_researcher_frame(self) -> Self:
+        """Join global projection, HUD, selection and incoming transition to one live
+        endpoint.
+        """
         if (self.incoming_transition_id is None) != (
             self.incoming_transition_index is None
         ):
@@ -1018,6 +1194,9 @@ class ActorPovLiveDebuggerFrameV2(_LiveDebuggerEnvelopeV2):
 
     @model_validator(mode="after")
     def _validate_pov_frame(self) -> Self:
+        """Join actor projection, HUD and latest-result identity to the same live
+        recipient endpoint.
+        """
         scene = self.projection.scene
         expected_pov_transition_id = (
             None
@@ -1061,6 +1240,9 @@ class SharedObsAgentPovLiveDebuggerFrameV2(_LiveDebuggerEnvelopeV2):
 
     @model_validator(mode="after")
     def _validate_shared_obs_frame(self) -> Self:
+        """Require canonical recipient frame and incoming-transition IDs for this
+        shared view.
+        """
         prefix = (
             f"{self.episode_id}:shared-obs-visual-union:"
             f"{self.recipient_public_agent_id}"
@@ -1087,6 +1269,10 @@ type LiveDebuggerFrame = (
 
 
 class CommandResponseV2(_ProtocolModel):
+    """A live command result with the latest validated audience-specific frame and
+    optional notice.
+    """
+
     schema_version: Literal[2] = 2
     result: CommandResult
     frame: Annotated[LiveDebuggerFrame, Field(discriminator="frame_kind")]
@@ -1094,6 +1280,8 @@ class CommandResponseV2(_ProtocolModel):
 
 
 class ApiErrorV2(_ProtocolModel):
+    """A stable live API error with a message and optional current authorized frame."""
+
     schema_version: Literal[2] = 2
     error_code: ApiErrorCode
     message: str

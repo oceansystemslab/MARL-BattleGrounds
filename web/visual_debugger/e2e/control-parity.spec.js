@@ -1,3 +1,7 @@
+/**
+ * @file Check pointer/keyboard draft submission and rapid input against exactly one
+ * real successor transition.
+ */
 import { expect, test } from "@playwright/test";
 
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
@@ -33,21 +37,14 @@ test.afterAll(async () => {
   await stopDebugger(child);
 });
 
-/**
- * @param {import("@playwright/test").Page} page
- * @returns {Promise<number>}
- */
+/** @param {import("@playwright/test").Page} page
+ * @returns {Promise<number>} */
 async function currentStep(page) {
   return Number(await page.locator("#step-value").textContent());
 }
 
-/**
- * Read the exact currently installed authorized presentation from the real
- * loopback service. This does not bypass the browser capability boundary.
- *
- * @param {import("@playwright/test").Page} page
- * @returns {Promise<Record<string, any>>}
- */
+/** @param {import("@playwright/test").Page} page
+ * @returns {Promise<Record<string, any>>} */
 async function currentAuthorizedPresentation(page) {
   return page.evaluate(async () => {
     const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
@@ -69,12 +66,8 @@ async function currentAuthorizedPresentation(page) {
   });
 }
 
-/**
- * Wait for one ordinary live command and its complete presentation successor.
- *
- * @param {import("@playwright/test").Page} page
- * @param {() => Promise<unknown>} activate
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {() => Promise<unknown>} activate */
 async function activateLiveCommand(page, activate) {
   const response = page.waitForResponse(
     (candidate) =>
@@ -91,10 +84,8 @@ async function activateLiveCommand(page, activate) {
   await expect(page.locator("#battlefield-empty")).toBeHidden();
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {number} publicAgentId
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {number} publicAgentId */
 async function controlLiveAgent(page, publicAgentId) {
   await activateLiveCommand(page, () =>
     page
@@ -109,10 +100,8 @@ async function controlLiveAgent(page, publicAgentId) {
   );
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {number} publicAgentId
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {number} publicAgentId */
 async function liveTargetOption(page, publicAgentId) {
   const option = page
     .locator("#command-target-select option")
@@ -126,12 +115,7 @@ async function liveTargetOption(page, publicAgentId) {
   return { option, text, value };
 }
 
-/**
- * Return one global live-researcher roster actor that the current Agent POV
- * battlefield does not expose. Fog must not be encoded into the roster DOM.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function liveRosterActorOutsideBattlefield(page) {
   const publicId = (/** @type {string | null} */ label) =>
     label?.match(/Agent ID ([^,.]+)/u)?.[1] ?? null;
@@ -160,12 +144,7 @@ async function liveRosterActorOutsideBattlefield(page) {
   return rosterActors.nth(index);
 }
 
-/**
- * Hold exactly one real authorized-presentation response after the browser has
- * synchronously crossed into pending authority.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function holdNextPresentation(page) {
   let markHeld = () => {};
   let releaseResponse = () => {};
@@ -201,11 +180,9 @@ async function holdNextPresentation(page) {
   };
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} selector
- * @param {boolean} open
- */
+ * @param {boolean} open */
 async function setDisclosureOpen(page, selector, open) {
   const disclosure = page.locator(selector);
   if ((await disclosure.getAttribute("open")) !== (open ? "" : null)) {
@@ -218,9 +195,7 @@ async function setDisclosureOpen(page, selector, open) {
   }
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function expectExactDisclosureDefaults(page) {
   await expect(page.locator("#command-deck")).toHaveAttribute("open", "");
   await expect(page.locator("#roster-details")).toHaveAttribute("open", "");
@@ -234,10 +209,8 @@ async function expectExactDisclosureDefaults(page) {
   }
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @returns {Promise<Readonly<Record<string, boolean>>>}
- */
+/** @param {import("@playwright/test").Page} page
+ * @returns {Promise<Readonly<Record<string, boolean>>>} */
 async function disclosureOpenState(page) {
   /** @type {Record<string, boolean>} */
   const result = {};
@@ -247,11 +220,9 @@ async function disclosureOpenState(page) {
   return Object.freeze(result);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} previousPresentationKey
- * @param {Readonly<Record<string, boolean>>} expectedDisclosureOpen
- */
+ * @param {Readonly<Record<string, boolean>>} expectedDisclosureOpen */
 async function expectRetainedDisclosureAuthority(
   page,
   previousPresentationKey,
@@ -1084,7 +1055,6 @@ test("Agent keyboard battlefield activation rebinds focus to the authorized succ
 test("post-Charge Agent history stays installable through a reciprocal Charge", async ({
   page,
 }) => {
-  test.setTimeout(300_000);
   /** @type {Record<string, any>[]} */
   const commandRequests = [];
   /** @type {{path: string, status: number}[]} */

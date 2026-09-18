@@ -1,4 +1,4 @@
-"""Focused semantic proofs for Milestone 5 basic target legality."""
+"""Check which targets are legal for Basic abilities."""
 # pyright: reportPrivateUsage=false
 
 from typing import Literal, cast
@@ -52,7 +52,6 @@ _ENEMY_TARGET_START = 1 + MAX_AGENTS_PER_TEAM
 
 
 def _requested_roster(actor_class_id: int) -> Array:
-    """Return a fixed roster with one actor, ally, and enemy candidate."""
     roster = jnp.full((MAX_AGENT_SLOTS,), NEUTRAL_CLASS_ID, dtype=jnp.int32)
     roster = roster.at[_ACTOR_SLOT].set(actor_class_id)
     roster = roster.at[_ALLY_SLOT].set(MAGE_CLASS_ID)
@@ -61,7 +60,6 @@ def _requested_roster(actor_class_id: int) -> Array:
 
 
 def _stay_action() -> Action:
-    """Return a slot-aligned joint action that preserves scenario geometry."""
     return Action(
         move=jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32),
         select_target=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
@@ -70,13 +68,11 @@ def _stay_action() -> Action:
 
 
 def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
-    """Return the action mask paired with an explicitly built test state."""
     _, action_mask = _build_observation_and_action_mask(state, config)
     return action_mask
 
 
 def _target_scenario(actor_class_id: int = MAGE_CLASS_ID) -> tuple[EnvConfig, EnvState]:
-    """Build a clear-LOS 2v1 scenario with every candidate inside basic range."""
     profile = resolve_agent_profile(
         _requested_roster(actor_class_id),
         jnp.asarray((2, 1), dtype=jnp.int32),
@@ -125,7 +121,6 @@ def _target_scenario(actor_class_id: int = MAGE_CLASS_ID) -> tuple[EnvConfig, En
 def _step_scenario(
     config: EnvConfig, state: EnvState
 ) -> tuple[EnvState, Observation, ActionMask]:
-    """Advance one inert tick and return the public target-mask surfaces."""
     next_state, observation, _, _, action_mask, _ = step(
         config,
         state,
@@ -140,7 +135,6 @@ def _assert_public_target_contract(
     observation: Observation,
     action_mask: ActionMask,
 ) -> None:
-    """Assert perception and basic-legality surfaces remain separately owned."""
     assert "ally_targetability_mask" not in Observation._fields
     assert "enemy_targetability_mask" not in Observation._fields
     assert observation.ally_visibility_mask.shape == (
@@ -174,7 +168,6 @@ def _assert_public_target_contract(
 
 
 def _basic_relation_masks(action_mask: ActionMask) -> tuple[Array, Array]:
-    """Return ally/enemy slices from the authoritative no-ultimate lane."""
     basic_lane = action_mask.select_target_use_ultimate_joint_mask[..., 0]
     return (
         basic_lane[:, _ALLY_TARGET_START : _ALLY_TARGET_START + MAX_AGENTS_PER_TEAM],
@@ -192,7 +185,6 @@ def _basic_relation_masks(action_mask: ActionMask) -> tuple[Array, Array]:
 def test_spawn_shield_source_allows_every_move_and_only_neutral_combat(
     shielded_source_slot: int,
 ) -> None:
-    """A shielded source retains all movement and exactly one inert combat pair."""
     config, state = _target_scenario()
     shielded_state = state._replace(
         spawn_shield_durations=state.spawn_shield_durations.at[
@@ -256,7 +248,6 @@ def test_spawn_shield_removes_candidates_from_authoritative_combat_masks(
     shielded_candidate_slot: int,
     target_action: int,
 ) -> None:
-    """Exclude shielded ally and enemy recipients from the shared joint mask."""
     config, state = _target_scenario(actor_class_id)
     _, control_mask = _build_observation_and_action_mask(state, config)
     shielded_state = state._replace(
@@ -310,7 +301,6 @@ def test_basic_targetability_matches_actor_capability(
     expects_ally_targets: bool,
     expects_enemy_targets: bool,
 ) -> None:
-    """Prove the complete ally/enemy relation contract for each actor class."""
     config, state = _target_scenario(actor_class_id)
     _, observation, action_mask = _step_scenario(config, state)
 
@@ -354,7 +344,6 @@ def test_basic_targetability_matches_actor_capability(
 def test_actor_stun_disables_nonempty_targets_but_preserves_none(
     active_stun_channels: tuple[int, ...],
 ) -> None:
-    """Prove every stun source removes actor control but preserves target-none."""
     config, state = _target_scenario()
     stun_maxima = (
         combat.WARRIOR_CHARGE_STUN_DURATION_TICKS,
@@ -400,7 +389,6 @@ def test_actor_stun_disables_nonempty_targets_but_preserves_none(
 def test_candidate_stun_does_not_change_targetability(
     candidate_stun_channel: int,
 ) -> None:
-    """Prove stun is an actor-control predicate, not a candidate predicate."""
     config, state = _target_scenario()
     _, control_action_mask = _build_observation_and_action_mask(state, config)
     stun_maxima = (
@@ -452,7 +440,6 @@ def test_candidate_stun_does_not_change_targetability(
 def test_actor_stun_changes_only_control_and_exposed_stun_features(
     actor_class_id: int,
 ) -> None:
-    """Prove stun preserves perception while its public status columns update."""
     config, state = _target_scenario(actor_class_id)
     _, control_observation, control_action_mask = _step_scenario(config, state)
     stunned_state = state._replace(
@@ -521,7 +508,6 @@ def test_actor_stun_changes_only_control_and_exposed_stun_features(
 def test_priest_targetability_is_independent_of_ally_health(
     candidate_health_fraction: float,
 ) -> None:
-    """Prove health magnitude does not determine basic target legality."""
     config, state = _target_scenario(PRIEST_CLASS_ID)
     candidate_health = (
         config.agent_profile.max_health[_ALLY_SLOT] * candidate_health_fraction
@@ -566,7 +552,6 @@ UnrelatedStateCase = Literal[
 def test_unrelated_combat_state_does_not_change_basic_targetability(
     unrelated_state_case: UnrelatedStateCase,
 ) -> None:
-    """Prove unrelated cooldown and status fields do not enter basic legality."""
     config, state = _target_scenario()
     _, control_action_mask = _build_observation_and_action_mask(state, config)
 
@@ -641,7 +626,6 @@ def test_inactive_or_dead_actor_exposes_only_target_none(
     actor_active: bool,
     actor_alive: bool,
 ) -> None:
-    """Prove nonacting actors expose target-none without enabling unit targets."""
     config, state = _target_scenario()
     # The inactive case deliberately mutates only the identity gates so this
     # low-level mask test can isolate redaction behavior. It is not an
@@ -675,7 +659,6 @@ def test_inactive_or_dead_actor_exposes_only_target_none(
 
 
 def test_no_team_slots_never_form_basic_target_relations() -> None:
-    """Prove matching NO_TEAM_ID values do not constitute an ally relation."""
     config, state = _target_scenario(PRIEST_CLASS_ID)
     no_team_ids = config.agent_profile.team_ids.at[_ACTOR_SLOT].set(NO_TEAM_ID)
     no_team_ids = no_team_ids.at[_ALLY_SLOT].set(NO_TEAM_ID)
@@ -697,7 +680,6 @@ def test_no_team_slots_never_form_basic_target_relations() -> None:
 
 
 def test_jitted_step_matches_eager_class_and_stun_targetability() -> None:
-    """Prove compiled target masks match eager class and actor-stun semantics."""
     config, state = _target_scenario()
     state = state._replace(
         stun_durations=state.stun_durations.at[

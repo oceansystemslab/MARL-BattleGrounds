@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+
+# Launch the DevClient from this checkout, from any working directory.
+# Usage: scripts/dev/run_dev_client.sh --help. Forward all arguments to
+# scripts/dev/debug_renderer.py. A literal --static argument asks uv to include
+# the viz extra. Requires uv; uv may install/sync dependencies. The Python entry
+# point owns server, file and rendering effects. Missing project/entrypoint files
+# exit 2; missing uv exits 127. exec passes the Python process's final status back.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"

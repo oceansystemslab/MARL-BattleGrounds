@@ -1,3 +1,11 @@
+/**
+ * @file Build tooltip and inspector descriptions from authorized display records.
+ * These pure builders copy quantities from their inputs and use shared
+ * display vocabulary. They do not calculate simulator outcomes, grant
+ * information access or validate an entire presentation. Callers must pass
+ * records from the appropriate normalized audience and perform required
+ * joins. Missing facts stay unavailable; descriptor IDs are internal keys.
+ */
 import {
   canonicalAgentIdentity,
   exactAuthorizedAgentIdentityV1,
@@ -36,7 +44,28 @@ const FULL_ONLY = Object.freeze({ compact: false, full: true });
 const TECHNICAL_FACT_HELP = Object.freeze({
   episode: Object.freeze({
     title: "Episode",
-    summary: "Identifies the authorized live episode represented by this frame.",
+    summary: "Identifies the recorded episode represented by this frame.",
+  }),
+  task_mode: Object.freeze({
+    title: "Task Mode",
+    summary: "The task whose rules govern this episode.",
+  }),
+  map: Object.freeze({
+    title: "Map",
+    summary: "The recorded technical map name. Its split is shown only when recorded.",
+  }),
+  observation_mode: Object.freeze({
+    title: "Observation Mode",
+    summary: "The policy observation mode used when this episode was recorded.",
+  }),
+  episode_limit: Object.freeze({
+    title: "Episode Limit",
+    summary: "The maximum number of transitions planned for this episode.",
+  }),
+  seeds: Object.freeze({
+    title: "Seeds",
+    summary:
+      "The recorded root seed and episode stream coordinate identify the random streams. Unknown means the value was not recorded.",
   }),
   artifact_digest_prefix: Object.freeze({
     title: "Artifact Digest Prefix",
@@ -76,10 +105,59 @@ const TECHNICAL_FACT_HELP = Object.freeze({
 export { canonicalAgentIdentity } from "./agent-identity.js";
 
 /**
- * Return finite help for one installed operational or Technical Frame fact.
- * Values stay on their owning visible nodes; this descriptor contains only
- * durable explanatory copy and therefore cannot disclose a hidden completion
- * reason, processing error, path, or transport generation.
+ * Build a descriptor for a normalized grouped death event. event supplies
+ * eventId, label and members with title, killingTeamId and contributor rows.
+ * Preserve recorded contributor order; null contributors remain explicitly
+ * unavailable for historical evidence. Return a semantic descriptor without
+ * assigning final-hit credit or changing the event. Caller owns authorization.
+ *
+ * @param {JsonRecord} event
+ */
+export function explainDeathAnnouncement(event) {
+  return createSemanticDescriptor({
+    kind: "event",
+    id: `death-announcement:${event.eventId}`,
+    title: event.label,
+    tone: "information",
+    accent: "none",
+    summary:
+      "Kill contributors include direct damage and useful same-tick Priest healing of a damaging contributor. Credit is shared; it does not identify one final hitter.",
+    rows: [],
+    sections: event.members.map((/** @type {JsonRecord} */ member) => ({
+      title: member.title,
+      summary: "This agent died on the incoming transition.",
+      rows: [
+        {
+          label: "Killing Team",
+          value:
+            member.killingTeamId === null
+              ? "Unavailable"
+              : `Team ${member.killingTeamId === 1 ? "A" : "B"}`,
+          metadata: COMPACT_AND_FULL,
+        },
+        {
+          label: "Kill Contributors",
+          value:
+            member.contributors === null
+              ? "Unavailable — not recorded in this historical evidence."
+              : member.contributors
+                  .map((/** @type {JsonRecord} */ contributor) => contributor.title)
+                  .join("; "),
+          metadata: COMPACT_AND_FULL,
+        },
+      ],
+      metadata: COMPACT_AND_FULL,
+    })),
+    metadata: COMPACT_AND_FULL,
+    anchor: "pointer",
+  });
+}
+
+/**
+ * Return a help descriptor for one recognized Technical Frame factId.
+ * Throw RangeError for an unknown/nonstring ID. The descriptor contains help
+ * only; it does not include a current value, processing error, hidden outcome
+ * or source path. Its visible fact node owns the actual recorded value.
  *
  * @param {unknown} factId
  */
@@ -104,15 +182,22 @@ export function explainTechnicalFact(factId) {
   });
 }
 
-/** @param {unknown} value @returns {value is JsonRecord} */
+/**
+ * Return whether value is a non-null non-array object. This shallow check
+ * accepts class instances and does not validate fields or block accessors.
+ *
+ * @param {unknown} value @returns {value is JsonRecord}
+ */
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
- * Snapshot only named own enumerable data properties. Accessors are treated as
- * unavailable, and a hostile Proxy fails closed without exposing a trap error
- * to the tooltip or inspector consumer.
+ * Copy only keys' own enumerable data values into a frozen record.
+ * Missing, accessor-backed or nonenumerable fields become undefined. Return
+ * null for nonobjects, arrays or reflection errors; extra fields are ignored.
+ * Children remain references. Proxy traps may run during reflection, but
+ * their thrown errors are caught rather than shown in the interface.
  *
  * @param {unknown} value
  * @param {readonly string[]} keys
@@ -144,9 +229,11 @@ function snapshotOwnDataFields(value, keys) {
 }
 
 /**
- * Snapshot one exact plain-data record without invoking accessors. This is the
- * fail-closed boundary for mechanics discriminators: missing, extra, symbolic,
- * inherited, accessor-backed, and hostile Proxy fields are all unavailable.
+ * Copy a plain record with exactly keys into a frozen record, or return
+ * null when its shape cannot be trusted. Require Object.prototype/null,
+ * no symbols or extra keys and enumerable own data fields. Catch reflection
+ * errors and never read accessor values. Child values remain references;
+ * this does not validate their types or prevent Proxy traps from executing.
  *
  * @param {unknown} value
  * @param {readonly string[]} keys
@@ -182,22 +269,44 @@ function snapshotExactOwnDataFields(value, keys) {
   }
 }
 
-/** @param {unknown} value */
+/**
+ * Return a finite numeric value unchanged, otherwise null. Do not coerce
+ * strings or booleans, round values or enforce a scientific range.
+ *
+ * @param {unknown} value
+ */
 function finiteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-/** @param {unknown} value */
+/**
+ * Return value when Number.isInteger accepts it, otherwise null. This
+ * is not a safe-integer or nonnegative check; callers enforce those bounds
+ * when their contract requires them.
+ *
+ * @param {unknown} value
+ */
 function integer(value) {
   return Number.isInteger(value) ? Number(value) : null;
 }
 
-/** @param {unknown} value */
+/**
+ * Return a trimmed nonempty string, otherwise null. This does not parse
+ * markup, validate authority or limit length.
+ *
+ * @param {unknown} value
+ */
 function text(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-/** @param {unknown} value */
+/**
+ * Turn a nonempty identifier into display words by replacing underscores
+ * and capitalizing word starts. Return Unknown for invalid/empty input.
+ * This is display formatting, not a semantic catalog lookup.
+ *
+ * @param {unknown} value
+ */
 function humanize(value) {
   return (
     text(value)
@@ -206,37 +315,60 @@ function humanize(value) {
   );
 }
 
-/** @param {unknown} value */
-function publicAgentLabel(value) {
-  const identity = text(value);
-  return identity === null ? "Agent ID unavailable" : `Agent ID ${identity}`;
-}
-
-/** @param {unknown} value */
+/**
+ * Return the title from a complete exact authorized identity, or null.
+ * Delegate identity checks to exactAuthorizedAgentIdentityV1; never infer a
+ * public identity from a global slot or a partial record.
+ *
+ * @param {unknown} value
+ */
 function authorizedAgentIdentityTitle(value) {
   return exactAuthorizedAgentIdentityV1(value)?.title ?? null;
 }
 
-/** @param {unknown} value */
+/**
+ * Trim string value and add a final period unless it already ends in
+ * ., ! or ?. Return null for invalid/empty input. No semantic rewriting occurs.
+ *
+ * @param {unknown} value
+ */
 function sentence(value) {
   const copy = text(value);
   if (copy === null) return null;
   return /[.!?]$/u.test(copy) ? copy : `${copy}.`;
 }
 
-/** @param {unknown} value */
+/**
+ * Format finite numeric value with the shared display formatter; return
+ * Unavailable otherwise. The display may round; the source number is unchanged.
+ *
+ * @param {unknown} value
+ */
 function exactNumber(value) {
   const number = finiteNumber(value);
   return number === null ? "Unavailable" : formatDisplayNumber(number);
 }
 
-/** @param {unknown} value */
+/**
+ * Format an integer as N tick/ticks, using singular only for 1. Return
+ * Unavailable for a noninteger. This does not reject negative counts or
+ * convert seconds to simulator ticks.
+ *
+ * @param {unknown} value
+ */
 function tickCount(value) {
   const count = integer(value);
-  return count === null ? "Unavailable" : `${count} ${count === 1 ? "Tick" : "Ticks"}`;
+  return count === null ? "Unavailable" : `${count} ${count === 1 ? "tick" : "ticks"}`;
 }
 
-/** @param {JsonRecord} record */
+/**
+ * Build an internal descriptor key from presentation_key, then integer
+ * global_slot, then public_agent_id, falling back to unknown. It does not
+ * prove identity or authorization. Never display this internal key as a
+ * public agent label.
+ *
+ * @param {JsonRecord} record
+ */
 function semanticIdentity(record) {
   return (
     text(record.presentation_key) ??
@@ -249,9 +381,10 @@ function semanticIdentity(record) {
 }
 
 /**
- * Join one scientific record to one complete authorized scene identity using
- * only its opaque presentation key and public ID. Slots, class guesses, DOM
- * order, and raw-object fallback identity are deliberately excluded.
+ * Return owner's complete identity only when reference's prefixed
+ * presentation_key and public_agent_id both match it exactly. prefix is
+ * empty, source_ or owner_. Return null for incomplete/mismatched identities
+ * or unreadable fields. Do not fall back to slots, class names or DOM order.
  *
  * @param {unknown} reference
  * @param {unknown} owner
@@ -275,7 +408,13 @@ function exactJoinedAuthorizedIdentity(reference, owner, prefix) {
   return identity;
 }
 
-/** @param {unknown} value */
+/**
+ * Format a two-element array of finite coordinates as (x, y), otherwise
+ * return Unavailable. Use the shared number formatter; units and authorized
+ * coordinate space are the caller's responsibility.
+ *
+ * @param {unknown} value
+ */
 function point(value) {
   return Array.isArray(value) &&
     value.length === 2 &&
@@ -284,7 +423,14 @@ function point(value) {
     : "Unavailable";
 }
 
-/** @param {unknown} multiplier */
+/**
+ * Format a finite multiplier as its signed percent change from 1.
+ * Use a plus sign for an increase and a minus sign for a decrease. Return
+ * Unavailable for other inputs. This converts a recorded multiplier for
+ * display without calculating the underlying effect.
+ *
+ * @param {unknown} multiplier
+ */
 function multiplierPercent(multiplier) {
   const exact = finiteNumber(multiplier);
   if (exact === null) {
@@ -296,9 +442,10 @@ function multiplierPercent(multiplier) {
 }
 
 /**
- * Convert one exact wire multiplier into aura-purpose copy. The presentation
- * registry supplies only the qualitative damage channel; every quantity here
- * comes from the normalized field or aggregate modifier.
+ * Describe multiplier using presentation.effectKind's damage channel.
+ * scope=field adds per-emitter wording; recipient describes the aggregate.
+ * Unknown channels use generic recorded-change text and nonfinite values
+ * produce Effect unavailable. Return text only; no aura overlap is calculated.
  *
  * @param {{effectKind: string}} presentation
  * @param {unknown} multiplier
@@ -321,9 +468,11 @@ function auraEffectPresentation(presentation, multiplier, scope) {
 }
 
 /**
- * Translate one wire-authored status magnitude into researcher-readable copy.
- * This is a display conversion of the recorded scalar, never a catalog lookup
- * or browser-owned tuning value.
+ * Convert recorded magnitude to one labelled display row, or null for
+ * missing/none kind or nonfinite magnitude. Recognize movement, healing and
+ * damage multipliers plus movement floors; other named kinds use a generic
+ * numeric row. Return a plain label/value object without looking up tuning
+ * values or validating the input's permitted scientific range.
  *
  * @param {unknown} magnitudeKind
  * @param {unknown} magnitude
@@ -375,6 +524,10 @@ function statusMagnitudePresentation(magnitudeKind, magnitude) {
 }
 
 /**
+ * Create a label/value row, converting value with String. metadata defaults
+ * to visibility in compact and full views and is retained by reference.
+ * Return a plain record; final descriptor construction owns normalization.
+ *
  * @param {string} label
  * @param {unknown} value
  * @param {{compact: boolean, full: boolean}} [metadata]
@@ -384,6 +537,10 @@ function row(label, value, metadata = COMPACT_AND_FULL) {
 }
 
 /**
+ * Create a section with title and rows, optional null summary and
+ * full-only metadata by default. Preserve references; do not render DOM or
+ * validate row contents here.
+ *
  * @param {string} title
  * @param {Array<ReturnType<typeof row>>} rows
  * @param {string | null} [summary]
@@ -394,6 +551,12 @@ function section(title, rows, summary = null, metadata = FULL_ONLY) {
 }
 
 /**
+ * Create a normalized semantic descriptor from rows and optional sections.
+ * sections defaults to [], options to {}; defaults are neutral tone, no
+ * accent and element anchoring. Mark the descriptor visible in compact/full
+ * views; each row/section keeps its own visibility rules. Delegate final
+ * normalization to createSemanticDescriptor and return its frozen result.
+ *
  * @param {string} kind
  * @param {string} id
  * @param {string} title
@@ -418,6 +581,14 @@ function descriptor(kind, id, title, summary, rows, sections = [], options = {})
 }
 
 /**
+ * Describe current health, speed, Ultimate cooldown and combat countdown
+ * from an authorized agent record. Missing fields display Unavailable.
+ * selection defaults to {}; only audience=agent_pov selects the restricted
+ * field route, while other selection flags do not change this card. Return
+ * a descriptor without reading simulator state or modifying inputs. Caller
+ * must supply the correct audience; this helper is not a privacy filter for
+ * arbitrary researcher records.
+ *
  * @param {unknown} rawAgent
  * @param {{controlled?: boolean, selected?: boolean, reference?: boolean, inspected?: boolean, audience?: string}} [selection]
  * @returns {SemanticDescriptor}
@@ -482,8 +653,10 @@ export function explainAgent(rawAgent, selection = {}) {
 }
 
 /**
- * Build an agent card through a recipient-authorized field whitelist. Passing
- * researcher mechanics or arbitrary extra fields cannot affect the result.
+ * Build an agent card from the permitted identity/current-state fields.
+ * Ignore _selection (default {}) and unrelated fields. Delegate formatting
+ * to explainAgent using a reduced record. Return a descriptor; this field
+ * projection does not itself prove the input was authorized for a recipient.
  *
  * @param {unknown} rawAgent
  * @param {Record<string, unknown>} [_selection]
@@ -494,6 +667,7 @@ export function explainPovAgent(rawAgent, _selection = {}) {
   const reduced = {
     presentation_key: input.presentation_key,
     public_agent_id: input.public_agent_id,
+    display_agent_id: input.display_agent_id,
     team_id: input.team_id,
     class_id: input.class_id,
     current_health: input.current_health,
@@ -523,6 +697,12 @@ const SPAWN_SHIELD_V2_KEYS = Object.freeze([
 const SPAWN_SHIELD_UNAVAILABLE_KEYS = Object.freeze(["availability_kind"]);
 
 /**
+ * Recognize exact available V1, available_v2 or unavailable Spawn Shield
+ * records. Require nonnegative safe duration and positive finite speed; V2
+ * also requires each declared categorical effect. Return a frozen kind/values
+ * record, using unavailable with null values for malformed inputs. This
+ * checks the serialized mechanics contract, not a live Core configuration.
+ *
  * @param {unknown} rawMechanics
  * @returns {Readonly<{kind: "v1" | "v2" | "unavailable", values: Readonly<Record<string, unknown>> | null}>}
  */
@@ -575,9 +755,13 @@ function exactSpawnShieldMechanics(rawMechanics) {
 }
 
 /**
- * Build the single mechanics-discriminated Spawn Shield view consumed by the
- * renderer. V2 alone unlocks categorical semantics; V1 carries only recorded
- * numeric/current facts, and unavailable or malformed mechanics fail closed.
+ * Build Spawn Shield badge state, accessible labels and a descriptor.
+ * Use rawAgent's exact identity and nonnegative integer remaining duration.
+ * Missing/invalid duration yields inactive/0 for badge control but remains
+ * Unavailable in the descriptor. Exact V1 mechanics adds numeric fields;
+ * V2 also permits categorical effects. Invalid mechanics does not invent
+ * those effects. Return a frozen view without modifying inputs or applying
+ * shield logic. A positive recorded duration alone determines active.
  *
  * @param {unknown} rawAgent
  * @param {unknown} rawMechanics
@@ -653,10 +837,9 @@ export function createSpawnShieldView(rawAgent, rawMechanics) {
 }
 
 /**
- * Return Spawn Shield's categorical status copy only when the installed
- * mechanics variant authorizes those semantics. Historical V1 presentations
- * intentionally carry numeric/current facts only, so their durable badge and
- * lifecycle effect both fail closed to a row-only explanation.
+ * Return Spawn Shield's categorical summary only for a valid exact V2
+ * mechanics record. Return null for V1, unavailable or malformed records.
+ * Historical numeric-only evidence does not acquire today's categorical text.
  *
  * @param {unknown} rawMechanics
  * @returns {string | null}
@@ -669,6 +852,10 @@ export function spawnShieldStatusSummary(rawMechanics) {
 }
 
 /**
+ * Return only the descriptor from createSpawnShieldView. rawAgent provides
+ * current duration/identity; omitted or invalid rawMechanics leaves configured
+ * effects unavailable. No shield state is created or changed.
+ *
  * @param {unknown} rawAgent
  * @param {unknown} [rawMechanics]
  * @returns {SemanticDescriptor}
@@ -677,25 +864,45 @@ export function explainSpawnShield(rawAgent, rawMechanics) {
   return createSpawnShieldView(rawAgent, rawMechanics).descriptor;
 }
 
-/** @param {unknown} value */
+/**
+ * Return formatted finite numeric value, or null. Null means an authored
+ * guide lacks a required value; do not interpolate the word Unavailable.
+ *
+ * @param {unknown} value
+ */
 function formattedMechanicNumber(value) {
   const exact = finiteNumber(value);
   return exact === null ? null : formatDisplayNumber(exact);
 }
 
-/** @param {string} prefix @param {unknown} value */
+/**
+ * Prefix a formatted finite value with prefix, or return null when value
+ * is unavailable. This builds prose only and leaves numeric data unchanged.
+ *
+ * @param {string} prefix @param {unknown} value
+ */
 function prefixedMechanicNumber(prefix, value) {
   const formatted = formattedMechanicNumber(value);
   return formatted === null ? null : `${prefix}${formatted}`;
 }
 
-/** @param {unknown} value */
+/**
+ * Format integer value in ticks, or return null. This does not enforce
+ * nonnegative/safe bounds; validated mechanics must supply those guarantees.
+ *
+ * @param {unknown} value
+ */
 function formattedMechanicTicks(value) {
   const exact = integer(value);
   return exact === null ? null : tickCount(exact);
 }
 
 /**
+ * Return the sole record in rawItems whose field exactly equals expected.
+ * Require an array entirely made of non-null non-array objects. Return null
+ * for invalid input, no match or duplicates. The matched object is shared;
+ * this helper does not validate the remaining fields.
+ *
  * @param {unknown} rawItems
  * @param {string} field
  * @param {string} expected
@@ -708,6 +915,12 @@ function exactNestedMechanic(rawItems, field, expected) {
 }
 
 /**
+ * Describe the sole matching statusId when its magnitude_kind exactly
+ * matches magnitudeKind and its magnitude is finite. Support damage,
+ * movement and healing multipliers plus movement floors. Return null for
+ * missing, ambiguous, mismatched or unsupported mechanics. All values come
+ * from the supplied authorized mechanics bank.
+ *
  * @param {JsonRecord} mechanics
  * @param {string} statusId
  * @param {string} magnitudeKind
@@ -720,7 +933,7 @@ function formattedStatusMechanicEffect(mechanics, statusId, magnitudeKind) {
   const difference = `${formatDisplayNumber(Math.abs(1 - magnitude) * 100)}%`;
   const multiplier = `×${formatDisplayNumber(magnitude)}`;
   if (magnitudeKind === "damage_multiplier") {
-    return `a factor of ${formatDisplayNumber(magnitude)} (${difference} ${magnitude >= 1 ? "more" : "less"} damage dealt)`;
+    return `a ${difference} ${magnitude >= 1 ? "increase" : "reduction"} (${multiplier})`;
   }
   if (magnitudeKind === "movement_multiplier") {
     return `a ${difference} movement ${magnitude <= 1 ? "reduction" : "increase"} (${multiplier})`;
@@ -729,12 +942,16 @@ function formattedStatusMechanicEffect(mechanics, statusId, magnitudeKind) {
     return `a ${difference} ${magnitude <= 1 ? "reduction" : "increase"} (${multiplier})`;
   }
   if (magnitudeKind === "movement_floor") {
-    return `a floor of ${formatDisplayNumber(magnitude * 100)}% of base movement speed (${multiplier})`;
+    return `${formatDisplayNumber(magnitude * 100)}% of base movement speed (${multiplier})`;
   }
   return null;
 }
 
 /**
+ * Format duration_steps for the sole matching statusId, or return null
+ * when the status or integer duration is unavailable. Preserve the recorded
+ * duration rather than looking up a browser-side default.
+ *
  * @param {JsonRecord} mechanics
  * @param {string} statusId
  */
@@ -744,6 +961,9 @@ function formattedStatusMechanicDuration(mechanics, statusId) {
 }
 
 /**
+ * Return the sole auraId match in mechanics.aura_mechanics through
+ * exactNestedMechanic, or null. No copy or aura-effect calculation occurs.
+ *
  * @param {JsonRecord} mechanics
  * @param {string} auraId
  */
@@ -752,6 +972,11 @@ function exactAuraMechanic(mechanics, auraId) {
 }
 
 /**
+ * Convert a finite per-emitter multiplier into authored-guide wording.
+ * Damage-dealt channels allow increases/reductions; damage-received supports
+ * a multiplier at most 1. Return null for unsupported/missing values so the
+ * guide cannot silently invent an effect.
+ *
  * @param {{effectKind: string}} presentation
  * @param {unknown} multiplier
  */
@@ -760,18 +985,20 @@ function formattedAuraDocumentationEffect(presentation, multiplier) {
   if (exact === null) return null;
   const difference = `${formatDisplayNumber(Math.abs(1 - exact) * 100)}%`;
   if (presentation.effectKind === "damage_dealt") {
-    return `a ${difference} outgoing-damage ${exact >= 1 ? "increase" : "reduction"} per recorded emitter`;
+    return `a ${difference} damage ${exact >= 1 ? "bonus" : "reduction"}`;
   }
   if (presentation.effectKind === "damage_received") {
-    return `a ${difference} incoming-damage ${exact <= 1 ? "reduction" : "increase"} per recorded emitter`;
+    return exact <= 1 ? difference : null;
   }
   return null;
 }
 
 /**
- * Build only the named, preformatted values consumed by one certified authored
- * guide. Missing nested mechanics remain null and can never become an
- * `Unavailable` interpolation.
+ * Build the named formatted values needed by the supplied class's guide.
+ * Use recorded Ultimate, status and aura mechanics for classes 1–5. Return
+ * a plain string map, or null if class/required values are missing, ambiguous
+ * or format as unavailable. This prepares substitutions only; the shared
+ * profile resolver decides whether that authored guide applies.
  *
  * @param {JsonRecord} mechanics
  * @returns {Record<string, string> | null}
@@ -852,7 +1079,9 @@ function classDocumentationValueMap(mechanics) {
       ],
       [
         "damageMitigationFloor",
-        aura === null ? null : formattedMechanicNumber(aura.clamp_value),
+        aura === null || finiteNumber(aura.clamp_value) === null
+          ? null
+          : `${formatDisplayNumber(aura.clamp_value * 100)}%`,
       ],
     ];
   } else if (classId === 3) {
@@ -906,13 +1135,7 @@ function classDocumentationValueMap(mechanics) {
         "poisonAntiHealDuration",
         formattedStatusMechanicDuration(mechanics, "rogue_poison_anti_heal"),
       ],
-      [
-        "baseMovementSpeed",
-        prefixedMechanicNumber(
-          "base movement speed of ",
-          mechanics.base_movement_speed,
-        ),
-      ],
+      ["baseMovementSpeed", formattedMechanicNumber(mechanics.base_movement_speed)],
       ["outOfCombatDelay", formattedMechanicTicks(mechanics.out_of_combat_delay_steps)],
     ];
   } else if (classId === 5) {
@@ -950,9 +1173,11 @@ function classDocumentationValueMap(mechanics) {
 }
 
 /**
- * Resolve the authored guide from one authorized V2 class-mechanics record.
- * Both the persistent class card and transient Ultimate explanation use this
- * exact path so their authored copy and core-derived values cannot drift.
+ * Resolve a guide only for V2 mechanics with a recognized matching class
+ * ID/name and an accepted documentation profile. Require exactly its named
+ * formatted values, then delegate to resolveClassDocumentationV1. Return
+ * the resolved guide or null. Persistent class cards and Ultimate cards use
+ * this same authority; this does not validate an entire wire presentation.
  *
  * @param {JsonRecord} mechanics
  */
@@ -987,7 +1212,9 @@ function resolvedAuthorizedClassDocumentationV1(mechanics) {
 }
 
 /**
- * Return the exact Ultimate copy used by Comprehensive Agent Class Details.
+ * Return the resolved Ultimate name/description for a valid supported
+ * V2 class-mechanics guide, otherwise null. Reuse the exact class-card guide
+ * resolver; no live cooldown or action availability is inferred.
  *
  * @param {unknown} rawClassMechanics
  * @returns {Readonly<{name: string, description: string}> | null}
@@ -998,6 +1225,13 @@ export function authorizedUltimatePresentationV1(rawClassMechanics) {
 }
 
 /**
+ * Build full-view rows from a recognized class's complete numeric mechanics.
+ * Require matching class name, finite quantities, integer tick fields and
+ * known Basic/Ultimate target modes; return null if any required field is
+ * missing. Return base rows for health, radii, movement, Basic and regeneration.
+ * The caller appends Ultimate/passive rows. This is a display completeness
+ * check, not validation of every legal simulator parameter range.
+ *
  * @param {JsonRecord} mechanics
  * @returns {Array<ReturnType<typeof row>> | null}
  */
@@ -1055,16 +1289,16 @@ function documentationMechanicsRows(mechanics) {
     row("Basic Ability Radius", basicRadius, FULL_ONLY),
   ];
   if (/** @type {number} */ (basicDamage) > 0) {
-    rows.push(row("Basic Raw Damage", basicDamage, FULL_ONLY));
+    rows.push(row("Base Basic Damage", basicDamage, FULL_ONLY));
   }
   if (/** @type {number} */ (basicHealing) > 0) {
-    rows.push(row("Basic Raw Healing", basicHealing, FULL_ONLY));
+    rows.push(row("Base Basic Healing", basicHealing, FULL_ONLY));
   }
   rows.push(
     row("Out-of-Combat Delay", outOfCombatDelay, FULL_ONLY),
     row(
       "Out-of-Combat Regeneration",
-      `${formatDisplayNumber(/** @type {number} */ (regeneration) * 100)}% of maximum health per Tick`,
+      `${formatDisplayNumber(/** @type {number} */ (regeneration) * 100)}% of maximum health per tick`,
       FULL_ONLY,
     ),
   );
@@ -1072,9 +1306,12 @@ function documentationMechanicsRows(mechanics) {
 }
 
 /**
- * Build the persistent class-documentation card from one exact owner/mechanics
- * join. Current agent state is deliberately unreachable. V1 and unavailable
- * profiles retain payload mechanics but receive no current authored copy.
+ * Build a persistent class card from matching owner and class mechanics.
+ * Require a public ID, recognized team/class names and complete mechanics.
+ * Return null for invalid joins or an explicit unsupported mechanics version.
+ * V2 with an accepted profile adds authored overview, tactical and ability
+ * text; historical version-absent records keep numeric mechanics only.
+ * Return a descriptor using no current health/status fields and change no input.
  *
  * @param {unknown} rawOwner
  * @param {unknown} rawClassMechanics
@@ -1126,12 +1363,12 @@ export function explainClassDocumentation(rawOwner, rawClassMechanics) {
   );
   if (/** @type {number} */ (finiteNumber(mechanics.ultimate_raw_damage)) > 0) {
     completeMechanicsRows.push(
-      row("Ultimate Raw Damage", mechanics.ultimate_raw_damage, FULL_ONLY),
+      row("Base Ultimate Damage", mechanics.ultimate_raw_damage, FULL_ONLY),
     );
   }
   if (/** @type {number} */ (finiteNumber(mechanics.ultimate_raw_healing)) > 0) {
     completeMechanicsRows.push(
-      row("Ultimate Raw Healing", mechanics.ultimate_raw_healing, FULL_ONLY),
+      row("Base Ultimate Healing", mechanics.ultimate_raw_healing, FULL_ONLY),
     );
   }
   if (authored !== null) {
@@ -1166,9 +1403,12 @@ export function explainClassDocumentation(rawOwner, rawClassMechanics) {
 }
 
 /**
- * Shared durable-status card. Audience changes only B3 source disclosure; the
- * configured duration, remaining duration, magnitude, and trap break fact are
- * copied from the same authorized status record.
+ * Build a status descriptor from authorized status, recipient and sources.
+ * Copy configured/remaining durations and matching magnitude values. Add the
+ * positive-raw-damage break rule only when both catalog semantics and record
+ * permit it. audience controls direct-source disclosure through the shared
+ * attribution helper; in_combat has no source row. Return a descriptor; this
+ * does not apply a status or prove upstream audience authorization.
  *
  * @param {unknown} rawStatus
  * @param {unknown} rawRecipient
@@ -1234,6 +1474,11 @@ function explainDurableStatus(rawStatus, rawRecipient, rawSourceAgents, audience
 }
 
 /**
+ * Describe an authorized recipient status without direct-source attribution.
+ * rawRecipient defaults to {}. Reuse the same recorded duration/magnitude
+ * path as researcher cards, with agent_pov and an empty source list. Return
+ * a descriptor; caller supplies recipient-authorized status data.
+ *
  * @param {unknown} rawStatus
  * @param {unknown} [rawRecipient]
  */
@@ -1242,6 +1487,11 @@ export function explainPovStatus(rawStatus, rawRecipient = {}) {
 }
 
 /**
+ * Describe an authorized status for researcher inspection. rawRecipient
+ * defaults to {} and rawSourceAgents to []; incomplete exact source joins
+ * produce no attribution row. Return the shared durable-status descriptor
+ * without assigning contributor credit or changing any record.
+ *
  * @param {unknown} rawStatus
  * @param {unknown} [rawRecipient]
  * @param {ReadonlyArray<unknown>} [rawSourceAgents]
@@ -1251,6 +1501,12 @@ export function explainStatus(rawStatus, rawRecipient = {}, rawSourceAgents = []
 }
 
 /**
+ * Describe an aggregate aura modifier for an exact authorized recipient.
+ * rawRecipient defaults to {}; missing recipient identity or unreadable
+ * modifier returns null. Copy only named data fields and use the recorded
+ * multiplier for the effect text. Return a descriptor without attributing
+ * an aggregate multiplier to an individual emitter.
+ *
  * @param {unknown} rawModifier
  * @param {unknown} [rawRecipient]
  */
@@ -1292,6 +1548,13 @@ export function explainModifier(rawModifier, rawRecipient = {}) {
 }
 
 /**
+ * Build a descriptor for items hidden by a compact status/modifier layout.
+ * Preserve array order and include each item's compact explanation; an
+ * unavailable item keeps its row. kind must be status or modifier. Recipient
+ * and source list default to {}/[]. Non-array input becomes an empty list.
+ * Hidden here means not drawn in the dock, not scientifically unauthorized;
+ * the caller must already have rights to every supplied item.
+ *
  * @param {ReadonlyArray<unknown>} rawItems
  * @param {"status" | "modifier"} kind
  * @param {unknown} [rawRecipient]
@@ -1331,10 +1594,11 @@ export function explainOverflow(
 }
 
 /**
- * Recipient-authorized overflow for POV status docks. Every hidden item passes
- * through the same reduced status projection as a visible POV status cell;
- * callers may add researcher-space attribution only after an exact public-fact
- * join, while this source-free fallback remains fog-authorized.
+ * Describe compact-layout overflow through the Agent POV status route.
+ * rawRecipient defaults to {}; retain only its identity fields and never
+ * add direct-source attribution. Preserve item order; non-array input is
+ * empty. Return a descriptor. The caller must supply authorized hidden-in-
+ * layout items, not hidden simulator facts.
  *
  * @param {ReadonlyArray<unknown>} rawItems
  * @param {unknown} [rawRecipient]
@@ -1344,6 +1608,7 @@ export function explainPovOverflow(rawItems, rawRecipient = {}) {
   const recipient = {
     presentation_key: inputRecipient.presentation_key,
     public_agent_id: inputRecipient.public_agent_id,
+    display_agent_id: inputRecipient.display_agent_id,
   };
   const items = Array.isArray(rawItems) ? rawItems : [];
   const rows = items.map((item, index) => {
@@ -1368,6 +1633,12 @@ export function explainPovOverflow(rawItems, rawRecipient = {}) {
 }
 
 /**
+ * Describe a nonnegative integer cooldown only after the record's exact
+ * presentation/public identity joins rawOwner. rawOwner defaults to null,
+ * which returns null. Prefer ultimate_cooldown_remaining, then the legacy
+ * ultimate_cooldown field. Zero displays Ready. Invalid/unjoined values
+ * return null; no availability mask or cooldown progression is calculated.
+ *
  * @param {unknown} rawRecord
  * @param {unknown} [rawOwner]
  * @returns {SemanticDescriptor | null}
@@ -1413,6 +1684,14 @@ export function explainCooldown(rawRecord, rawOwner = null) {
 }
 
 /**
+ * Describe an authorized aura field's recorded multiplier and radius.
+ * rawSourceAgent defaults to null and audience to researcher; unsupported
+ * audiences or unreadable fields return null. Source attribution requires
+ * exact source identity and matching class accent. Even an agent_pov call
+ * may show a supplied, correctly joined researcher source; the caller must
+ * authorize that source separately. Return a pointer-anchored descriptor
+ * without computing affected agents or overlap.
+ *
  * @param {unknown} rawField
  * @param {unknown} [rawSourceAgent]
  * @param {"researcher" | "agent_pov"} [audience]
@@ -1481,6 +1760,12 @@ export function explainAura(rawField, rawSourceAgent = null, audience = "researc
 }
 
 /**
+ * Describe a finite observation, Basic or Ultimate radius after an exact
+ * owner identity join. rawOwner defaults to null, so omitted ownership
+ * returns null. Reject unknown kinds/missing values with null. Radius units
+ * and nonnegative validity belong to the normalized input; this helper
+ * formats the value and does not calculate range or target legality.
+ *
  * @param {unknown} rawRange
  * @param {unknown} [rawOwner]
  * @returns {SemanticDescriptor | null}
@@ -1524,7 +1809,14 @@ export function explainRange(rawRange, rawOwner = null) {
   );
 }
 
-/** @param {unknown} rawObstacle */
+/**
+ * Describe an authorized obstacle's ID and center, plus pillar radius or
+ * wall width/height/rotation. Missing fields display Unavailable. Return a
+ * pointer-anchored descriptor without reconstructing geometry or checking
+ * collision validity. The caller supplies the recorded coordinate units.
+ *
+ * @param {unknown} rawObstacle
+ */
 export function explainObstacle(rawObstacle) {
   const obstacle = isRecord(rawObstacle) ? rawObstacle : {};
   const obstacleId = text(obstacle.obstacle_id) ?? "Unavailable";
@@ -1552,30 +1844,12 @@ export function explainObstacle(rawObstacle) {
 }
 
 /**
- * @param {unknown} rawFact
- * @param {{observerAgent?: unknown, candidateAgent?: unknown}} [context]
- */
-export function explainVisibility(rawFact, context = {}) {
-  const fact = isRecord(rawFact) ? rawFact : {};
-  const observer = isRecord(context.observerAgent) ? context.observerAgent : {};
-  const candidate = isRecord(context.candidateAgent) ? context.candidateAgent : {};
-  const visible = typeof fact.visible === "boolean" ? fact.visible : null;
-  return descriptor(
-    "visibility",
-    `visibility:${integer(fact.observer_global_slot) ?? "unknown"}:${integer(fact.candidate_global_slot) ?? "unknown"}`,
-    "Observer Visibility",
-    "Oracle View visibility diagnostic copied from the normalized scene.",
-    [
-      row("Observer", publicAgentLabel(observer.public_agent_id)),
-      row("Candidate", publicAgentLabel(candidate.public_agent_id)),
-      row("Visible", visible === null ? "Unavailable" : visible ? "True" : "False"),
-    ],
-    [],
-    { tone: "information" },
-  );
-}
-
-/**
+ * Describe one recorded boolean availability lane after an exact owner
+ * join. lane=0 means Basic and 1 means Ultimate; any other lane returns null.
+ * Prefer named ability availability, falling back to lane_N_available only
+ * when the named field is undefined. Invalid/nonboolean/unjoined data returns
+ * null. This displays a mask fact; it does not recalculate Core acceptance.
+ *
  * @param {unknown} rawLegality
  * @param {0 | 1} lane
  * @param {unknown} rawOwner
@@ -1620,6 +1894,12 @@ export function explainLegality(rawLegality, lane, rawOwner) {
 }
 
 /**
+ * Describe an authorized planned action route, not a physical path.
+ * context defaults to {} and may contain separately authorized sourceAgent
+ * and recipientAgent identities. Those titles are displayed without an
+ * additional route-to-identity join here; the caller owns that join. Missing
+ * identity shows Unavailable. Return a pointer-anchored descriptor only.
+ *
  * @param {unknown} rawRoute
  * @param {{sourceAgent?: unknown, recipientAgent?: unknown}} [context]
  */
@@ -1643,7 +1923,17 @@ export function explainPendingRoute(rawRoute, context = {}) {
   );
 }
 
-/** @param {unknown} rawEvent */
+/**
+ * Describe a normalized activation event using its authorized identities
+ * and display token. A matching source class with an accepted V2 guide may
+ * provide authored Ultimate text. Supplied exact identities are displayed;
+ * redaction flags suppress missing-identity fallback rows rather than erase
+ * an explicitly supplied identity. Caller must enforce those input rights.
+ * If no target ID is supplied and the recipient is not redacted, its label
+ * falls back to the supplied source identity. No damage amount is calculated.
+ *
+ * @param {unknown} rawEvent
+ */
 export function explainActivation(rawEvent) {
   const event = isRecord(rawEvent) ? rawEvent : {};
   const token = resolveVisualToken(
@@ -1708,7 +1998,15 @@ export function explainActivation(rawEvent) {
   );
 }
 
-/** @param {unknown} rawEvent */
+/**
+ * Describe a recipient's recorded before/after net-health outcome.
+ * Use supplied exact recipient identity and finite netDelta/net_delta; missing
+ * values display Unavailable. Return a descriptor with warning tone for a
+ * negative delta. This is recipient-level net change, not individual damage
+ * source credit or a calculation from simulator state.
+ *
+ * @param {unknown} rawEvent
+ */
 export function explainNetHealth(rawEvent) {
   const event = isRecord(rawEvent) ? rawEvent : {};
   const delta = finiteNumber(event.netDelta ?? event.net_delta);
@@ -1732,7 +2030,13 @@ export function explainNetHealth(rawEvent) {
   );
 }
 
-/** @param {number} delta */
+/**
+ * Format a finite delta with a plus sign for gains. Preserve a nonzero
+ * sub-display-unit amount as signed <0.01 when normal formatting shows zero.
+ * Return text; caller validates finiteness and keeps the exact source value.
+ *
+ * @param {number} delta
+ */
 function formatNetDelta(delta) {
   const displayed = formatDisplayNumber(delta);
   if (delta !== 0 && displayed === "0") {

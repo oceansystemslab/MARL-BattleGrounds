@@ -1,4 +1,4 @@
-"""Scenario 7's coordinated-retreat witness and four matched heal omissions."""
+"""Check Scenario 7's coordinated retreat and four matched healing omissions."""
 
 from collections.abc import Callable
 from typing import NamedTuple, cast
@@ -79,7 +79,6 @@ def _run_witness(
     scenario: CompiledDevScenarioV1,
     omit_heal_tick: int | None = None,
 ) -> list[WitnessTransition]:
-    """Run the fixed Team A sequence; stop immediately at either terminal flag."""
     assert omit_heal_tick is None or 1 <= omit_heal_tick <= 4
     state, observation, mask = (
         scenario.initial_state,
@@ -244,9 +243,9 @@ def test_witness_repeats_and_wins_on_tick_4_without_a_team_a_death(
     np.testing.assert_allclose(
         final.after.agent_positions[jnp.asarray([0, 1, 4, 7])],
         [
-            [12.421540, 6.202107],
-            [8.785655, 5.152372],
-            [13.506084, 5.473134],
+            [12.424541, 6.202107],
+            [8.797300, 5.133029],
+            [13.511398, 5.480935],
             [14.5, 7.821322],
         ],
         rtol=0,
@@ -260,7 +259,7 @@ def test_team_b_responses_are_generated_by_alpha(
     moves = (
         (MOVE_EAST, 0, MOVE_STAY, MOVE_NORTHEAST, 0),
         (0, 0, MOVE_NORTHEAST, 0, 0),
-        (0, 0, MOVE_NORTHEAST, MOVE_NORTH, 0),
+        (0, 0, MOVE_NORTHEAST, MOVE_NORTHWEST, 0),
         (0, 0, MOVE_NORTHEAST, 0, 0),
     )
     targets = ((6, 0, 7, 0, 0), (0, 0, 10, 0, 0), (0, 0, 6, 0, 0), (0, 0, 6, 0, 0))

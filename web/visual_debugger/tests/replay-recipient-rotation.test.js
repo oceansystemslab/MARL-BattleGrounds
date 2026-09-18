@@ -1,3 +1,7 @@
+/**
+ * @file Check that an agent-recipient change preserves every required replay scope
+ * field and accepts only joined frames.
+ */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -35,10 +39,8 @@ async function joinedReplayAgent(kind) {
   return joinReplayTransportAndTimelineV1(joined, source.timeline);
 }
 
-/**
- * @param {NonNullable<ReturnType<typeof replayAgentRecipientRotationIdentity>>} source
- * @param {Readonly<Record<string, unknown>>} changes
- */
+/** @param {NonNullable<ReturnType<typeof replayAgentRecipientRotationIdentity>>} source
+ * @param {Readonly<Record<string, unknown>>} changes */
 function changedIdentity(source, changes) {
   return Object.freeze({ ...source, ...changes });
 }

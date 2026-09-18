@@ -1,3 +1,7 @@
+/**
+ * @file Check exact aura explanation text and unavailable results for unknown
+ * semantic inputs.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 

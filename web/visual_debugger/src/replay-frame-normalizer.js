@@ -1,3 +1,14 @@
+/**
+ * @file Check replay transport frames, timelines, command responses, and artifact facts.
+ * The Replay Viewer and authorized-presentation join layer use these helpers before
+ * installing fetched data. Validation keeps artifact identity, selected audience,
+ * completion evidence, and cursor generations coherent. The shared live projection
+ * normalizer owns scene geometry and event/cue checks.
+ * All work is synchronous and in memory. Returned records are frozen at the owned
+ * record/array boundaries; this is not a general recursive copier. No file or network
+ * request is made. Normalized transport does not by itself carry the separate
+ * six-branch authorized-presentation approval marker.
+ */
 import { normalizeDebuggerAudienceProjectionV2 } from "./frame-normalizer.js";
 
 const REPLAY_FRAME_KINDS = new Set([
@@ -8,7 +19,7 @@ const TIMELINE_KINDS = new Set(["researcher", "actor_pov"]);
 const PRESETS = new Set(["presentation", "analysis"]);
 const COMPLETION_STATES = new Set(["complete", "partial", "interrupted", "failed"]);
 const FAILURE_ORIGINS = new Set(["simulation", "policy", "validation", "capture"]);
-const PROCESSING_STATES = new Set(["succeeded", "failed"]);
+const PROCESSING_STATES = new Set(["succeeded", "failed", "not_requested"]);
 const PROCESSING_FAILURE_STAGES = new Set([
   "initial_validation",
   "reducer_initialize",
@@ -118,6 +129,9 @@ const ARTIFACT_FACTS_KEYS = [
 ];
 
 /**
+ * Return whether value is a non-null object that is not an array.
+ * This checks only its container shape, not its replay schema or authority.
+ *
  * @param {unknown} value
  * @returns {value is Record<string, any>}
  */
@@ -126,6 +140,9 @@ function isRecord(value) {
 }
 
 /**
+ * Return value unchanged when it is a non-array object. Otherwise throw TypeError
+ * using label to name the invalid field. Nested schema validation belongs to callers.
+ *
  * @param {unknown} value
  * @param {string} label
  * @returns {Record<string, any>}
@@ -138,6 +155,11 @@ function record(value, label) {
 }
 
 /**
+ * Check that value has exactly the enumerable string keys in expected, ignoring
+ * key order. Return undefined on success; throw TypeError naming label for missing
+ * or extra keys. The caller supplies a record; symbol/non-enumerable keys are not
+ * included by Object.keys.
+ *
  * @param {Record<string, any>} value
  * @param {readonly string[]} expected
  * @param {string} label
@@ -153,7 +175,13 @@ function exactKeys(value, expected, label) {
   }
 }
 
-/** @param {unknown} left @param {unknown} right @returns {boolean} */
+/**
+ * Compare left and right recursively by Object.is for scalars, ordered array
+ * entries, and equal sorted enumerable record keys. Return a boolean without changing
+ * inputs. Inputs are finite JSON-like trees; cyclic objects are unsupported.
+ *
+ * @param {unknown} left @param {unknown} right @returns {boolean}
+ */
 function structurallyEqual(left, right) {
   if (Object.is(left, right)) {
     return true;
@@ -181,6 +209,10 @@ function structurallyEqual(left, right) {
 }
 
 /**
+ * Return numeric value when it is an integer at least zero, otherwise throw
+ * TypeError naming label. Strings and booleans are not converted into valid inputs;
+ * this helper does not impose Number.MAX_SAFE_INTEGER as an additional upper bound.
+ *
  * @param {unknown} value
  * @param {string} label
  */
@@ -192,6 +224,9 @@ function nonNegativeInteger(value, label) {
 }
 
 /**
+ * Return integer value when it is greater than zero; otherwise throw TypeError
+ * naming label. Uses the same exact-number input rules as nonNegativeInteger.
+ *
  * @param {unknown} value
  * @param {string} label
  */
@@ -204,6 +239,10 @@ function positiveInteger(value, label) {
 }
 
 /**
+ * Return integer value on the fixed simulator-global axis 0 through 9.
+ * Throw TypeError naming label for an invalid type or range. Slots 0 through 4 are
+ * Team A and 5 through 9 are Team B; this does not prove roster activity.
+ *
  * @param {unknown} value
  * @param {string} label
  */
@@ -216,6 +255,9 @@ function globalSlot(value, label) {
 }
 
 /**
+ * Return value unchanged when it is a string with non-whitespace content.
+ * Throw TypeError naming label otherwise. Accepted strings are not trimmed.
+ *
  * @param {unknown} value
  * @param {string} label
  */
@@ -227,6 +269,9 @@ function nonEmptyString(value, label) {
 }
 
 /**
+ * Return value unchanged when it is a string or null; otherwise throw TypeError
+ * naming label. Empty strings are allowed here; callers apply any stronger rule.
+ *
  * @param {unknown} value
  * @param {string} label
  */
@@ -238,6 +283,12 @@ function nullableString(value, label) {
 }
 
 /**
+ * Validate and shallow-copy the record value as a frozen replay reference.
+ * Require its exact fields, reference/replay version 1, 2, or 3 with matching versions,
+ * canonical episode:replay ID, lowercase 64-character digest text, and positive byte
+ * length. Throw TypeError for an invalid field or join. Digests are checked for syntax;
+ * this helper does not read source bytes or recompute their hashes.
+ *
  * @param {Record<string, any>} value
  * @returns {Readonly<Record<string, any>>}
  */
@@ -245,8 +296,8 @@ function normalizeArtifactReference(value) {
   exactKeys(value, ARTIFACT_REFERENCE_KEYS, "Replay artifact reference");
   if (
     value.schema_id !== REPLAY_ARTIFACT_REFERENCE_SCHEMA_ID ||
-    value.schema_version !== 1 ||
-    value.replay_schema_version !== 1
+    ![1, 2, 3].includes(value.schema_version) ||
+    value.replay_schema_version !== value.schema_version
   ) {
     throw new TypeError("Replay artifact reference root is invalid.");
   }
@@ -278,6 +329,12 @@ function normalizeArtifactReference(value) {
 }
 
 /**
+ * Validate record value and return a frozen artifact summary with its normalized
+ * replay reference. Require schema 1, a positive horizon, a captured count within it,
+ * exactly T+1 frames, and a recognized metric-report availability state. Throw TypeError
+ * for invalid structure or counts. Missing, not-recorded, and POV-hidden metrics remain
+ * distinct; audience-specific helpers enforce which disclosure is allowed.
+ *
  * @param {Record<string, any>} value
  * @returns {Readonly<Record<string, any>>}
  */
@@ -307,6 +364,7 @@ function normalizeArtifactSummary(value) {
   if (
     value.metric_report_availability !== "available" &&
     value.metric_report_availability !== "missing" &&
+    value.metric_report_availability !== "not_recorded" &&
     value.metric_report_availability !== "not_available_in_actor_pov"
   ) {
     throw new TypeError("Replay metric-report availability is invalid.");
@@ -315,6 +373,12 @@ function normalizeArtifactSummary(value) {
 }
 
 /**
+ * Validate record value as a replay cursor and return a frozen copy.
+ * Require exact schema-1 fields and nonnegative integer frame/final/generation values.
+ * The current frame cannot exceed the final frame, and choreography generation cannot
+ * exceed cursor generation. Throw TypeError otherwise; artifact count joins are checked
+ * by the containing frame normalizer.
+ *
  * @param {Record<string, any>} value
  * @returns {Readonly<Record<string, any>>}
  */
@@ -359,6 +423,10 @@ function normalizeCursor(value) {
 }
 
 /**
+ * Return a frozen copy of array value containing only task_terminal or
+ * declared_horizon labels. Throw TypeError naming label for another shape or label.
+ * This helper does not check ordering or duplicates; completion semantics does.
+ *
  * @param {unknown} value
  * @param {string} label
  */
@@ -372,7 +440,14 @@ function completionBases(value, label) {
   return Object.freeze([...value]);
 }
 
-/** @param {Record<string, any>} completion */
+/**
+ * Return captured_prefix for an incomplete completion record. For a complete record,
+ * map the exact ordered bases to task_terminal, declared_horizon, or their combined
+ * endpoint kind. Throw TypeError if complete evidence has another ordering/content.
+ * The caller supplies a normalized completion record.
+ *
+ * @param {Record<string, any>} completion
+ */
 function expectedEndpointKind(completion) {
   if (completion.completion_state !== "complete") {
     return "captured_prefix";
@@ -395,6 +470,14 @@ function expectedEndpointKind(completion) {
 }
 
 /**
+ * Check completion evidence without copying value; return undefined on success.
+ * captured is the saved transition count and reason its public failure/end reason.
+ * failureOrigin is a researcher failure label or null; undefined means the POV record
+ * does not expose that field. A zero-step prefix cannot be done. Complete data needs
+ * exact ordered terminal/horizon evidence and no failure origin. Incomplete data needs
+ * no completion basis and a nonblank reason; failed researcher data also needs a known
+ * failure origin. Throw TypeError for contradictions. Other scalar checks occur first.
+ *
  * @param {Record<string, any>} value
  * @param {number} captured
  * @param {string | null} reason
@@ -444,6 +527,12 @@ function validateCompletionSemantics(value, captured, reason, failureOrigin) {
 }
 
 /**
+ * Validate researcher completion record value against normalized artifact summary.
+ * Counts must agree with the saved horizon/prefix, the final frame ID must be canonical,
+ * and flags/reason/failure origin must match completion semantics. Return a frozen copy
+ * with a frozen bases array, or throw TypeError. The enclosing frame additionally joins
+ * the episode ID to its artifact; this helper does not infer a completion from playback.
+ *
  * @param {Record<string, any>} value
  * @param {ReturnType<typeof normalizeArtifactSummary>} summary
  * @returns {Readonly<Record<string, any>>}
@@ -498,6 +587,11 @@ function normalizeResearcherCompletion(value, summary) {
 }
 
 /**
+ * Validate actor-visible completion record value against normalized summary.
+ * Require schema 1, matching horizon/captured counts, boolean done flags, and valid
+ * public completion evidence/reason. Return a frozen copy with frozen bases, or throw
+ * TypeError. No researcher failure-origin or processing details are added.
+ *
  * @param {Record<string, any>} value
  * @param {ReturnType<typeof normalizeArtifactSummary>} summary
  * @returns {Readonly<Record<string, any>>}
@@ -544,7 +638,16 @@ function normalizePovCompletion(value, summary) {
   });
 }
 
-/** @param {Record<string, any>} value */
+/**
+ * Validate researcher processing record value and return a frozen copy.
+ * Keep succeeded, failed, and not_requested distinct. Successful/unrequested records
+ * have null failure fields. Failure requires a known stage and nonempty code; only
+ * transition-validation or reducer-advance stages admit an attempted index, and reducer
+ * advance requires one. Counts/indices are nonnegative integers. Throw TypeError for
+ * invalid fields or combinations; the enclosing artifact checks count totals.
+ *
+ * @param {Record<string, any>} value
+ */
 function normalizeProcessing(value) {
   exactKeys(value, PROCESSING_KEYS, "Replay processing");
   if (value.schema_version !== 1 || !PROCESSING_STATES.has(value.status)) {
@@ -563,7 +666,7 @@ function normalizeProcessing(value) {
   ) {
     throw new TypeError("processing.attempted_transition_index is invalid.");
   }
-  if (value.status === "succeeded") {
+  if (value.status === "succeeded" || value.status === "not_requested") {
     if (
       value.failure_stage !== null ||
       value.failure_code !== null ||
@@ -592,7 +695,13 @@ function normalizeProcessing(value) {
   return Object.freeze({ ...value });
 }
 
-/** @param {Record<string, any>} value */
+/**
+ * Require record value to contain only schema version 1 and the explicit
+ * not_available_in_actor_pov disclosure. Return a frozen copy or throw TypeError.
+ * This does not reveal whether researcher metric processing succeeded or failed.
+ *
+ * @param {Record<string, any>} value
+ */
 function normalizePovProcessing(value) {
   exactKeys(value, POV_PROCESSING_KEYS, "Actor POV processing disclosure");
   if (value.schema_version !== 1 || value.disclosure !== "not_available_in_actor_pov") {
@@ -602,8 +711,12 @@ function normalizePovProcessing(value) {
 }
 
 /**
- * Normalize artifact-wide replay evidence that remains independent of the
- * fogged battlefield presentation selected for an Agent replay view.
+ * Validate artifact-wide replay facts independently of the current fogged scene.
+ * value must contain exact schema-1 artifact_summary, researcher completion, and
+ * processing fields. Require consistent episode identity and processing counts; the
+ * summary keeps actual metric availability rather than the POV-hidden placeholder.
+ * Return a frozen object containing the three normalized records, or throw TypeError.
+ * These facts support researcher panels; they do not authorize hidden battlefield data.
  *
  * @param {unknown} value
  * @returns {Readonly<Record<string, any>>}
@@ -646,6 +759,12 @@ export function normalizeReplayArtifactFactsV1(value) {
 }
 
 /**
+ * Check that normalized summary and recipient completion agree with normalized facts.
+ * Compare the source reference, horizon/frame/transition counts, episode, completion
+ * state, done flags, and ordered bases. Return undefined when they join, otherwise
+ * throw TypeError. Researcher-only failure details and metric disclosure are not copied
+ * into the actor-local completion record.
+ *
  * @param {Readonly<Record<string, any>>} summary
  * @param {Readonly<Record<string, any>>} completion
  * @param {Readonly<Record<string, any>>} facts
@@ -673,7 +792,12 @@ function validatePovArtifactFacts(summary, completion, facts) {
   }
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Return value when it is a finite JavaScript number; otherwise throw TypeError
+ * naming label. Numeric strings, NaN, and infinities are rejected.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function finiteNumber(value, label) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new TypeError(`${label} must be a finite number.`);
@@ -682,6 +806,12 @@ function finiteNumber(value, label) {
 }
 
 /**
+ * Normalize frame's researcher replay projection using the shared live scene authority.
+ * cursor supplies the already checked artifact frame index. Return {normalized,
+ * episodeId}; normalized contains scene, event batch, and normalized projection.
+ * Throw TypeError for invalid scene/identity data. The temporary live-shaped carrier
+ * is only an adapter input; it does not grant live command or animation authority.
+ *
  * @param {Record<string, any>} frame
  * @param {ReturnType<typeof normalizeCursor>} cursor
  */
@@ -703,6 +833,12 @@ function normalizeResearcherProjection(frame, cursor) {
 }
 
 /**
+ * Normalize frame's actor replay projection using the shared POV scene authority.
+ * cursor supplies the checked frame index. First require public actor ID, global slot,
+ * and POV frame ID to agree with the source scene, then return {normalized, episodeId}.
+ * Throw TypeError for failed joins or source validation. The adapter passes an empty
+ * HUD and never constructs privileged researcher events.
+ *
  * @param {Record<string, any>} frame
  * @param {ReturnType<typeof normalizeCursor>} cursor
  */
@@ -732,15 +868,26 @@ function normalizePovProjection(frame, cursor) {
   return { normalized, episodeId };
 }
 
-/** @param {unknown} value */
+/**
+ * Return whether value is a record with a recognized researcher or actor-POV replay
+ * frame_kind. This is a dispatch hint only: it does not validate the complete frame.
+ *
+ * @param {unknown} value
+ */
 export function isReplayViewerFrame(value) {
   return isRecord(value) && REPLAY_FRAME_KINDS.has(value.frame_kind);
 }
 
 /**
- * Strictly normalize one audience-owned replay wire frame for shared visual
- * components. `animateIncoming` is response transport state and is never read
- * from the durable frame itself.
+ * Validate an audience-specific replay wire value and build the frozen display frame.
+ * animateIncoming defaults to false and must be a boolean supplied by a checked command
+ * response, never by a durable frame field. Validate exact fields, schema, artifact,
+ * cursor, source projection, completion, processing, canonical IDs, and any final POV
+ * end cue. Return the normalized source fields plus scene/event_batch, replay audience,
+ * session/episode/frame aliases, empty HUD, and animation intent. The output preset is
+ * analysis; controlled selection and selected legality are cleared for replay.
+ * Throw TypeError for unsupported fields, audience disclosures, values, or joins.
+ * This transport normalizer does not attach authorized-presentation approval.
  *
  * @param {unknown} value
  * @returns {Readonly<Record<string, any>>}
@@ -984,8 +1131,11 @@ function normalizeReplayViewerFrame(value, animateIncoming = false) {
 }
 
 /**
- * Normalize a durable replay frame. Direct frames are always settled;
- * animation authority is intentionally unavailable through this API.
+ * Validate durable replay wire value and return its frozen normalized display frame.
+ * Accept researcher_replay_viewer or actor_pov_replay_viewer under schema 1. Strict
+ * artifact, scene, cursor, identity, and completion checks run through the shared
+ * normalizer. Throw TypeError on invalid input. animate_incoming is always false;
+ * loading a durable frame never grants animation intent. No I/O is performed.
  *
  * @param {unknown} value
  */
@@ -994,6 +1144,13 @@ export function normalizeReplayViewerFrameV1(value) {
 }
 
 /**
+ * Validate command-response value and return a frozen envelope with normalized frame.
+ * Require exact schema-1 fields: result, frame, nullable notice, and boolean
+ * animate_incoming. Result is applied, duplicate, no_op, or shutdown_scheduled.
+ * Animation may be true only for applied responses after frame zero with positive
+ * choreography generation. Throw TypeError for invalid fields, frame, or animation
+ * intent. Continuity with the previously installed frame is checked separately.
+ *
  * @param {unknown} value
  * @returns {Readonly<Record<string, any>>}
  */
@@ -1027,9 +1184,11 @@ export function normalizeReplayCommandResponseV1(value) {
 }
 
 /**
- * Strictly normalize the replay-only failure envelope. Error responses never
- * carry animation authority; an optional latest frame is therefore always
- * installed settled.
+ * Validate replay API error value and return a frozen failure envelope.
+ * Require schema 1, a recognized replay error_code, nonblank message, and latest_frame
+ * that is null or a valid durable replay frame. A supplied latest frame is normalized
+ * with animation disabled. Throw TypeError on invalid input; this helper does not throw
+ * merely because the envelope describes a server error, and it performs no recovery I/O.
  *
  * @param {unknown} value
  * @returns {Readonly<Record<string, any>>}
@@ -1057,6 +1216,15 @@ export function normalizeReplayApiErrorV1(value) {
 }
 
 /**
+ * Validate a complete researcher or actor-POV timeline value and freeze its rows.
+ * Require schema 1, exact audience fields, matching artifact/completion identity,
+ * exactly T+1 ordered rows, adjacent simulator ticks, canonical incoming references,
+ * and the correct final endpoint kind. Frame zero has no incoming reference or events/
+ * cues. Actor POV includes its public ID and global slot but hides metric availability.
+ * Return a frozen timeline with normalized summary/completion and frozen row copies.
+ * Throw TypeError for a malformed record, audience disclosure, identity, count, or join.
+ * Join it to the current frame separately before installing an asynchronously fetched result.
+ *
  * @param {unknown} value
  * @returns {Readonly<Record<string, any>>}
  */
@@ -1215,10 +1383,12 @@ export function normalizeReplayTimelineV1(value) {
 }
 
 /**
- * Join independently fetched replay frame/timeline roots after each has
- * crossed its strict audience normalizer. This rejects a late timeline
- * response from an audience that was superseded while the request was in
- * flight.
+ * Return timeline unchanged only when it joins the already normalized frame.
+ * Both inputs must have crossed their audience-specific normalizers. Check audience,
+ * selected actor where present, timeline/artifact/completion identity, final index,
+ * and the current row's index, simulator tick, and incoming transition. Throw TypeError
+ * for a mismatch, including a late response for a superseded audience. No copying,
+ * fetching, or installation occurs here.
  *
  * @param {Readonly<Record<string, any>>} frame
  * @param {Readonly<Record<string, any>>} timeline
@@ -1276,8 +1446,15 @@ export function joinReplayFrameAndTimeline(frame, timeline) {
 }
 
 /**
- * Pin immutable launch/artifact identity and exact revision movement before a
- * command response is eligible for frame/timeline installation.
+ * Return normalized next only when it continues normalized previous for result.
+ * Require the same launch session, source artifact, immutable counts, completion, and
+ * artifact-wide facts. Audience changes may change the permitted local disclosure.
+ * For applied, revision increases by one; duplicate or stale_resync permits a newer or
+ * equal revision with nondecreasing, coherent cursor/choreography generations. Other
+ * results require the same revision. The caller supplies an already validated result
+ * label; this helper does not reject unknown labels separately.
+ * Throw TypeError when continuity fails. This checks installation eligibility, not
+ * that a requested command took effect or that playback advanced by one frame.
  *
  * @param {Readonly<Record<string, any>>} previous
  * @param {Readonly<Record<string, any>>} next

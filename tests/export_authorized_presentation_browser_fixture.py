@@ -1,4 +1,8 @@
-"""Generate exact Python-owned authorized-presentation browser fixtures."""
+"""Export Python's authorized presentation records for browser tests.
+
+The output lets browser tests compare their decoding with the Python-owned
+record format. This is test infrastructure, not a researcher command.
+"""
 
 # pyright: reportPrivateUsage=false
 
@@ -48,7 +52,7 @@ from tests.test_visual_debugger_service import _service
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.core.env import initialize_scenario_state
-from marl_battlegrounds.evaluation.capture import capture_initial_evaluation_frame_v1
+from marl_battlegrounds.evaluation.capture import capture_initial_evaluation_frame_v2
 from marl_battlegrounds.evaluation.replay_io import (
     REPLAY_FILE_SUFFIX_V1,
     load_replay_bundle_v1,
@@ -125,7 +129,6 @@ def _live_shared_pov_service() -> DebuggerService:
 
 
 def _live_corpse_overlay_frame() -> LiveNoSharedObsAuthorizedPresentationFrameV1:
-    """Build one editable live Agent frame with an authorized local corpse."""
     session = create_session(
         get_scenario("arena_5v5"),
         seed=0,
@@ -143,7 +146,7 @@ def _live_corpse_overlay_frame() -> LiveNoSharedObsAuthorizedPresentationFrameV1
         authored_state,
         session.config,
     )
-    frame = capture_initial_evaluation_frame_v1(
+    frame = capture_initial_evaluation_frame_v2(
         session.evaluation_context,
         state,
         observation,
@@ -192,7 +195,6 @@ def _corpse_overlay_browser_cases() -> tuple[
     ReplayNoSharedObsAuthorizedPresentationFrameV1,
     dict[str, str],
 ]:
-    """Return initial/persistent overlays plus digest-valid poison cases."""
     bundle = build_corpse_overlay_bundle(execution_information_mode="no_shared_obs")
     with TemporaryDirectory(prefix="marl-corpse-overlay-fixture-") as directory:
         path = Path(directory) / f"corpse{REPLAY_FILE_SUFFIX_V1}"
@@ -204,6 +206,7 @@ def _corpse_overlay_browser_cases() -> tuple[
             view_mode="pov",
             pov_global_slot=0,
             viewer_session_id="browser-replay-no-shared-corpse-overlay",
+            show_ranges=True,
         )
         result = service.current_presentation()
         persistent_service = ReplayViewerService(
@@ -212,6 +215,7 @@ def _corpse_overlay_browser_cases() -> tuple[
             view_mode="pov",
             pov_global_slot=0,
             viewer_session_id="browser-replay-no-shared-persistent-corpse-overlay",
+            show_ranges=True,
         )
         persistent_result = persistent_service.current_presentation()
     if (
@@ -324,7 +328,6 @@ def _corpse_overlay_browser_cases() -> tuple[
 def _legacy_v1_scene(
     scene: AuthorizedBattlefieldSceneV1,
 ) -> AuthorizedBattlefieldSceneV1:
-    """Downgrade only the two additive nested contracts through V1 models."""
     shield = scene.spawn_shield_mechanics
     if type(shield) is not AuthorizedSpawnShieldMechanicsAvailableV2:
         raise RuntimeError("canonical fixture requires available Spawn Shield V2")
@@ -354,7 +357,6 @@ def _legacy_v1_scene(
 def _legacy_v1_compatibility_presentation(
     frame: LiveOracleAuthorizedPresentationFrameV1,
 ) -> LiveOracleAuthorizedPresentationFrameV1:
-    """Construct and reseal one authoritative full-frame legacy V1 case."""
     endpoint = frame.current_endpoint
     legacy_endpoint = _seal_oracle_authorized_current_endpoint_v1(
         episode_id=endpoint.episode_id,
@@ -388,7 +390,6 @@ def _with_visual_events(
     trajectories: tuple[AgentPovVisualIncomingAgentPhaseTrajectoryV1, ...],
     event: ReplayIncomingAbilityActivatedEventV1 | ReplayIncomingAgentLeftCombatEventV1,
 ) -> ReplayNoSharedObsAuthorizedPresentationFrameV1:
-    """Revalidate one branded adjacent-fog browser contract case."""
     visual = frame.visual_events
     if visual is None or visual.events:
         raise RuntimeError("adjacent-fog fixture requires an empty incoming inventory")
@@ -413,7 +414,6 @@ def _with_visual_events(
 def _adjacent_fog_state_cases(
     frame: ReplayNoSharedObsAuthorizedPresentationFrameV1,
 ) -> dict[str, ReplayNoSharedObsAuthorizedPresentationFrameV1]:
-    """Generate positive browser cases for both adjacent fog-set directions."""
     visual = frame.visual_events
     if visual is None or visual.events:
         raise RuntimeError("adjacent-fog fixture requires a noninitial empty frame")
@@ -537,6 +537,7 @@ def render_fixture() -> str:
                 view_mode="researcher",
                 selected_global_slot=0,
                 viewer_session_id=continuity_session,
+                show_ranges=True,
             )
         ),
         "shared_obs": _pair(
@@ -546,6 +547,7 @@ def render_fixture() -> str:
                 view_mode="pov",
                 pov_global_slot=0,
                 viewer_session_id=continuity_session,
+                show_ranges=True,
             )
         ),
     }

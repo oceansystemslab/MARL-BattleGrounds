@@ -1,3 +1,8 @@
+/* File purpose: stabilize documented screenshot-only presentation details.
+ * The visual-test helper injects this sheet; production styling stays in
+ * styles.css. Keep test assertions and ordinary browser behavior independent
+ * of these snapshot-only overrides.
+ */
 #transition-value {
   visibility: hidden;
 }

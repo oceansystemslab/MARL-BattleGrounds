@@ -1,4 +1,12 @@
-"""Canonical fixed-axis mappings shared by simulator and host consumers."""
+"""Keep global slots, actor-relative targets and observation rows in agreement.
+
+Team A occupies global slots 0..4 and Team B occupies 5..9. Each actor uses
+target zero for None, 1..5 for own-team rows and 6..10 for opposing rows.
+These mappings include unused slots and self; they do not decide legality.
+Movement categories retain world directions for both teams.
+
+Python helpers validate concrete IDs on the host. Constant tuples support
+host consumers, while the JAX array tables support compiled indexing."""
 
 from typing import Literal
 
@@ -115,6 +123,12 @@ GLOBAL_RECIPIENT_SLOT_INDEX_BY_ACTOR_AND_TARGET_ACTION: Array = jnp.asarray(
 
 
 def _validate_global_slot(global_slot: object, *, name: str) -> int:
+    """Check a host slot ID before indexing a fixed mapping table.
+
+    ``name`` labels errors. Accept Python ints other than bool in 0..9;
+    raise TypeError for another type and ValueError outside that range.
+    This uses Python control flow and is not a traced-array validator.
+    """
     if isinstance(global_slot, bool) or not isinstance(global_slot, int):
         raise TypeError(f"{name} must be an int; got {type(global_slot).__name__}.")
     if not 0 <= global_slot < MAX_AGENT_SLOTS:
@@ -126,6 +140,11 @@ def _validate_global_slot(global_slot: object, *, name: str) -> int:
 
 
 def _validate_target_action(target_action: object) -> int:
+    """Check a host target category before indexing a mapping table.
+
+    Accept Python ints other than bool in 0..10. Raise TypeError for another
+    type and ValueError outside that range. Zero means Target None.
+    """
     if isinstance(target_action, bool) or not isinstance(target_action, int):
         raise TypeError(
             f"target_action must be an int; got {type(target_action).__name__}."
@@ -141,7 +160,33 @@ def global_slot_to_target_action(
     actor_global_slot: int,
     target_global_slot: int | None,
 ) -> int:
-    """Return the actor-relative target category for one fixed global slot."""
+    """Express one global recipient as an actor-relative target category.
+
+    Parameters
+    ----------
+    actor_global_slot : int
+        Acting slot in 0..9. Slots 0..4 are Team A; 5..9 are Team B.
+    target_global_slot : int or None
+        Recipient slot in 0..9, or None for Target None.
+
+    Returns
+    -------
+    int
+        Zero for None; 1..5 for an own-team row; 6..10 for an opposing row.
+        Own-team rows include the actor itself.
+
+    Raises
+    ------
+    TypeError
+        A supplied slot is not a Python int, or is a bool.
+    ValueError
+        A supplied slot is outside 0..9.
+
+    Notes
+    -----
+    This host helper checks identity only, not participation or legality.
+    Use the fixed array tables for traced JAX indexing.
+    """
     actor_global_slot = _validate_global_slot(
         actor_global_slot,
         name="actor_global_slot",
@@ -161,7 +206,32 @@ def target_action_to_global_slot(
     actor_global_slot: int,
     target_action: int,
 ) -> int | None:
-    """Return the fixed global recipient represented by one target category."""
+    """Decode an actor-relative target category to its global recipient.
+
+    Parameters
+    ----------
+    actor_global_slot : int
+        Acting slot in 0..9, with Team A before Team B.
+    target_action : int
+        Category in 0..10: none, five own-team rows, then five opposing rows.
+
+    Returns
+    -------
+    int or None
+        Global recipient in 0..9, or None for target category zero.
+
+    Raises
+    ------
+    TypeError
+        Either input is not a Python int, or is a bool.
+    ValueError
+        A slot or category is outside its range.
+
+    Notes
+    -----
+    This is a host identity lookup. It does not inspect masks, visibility,
+    class, alive status or configured participation.
+    """
     actor_global_slot = _validate_global_slot(
         actor_global_slot,
         name="actor_global_slot",
@@ -176,7 +246,32 @@ def observation_relation_and_row(
     observer_global_slot: int,
     candidate_global_slot: int,
 ) -> tuple[_ObservationRelation, int]:
-    """Return the candidate's ally/enemy relation and stable observation row."""
+    """Locate a candidate in one observer's stable ally or enemy rows.
+
+    Parameters
+    ----------
+    observer_global_slot : int
+        Observer slot in 0..9, with Team A before Team B.
+    candidate_global_slot : int
+        Candidate slot in 0..9, including self or an unused slot.
+
+    Returns
+    -------
+    tuple of str and int
+        ``("ally", row)`` or ``("enemy", row)`` with row in 0..4.
+        The result follows roster order and does not depend on visibility.
+
+    Raises
+    ------
+    TypeError
+        A slot is not a Python int, or is a bool.
+    ValueError
+        A slot is outside 0..9.
+
+    Notes
+    -----
+    This host helper does not read a simulator state or transform positions.
+    """
     observer_global_slot = _validate_global_slot(
         observer_global_slot,
         name="observer_global_slot",

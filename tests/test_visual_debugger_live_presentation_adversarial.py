@@ -1,4 +1,4 @@
-"""Adversarial privacy, authority-join, and import-boundary proofs."""
+"""Check privacy, matching record identities and imports using hostile inputs."""
 
 from __future__ import annotations
 
@@ -35,10 +35,13 @@ from tests.test_visual_debugger_service import (
 )
 
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
-from marl_battlegrounds.evaluation.models import AssignedPolicySlotV1
+from marl_battlegrounds.evaluation.models import (
+    AgentDiedEventV1,
+    AssignedPolicySlotV2,
+)
 from marl_battlegrounds.evaluation.pov import (
-    ActorPovAdjacentTransitionSliceV1,
-    ActorPovCurrentSliceV1,
+    ActorPovAdjacentTransitionSlice,
+    ActorPovCurrentSlice,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import build_visual_event_batch_v2
 
@@ -129,8 +132,8 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
     keys = _recursive_keys(payload)
     strings = _recursive_string_values(payload)
 
-    # Researcher match metadata is a separate root envelope. Its configured
-    # policy identities do not relax any actor or spatial digest restriction.
+    # Researcher match metadata is a separate root envelope. Configured policy
+    # identities and non-spatial death announcements do not relax actor privacy.
     assert set(match_summary) == {
         "schema_version",
         "episode_id",
@@ -141,6 +144,12 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
         "scores",
         "outcome",
         "teams",
+        "deaths",
+        "map",
+        "observation_mode",
+        "episode_limit",
+        "root_seed",
+        "episode_seed",
     }
     context = service.session.evaluation_context
     frame = service.session.current_evaluation_frame
@@ -148,12 +157,33 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
     assert match_summary["episode_id"] == context.identity.episode_id
     assert match_summary["source_frame_index"] == frame.frame_index
     assert match_summary["simulator_step_count"] == frame.simulator_step_count
+    assert match_summary["observation_mode"] == context.execution_information_mode
+    assert match_summary["episode_limit"] == context.expected_horizon
+    assert match_summary["root_seed"] == context.seed_protocol.root_seed
+    assert match_summary["episode_seed"] == context.seed_protocol.episode_seed
+    assert match_summary["map"] == {
+        "map_id": None,
+        "technical_name": context.identity.layout.identifier,
+        "display_name": "Custom Map",
+        "split": None,
+    }
     assert match_summary["task_mode"] == context.resolved_env_config.task_mode == 0
     assert match_summary["score_threshold"] == (
         context.resolved_env_config.team_deathmatch_score_threshold
     )
     assert match_summary["scores"] == list(frame.snapshot.team_deathmatch_scores)
     assert match_summary["outcome"] == "not_applicable"
+    assert match_summary["deaths"] == [
+        {
+            "public_agent_id": context.roster[
+                event.recipient_global_slot
+            ].public_agent_id,
+            "team_id": context.roster[event.recipient_global_slot].configured_team_id,
+            "class_id": context.roster[event.recipient_global_slot].class_id,
+        }
+        for event in incoming.transition.events
+        if isinstance(event, AgentDiedEventV1)
+    ]
     teams = cast(list[dict[str, object]], match_summary["teams"])
     assert [team["team_id"] for team in teams] == [1, 2]
     for team in teams:
@@ -169,7 +199,7 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
                 context.roster, context.policy_assignments, strict=True
             )
             if roster.configured_team_id == team["team_id"]
-            and isinstance(assignment, AssignedPolicySlotV1)
+            and isinstance(assignment, AssignedPolicySlotV2)
         )
         assert team["display_name"] == "Scripted scenario"
         assert team["policy_ids"] == list(
@@ -260,8 +290,8 @@ def test_live_no_shared_excludes_oracle_ids_and_diagnostics() -> None:
 def _recipient_pair(
     service: DebuggerService,
 ) -> tuple[
-    ActorPovCurrentSliceV1,
-    ActorPovAdjacentTransitionSliceV1,
+    ActorPovCurrentSlice,
+    ActorPovAdjacentTransitionSlice,
     ActorPovLiveDebuggerFrameV2,
 ]:
     session = service.session

@@ -1,3 +1,7 @@
+/**
+ * @file Exercise real-service presentation installs, pending views, replay endpoints,
+ * forged-root rejection and death/respawn identity.
+ */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -6,7 +10,11 @@ import { isAbsolute, join, resolve } from "node:path";
 import { expect, test } from "@playwright/test";
 import { formatDisplayNumber } from "../src/display.js";
 import { statusLifecyclePresentation } from "../src/semantic-vocabulary.js";
-import { CHOREOGRAPHY_ROOT, installWaapiAutopause } from "./support/choreography.js";
+import {
+  CHOREOGRAPHY_ROOT,
+  finishControllerClock,
+  installWaapiAutopause,
+} from "./support/choreography.js";
 import {
   REPOSITORY_ROOT,
   startDebugger,
@@ -310,12 +318,7 @@ async function cp5Slice5CheckedSampleSnapshot() {
   return snapshot;
 }
 
-/**
- * Read the exact authorized response body so hidden raw-transport mutations
- * can be proved byte-inert rather than merely object-equal.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function cp5Slice5PresentationBody(page) {
   return page.evaluate(async () => {
     const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
@@ -335,13 +338,8 @@ async function cp5Slice5PresentationBody(page) {
   });
 }
 
-/**
- * Project one real authorized response through the pure planner and collect
- * only stable semantic DOM state from the installed product.
- *
- * @param {import("@playwright/test").Page} page
- * @param {Record<string, any>} rawPresentation
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} rawPresentation */
 async function cp5Slice5PlanAndDomSignature(page, rawPresentation) {
   return page.evaluate(async (raw) => {
     const moduleRoot = "/src";
@@ -385,9 +383,63 @@ async function cp5Slice5PlanAndDomSignature(page, rawPresentation) {
     const planEvents =
       plan === null ? [] : /** @type {Array<Record<string, any>>} */ (plan.events);
     const orderedEventIds = incomingRows.map(({ id }) => id);
-    const plannedAtomicIds = planEvents.flatMap((event) =>
-      Array.isArray(event.atomicEventIds) ? event.atomicEventIds : [event.eventId],
+    // Grouped HUD announcements summarize recorded deaths; they are separate
+    // presentation cues, not additional authoritative transition events.
+    const announcements = planEvents.filter(
+      (event) => event.cueSemantic === "death_announcement",
     );
+    const deaths = /** @type {Array<Record<string, any>>} */ (
+      presentation.match_summary?.deaths ?? []
+    );
+    const deathSides = [1, 2].filter((team) =>
+      deaths.some((death) => (death.killing_team_id ?? death.team_id) === team),
+    );
+    if (
+      JSON.stringify(announcements.map((event) => event.sideId)) !==
+      JSON.stringify(deathSides)
+    ) {
+      throw new Error("Death announcements lost or duplicated a recorded team.");
+    }
+    for (const announcement of announcements) {
+      const teamDeaths = deaths.filter(
+        (death) => (death.killing_team_id ?? death.team_id) === announcement.sideId,
+      );
+      if (
+        announcement.members.length !== teamDeaths.length ||
+        new Set(
+          announcement.members.map(
+            (/** @type {Record<string, any>} */ member) => member.publicIdentity,
+          ),
+        ).size !== teamDeaths.length ||
+        orderedEventIds.includes(announcement.eventId) ||
+        announcement.phaseEnd - announcement.phaseStart !== 1500
+      ) {
+        throw new Error("Death announcement membership, identity, or dwell changed.");
+      }
+      const knownTeam = teamDeaths.every(
+        (death) => death.killing_team_id === announcement.sideId,
+      )
+        ? announcement.sideId
+        : null;
+      if (
+        announcement.teamId !== knownTeam ||
+        announcement.members.some(
+          (/** @type {Record<string, any>} */ member, /** @type {number} */ index) =>
+            member.killingTeamId !== (teamDeaths[index].killing_team_id ?? null) ||
+            (member.contributors?.length ?? null) !==
+              (teamDeaths[index].contributors?.length ?? null),
+        )
+      ) {
+        throw new Error(
+          "Death announcement changed recorded killing-team attribution.",
+        );
+      }
+    }
+    const plannedAtomicIds = planEvents
+      .filter((event) => event.cueSemantic !== "death_announcement")
+      .flatMap((event) =>
+        Array.isArray(event.atomicEventIds) ? event.atomicEventIds : [event.eventId],
+      );
     if (JSON.stringify(plannedAtomicIds) !== JSON.stringify(orderedEventIds)) {
       throw new Error("Authorized plan lost, duplicated, or reordered an incoming ID.");
     }
@@ -440,6 +492,7 @@ async function cp5Slice5PlanAndDomSignature(page, rawPresentation) {
           transitionId: event.transitionId,
           authorityVocabulary: event.authorityVocabulary,
           kind: event.kind,
+          cueSemantic: event.cueSemantic ?? null,
           spatial: event.spatial,
           presentationSuppressed: event.presentationSuppressed ?? false,
           persistent: event.persistent ?? false,
@@ -519,14 +572,9 @@ async function cp5Slice5PlanAndDomSignature(page, rawPresentation) {
   }, rawPresentation);
 }
 
-/**
- * Reinstall one real leaf with a schema-valid private raw transport mutation.
- * The certified presentation response is deliberately left untouched.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} productUrl
- * @param {string} expectedPresentationKind
- */
+ * @param {string} expectedPresentationKind */
 async function cp5Slice5AssertHiddenTransportNoninterference(
   page,
   productUrl,
@@ -673,30 +721,49 @@ const EXPECTED_AGENT_CLASSES = Object.freeze({
 /** @type {Readonly<Record<number, string>>} */
 const EXPECTED_AGENT_TEAMS = Object.freeze({ 1: "Team A", 2: "Team B" });
 
-/** @param {Record<string, any>} agent */
-function expectedAgentIdentity(agent) {
+/** @param {Record<string, any>} agent @param {Record<string, any>} presentation */
+function expectedAgentIdentity(agent, presentation) {
+  const directory = (
+    presentation.researcher_space?.identity_directory ??
+    presentation.current_endpoint.identity_directory
+  ).identities;
+  const matches = directory.filter(
+    (/** @type {Record<string, any>} */ row) =>
+      row.public_agent_id === agent.public_agent_id,
+  );
+  expect(matches).toHaveLength(1);
+  const identity = matches[0];
+  expect(identity.configured_active).toBe(true);
+  expect(identity.team_id).toBe(agent.team_id);
+  expect(identity.class_id).toBe(agent.class_id);
+  expect(Number.isInteger(identity.team_local_slot)).toBe(true);
+  expect(identity.team_local_slot).toBeGreaterThanOrEqual(0);
+  expect(identity.team_local_slot).toBeLessThan(5);
+  const displayId = (identity.team_id - 1) * 5 + identity.team_local_slot;
   const classIdentity = EXPECTED_AGENT_CLASSES[agent.class_id];
   const teamLabel = EXPECTED_AGENT_TEAMS[agent.team_id];
   expect(classIdentity).toBeTruthy();
   expect(teamLabel).toBeTruthy();
   expect(typeof agent.public_agent_id).toBe("string");
   return {
-    title: `Agent ID ${agent.public_agent_id} · ${classIdentity.label} · ${teamLabel}`,
+    displayId,
+    title: `Agent ID ${displayId} · ${classIdentity.label} · ${teamLabel}`,
     accent: classIdentity.accent,
     team: agent.team_id === 1 ? "team-a" : "team-b",
   };
 }
 
-/**
- * Prove the compact agent card is current-fact-only and cannot replace the
- * persistent certified class-documentation card.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {Record<string, any>} agent
  * @param {unknown} persistentCardBefore
- */
-async function expectCompactAgentTooltip(page, agent, persistentCardBefore) {
-  const identity = expectedAgentIdentity(agent);
+ * @param {Record<string, any>} presentation */
+async function expectCompactAgentTooltip(
+  page,
+  agent,
+  persistentCardBefore,
+  presentation,
+) {
+  const identity = expectedAgentIdentity(agent, presentation);
   const expectedLabels = [
     "Health",
     "Effective Speed",
@@ -737,12 +804,11 @@ async function expectCompactAgentTooltip(page, agent, persistentCardBefore) {
   );
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {Record<string, any>} agent
- */
-async function expectCertifiedDocumentationCard(page, agent) {
-  const identity = expectedAgentIdentity(agent);
+ * @param {Record<string, any>} presentation */
+async function expectCertifiedDocumentationCard(page, agent, presentation) {
+  const identity = expectedAgentIdentity(agent, presentation);
   await expect(page.locator("#selection-card > .sr-only")).toHaveText(identity.title);
   await expect(
     page.locator("#selection-card .semantic-explanation__heading"),
@@ -782,7 +848,28 @@ async function expectRetiredMetadataAbsent(page) {
 const TECHNICAL_HELP = Object.freeze({
   episode: Object.freeze({
     label: "Episode",
-    summary: "Identifies the authorized live episode represented by this frame.",
+    summary: "Identifies the recorded episode represented by this frame.",
+  }),
+  task_mode: Object.freeze({
+    label: "Task Mode",
+    summary: "The task whose rules govern this episode.",
+  }),
+  map: Object.freeze({
+    label: "Map",
+    summary: "The recorded technical map name. Its split is shown only when recorded.",
+  }),
+  observation_mode: Object.freeze({
+    label: "Observation Mode",
+    summary: "The policy observation mode used when this episode was recorded.",
+  }),
+  episode_limit: Object.freeze({
+    label: "Episode Limit",
+    summary: "The maximum number of transitions planned for this episode.",
+  }),
+  seeds: Object.freeze({
+    label: "Seeds",
+    summary:
+      "The recorded root seed and episode stream coordinate identify the random streams. Unknown means the value was not recorded.",
   }),
   artifact_digest_prefix: Object.freeze({
     label: "Artifact Digest Prefix",
@@ -830,10 +917,8 @@ const FORBIDDEN_TECHNICAL_FACT_IDS = Object.freeze([
   "presentation_key",
 ]);
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {Record<string, any>} presentation
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} presentation */
 async function expectTechnicalFrameDom(page, presentation) {
   const liveResearcherTechnical =
     presentation.presentation_kind === "live_no_shared_obs_agent_pov" ||
@@ -887,7 +972,31 @@ async function expectTechnicalFrameDom(page, presentation) {
       `Unsupported Technical Frame presentation kind ${String(presentation.presentation_kind)}.`,
     );
   }
-  const expected = specification.filter(([, field]) => technical[field] !== null);
+  /** @type {Array<[keyof typeof TECHNICAL_HELP, string]>} */
+  const expected = specification
+    .filter(([, field]) => technical[field] !== null)
+    .map(([id, field]) => [id, String(technical[field])]);
+  const match = presentation.match_summary;
+  if (match) {
+    if (!expected.some(([id]) => id === "episode")) {
+      expected.unshift(["episode", match.episode_id]);
+    }
+    expected.push(["task_mode", match.task_mode === 1 ? "TDM" : "Combat diagnostic"]);
+    if (match.map) expected.push(["map", match.map.technical_name]);
+    if (match.observation_mode) {
+      expected.push([
+        "observation_mode",
+        match.observation_mode === "shared_obs" ? "SharedObs" : "NoSharedObs",
+      ]);
+    }
+    if (match.episode_limit !== null && match.episode_limit !== undefined) {
+      expected.push(["episode_limit", `${match.episode_limit} ticks`]);
+    }
+    expected.push([
+      "seeds",
+      `Root ${match.root_seed ?? "unknown"} · Episode stream ${match.episode_seed ?? "unknown"}`,
+    ]);
+  }
   const frameField = specification.find(([id]) => id === "frame")?.[1];
   const incomingField = specification.find(([id]) => id === "incoming_transition")?.[1];
   if (frameField === undefined || incomingField === undefined) {
@@ -910,10 +1019,10 @@ async function expectTechnicalFrameDom(page, presentation) {
       })),
     ),
   ).toEqual(
-    expected.map(([id, field]) => ({
+    expected.map(([id, value]) => ({
       id,
       label: TECHNICAL_HELP[id].label,
-      value: String(technical[field]),
+      value,
       tabindex: "0",
     })),
   );
@@ -992,10 +1101,8 @@ async function expectTechnicalFrameDom(page, presentation) {
   }
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {Record<string, any>} presentation
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} presentation */
 async function expectLatestTransitionDom(page, presentation) {
   const researcher = presentation.researcher_space ?? null;
   const rawRows =
@@ -1025,7 +1132,7 @@ async function expectLatestTransitionDom(page, presentation) {
         candidate.public_agent_id === row.actor_public_agent_id,
     );
     expect(identity).toBeTruthy();
-    const expectedIdentity = expectedAgentIdentity(identity);
+    const expectedIdentity = expectedAgentIdentity(identity, presentation);
     const rendered = rows.nth(index);
     await expect(rendered.locator(".accepted-action-row__title")).toHaveText(
       expectedIdentity.title,
@@ -1056,10 +1163,8 @@ async function expectLatestTransitionDom(page, presentation) {
   }
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {Record<string, any>} presentation
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} presentation */
 async function expectPendingJointActionDom(page, presentation) {
   const researcher = presentation.researcher_space ?? null;
   const pending = researcher?.pending_joint_action ?? presentation.pending_joint_action;
@@ -1088,7 +1193,7 @@ async function expectPendingJointActionDom(page, presentation) {
         candidate.public_agent_id === row.actor_public_agent_id,
     );
     expect(identity).toBeTruthy();
-    const expectedIdentity = expectedAgentIdentity(identity);
+    const expectedIdentity = expectedAgentIdentity(identity, presentation);
     const rendered = rows.nth(index);
     await expect(rendered).toHaveAttribute("data-team", expectedIdentity.team);
     await expect(rendered.locator(".accepted-action-row__title")).toHaveText(
@@ -1163,11 +1268,9 @@ async function scientificDisclosureState(page) {
   }, SCIENTIFIC_DISCLOSURE_SELECTORS);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} panelSelector
- * @param {number} scrollTop
- */
+ * @param {number} scrollTop */
 async function installScientificDisclosureScroll(page, panelSelector, scrollTop) {
   const installed = await page.locator(panelSelector).evaluate((panel, top) => {
     const body = panel.querySelector(":scope > :not(summary)");
@@ -1206,13 +1309,8 @@ async function observeAgentDetailsOpenMutations(page) {
   });
 }
 
-/**
- * Restore the retained trajectory's native baseline after one screenshot-only
- * viewport and disclosure state.
- *
- * @param {import("@playwright/test").Page} page
- * @param {string[]} openedDetails
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string[]} openedDetails */
 async function cleanupAfterCp4ECapture(page, openedDetails) {
   await page.setViewportSize({ width: 1440, height: 900 });
   await closeDetails(page, openedDetails);
@@ -1225,12 +1323,8 @@ async function cleanupAfterCp4ECapture(page, openedDetails) {
   await page.evaluate(() => window.scrollTo(0, 0));
 }
 
-/**
- * Capture one prescribed native state only when the CP4-E evidence run opts in.
- *
- * @param {import("@playwright/test").Page} page
- * @param {{filename: string, width: number, height: number, presentation: Record<string, any>, selectedAgent: Record<string, any>}} options
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {{filename: string, width: number, height: number, presentation: Record<string, any>, selectedAgent: Record<string, any>}} options */
 async function captureCp4ENativeState(page, options) {
   if (cp4ECaptureDirectory === null) {
     return;
@@ -1250,7 +1344,10 @@ async function captureCp4ENativeState(page, options) {
     "data-presentation-authority",
     "installed",
   );
-  const selectedIdentity = expectedAgentIdentity(options.selectedAgent);
+  const selectedIdentity = expectedAgentIdentity(
+    options.selectedAgent,
+    options.presentation,
+  );
   await page
     .locator(
       `#battlefield .agent[data-presentation-key="${options.selectedAgent.presentation_key}"]`,
@@ -1354,12 +1451,10 @@ async function captureCp4ENativeState(page, options) {
   });
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} url
  * @param {"live" | "replay"} mode
- * @param {{allVisualFilters?: boolean}} [options]
- */
+ * @param {{allVisualFilters?: boolean}} [options] */
 async function openProduct(page, url, mode, { allVisualFilters = false } = {}) {
   captureBrowserErrors(page);
   await page.goto(url);
@@ -1390,17 +1485,10 @@ async function enableAllVisualFilters(page) {
   await expect(page.locator("#connection-status")).toHaveText("Online");
 }
 
-/**
- * Hold only the initial authorized-presentation response after the synchronous
- * route bootstrap has established product identity. The pending shell must
- * remain product-correct without exposing any previously or partially joined
- * scientific presentation.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} url
  * @param {"live" | "replay"} mode
- * @param {"combat_debugger" | "replay_viewer"} productKind
- */
+ * @param {"combat_debugger" | "replay_viewer"} productKind */
 async function openProductWithHeldInitialPresentation(page, url, mode, productKind) {
   let releasePresentation = () => {};
   let markPresentationHeld = () => {};
@@ -1499,14 +1587,9 @@ async function openProductWithHeldInitialPresentation(page, url, mode, productKi
   await opening;
 }
 
-/**
- * Prove one replay utility activation emits one exact command and installs the
- * response's joined successor presentation before this helper returns.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} selector
- * @param {Readonly<Record<string, unknown>>} expectedCommand
- */
+ * @param {Readonly<Record<string, unknown>>} expectedCommand */
 async function expectSingleReplayUtilityCommand(page, selector, expectedCommand) {
   /** @type {import("@playwright/test").Request[]} */
   const commandRequests = [];
@@ -1550,15 +1633,10 @@ async function expectSingleReplayUtilityCommand(page, selector, expectedCommand)
   return responsePayload;
 }
 
-/**
- * Run one native activation and prove it crosses exactly one product command
- * boundary with the exact existing command body.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {"/api/command" | "/api/replay/command"} path
  * @param {() => Promise<void>} activate
- * @param {Readonly<Record<string, unknown>>} expectedCommand
- */
+ * @param {Readonly<Record<string, unknown>>} expectedCommand */
 async function expectSingleActivationCommand(page, path, activate, expectedCommand) {
   /** @type {import("@playwright/test").Request[]} */
   const requests = [];
@@ -1599,15 +1677,10 @@ async function expectSingleActivationCommand(page, path, activate, expectedComma
   expect(requests[0].postDataJSON().command).toEqual(expectedCommand);
 }
 
-/**
- * Prove one native interaction emits exactly one product command while letting
- * the caller validate runtime-derived pointer coordinates.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {"/api/command" | "/api/replay/command"} path
  * @param {() => Promise<void>} activate
- * @param {(command: Record<string, any>) => void} verifyCommand
- */
+ * @param {(command: Record<string, any>) => void} verifyCommand */
 async function expectSingleCommandMatching(page, path, activate, verifyCommand) {
   /** @type {import("@playwright/test").Request[]} */
   const requests = [];
@@ -1641,13 +1714,8 @@ async function expectSingleCommandMatching(page, path, activate, verifyCommand) 
   verifyCommand(requests[0].postDataJSON().command);
 }
 
-/**
- * Run one local interaction through a real browser event and prove neither
- * product command route was touched.
- *
- * @param {import("@playwright/test").Page} page
- * @param {() => Promise<void>} activate
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {() => Promise<void>} activate */
 async function expectZeroCommandInteraction(page, activate) {
   /** @type {import("@playwright/test").Request[]} */
   const requests = [];
@@ -1674,30 +1742,19 @@ async function expectZeroCommandInteraction(page, activate) {
   expect(requests).toEqual([]);
 }
 
-/**
- * Pointer activation restores the debugger's battlefield-owned command focus
- * and never exposes the oversized SVG-agent focus outline.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function expectBattlefieldRootCommandFocus(page) {
   await expect(page.locator("#battlefield")).toBeFocused();
   await expect(page.locator("#battlefield .agent:focus-visible")).toHaveCount(0);
 }
 
-/**
- * Exercise the one authorized activation through both public surfaces and all
- * three native activation gestures. Oracle cells cross one exact command
- * boundary; local inspection cells cross none.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {{
  *   body: import("@playwright/test").Locator,
  *   row: import("@playwright/test").Locator,
  *   path: "/api/command" | "/api/replay/command" | null,
  *   command: Readonly<Record<string, unknown>> | null,
- * }} options
- */
+ * }} options */
 async function expectNativeAgentActivationMatrix(page, { body, row, path, command }) {
   const scrollY = () => page.evaluate(() => window.scrollY);
   const cells = [
@@ -1733,13 +1790,8 @@ async function expectNativeAgentActivationMatrix(page, { body, row, path, comman
   }
 }
 
-/**
- * A terminal replay has no outgoing transition, but its frozen snapshot stays
- * researcher-selectable without advancing the cursor.
- *
- * @param {import("@playwright/test").Page} page
- * @returns {Promise<Record<string, any>>}
- */
+/** @param {import("@playwright/test").Page} page
+ * @returns {Promise<Record<string, any>>} */
 async function expectTerminalReplayAgentSelection(page) {
   await expect(page.locator("#battlefield")).toHaveAttribute("role", "group");
   await expect(page.locator("#battlefield")).toHaveAttribute("tabindex", "-1");
@@ -1788,13 +1840,8 @@ async function expectTerminalReplayAgentSelection(page) {
   return candidate;
 }
 
-/**
- * Read one exact authenticated product resource without bypassing the real
- * loopback service or hand-authoring an authority payload.
- *
- * @param {import("@playwright/test").Page} page
- * @param {string} path
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} path */
 async function authenticatedGet(page, path) {
   return page.evaluate(async (requestPath) => {
     const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
@@ -1814,11 +1861,9 @@ async function authenticatedGet(page, path) {
   }, path);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} transportKind
- * @param {string} presentationKind
- */
+ * @param {string} presentationKind */
 async function expectInstalledLeaf(page, transportKind, presentationKind) {
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page.locator("html")).toHaveAttribute(
@@ -1844,13 +1889,8 @@ async function expectInstalledLeaf(page, transportKind, presentationKind) {
   return { transport, presentation };
 }
 
-/**
- * Prove the retained researcher-space session fact uses the global incoming
- * transition while battlefield choreography keeps its audience-local ID.
- *
- * @param {import("@playwright/test").Page} page
- * @param {Record<string, any>} presentation
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {Record<string, any>} presentation */
 async function expectAuthorizedIncomingTransitionDom(page, presentation) {
   const latestEvents = presentation.latest_events;
   const researcherSpace = presentation.researcher_space;
@@ -1872,15 +1912,9 @@ async function expectAuthorizedIncomingTransitionDom(page, presentation) {
   await expect(page.locator("#transition-value")).toHaveText(expected ?? "—");
 }
 
-/**
- * Prove current selected-owner facts remain separate from the optional outgoing
- * inspection overlay. This reuses the real service trajectory already owned by
- * the five-leaf test; it adds no fixture server or viewport loop.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {Record<string, any>} presentation
- * @param {{agentDetailsActivated?: boolean, retainedAgent?: Record<string, any> | null, rangesVisible?: boolean}} [options]
- */
+ * @param {{agentDetailsActivated?: boolean, retainedAgent?: Record<string, any> | null, rangesVisible?: boolean}} [options] */
 async function expectReplayInspectionDom(
   page,
   presentation,
@@ -1935,7 +1969,7 @@ async function expectReplayInspectionDom(
         candidate.public_agent_id === row.actor_public_agent_id,
     );
     expect(identity).toBeTruthy();
-    const expectedIdentity = expectedAgentIdentity(identity);
+    const expectedIdentity = expectedAgentIdentity(identity, presentation);
     const rendered = upcomingRows.nth(index);
     await expect(rendered.locator(".accepted-action-row__title")).toHaveText(
       expectedIdentity.title,
@@ -1975,9 +2009,9 @@ async function expectReplayInspectionDom(
     } else {
       await expect(page.locator("#agent-details")).toHaveAttribute(
         "data-accent",
-        expectedAgentIdentity(retainedAgent).accent,
+        expectedAgentIdentity(retainedAgent, presentation).accent,
       );
-      await expectCertifiedDocumentationCard(page, retainedAgent);
+      await expectCertifiedDocumentationCard(page, retainedAgent, presentation);
     }
     await expect(page.locator('[data-layer="debug-range"] .range-ring')).toHaveCount(0);
     await expect(page.locator("#battlefield .legality-dock")).toHaveCount(0);
@@ -1997,7 +2031,7 @@ async function expectReplayInspectionDom(
       "data-accent",
       String(classAccent),
     );
-    await expectCertifiedDocumentationCard(page, owner);
+    await expectCertifiedDocumentationCard(page, owner, presentation);
   } else {
     await expect(page.locator("#agent-details")).not.toHaveAttribute("data-accent");
     await expect(page.locator("#selection-card")).toContainText(
@@ -2052,7 +2086,7 @@ async function expectReplayInspectionDom(
   await expect(legalityDock).toHaveCount(1);
   await expect(legalityDock).toHaveAttribute(
     "aria-label",
-    `Exact actor-owned legality for Agent ID ${owner.public_agent_id}`,
+    `Exact actor-owned legality for Agent ID ${expectedAgentIdentity(owner, presentation).displayId}`,
   );
   expect(
     await legalityDock.locator(".legality-pill").evaluateAll((pills) =>
@@ -2111,12 +2145,7 @@ async function expectReplayInspectionDom(
   }
 }
 
-/**
- * Snapshot every browser-owned DOM string and attribute at the authority
- * boundary. Source JavaScript is intentionally outside this scan.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function authorityDomSnapshot(page) {
   return page.evaluate(() => ({
     attributes: [document.body, ...document.body.querySelectorAll("*")].flatMap(
@@ -2130,12 +2159,10 @@ async function authorityDomSnapshot(page) {
   }));
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {Record<string, any>} presentation
  * @param {string[]} forbiddenValues
- * @param {boolean} [activationEnabled]
- */
+ * @param {boolean} [activationEnabled] */
 async function expectAgentAuthoritySurface(
   page,
   presentation,
@@ -2312,10 +2339,8 @@ async function expectAuthorizedRosterColors(page) {
   expect(new Set(colors.mutedClassLabels)).toEqual(new Set([colors.expectedMuted]));
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {number} frameIndex
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {number} frameIndex */
 async function seekReplay(page, frameIndex) {
   const responsePromise = page.waitForResponse(
     (response) =>
@@ -2341,14 +2366,9 @@ async function seekReplay(page, frameIndex) {
   );
 }
 
-/**
- * Prove the synchronous clear boundary while one real authority response is
- * deliberately held after the server has accepted the audience command.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {string} oldScientificSentinel
- * @param {string} oldPresentationKey
- */
+ * @param {string} oldPresentationKey */
 async function expectPendingAuthorityIsEmpty(
   page,
   oldScientificSentinel,
@@ -2486,7 +2506,7 @@ test("all five real service leaves install with safe pending continuity", async 
   ]);
   await expect(page.locator("#live-visual-key")).not.toHaveAttribute("hidden", "");
   await expect(page.locator("#replay-visual-key")).toHaveAttribute("hidden", "");
-  const oldScientificSentinel = `Agent ID ${liveOracle.presentation.current_endpoint.scene.agents[0].public_agent_id}`;
+  const oldScientificSentinel = `Agent ID ${expectedAgentIdentity(liveOracle.presentation.current_endpoint.scene.agents[0], liveOracle.presentation).displayId}`;
   const oldPresentationKey =
     liveOracle.presentation.current_endpoint.scene.agents[0].presentation_key;
   const controlledAgent = page.locator('#battlefield .agent[data-controlled="true"]');
@@ -2520,7 +2540,11 @@ test("all five real service leaves install with safe pending continuity", async 
       global_slot: controlledSlot,
     },
   );
-  await expectCertifiedDocumentationCard(page, controlledAgentFacts);
+  await expectCertifiedDocumentationCard(
+    page,
+    controlledAgentFacts,
+    liveOracle.presentation,
+  );
   const liveOracleDocumentationBefore = await page
     .locator("#selection-card")
     .evaluate((node) => node.innerHTML);
@@ -2529,6 +2553,7 @@ test("all five real service leaves install with safe pending continuity", async 
     page,
     controlledAgentFacts,
     liveOracleDocumentationBefore,
+    liveOracle.presentation,
   );
   await expectTechnicalFrameDom(page, liveOracle.presentation);
   await expectLatestTransitionDom(page, liveOracle.presentation);
@@ -2544,6 +2569,7 @@ test("all five real service leaves install with safe pending continuity", async 
     page,
     controlledAgentFacts,
     liveOracleDocumentationBefore,
+    liveOracle.presentation,
   );
   await captureCp4ENativeState(page, {
     filename: "live-oracle-1440x900.png",
@@ -2680,12 +2706,17 @@ test("all five real service leaves install with safe pending continuity", async 
   );
   expect(recipientAgent).toBeTruthy();
   await page.setViewportSize({ width: 960, height: 600 });
-  await expectCertifiedDocumentationCard(page, recipientAgent);
+  await expectCertifiedDocumentationCard(page, recipientAgent, liveAgent.presentation);
   const liveAgentDocumentationBefore = await page
     .locator("#selection-card")
     .evaluate((node) => node.innerHTML);
   await recipientBody.hover();
-  await expectCompactAgentTooltip(page, recipientAgent, liveAgentDocumentationBefore);
+  await expectCompactAgentTooltip(
+    page,
+    recipientAgent,
+    liveAgentDocumentationBefore,
+    liveAgent.presentation,
+  );
   await expect(page.locator("#battlefield .pending-route")).toHaveCount(0);
   await openDetails(page, [
     "#agent-details",
@@ -2693,7 +2724,12 @@ test("all five real service leaves install with safe pending continuity", async 
     "#technical-frame-details",
   ]);
   await recipientBody.hover();
-  await expectCompactAgentTooltip(page, recipientAgent, liveAgentDocumentationBefore);
+  await expectCompactAgentTooltip(
+    page,
+    recipientAgent,
+    liveAgentDocumentationBefore,
+    liveAgent.presentation,
+  );
   await captureCp4ENativeState(page, {
     filename: "live-no-shared-agent-960x600.png",
     width: 960,
@@ -2710,6 +2746,9 @@ test("all five real service leaves install with safe pending continuity", async 
 
   await openDetails(page, ["#visual-filters"]);
   const liveAgentRanges = page.locator("#live-ranges-button");
+  if ((await liveAgentRanges.getAttribute("aria-pressed")) === "false") {
+    await expectZeroCommandInteraction(page, () => liveAgentRanges.click());
+  }
   await expect(liveAgentRanges).toHaveAttribute("aria-pressed", "true");
   await expectZeroCommandInteraction(page, () => liveAgentRanges.click());
   await expect(liveAgentRanges).toHaveAttribute("aria-pressed", "false");
@@ -3441,6 +3480,7 @@ test("all five real service leaves install with safe pending continuity", async 
     page,
     replaySelectedAgent,
     replayOracleDocumentationBefore,
+    replayOracleSelected,
   );
 
   await expectAuthorizedIncomingTransitionDom(page, replayOracle.presentation);
@@ -3520,6 +3560,7 @@ test("all five real service leaves install with safe pending continuity", async 
     page,
     replayOracleMiddleOwner,
     replayOracleMiddleDocumentation,
+    replayOracleMiddle,
   );
   await captureCp4ENativeState(page, {
     filename: "replay-oracle-960x600.png",
@@ -3541,7 +3582,8 @@ test("all five real service leaves install with safe pending continuity", async 
   await expectTechnicalFrameDom(page, replayOracleFinal);
   await expectLatestTransitionDom(page, replayOracleFinal);
   const terminalActivatedAgent = await expectTerminalReplayAgentSelection(page);
-  const nextShowRanges = replayOracle.transport.show_ranges !== true;
+  const terminalTransport = await authenticatedGet(page, "/api/frame");
+  const nextShowRanges = terminalTransport.show_ranges !== true;
   await expectSingleReplayUtilityCommand(page, "#replay-ranges-button", {
     command_type: "set_ranges",
     show_ranges: nextShowRanges,
@@ -3639,6 +3681,10 @@ test("all five real service leaves install with safe pending continuity", async 
     "replay_no_shared_obs_agent_pov",
   );
   await page.unroute("**/api/presentation/frame");
+  const replayAgentRanges = page.locator("#replay-ranges-button");
+  await expect(replayAgentRanges).toHaveAttribute("aria-pressed", "false");
+  await expectZeroCommandInteraction(page, () => replayAgentRanges.click());
+  await expect(replayAgentRanges).toHaveAttribute("aria-pressed", "true");
   const replayAgentArtifactReference =
     replayAgent.transport.artifact_facts.artifact_summary.replay_reference;
   const replayAgentArtifactShellValues = new Set([
@@ -3682,6 +3728,7 @@ test("all five real service leaves install with safe pending continuity", async 
     page,
     replayAgentSelected,
     replayAgentInitialDocumentation,
+    replayAgent.presentation,
   );
   await expect(page.locator("#battlefield-instructions")).toHaveText(
     "Replay Agent POV is read-only. Activate a visible body or choose any agent in the roster to switch to that agent's fog-of-war view at the same replay tick.",
@@ -3731,7 +3778,6 @@ test("all five real service leaves install with safe pending continuity", async 
     `#roster [data-visibility="not-visible"] .roster-primary-action[data-presentation-key="${replayAgentNotVisible.presentation_key}"]`,
   );
   await expect(replayAgentNotVisibleRow).toBeEnabled();
-  const replayAgentRanges = page.locator("#replay-ranges-button");
   await expect(replayAgentRanges).toHaveAttribute("aria-pressed", "true");
   await expectZeroCommandInteraction(page, () => replayAgentRanges.click());
   await expect(replayAgentRanges).toHaveAttribute("aria-pressed", "false");
@@ -3837,7 +3883,11 @@ test("all five real service leaves install with safe pending continuity", async 
   await expect(page.locator("#selection-heading")).toHaveText(
     "Comprehensive Agent Class Details",
   );
-  await expectCertifiedDocumentationCard(page, replayAgentNotVisible);
+  await expectCertifiedDocumentationCard(
+    page,
+    replayAgentNotVisible,
+    switchedReplayAgent.presentation,
+  );
   await expect(
     page.locator(`#battlefield [data-presentation-key="${replayAgentRecipientKey}"]`),
   ).toHaveCount(0);
@@ -3980,10 +4030,8 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
       [4, "rogue"],
       [5, "priest"],
     ]);
-    /**
-     * @param {Record<string, any>} presentation
-     * @param {string} frameLabel
-     */
+    /** @param {Record<string, any>} presentation
+     * @param {string} frameLabel */
     const expectCombatIdentityMatrix = async (presentation, frameLabel) => {
       const authorizedAgents = /** @type {Record<string, any>[]} */ (
         presentation.current_endpoint.scene.agents
@@ -4622,13 +4670,9 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
   }
 });
 
-/**
- * Run one independently collected partition of the CP5 causal/privacy proof.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {readonly string[]} selectedContractNames
- * @param {boolean} includeSharedArtifactProof
- */
+ * @param {boolean} includeSharedArtifactProof */
 async function runCp5Slice5Proof(
   page,
   selectedContractNames,
@@ -4638,7 +4682,6 @@ async function runCp5Slice5Proof(
     cp4C3ShieldOnly || cp4ECaptureDirectory !== null,
     "CP5 Slice 5 causal/privacy proof is outside bounded CP4 capture modes.",
   );
-  test.setTimeout(900_000);
   await installWaapiAutopause(page);
   const checkedSampleBytesBefore = await cp5Slice5CheckedSampleSnapshot();
 
@@ -5063,19 +5106,10 @@ async function runCp5Slice5Proof(
   /** @param {Record<string, any>} signature */
   const signaturePlanEvents = (signature) =>
     /** @type {Record<string, any>[]} */ (signature.plan.events);
-  /**
-   * Prove the exact product-installed effect and route surface against a
-   * scenario-owned list whose IDs, vocabulary, and endpoint slots were
-   * extracted independently from the real registered trajectory.
-   *
-   * Row shape: ordinal, type, source slot, target slot, recipient slot,
-   * agent slot, persistent.
-   *
-   * @param {{presentation: Record<string, any>, signature: Record<string, any>}} frame
+  /** @param {{presentation: Record<string, any>, signature: Record<string, any>}} frame
    * @param {string} label
    * @param {Array<[number, string, number | null, number | null, number | null, number | null, boolean?]>} effectRows
-   * @param {number[]} routeOrdinals
-   */
+   * @param {number[]} routeOrdinals */
   const expectExactInstalledSurface = (frame, label, effectRows, routeOrdinals) => {
     const { presentation, signature } = frame;
     const transitionId = presentation.latest_events?.incoming_transition_id;
@@ -5208,14 +5242,9 @@ async function runCp5Slice5Proof(
       inspection.decision_mask.target_use_ultimate_joint_mask,
   });
 
-  /**
-   * Select every named acting owner at the real predecessor, prove its exact
-   * tuple against that epoch's mask, then join it to the successor action row.
-   *
-   * @param {string} contractName
+  /** @param {string} contractName
    * @param {number} frameIndex
-   * @param {Array<Record<string, any>>} expectations
-   */
+   * @param {Array<Record<string, any>>} expectations */
   const proveOutgoingOwnerSet = async (contractName, frameIndex, expectations) => {
     if (
       (await page.locator("#replay-frame-slider").inputValue()) !== String(frameIndex)
@@ -5351,10 +5380,8 @@ async function runCp5Slice5Proof(
     );
   };
 
-  /**
-   * @param {string} productUrl
-   * @param {Record<string, any>} contract
-   */
+  /** @param {string} productUrl
+   * @param {Record<string, any>} contract */
   const proveOracleTrajectory = async (productUrl, contract) => {
     if (!contract.povFirst) {
       await page.goto("about:blank");
@@ -5469,7 +5496,9 @@ async function runCp5Slice5Proof(
         const incomingKindById = new Map(
           incomingEvents.map((event) => [event.event_id, event.event_kind]),
         );
-        for (const event of planEvents) {
+        for (const event of planEvents.filter(
+          (event) => event.cueSemantic !== "death_announcement",
+        )) {
           expect(event.transitionId).toBe(incoming.incoming_transition_id);
           expect(event.authorityVocabulary).toBe("event");
           expect(incomingKindById.get(event.eventId)).toBe(event.eventType);
@@ -6316,8 +6345,7 @@ async function runCp5Slice5Proof(
             expectedStatuses[frameIndex],
           );
         }
-        /**
-         * @param {number} frameIndex
+        /** @param {number} frameIndex
          * @param {number} primaryOrdinal
          * @param {string} eventType
          * @param {string} tokenId
@@ -6325,8 +6353,7 @@ async function runCp5Slice5Proof(
          * @param {string} lifecycleLabel
          * @param {string} lifecycleAccessibleName
          * @param {number[]} atomicOrdinals
-         * @param {number[]} applicationOrdinals
-         */
+         * @param {number[]} applicationOrdinals */
         const lifecycleEvent = (
           frameIndex,
           primaryOrdinal,
@@ -7031,7 +7058,12 @@ test("real Shared replay installs frame zero, middle, final, then rejects a forg
           `#battlefield .agent[data-presentation-key="${owner.presentation_key}"]`,
         )
         .hover();
-      await expectCompactAgentTooltip(page, owner, documentationBefore);
+      await expectCompactAgentTooltip(
+        page,
+        owner,
+        documentationBefore,
+        leaf.presentation,
+      );
       await captureCp4ENativeState(page, {
         filename: "replay-shared-agent-1440x900.png",
         width: 1440,
@@ -7132,7 +7164,7 @@ test("real Shared replay installs frame zero, middle, final, then rejects a forg
   const middleScene =
     middlePresentation.current_endpoint.scene ??
     middlePresentation.current_endpoint.parts?.scene;
-  const middleSentinel = `Agent ID ${middleScene.agents[0].public_agent_id}`;
+  const middleSentinel = `Agent ID ${expectedAgentIdentity(middleScene.agents[0], middlePresentation).displayId}`;
   await expectPendingAuthorityIsEmpty(
     page,
     middleSentinel,
@@ -7276,8 +7308,8 @@ test("real death and respawn keep one opaque Oracle body identity", async ({
       "Movement only",
       "Excluded as emitter and beneficiary",
       "The agent can move through other agents while shielded; collision resumes at the end of the shield's final transition.",
-      "3 Ticks",
-      "3 Ticks",
+      "3 ticks",
+      "3 ticks",
       "Agent ID 5 · Rogue · Team B",
     ],
   );
@@ -7394,7 +7426,9 @@ test("real death cycle retains truthful outward lifecycle cues at both review vi
     if (!deathEvent) {
       throw new Error("Authorized death event is unavailable.");
     }
-    const deathEffect = page.locator('.combat-effect[data-event-type="agent_died"]');
+    const deathEffect = page.locator(
+      '.combat-effect[data-event-type="agent_died"][data-cue-semantic="agent_died"]',
+    );
     await expect(deathEffect).toHaveCount(1);
     await expect(deathEffect).toHaveAttribute("data-event-id", deathEvent.event_id);
     await expect(deathEffect).toHaveAttribute("data-persistent", "true");
@@ -7819,10 +7853,8 @@ async function corpsePresentationState(page) {
   return { transport, presentation };
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} presentationKey
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} presentationKey */
 async function corpseBodyPaint(page, presentationKey) {
   const body = page.locator(
     `#battlefield .agent[data-presentation-key="${presentationKey}"]`,
@@ -7846,10 +7878,8 @@ async function corpseBodyPaint(page, presentationKey) {
   });
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {() => Promise<void>} activate
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {() => Promise<void>} activate */
 async function expectNoCorpseCommands(page, activate) {
   /** @type {import("@playwright/test").Request[]} */
   const requests = [];
@@ -7878,7 +7908,6 @@ async function expectNoCorpseCommands(page, activate) {
 test("real Agent replay paints only locally authorized Oracle corpses without changing replay state", async ({
   page,
 }) => {
-  test.setTimeout(180_000);
   if (artifacts === null) {
     throw new Error("Authorized corpse replay artifacts are unavailable.");
   }
@@ -8001,7 +8030,7 @@ test("real Agent replay paints only locally authorized Oracle corpses without ch
         agent.presentation.source.source_simulator_step_count;
       await expectNoCorpseCommands(page, () => authorizedBody.click());
       await expect(page.locator("#selection-card")).toContainText(
-        `Agent ID ${authorizedCorpse.public_agent_id}`,
+        `Agent ID ${expectedAgentIdentity(authorizedCorpse, agent.presentation).displayId}`,
       );
       await expectNoCorpseCommands(page, () =>
         authorizedBody.click({ modifiers: ["Shift"] }),
@@ -8054,7 +8083,7 @@ test("real Agent replay paints only locally authorized Oracle corpses without ch
       );
       await expectNoCorpseCommands(page, () => baseCorpseBody.click());
       await expect(page.locator("#selection-card")).toContainText(
-        `Agent ID ${baseCorpse.public_agent_id}`,
+        `Agent ID ${expectedAgentIdentity(baseCorpse, corpseRecipient.presentation).displayId}`,
       );
       const afterBaseCorpseInspection = await corpsePresentationState(page);
       expect(afterBaseCorpseInspection.transport.cursor).toEqual(
@@ -8141,8 +8170,8 @@ test("real Agent replay paints only locally authorized Oracle corpses without ch
 
 test("real Live NoShared paints a locally visible corpse as inspection-only Oracle evidence", async ({
   page,
-}) => {
-  test.setTimeout(120_000);
+}, testInfo) => {
+  await installWaapiAutopause(page);
   const service = await startScriptedDebugger({ scenario: "death_respawn_cycle" });
   try {
     await openProduct(page, service.url, "live");
@@ -8162,6 +8191,53 @@ test("real Live NoShared paints a locally visible corpse as inspection-only Orac
         agent.life_state === "corpse" && agent.current_health === 0,
     );
     expect(oracleCorpse).toMatchObject({ life_state: "corpse", current_health: 0 });
+    const deaths = oracle.presentation.match_summary.deaths;
+    expect(deaths).toHaveLength(1);
+    expect(deaths[0].public_agent_id).toBe(oracleCorpse.public_agent_id);
+    expect(deaths[0].contributors.length).toBeGreaterThan(0);
+    const deathCard = page.locator(".combat-death-announcement");
+    await expect(deathCard).toHaveCount(1);
+    await expect(deathCard).toHaveClass(
+      new RegExp(`--team-${deaths[0].killing_team_id === 1 ? "a" : "b"}`, "u"),
+    );
+    await deathCard.evaluate(async (card) => {
+      const battlefield = card.closest("svg");
+      const animation = card.parentElement?.getAnimations()[0];
+      if (!battlefield || !animation?.effect)
+        throw new Error("Live death presentation clock is unavailable.");
+      const timing = animation.effect.getTiming();
+      const time = Number(timing.delay) + Number(timing.duration) / 2;
+      const animations = battlefield
+        .getAnimations({ subtree: true })
+        .filter(({ id }) => id.startsWith("mbg:"));
+      for (const owned of animations) {
+        owned.pause();
+        owned.currentTime = time;
+      }
+      await Promise.all(animations.map(({ ready }) => ready));
+    });
+    const victim = deathCard.locator(".combat-death-announcement__victim");
+    const victimTitle = expectedAgentIdentity(oracleCorpse, oracle.presentation).title;
+    await expect(victim).toHaveText(victimTitle);
+    await victim.locator("rect").hover();
+    await expect(page.locator("#visual-tooltip")).toContainText(victimTitle);
+    for (const contributor of deaths[0].contributors) {
+      await expect(page.locator("#visual-tooltip")).toContainText(
+        expectedAgentIdentity(contributor, oracle.presentation).title,
+      );
+    }
+    await page.mouse.move(0, 0);
+    await victim.focus();
+    await expect(page.locator("#visual-tooltip")).toContainText("Kill Contributors");
+    await page.screenshot({
+      path: testInfo.outputPath("live-death-contributors.png"),
+      fullPage: true,
+    });
+    await page.locator("#view-select").focus();
+    await page.screenshot({
+      path: testInfo.outputPath("live-compact-death.png"),
+      fullPage: true,
+    });
     const oraclePaint = await corpseBodyPaint(page, oracleCorpse.presentation_key);
     const oracleRevision = oracle.transport.revision;
     const oracleStep = oracle.transport.simulator_step_count;
@@ -8178,6 +8254,9 @@ test("real Live NoShared paints a locally visible corpse as inspection-only Orac
       "installed",
     );
 
+    // The HUD proof freezes the clock. Finish the rebuilt transition before
+    // the existing corpse-body checks, as ordinary playback would do.
+    await finishControllerClock(page, "cleanup");
     let agent = await corpsePresentationState(page);
     expect(agent.transport.frame_kind).toBe("actor_pov_live_debugger");
     expect(agent.presentation.presentation_kind).toBe("live_no_shared_obs_agent_pov");
@@ -8215,7 +8294,7 @@ test("real Live NoShared paints a locally visible corpse as inspection-only Orac
     const stepBeforeInspection = agent.transport.simulator_step_count;
     await expectNoCorpseCommands(page, () => corpseBody.click());
     await expect(page.locator("#selection-card")).toContainText(
-      `Agent ID ${authorizedCorpse.public_agent_id}`,
+      `Agent ID ${expectedAgentIdentity(authorizedCorpse, agent.presentation).displayId}`,
     );
     await expectNoCorpseCommands(page, () =>
       corpseBody.click({ modifiers: ["Shift"] }),

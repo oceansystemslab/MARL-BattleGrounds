@@ -1,4 +1,4 @@
-"""Exact public-trajectory integration tests for every debugger scenario."""
+"""Check debugger scenarios through their public game trajectories."""
 
 import jax.numpy as jnp
 import numpy as np
@@ -28,13 +28,13 @@ from scripts.dev.visual_debugger.scenarios import (
     list_scenarios,
 )
 from scripts.dev.visual_debugger.service import DebuggerService
-from scripts.dev.visual_debugger.targeting import global_slot_to_target_action
 from tests.visual_debugger_fixtures import (
     debugger_test_launch_specification,
     rejection_lane_scenario,
     submit_fixture_frame,
 )
 
+from marl_battlegrounds.core.axis_mappings import global_slot_to_target_action
 from marl_battlegrounds.core.config import (
     CANONICAL_PRODUCT_MOVEMENT_SCALE,
     validate_env_config,
@@ -130,7 +130,6 @@ def _canonical_status_event_types(
 
 
 def _catalog_status_duration(session: DebuggerSession, status_id: str) -> int:
-    """Read one configured duration from the episode's immutable catalog."""
     return next(
         row.duration_steps
         for row in session.evaluation_context.static_mechanics_catalog.status_channels
@@ -139,7 +138,6 @@ def _catalog_status_duration(session: DebuggerSession, status_id: str) -> int:
 
 
 def _catalog_aura_multiplier(session: DebuggerSession, aura_id: str) -> float:
-    """Read one configured per-emitter multiplier from the episode catalog."""
     return next(
         row.per_emitter_multiplier
         for row in session.evaluation_context.static_mechanics_catalog.aura_mechanics
@@ -148,7 +146,6 @@ def _catalog_aura_multiplier(session: DebuggerSession, aura_id: str) -> float:
 
 
 def _researcher_scene(session: DebuggerSession) -> BattlefieldSceneV2:
-    """Build the normalized Scene V2 served for the current debugger epoch."""
     return build_evaluation_battlefield_scene_v2(
         session.evaluation_context,
         session.current_evaluation_frame,
@@ -160,7 +157,6 @@ def _researcher_scene(session: DebuggerSession) -> BattlefieldSceneV2:
 def _authoritative_visual_tokens(
     scenarios: tuple[DebuggerScenario, ...],
 ) -> set[str]:
-    """Derive paintable evidence from transitions and authorized scene leaves."""
     tokens: set[str] = set()
 
     def record_scene(scene: AuthorizedBattlefieldSceneV1) -> None:
@@ -303,7 +299,6 @@ def _authoritative_visual_tokens(
 
 
 def _required_authoritative_visual_tokens(session: DebuggerSession) -> set[str]:
-    """Return the catalog-derived mechanic tokens requiring paired scenarios."""
     catalog = session.evaluation_context.static_mechanics_catalog
     status_ids = tuple(row.status_id for row in catalog.status_channels)
     aura_ids = tuple(row.aura_id for row in catalog.aura_mechanics)
@@ -338,7 +333,6 @@ def _assert_health_matches_researcher_scene(
     session: DebuggerSession,
     global_slots: tuple[int, ...],
 ) -> None:
-    """Join public health-resolution events to successor Scene V2 health."""
     view = session.incoming_evaluation_view
     assert view is not None
     scene = _researcher_scene(session)
@@ -368,7 +362,6 @@ def _assert_effective_speed_matches_researcher_scene(
     session: DebuggerSession,
     global_slot: int,
 ) -> None:
-    """Tie effective-speed checks to the normalized Scene V2 value."""
     scene = _researcher_scene(session)
     agent = next(row for row in scene.agents if row.global_slot == global_slot)
     assert float(
@@ -383,7 +376,6 @@ def _assert_durable_mechanics_match_researcher_scene(
     session: DebuggerSession,
     global_slots: tuple[int, ...],
 ) -> None:
-    """Join status/cooldown truth to Scene V2 without owning tuning numbers."""
     scene_by_slot = {row.global_slot: row for row in _researcher_scene(session).agents}
     for global_slot in global_slots:
         state_durations = (
@@ -416,7 +408,6 @@ def _assert_durable_mechanics_match_researcher_scene(
 
 
 def _scene_status_ids(session: DebuggerSession, global_slot: int) -> tuple[str, ...]:
-    """Read stable status identity, without mirroring volatile durations."""
     agent = next(
         row
         for row in _researcher_scene(session).agents
@@ -429,7 +420,6 @@ def _scene_status_durations(
     session: DebuggerSession,
     global_slot: int,
 ) -> dict[str, int]:
-    """Read normalized durable status values keyed by stable catalog identity."""
     agent = next(
         row
         for row in _researcher_scene(session).agents
@@ -444,7 +434,6 @@ def _expected_status_durations_after_transition(
     global_slot: int,
     previous: dict[str, int],
 ) -> dict[str, int]:
-    """Derive timer aging and lifecycle edges from catalog/event authority."""
     expected = {
         status_id: duration - 1
         for status_id, duration in previous.items()
@@ -469,7 +458,6 @@ def _expected_status_durations_after_transition(
 
 
 def _positive_scene_cooldown_slots(session: DebuggerSession) -> tuple[int, ...]:
-    """Read cooldown ownership from normalized successor scene truth."""
     return tuple(
         row.global_slot
         for row in _researcher_scene(session).agents
@@ -482,7 +470,6 @@ def _expected_trap_lifecycle_by_slot(
     duration: int,
     transition: int,
 ) -> dict[int, tuple[str, ...]]:
-    """Derive the authored five-frame Trap story from its catalog duration."""
     expected: dict[int, tuple[str, ...]] = {
         global_slot: () for global_slot in (5, 6, 7, 8)
     }
@@ -520,7 +507,6 @@ def _assert_catalog_derived_trap_lifecycle(
     *,
     transition: int,
 ) -> None:
-    """Prove exact Trap causality without fixing its duration to four ticks."""
     expected = _expected_trap_lifecycle_by_slot(
         duration=_catalog_status_duration(session, "hunter_trap_stun"),
         transition=transition,
@@ -1420,7 +1406,6 @@ def test_researcher_scenarios_cover_every_canonical_event_kind() -> None:
 
 
 def test_every_authoritative_visual_mechanic_has_regular_and_stress_evidence() -> None:
-    """Enforce executable paired coverage without trusting scenario prose."""
     _, reference = _session("basic_support")
     required = _required_authoritative_visual_tokens(reference)
     researcher_tokens = _authoritative_visual_tokens(

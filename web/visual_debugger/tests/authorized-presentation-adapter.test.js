@@ -1,6 +1,11 @@
+/**
+ * @file Check that only normalized authorized frames become browser views and that
+ * identity/preferences keep their exact scope.
+ */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { canonicalAgentIdentity } from "../src/agent-identity.js";
 
 import {
   authorizedOracleCommandSlotForPresentationKey,
@@ -58,6 +63,23 @@ const fixture = JSON.parse(
   ),
 );
 
+test("numeric researcher identities preserve every legacy replay and command identifier", async () => {
+  for (const [kind, raw] of Object.entries(fixture.presentations)) {
+    const original = JSON.stringify(raw);
+    const frame = await normalizeAuthorizedPresentationFrameV1(raw);
+    for (const identity of authorizedPresentationIdentityRows(frame)) {
+      if (identity.command_global_slot === null) continue;
+      assert.equal(
+        canonicalAgentIdentity(identity.agent).publicIdentity,
+        `Agent ID ${identity.command_global_slot}`,
+        kind,
+      );
+      assert.equal(identity.agent.public_agent_id, identity.public_agent_id, kind);
+    }
+    assert.equal(JSON.stringify(raw), original, kind);
+  }
+});
+
 const EXPECTED_CLASS_LABELS = new Map([
   [1, "Mage"],
   [2, "Warrior"],
@@ -68,7 +90,7 @@ const EXPECTED_CLASS_LABELS = new Map([
 
 /** @param {Record<string, any>} identity */
 function expectedAuthorizedIdentityTitle(identity) {
-  return `Agent ID ${identity.public_agent_id} · ${EXPECTED_CLASS_LABELS.get(Number(identity.class_id))} · Team ${identity.team_id === 1 ? "A" : "B"}`;
+  return `Agent ID ${identity.display_agent_id ?? String(identity.public_agent_id).replace(/^agent-slot-(\d)$/u, "$1")} · ${EXPECTED_CLASS_LABELS.get(Number(identity.class_id))} · Team ${identity.team_id === 1 ? "A" : "B"}`;
 }
 
 /** @param {keyof typeof fixture.presentations} kind */
@@ -188,10 +210,6 @@ function oracleTrajectoryForClass(raw, classId) {
   return trajectory;
 }
 
-/**
- * Give every represented class distinct start/post-Charge/successor points
- * without changing the digest-owned current endpoint.
- */
 function movingOracleRaw() {
   const raw = structuredClone(fixture.presentations.replay_oracle);
   const startsByClass = new Map([
@@ -248,11 +266,9 @@ function projectedTrajectoryPoint(raw, classId, phase) {
   return { x: x * 10, y: y * 10 };
 }
 
-/**
- * @param {Record<string, any>} raw
+/** @param {Record<string, any>} raw
  * @param {string} kind
- * @param {{channel?: number, recipientClass?: number, sourceClass?: number}} [options]
- */
+ * @param {{channel?: number, recipientClass?: number, sourceClass?: number}} [options] */
 function oracleStatusEvent(raw, kind, options = {}) {
   const channel = options.channel ?? 4;
   const event = {
@@ -1496,7 +1512,7 @@ test("Pending Joint Action is one exact researcher-space row per live actor", as
   }
 });
 
-test("Technical Frame projects the exact final six-leaf allowlist atomically", async () => {
+test("Technical Frame preserves the six legacy allowlists without episode metadata", async () => {
   const liveShared = fixture.presentations.live_shared_obs_agent_pov;
   const cases = [
     [
@@ -1570,9 +1586,11 @@ test("Technical Frame projects the exact final six-leaf allowlist atomically", a
     ],
   ];
   for (const [kind, expected] of cases) {
-    const frame = await normalized(
-      /** @type {keyof typeof fixture.presentations} */ (kind),
+    const raw = structuredClone(
+      fixture.presentations[/** @type {keyof typeof fixture.presentations} */ (kind)],
     );
+    raw.match_summary = null;
+    const frame = await normalizeAuthorizedPresentationFrameV1(raw);
     const before = JSON.stringify(frame);
     const facts = authorizedPresentationTechnicalFacts(frame);
     assert.deepEqual(
@@ -1660,8 +1678,12 @@ test("Technical Frame projects the exact final six-leaf allowlist atomically", a
     ],
   ];
   for (const [kind, expected] of frameZeroCases) {
+    const raw = structuredClone(
+      fixture.state_cases[/** @type {keyof typeof fixture.state_cases} */ (kind)],
+    );
+    raw.match_summary = null;
     const facts = authorizedPresentationTechnicalFacts(
-      await normalizedState(/** @type {keyof typeof fixture.state_cases} */ (kind)),
+      await normalizeAuthorizedPresentationFrameV1(raw),
     );
     assert.deepEqual(
       facts.map(({ id, label, value }) => [id, label, value]),
@@ -3002,6 +3024,7 @@ test("Oracle status compositor applies exact precedence and preserves every atom
         sourceIdentity: {
           presentation_key: sourceAgent.presentation_key,
           public_agent_id: sourceAgent.public_agent_id,
+          display_agent_id: sourceAgent.display_agent_id,
           class_id: sourceAgent.class_id,
           team_id: sourceAgent.team_id,
         },

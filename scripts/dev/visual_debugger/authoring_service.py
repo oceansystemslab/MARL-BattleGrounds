@@ -1,4 +1,13 @@
-"""One live-only DevClient authoring binding and authoritative load service."""
+"""Handle private DevClient authoring commands and validated live loads.
+
+The live HTTP binding parses commands with ``DevAuthoringCommandRequestV1`` and
+calls ``DevClientAuthoringBinding.apply_command``. Draft storage, compilation and
+live installation stay in their dedicated owners. The binding serializes requests
+with a lock and returns field-linked errors. The load service keeps a fixed compiled
+snapshot so later edits cannot change a running scenario. Import builds the shared
+read-only mechanics catalog; commands may allocate JAX arrays, read/write local
+drafts, or replace the live endpoint according to their explicit operation.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +31,7 @@ from marl_battlegrounds.core import combat
 from marl_battlegrounds.core.config import CANONICAL_PRODUCT_MOVEMENT_SCALE
 from marl_battlegrounds.core.types import MAX_OBSTACLE_SLOTS, EnvConfig, EnvState
 from marl_battlegrounds.evaluation.catalog import build_static_mechanics_catalog_v1
+from marl_battlegrounds.evaluation.map_identity import approved_map_id
 from marl_battlegrounds.evaluation.models import (
     AuraMechanicV1,
     ClassMechanicsV1,
@@ -75,6 +85,10 @@ type CommandType = Literal[
 
 
 class _ServiceModel(BaseModel):
+    """Strict immutable authoring-service model that rejects extra fields and
+    nonfinite numbers.
+    """
+
     model_config = ConfigDict(
         allow_inf_nan=False,
         extra="forbid",
@@ -85,6 +99,8 @@ class _ServiceModel(BaseModel):
 
 
 class DevSavedDraftSourceV1(_ServiceModel):
+    """Select one exact saved map or scenario ID and positive revision."""
+
     source_kind: Literal["saved_draft"] = "saved_draft"
     asset_kind: DevAssetKind
     asset_id: SafeAssetId
@@ -95,12 +111,15 @@ type DevPersistedSourceV1 = DevSavedDraftSourceV1
 
 
 class DevCurrentBufferSourceV1(_ServiceModel):
+    """Carry a complete unsaved editor buffer with its matching map/scenario kind."""
+
     source_kind: Literal["current_buffer"] = "current_buffer"
     asset_kind: DevAssetKind
     draft: DevDraftPayload
 
     @model_validator(mode="after")
     def _validate_asset_kind(self) -> DevCurrentBufferSourceV1:
+        """Require asset_kind to agree with the concrete draft model."""
         expected_kind: DevAssetKind = (
             "map" if isinstance(self.draft, DevMapDraftV1) else "scenario"
         )
@@ -116,16 +135,26 @@ type DevDebugAssetSourceV1 = Annotated[
 
 
 class DevListCommandV1(_ServiceModel):
+    """List saved maps, saved scenarios, or both; the default selection is all."""
+
     command_type: Literal["list"] = "list"
     asset_kind: Literal["map", "scenario", "all"] = "all"
 
 
 class DevNewMapCommandV1(_ServiceModel):
+    """Create an unsaved blank map with the requested safe asset ID."""
+
     command_type: Literal["new_map"] = "new_map"
     asset_id: SafeAssetId = "untitled_map"
 
 
 class DevNewScenarioCommandV1(_ServiceModel):
+    """Create a blank scenario, copy a saved map, or duplicate a saved scenario.
+
+    Blank creation accepts no source. Copy and duplicate modes require an exact
+    saved revision of the corresponding asset kind.
+    """
+
     command_type: Literal["new_scenario"] = "new_scenario"
     asset_id: SafeAssetId = "untitled_scenario"
     creation_mode: Literal[
@@ -137,6 +166,9 @@ class DevNewScenarioCommandV1(_ServiceModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> DevNewScenarioCommandV1:
+        """Require the source kind appropriate to the selected scenario-creation
+        mode.
+        """
         if self.creation_mode == "blank":
             if self.source is not None:
                 raise ValueError("blank scenario creation does not accept a source")
@@ -150,33 +182,49 @@ class DevNewScenarioCommandV1(_ServiceModel):
 
 
 class DevOpenCommandV1(_ServiceModel):
+    """Open one exact saved asset revision into an editor buffer."""
+
     command_type: Literal["open"] = "open"
     source: DevPersistedSourceV1
 
 
 class DevSaveCommandV1(_ServiceModel):
+    """Save a complete draft only if its expected current revision still matches."""
+
     command_type: Literal["save"] = "save"
     draft: DevDraftPayload
     expected_revision: DevDraftRevision
 
 
 class DevSaveAsCommandV1(_ServiceModel):
+    """Save a copy under a new safe identity without overwriting an existing draft."""
+
     command_type: Literal["save_as"] = "save_as"
     draft: DevDraftPayload
     asset_id: SafeAssetId
 
 
 class DevValidateCommandV1(_ServiceModel):
+    """Check a complete draft without saving it or replacing the running scenario."""
+
     command_type: Literal["validate"] = "validate"
     draft: DevDraftPayload
 
 
 class DevDeleteCommandV1(_ServiceModel):
+    """Delete an exact saved asset identity using its last observed revision as a
+    guard.
+    """
+
     command_type: Literal["delete"] = "delete"
     source: DevSavedDraftSourceV1
 
 
 class DevOpenInDebugCommandV1(_ServiceModel):
+    """Compile a current buffer or exact saved revision and request live
+    installation.
+    """
+
     command_type: Literal["open_in_debug"] = "open_in_debug"
     source: DevDebugAssetSourceV1
 
@@ -202,6 +250,12 @@ class DevAuthoringCommandRequestV1(RootModel[DevAuthoringCommandV1]):
 
 
 class DevValidationSummaryV1(_ServiceModel):
+    """Report whether a draft is executable, with linked problems and available digests.
+
+    Scenario summaries may include ten effective movement speeds. Missing runtime
+    fields remain None for invalid drafts and map-only validation.
+    """
+
     asset_kind: DevAssetKind
     execution_valid: bool
     semantic_digest: SemanticDigest | None = None
@@ -219,6 +273,10 @@ class DevValidationSummaryV1(_ServiceModel):
 
 
 class DevAssetSummaryV1(_ServiceModel):
+    """Describe one saved asset revision for discovery, including dimensions and
+    validity.
+    """
+
     asset_kind: DevAssetKind
     source_kind: Literal["saved_draft"] = "saved_draft"
     asset_id: SafeAssetId
@@ -233,6 +291,10 @@ class DevAssetSummaryV1(_ServiceModel):
 
 
 class DevDeletedAssetSummaryV1(_ServiceModel):
+    """Report the deleted asset identity, greatest revision, and number of removed
+    revisions.
+    """
+
     asset_kind: DevAssetKind
     asset_id: SafeAssetId
     latest_revision: DevSavedRevision
@@ -240,6 +302,13 @@ class DevDeletedAssetSummaryV1(_ServiceModel):
 
 
 class DevDebugLoadSummaryV1(_ServiceModel):
+    """Identify the exact compiled map preview or scenario installed in the live
+    debugger.
+
+    Source IDs describe the input. Semantic and resolved digests bind the normalized
+    physical content and runtime endpoint actually loaded.
+    """
+
     source_kind: Literal["current_buffer", "saved_draft"]
     asset_kind: DevAssetKind
     debug_profile: Literal["authored_scenario", "default_tdm_map_preview"]
@@ -276,6 +345,9 @@ class DevAuthoringCatalogV1(_ServiceModel):
 
 
 def _build_authoring_catalog() -> DevAuthoringCatalogV1:
+    """Expose the shared mechanics catalog with editor capacities and fixed grid
+    settings.
+    """
     catalog = build_static_mechanics_catalog_v1()
     return DevAuthoringCatalogV1(
         mechanics_catalog_digest=catalog.canonical_digest_sha256,
@@ -316,7 +388,24 @@ class LoadedDevScenarioSnapshotV1:
 def debugger_scenario_from_snapshot(
     snapshot: LoadedDevScenarioSnapshotV1,
 ) -> DebuggerScenario:
-    """Adapt one validated host snapshot to the existing debugger contract."""
+    """Adapt one compiled snapshot to the live debugger's scenario interface.
+
+    Parameters
+    ----------
+    snapshot : LoadedDevScenarioSnapshotV1
+        Successfully compiled source, runtime endpoint and matching load summary.
+
+    Returns
+    -------
+    DebuggerScenario
+        Interactive scenario with a factory that deep-copies the frozen config/state.
+        It retains authored provenance and selects the first active Team A slot.
+
+    Notes
+    -----
+    Does not load new source bytes or install the scenario. Future resets use the same
+    compiled source, even when the editor or saved draft changes.
+    """
     compiled = snapshot.compiled
     source = snapshot.source
     if isinstance(source, DevCurrentBufferSourceV1):
@@ -337,8 +426,14 @@ def debugger_scenario_from_snapshot(
         for row in compiled.content.roster
         if row.team == "A" and row.team_local_slot <= compiled.content.team_a_size
     )
+    map_source = compiled.content.source_map_provenance
+    map_id = approved_map_id(
+        None if map_source is None else map_source.asset_id,
+        compiled.map_semantic_digest,
+    )
 
     def build_scenario() -> tuple[EnvConfig, EnvState]:
+        """Deep-copy the frozen compiled config/state for each new live reset."""
         return copy.deepcopy(compiled.config), copy.deepcopy(compiled.initial_state)
 
     return DebuggerScenario(
@@ -361,11 +456,16 @@ def debugger_scenario_from_snapshot(
             map_semantic_digest=compiled.map_semantic_digest,
             resolved_configuration_digest=compiled.resolved_configuration_digest,
             resolved_initial_state_digest=compiled.resolved_initial_state_digest,
+            map_id=map_id,
         ),
     )
 
 
 class DevScenarioLoadAttemptV1(_ServiceModel):
+    """Report a completed load or its linked errors without exposing a failed partial
+    snapshot.
+    """
+
     ok: bool
     summary: DevDebugLoadSummaryV1 | None = None
     problems: tuple[DevAuthoringProblemV1, ...] = ()
@@ -377,6 +477,9 @@ def _service_problem(
     *,
     field_path: str = "command",
 ) -> DevAuthoringProblemV1:
+    """Build a stable authoring-command error linked to a field, defaulting to the
+    command root.
+    """
     return DevAuthoringProblemV1(
         severity="error",
         stable_code=code,
@@ -386,6 +489,9 @@ def _service_problem(
 
 
 def _validation_summary(draft: DevDraftPayload) -> DevValidationSummaryV1:
+    """Validate a map or compile a scenario and return truthful available summary
+    fields.
+    """
     if isinstance(draft, DevMapDraftV1):
         problems = validate_map_content(draft.content)
         valid = not any(problem.severity == "error" for problem in problems)
@@ -436,7 +542,22 @@ def _validation_summary(draft: DevDraftPayload) -> DevValidationSummaryV1:
 
 
 class DevScenarioLoadService:
-    """Discover and load exact authored assets without partial replacement."""
+    """Compile exact authored assets before replacing the current live snapshot.
+
+    Parameters
+    ----------
+    store : DevAssetStore
+        Protected local store used to resolve saved revisions.
+    install_snapshot : callable or None, optional
+        Host callback receiving a fully compiled snapshot. None retains the snapshot
+        locally without installing it in another live service.
+
+    Notes
+    -----
+    The current snapshot changes only after compilation and the installer succeed.
+    An installer must apply its own atomic replacement contract; this service cannot
+    undo arbitrary external callback side effects.
+    """
 
     def __init__(
         self,
@@ -444,18 +565,23 @@ class DevScenarioLoadService:
         *,
         install_snapshot: Callable[[LoadedDevScenarioSnapshotV1], None] | None = None,
     ) -> None:
+        """Keep the store and optional installer; start with no loaded snapshot."""
         self._store = store
         self._install_snapshot = install_snapshot
         self._current_snapshot: LoadedDevScenarioSnapshotV1 | None = None
 
     @property
     def current_snapshot(self) -> LoadedDevScenarioSnapshotV1 | None:
+        """Return the last successfully installed compiled snapshot, or None before a
+        load.
+        """
         return self._current_snapshot
 
     def _open_source(
         self,
         source: DevDebugAssetSourceV1,
     ) -> DevDraftPayload:
+        """Deep-copy a current buffer or load the exact requested saved revision."""
         if isinstance(source, DevCurrentBufferSourceV1):
             return source.draft.model_copy(deep=True)
         return self._store.load_draft(
@@ -473,6 +599,11 @@ class DevScenarioLoadService:
         str,
         Literal["authored_scenario", "default_tdm_map_preview"],
     ]:
+        """Compile a scenario directly or build a temporary default TDM preview of a
+        map.
+
+        Preview creation does not modify or save the source map.
+        """
         if source.asset_kind == "scenario":
             if not isinstance(opened, DevScenarioDraftV1):
                 raise TypeError("scenario Debug source resolved a non-scenario asset")
@@ -519,6 +650,9 @@ class DevScenarioLoadService:
         source_name: str,
         debug_profile: Literal["authored_scenario", "default_tdm_map_preview"],
     ) -> DevDebugLoadSummaryV1:
+        """Bind the loaded source identity to the exact compiled runtime and semantic
+        digests.
+        """
         asset_id: str | None = None
         revision: int | None = None
         if isinstance(source, DevCurrentBufferSourceV1):
@@ -544,7 +678,27 @@ class DevScenarioLoadService:
         )
 
     def load(self, source: DevDebugAssetSourceV1) -> DevScenarioLoadAttemptV1:
-        """Reopen, compile, revalidate, then atomically replace current snapshot."""
+        """Resolve, compile and install one source before exposing it as current.
+
+        Parameters
+        ----------
+        source : DevDebugAssetSourceV1
+            Complete current buffer or exact saved map/scenario revision.
+
+        Returns
+        -------
+        DevScenarioLoadAttemptV1
+            Success with the exact loaded summary, or failure with linked problems.
+            Handled failures leave this service's current snapshot unchanged.
+
+        Notes
+        -----
+        May read a saved draft and perform compilation/reset work. The optional
+        installer
+        runs only after the full snapshot is ready. Expected storage, validation and
+        install
+        errors become result problems; unexpected failures propagate.
+        """
         try:
             opened = self._open_source(source)
             compiled, source_name, debug_profile = self._compile_source(source, opened)
@@ -608,7 +762,27 @@ class DevScenarioLoadService:
         *,
         include_invalid_drafts: bool = False,
     ) -> tuple[DevAssetSummaryV1, ...]:
-        """Summarize one asset kind for authoring and Debug discovery."""
+        """Summarize the latest parseable revision of each asset in one collection.
+
+        Parameters
+        ----------
+        asset_kind : {"map", "scenario"}, optional
+            Collection to inspect; defaults to scenarios.
+        include_invalid_drafts : bool, optional
+            False includes only executable drafts. True also includes parseable drafts
+            whose execution checks fail, so the editor can offer them for repair.
+
+        Returns
+        -------
+        tuple of DevAssetSummaryV1
+            Stable saved-asset summaries. Missing, corrupt, or unreadable draft entries
+            caught by the expected validation path are skipped.
+
+        Notes
+        -----
+        Reads and validates saved content without saving drafts or installing a
+        scenario.
+        """
         summaries: list[DevAssetSummaryV1] = []
         for reference in self._store.iter_draft_references(
             asset_kind,
@@ -648,12 +822,36 @@ class DevScenarioLoadService:
         return tuple(summaries)
 
     def discover(self) -> tuple[DevAssetSummaryV1, ...]:
-        """Return exact valid saved maps and scenarios for Combat."""
+        """List executable saved scenarios followed by executable saved maps.
+
+        Returns
+        -------
+        tuple of DevAssetSummaryV1
+            Latest valid saved identities available to the live Combat interface.
+
+        Notes
+        -----
+        Uses the same validation path as collection listing; no live snapshot is
+        replaced.
+        """
         return self.list_persisted("scenario") + self.list_persisted("map")
 
 
 class DevClientAuthoringBinding:
-    """Single callable live-only host authority for the authoring endpoint."""
+    """Serialize parsed editor commands for one local draft store.
+
+    Parameters
+    ----------
+    store : DevAssetStore
+        Owner of saved map/scenario revisions.
+    scenario_loader : DevScenarioLoadService or None, optional
+        Loader connected to the live service. None creates a loader using this store.
+
+    Notes
+    -----
+    The lock serializes command execution in this process. The store separately owns
+    cross-process mutation locks and revision checks.
+    """
 
     def __init__(
         self,
@@ -661,6 +859,7 @@ class DevClientAuthoringBinding:
         *,
         scenario_loader: DevScenarioLoadService | None = None,
     ) -> None:
+        """Bind a store, a command lock, and the supplied or default scenario loader."""
         self._store = store
         self._lock = Lock()
         self._scenario_loader = (
@@ -671,12 +870,14 @@ class DevClientAuthoringBinding:
 
     @property
     def scenario_loader(self) -> DevScenarioLoadService:
+        """Return the loader that owns this binding's live compiled snapshot."""
         return self._scenario_loader
 
     def _load_persisted(
         self,
         source: DevPersistedSourceV1,
     ) -> DevDraftPayload:
+        """Load one exact saved source revision through the protected draft store."""
         return self._store.load_draft(
             source.asset_kind,
             source.asset_id,
@@ -687,6 +888,9 @@ class DevClientAuthoringBinding:
         self,
         requested: Literal["map", "scenario", "all"],
     ) -> tuple[DevAssetSummaryV1, ...]:
+        """List requested asset kinds with parseable invalid drafts retained for
+        editing.
+        """
         summaries: list[DevAssetSummaryV1] = []
         if requested in ("scenario", "all"):
             summaries.extend(
@@ -705,6 +909,7 @@ class DevClientAuthoringBinding:
         return tuple(summaries)
 
     def _new_scenario(self, command: DevNewScenarioCommandV1) -> DevScenarioDraftV1:
+        """Resolve the validated creation mode using the shared blank/copy factories."""
         if command.creation_mode == "blank":
             return new_scenario_draft(command.asset_id)
         if command.source is None:
@@ -722,7 +927,25 @@ class DevClientAuthoringBinding:
         self,
         request: DevAuthoringCommandRequestV1,
     ) -> DevAuthoringCommandResponseV1:
-        """Serialize and apply one strictly parsed live authoring command."""
+        """Apply one parsed editor request while holding the binding's command lock.
+
+        Parameters
+        ----------
+        request : DevAuthoringCommandRequestV1
+            Strict command root selecting one supported authoring operation.
+
+        Returns
+        -------
+        DevAuthoringCommandResponseV1
+            Command-specific draft, listing, validation, deletion or load data. Expected
+            storage/validation failures return ``ok=False`` with linked problems.
+
+        Notes
+        -----
+        Only the selected operation runs. Save and delete commands change local draft
+        files; Open In Debug may replace the live scenario. New and Validate commands do
+        not save content. Unexpected failures are not silently converted into success.
+        """
         with self._lock:
             return self._apply_command(request)
 
@@ -730,6 +953,9 @@ class DevClientAuthoringBinding:
         self,
         request: DevAuthoringCommandRequestV1,
     ) -> DevAuthoringCommandResponseV1:
+        """Dispatch one command under the caller-held lock and translate expected
+        failures.
+        """
         command = request.root
         try:
             if isinstance(command, DevListCommandV1):

@@ -1,4 +1,4 @@
-"""Launch-scoped debugger source-revision discovery proofs."""
+"""Check the source revision recorded when the debugger starts."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from scripts.dev.visual_debugger.revision import (
-    discover_debugger_code_revision_v1,
-)
 
 from marl_battlegrounds.evaluation.models import canonical_json_bytes
+from marl_battlegrounds.evaluation.revision import (
+    discover_code_revision_v1,
+)
 
 
 def _run_git(
@@ -71,7 +71,7 @@ def test_clean_revision_matches_head_tree_and_ignores_ignored_files(
     _initialize_repository(repository)
     (repository / "ignored.txt").write_text("local-only\n", encoding="utf-8")
 
-    revision = discover_debugger_code_revision_v1(
+    revision = discover_code_revision_v1(
         repository,
         package_version="0.0.0",
     )
@@ -103,22 +103,22 @@ def test_tracked_dirty_revision_is_deterministic_and_content_sensitive(
 ) -> None:
     repository = tmp_path / "tracked-dirty"
     tracked = _initialize_repository(repository)
-    clean = discover_debugger_code_revision_v1(
+    clean = discover_code_revision_v1(
         repository,
         package_version="0.0.0",
     )
     tracked.write_text("first dirty value\n", encoding="utf-8")
 
-    first = discover_debugger_code_revision_v1(
+    first = discover_code_revision_v1(
         repository,
         package_version="0.0.0",
     )
-    repeated = discover_debugger_code_revision_v1(
+    repeated = discover_code_revision_v1(
         repository,
         package_version="0.0.0",
     )
     tracked.write_text("second dirty value\n", encoding="utf-8")
-    changed = discover_debugger_code_revision_v1(
+    changed = discover_code_revision_v1(
         repository,
         package_version="0.0.0",
     )
@@ -141,11 +141,11 @@ def test_untracked_digest_is_order_independent_and_tracks_path_and_content(
     first_path.write_bytes(b"alpha\x00payload")
     second_path.write_bytes(b"zeta payload")
 
-    first = discover_debugger_code_revision_v1(
+    first = discover_code_revision_v1(
         repository,
         package_version="0.0.0",
     )
-    repeated = discover_debugger_code_revision_v1(
+    repeated = discover_code_revision_v1(
         repository,
         package_version="0.0.0",
     )
@@ -153,18 +153,18 @@ def test_untracked_digest_is_order_independent_and_tracks_path_and_content(
     second_path.unlink()
     second_path.write_bytes(b"zeta payload")
     first_path.write_bytes(b"alpha\x00payload")
-    recreated_in_reverse_order = discover_debugger_code_revision_v1(
+    recreated_in_reverse_order = discover_code_revision_v1(
         repository,
         package_version="0.0.0",
     )
     second_path.write_bytes(b"different payload")
-    changed_content = discover_debugger_code_revision_v1(
+    changed_content = discover_code_revision_v1(
         repository,
         package_version="0.0.0",
     )
     second_path.unlink()
     (repository / "renamed.txt").write_bytes(b"zeta payload")
-    changed_path = discover_debugger_code_revision_v1(
+    changed_path = discover_code_revision_v1(
         repository,
         package_version="0.0.0",
     )
@@ -193,11 +193,11 @@ def test_equal_checkouts_produce_equal_path_free_dirty_revision(
     (first_repository / "new.bin").write_bytes(b"same untracked bytes\x00")
     (second_repository / "new.bin").write_bytes(b"same untracked bytes\x00")
 
-    first = discover_debugger_code_revision_v1(
+    first = discover_code_revision_v1(
         first_repository,
         package_version="0.0.0",
     )
-    second = discover_debugger_code_revision_v1(
+    second = discover_code_revision_v1(
         second_repository,
         package_version="0.0.0",
     )
@@ -214,12 +214,12 @@ def test_revision_discovery_rejects_non_path_and_non_repository(
     tmp_path: Path,
 ) -> None:
     with pytest.raises(TypeError, match=r"must be a pathlib\.Path"):
-        discover_debugger_code_revision_v1(
+        discover_code_revision_v1(
             os.fspath(tmp_path),  # type: ignore[arg-type]
             package_version="0.0.0",
         )
     with pytest.raises(ValueError, match="Git revision discovery failed"):
-        discover_debugger_code_revision_v1(
+        discover_code_revision_v1(
             tmp_path,
             package_version="0.0.0",
         )

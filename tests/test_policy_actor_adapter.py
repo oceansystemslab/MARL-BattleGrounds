@@ -1,4 +1,4 @@
-"""Fixed-slot and information-boundary proof for policy action assembly."""
+"""Check action assembly and the information passed to each actor."""
 
 import ast
 import inspect
@@ -44,7 +44,6 @@ from marl_battlegrounds.policies.no_shared_obs import (
 
 
 def _assert_tree_arrays_exact(actual: object, expected: object) -> None:
-    """Require identical PyTree structures, dtypes, shapes, and values."""
     assert jax.tree_util.tree_structure(actual) == jax.tree_util.tree_structure(
         expected
     )
@@ -61,7 +60,6 @@ def _assert_tree_arrays_exact(actual: object, expected: object) -> None:
 
 
 def _recipient_coded_leaf(leaf: Array) -> Array:
-    """Broadcast a distinct global-slot code across every recipient row."""
     recipient_codes = jnp.arange(MAX_AGENT_SLOTS, dtype=jnp.int32)
     if jnp.issubdtype(leaf.dtype, jnp.bool_):
         typed_codes = (recipient_codes % 2).astype(jnp.bool_)
@@ -72,7 +70,6 @@ def _recipient_coded_leaf(leaf: Array) -> Array:
 
 
 def _recipient_coded_policy_inputs() -> tuple[Observation, ActionMask]:
-    """Return complete policy inputs whose leaves identify their recipient row."""
     config = evaluation_env_config(team_sizes=(2, 3))
     _, observation, action_mask, _ = reset(config, jax.random.key(0))
     return (
@@ -86,7 +83,6 @@ def _shape_checking_slot_policy(
     action_mask: ActionMask,
     key: Array,
 ) -> ActorAction:
-    """Assert the complete rank-reduced contract and encode row, mask, and key."""
     assert observation.self_features.shape == (SELF_FEATURES,)
     assert observation.ally_unit_features.shape == (
         MAX_AGENTS_PER_TEAM,
@@ -204,7 +200,6 @@ def _shape_checking_slot_policy(
 
 
 def _perturb_nonfocal_rows(leaf: Array, focal_global_slot: int) -> Array:
-    """Change every recipient row except the focal row without changing shape."""
     if jnp.issubdtype(leaf.dtype, jnp.bool_):
         perturbed = jnp.logical_not(leaf)
     else:
@@ -216,12 +211,10 @@ def _perturb_nonfocal_rows(leaf: Array, focal_global_slot: int) -> Array:
 
 
 def _actor_key_bits(actor_key: Array) -> Array:
-    """Encode one actor key as a deterministic scalar test value."""
     return jax.random.bits(actor_key, (), dtype=jnp.uint32).astype(jnp.int32)
 
 
 def test_actor_action_and_joint_assembly_preserve_exact_fixed_slot_values() -> None:
-    """Scalar and batched actions retain shape, dtype, ordering, and raw values."""
     scalar_action = ActorAction(
         move=jnp.asarray(3, dtype=jnp.int32),
         select_target=jnp.asarray(7, dtype=jnp.int32),
@@ -270,7 +263,6 @@ def test_no_shared_obs_executor_slices_complete_rows_and_keys_in_global_order(
     start_global_slot: int,
     use_legacy_keys: bool,
 ) -> None:
-    """Each team receives exactly five complete actor rows and matching keys."""
     observation, action_mask = _recipient_coded_policy_inputs()
     typed_keys = jax.random.split(jax.random.key(17), MAX_AGENT_SLOTS)
     actor_keys = jax.random.key_data(typed_keys) if use_legacy_keys else typed_keys
@@ -322,7 +314,6 @@ def test_no_shared_obs_executor_slices_complete_rows_and_keys_in_global_order(
 
 
 def test_no_shared_obs_executor_is_focally_independent_of_other_rows_and_keys() -> None:
-    """A focal result depends on only its own row, local mask, and actor key."""
     focal_global_slot = 2
     observation, action_mask = _recipient_coded_policy_inputs()
     actor_keys = jax.random.split(jax.random.key(23), MAX_AGENT_SLOTS)
@@ -371,7 +362,6 @@ def test_no_shared_obs_executor_is_focally_independent_of_other_rows_and_keys() 
 
 
 def test_actor_assembler_dependency_boundary_excludes_policy_input_authority() -> None:
-    """The mode-neutral assembler imports no observation or regime concepts."""
     module_tree = ast.parse(inspect.getsource(actor_module))
     imported_modules: set[str] = set()
     imported_core_type_names: set[str] = set()

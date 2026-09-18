@@ -1,3 +1,7 @@
+/**
+ * @file Check live transport normalization, schema/authority boundaries and
+ * production-captured frame identities.
+ */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -100,11 +104,9 @@ function eventType(event) {
   return event.event_type;
 }
 
-/**
- * @param {number} globalSlot
+/** @param {number} globalSlot
  * @param {string} phase
- * @param {readonly [number, number]} position
- */
+ * @param {readonly [number, number]} position */
 function anchor(globalSlot, phase, position) {
   return {
     phase,

@@ -1,4 +1,4 @@
-"""Integration proof that researcher scene mechanics remain catalog-authored."""
+"""Check that displayed mechanics come from the shared catalog."""
 
 from __future__ import annotations
 
@@ -17,12 +17,10 @@ from tests.catalog_propagation_fixture import (
 )
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
-from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV1
 from marl_battlegrounds.rendering.scene import to_jsonable
 
 
 def test_catalog_mechanic_mutation_reaches_serialized_researcher_scene() -> None:
-    """Keep browser mechanics factual instead of duplicating catalog tuning."""
     live_frame, expected = build_catalog_propagation_fixture()
     scene = live_frame.projection.scene
     scene_payload = cast(
@@ -69,7 +67,6 @@ def test_catalog_mechanic_mutation_reaches_serialized_researcher_scene() -> None
 def test_catalog_mechanic_mutation_is_relative_to_any_valid_source_catalog(
     source_basic_damage: float,
 ) -> None:
-    """A production tune must not collide with fixed test sentinels."""
     session = create_session(
         get_scenario("arena_5v5"),
         seed=0,
@@ -98,7 +95,7 @@ def test_catalog_mechanic_mutation_is_relative_to_any_valid_source_catalog(
     assert expected.burst_multiplier == 1.96
     assert expected.aura_radius == 7.5
     assert expected.aura_multiplier == 1.19
-    assert varied_context == EvaluationEpisodeContextV1.model_validate_json(
+    assert varied_context == type(varied_context).model_validate_json(
         varied_context.model_dump_json()
     )
     assert varied_context.static_mechanics_catalog == type(

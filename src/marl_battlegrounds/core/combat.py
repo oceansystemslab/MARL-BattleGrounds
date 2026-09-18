@@ -1,4 +1,13 @@
-"""Pure combat catalog support for the JAX-native simulator."""
+"""Own class catalogs and derive current status strengths for Core.
+
+Catalog rows are neutral, Mage, Warrior, Hunter, Rogue and Priest. Lookup
+helpers return JAX arrays without validating IDs. Configuration builders
+resolve and validate those values before reset. Status helpers read stored
+durations and derive strengths; they do not apply damage or advance time.
+
+``derive_effective_movement_speeds`` is shared by physical movement and
+observations. Keeping it here gives both paths the same current speed.
+Catalog arrays use float32 for magnitudes and int32 for counts and modes."""
 
 import jax.numpy as jnp
 from jax import Array
@@ -260,79 +269,344 @@ OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS = jnp.asarray(
 
 
 def get_max_health_by_class_ids(class_ids: int | Array) -> Array:
-    """Return max health values for one or more class IDs."""
+    """Return catalog maximum health for the supplied class IDs.
+
+    Parameters
+    ----------
+    class_ids : int or jax.Array
+        Class IDs in 0..5. Zero is neutral; 1..5 are Mage, Warrior, Hunter,
+        Rogue and Priest. Array inputs use integer dtype and may have any shape.
+
+    Returns
+    -------
+    jax.Array
+        Float32 values with the input shape, or scalar shape () for one ID.
+        Values use health units. Neutral entries are zero.
+
+    Notes
+    -----
+    This is a pure JAX table lookup. Callers validate IDs before execution;
+    out-of-range indexing is not a supported validation mechanism.
+    """
     return MAX_HEALTH_BY_CLASS[class_ids]
 
 
 def get_base_movement_speed_by_class_ids(class_ids: int | Array) -> Array:
-    """Return movement speed values for one or more class IDs."""
+    """Return catalog base movement speed for the supplied class IDs.
+
+    Parameters
+    ----------
+    class_ids : int or jax.Array
+        Class IDs in 0..5. Zero is neutral; 1..5 are Mage, Warrior, Hunter,
+        Rogue and Priest. Array inputs use integer dtype and may have any shape.
+
+    Returns
+    -------
+    jax.Array
+        Float32 values with the input shape, or scalar shape () for one ID.
+        Values use world units per step before the episode movement scale. Neutral
+        entries are zero.
+
+    Notes
+    -----
+    This is a pure JAX table lookup. Callers validate IDs before execution;
+    out-of-range indexing is not a supported validation mechanism.
+    """
     return BASE_MOVEMENT_SPEED_BY_CLASS[class_ids]
 
 
 def get_body_radius_by_class_ids(class_ids: int | Array) -> Array:
-    """Return body radius values for one or more class IDs."""
+    """Return catalog body radius for the supplied class IDs.
+
+    Parameters
+    ----------
+    class_ids : int or jax.Array
+        Class IDs in 0..5. Zero is neutral; 1..5 are Mage, Warrior, Hunter,
+        Rogue and Priest. Array inputs use integer dtype and may have any shape.
+
+    Returns
+    -------
+    jax.Array
+        Float32 values with the input shape, or scalar shape () for one ID.
+        Values use world units. Neutral entries are zero.
+
+    Notes
+    -----
+    This is a pure JAX table lookup. Callers validate IDs before execution;
+    out-of-range indexing is not a supported validation mechanism.
+    """
     return BODY_RADIUS_BY_CLASS[class_ids]
 
 
 def get_basic_interaction_radius_by_class_ids(class_ids: int | Array) -> Array:
-    """Return basic interaction radii for one or more class IDs."""
+    """Return catalog Basic interaction radius for the supplied class IDs.
+
+    Parameters
+    ----------
+    class_ids : int or jax.Array
+        Class IDs in 0..5. Zero is neutral; 1..5 are Mage, Warrior, Hunter,
+        Rogue and Priest. Array inputs use integer dtype and may have any shape.
+
+    Returns
+    -------
+    jax.Array
+        Float32 values with the input shape, or scalar shape () for one ID.
+        Values use world units. Neutral entries are zero.
+
+    Notes
+    -----
+    This is a pure JAX table lookup. Callers validate IDs before execution;
+    out-of-range indexing is not a supported validation mechanism.
+    """
     return BASIC_INTERACTION_RADIUS_BY_CLASS[class_ids]
 
 
 def get_basic_damage_by_class_ids(class_ids: int | Array) -> Array:
-    """Return basic damage values for one or more class IDs."""
+    """Return catalog Basic damage for the supplied class IDs.
+
+    Parameters
+    ----------
+    class_ids : int or jax.Array
+        Class IDs in 0..5. Zero is neutral; 1..5 are Mage, Warrior, Hunter,
+        Rogue and Priest. Array inputs use integer dtype and may have any shape.
+
+    Returns
+    -------
+    jax.Array
+        Float32 values with the input shape, or scalar shape () for one ID.
+        Values use health units before status and aura modifiers. Neutral entries
+        are zero.
+
+    Notes
+    -----
+    This is a pure JAX table lookup. Callers validate IDs before execution;
+    out-of-range indexing is not a supported validation mechanism.
+    """
     return BASIC_DAMAGE_BY_CLASS[class_ids]
 
 
 def get_basic_healing_by_class_ids(class_ids: int | Array) -> Array:
-    """Return basic healing values for one or more class IDs."""
+    """Return catalog Basic healing for the supplied class IDs.
+
+    Parameters
+    ----------
+    class_ids : int or jax.Array
+        Class IDs in 0..5. Zero is neutral; 1..5 are Mage, Warrior, Hunter,
+        Rogue and Priest. Array inputs use integer dtype and may have any shape.
+
+    Returns
+    -------
+    jax.Array
+        Float32 values with the input shape, or scalar shape () for one ID.
+        Values use health units before recipient modifiers and health clipping.
+        Neutral entries are zero.
+
+    Notes
+    -----
+    This is a pure JAX table lookup. Callers validate IDs before execution;
+    out-of-range indexing is not a supported validation mechanism.
+    """
     return BASIC_HEALING_BY_CLASS[class_ids]
 
 
 def get_ultimate_interaction_radius_by_class_ids(class_ids: int | Array) -> Array:
-    """Return ultimate interaction radii for one or more class IDs."""
+    """Return catalog Ultimate interaction radius for the supplied class IDs.
+
+    Parameters
+    ----------
+    class_ids : int or jax.Array
+        Class IDs in 0..5. Zero is neutral; 1..5 are Mage, Warrior, Hunter,
+        Rogue and Priest. Array inputs use integer dtype and may have any shape.
+
+    Returns
+    -------
+    jax.Array
+        Float32 values with the input shape, or scalar shape () for one ID.
+        Values use world units; Mage's no-target Ultimate has radius zero. Neutral
+        entries are zero.
+
+    Notes
+    -----
+    This is a pure JAX table lookup. Callers validate IDs before execution;
+    out-of-range indexing is not a supported validation mechanism.
+    """
     return ULTIMATE_INTERACTION_RADIUS_BY_CLASS[class_ids]
 
 
 def get_ultimate_cooldown_by_class_ids(class_ids: int | Array) -> Array:
-    """Return ultimate cooldown values for one or more class IDs."""
+    """Return catalog Ultimate cooldown for the supplied class IDs.
+
+    Parameters
+    ----------
+    class_ids : int or jax.Array
+        Class IDs in 0..5. Zero is neutral; 1..5 are Mage, Warrior, Hunter,
+        Rogue and Priest. Array inputs use integer dtype and may have any shape.
+
+    Returns
+    -------
+    jax.Array
+        Int32 values with the input shape, or scalar shape () for one ID.
+        Values use steps. Neutral entries are zero.
+
+    Notes
+    -----
+    This is a pure JAX table lookup. Callers validate IDs before execution;
+    out-of-range indexing is not a supported validation mechanism.
+    """
     return ULTIMATE_COOLDOWN_BY_CLASS[class_ids]
 
 
 def get_observation_radius_by_class_ids(class_ids: int | Array) -> Array:
-    """Return observation radii for one or more class IDs."""
+    """Return catalog observation radius for the supplied class IDs.
+
+    Parameters
+    ----------
+    class_ids : int or jax.Array
+        Class IDs in 0..5. Zero is neutral; 1..5 are Mage, Warrior, Hunter,
+        Rogue and Priest. Array inputs use integer dtype and may have any shape.
+
+    Returns
+    -------
+    jax.Array
+        Float32 values with the input shape, or scalar shape () for one ID.
+        Values use world units. Neutral entries are zero.
+
+    Notes
+    -----
+    This is a pure JAX table lookup. Callers validate IDs before execution;
+    out-of-range indexing is not a supported validation mechanism.
+    """
     return OBSERVATION_RADIUS_BY_CLASS[class_ids]
 
 
 def get_ultimate_target_mode_by_class_ids(class_ids: int | Array) -> Array:
-    """Return ultimate target-relation modes for one or more class IDs."""
+    """Return catalog Ultimate target mode for the supplied class IDs.
+
+    Parameters
+    ----------
+    class_ids : int or jax.Array
+        Class IDs in 0..5. Zero is neutral; 1..5 are Mage, Warrior, Hunter,
+        Rogue and Priest. Array inputs use integer dtype and may have any shape.
+
+    Returns
+    -------
+    jax.Array
+        Int32 values with the input shape, or scalar shape () for one ID.
+        Values use mode IDs: 0 inert, 1 no target, 2 ally, 3 enemy. Neutral entries
+        are zero.
+
+    Notes
+    -----
+    This is a pure JAX table lookup. Callers validate IDs before execution;
+    out-of-range indexing is not a supported validation mechanism.
+    """
     return ULTIMATE_TARGET_MODE_BY_CLASS[class_ids]
 
 
 def get_ultimate_damage_by_class_ids(class_ids: int | Array) -> Array:
-    """Return ultimate damage values for one or more class IDs."""
+    """Return catalog Ultimate damage for the supplied class IDs.
+
+    Parameters
+    ----------
+    class_ids : int or jax.Array
+        Class IDs in 0..5. Zero is neutral; 1..5 are Mage, Warrior, Hunter,
+        Rogue and Priest. Array inputs use integer dtype and may have any shape.
+
+    Returns
+    -------
+    jax.Array
+        Float32 values with the input shape, or scalar shape () for one ID.
+        Values use health units before status and aura modifiers. Neutral entries
+        are zero.
+
+    Notes
+    -----
+    This is a pure JAX table lookup. Callers validate IDs before execution;
+    out-of-range indexing is not a supported validation mechanism.
+    """
     return ULTIMATE_DAMAGE_BY_CLASS[class_ids]
 
 
 def get_ultimate_healing_by_class_ids(class_ids: int | Array) -> Array:
-    """Return ultimate healing values for one or more class IDs."""
+    """Return catalog Ultimate healing for the supplied class IDs.
+
+    Parameters
+    ----------
+    class_ids : int or jax.Array
+        Class IDs in 0..5. Zero is neutral; 1..5 are Mage, Warrior, Hunter,
+        Rogue and Priest. Array inputs use integer dtype and may have any shape.
+
+    Returns
+    -------
+    jax.Array
+        Float32 values with the input shape, or scalar shape () for one ID.
+        Values use health units before recipient modifiers and health clipping.
+        Neutral entries are zero.
+
+    Notes
+    -----
+    This is a pure JAX table lookup. Callers validate IDs before execution;
+    out-of-range indexing is not a supported validation mechanism.
+    """
     return ULTIMATE_HEALING_BY_CLASS[class_ids]
 
 
 def get_ooc_delay_steps_by_class_ids(class_ids: int | Array) -> Array:
-    """Return out-of-combat countdown reset values for one or more class IDs."""
+    """Return catalog out-of-combat recovery delay for the supplied class IDs.
+
+    Parameters
+    ----------
+    class_ids : int or jax.Array
+        Class IDs in 0..5. Zero is neutral; 1..5 are Mage, Warrior, Hunter,
+        Rogue and Priest. Array inputs use integer dtype and may have any shape.
+
+    Returns
+    -------
+    jax.Array
+        Int32 values with the input shape, or scalar shape () for one ID.
+        Values use steps used to reset the recovery countdown. Neutral entries are zero.
+
+    Notes
+    -----
+    This is a pure JAX table lookup. Callers validate IDs before execution;
+    out-of-range indexing is not a supported validation mechanism.
+    """
     return OUT_OF_COMBAT_DELAY_STEPS_BY_CLASS[class_ids]
 
 
 def get_ooc_health_regen_fraction_per_step_by_class_ids(
     class_ids: int | Array,
 ) -> Array:
-    """Return maximum-health regeneration fractions for one or more class IDs."""
+    """Return catalog out-of-combat recovery fraction for the supplied class IDs.
+
+    Parameters
+    ----------
+    class_ids : int or jax.Array
+        Class IDs in 0..5. Zero is neutral; 1..5 are Mage, Warrior, Hunter,
+        Rogue and Priest. Array inputs use integer dtype and may have any shape.
+
+    Returns
+    -------
+    jax.Array
+        Float32 values with the input shape, or scalar shape () for one ID.
+        Values use fraction of maximum health recovered per eligible step. Neutral
+        entries are zero.
+
+    Notes
+    -----
+    This is a pure JAX table lookup. Callers validate IDs before execution;
+    out-of-range indexing is not a supported validation mechanism.
+    """
     return OUT_OF_COMBAT_HEALTH_REGENERATION_FRACTION_PER_STEP_BY_CLASS[class_ids]
 
 
 def _build_slow_multipliers(slow_durations: Array) -> Array:
-    """Return per-source slow multipliers selected by active durations."""
+    """Read active slow strengths in Warrior, Hunter and Rogue channel order.
+
+    Input durations are int32 (10, 3). The matching multiplier is selected
+    when a duration is positive; an inactive channel contributes 1.0.
+    The fixed channel table broadcasts over slots and is not stored in state.
+    """
     class_slow_multipliers = jnp.asarray(
         [
             WARRIOR_CHARGE_SLOW_MULTIPLIER,
@@ -349,7 +623,11 @@ def _build_slow_multipliers(slow_durations: Array) -> Array:
 def _build_priest_blessing_of_freedom_slow_floor_fractions(
     priest_blessing_of_freedom_slow_floor_durations: Array,
 ) -> Array:
-    """Return the active Priest movement-speed floor for each agent slot."""
+    """Read the Priest speed floor for each current duration.
+
+    Int32 durations (10,) produce float32 fractions (10,): the catalog
+    floor while positive, otherwise 0.0. Zero means no extra floor.
+    """
     return jnp.where(
         priest_blessing_of_freedom_slow_floor_durations > 0,
         PRIEST_HEAL_SPEED_FLOOR,
@@ -360,7 +638,24 @@ def _build_priest_blessing_of_freedom_slow_floor_fractions(
 def build_rogue_poison_anti_heal_multipliers(
     rogue_poison_anti_heal_durations: Array,
 ) -> Array:
-    """Return per-slot Rogue Poison healing multipliers from durations."""
+    """Read the healing multiplier for each current Rogue Poison duration.
+
+    Parameters
+    ----------
+    rogue_poison_anti_heal_durations : jax.Array
+        Nonnegative int32 remaining durations (10,) in steps.
+
+    Returns
+    -------
+    jax.Array
+        Float32 (10,): the catalog anti-heal multiplier where duration is
+        positive, otherwise 1.0 so unmodified healing is preserved.
+
+    Notes
+    -----
+    This pure JAX helper reads durations without decrementing them. Map it
+    across games with vmap when working with a native environment batch.
+    """
     return jnp.where(
         rogue_poison_anti_heal_durations > 0, ROGUE_POISON_ANTI_HEAL_MULTIPLIER, 1.0
     ).astype(jnp.float32)
@@ -371,15 +666,31 @@ def derive_status_magnitudes(
     rogue_poison_anti_heal_durations: Array,
     priest_blessing_of_freedom_slow_floor_durations: Array,
 ) -> tuple[Array, Array, Array]:
-    """Derive the fixed-strength status payloads consumed by current mechanics.
+    """Read current status strengths from the stored remaining durations.
 
-    Multiplicative effects use ``1.0`` while inactive. The Priest movement-floor
-    fraction uses ``0.0`` while inactive because absence is not a multiplier.
-    The return order is slow multipliers, Rogue anti-heal multipliers, then
-    Priest slow-floor fractions. Inputs and outputs retain the simulator's fixed
-    slot and source-channel shapes so this helper remains safe under eager, JIT,
-    and scanned execution. Add other derived payloads only when a production
-    mechanic consumes them.
+    Parameters
+    ----------
+    slow_durations : jax.Array
+        Int32 (10, 3) nonnegative durations in Warrior, Hunter, Rogue order.
+    rogue_poison_anti_heal_durations : jax.Array
+        Int32 (10,) nonnegative anti-heal durations in steps.
+    priest_blessing_of_freedom_slow_floor_durations : jax.Array
+        Int32 (10,) nonnegative Priest movement-floor durations in steps.
+
+    Returns
+    -------
+    tuple of jax.Array
+        Slow multipliers (10, 3), Rogue healing multipliers (10,), then
+        Priest speed-floor fractions (10,). In the supported float32 Core
+        path all outputs are float32. Inactive multipliers are 1.0;
+        an absent extra movement floor is 0.0.
+
+    Notes
+    -----
+    This reads the current decision's strengths without changing durations.
+    State owns durations; this catalog owns fixed strengths. The helper is
+    pure JAX and supports jit and vmap. Add a derived payload only when a
+    production mechanic consumes it.
     """
     slow_multipliers = _build_slow_multipliers(slow_durations)
 
@@ -410,17 +721,43 @@ def derive_effective_movement_speeds(
     active_and_alive_mask: Array,
     ordinary_movement_distance_scale: float,
 ) -> Array:
-    """Derive the currently actuated voluntary speed for every fixed slot.
+    """Return the voluntary distance each fixed slot can move this step.
 
-    Slow sources compose multiplicatively before the global and Blessing of
-    Freedom floors apply. The episode's ordinary-movement distance scale then
-    converts catalog speed into per-step voluntary displacement. A positive
-    spawn-shield counter instead selects the configured absolute shield speed,
-    bypassing ordinary class, status, and distance-scale adjustments. Inactive
-    and dead actors expose exactly zero effective speed; unshielded stunned
-    actors also expose zero. The returned ``float32`` vector has shape
-    ``(MAX_AGENT_SLOTS,)`` and is shared by movement actuation and the
-    policy-facing observation contract.
+    Slow channels multiply before the global and Priest minimum-speed
+    fractions apply. The ordinary movement scale then converts catalog
+    speed to distance per step. A positive spawn shield instead selects
+    the absolute shield speed and bypasses those adjustments.
+
+    Parameters
+    ----------
+    slow_durations : jax.Array
+        Nonnegative int32 (10, 3) source-specific remaining slow steps.
+    priest_freedom_slow_floor_durations : jax.Array
+        Nonnegative int32 (10,) remaining Priest speed-floor steps.
+    stun_durations : jax.Array
+        Nonnegative int32 (10, 3) source-specific remaining stun steps.
+    spawn_shield_durations : jax.Array
+        Nonnegative int32 (10,) remaining protected movement steps.
+    base_movement_speeds : jax.Array
+        Float32 (10,) class-catalog movement speeds.
+    spawn_shield_movement_speed : float or jax.Array
+        Positive finite scalar shielded movement distance per step.
+    active_and_alive_mask : jax.Array
+        Bool (10,) indicating actors currently able to participate.
+    ordinary_movement_distance_scale : float
+        Episode scale in (0.0, 1.0], supplied as a dynamic scalar under JAX.
+
+    Returns
+    -------
+    jax.Array
+        Float32 (10,) movement distances in world units. Dead and unused
+        slots are zero. Unshielded stunned actors are also zero.
+
+    Notes
+    -----
+    Movement and observations share this helper so the visible speed agrees
+    with actuation. Inputs describe the same current decision. Durations are
+    not advanced here. This is pure JAX; use vmap for separate games.
     """
     effective_movement_multipliers = jnp.maximum(
         jnp.prod(_build_slow_multipliers(slow_durations), axis=-1),

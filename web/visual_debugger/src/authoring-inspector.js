@@ -1,3 +1,9 @@
+/**
+ * @file Build the map/scenario editor's native form fields and decode their edits.
+ * The inspector shows authored values and host-supplied mechanics. It does
+ * not validate simulator rules, mutate draft content or save files. Input
+ * events carry explicit draft paths for the owning editor to apply.
+ */
 import {
   authoringKind,
   mapContent,
@@ -7,19 +13,39 @@ import { formatDisplayNumber } from "./display.js";
 
 /** @typedef {Record<string, any>} JsonRecord */
 
-/** @param {string} label @param {readonly (string | number)[] | null} path @param {unknown} value @param {Record<string, any>} [options] */
+/**
+ * Return a mutable field descriptor with label, path and value. path is
+ * a draft-key array, or null for display-only information. options defaults
+ * to {} and is spread last, so its properties override earlier ones. This
+ * helper performs no validation and does not create an input element.
+ *
+ * @param {string} label @param {readonly (string | number)[] | null} path @param {unknown} value @param {Record<string, any>} [options]
+ */
 function field(label, path, value, options = {}) {
   return { label, path, value, ...options };
 }
 
-/** @param {unknown} value @param {boolean} readonly */
+/**
+ * Return text for a form value. readonly defaults to false. Read-only
+ * numbers use the shared display formatter; editable values retain String
+ * conversion without rounding. null/undefined become empty text. The value
+ * is not changed and this does not validate an edit.
+ *
+ * @param {unknown} value @param {boolean} readonly
+ */
 export function authoringFieldDisplayValue(value, readonly = false) {
   return readonly && typeof value === "number"
     ? formatDisplayNumber(value)
     : String(value ?? "");
 }
 
-/** @param {unknown} value */
+/**
+ * Convert value to text, replace underscores with spaces, trim it and
+ * capitalize the first character. null/undefined or empty text return an
+ * empty string. This makes a label, not a new ID or schema key.
+ *
+ * @param {unknown} value
+ */
 export function humanizeAuthoringIdentifier(value) {
   const normalized = String(value ?? "")
     .replaceAll("_", " ")
@@ -29,7 +55,16 @@ export function humanizeAuthoringIdentifier(value) {
     : "";
 }
 
-/** @param {HTMLElement} owner @param {Record<string, any>} descriptor */
+/**
+ * Append one labelled input to owner using descriptor. options chooses a
+ * select; type=textarea chooses a multiline input; otherwise create an input
+ * with type defaulting to text. Apply value, optional limits/step, encoded
+ * draft path and readonly/disabled state. New nodes use the page document
+ * and reference authoring-inspector-help. Return undefined; no event handler,
+ * draft update or host validation is installed here.
+ *
+ * @param {HTMLElement} owner @param {Record<string, any>} descriptor
+ */
 function appendField(owner, descriptor) {
   const label = document.createElement("label");
   label.className = "authoring-field";
@@ -79,7 +114,15 @@ function appendField(owner, descriptor) {
   owner.append(label);
 }
 
-/** @param {string} encodedPath @param {string} fieldPath */
+/**
+ * Return whether encodedPath identifies a field under the dotted fieldPath.
+ * Parse encodedPath as a JSON array, strip an initial content key, and also
+ * try removing embedded_map. A nonempty problem path may match a prefix of
+ * the authored field. Malformed JSON/array or nonstring fieldPath returns
+ * false. No form or problem record is changed.
+ *
+ * @param {string} encodedPath @param {string} fieldPath
+ */
 export function authoringPathMatchesProblem(encodedPath, fieldPath) {
   /** @type {unknown} */
   let decoded;
@@ -106,7 +149,14 @@ export function authoringPathMatchesProblem(encodedPath, fieldPath) {
   );
 }
 
-/** @param {{querySelectorAll(selectors: string): Iterable<any>}} form @param {string} fieldPath */
+/**
+ * Focus and scroll to the first form control matching fieldPath. form must
+ * provide querySelectorAll; fields use data-authoring-path. Return true when
+ * a match receives focus, false otherwise. The optional scroll method uses
+ * block=nearest. Does not edit the control's value or validate the problem.
+ *
+ * @param {{querySelectorAll(selectors: string): Iterable<any>}} form @param {string} fieldPath
+ */
 export function focusAuthoringProblemField(form, fieldPath) {
   for (const input of form.querySelectorAll("[data-authoring-path]")) {
     if (authoringPathMatchesProblem(input.dataset.authoringPath ?? "", fieldPath)) {
@@ -118,7 +168,13 @@ export function focusAuthoringProblemField(form, fieldPath) {
   return false;
 }
 
-/** @param {HTMLElement} form @param {string} legendText @param {readonly Record<string, any>[]} fields */
+/**
+ * Append a fieldset to form with legendText and fields in supplied order.
+ * Each descriptor is passed to appendField. Return undefined; mutate only
+ * the DOM and leave descriptors unchanged. The page document owns new nodes.
+ *
+ * @param {HTMLElement} form @param {string} legendText @param {readonly Record<string, any>[]} fields
+ */
 function appendGroup(form, legendText, fields) {
   const fieldset = document.createElement("fieldset");
   fieldset.className = "authoring-fieldset";
@@ -146,7 +202,14 @@ const AGENT_TIMER_FIELDS = [
   "priest_blessing_of_freedom_duration",
 ];
 
-/** @param {JsonRecord | null} catalog @param {string} className */
+/**
+ * Find className in catalog.class_mechanics, ignoring case. Return the
+ * original matching record, or null for a missing catalog/list/name. className
+ * must be a string and catalog rows must have their expected shape. No copy,
+ * freeze or simulator validation is performed.
+ *
+ * @param {JsonRecord | null} catalog @param {string} className
+ */
 export function authoringClassMechanics(catalog, className) {
   if (!Array.isArray(catalog?.class_mechanics)) {
     return null;
@@ -161,7 +224,13 @@ export function authoringClassMechanics(catalog, className) {
   );
 }
 
-/** @param {JsonRecord | null} catalog @param {unknown} classId */
+/**
+ * Return a frozen array of catalog status rows whose source_class_id equals
+ * integer classId. Missing lists or noninteger IDs return an empty array.
+ * Nested row objects are reused; this lookup does not change or validate them.
+ *
+ * @param {JsonRecord | null} catalog @param {unknown} classId
+ */
 export function authoringClassStatusMechanics(catalog, classId) {
   if (!Number.isInteger(classId) || !Array.isArray(catalog?.status_channels)) {
     return Object.freeze([]);
@@ -173,7 +242,13 @@ export function authoringClassStatusMechanics(catalog, classId) {
   );
 }
 
-/** @param {JsonRecord | null} catalog @param {unknown} classId */
+/**
+ * Return a frozen array of catalog aura rows whose emitter_class_id equals
+ * integer classId. Missing lists or noninteger IDs return an empty array.
+ * The returned rows retain their original references and are not revalidated.
+ *
+ * @param {JsonRecord | null} catalog @param {unknown} classId
+ */
 export function authoringClassAuraMechanics(catalog, classId) {
   if (!Number.isInteger(classId) || !Array.isArray(catalog?.aura_mechanics)) {
     return Object.freeze([]);
@@ -185,7 +260,14 @@ export function authoringClassAuraMechanics(catalog, classId) {
   );
 }
 
-/** @param {JsonRecord | null} catalog */
+/**
+ * Build class selector value/label pairs from catalog.class_mechanics in
+ * catalog order. Values are lowercase names; labels preserve the names.
+ * A missing list returns []; rows must already contain string class_name.
+ * Return new mutable records without changing the catalog.
+ *
+ * @param {JsonRecord | null} catalog
+ */
 function classOptions(catalog) {
   if (!Array.isArray(catalog?.class_mechanics)) {
     return [];
@@ -196,7 +278,15 @@ function classOptions(catalog) {
   }));
 }
 
-/** @param {HTMLElement} form @param {JsonRecord} draft */
+/**
+ * Append whole-draft editing groups to form. draft must be a recognized
+ * map/scenario with the expected nested fields. Maps show identity and size;
+ * scenarios add embedded map, roster sizes, episode rules and current state.
+ * HTML min/step hints do not replace host validation. Return undefined and
+ * leave draft unchanged; the caller clears the form before rendering.
+ *
+ * @param {HTMLElement} form @param {JsonRecord} draft
+ */
 function renderDocument(form, draft) {
   const kind = authoringKind(draft);
   const content = draft.content;
@@ -329,7 +419,19 @@ function renderDocument(form, draft) {
   ]);
 }
 
-/** @param {HTMLElement} form @param {JsonRecord} draft @param {JsonRecord} object @param {JsonRecord | null} catalog @param {JsonRecord | null} validation */
+/**
+ * Append fields for one selected draft object to form.
+ *
+ * object comes from selectedAuthoringObject and must still belong to draft.
+ * Walls/pillars show shape fields, pads show positions, and agents show
+ * identity, class, position, health and timers. catalog supplies read-only
+ * mechanics; validation may supply the latest effective movement speeds.
+ * Missing derived speed is shown as Validate to derive. Null catalog or
+ * validation is supported. Return undefined; only DOM changes, with no
+ * geometry, lifecycle or rule validation.
+ *
+ * @param {HTMLElement} form @param {JsonRecord} draft @param {JsonRecord} object @param {JsonRecord | null} catalog @param {JsonRecord | null} validation
+ */
 function renderObject(form, draft, object, catalog, validation) {
   const map = mapContent(draft);
   const mapPath =
@@ -544,7 +646,17 @@ function renderObject(form, draft, object, catalog, validation) {
   }
 }
 
-/** @param {HTMLElement} form @param {JsonRecord | null} draft @param {string | null} selectedId @param {JsonRecord | null} catalog @param {JsonRecord | null} validation */
+/**
+ * Replace form contents with document fields or the selected object's fields.
+ *
+ * draft=null shows an empty-state prompt. selectedId=null or an unmatched ID
+ * shows whole-document fields. catalog and validation both default to null
+ * and add host facts when present. Return undefined. Draft/catalog validation
+ * errors may propagate after clearing the form. This function does not bind
+ * change handlers, apply edits or write files.
+ *
+ * @param {HTMLElement} form @param {JsonRecord | null} draft @param {string | null} selectedId @param {JsonRecord | null} catalog @param {JsonRecord | null} validation
+ */
 export function renderAuthoringInspector(
   form,
   draft,
@@ -568,7 +680,16 @@ export function renderAuthoringInspector(
   }
 }
 
-/** @param {EventTarget | null} target */
+/**
+ * Decode an input/select/textarea target into a new {path, value} edit.
+ * Return null for another target or missing data-authoring-path. The path is
+ * JSON-parsed without further shape checks; bad JSON throws. Checkboxes yield
+ * booleans, blank number inputs yield null, other number inputs use Number,
+ * and remaining controls yield strings. No finiteness, readonly or field
+ * permission check is performed; the editor and host own those checks.
+ *
+ * @param {EventTarget | null} target
+ */
 export function readAuthoringFieldEdit(target) {
   if (
     !(target instanceof HTMLInputElement) &&

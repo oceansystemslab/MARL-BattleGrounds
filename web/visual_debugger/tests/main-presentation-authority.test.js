@@ -1,3 +1,7 @@
+/**
+ * @file Check that browser installation and page mode use validated joined authority
+ * rather than retained raw transport.
+ */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -17,11 +21,9 @@ const fixtureUrl = new URL(
   import.meta.url,
 );
 
-/**
- * @param {string} source
+/** @param {string} source
  * @param {string} earlier
- * @param {string} later
- */
+ * @param {string} later */
 function assertSourceOrder(source, earlier, later) {
   const earlierIndex = source.indexOf(earlier);
   const laterIndex = source.indexOf(later);
@@ -30,14 +32,9 @@ function assertSourceOrder(source, earlier, later) {
   assert.ok(earlierIndex < laterIndex, `${earlier} must precede ${later}`);
 }
 
-/**
- * Import one dependency-free pure helper directly from the production source
- * without evaluating the browser module's DOM bootstrap.
- *
- * @param {string} source
+/** @param {string} source
  * @param {string} name
- * @param {string} nextName
- */
+ * @param {string} nextName */
 async function importPureMainHelper(source, name, nextName) {
   const start = source.indexOf(`function ${name}(`);
   const end = source.indexOf(`function ${nextName}(`, start);
@@ -122,11 +119,16 @@ test("main derives product shell mode only from validated route identity", async
 test("main applies explicit retain-or-clear policy before bounded installation", async () => {
   const source = await readFile(mainUrl, "utf8");
   const beginStart = source.indexOf("function beginPresentationAuthorityAttempt(");
-  const beginEnd = source.indexOf("/**\n * Keep the two-column workspace", beginStart);
+  const beginEnd = source.indexOf(
+    "function holdWorkspaceHeightDuringAuthorityInstall()",
+    beginStart,
+  );
 
   assert.notEqual(beginStart, -1);
   assert.notEqual(beginEnd, -1);
-  const beginSource = source.slice(beginStart, beginEnd);
+  const beginSource = source
+    .slice(beginStart, beginEnd)
+    .replace(/\n\/\*\*(?:(?!\*\/)[\s\S])*\*\/\s*$/u, "");
 
   assert.match(
     source,
@@ -598,7 +600,7 @@ test("main shares the Agent Details latch and rejects stale local keys and focus
     source,
     /function stageReplayRecipientActivation\([\s\S]*sourcePreferenceGeneration: presentationPreferenceGeneration[\s\S]*recipientPublicAgentId: publicAgentId[\s\S]*autoOpenAgentDetails/u,
   );
-  assert.match(source, /let agentLocalRangesVisible = true;/u);
+  assert.match(source, /let agentLocalRangesVisible = false;/u);
   assert.match(source, /let agentLocalRangesInitialized = false;/u);
   assert.match(
     source,
@@ -634,14 +636,13 @@ test("main excludes the global Visual Key from scientific preference and inert s
 test("main sends authorized battlefield pointer commands in both live visual authorities", async () => {
   const source = await readFile(mainUrl, "utf8");
   const dispatchStart = source.indexOf("async function dispatchCommand(");
-  const dispatchEnd = source.indexOf(
-    "/** @param {{reviewHandoff?: boolean}} options */",
-    dispatchStart,
-  );
+  const dispatchEnd = source.indexOf("async function loadCurrentFrame(", dispatchStart);
 
   assert.notEqual(dispatchStart, -1);
   assert.notEqual(dispatchEnd, -1);
-  const dispatchSource = source.slice(dispatchStart, dispatchEnd);
+  const dispatchSource = source
+    .slice(dispatchStart, dispatchEnd)
+    .replace(/\n\/\*\*(?:(?!\*\/)[\s\S])*\*\/\s*$/u, "");
   assert.doesNotMatch(
     dispatchSource,
     /command\.command_type === "battlefield_pointer"[\s\S]*authorizedPresentationAudience\(state\.presentation\) !== "researcher"[\s\S]*return;/u,
@@ -847,10 +848,12 @@ test("battlefield delegation leaves nested scientific owners and terminal frames
     "function installAuthorizedAgentActivation()",
   );
   const installEnd = mainSource.indexOf(
-    "/**\n * Apply the already-resolved single effect.",
+    "function activateAuthorizedAgent(",
     installStart,
   );
-  const installSource = mainSource.slice(installStart, installEnd);
+  const installSource = mainSource
+    .slice(installStart, installEnd)
+    .replace(/\n\/\*\*(?:(?!\*\/)[\s\S])*\*\/\s*$/u, "");
 
   assert.match(
     controlsSource,
@@ -1017,7 +1020,7 @@ test("replay artifact actions snapshot once, fence every await, and never drive 
   const source = await readFile(mainUrl, "utf8");
   const exportStart = source.indexOf("async function exportReplayBattlefieldPng()");
   const exportEnd = source.indexOf(
-    "async function downloadReplayMetricReport(original = false)",
+    "async function downloadReplayMetricReport(details = false)",
     exportStart,
   );
   const metricEnd = source.indexOf("/** @type {{key: string, summary:", exportEnd);
@@ -1075,16 +1078,16 @@ test("replay artifact actions snapshot once, fence every await, and never drive 
   );
   assertSourceOrder(
     metricSource,
-    "await getReplayMetricReport(state.token)",
+    "await getReplayEpisodeDetails(state.token)",
     "if (!replayArtifactActionIsCurrent(transaction))",
   );
   assertSourceOrder(
     metricSource,
-    "await getReplayMetricReport(state.token)",
+    "await getReplayEpisodeDetails(state.token)",
     "downloadReplayArtifact(",
   );
   assert.equal(
-    [...metricSource.matchAll(/getReplayMetricReport\(state\.token\)/gu)].length,
+    [...metricSource.matchAll(/getReplayEpisodeDetails\(state\.token\)/gu)].length,
     1,
   );
   for (const actionSource of [exportSource, metricSource]) {
@@ -1095,7 +1098,7 @@ test("replay artifact actions snapshot once, fence every await, and never drive 
   }
   assert.match(
     metricSource,
-    /new Blob\(\[report\.bytes\],[\s\S]*original\s*\? "application\/json; charset=utf-8"[\s\S]*: "text\/csv; charset=utf-8"/u,
+    /new Blob\(\[report\.bytes\],[\s\S]*details\s*\? "application\/json; charset=utf-8"[\s\S]*: "text\/csv; charset=utf-8"/u,
   );
   assert.match(metricSource, /replayMetricContext\(\)\?\.key !== context\?\.key/u);
   const metricCatchStart = metricSource.indexOf("} catch (error) {");
@@ -1275,7 +1278,7 @@ test("main renders ranges and inspector chrome only from installed presentation 
   );
   assert.match(
     source,
-    /const visibleControlCount = EXPECTED_VISUAL_FILTER_COUNT \+ 1;[\s\S]*enabledControlCount/u,
+    /const visibleControlCount = VISUAL_FILTER_REGISTRY.length \+ 1;[\s\S]*enabledControlCount/u,
   );
   assert.match(
     source,
@@ -1313,7 +1316,9 @@ test("main separates battlefield and researcher incoming transition IDs", async 
 
   assert.notEqual(helperStart, -1);
   assert.notEqual(helperEnd, -1);
-  const helperSource = source.slice(helperStart, helperEnd);
+  const helperSource = source
+    .slice(helperStart, helperEnd)
+    .replace(/\n\/\*\*(?:(?!\*\/)[\s\S])*\*\/\s*$/u, "");
   assert.match(helperSource, /!isRecord\(presentation\.latest_events\)/u);
   assert.match(
     helperSource,
@@ -1465,10 +1470,7 @@ test("main reuses only Submit for coherent scripted-live advancement", async () 
     availabilityStart,
   );
   const dispatchStart = source.indexOf("async function dispatchCommand(");
-  const dispatchEnd = source.indexOf(
-    "/** @param {{reviewHandoff?: boolean}} options */",
-    dispatchStart,
-  );
+  const dispatchEnd = source.indexOf("async function loadCurrentFrame(", dispatchStart);
 
   assert.notEqual(helperStart, -1);
   assert.notEqual(helperEnd, -1);
@@ -1478,7 +1480,9 @@ test("main reuses only Submit for coherent scripted-live advancement", async () 
   assert.notEqual(dispatchEnd, -1);
   const helperSource = source.slice(helperStart, helperEnd);
   const availabilitySource = source.slice(availabilityStart, availabilityEnd);
-  const dispatchSource = source.slice(dispatchStart, dispatchEnd);
+  const dispatchSource = source
+    .slice(dispatchStart, dispatchEnd)
+    .replace(/\n\/\*\*(?:(?!\*\/)[\s\S])*\*\/\s*$/u, "");
   assert.match(
     source,
     /function installedPresentationAuthority\(\)[\s\S]*resolveInstalledPresentationAuthorityV1\([\s\S]*state\.authority,[\s\S]*state\.frame,[\s\S]*state\.presentation,/u,
@@ -1539,7 +1543,7 @@ test("main reuses only Submit for coherent scripted-live advancement", async () 
   assert.doesNotMatch(source, /advance-script-button/u);
   assert.match(
     source,
-    /"Apply authorized action",\s*"Submit an editable draft or advance an inspection-only scripted frame through the authoritative Python service\."/u,
+    /"Apply Authorized Action",\s*"Submit an editable draft or advance an inspection-only scripted frame through the authoritative Python service\."/u,
   );
   assert.match(
     source,

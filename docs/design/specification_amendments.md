@@ -3,19 +3,29 @@
 > **NORMATIVE CONTRACT — ACTIVATED 2026-08-10.** This document records the
 > accepted amendments to the historical design PDF.
 
-This document changes `MARL_BGs_Design_Document.pdf`. The PDF remains the
-unaltered historical architectural blueprint; this file is the controlling
-public source where the two disagree. An amendment changes only the clauses it
-names. Unmentioned PDF requirements remain in force.
+This is the dated decision record for changes to the historical design PDF.
+Each amendment changes only the clauses it names. Later explicit decisions
+supersede conflicting earlier clauses; an old future-tense sentence does not
+mean that feature is still unimplemented. Keep historical wording, numbers,
+source identities and evidence intact when reading later decisions.
 
-The amendments below were drafted before Milestone 6 Step 5 implementation.
-They deliberately favor the four project North Stars: researcher-centricity,
-low sample complexity, meaningful tactical and strategic team behavior, and
-professional MARL/software engineering.
+Use the [workflow guide](../evaluation/workflows.md) for current executable API
+examples and the [protocol](../evaluation/protocol.md) for current scientific
+rules. These distinguish implemented behavior, accepted future design and
+historical evidence. The current monthly Big 12 snapshot direction supersedes
+A27's weekly schedule and fixed numerical example; the final official budget
+and remaining admission gates are still unresolved.
 
-**Current roadmap numbering:** A36 records the 2026-09-07 executive override.
-Earlier amendments and historical filenames retain their original milestone
-numbers; use A36's mapping when following the current delivery order.
+The four North Stars remain researcher usability, low sample complexity,
+meaningful tactical/strategic team behavior and professional engineering.
+Design acceptance is separate from correctness, GPU efficiency and learning
+proof. The [documentation standard](../dev/documentation_standard.md) governs
+new explanatory prose; it does not authorize changing historical evidence.
+
+**Roadmap numbering:** A36 records the executive mapping. Older titles and file
+names keep their original milestone numbers. **Current actor inputs:** A37 owns
+the later relative-identity/version changes. A38 records the separate geometry
+work and its evidence limits. Neither is silently requalified by a docs edit.
 
 ## A1. Actor execution-information regimes
 
@@ -1170,6 +1180,10 @@ visibility, line-of-sight, observation-redaction, and rendering semantics do not
 otherwise change.
 
 ## A19. SharedObs structured runtime advancement
+
+The global-slot policy payload described below is historical. A37 replaces its
+current execution layout and callback identity argument. V1 recordings keep the
+layout below for exact historical reconstruction.
 
 **Classification:** accepted milestone-ownership advancement without a core
 observation or simulator change.
@@ -2399,8 +2413,8 @@ This amendment records decisions and planned work, not implementation completion
 | M14 | Capture the Flag | M9 |
 
 The submission sequence is M7 through M12. M13 and M14 begin after manuscript
-submission. Milestones 1–6 retain their identities. The current M12 owns full
-manuscript training runs, behavioral ablations, the frozen Paper 1 tournament,
+submission and the optimization audit below. Milestones 1–6 retain their identities.
+The current M12 owns full manuscript training runs, behavioral ablations, the frozen Paper 1 tournament,
 analysis and release artifacts. Earlier milestones qualify their machinery
 with focused tests and bounded pilots; protocols and selection rules are
 frozen before the dependent full runs.
@@ -2410,6 +2424,23 @@ versioned schema identifiers are not mechanically renumbered. Their old numbers
 are aliases under this table. New plans use the current name/number and give
 the historical alias when needed to disambiguate a source. Existing private
 handoffs remain at their original paths with an explicit current-name notice.
+
+### Post-manuscript optimization audit
+
+The user's 2026-09-08 decision requires a dedicated optimization phase after
+manuscript completion and before KOTH/CTF implementation. Profile representative
+training, validation, evaluation, metrics, replay and persistence workloads across
+realistic batch sizes and rollout lengths. Examine runtime, peak VRAM/RAM, data
+transfer, allocation and disk costs; remove repeated computation and serialization.
+Address every identified material improvement and verify unchanged results with
+before/after measurements. Close the audit only when no identified material
+optimization remains unresolved for the declared workloads. Keep researcher
+interfaces simple and require explicit approval for concrete Core changes.
+
+The ambition is to make MARL-BGs one of the most efficient MARL benchmarks.
+Substantiate comparisons with equivalent workloads, declared hardware/precision,
+warm and compilation timings, memory measurements and preserved semantics. This
+phase does not renumber milestones or defer optimization during active work.
 
 ### Approved scenarios and maps
 
@@ -2438,14 +2469,80 @@ existing paired side assignments. Geometric symmetry supports equal starting
 geometry; it does not by itself prove every numerical or policy behavior is
 side-invariant.
 
-The permitted audit now passes all 52 maps: exact authored obstacle reflection
-and exact opposing same-slot spawn pads. The user corrected Darkspear in r4,
-moving only `obstacle_6` from x=14.5 to x=13.5 to reflect `obstacle_1` at x=6.5.
-All other audited map bytes are unchanged. Compiled geometry agrees within
-1e-5 world units after float32 conversion (largest discrepancy approximately
-3.09e-8). Scenario 3 r25 is a prose-only successor to the accepted r24; its
+At the earlier M7 closeout, the permitted audit passed all 52 maps: exact
+authored obstacle reflection and exact opposing same-slot spawn pads. The user
+corrected Darkspear in r4, moving only `obstacle_6` from x=14.5 to x=13.5 to
+reflect `obstacle_1` at x=6.5.
+All other audited map bytes were unchanged at that checkpoint. Compiled geometry
+agreed within 1e-5 world units after float32 conversion (largest discrepancy
+approximately 3.09e-8). Scenario 3 r25 is a prose-only successor to the accepted r24; its
 physical semantic digest is unchanged. These provenance updates implement the
-existing approvals and do not reopen them.
+existing approvals and do not reopen them. This is historical evidence; the map
+revision selection below supersedes it for new games.
+
+### Approved map publication on 2026-09-16
+
+**Status:** published locally and verified on 2026-09-16; uncommitted. All 137
+focused GPU tests passed, including the nine winning scenario lines. A separate
+GPU batch checked reset and movement on all 52 maps. Two exports produced
+identical bytes. Installed-wheel checks passed outside the repository, including
+current map loading, retained history and rejection of stale catalog entries.
+
+Publish the exact audited set: 39 maps have physical changes, Map 3 changes only
+obstacle IDs, and 12 maps are unchanged. Keep the 52 map IDs, names, splits,
+aliases and scenario content. The packaged
+[manifest](../../src/marl_battlegrounds/data/tdm/manifest.json) records the selected
+saved revision, source hash and compiled resource hash for each map. New games
+must use that selection, not a moving latest-draft lookup.
+
+The repeated source audit passed exact vertical reflection and consecutive
+obstacle IDs `0` through `N - 1` on all 52 maps. The clearance check measures
+the shortest distance between shape edges in map units, including rotated
+rectangles. It uses these approved limits:
+
+- A rectangle's open gap to a boundary wall must be at least 1.095.
+- A circle's open gap to a boundary wall must be at least 1.05. The user accepts
+  1.04999 when it rounds to 1.05.
+- A gap of at most 0.01 to a boundary wall counts as contact with that wall.
+  Check each wall separately; touching one wall does not excuse another gap.
+- A positive gap between two obstacles must be at least 1.05. Touching or
+  overlapping obstacles and the exact exceptions below are allowed.
+
+The following exceptions apply only to the named map, obstacle and wall or
+pair. Numbers refer to the audited obstacle IDs, not arbitrary later row order.
+An exception does not approve a wider set of gaps.
+
+| Map ID | Boundary-wall exceptions | Obstacle-pair exceptions |
+| --- | --- | --- |
+| 11 | 23 and 24: bottom; 25 and 26: top | None |
+| 12 | None | (6, 8), (9, 11), (17, 20), (18, 19) |
+| 13 | 10 and 17: bottom | None |
+| 31 | 4 and 7: bottom | None |
+| 39 | None | (11, 14), (11, 15) |
+| 40 | 22: bottom; 23: top | None |
+| 42 | 15, 16, 17 and 18: top | None |
+| 47 | 26: bottom; 27: top | (1, 31), (3, 30) |
+| 49 | 17 and 18: top; 19 and 20: bottom | None |
+
+GPU clearance checks of the repaired Maps 21, 36 and 48 reported minimum
+non-exempt gaps of approximately 1.142892647, 1.099999905 and 1.216316939,
+respectively. These measurements and the source audit support the declared
+geometry checks. They do not prove every crowded route is traversable or
+requalify solver performance on the changed maps.
+
+Retain prior packaged map identities in one immutable bundled
+[history resource](../../src/marl_battlegrounds/data/tdm/map_history.json).
+Old replays must keep their recorded layout, revision and identity; a new map
+selection must not relabel them as the new geometry. History supports reading
+old records and does not change the current map catalog used for new games.
+Restart running DevClient, Replay Viewer and Python processes after updating
+the package so their cached catalog is refreshed. Restarting does not change
+an already recorded game.
+
+Earlier replays, solver tests and speed measurements remain evidence for their
+recorded map versions. Do not present them as measurements of these revised
+maps. This publication does not change the approved eight scenarios, their
+embedded geometry or their winning-command witnesses.
 
 ### Final M7 DevClient and Replay Viewer work
 
@@ -2504,8 +2601,10 @@ scores retain their existing replay/scoreboard authority. Detailed TDM metrics
 require explicit opt-in, including requests for Replay Viewer detailed analysis.
 Periodic diagnostics and validation-map evaluation must reuse the same evaluator.
 The proposed downstream interface is one interval, a selected validation-map set,
-a match count, and critical/full metrics. The packaged validation-map labels are
-24, 29, 30, 32 and 37; frozen manifests remain split-membership authority. The
+a match count, and critical/full metrics. The 2026-09-12 catalogue reorder
+replaces public validation IDs 24, 29, 30, 32 and 37 with 42–46. Numbered map names,
+authored IDs and folders follow the new IDs. Geometry and split membership stay
+unchanged; frozen manifests remain the authority. The
 user requests measured costs before finalizing cadence/API details, so this is
 a provisional handoff, not an activated scheduler. Log any eventual schedule and
 selected episode identities.
@@ -2548,3 +2647,194 @@ the exact file/function, reason, behavioral impact and proposed scope. A host
 reimplementation of simulator rules is not an acceptable way around that gate.
 No Core change is currently planned. Existing action/observation, policy,
 controller and simulator semantics remain authoritative.
+
+## A37. Relative Policy Identity And Versioned Recordings
+
+**Accepted change — 2026-09-12.** This supersedes earlier clauses that expose a
+hard team ID or global slot in current policy inputs. Simulator routing,
+configuration, transition facts and recording metadata retain their existing
+identities. This amendment does not alter collision, combat, masks, action
+meanings, rewards, random-key assignment or termination.
+
+The approved Core scope is limited to `core/types.py` and the observation
+builders in `core/env.py`. Feature column 3 becomes `AGENT_FEATURE_IS_ENEMY`:
+self and allies have zero, visible enemies have one, and the existing visibility
+mask still clears hidden rows. The feature width remains 58 and every other
+column keeps its meaning. `Observation.self_ally_index` is an `int32` local row
+0–4 for active actors, stable through death and respawn; inactive rows use zero.
+Activity masks distinguish padding. `self_features` remains the normal way a
+shared network conditions on its own class and state. The local index supports
+row lookup and is not automatically added as a network feature.
+
+`SpawnLifecycleObservation` is unchanged. Its own-team/opponent groups and
+existing active/alive/visibility information already distinguish hidden units
+and padding. Absolute world positions and map/spawn geometry retain their
+existing visibility contracts; removing simulator labels does not hide physical
+location or promise that a method cannot learn a side preference.
+
+Current `ActorInput` contains observation, source bank and source availability.
+SharedObs callbacks take five arguments: observation, action mask, key, bank and
+availability. NoSharedObs retains three arguments: observation, mask and key.
+No policy receives a global slot or hard team ID from these adapters.
+
+`SharedObsSensorSourceBankV2` gives each actor features `(5, 10, 58)`, visibility
+`(5, 10)` and objectives `(5, 8, 12)`, with availability `(5,)`. Sources are the
+five stable own-team positions; candidates are five allies followed by five
+enemies. Self is an unavailable shared source because its own view is supplied
+separately. Build team source data once from existing relative rows, then mask
+all unavailable material per recipient. Preserve authorized subsets, dead-source
+redaction, own-view precedence and lowest-source selection. Store compact
+observations during rollouts, not expanded actor banks. The recorder's existing
+global availability matrix remains metadata used to reconstruct local inputs.
+
+Changed payloads have explicit versions: base observation/frame V2, episode
+context V3, replay header/artifact/reference V3, SharedObs projection V2,
+NoSharedObs projection V3 and actor-POV V2. Scenario evaluation V4 binds the new
+replay reference while reusing unchanged scenario definitions and predicates.
+Other unchanged records retain their versions. Old V1/V2 readers preserve the
+original team-ID column, global source layout, identities and bytes. Current
+capture records actual delivered observation values, with no translation back
+to pretend historical inputs. Viewer ownership comes from roster metadata.
+Reject incompatible version combinations and changed-contract resumes.
+
+Ordinary evaluation continues to assign the first policy to simulator Team A.
+Team B training and diagnostic use remain supported. Raw team and agent metrics
+retain their physical identities. Broader tournament rules remain unresolved.
+[A38](#a38-neutral-collision-handling) supersedes the earlier decision to defer
+collision ordering work until after training the 12 policies. Equal real
+training steps at both spawn ends do not themselves prove slot fairness.
+
+Acceptance requires exact preserved results for the two saved 2,000-game GPU
+schedules, separate matched-shape action/state/input comparisons, historical and
+current recording tests, and measured computation/storage costs. Source review
+alone cannot establish speed, sample efficiency, learned behavior or fairness.
+
+## A38. Neutral Collision Handling
+
+**Accepted change — 2026-09-14.** This supersedes A37's collision-ordering
+deferral and earlier requirements for sequential global-slot or obstacle-row
+collision resolution. It authorizes the reviewed replacement in
+`core/geometry.py`, its ordinary/Charge calls in `core/env.py`, and the two
+explicit static-only policy query budgets in `policies/reactive_common.py`.
+The replacement is integrated. The evidence below supports this change;
+release qualification remains separate from the accepted collision contract.
+
+Reordering agent rows, with every per-agent input reordered to match, must only
+reorder the result. Reordering obstacle rows must leave the result unchanged.
+These are exact float32 storage contracts within the same backend, array shapes
+and execution settings. Team IDs, global slots and obstacle IDs must not choose
+a contact winner or a separating direction. Changing physical coordinates is
+a different operation: ordinary floating-point differences under reflection,
+including their growth through later contact and policy decisions, remain
+diagnostic. This evidence does not assert exact CPU/GPU numerical identity.
+Neither this contract nor a symmetric map requires every self-play game to draw.
+
+The movement solver keeps separate body and static corrections in repeated
+rounds. Its default is four physical movement substeps, with 28 literal
+collision rounds per substep and one body sweep per round. Correction strength
+is fixed at 1. Each substep keeps one starting position; numerical rounds repair
+proposed endpoints from that start. Bounds, actual pillar circles and actual
+rotated rectangles remain authoritative. A rectangle's disc-clearance region
+includes its rounded corners. Static correction retains useful sliding, and a
+whole-disc travel check guards the committed straight segment. This does not
+claim continuous collision detection between moving bodies.
+
+Each body pair shares its correction equally. Geometry supplies contact and
+tie directions, using separation and movement intent rather than row identity.
+A body that becomes a collision participant at the final substep may already
+overlap another body after its earlier intangible movement. That narrow case
+uses the current radial separation for recovery. Already blocking pairs retain
+their incoming-side rule. Equal-radius bodies with exactly equal positions and
+equal intended movement have no physical separating direction. This narrow
+anonymous coincidence may remain coincident; it must not acquire an arbitrary
+axis or slot-based push. Static validity still applies. A later distinct
+movement intent must receive normal collision handling.
+
+Charge uses the explicit `project_charge_endpoints_with_geometry` helper.
+Its requested relocation may pass intervening bodies or obstacles, as before.
+It first repairs the arrival's static contacts, then resolves body contacts
+using the arrival geometry; earlier separation only breaks a direction tie.
+The default performs 28 arrival-recovery rounds and 28 collision rounds in one
+endpoint step. Ordinary movement then runs from the realized Charge positions
+using the already chosen actions. Intermediate Charge body overlap is a
+diagnostic; public body acceptance applies after Charge and ordinary movement.
+
+The accepted general body-overlap ceiling is exactly **0.135 map units** for
+participating bodies in the valid-start qualification scope. This is the amount
+by which the sum of two radii exceeds their center distance. Zero overlap remains
+the preferred result. There is no added tolerance on this ceiling. Named simple
+controls keep their stricter limits,
+and the anonymous case above is the explicit exception. Finite values, bounds,
+obstacle clearance and static travel checks remain separate hard requirements.
+The common ceiling replaces historical per-stratum body limits; those older
+measurements remain diagnostics. Respawn still places each body on its assigned
+pad at the end of the transition. A zero-shield respawn can create the exact
+anonymous overlap described above.
+
+The ordinary helper keeps its existing signature; explicit round counts are
+literal, and zero body sweeps disables body correction. The two static-only
+policy queries explicitly retain four collision rounds. State, observation,
+mask, action, reward, transition-fact and recording schemas are unchanged.
+Action choice, Charge, ordinary movement, death, shield and respawn timing are
+unchanged. No solver memory, public precision setting or coordinate grid is
+added. Existing line-of-sight and obstacle-query behavior is preserved.
+
+The default briefly increased to 64 rounds on 2026-09-15, then returned to 28
+after the GPU cost and scenario comparisons. A commented 64-round option remains
+beside the default for excessive body overlap found during training. R28 was
+about 2.2–2.3 times as fast as R64 in the isolated RTX 5090 movement and Charge
+checks at batches 1, 64 and 1024. This does not measure full training speed.
+The following evidence describes the original 28-round integration and
+acceptance decisions; changing the default back does not rerun those checks.
+
+Completed RTX 5090 evidence for that integration includes 208 aligned team/slot
+pairs across 54 recorded fields in the 416-condition full-game census, plus its exact repeated
+run with reordered world lanes. The final integrated source reproduces all 92
+saved arrays from those two executions exactly, including captured collision
+inputs and outputs. The integrated movement helper also matches the frozen
+candidate exactly on endpoints and all four committed substeps for the full
+13,312-input bank on CPU and GPU. Focused comparisons cover Charge and the
+static-only policy queries. A final type-only change preserves the calculation
+and passes the full GPU game comparison. No full CPU game comparison between
+the candidate and integrated versions is claimed.
+
+Three further public contacts found in the CPU census were replayed with the
+same saved inputs on GPU. Their GPU overlap depths are 0.134743, 0.095014 and
+0.107966 map units. The user inspected these contacts and accepted the 0.135
+ceiling. All three pass that ceiling; their earlier failures under 0.076 remain
+recorded. This acceptance change does not change the 28-round solver or its cost.
+
+The separate controlled-reflection study completes 2,496 games with no assigned
+physical failures and exact retained team/slot comparisons in both orientations.
+Reflected game outcomes often differ: 194 of 416 matched outcomes agree when
+controllers choose actions throughout each game. These are spatial-reflection
+diagnostics, not evidence that all mirrored fights agree. The checks support
+the stated comparisons; they do not establish a universal speedup or
+sample-efficiency claim.
+
+**Scenario repair — 2026-09-15.** The user supplied revised winning commands
+for Scenarios 1, 3, 5 and 8 and three small physical edits for Scenario 4.
+Its Mage-B starts at y=5.8, obstacle_0 moves to x=7.2, and obstacle_2 moves
+to y=3.4. Scenarios 2, 6 and 7 retain their commands and physical setup.
+All eight keep their goals, rules and intended mechanics. Their nine winning
+lines, including both Scenario 1 healing choices, now win 20–19 on GPU over
+41 real transitions. Expected per-turn records were updated only after those
+user-supplied routes were verified with live opponent decisions. Scenario 3's
+revised missed-move control loses Hunter on turn 7; its older draw result
+belongs to the earlier route.
+
+The packaged scenarios and Notes now use revisions 41/19/26/14/15/16/29/18.
+Scenario 3 retains approved r24 physics. Twenty-four focused GPU checks pass
+for the packaged solutions, their identities and public initialization.
+Standalone solution tests use the revised commands and the current packaged
+setups where those setups changed. Historical fixture checks remain separate.
+Scenario 2 demonstrates its within-range wall protection on turn 4, after its
+turn-3 Ultimate heal. Delaying Charge in the revised Scenario 8 lets Priest-B
+complete its chosen self-heal and produces a 19–19 draw. This retains the
+action-timing lesson; the older dying-healer rescue belongs to the older route.
+CPU/GPU position and displacement snapshots allow 0.00016 map units of
+rounding difference; health and damage retain 0.00001, and actions, life flags,
+scores and outcomes remain exact. Storage permutations remain exact on the
+same backend. These focused
+results do not claim a complete regression-gate or release-qualification pass;
+those gates must be run on the final candidate.

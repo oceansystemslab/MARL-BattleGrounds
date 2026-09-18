@@ -1,7 +1,7 @@
-"""Reactive TDM rules and accepted Scenario 1 and Scenario 2 witnesses."""
+"""Check Reactive TDM decisions and the reviewed Scenario 1 and 2 solutions."""
 
 from collections.abc import Callable
-from pathlib import Path
+from operator import itemgetter
 from typing import cast
 
 import jax
@@ -11,9 +11,7 @@ import pytest
 from jax import Array
 from scripts.dev.visual_debugger.authoring_compiler import (
     CompiledDevScenarioV1,
-    compile_dev_scenario,
 )
-from scripts.dev.visual_debugger.authoring_models import DevScenarioDraftV1
 from tests.scenario_controller_fixtures import load_scenario_1
 
 from marl_battlegrounds.core.axis_mappings import (
@@ -72,11 +70,12 @@ from marl_battlegrounds.policies.reactive_tdm_alpha import (
 )
 from marl_battlegrounds.policies.shared_obs import (
     SharedObsPolicy,
-    SharedObsSensorSourceBankV1,
+    SharedObsSensorSourceBankV2,
     build_default_shared_obs_information_availability,
     build_shared_obs_sensor_source_bank,
     execute_shared_obs_team_policy,
 )
+from marl_battlegrounds.tasks import TDMScenario, load_tdm_scenario
 
 _POLICY = cast(SharedObsPolicy, jax.jit(reactive_tdm_alpha_policy))
 _REFINE = cast(
@@ -187,9 +186,13 @@ def _mask(*pairs: tuple[int, int], move: int | None = None) -> ActionMask:
     return ActionMask(moves, joint.any(axis=1), joint.any(axis=0), joint)
 
 
-def _empty_bank(scenario: CompiledDevScenarioV1) -> SharedObsSensorSourceBankV1:
+def _empty_bank(scenario: CompiledDevScenarioV1) -> SharedObsSensorSourceBankV2:
+    def empty_team(leaf: Array) -> Array:
+        return _zeros(leaf[1])
+
     return jax.tree.map(
-        _zeros, build_shared_obs_sensor_source_bank(scenario.observation)
+        empty_team,
+        build_shared_obs_sensor_source_bank(scenario.observation),
     )
 
 
@@ -203,8 +206,7 @@ def _act(
         mask if mask is not None else _mask(),
         jax.random.key(0),
         _empty_bank(scenario),
-        jnp.zeros(10, dtype=jnp.bool_),
-        jnp.int32(9),
+        jnp.zeros(5, dtype=jnp.bool_),
     )
 
 
@@ -403,6 +405,7 @@ def test_scalar_policy_is_team_agnostic_for_each_class(
     obs = _observation(scenario, class_id)
     own = obs.self_features
     obs = obs._replace(
+        self_ally_index=jnp.int32(0),
         ally_unit_features=jnp.zeros_like(obs.ally_unit_features).at[0].set(own),
         ally_visibility_mask=jnp.array([True, False, False, False, False]),
     )
@@ -410,9 +413,9 @@ def test_scalar_policy_is_team_agnostic_for_each_class(
     obs = _visible(obs, "enemy", 0, (8, 5), hp=20)
     mask = _mask((1, 0), (2, 0), (2, 1), (6, 0), (6, 1), (0, 1))
     bank = _empty_bank(scenario)
-    availability = jnp.zeros(10, dtype=jnp.bool_)
-    a = _POLICY(obs, mask, jax.random.key(1), bank, availability, jnp.int32(0))
-    b = _POLICY(obs, mask, jax.random.key(77), bank, availability, jnp.int32(5))
+    availability = jnp.zeros(5, dtype=jnp.bool_)
+    a = _POLICY(obs, mask, jax.random.key(1), bank, availability)
+    b = _POLICY(obs, mask, jax.random.key(77), bank, availability)
     _assert_exact(a, b)
 
 
@@ -506,28 +509,24 @@ def test_unavailable_shared_rows_and_unused_history_cannot_change_action(
 ) -> None:
     obs = _observation(scenario, ROGUE_CLASS_ID)
     bank = _empty_bank(scenario)
-    no_sources = jnp.zeros(10, dtype=jnp.bool_)
-    expected = _POLICY(obs, _mask(), jax.random.key(0), bank, no_sources, jnp.int32(9))
+    no_sources = jnp.zeros(5, dtype=jnp.bool_)
+    expected = _POLICY(obs, _mask(), jax.random.key(0), bank, no_sources)
     hostile = jax.tree.map(_ones, bank)
     changed = obs._replace(
         previous_timestep_actions=jax.tree.map(_ones, obs.previous_timestep_actions)
     )
-    actual = _POLICY(
-        changed, _mask(), jax.random.key(77), hostile, no_sources, jnp.int32(9)
-    )
+    actual = _POLICY(changed, _mask(), jax.random.key(77), hostile, no_sources)
     _assert_exact(actual, expected)
     sighting = _row(obs.self_features, xy=(13, 5))
     bank = bank._replace(
-        unit_features_by_sensor_source_and_global_slot=bank.unit_features_by_sensor_source_and_global_slot.at[
-            5, 0
+        unit_features_by_source_and_candidate=bank.unit_features_by_source_and_candidate.at[
+            0, 5
         ].set(sighting),
-        unit_visibility_by_sensor_source_and_global_slot=bank.unit_visibility_by_sensor_source_and_global_slot.at[
-            5, 0
+        unit_visibility_by_source_and_candidate=bank.unit_visibility_by_source_and_candidate.at[
+            0, 5
         ].set(True),
     )
-    actual = _POLICY(
-        obs, _mask(), jax.random.key(0), bank, no_sources.at[5].set(True), jnp.int32(9)
-    )
+    actual = _POLICY(obs, _mask(), jax.random.key(0), bank, no_sources.at[0].set(True))
     assert tuple(int(x) for x in actual) == (MOVE_EAST, 0, 0)
 
 
@@ -613,7 +612,10 @@ def test_static_obstacle_contact_clipping_and_slide_alternatives(
 
 
 def _team_b(
-    scenario: CompiledDevScenarioV1, obs: Observation, mask: ActionMask, key: int = 0
+    scenario: CompiledDevScenarioV1 | TDMScenario,
+    obs: Observation,
+    mask: ActionMask,
+    key: int = 0,
 ) -> ActorAction:
     profile = scenario.config.agent_profile
     availability = build_default_shared_obs_information_availability(
@@ -649,9 +651,8 @@ def test_scalar_eager_jit_team_parity_and_key_invariance(
         cast(Observation, _scalar(scenario.observation, 9)),
         cast(ActionMask, _scalar(scenario.action_mask, 9)),
         jax.random.key(0),
-        bank,
-        av[9],
-        jnp.int32(9),
+        jax.tree.map(itemgetter(1), bank),
+        av[9, 5:],
     )
     eager = reactive_tdm_alpha_policy(*args)
     _assert_exact(eager, _POLICY(*args))
@@ -659,15 +660,14 @@ def test_scalar_eager_jit_team_parity_and_key_invariance(
 
 
 @pytest.mark.parametrize(
-    ("heal_target", "survivor", "hp"), [(3, 2, 2.575), (4, 3, 20.0)]
+    ("heal_target", "survivor", "hp"), [(3, 2, 25.0), (4, 3, 20.0)]
 )
 def test_reactive_controller_reproduces_both_accepted_witnesses(
-    scenario: CompiledDevScenarioV1, heal_target: int, survivor: int, hp: float
+    heal_target: int, survivor: int, hp: float
 ) -> None:
-    state, obs, mask = (
-        scenario.initial_state,
-        scenario.observation,
-        scenario.action_mask,
+    scenario = load_tdm_scenario(1)
+    state, obs, mask, _ = initialize_scenario_state(
+        scenario.initial_state, scenario.config
     )
     expected_moves = [
         [MOVE_EAST, 0, 0, MOVE_SOUTH, MOVE_NORTH],
@@ -684,7 +684,7 @@ def test_reactive_controller_reproduces_both_accepted_witnesses(
             jnp.array(
                 [0, 0, MOVE_EAST, MOVE_SOUTH, 0]
                 if tick == 0
-                else [0, 0, MOVE_NORTHEAST, 0, 0]
+                else [0, 0, MOVE_NORTHEAST, MOVE_NORTH, 0]
                 if tick == 1
                 else [0] * 5,
                 dtype=jnp.int32,
@@ -717,10 +717,11 @@ def test_reactive_controller_reproduces_both_accepted_witnesses(
             )
         )
         if tick == 2:
-            assert not bool(mask.select_target_use_ultimate_joint_mask[5, 9, 0])
-            assert int(b.select_target[0]) == 8
-            assert int(b.select_target[3]) == (9 if heal_target == 3 else 8)
-            np.testing.assert_array_equal(b.move, [MOVE_EAST, 0, 0, MOVE_NORTHEAST, 0])
+            # The opening heal changes which of Hunter and Rogue is weaker.
+            target = 9 if heal_target == 3 else 8
+            assert int(b.select_target[0]) == target
+            assert int(b.select_target[3]) == target
+            np.testing.assert_array_equal(b.move, [MOVE_EAST, 0, 0, MOVE_SOUTHEAST, 0])
         np.testing.assert_array_equal(b.use_ultimate, [0, 0, 0, 0, 0])
         state, obs, reward, done, mask, _ = _STEP(
             scenario.config, state, mask, joint, jax.random.key(0)
@@ -799,17 +800,10 @@ def test_rules_continue_to_final_wave_with_dead_class_noops(
 
 
 def test_reactive_controller_reproduces_scenario_2_cover_and_healing_witness() -> None:
-    fixture = Path(__file__).parent / "fixtures" / "scenario_2_r12.json"
-    draft = DevScenarioDraftV1.model_validate_json(fixture.read_text(encoding="utf-8"))
-    scenario = compile_dev_scenario(draft)
-    assert draft.revision == 12
-    assert scenario.semantic_digest == (
-        "1b2e2d391053a0de15c7f292dc70f6db679ed9e62e35ec1f11dcc68bb9f1c2cc"
-    )
-    state, obs, mask = (
-        scenario.initial_state,
-        scenario.observation,
-        scenario.action_mask,
+    scenario = load_tdm_scenario(2)
+    assert scenario.info.approved_source.revision == 19
+    state, obs, mask, _ = initialize_scenario_state(
+        scenario.initial_state, scenario.config
     )
     # Warrior/Priest: Charge/self-heal, basic/heal, no-combat/Ultimate, basic/no-combat.
     # Target actions are observer-relative; Team A's 9 is Rogue-B and 6 is Mage-B.
@@ -825,16 +819,18 @@ def test_reactive_controller_reproduces_scenario_2_cover_and_healing_witness() -
         [MOVE_WEST, 0, 0, MOVE_WEST, 0],
         [MOVE_SOUTH, 0, 0, 0, 0],
         [MOVE_SOUTH, 0, 0, 0, 0],
-        [MOVE_NORTH, 0, 0, 0, 0],
+        [MOVE_NORTHEAST, 0, 0, 0, 0],
     ]
     expected_scores = [[18, 19], [19, 19], [19, 19], [20, 19]]
     expected_warrior_hp = [15.9387493, 4.8774986, 185.8162537, 166.7550049]
     for tick in range(4):
         if tick == 2:
+            assert bool(mask.select_target_use_ultimate_joint_mask[4, 2, 1])
+        if tick == 3:
             # Priest is protected by cover, not by being outside Mage's basic range.
             mage, priest = state.agent_positions[5], state.agent_positions[4]
             distance = float(cast(Array, jnp.linalg.norm(mage - priest)))
-            assert distance == pytest.approx(2.982093, abs=1e-5)
+            assert distance == pytest.approx(2.6761029, abs=1e-5)
             assert distance < float(
                 scenario.config.agent_profile.basic_interaction_radii[5]
             )
@@ -842,7 +838,6 @@ def test_reactive_controller_reproduces_scenario_2_cover_and_healing_witness() -
                 has_clear_line_of_sight(mage, priest, scenario.config.obstacles)
             )
             assert not bool(mask.select_target_use_ultimate_joint_mask[5, 10, 0])
-            assert bool(mask.select_target_use_ultimate_joint_mask[4, 2, 1])
         # These are expected outputs only; Team B is generated afresh from this epoch.
         b = _team_b(scenario, obs, mask)
         np.testing.assert_array_equal(b.move, expected_b_moves[tick])

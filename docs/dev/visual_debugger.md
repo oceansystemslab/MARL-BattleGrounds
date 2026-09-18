@@ -1,92 +1,91 @@
-# Browser tools migration
+# Browser Tools Migration
 
-The former combined “Visual Debugger and Analyzer” surface is now the DevClient
-and the separate Replay Viewer, with independent launchers and authority:
+Use **DevClient** for live play and local map/scenario editing. Use **Replay
+Viewer** for recorded games, checked samples, and scripted demonstrations. These
+replace the former combined Visual Debugger and Analyzer.
 
-| Product | Use it for | Canonical launcher |
+| Product | Main Work | Launcher |
 | --- | --- | --- |
-| [DevClient](combat_debugger.md) | Combat Debugger plus local reusable Map and TDM Scenario authoring | `./scripts/dev/run_dev_client.sh` |
-| [Replay Viewer](replay_viewer.md) | Existing replay artifacts, checked samples, and isolated scripted demonstrations | `./scripts/dev/run_replay_viewer.sh` |
+| [DevClient](combat_debugger.md) | Combat Debugger, Maps, and Scenarios | `./scripts/dev/run_dev_client.sh` |
+| [Replay Viewer](replay_viewer.md) | Inspect, play, analyze, and export recorded games | `./scripts/dev/run_replay_viewer.sh` |
 
-Both products use the fixed Analysis presentation and the same native browser
-visual language. They do not share command authority: the DevClient can author
-assets and submit live actions, while the Replay Viewer is read-only.
+Both use the fixed Analysis presentation. Python owns simulation, action
+legality, saved-content validation, and the facts each view may show. The
+browser owns layout, help, filters, and animation. Browser-only interaction does
+not run a simulator turn.
 
-## Command migration
+## Command Migration
 
-| Previous intent | Current command |
+Run these commands from the checkout with `uv` available. Replace `PATH`,
+`NAME`, and `N` with a real replay path, listed name, and frame index.
+
+| Previous Task | Current Command |
 | --- | --- |
 | Open the developer workspace | `./scripts/dev/run_dev_client.sh` |
-| Record a Combat Debugger episode | `./scripts/dev/run_dev_client.sh --record-replay PATH` |
-| Render a Combat Debugger reset snapshot | `./scripts/dev/run_dev_client.sh --static` |
+| Record a live episode | `./scripts/dev/run_dev_client.sh --record-replay PATH` |
+| Draw a live reset snapshot | `./scripts/dev/run_dev_client.sh --static` |
 | Open a replay formerly selected with debugger `--replay` | `./scripts/dev/run_replay_viewer.sh --replay PATH` |
 | Open a checked sample formerly selected with debugger `--sample-replay` | `./scripts/dev/run_replay_viewer.sh --sample-replay NAME` |
 | Open a scripted demonstration formerly selected with debugger `--scenario` | `./scripts/dev/run_replay_viewer.sh --scenario NAME` |
-| List replay scenarios or samples | `./scripts/dev/run_replay_viewer.sh --list-scenarios` or `./scripts/dev/run_replay_viewer.sh --list-sample-replays` |
-| Render an exact replay frame | `./scripts/dev/run_replay_viewer.sh --replay PATH --static --frame-index N` |
+| List scripted demonstrations | `./scripts/dev/run_replay_viewer.sh --list-scenarios` |
+| List checked samples | `./scripts/dev/run_replay_viewer.sh --list-sample-replays` |
+| Draw one exact replay frame | `./scripts/dev/run_replay_viewer.sh --replay PATH --static --frame-index N` |
 
-The Combat Debugger lists execution-valid saved map and scenario revisions.
-Scenario assets load their authored state; maps are clearly identified
-deterministic default-5v5-TDM previews. Both authoring areas call the same strict
-compile/revalidate loader through `Open in Debug`, and either team can use
-**Manual**, **Reactive TDM ALPHA**, or **Random**. ALPHA is the existing deterministic
-five-class SharedObs controller for either team. Team B also offers the
-SharedObs-only **Reactive TDM BETA**:
-other classes use Reactive TDM unchanged; Rogues pursue observed enemy Priests
-first, otherwise Mages, otherwise Hunters, choosing the lowest-health prey within that class
-with global-slot ties. They attempt glancing shoulder routes past intervening
-bodies while independently attacking low-health legal targets. Without an
-observed living Priest, Mage or Hunter, Rogue movement falls back to ordinary
-Reactive TDM. Shoulder contact uses ordinary simulator collision response and
-does not guarantee a route. These policies are diagnostic/scenario-pressure tools,
-not official baselines or Big 12 entrants. Random remains available under both information
-modes; NoSharedObs is disabled while either team uses a reactive controller.
+`run_debug_renderer.sh` is a compatibility redirect to DevClient. Replay Viewer
+has no authoring area, action composer, manual submit, reset, or recording
+destination. Its Left/Right/Space shortcuts navigate recorded frames and yield
+to ordinary form controls. Node.js and npm are contributor tools; they are not
+needed to launch the built browser assets.
 
-Load any valid interactive scenario or map preview (or keep the default arena),
-keep Team A Manual, select SharedObs, choose a reactive Team B controller,
-and submit turns. Reset restores the exact loaded starting state. No task,
-horizon, roster, asset-ID, or respawn restriction applies. Expected rejection
-leaves the session healthy and shows a notice without requiring reconnect.
-Policy-controlled agents remain inspectable but action-read-only. Scenarios 3
-and 5 share the Team B-only BETA option; ALPHA is available on either team.
-The old standalone Scenario 3, Scripted TDM and separate Reactive MRP executable
-interfaces have been removed. The surviving `scenario_5` identity and behavior
-v4 identify Priest → Mage → Hunter pursuit with local wall steering. ALPHA v2
-and BETA v4 prefer passing below nearby vertical walls, falling back above when
-needed; BETA retains body-admissible detours. This is a partial improvement,
-not guaranteed navigation—three-tick ALPHA allied congestion remains known.
-Historical recordings
-remain readable, and fixed-frame scripted diagnostics remain separate.
-See the [Combat Debugger guide](combat_debugger.md#loading-saved-scenarios-and-map-previews)
-for the execution boundaries and loading workflow.
-Future official scenario evaluations bind pressure controllers through separate
-evaluation definitions while saved scenarios remain controller-independent.
-DevClient use remains diagnostic. See
-[A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
-and [A32](../design/specification_amendments.md#a32-scenario-5-shoulder-bypass-and-fallback-prey).
-Save is the only way the DevClient persists asset content; it
-creates durable numbered local revisions and never autosaves. Every applicable
-selector exposes every latest revision in numeric-aware asset-ID order through
-its native scrolling control. New Map and Scenario asset IDs use lowercase
-snake case, and generated obstacle IDs use `obstacle_N`; visible content names
-remain free-form. Confirmed deletion removes an unwanted saved asset. The
-Replay Viewer intentionally has no authoring route, action composer, manual
-submission, reset, or recording destination. The historical
-`run_debug_renderer.sh` launcher remains a compatibility redirect only.
+## Live Editing and Controllers
 
-## Shared boundaries
+Create or open a map/scenario in DevClient, save it, then load that revision in
+Combat Debugger. A saved scenario restores its authored state. A saved map opens
+a clearly labeled default 5v5 TDM preview. **Open in Debug** uses the same
+Python build-and-validation path. A rejected load leaves the current session
+unchanged. Reset restores the already loaded snapshot; it does not pick up later
+edits to the saved asset.
 
-- Python remains the authority for simulator state, legality, replay
-  validation, audience projection, and metric access.
-- Browser layout, help, panels, animation, and the 19 visible filter controls
-  are presentation-only.
-- The replay transport uses Start/End controls, exact seeks, and document-level
-  unmodified Left/Right/Space shortcuts that yield to interactive controls.
-- Node.js and npm are contributor tools, not researcher runtime dependencies.
-- SharedObs replay presentation follows
-  [specification amendment A17](../design/specification_amendments.md#a17-sharedobs-recorded-visual-union-presentation):
-  the recorded same-epoch visual union is rendering-only and is not a
-  materialized learner input.
+Save is explicit, with no autosave. It creates numbered local revisions and
+checks the expected revision before writing. Selectors list every applicable
+latest revision in numeric-aware asset-ID order. Asset IDs use lowercase snake
+case; new obstacle IDs use `obstacle_N`. Visible names remain free-form.
+**Delete Saved** needs confirmation and removes all revisions of that identity;
+an open draft remains available as an unsaved copy.
 
-For contributor checks, see [quality_gates.md](quality_gates.md). For the
-runtime/tooling split, see [dependency_policy.md](dependency_policy.md).
+Both teams can use **Manual**, **Reactive TDM ALPHA**, or **Random**. Team B can
+also use **Reactive TDM BETA**. Reactive controllers require SharedObs; Random
+and Manual also support NoSharedObs. Policy-controlled agents stay inspectable,
+but their actions cannot be edited manually. Submit can run both automatic
+teams. A controller or information-mode change resets the loaded snapshot.
+
+ALPHA v2 handles all five classes. BETA v4 uses the same rules except that Rogue
+pursues observed living Priests, then Mages, then Hunters, with lowest-health
+and global-slot tie breaks. Its glancing shoulder routes and local wall steering
+do not guarantee navigation. Both prefer passing below nearby vertical walls,
+then above when needed. A three-tick ALPHA allied-congestion stall remains
+known. The shared `scenario_5` BETA behavior serves Scenarios 3 and 5; the old
+standalone Scenario 3, Scripted TDM, and separate Reactive MRP interfaces were
+removed. Historical recording identities remain readable.
+
+These are diagnostic/scenario-pressure tools, not official baselines or Big 12
+entrants. Future official evaluation definitions must bind the same versioned
+controller to every compared treatment; saved physical scenarios stay
+independent of controllers. See the [live workflow and detailed controller
+rules](combat_debugger.md#loading-saved-scenarios-and-map-previews),
+[A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations),
+and
+[A32](../design/specification_amendments.md#a32-scenario-5-shoulder-bypass-and-fallback-prey).
+
+## Display and Evidence Boundaries
+
+The 19 visual filters and separate Ranges control change display, not simulation
+or recorded data. SharedObs display follows
+[A17](../design/specification_amendments.md#a17-sharedobs-recorded-visual-union-presentation):
+it combines permitted same-tick sensor views for rendering. It does not create a
+learner input or grant access to hidden facts. A successful DevClient session or
+a viewable replay does not by itself qualify an official experiment.
+
+Follow the [Documentation Standard](documentation_standard.md) when changing
+these tools. Use [Quality Gates](quality_gates.md) for contributor checks and
+[Dependency Policy](dependency_policy.md) for the runtime/tooling split.

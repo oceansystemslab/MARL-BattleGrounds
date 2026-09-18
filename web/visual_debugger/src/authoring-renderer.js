@@ -1,3 +1,9 @@
+/**
+ * @file Draw editable draft geometry and convert authoring pointer/camera positions.
+ * This browser-only renderer owns SVG appearance, not Core geometry validity.
+ * Draft positions use upward-positive world Y; SVG camera coordinates use
+ * downward-positive Y. Callers own saving, selection and event handlers.
+ */
 import { authoringObjects, mapContent } from "./authoring-model.js";
 import { createSvgIcon } from "./icons.js";
 
@@ -10,7 +16,14 @@ const AUTHORING_AGENT_CLASSES = Object.freeze(
   new Set(["mage", "warrior", "hunter", "rogue", "priest"]),
 );
 
-/** @param {string} name @param {Record<string, string | number>} attributes */
+/**
+ * Create a detached SVG node in the page document. name is its SVG tag;
+ * attributes defaults to {} and each value is converted to a string before
+ * setAttribute. Return the element without attaching it. Callers supply
+ * trusted local tags/attributes; this is not an HTML or input validator.
+ *
+ * @param {string} name @param {Record<string, string | number>} attributes
+ */
 function svgElement(name, attributes = {}) {
   const element = document.createElementNS(SVG_NAMESPACE, name);
   for (const [key, value] of Object.entries(attributes)) {
@@ -19,7 +32,13 @@ function svgElement(name, attributes = {}) {
   return element;
 }
 
-/** @param {unknown} mapWidth @param {unknown} mapHeight */
+/**
+ * Convert mapWidth/mapHeight to positive finite numbers and return a frozen
+ * width/height record. Nonpositive or nonfinite results return null. Native
+ * Number-conversion errors may propagate. No draft values are changed.
+ *
+ * @param {unknown} mapWidth @param {unknown} mapHeight
+ */
 export function authoringMapDimensions(mapWidth, mapHeight) {
   const width = Number(mapWidth);
   const height = Number(mapHeight);
@@ -29,7 +48,13 @@ export function authoringMapDimensions(mapWidth, mapHeight) {
   return Object.freeze({ width, height });
 }
 
-/** @param {number} gridSpacing */
+/**
+ * Return frozen SVG tile dimensions and an edge path for gridSpacing in
+ * world units. Convert it to a number and throw RangeError if nonfinite or
+ * nonpositive. The helper creates no DOM and does not snap authored objects.
+ *
+ * @param {number} gridSpacing
+ */
 export function authoringGridPattern(gridSpacing) {
   const spacing = Number(gridSpacing);
   if (!Number.isFinite(spacing) || spacing <= 0) {
@@ -42,7 +67,14 @@ export function authoringGridPattern(gridSpacing) {
   });
 }
 
-/** @param {any} draft */
+/**
+ * Return draft's selectable objects in painter order: pads, walls/pillars,
+ * then active-roster agents. Use authoringObjects for validation/projection
+ * and return a new frozen array. Each projection retains its nested draft
+ * references. Unknown shape kinds are omitted; no draft or DOM is changed.
+ *
+ * @param {any} draft
+ */
 export function authoringPaintObjects(draft) {
   const objects = authoringObjects(draft);
   const pads = objects.filter((object) => object.kind === "spawn_pad");
@@ -53,7 +85,14 @@ export function authoringPaintObjects(draft) {
   return Object.freeze([...pads, ...obstacles, ...agents]);
 }
 
-/** @param {any} object @param {any} catalog */
+/**
+ * Find object.roster.class_name in catalog.class_mechanics, ignoring case.
+ * Return its positive finite body_radius in world units, or the display
+ * fallback 0.45 if missing/invalid. This fallback is for editor appearance
+ * only and does not establish the simulator's configured body radius.
+ *
+ * @param {any} object @param {any} catalog
+ */
 export function authoringAgentBodyRadius(object, catalog) {
   const className = object?.roster?.class_name;
   const mechanics = Array.isArray(catalog?.class_mechanics)
@@ -68,7 +107,13 @@ export function authoringAgentBodyRadius(object, catalog) {
   return Number.isFinite(radius) && radius > 0 ? radius : DEFAULT_AGENT_BODY_RADIUS;
 }
 
-/** @param {any} catalog */
+/**
+ * Return the largest positive finite body_radius in catalog.class_mechanics,
+ * or the display fallback 0.5 when none is available. The radius is in world
+ * units and affects the editor's pad marker only; no configuration is changed.
+ *
+ * @param {any} catalog
+ */
 export function authoringSpawnPadRadius(catalog) {
   const radii = Array.isArray(catalog?.class_mechanics)
     ? catalog.class_mechanics
@@ -78,7 +123,13 @@ export function authoringSpawnPadRadius(catalog) {
   return radii.length > 0 ? Math.max(...radii) : DEFAULT_SPAWN_PAD_RADIUS;
 }
 
-/** @param {any} object */
+/**
+ * Return a frozen class/glyph/alive display record for object. Trim and
+ * lowercase its roster class; unsupported names use unknown. alive is true
+ * only for state.alive === true. No class mechanics or lifecycle is inferred.
+ *
+ * @param {any} object
+ */
 export function authoringAgentVisual(object) {
   const requestedClass =
     typeof object?.roster?.class_name === "string"
@@ -94,7 +145,16 @@ export function authoringAgentVisual(object) {
   });
 }
 
-/** @param {unknown} camera @param {unknown} mapWidth @param {unknown} mapHeight */
+/**
+ * Return a frozen finite camera, or a full-map fallback.
+ *
+ * camera supplies x/y/width/height in SVG coordinates. Width and height must
+ * be positive; x/y may be outside the map. mapWidth/mapHeight define the
+ * fallback, or 20-by-10 is used when those dimensions are invalid. Numeric
+ * conversion is applied. This does not clamp pan/zoom or mutate the input.
+ *
+ * @param {unknown} camera @param {unknown} mapWidth @param {unknown} mapHeight
+ */
 export function normalizeAuthoringCamera(camera, mapWidth, mapHeight) {
   const dimensions =
     authoringMapDimensions(mapWidth, mapHeight) ??
@@ -115,8 +175,12 @@ export function normalizeAuthoringCamera(camera, mapWidth, mapHeight) {
 }
 
 /**
- * Convert one client coordinate through an SVG meet-fit and viewBox. Returned
- * Y uses the simulator's upward-positive world convention.
+ * Convert clientX/clientY pixels through a centered meet-fit SVG camera.
+ *
+ * bounds is the element's client rectangle; camera is a valid positive SVG
+ * view box. mapHeight converts downward SVG Y to upward world Y. Return a
+ * frozen x/y world point. Nonpositive bounds throw RangeError. The caller
+ * owns camera/finiteness checks; no clipping to the map or DOM update occurs.
  *
  * @param {{left: number, top: number, width: number, height: number}} bounds
  * @param {{x: number, y: number, width: number, height: number}} camera
@@ -145,8 +209,12 @@ export function authoringClientPointToWorld(
 }
 
 /**
- * Zoom around a client-resolved world anchor while keeping the map aspect
- * ratio and leaving authored content untouched.
+ * Return a frozen camera zoomed around worldAnchor without moving that anchor
+ * on screen. factor must convert to a positive finite number or throw
+ * RangeError. Limit width to mapWidth/8 through mapWidth*2 and preserve the
+ * current camera aspect ratio. mapHeight converts world Y to SVG Y. The caller
+ * supplies valid camera/map/anchor values; this does not clamp the camera
+ * origin or modify authored content.
  *
  * @param {{x: number, y: number, width: number, height: number}} camera
  * @param {number} mapWidth
@@ -176,6 +244,10 @@ export function zoomAuthoringCamera(camera, mapWidth, mapHeight, worldAnchor, fa
 }
 
 /**
+ * Return a frozen camera copy shifted by deltaVisualX/deltaVisualY in SVG
+ * view-box units. Preserve width/height and other fields. Inputs must already
+ * be valid numbers; there is no validation, map clamping or DOM change.
+ *
  * @param {{x: number, y: number, width: number, height: number}} camera
  * @param {number} deltaVisualX
  * @param {number} deltaVisualY
@@ -188,7 +260,24 @@ export function panAuthoringCamera(camera, deltaVisualX, deltaVisualY) {
   });
 }
 
-/** @param {SVGSVGElement} svg @param {any} draft @param {string | null} selectedId @param {any} camera @param {number} gridSpacing @param {any} catalog */
+/**
+ * Replace svg's children with the draft map, grid, objects and selection.
+ *
+ * draft is a map/scenario draft understood by mapContent. selectedId marks
+ * the matching object; null selects none. camera is normalized against map
+ * dimensions. gridSpacing is positive in world units. catalog defaults to
+ * null; missing mechanics use the documented display radii. Return the
+ * resolved frozen camera. Invalid map dimensions render an explanatory
+ * fallback panel and return its camera.
+ *
+ * The function mutates svg, using fixed clip/grid IDs and the page document
+ * for primitives. Use one authoring surface in that document. Shape values
+ * are rendered as authored, without Core collision/bounds validation. Other
+ * validation errors may propagate after the SVG is cleared. No draft changes,
+ * file writes, network calls or simulator steps occur.
+ *
+ * @param {SVGSVGElement} svg @param {any} draft @param {string | null} selectedId @param {any} camera @param {number} gridSpacing @param {any} catalog
+ */
 export function renderAuthoringSvg(
   svg,
   draft,

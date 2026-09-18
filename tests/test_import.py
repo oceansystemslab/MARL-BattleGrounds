@@ -1,8 +1,7 @@
-"""Import smoke tests for the MARL-BattleGrounds package."""
+"""Check that the package can be imported through its public name."""
 
 
 def test_package_imports() -> None:
-    """The package should be importable after installation."""
     import marl_battlegrounds
 
     assert marl_battlegrounds.__name__ == "marl_battlegrounds"

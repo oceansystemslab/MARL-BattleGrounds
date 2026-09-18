@@ -1,7 +1,8 @@
-"""Live recipient-slice proofs over the accepted CP2/CP3 coherent view."""
+"""Check that current actor-POV records use matched observations and transitions."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -200,7 +201,6 @@ def test_current_slice_fails_closed_for_shared_obs_and_inactive_actor() -> None:
 def test_live_pov_v1_factories_reject_actor_projection_v2(
     trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """POV V1 must not claim exact materialization of the newer actor input."""
     projection_v2_context = trajectory.context.model_copy(
         update={"actor_projection": NO_SHARED_OBS_ACTOR_PROJECTION_V2}
     )
@@ -459,3 +459,227 @@ def test_adjacent_rendering_seam_revalidates_model_constructed_roots() -> None:
         ActorPovAdjacentTransitionSliceV1.model_validate(
             forged.model_dump(mode="python")
         )
+
+
+@pytest.mark.parametrize("global_slot", (0, 5))
+def test_current_actor_rows_keep_local_identity_in_live_and_replay(
+    global_slot: int,
+) -> None:
+    import numpy as np
+    from tests.evaluation_fixtures import current_captured_evaluation_trajectory
+    from tests.test_evaluation_pov import (
+        _runtime_provenance,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    from marl_battlegrounds.evaluation.pov import (
+        ActorPovCurrentSliceV2,
+        ActorPovReplayArtifactV2,
+        export_actor_pov_replay_v2,
+        validate_actor_pov_replay_against_replay_v2,
+    )
+    from marl_battlegrounds.evaluation.replay_v3 import build_replay_v3
+    from marl_battlegrounds.rendering.authorized_pov_scene import (
+        build_no_shared_obs_authorized_scene_v1,
+    )
+
+    trajectory = current_captured_evaluation_trajectory(transition_count=1)
+    view = EvaluationTransitionViewV1(
+        context=trajectory.context,
+        start_frame=trajectory.frames[0],
+        transition=trajectory.transitions[0],
+        successor_frame=trajectory.frames[1],
+    )
+    current = build_actor_pov_current_slice_v1(
+        trajectory.context,
+        trajectory.frames[1],
+        global_slot=global_slot,
+        incoming_transition_view=view,
+    )
+    assert type(current) is ActorPovCurrentSliceV2
+    observed = trajectory.observations[1]
+    assert current.frame.self_ally_index == int(observed.self_ally_index[global_slot])
+    for name in (
+        "self_features",
+        "ally_unit_features",
+        "enemy_unit_features",
+        "ally_visibility_mask",
+        "enemy_visibility_mask",
+        "objective_features",
+        "map_obstacle_features",
+        "context_features",
+    ):
+        np.testing.assert_array_equal(
+            getattr(current.frame, name),
+            np.asarray(getattr(observed, name))[global_slot],
+        )
+    np.testing.assert_array_equal(
+        current.frame.class_ids_by_team,
+        np.asarray(observed.spawn_lifecycle.class_ids_by_agent_by_team)[global_slot],
+    )
+    replay = build_replay_v3(
+        trajectory.context,
+        trajectory.frames,
+        trajectory.transitions,
+        runtime_provenance=_runtime_provenance(),
+    )
+    exported = export_actor_pov_replay_v2(replay, global_slot=global_slot)
+    assert type(exported) is ActorPovReplayArtifactV2
+    validate_actor_pov_replay_against_replay_v2(exported, replay)
+    assert exported.content.frames[1] == current.frame
+    scene = build_no_shared_obs_authorized_scene_v1(
+        current,
+        public_catalog=trajectory.context.static_mechanics_catalog,
+        authority_session_id="current-input-check",
+    )
+    own = next(row for row in scene.scene.agents if row.relation == "self")
+    assert own.team_id == trajectory.context.roster[global_slot].configured_team_id
+    assert current.frame.self_features[3] == 0.0
+
+
+@pytest.mark.parametrize("global_slot", (0, 5))
+def test_current_shared_source_rows_keep_relation_flags(global_slot: int) -> None:
+    from tests.evaluation_fixtures import current_captured_evaluation_trajectory
+
+    from marl_battlegrounds.rendering.evaluation_adapter import (
+        SharedObsBaseSensorFrameV2,
+        SharedObsSourceMaterialProjectionV2,
+        build_shared_obs_source_material_projection_v1,
+    )
+
+    trajectory = current_captured_evaluation_trajectory(
+        transition_count=1,
+        execution_information_mode="shared_obs",
+    )
+    projection = build_shared_obs_source_material_projection_v1(
+        trajectory.context,
+        trajectory.frames[0],
+        selected_global_slot=global_slot,
+    )
+    assert type(projection) is SharedObsSourceMaterialProjectionV2
+    assert projection.axis_mapping.source_context_schema_version == 3
+    assert projection.axis_mapping.source_frame_schema_version == 2
+    raw = projection.base_sensor_frame
+    assert type(raw) is SharedObsBaseSensorFrameV2
+    assert raw.self_ally_index == global_slot % 5
+    assert (
+        raw.self_features
+        == trajectory.frames[0].base_observation.self_features[global_slot]
+    )
+    assert raw.self_features[3] == 0.0
+    assert projection.base_sensor_scene.self_actor.team_id == (
+        1 if global_slot < 5 else 2
+    )
+
+
+@pytest.mark.parametrize("global_slot", (0, 5))
+def test_current_shared_replay_seek_keeps_the_same_authorized_union(
+    global_slot: int,
+    tmp_path: Path,
+) -> None:
+    from scripts.dev.visual_debugger.presentation_protocol import (
+        ReplaySharedObsAuthorizedPresentationFrameV1,
+    )
+    from scripts.dev.visual_debugger.replay_protocol import (
+        ReplayAbsoluteSeekCommandV1,
+        ReplayCommandRequestV1,
+    )
+    from scripts.dev.visual_debugger.replay_service import ReplayViewerService
+    from tests.evaluation_fixtures import current_captured_evaluation_trajectory
+    from tests.test_evaluation_pov import (
+        _runtime_provenance,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    from marl_battlegrounds.evaluation.replay_io import load_replay, save_replay
+    from marl_battlegrounds.evaluation.replay_v3 import build_replay_v3
+
+    trajectory = current_captured_evaluation_trajectory(
+        transition_count=2,
+        execution_information_mode="shared_obs",
+    )
+    replay = build_replay_v3(
+        trajectory.context,
+        trajectory.frames,
+        trajectory.transitions,
+        runtime_provenance=_runtime_provenance(),
+    )
+    path = tmp_path / "current-shared.marlbg-replay.json"
+    save_replay(replay, path)
+    viewer = ReplayViewerService(
+        load_replay(path),
+        view_mode="pov",
+        pov_global_slot=global_slot,
+    )
+    endpoints: dict[int, object] = {}
+    for ordinal, frame_index in enumerate((0, 1, 2, 1, 0)):
+        result = viewer.apply_command(
+            ReplayCommandRequestV1(
+                client_id="current-shared",
+                command_id=f"seek-{ordinal}",
+                base_revision=viewer.revision,
+                command=ReplayAbsoluteSeekCommandV1(frame_index=frame_index),
+            )
+        )
+        assert result.outcome == "response"
+        presentation = viewer.current_presentation().payload
+        assert type(presentation) is ReplaySharedObsAuthorizedPresentationFrameV1
+        parts = presentation.current_endpoint.parts
+        if frame_index in endpoints:
+            assert parts == endpoints[frame_index]
+        endpoints[frame_index] = parts
+        frame = trajectory.frames[frame_index]
+        sources = (
+            frame.shared_obs_information_availability_by_recipient_and_sensor_source
+        )
+        assert sources is not None
+        source_slots = {global_slot} | {
+            slot for slot, enabled in enumerate(sources[global_slot]) if enabled
+        }
+        allowed_ids = {
+            trajectory.context.roster[slot].public_agent_id for slot in source_slots
+        }
+        expected_positions: dict[str, tuple[float, ...]] = {}
+        for source_slot in source_slots:
+            observation = frame.base_observation
+            expected_positions[
+                trajectory.context.roster[source_slot].public_agent_id
+            ] = observation.self_features[source_slot][:2]
+            own_start = (source_slot // 5) * 5
+            for first, visibility, rows in (
+                (
+                    own_start,
+                    observation.ally_visibility_mask[source_slot],
+                    observation.ally_unit_features[source_slot],
+                ),
+                (
+                    5 - own_start,
+                    observation.enemy_visibility_mask[source_slot],
+                    observation.enemy_unit_features[source_slot],
+                ),
+            ):
+                for local, visible in enumerate(visibility):
+                    if visible:
+                        expected_positions[
+                            trajectory.context.roster[first + local].public_agent_id
+                        ] = rows[local][:2]
+        assert {body.public_agent_id for body in parts.scene.agents} == set(
+            expected_positions
+        )
+        assert all(
+            body.position == expected_positions[body.public_agent_id]
+            for body in parts.scene.agents
+        )
+        assert {
+            source.source_public_agent_id for source in parts.authorized_sensor_sources
+        } == allowed_ids
+        for body in parts.scene.agents:
+            roster = next(
+                row
+                for row in trajectory.context.roster
+                if row.public_agent_id == body.public_agent_id
+            )
+            assert body.team_id == roster.configured_team_id
+        assert (
+            parts.next_decision_action_mask.move
+            == frame.action_mask.move_mask[global_slot]
+        )
+    assert load_replay(path).replay == replay

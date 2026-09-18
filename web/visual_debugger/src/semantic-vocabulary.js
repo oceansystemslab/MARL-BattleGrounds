@@ -1,11 +1,9 @@
 /**
- * Finite, qualitative presentation copy for stable status and aura identities.
- *
- * This registry deliberately contains no tuning values, rankings, matchup
- * claims, or outcome guarantees. Exact quantities always come from the joined
- * normalized scene record at render time.
+ * @file Supply qualitative status/aura labels for browser explanations.
+ * These frozen definitions contain no tuning quantities. Callers obtain exact
+ * durations, radii and effect values from their authorized presentation.
+ * Unknown tokens receive neutral labels or no lifecycle result.
  */
-
 const STATUS_PRESENTATION = Object.freeze({
   spawn_shield: statusProfile(
     "Spawn Shield",
@@ -115,6 +113,13 @@ const STATUS_LIFECYCLE_PREFIX = Object.freeze({
 });
 
 /**
+ * Freeze a status display definition without validating its arguments.
+ *
+ * title and effect are authored text. accent selects the class color and
+ * magnitudeKind names the kind of numerical field a caller may display.
+ * positiveDamageBreak defaults to false and marks effects broken by damage.
+ * Return a frozen record of those values; no quantities are computed.
+ *
  * @param {string} title
  * @param {string} effect
  * @param {"mage" | "warrior" | "hunter" | "rogue" | "priest" | "none"} accent
@@ -138,6 +143,14 @@ function statusProfile(
 }
 
 /**
+ * Freeze the qualitative labels for one aura definition.
+ *
+ * title serves both the field and recipient cards. fieldEffect and
+ * aggregateEffect describe those views; fieldEffectLabel and
+ * aggregateEffectLabel name their numerical rows. accent selects Mage/Warrior
+ * and effectKind distinguishes damage dealt/received. Return a frozen record
+ * without validation, numerical calculation or input changes.
+ *
  * @param {string} title
  * @param {string} fieldEffect
  * @param {string} aggregateEffect
@@ -168,6 +181,13 @@ function auraProfile(
 }
 
 /**
+ * Return a frozen status definition for tokenId.
+ *
+ * String input is trimmed before lookup. Unknown/nonstring input receives a
+ * neutral Recorded Status record with no magnitude kind or damage-break flag.
+ * Known definitions are shared. This lookup does not decide whether an actor
+ * is allowed to see the status or supply its numerical duration.
+ *
  * @param {unknown} tokenId
  */
 export function statusPresentation(tokenId) {
@@ -184,9 +204,14 @@ export function statusPresentation(tokenId) {
 }
 
 /**
- * Resolve one status lifecycle into status-specific explanatory copy. The
- * Applications retain the exact durable-badge explanation. Expiry and death
- * clearing are self-explanatory and therefore intentionally carry no summary.
+ * Build a frozen lifecycle title/summary, or return null for an unknown event.
+ *
+ * lifecycleTokenId is trimmed and must name a known lifecycle. statusTokenId
+ * selects a status definition, with neutral fallback. Expiry and death clearing
+ * have a null summary. Exact in_combat expiry and exact stun_hunter_trap
+ * breakage receive special text; those special comparisons use the untrimmed
+ * status input. Other summaries use the status effect description. Inputs are
+ * unchanged; visibility and duration checks remain the caller's responsibility.
  *
  * @param {unknown} statusTokenId
  * @param {unknown} lifecycleTokenId
@@ -219,8 +244,12 @@ export function statusLifecyclePresentation(statusTokenId, lifecycleTokenId) {
 }
 
 /**
- * Resolve only the two stable aura identities into qualitative display names.
- * Exact radii and multipliers remain outside this numeric-free registry.
+ * Return a frozen qualitative aura definition, with a neutral fallback.
+ *
+ * auraId is trimmed when it is a string. Support the two declared legacy
+ * aliases, then look up Mage damage amplification or Warrior damage mitigation.
+ * Unknown values return generic aura labels. No radius, multiplier, emitter
+ * identity or permission is inferred. Known definitions are shared.
  *
  * @param {unknown} auraId
  */

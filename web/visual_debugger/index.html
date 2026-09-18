@@ -1,4 +1,10 @@
 <!doctype html>
+<!--
+  Shared native client page for DevClient and Replay Viewer. The server supplies
+  bootstrap.js, which selects the product; src/main.js installs its authorized
+  data and controls. Stable IDs are binding points for that code. Keep scripts,
+  styles and fonts local and preserve the content-security policy below.
+-->
 <html lang="en">
   <head>
     <meta charset="utf-8">
@@ -193,11 +199,11 @@
           </span>
         </div>
       </fieldset>
-      <progress id="recording-metrics-progress" class="metrics-progress" aria-label="Preparing recorded-game metrics" aria-describedby="recording-status-note" hidden></progress>
+      <progress id="recording-metrics-progress" class="metrics-progress" aria-label="Saving replay" aria-describedby="recording-status-note" hidden></progress>
       <p id="recording-status-note" class="recording-panel__note" aria-live="polite">
         Recording authority is supplied by the local Python service.
       </p>
-      <p id="recording-metrics-help" class="recording-panel__note" hidden>Metrics summarize the captured game.</p>
+      <p id="recording-metrics-help" class="recording-panel__note" hidden>Saving captured frames and provenance. Metrics can be computed separately in Replay Viewer.</p>
     </section>
 
     <section
@@ -255,9 +261,9 @@
           disabled
         >Download Metrics CSV</button>
         <span id="replay-download-metrics-help" class="sr-only">
-          Download evaluation metrics for the selected cursor or final-episode scope.
+          Download evaluation metrics for the selected Up to Current Tick or Entire Episode scope.
         </span>
-        <button id="replay-original-metrics-button" type="button" disabled>Original Metrics JSON</button>
+        <button id="replay-episode-details-button" type="button" disabled>Episode Details</button>
       </fieldset>
       <div id="replay-metrics-preparation" class="metric-preparation" role="status" hidden>
         <progress class="metrics-progress" aria-label="Preparing metric download" aria-describedby="replay-metrics-preparation-text"></progress>
@@ -488,16 +494,31 @@
           <div class="disclosure-body">
             <label for="metric-scope">Scope</label>
             <select id="metric-scope">
-              <option value="cursor">At cursor</option>
-              <option value="final">Final episode</option>
+              <option value="cursor">Up to Current Tick</option>
+              <option value="final">Entire Episode</option>
             </select>
-            <label for="metric-selection">Metric</label>
-            <select id="metric-selection"><option value="overview">Team overview</option></select>
+            <label for="metric-selection">Topic</label>
+            <select id="metric-selection"><option value="priority">Episode Results</option></select>
+            <div id="metric-view-field" hidden>
+              <label for="metric-view">View</label>
+              <select id="metric-view"><option value="single">All Measurements</option></select>
+            </div>
+            <div id="metric-search-area" class="metric-search">
+              <label for="metric-search">Find a Measurement</label>
+              <input id="metric-search" type="search" role="combobox" placeholder="Name, CSV column, or meaning" autocomplete="off" aria-autocomplete="list" aria-expanded="false" aria-controls="metric-search-results" aria-describedby="metric-search-status" disabled>
+              <p id="metric-search-status" class="section-note" role="status">Search includes every numerical CSV column.</p>
+              <div id="metric-search-content" hidden>
+                <div id="metric-search-results" role="listbox" aria-label="Measurements" hidden></div>
+                <button id="metric-search-more" type="button" hidden>Show More</button>
+                <section id="metric-search-definition" class="metric-search-definition" aria-label="Measurement definition" tabindex="-1" hidden></section>
+              </div>
+            </div>
             <progress id="metric-progress" class="metrics-progress" aria-label="Preparing replay metrics" aria-describedby="metric-status" hidden></progress>
             <p id="metric-status" class="section-note" role="status">Open to analyze the captured replay.</p>
-            <div id="metric-rows"></div>
+            <p id="metric-description" class="section-note"></p>
+            <section id="metric-rows" aria-label="Evaluation metric measurements"></section>
             <p class="section-note">Metrics summarize the captured game.</p>
-            <p class="section-note">Cursor values describe the captured prefix. Complete-episode results remain pending until completion. Coordination and conditional class metrics are descriptive associations. This analysis is never an agent input.</p>
+            <p class="section-note">Up to Current Tick excludes later transitions. Outcomes remain unavailable until completion. Hover or focus a measure for its definition and missing-value rules.</p>
           </div>
         </details>
 
@@ -583,6 +604,9 @@
               </button>
               <button id="disable-all-visual-filters-button" type="button">
                 Disable All
+              </button>
+              <button id="default-visual-filters-button" type="button">
+                Default Configuration
               </button>
             </div>
           </div>

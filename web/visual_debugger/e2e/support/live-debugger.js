@@ -1,3 +1,7 @@
+/**
+ * @file Launch and control a local live debugger for browser tests, with fixed inputs
+ * and explicit process cleanup.
+ */
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,23 +29,14 @@ export function combatDebuggerArguments(extraArgs = []) {
   ];
 }
 
-/**
- * Node keeps exitCode null when a child exits because of a signal, so both
- * fields participate in the lifecycle check.
- *
- * @param {import("node:child_process").ChildProcess} child
- */
+/** @param {import("node:child_process").ChildProcess} child */
 function hasExited(child) {
   return child.exitCode !== null || child.signalCode !== null;
 }
 
-/**
- * Wait a bounded period for one child process to emit its exit event.
- *
- * @param {import("node:child_process").ChildProcess} child
+/** @param {import("node:child_process").ChildProcess} child
  * @param {number} timeoutMs
- * @returns {Promise<boolean>}
- */
+ * @returns {Promise<boolean>} */
 function waitForExit(child, timeoutMs) {
   if (hasExited(child)) {
     return Promise.resolve(true);
@@ -59,15 +54,11 @@ function waitForExit(child, timeoutMs) {
   });
 }
 
-/**
- * Start the real loopback debugger for browser integration tests.
- *
- * @param {{scenario?: string, extraArgs?: string[]}} options
+/** @param {{scenario?: string, extraArgs?: string[]}} options
  * @returns {Promise<{
  *   process: import("node:child_process").ChildProcess,
  *   url: string,
- * }>}
- */
+ * }>} */
 export function startDebugger({ scenario, extraArgs = [] } = {}) {
   if (scenario !== undefined && scenario !== "arena_5v5") {
     throw new TypeError(
@@ -77,13 +68,7 @@ export function startDebugger({ scenario, extraArgs = [] } = {}) {
   return startDebuggerProcess(combatDebuggerArguments(extraArgs));
 }
 
-/**
- * Start a registered scripted DebuggerService used only by browser causal
- * tests. This bypasses neither the real HTTP server nor service logic, and
- * deliberately adds no scenario option to the public launcher.
- *
- * @param {{scenario?: string}} options
- */
+/** @param {{scenario?: string}} options */
 export function startScriptedDebugger({ scenario = "aura_crossfire" } = {}) {
   return startDebuggerProcess([
     "run",
@@ -97,13 +82,7 @@ export function startScriptedDebugger({ scenario = "aura_crossfire" } = {}) {
   ]);
 }
 
-/**
- * Start the public DevClient launcher path with saved drafts isolated in
- * one caller-owned temporary directory. Reusing the directory across process
- * restarts proves persisted discovery without touching developer assets.
- *
- * @param {{artifactRoot: string, seedMapCount?: number, seedScenarioCount?: number}} options
- */
+/** @param {{artifactRoot: string, seedMapCount?: number, seedScenarioCount?: number}} options */
 export function startIsolatedDevClient({
   artifactRoot,
   seedMapCount = 0,
@@ -134,13 +113,11 @@ export function startIsolatedDevClient({
   ]);
 }
 
-/**
- * @param {string[]} arguments_
+/** @param {string[]} arguments_
  * @returns {Promise<{
  *   process: import("node:child_process").ChildProcess,
  *   url: string,
- * }>}
- */
+ * }>} */
 function startDebuggerProcess(arguments_) {
   return new Promise((resolveUrl, reject) => {
     const child = spawn("uv", arguments_, {
@@ -193,11 +170,7 @@ function startDebuggerProcess(arguments_) {
   });
 }
 
-/**
- * Stop one loopback debugger process without relying on browser-close signals.
- *
- * @param {import("node:child_process").ChildProcess | null} child
- */
+/** @param {import("node:child_process").ChildProcess | null} child */
 export async function stopDebugger(child) {
   if (!child || hasExited(child)) {
     return;

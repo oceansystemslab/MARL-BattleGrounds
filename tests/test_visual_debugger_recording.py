@@ -1,4 +1,4 @@
-"""Lifecycle, atomic-byte, and path-boundary proofs for debugger recording."""
+"""Check debugger recording, atomic file replacement and allowed output paths."""
 
 from __future__ import annotations
 
@@ -58,13 +58,11 @@ _DIGEST_B = "b" * 64
 
 
 class _FailingReducerState(EvaluationMetricReducerStateV1):
-    """Minimal frozen state for the injected nonterminal processing failure."""
+    pass
 
 
 @dataclass(slots=True)
 class _FailingAdvanceReducer:
-    """Pure test reducer that fails after CP2 validation commits the unit."""
-
     reducer_id: str = "test.recording-failure"
     reducer_version: int = 1
 
@@ -184,7 +182,6 @@ def _append_all(
 def test_recording_specification_is_frozen_content_addressed_and_path_free(
     tmp_path: Path,
 ) -> None:
-    """Scientific identity changes with source/wrappers, never destinations."""
     wrapper = ReplayWrapperMetadataV1(
         position=0,
         wrapper_id="debugger-manual-adapter",

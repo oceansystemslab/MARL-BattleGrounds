@@ -1,3 +1,7 @@
+/**
+ * @file Check one-step scripted live submission, initial transition display and
+ * recording completion.
+ */
 import { expect, test } from "@playwright/test";
 
 import { startScriptedDebugger, stopDebugger } from "./support/live-debugger.js";
@@ -18,10 +22,8 @@ test.afterAll(async () => {
   await stopDebugger(child);
 });
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} path
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} path */
 async function authenticatedGet(page, path) {
   return page.evaluate(async (requestPath) => {
     const token = window.sessionStorage.getItem("marl-battlegrounds.debugger-token");
@@ -97,7 +99,7 @@ test("scripted live Submit advances once, installs T0, and seals at completion",
   );
   await submit.hover();
   await expect(page.locator("#visual-tooltip-title")).toHaveText(
-    "Apply authorized action",
+    "Apply Authorized Action",
   );
   await expect(page.locator("#reset-button")).toBeDisabled();
   await expect(page.locator("#command-target-select")).toBeDisabled();

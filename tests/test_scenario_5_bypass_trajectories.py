@@ -1,4 +1,4 @@
-"""Real shoulder contact and matched strict-steering comparisons."""
+"""Check real shoulder-contact routes and matched stricter-steering comparisons."""
 
 from collections.abc import Callable
 from typing import cast
@@ -20,7 +20,6 @@ from marl_battlegrounds.core.env import step
 from marl_battlegrounds.core.types import (
     MOVE_NORTH,
     MOVE_NORTHWEST,
-    MOVE_SOUTH,
     MOVE_SOUTHWEST,
     MOVE_STAY,
     MOVE_WEST,
@@ -124,7 +123,7 @@ def _run(
 @pytest.mark.parametrize(
     "warrior_move,expected_moves",
     [
-        (MOVE_STAY, [MOVE_NORTHWEST, MOVE_WEST, MOVE_SOUTH]),
+        (MOVE_STAY, [MOVE_NORTHWEST, MOVE_WEST, MOVE_SOUTHWEST]),
         (MOVE_NORTH, [MOVE_NORTHWEST, MOVE_SOUTHWEST, MOVE_WEST]),
     ],
 )
@@ -134,7 +133,8 @@ def test_shoulder_bypass_preserves_three_tick_priority_prey_finish(
     expected_moves: list[int],
 ) -> None:
     # The retired strict controller finished at tick 4 in the b34e343 matched
-    # comparison. Preserve the measured v2 trajectory without executing old code.
+    # comparison. The neutral collision solver keeps the tick-3 finish and
+    # contact below; its final approach is now Southwest for a stationary blocker.
     bypass = _run(scenario, warrior_move)
     assert [int(b.move[3]) for b, _ in bypass[:3]] == expected_moves
     assert [int(b.select_target[3]) for b, _ in bypass[:3]] == [7, 7, 8]

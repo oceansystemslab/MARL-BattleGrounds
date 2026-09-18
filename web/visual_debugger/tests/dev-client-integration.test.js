@@ -1,3 +1,7 @@
+/**
+ * @file Check separation of DevClient authoring from Replay Viewer startup and the
+ * allowed saved-draft surfaces.
+ */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -32,7 +36,7 @@ test("Replay startup cannot load the DevClient authoring module", async () => {
   assert.doesNotMatch(markup, /<script[^>]+src="\/src\/dev-client\.js"/u);
   assert.match(
     main,
-    /const startupIdentity = applyProductIdentity\([\s\S]*startupIdentity\.product_kind === "combat_debugger"[\s\S]*startupIdentity\.authoring_available[\s\S]*import\("\.\/dev-client\.js"\)/u,
+    /const startupIdentity = applyBootstrap\([\s\S]*startupIdentity\.product_kind === "combat_debugger"[\s\S]*startupIdentity\.authoring_available[\s\S]*import\("\.\/dev-client\.js"\)/u,
   );
 });
 
@@ -145,7 +149,7 @@ test("browser asset IDs use strict lowercase snake_case", async () => {
   for (const valid of [
     "map",
     "map_2",
-    "tdm_map_id_10_kawaii_training",
+    "tdm_map_id_22_kawaii_training",
     "a".repeat(64),
   ]) {
     assert.equal(isValidAuthoringAssetId(valid), true, valid);

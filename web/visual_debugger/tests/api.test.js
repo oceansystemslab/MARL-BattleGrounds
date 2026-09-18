@@ -1,3 +1,7 @@
+/**
+ * @file Check HTTP/frame decoding, schema rejection, authorized joins and browser
+ * command/error handling.
+ */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -9,7 +13,9 @@ import {
   getCurrentFrame,
   getCurrentFrameAndPresentation,
   getCurrentPresentation,
-  getReplayMetricReport,
+  getReplayEpisodeDetails,
+  getReplayMetricCatalog,
+  getReplayMetrics,
   getReplayTimeline,
   postCommand,
   postReplayCommand,
@@ -30,11 +36,9 @@ const presentationKinds = [
   "replay_shared_obs_agent_pov",
 ];
 
-/**
- * @template T
+/** @template T
  * @param {T} value
- * @returns {T}
- */
+ * @returns {T} */
 function clone(value) {
   return structuredClone(value);
 }
@@ -56,11 +60,9 @@ function withEndpointReadTripwire(source) {
   return { presentation, readCount: () => reads };
 }
 
-/**
- * @param {unknown} payload
+/** @param {unknown} payload
  * @param {{ok?: boolean, status?: number, contentType?: string}} options
- * @returns {Response}
- */
+ * @returns {Response} */
 function jsonResponse(
   payload,
   { ok = true, status = 200, contentType = "application/json" } = {},
@@ -72,34 +74,6 @@ function jsonResponse(
       ok,
       status,
       text: async () => "",
-    })
-  );
-}
-
-/**
- * @param {Uint8Array} bytes
- * @param {Record<string, string>} [overrides]
- * @param {number} [status]
- */
-function metricResponse(bytes, overrides = {}, status = 200) {
-  const headers = new Map(
-    Object.entries({
-      "cache-control": "no-store",
-      "content-disposition": 'attachment; filename="episode.marlbg-metrics.json"',
-      "content-length": String(bytes.byteLength),
-      "content-type": "application/json; charset=utf-8",
-      ...overrides,
-    }),
-  );
-  return /** @type {Response} */ (
-    /** @type {unknown} */ ({
-      arrayBuffer: async () => bytes.slice().buffer,
-      headers: {
-        get: (/** @type {string} */ name) =>
-          headers.get(String(name).toLowerCase()) ?? null,
-      },
-      ok: status >= 200 && status < 300,
-      status,
     })
   );
 }
@@ -565,10 +539,8 @@ test("replay timeline and command use separate exact routes and send once", asyn
     configurable: true,
     value: {
       clearTimeout: globalThis.clearTimeout,
-      /**
-       * @param {string} path
-       * @param {RequestInit} options
-       */
+      /** @param {string} path
+       * @param {RequestInit} options */
       fetch: async (path, options) => {
         calls.push({ path: String(path), options });
         return {
@@ -602,218 +574,6 @@ test("replay timeline and command use separate exact routes and send once", asyn
     assert.equal(calls[1].path, "/api/replay/command");
     assert.equal(calls[1].options.method, "POST");
     assert.equal(calls[1].options.body, JSON.stringify(request));
-  } finally {
-    if (originalWindow) {
-      Object.defineProperty(globalThis, "window", originalWindow);
-    } else {
-      Reflect.deleteProperty(globalThis, "window");
-    }
-  }
-});
-
-test("metric report GET preserves exact bytes and validates its attachment", async () => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
-  const expected = new TextEncoder().encode('{"canonical":"bytes"}');
-  /** @type {Array<{path: string, options: RequestInit}>} */
-  const calls = [];
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: {
-      clearTimeout: globalThis.clearTimeout,
-      /** @param {string} path @param {RequestInit} options */
-      fetch: async (path, options) => {
-        calls.push({ path: String(path), options });
-        return metricResponse(expected);
-      },
-      setTimeout: globalThis.setTimeout,
-    },
-  });
-
-  try {
-    const result = await getReplayMetricReport("capability");
-    assert.equal(Object.isFrozen(result), true);
-    assert.equal(result.filename, "episode.marlbg-metrics.json");
-    assert.deepEqual(new Uint8Array(result.bytes), expected);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].path, "/api/replay/metric-report");
-    assert.deepEqual(calls[0].options, {
-      method: "GET",
-      headers: { "X-MARL-Debugger-Token": "capability" },
-      cache: "no-store",
-      credentials: "omit",
-      redirect: "error",
-      signal: calls[0].options.signal,
-    });
-    assert.ok(calls[0].options.signal instanceof AbortSignal);
-  } finally {
-    if (originalWindow) {
-      Object.defineProperty(globalThis, "window", originalWindow);
-    } else {
-      Reflect.deleteProperty(globalThis, "window");
-    }
-  }
-});
-
-test("metric report rejects malformed success headers and lengths without retry", async () => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
-  const expected = new TextEncoder().encode("{}");
-  /** @type {Array<Record<string, string>>} */
-  const cases = [
-    { "content-type": "application/json" },
-    { "cache-control": "private" },
-    { "content-disposition": 'inline; filename="episode.marlbg-metrics.json"' },
-    {
-      "content-disposition":
-        'attachment; filename="episode.marlbg-metrics.json.marlbg-metrics.json"',
-    },
-    { "content-disposition": 'attachment; filename="../x.marlbg-metrics.json"' },
-    { "content-length": "02" },
-    { "content-length": "3" },
-  ];
-  let fetchCalls = 0;
-  let responseIndex = 0;
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: {
-      clearTimeout: globalThis.clearTimeout,
-      fetch: async () => {
-        fetchCalls += 1;
-        return metricResponse(expected, cases[responseIndex++]);
-      },
-      setTimeout: globalThis.setTimeout,
-    },
-  });
-
-  try {
-    for (const _ of cases) {
-      await assert.rejects(
-        getReplayMetricReport("capability"),
-        (error) => error instanceof DebuggerApiError && error.status === 200,
-      );
-    }
-    assert.equal(fetchCalls, cases.length);
-  } finally {
-    if (originalWindow) {
-      Object.defineProperty(globalThis, "window", originalWindow);
-    } else {
-      Reflect.deleteProperty(globalThis, "window");
-    }
-  }
-});
-
-test("metric report rejects non-200 success statuses without retry", async () => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
-  const expected = new TextEncoder().encode("{}");
-  const statuses = [201, 204, 206];
-  let fetchCalls = 0;
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: {
-      clearTimeout: globalThis.clearTimeout,
-      fetch: async () => metricResponse(expected, {}, statuses[fetchCalls++]),
-      setTimeout: globalThis.setTimeout,
-    },
-  });
-
-  try {
-    for (const expectedStatus of statuses) {
-      await assert.rejects(getReplayMetricReport("capability"), (error) => {
-        assert.ok(error instanceof DebuggerApiError);
-        assert.equal(error.status, expectedStatus);
-        return true;
-      });
-    }
-    assert.equal(fetchCalls, statuses.length);
-  } finally {
-    if (originalWindow) {
-      Object.defineProperty(globalThis, "window", originalWindow);
-    } else {
-      Reflect.deleteProperty(globalThis, "window");
-    }
-  }
-});
-
-test("metric report preserves strict 403 and 404 replay errors and never retries", async () => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
-  const responses = [
-    {
-      status: 403,
-      payload: {
-        schema_version: 1,
-        error_code: "audience_unavailable",
-        message: "Metric reports are available only in Oracle View.",
-        latest_frame: null,
-      },
-    },
-    {
-      status: 404,
-      payload: {
-        schema_version: 1,
-        error_code: "not_found",
-        message: "No metric report is available for this replay.",
-        latest_frame: null,
-      },
-    },
-  ];
-  let fetchCalls = 0;
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: {
-      clearTimeout: globalThis.clearTimeout,
-      fetch: async () => {
-        const response = responses[fetchCalls++];
-        return jsonResponse(response.payload, {
-          ok: false,
-          status: response.status,
-        });
-      },
-      setTimeout: globalThis.setTimeout,
-    },
-  });
-
-  try {
-    for (const expected of responses) {
-      await assert.rejects(getReplayMetricReport("capability"), (error) => {
-        assert.ok(error instanceof DebuggerApiError);
-        assert.equal(error.status, expected.status);
-        assert.deepEqual(error.payload, expected.payload);
-        return true;
-      });
-    }
-    assert.equal(fetchCalls, 2);
-  } finally {
-    if (originalWindow) {
-      Object.defineProperty(globalThis, "window", originalWindow);
-    } else {
-      Reflect.deleteProperty(globalThis, "window");
-    }
-  }
-});
-
-test("metric report connection failure has no retry path", async () => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
-  let fetchCalls = 0;
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: {
-      clearTimeout: globalThis.clearTimeout,
-      fetch: async () => {
-        fetchCalls += 1;
-        throw new Error("synthetic disconnect");
-      },
-      setTimeout: globalThis.setTimeout,
-    },
-  });
-
-  try {
-    await assert.rejects(
-      getReplayMetricReport("capability"),
-      (error) =>
-        error instanceof DebuggerApiError &&
-        error.status === 0 &&
-        error.message.includes("Could not download"),
-    );
-    assert.equal(fetchCalls, 1);
   } finally {
     if (originalWindow) {
       Object.defineProperty(globalThis, "window", originalWindow);
@@ -886,5 +646,388 @@ test("replay HTTP errors cross the exact error boundary before callers can inspe
     } else {
       Reflect.deleteProperty(globalThis, "window");
     }
+  }
+});
+
+test("episode details download authenticates one JSON attachment and rejects mislabeled content", async () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const details = {
+    schema_id: "marlbg.replay.episode_details",
+    schema_version: 1,
+    context: { identity: { episode_id: "episode-1" } },
+    source_replay: {},
+    completion: {},
+  };
+  let filename = "episode-details.json";
+  let requests = 0;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      clearTimeout: globalThis.clearTimeout,
+      setTimeout: globalThis.setTimeout,
+      fetch: async (/** @type {string} */ path, /** @type {RequestInit} */ options) => {
+        requests += 1;
+        assert.equal(path, "/api/replay/details");
+        assert.equal(options.method, "GET");
+        assert.deepEqual(options.headers, { "X-MARL-Debugger-Token": "capability" });
+        return new Response(JSON.stringify(details), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "no-store",
+            "Content-Disposition": `attachment; filename="${filename}"`,
+          },
+        });
+      },
+    },
+  });
+  try {
+    const result = await getReplayEpisodeDetails("capability");
+    assert.equal(result.filename, "episode-details.json");
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(result.bytes)), details);
+    filename = "metrics.json";
+    await assert.rejects(
+      getReplayEpisodeDetails("capability"),
+      /Invalid episode details attachment/u,
+    );
+    assert.equal(requests, 2);
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("replay metrics accept recipient totals and require clear metadata and versioned CSV names", async () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const row = {
+    name: "team_a_agent_5_basic_applications",
+    stem: "basic_applications",
+    label: "Basic Ability Activations",
+    family: "abilities",
+    primary_topic: "abilities",
+    primary_view: "recipients",
+    locations: [{ topic: "abilities", view: "recipients" }],
+    topic_order: { abilities: [-1, 1, 5] },
+    subject: "Team A → Agent ID 5 · Hunter · Team B",
+    subject_role: "team",
+    recipient_role: "recipient",
+    scope: "team_recipient",
+    subjects: [1, 5],
+    description: "How many times Team A used Basic abilities on Agent ID 5.",
+    missing_when: "The source team or recipient is inactive.",
+    numerator: null,
+    denominator: null,
+    unit: "count",
+    status: null,
+    direction: "descriptive",
+    guidance: "Context dependent for Team A.",
+    applicable: true,
+    order: 26,
+    valid: true,
+    value: 0,
+  };
+  const summary = {
+    scope: "cursor",
+    frame_index: 1,
+    simulator_step_count: 1,
+    source_replay_digest: "a".repeat(64),
+    analysis_source_digest: "b".repeat(64),
+    topics: [
+      {
+        name: "abilities",
+        label: "Ability Activations",
+        section: "Results and Actions",
+        description: "Allowed uses.",
+        views: [
+          { name: "totals", label: "Totals" },
+          { name: "recipients", label: "By Recipient" },
+        ],
+      },
+    ],
+    statistics: [row],
+  };
+  /** @type {Record<string, any>} */
+  let payload = summary;
+  let filename = "tdm-metrics__episode-episode-001__schema-3__cursor__frame-1.csv";
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      clearTimeout: globalThis.clearTimeout,
+      setTimeout: globalThis.setTimeout,
+      fetch: async (/** @type {string} */ path, /** @type {RequestInit} */ options) => {
+        assert.deepEqual(options.headers, { "X-MARL-Debugger-Token": "capability" });
+        const csv = path.endsWith(".csv");
+        return new Response(
+          csv ? "episode_id\nepisode-001\n" : JSON.stringify(payload),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": csv ? "text/csv; charset=utf-8" : "application/json",
+              "Cache-Control": "no-store",
+              ...(csv
+                ? { "Content-Disposition": `attachment; filename="${filename}"` }
+                : {}),
+            },
+          },
+        );
+      },
+    },
+  });
+  try {
+    assert.deepEqual(await getReplayMetrics("capability", 1, "cursor"), summary);
+    for (const topic_text of [
+      {},
+      { abilities: { description: "Team A's activations on Agent ID 5." } },
+      { abilities: { subtitle: "Charge" } },
+      {
+        abilities: {
+          description: "Team A's activations on Agent ID 5.",
+          subtitle: "Charge",
+        },
+      },
+    ]) {
+      payload = { ...summary, statistics: [{ ...row, topic_text }] };
+      assert.deepEqual(await getReplayMetrics("capability", 1, "cursor"), payload);
+    }
+    for (const unit of ["fraction", "ratio", "steps"]) {
+      payload = {
+        ...summary,
+        statistics: [
+          {
+            ...row,
+            unit,
+            numerator: "How many agents returned in Team A respawn waves.",
+            denominator: "How many respawn waves Team A had.",
+          },
+        ],
+      };
+      assert.deepEqual(await getReplayMetrics("capability", 1, "cursor"), payload);
+    }
+    for (const topic of [
+      "ultimate_mage",
+      "ultimate_warrior",
+      "ultimate_hunter",
+      "ultimate_rogue",
+      "ultimate_priest",
+    ]) {
+      const topic_text = {
+        [topic]: {
+          label: "Total Ultimate Activations",
+          description: "How many times this agent used its Ultimate ability.",
+          subtitle: "Ultimate Ability",
+          numerator: "How many times this agent used its Ultimate on this target.",
+          denominator: "How many times this agent used its Ultimate.",
+          guidance: "Context dependent for Team A.",
+          missing_when: "No Ultimate was used.",
+        },
+      };
+      payload = {
+        ...summary,
+        topics: [{ ...summary.topics[0], name: topic }],
+        statistics: [
+          {
+            ...row,
+            primary_topic: topic,
+            locations: [{ topic, view: "recipients" }],
+            topic_order: { [topic]: [0] },
+            topic_text,
+          },
+        ],
+      };
+      assert.deepEqual(await getReplayMetrics("capability", 1, "cursor"), payload);
+      // An empty subtitle hides repeated effect text in a named ability table.
+      payload.statistics[0].topic_text[topic].subtitle = "";
+      assert.deepEqual(await getReplayMetrics("capability", 1, "cursor"), payload);
+      for (const field of ["label", "description"]) {
+        const original = payload.statistics[0].topic_text[topic][field];
+        payload.statistics[0].topic_text[topic][field] = "";
+        await assert.rejects(
+          getReplayMetrics("capability", 1, "cursor"),
+          /Invalid replay metric summary/u,
+        );
+        payload.statistics[0].topic_text[topic][field] = original;
+      }
+      for (const field of ["value", "status", "name", "applicable"]) {
+        payload.statistics[0].topic_text[topic][field] = "Cannot change meaning.";
+        await assert.rejects(
+          getReplayMetrics("capability", 1, "cursor"),
+          /Invalid replay metric summary/u,
+        );
+        delete payload.statistics[0].topic_text[topic][field];
+      }
+    }
+    for (const invalid of [
+      { applicable: "false" },
+      { locations: [1] },
+      { locations: [{ topic: "missing", view: "totals" }] },
+      { locations: [{ topic: "abilities", view: "missing" }] },
+      { primary_view: "totals" },
+      { topic_order: {} },
+      { topic_order: { abilities: [1.5] } },
+      { topic_order: { abilities: [1], unknown_topic: [2] } },
+      { topic_text: [] },
+      { topic_text: null },
+      { topic_text: { missing: { label: "A label" } } },
+      { topic_text: { abilities: {} } },
+      { topic_text: { abilities: { label: row.label } } },
+      {
+        topic_text: {
+          abilities: {
+            label: "Basic Ability Activations on This Target",
+            description: "Team A's activations on Agent ID 5.",
+          },
+        },
+      },
+      { topic_text: { abilities: { label: " " } } },
+      { topic_text: { abilities: { description: 3 } } },
+      { topic_text: { abilities: { subtitle: " " } } },
+      { topic_text: { abilities: { status: "A different effect" } } },
+      { topic_text: { abilities: { value: 3 } } },
+      { topic_text: { abilities: { denominator: "A different denominator" } } },
+      { denominator: 3 },
+      { numerator: 3 },
+      { numerator: "Only a numerator." },
+      { denominator: "Only a denominator." },
+      { numerator: "", denominator: "A count." },
+      { numerator: "A count.", denominator: " " },
+      { unit: "fraction" },
+      { recipient_role: 5 },
+      { order: -1 },
+      { scope: "unknown" },
+    ]) {
+      payload = { ...summary, statistics: [{ ...row, ...invalid }] };
+      await assert.rejects(
+        getReplayMetrics("capability", 1, "cursor"),
+        /Invalid replay metric summary/u,
+      );
+    }
+    const { value: _value, valid: _valid, ...metadata } = row;
+    const classNames = ["Neutral", "Mage", "Warrior", "Hunter", "Rogue", "Priest"];
+    const agents = Array.from({ length: 10 }, (_, slot) => ({
+      slot,
+      class_id: (slot % 5) + 1,
+      class_name: classNames[(slot % 5) + 1],
+      team_id: slot < 5 ? 1 : 2,
+      active: slot !== 5,
+    }));
+    const searchFacts = {
+      kind: "activation",
+      ability: "basic",
+      status: null,
+      status_subject: null,
+      source_class_id: null,
+      recipient_class_id: null,
+      subject: "source",
+      source: "team",
+      relation: null,
+      qualifiers: [],
+    };
+    const catalog = {
+      source_replay_digest: summary.source_replay_digest,
+      analysis_source_digest: summary.analysis_source_digest,
+      metric_schema_id: "marlbg.tdm.scalar",
+      metric_schema_version: 12,
+      topics: summary.topics,
+      class_names: classNames,
+      agents,
+      measurements: [
+        {
+          ...metadata,
+          applicable: false,
+          not_applicable_reason: "Agent 5 is inactive.",
+          search_terms: ["cast count"],
+          search_facts: searchFacts,
+        },
+      ],
+    };
+    payload = catalog;
+    assert.deepEqual(await getReplayMetricCatalog("capability"), catalog);
+    for (const invalid of [
+      { ...catalog, measurements: [row] },
+      {
+        ...catalog,
+        measurements: [{ ...catalog.measurements[0], search_terms: [false] }],
+      },
+      {
+        ...catalog,
+        measurements: [
+          {
+            ...catalog.measurements[0],
+            topic_text: { abilities: { label: row.label } },
+          },
+        ],
+      },
+      {
+        ...catalog,
+        measurements: [{ ...metadata, applicable: false, not_applicable_reason: null }],
+      },
+      { ...catalog, metric_schema_version: 0 },
+      { ...catalog, class_names: [] },
+      { ...catalog, class_names: ["Neutral", null] },
+      { ...catalog, agents: agents.slice(1) },
+      ...[
+        { slot: 1 },
+        { class_id: 99 },
+        { class_id: 1.5 },
+        { class_name: "Priest" },
+        { team_id: 2 },
+        { active: "true" },
+      ].map((patch) => ({
+        ...catalog,
+        agents: [{ ...agents[0], ...patch }, ...agents.slice(1)],
+      })),
+      ...[
+        null,
+        {},
+        { ...searchFacts, kind: "" },
+        { ...searchFacts, kind: "invented_metric" },
+        { ...searchFacts, ability: "passive" },
+        { ...searchFacts, status: 4 },
+        { ...searchFacts, status: "unrecorded_caster" },
+        { ...searchFacts, status_subject: "recipient" },
+        { ...searchFacts, status: "hunter_trap", status_subject: null },
+        { ...searchFacts, status: "hunter_trap", status_subject: "caster" },
+        { ...searchFacts, source_class_id: 0 },
+        { ...searchFacts, recipient_class_id: 1.5 },
+        { ...searchFacts, subject: "caster" },
+        { ...searchFacts, source: "guessed" },
+        { ...searchFacts, relation: "any" },
+        { ...searchFacts, qualifiers: [false] },
+      ].map((search_facts) => ({
+        ...catalog,
+        measurements: [{ ...catalog.measurements[0], search_facts }],
+      })),
+      { ...catalog, source_replay_digest: "wrong" },
+      {
+        ...catalog,
+        topics: [
+          { ...catalog.topics[0], views: [{ name: "missing", label: "Missing" }] },
+        ],
+      },
+    ]) {
+      payload = invalid;
+      await assert.rejects(
+        getReplayMetricCatalog("capability"),
+        /Invalid replay measurement catalog/u,
+      );
+    }
+    assert.equal(
+      (await getReplayMetrics("capability", 1, "cursor", "csv")).filename,
+      filename,
+    );
+    for (const invalid of [
+      "tdm-metrics-cursor-frame-1.csv",
+      "tdm-metrics__episode-../episode__schema-3__cursor__frame-1.csv",
+      "tdm-metrics__episode-episode-001__schema-3__cursor__frame-2.csv",
+    ]) {
+      filename = invalid;
+      await assert.rejects(
+        getReplayMetrics("capability", 1, "cursor", "csv"),
+        /Invalid metric CSV response/u,
+      );
+    }
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+    else Reflect.deleteProperty(globalThis, "window");
   }
 });

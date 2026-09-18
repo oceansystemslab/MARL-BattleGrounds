@@ -1,3 +1,7 @@
+/**
+ * @file Check asynchronous install generations, stale-result rejection, bounded GET
+ * recovery and commands sent only once.
+ */
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -5,13 +9,11 @@ import { PresentationInstallCoordinator } from "../src/presentation-install.js";
 
 class JoinRaceError extends Error {}
 
-/**
- * @returns {{
+/** @returns {{
  *   promise: Promise<any>,
  *   resolve: (value: any) => void,
  *   reject: (reason?: any) => void,
- * }}
- */
+ * }} */
 function deferred() {
   /** @type {(value: any) => void} */
   let resolve = () => {};

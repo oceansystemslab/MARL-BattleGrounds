@@ -1,4 +1,8 @@
-"""Exact contract and real-core parity tests for canonical simulator axes."""
+"""Check movement names, target categories and actor-to-slot mappings.
+
+The tests compare the mapping tables with real Core transitions so a table can
+be checked against the behavior that consumes it.
+"""
 
 from typing import cast
 
@@ -76,7 +80,6 @@ _EXPECTED_TEAM_B_TARGET_ROW = (None, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4)
 
 
 def _real_core_mapping_parity_config() -> EnvConfig:
-    """Build an asymmetric public config with both team blocks and padding."""
     requested_classes = jnp.asarray(
         (
             MAGE_CLASS_ID,
@@ -135,7 +138,6 @@ def _real_core_mapping_parity_config() -> EnvConfig:
 
 
 def _assert_tree_arrays_exact(actual: object, expected: object) -> None:
-    """Require identical PyTree structure, dtypes, shapes, and values."""
     assert jax.tree_util.tree_structure(actual) == jax.tree_util.tree_structure(
         expected
     )
@@ -369,14 +371,6 @@ def test_mapping_helpers_reject_non_integer_slot_and_action_types(
 
 
 def test_real_core_mapping_consumers_preserve_eager_jit_and_trace_contracts() -> None:
-    """Exercise canonical mappings through one real public transition.
-
-    This is the behavior-preserving extraction proof: the fixed tables must
-    still drive movement, actor-relative combat routing, observer relation
-    rows, accepted-action history, and lifecycle projection under both eager
-    and traced execution. The trace must close over the exact canonical JAX
-    payloads without introducing a host callback.
-    """
     config = _real_core_mapping_parity_config()
     key = jax.random.PRNGKey(17)
     reset_state, _, _, _ = reset(config, key)

@@ -1,12 +1,9 @@
 /**
- * Pure authority-safe source attribution for scientific cards.
- *
- * The formatter consumes only presentation keys and public IDs already present
- * in an authorized source reference plus the corresponding authorized scene
- * identity. It never searches by slot, class, event, position, proximity, or
- * any hidden/raw identity.
+ * @file Build source labels by joining recorded public source references to exact
+ * authorized scene identities. Preserve serialized source order and reject
+ * conflicting identities. Never search by global slot, class, position or
+ * proximity, and never infer an emitter from an aggregate aura multiplier.
  */
-
 import { exactAuthorizedAgentIdentityV1 } from "./agent-identity.js";
 
 const OPTION_KEYS = Object.freeze([
@@ -47,12 +44,17 @@ const UNAVAILABLE = attribution(
   "Source unavailable in this artifact",
 );
 /**
- * Format direct-source attribution or deliberately omit aggregate-aura source.
+ * Return a direct-source label, unavailable record or intentionally omitted row.
  *
- * `aggregate_aura` always returns `null`: an aggregate multiplier has no
- * serialized emitter attribution. Spawn Shield is intentionally not an
- * accepted attribution kind; its separate card owns only its authorized
- * Recipient identity and never manufactures a Source row.
+ * rawOptions must be an exact plain record with attribution_kind, audience,
+ * direct_sources and authorized_agents. Reject malformed options or unknown
+ * kind/audience with TypeError. aggregate_aura always returns null; agent_pov
+ * also returns null, because battlefield geometry alone does not authorize
+ * source identities. For researcher/direct input, require dense ordinary
+ * arrays and valid public identities. Join each unique source by both key and
+ * ID to exactly one agent, preserving first occurrence. Bad, absent or
+ * conflicting joins return the shared frozen unavailable record. Success is a
+ * frozen single/multiple label. Inputs and scene authority are not changed.
  *
  * @param {unknown} rawOptions
  * @returns {Readonly<SourceAttribution> | null}
@@ -127,6 +129,10 @@ export function authorizedSourceAttributionV1(rawOptions) {
 }
 
 /**
+ * Return a frozen source-label record containing the supplied state, label,
+ * value and complete text. The owning formatter validates meaning; this small
+ * constructor neither checks input nor modifies it.
+ *
  * @param {SourceAttributionState} state
  * @param {"Source" | "Sources"} label
  * @param {string} value
@@ -138,8 +144,13 @@ function attribution(state, label, value, text) {
 }
 
 /**
- * Keep serialized first occurrence, deduplicate only an exact repeated pair,
- * and reject conflicting key/ID aliases.
+ * Validate and deduplicate rawSources in their serialized order.
+ *
+ * Each source must have exactly source_presentation_key and
+ * source_public_agent_id as valid data strings. Remove exact duplicate pairs;
+ * a key mapped to several IDs, or an ID mapped to several keys, returns null.
+ * Success returns a frozen array of frozen reference records, including an
+ * empty array for no sources. The caller supplies an already snapshotted array.
  *
  * @param {readonly unknown[]} rawSources
  * @returns {readonly Readonly<{presentationKey: string, publicAgentId: string}>[] | null}
@@ -177,10 +188,12 @@ function exactFirstOccurrenceReferences(rawSources) {
 }
 
 /**
- * Snapshot a caller-owned array without invoking its iterator, indexed
- * accessors, or overridden array methods. Only a dense ordinary Array with the
- * own `length` property and exactly one enumerable data property per index is
- * accepted.
+ * Copy a dense ordinary array without invoking its iterator or indexed getters.
+ *
+ * value must use Array.prototype and have exactly its own length plus one
+ * enumerable data property per index. Holes, extra/symbol keys, accessors and
+ * inspection failures return null. Success returns a frozen shallow copy.
+ * Element objects are reused and validated separately; inputs are unchanged.
  *
  * @param {unknown} value
  * @returns {readonly unknown[] | null}
@@ -225,10 +238,13 @@ function snapshotDensePlainArray(value) {
 }
 
 /**
- * Snapshot plain enumerable data properties without invoking accessors.
- * Source/option records are exact; authorized agents may carry additional
- * already-normalized scientific fields, but their identity fields must all be
- * own enumerable data properties.
+ * Copy required own data fields from a plain record, or return null.
+ *
+ * value must use Object.prototype or a null prototype and have no symbol keys.
+ * requiredKeys must exist as enumerable data properties. If exact is true,
+ * reject extra fields too; if false, ignore other string-named fields. Return
+ * a frozen null-prototype shallow copy. Getters are not called; inspection
+ * errors return null. Nested values retain their original references.
  *
  * @param {unknown} value
  * @param {readonly string[]} requiredKeys
@@ -268,7 +284,13 @@ function snapshotRecord(value, requiredKeys, exact) {
   }
 }
 
-/** @param {unknown} value @returns {string | null} */
+/**
+ * Return value unchanged when it is a nonempty string of at most 512
+ * characters with no outer whitespace or CR/LF. Return null otherwise. This
+ * checks string shape only; the caller checks the source-to-agent identity join.
+ *
+ * @param {unknown} value @returns {string | null}
+ */
 function exactIdentifier(value) {
   return typeof value === "string" &&
     value.length > 0 &&

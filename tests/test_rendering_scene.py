@@ -1,4 +1,4 @@
-"""Pure tests for renderer-neutral scene, event, and vocabulary contracts."""
+"""Check display-independent scene records, events and vocabulary."""
 
 import json
 from dataclasses import FrozenInstanceError, fields, replace

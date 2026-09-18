@@ -1,7 +1,13 @@
-"""Stable semantic tokens shared by debugger and replay presentation.
+"""Own stable visual tokens for debugger and replay presentation.
 
-This module names presentation facts; it does not define simulator mechanics,
-durations, legality, acceptance, or combat values.
+VisualTokenDefinition supplies labels, accessibility text, glyphs, fallbacks
+and display priorities. Lookup helpers return known definitions or explicit
+unknown fallbacks; the catalog-status mapper is strict. The version-bound IDs
+remain independent of live simulator imports so recorded meanings do not drift.
+
+These tables do not define damage, durations, action legality or acceptance.
+Import-time checks enforce status-order/mapping agreement. Consumers may read
+the immutable token records; importing this module draws or writes nothing.
 """
 
 from collections.abc import Mapping
@@ -75,19 +81,60 @@ type TokenFamily = Literal[
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class VisualTokenDefinition:
-    """Renderer-neutral labels and fallbacks for one stable semantic token."""
+    """Describe one stable visual label, glyph and plain-text fallback.
+
+    All fields are required keyword arguments. This frozen, slotted record is
+    shared by debugger and replay views; it carries presentation metadata, not
+    simulator mechanics. Field docs describe each value beside its declaration.
+
+    Raises
+    ------
+    ValueError
+        A required text field is not a nonblank Python string, priority is not
+        a nonnegative Python int, or source_class_id is neither int nor None.
+
+    Notes
+    -----
+    family follows TokenFamily by caller contract; construction does not check
+    the Literal vocabulary. source_class_id is type-checked but not range-checked.
+    """
 
     token_id: str
+    """Stable exact ID used in serialized presentation records."""
     label: str
+    """Full nonblank display label, such as a class or status name."""
     short_label: str
+    """Nonblank compact label for space-limited views."""
     accessible_name: str
+    """Nonblank name for assistive technology and text descriptions."""
     family: TokenFamily
+    """TokenFamily category used to group presentation.
+
+    The caller supplies a supported Literal value; construction does not
+    validate this field.
+    """
     glyph: str
+    """Nonblank preferred display glyph, which may use Unicode."""
     fallback: str
+    """Nonblank plain-text fallback when the preferred glyph is unavailable."""
     priority: int
+    """Nonnegative Python int used for display ordering.
+
+    Lower values sort first; exact ties can use token_id. Bool is not accepted.
+    """
     source_class_id: int | None
+    """Python int identifying the source class, or None when absent.
+
+    Construction checks the type but does not impose a class-ID range.
+    """
 
     def __post_init__(self) -> None:
+        """Validate text and scalar metadata when a token is constructed.
+
+        Reject blank/non-string labels, noninteger or negative priority, and a
+        source class that is neither a Python int nor None with ValueError.
+        The frozen record is not modified; family and class ranges are not checked.
+        """
         for name in (
             "token_id",
             "label",
@@ -562,6 +609,13 @@ def _lookup(
     definitions: tuple[VisualTokenDefinition, ...],
     token_id: str,
 ) -> VisualTokenDefinition:
+    """Find an exact token ID or create an explicit unknown-token definition.
+
+    definitions is a tuple of immutable token records and token_id must be a
+    nonblank Python string. Return the existing matching record, or a fresh
+    unknown record retaining the supplied ID with priority 10,000 and '?' glyphs.
+    Raise ValueError for invalid ID text; do not trim or normalize a valid ID.
+    """
     if type(token_id) is not str or not token_id.strip():
         raise ValueError("token_id must be a non-empty Python string.")
     for definition in definitions:
@@ -581,22 +635,109 @@ def _lookup(
 
 
 def lookup_class_token(token_id: str) -> VisualTokenDefinition:
-    """Return one class token definition or a safe unknown fallback."""
+    """Return the visual definition for an exact class token ID.
+
+    Parameters
+    ----------
+    token_id : str
+        Nonblank Python token ID. Matching is exact; whitespace is not stripped.
+
+    Returns
+    -------
+    VisualTokenDefinition
+        The shared immutable class definition when known. Otherwise return
+        a fresh unknown definition retaining token_id, with '?' glyph/fallback,
+        no source class and priority 10,000.
+
+    Raises
+    ------
+    ValueError
+        token_id is not a Python string or is blank.
+
+    Notes
+    -----
+    This lookup does not validate simulator state or alter the token registry.
+    """
     return _lookup(CLASS_TOKENS, token_id)
 
 
 def lookup_team_token(token_id: str) -> VisualTokenDefinition:
-    """Return one team token definition or a safe unknown fallback."""
+    """Return the visual definition for an exact team token ID.
+
+    Parameters
+    ----------
+    token_id : str
+        Nonblank Python token ID. Matching is exact; whitespace is not stripped.
+
+    Returns
+    -------
+    VisualTokenDefinition
+        The shared immutable team definition when known. Otherwise return
+        a fresh unknown definition retaining token_id, with '?' glyph/fallback,
+        no source class and priority 10,000.
+
+    Raises
+    ------
+    ValueError
+        token_id is not a Python string or is blank.
+
+    Notes
+    -----
+    This lookup does not validate simulator state or alter the token registry.
+    """
     return _lookup(TEAM_TOKENS, token_id)
 
 
 def lookup_status_token(token_id: str) -> VisualTokenDefinition:
-    """Return one status token definition or a safe unknown fallback."""
+    """Return the visual definition for an exact status token ID.
+
+    Parameters
+    ----------
+    token_id : str
+        Nonblank Python token ID. Matching is exact; whitespace is not stripped.
+
+    Returns
+    -------
+    VisualTokenDefinition
+        The shared immutable status definition when known. Otherwise return
+        a fresh unknown definition retaining token_id, with '?' glyph/fallback,
+        no source class and priority 10,000.
+
+    Raises
+    ------
+    ValueError
+        token_id is not a Python string or is blank.
+
+    Notes
+    -----
+    This lookup does not validate simulator state or alter the token registry.
+    """
     return _lookup(STATUS_TOKENS, token_id)
 
 
 def status_token_id_from_catalog_status_id(status_id: str) -> StatusTokenId:
-    """Map one exact V1 catalog status ID to its V2 presentation token."""
+    """Map a published catalog status ID to its presentation token.
+
+    Parameters
+    ----------
+    status_id : str
+        Exact V1 catalog status ID from CATALOG_STATUS_TOKEN_ID_BY_STATUS_ID.
+
+    Returns
+    -------
+    StatusTokenId
+        The corresponding V2 presentation token string.
+
+    Raises
+    ------
+    ValueError
+        status_id is not a Python string or is absent from the catalog mapping.
+
+    Notes
+    -----
+    This strict schema mapping has no unknown fallback. It does not consult live
+    simulator constants or change status meanings in historical recordings.
+    """
     if type(status_id) is not str:
         raise ValueError("status_id must be a Python string.")
     token_id = CATALOG_STATUS_TOKEN_ID_BY_STATUS_ID.get(status_id)
@@ -606,22 +747,106 @@ def status_token_id_from_catalog_status_id(status_id: str) -> StatusTokenId:
 
 
 def lookup_activation_token(token_id: str) -> VisualTokenDefinition:
-    """Return one activation token definition or a safe unknown fallback."""
+    """Return the visual definition for an exact activation token ID.
+
+    Parameters
+    ----------
+    token_id : str
+        Nonblank Python token ID. Matching is exact; whitespace is not stripped.
+
+    Returns
+    -------
+    VisualTokenDefinition
+        The shared immutable activation definition when known. Otherwise return
+        a fresh unknown definition retaining token_id, with '?' glyph/fallback,
+        no source class and priority 10,000.
+
+    Raises
+    ------
+    ValueError
+        token_id is not a Python string or is blank.
+
+    Notes
+    -----
+    This lookup does not validate simulator state or alter the token registry.
+    """
     return _lookup(ACTIVATION_TOKENS, token_id)
 
 
 def lookup_modifier_token(token_id: str) -> VisualTokenDefinition:
-    """Return one modifier token definition or a safe unknown fallback."""
+    """Return the visual definition for an exact modifier token ID.
+
+    Parameters
+    ----------
+    token_id : str
+        Nonblank Python token ID. Matching is exact; whitespace is not stripped.
+
+    Returns
+    -------
+    VisualTokenDefinition
+        The shared immutable modifier definition when known. Otherwise return
+        a fresh unknown definition retaining token_id, with '?' glyph/fallback,
+        no source class and priority 10,000.
+
+    Raises
+    ------
+    ValueError
+        token_id is not a Python string or is blank.
+
+    Notes
+    -----
+    This lookup does not validate simulator state or alter the token registry.
+    """
     return _lookup(MODIFIER_TOKENS, token_id)
 
 
 def lookup_lifecycle_token(token_id: str) -> VisualTokenDefinition:
-    """Return one lifecycle token definition or a safe unknown fallback."""
+    """Return the visual definition for an exact lifecycle token ID.
+
+    Parameters
+    ----------
+    token_id : str
+        Nonblank Python token ID. Matching is exact; whitespace is not stripped.
+
+    Returns
+    -------
+    VisualTokenDefinition
+        The shared immutable lifecycle definition when known. Otherwise return
+        a fresh unknown definition retaining token_id, with '?' glyph/fallback,
+        no source class and priority 10,000.
+
+    Raises
+    ------
+    ValueError
+        token_id is not a Python string or is blank.
+
+    Notes
+    -----
+    This lookup does not validate simulator state or alter the token registry.
+    """
     return _lookup(LIFECYCLE_TOKENS, token_id)
 
 
 def class_token_from_id(class_id: int) -> VisualTokenDefinition:
-    """Resolve a simulator class ID without copying class mechanics."""
+    """Resolve a numeric class ID to its visual definition.
+
+    Parameters
+    ----------
+    class_id : int
+        Python class ID. Known IDs are 1 Mage, 2 Warrior, 3 Hunter, 4 Rogue,
+        and 5 Priest. Other integers are retained in an unknown fallback ID.
+
+    Returns
+    -------
+    VisualTokenDefinition
+        Existing immutable class token, or a fresh unknown token named
+        ``class_id_<value>``. No class mechanics are copied or inferred.
+
+    Raises
+    ------
+    ValueError
+        class_id is not an exact Python int; bool is rejected.
+    """
     if type(class_id) is not int:
         raise ValueError("class_id must be a Python int.")
     for definition in CLASS_TOKENS:
@@ -631,7 +856,25 @@ def class_token_from_id(class_id: int) -> VisualTokenDefinition:
 
 
 def team_token_from_id(team_id: int) -> VisualTokenDefinition:
-    """Resolve a simulator team ID without copying team mechanics."""
+    """Resolve a numeric team ID to its visual definition.
+
+    Parameters
+    ----------
+    team_id : int
+        Python team ID: 1 for Team A or 2 for Team B. Other integers use an
+        unknown fallback, including the unused-slot value zero.
+
+    Returns
+    -------
+    VisualTokenDefinition
+        Existing immutable team token, or a fresh unknown token named
+        ``team_id_<value>``.
+
+    Raises
+    ------
+    ValueError
+        team_id is not an exact Python int; bool is rejected.
+    """
     if type(team_id) is not int:
         raise ValueError("team_id must be a Python int.")
     token_id = {
@@ -642,7 +885,24 @@ def team_token_from_id(team_id: int) -> VisualTokenDefinition:
 
 
 def status_sort_key(token_id: str) -> tuple[int, str]:
-    """Return the canonical status priority with deterministic unknown ordering."""
+    """Return a stable priority-and-ID sort key for a status token.
+
+    Parameters
+    ----------
+    token_id : str
+        Exact nonblank Python token ID. Unknown strings are allowed.
+
+    Returns
+    -------
+    tuple of int and str
+        Numeric priority followed by the unchanged token ID. Unknown tokens
+        have priority 10,000 and sort deterministically by their ID.
+
+    Raises
+    ------
+    ValueError
+        token_id is not a nonblank Python string.
+    """
     definition = lookup_status_token(token_id)
     return definition.priority, definition.token_id
 

@@ -1,4 +1,4 @@
-"""Focused Agent POV visual-incoming authority and noninterference proofs."""
+"""Check which incoming visual events an Agent POV may display."""
 
 from __future__ import annotations
 

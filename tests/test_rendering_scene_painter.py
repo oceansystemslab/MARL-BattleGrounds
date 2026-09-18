@@ -1,4 +1,4 @@
-"""Focused semantic checks for the stateless canonical V2 scene painter."""
+"""Check drawing of the canonical V2 scene and event records."""
 
 import re
 from collections.abc import Callable, Iterable

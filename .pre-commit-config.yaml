@@ -1,3 +1,6 @@
+# Fast staged-file hygiene hooks, including mutating Ruff formatting/fixes.
+# These hooks do not replace complete candidate or clean GPU qualification.
+# Finish all fixes before freezing a candidate; see docs/dev/quality_gates.md.
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

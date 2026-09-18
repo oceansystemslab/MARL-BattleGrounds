@@ -1,0 +1,284 @@
+"""Check canonical table scope, original ownership and read-only bounded access.
+
+Synthetic complete records exercise the public saved reader and its memory view.
+No ratings are fitted, no games are played and no official bundle is installed.
+"""
+
+# pyright: reportPrivateUsage=false
+
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from canonical_record_fixtures import build_record_bundle
+from marl_battlegrounds.evaluation.canonical_results import CanonicalView
+from marl_battlegrounds.evaluation.results import load_results
+from marl_battlegrounds.evaluation.run_writer import RunWriter
+from marl_battlegrounds.evaluation.tournament_assets import AssetVerifier
+from marl_battlegrounds.evaluation.tournament_records import TournamentRecords
+from marl_battlegrounds.evaluation.tournament_reuse import resolve_reuse_plan
+
+
+def _saved(
+    tmp_path: Path, *, mode: str = "priority", full: bool = False
+) -> tuple[Path, dict[str, Any], TournamentRecords]:
+    bundle = build_record_bundle(tmp_path / "source", entrants=3, maps=1, full=full)
+    config = bundle["config"]
+    plan = resolve_reuse_plan(config, bundle["paths"])
+    details: dict[str, object] = {
+        "metrics": mode,
+        "full_metrics_episodes": [1] if full else [],
+        "replay_episodes": [],
+        "snapshot_id": config["snapshot_id"],
+    }
+    with RunWriter(
+        output_dir=tmp_path / "runs",
+        phase="tournament",
+        pass_id="schedule",
+        details=details,
+    ) as writer:
+        writer.set_tournament_coordinator("schedule")
+        reuse = {
+            "version": 1,
+            "source_descriptors": list(plan.source_descriptors),
+            "execution_plan": list(plan.jobs),
+            "budget": plan.budget,
+            "challenger_id": None,
+            "state": "incomplete",
+        }
+        writer._install_tournament_plan(config, plan.games, reuse)
+        path = writer.run_dir
+    manifest = json.loads((path / "run_details.json").read_bytes())
+    records = TournamentRecords(
+        config,
+        plan.games,
+        plan.jobs,
+        AssetVerifier(config),
+        manifest=manifest,
+        run_dir=path,
+    )
+    return path, manifest, records
+
+
+def test_saved_and_memory_tables_keep_original_rows_and_scope(tmp_path: Path) -> None:
+    path, manifest, records = _saved(tmp_path)
+    loaded = load_results(path, phase="tournament", pass_id="schedule")
+    memory = CanonicalView(manifest, run_dir=None, memory={"_record_access": records})
+    rows = list(memory.iter_rows("matches", 2))
+    table = loaded.table("matches")
+    assert len(rows) == len(table["episode_id"]) == 6
+    assert table["run_id"].tolist() == [row["run_id"] for row in rows]
+    assert all(row["run_id"] != manifest["run_id"] for row in rows)
+    assert loaded.status == "incomplete"
+    assert loaded.metadata["origin_join_version"] == 1
+    assert loaded.metadata["tournament_owner"]["run_id"] == manifest["run_id"]
+    assert loaded.table("episodes")["system_game_score"].tolist() == [None] * 6
+    assert [
+        len(batch["episode_id"]) for batch in loaded.iter_table("matches", rows=2)
+    ] == [2, 2, 2]
+    assert not (path / "match_results.csv").exists()
+
+
+def test_none_keeps_outcomes_and_only_selected_full_rows(tmp_path: Path) -> None:
+    path, _, _ = _saved(tmp_path, mode="none", full=True)
+    loaded = load_results(path)
+    assert len(loaded.table("matches")["outcome"]) == 6
+    assert loaded.table("full_metrics")["episode_id"].tolist() == [1001]
+    assert loaded.table("priority_metrics")["episode_id"].tolist() == [1001]
+    assert loaded.table("tournament_headline_metrics") == {}
+    assert (
+        loaded.metadata["tables"]["tournament_headline_metrics"]["availability"]
+        == "disabled"
+    )
+    assert len(list(loaded.iter_table("full_metrics", rows=1))) == 1
+
+
+def test_missing_source_is_an_error_not_a_partial_table(tmp_path: Path) -> None:
+    path, _, records = _saved(tmp_path)
+    table_id = records.config["record_sources"][0]["tables"]["match_results"][
+        "asset_id"
+    ]
+    Path(records.config["assets"][table_id]["path"]).unlink()
+    loaded = load_results(path)
+    with pytest.raises(
+        (ValueError, FileNotFoundError), match=r"[Mm]issing|[Pp]repare|[Aa]sset"
+    ):
+        loaded.table("matches")
+
+
+def test_loading_and_iteration_leave_run_bytes_unchanged(tmp_path: Path) -> None:
+    path, _, _ = _saved(tmp_path)
+    before = {
+        str(file.relative_to(path)): file.read_bytes()
+        for file in path.rglob("*")
+        if file.is_file()
+    }
+    loaded = load_results(path)
+    list(loaded.iter_table("matches", rows=1))
+    after = {
+        str(file.relative_to(path)): file.read_bytes()
+        for file in path.rglob("*")
+        if file.is_file()
+    }
+    assert before == after
+
+
+def test_saved_reader_has_no_jax_provider_or_executor_imports(tmp_path: Path) -> None:
+    path, _, _ = _saved(tmp_path)
+    script = """
+import sys
+import marl_battlegrounds as marl_bgs
+result = marl_bgs.load_results(sys.argv[1])
+assert len(result.table('matches')['episode_id']) == 6
+assert 'jax' not in sys.modules
+assert 'marl_battlegrounds.evaluation.evaluate' not in sys.modules
+assert 'marl_battlegrounds.evaluation.policy_execution' not in sys.modules
+"""
+    subprocess.run(
+        [sys.executable, "-c", script, str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "filename", ["tournament_config.json", "tournament_games.jsonl"]
+)
+def test_changed_immutable_plan_rejected_without_recovery(
+    tmp_path: Path, filename: str
+) -> None:
+    path, _, _ = _saved(tmp_path)
+    (path / filename).write_bytes((path / filename).read_bytes() + b" ")
+    before = {
+        file.name: hashlib.sha256(file.read_bytes()).hexdigest()
+        for file in path.iterdir()
+        if file.is_file()
+    }
+    with pytest.raises(ValueError, match="missing or changed"):
+        load_results(path)
+    assert before == {
+        file.name: hashlib.sha256(file.read_bytes()).hexdigest()
+        for file in path.iterdir()
+        if file.is_file()
+    }
+
+
+def test_pending_restore_is_rejected_before_source_access(tmp_path: Path) -> None:
+    path, manifest, records = _saved(tmp_path)
+    manifest["recording_restore"] = {"version": 1}
+    (path / "run_details.json").write_text(json.dumps(manifest))
+    for asset in records.config["assets"].values():
+        Path(asset["path"]).unlink(missing_ok=True)
+    with pytest.raises(ValueError, match="restore is pending"):
+        load_results(path)
+
+
+def test_open_view_rejects_changed_logical_plan(tmp_path: Path) -> None:
+    path, _, _ = _saved(tmp_path)
+    loaded = load_results(path)
+    (path / "tournament_games.jsonl").write_bytes(
+        (path / "tournament_games.jsonl").read_bytes() + b"\n"
+    )
+    with pytest.raises(ValueError, match="missing or changed"):
+        loaded.table("matches")
+
+
+def test_open_view_rejects_changed_capture_claims(tmp_path: Path) -> None:
+    path, manifest, _ = _saved(tmp_path)
+    loaded = load_results(path)
+    manifest["details"]["metrics"] = "none"
+    (path / "run_details.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="capture settings changed"):
+        loaded.table("matches")
+
+
+def test_spawn_coverage_has_actual_owners_and_a_single_challenger_scope(
+    tmp_path: Path,
+) -> None:
+    path, manifest, records = _saved(tmp_path)
+    loaded = load_results(path)
+    by_pair = loaded.metadata["spawn_balance"]
+    assert len(by_pair) == 3
+    assert all(
+        row["completed_games"] == {"default": 1, "swapped": 1, "unreported": 0}
+        for row in by_pair.values()
+    )
+    assert all(row["paired_complete"] is True for row in by_pair.values())
+    challenger = records.config["participants"][0]["entrant_id"]
+    manifest["tournament_reuse"]["challenger_id"] = challenger
+    view = CanonicalView(manifest, run_dir=None, memory={"_record_access": records})
+    focal = view.metadata["spawn_balance"]
+    assert focal["system_id"] == challenger
+    assert focal["opponent_id"] is None
+    assert focal["completed_games"] == {"default": 2, "swapped": 2, "unreported": 0}
+    assert focal["completed_pairs"] == focal["expected_pairs"] == 2
+    assert len(focal["matchups"]) == 2
+
+
+def test_example_prepares_saved_snapshot_and_only_needed_payloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from argparse import Namespace
+    from importlib.util import module_from_spec, spec_from_file_location
+    from types import SimpleNamespace
+
+    import marl_battlegrounds as marl_bgs
+    from marl_battlegrounds.evaluation import tournament_assets, tournament_config
+
+    spec = spec_from_file_location(
+        "canonical_example",
+        Path(__file__).parents[1] / "examples" / "canonical_tournament.py",
+    )
+    assert spec is not None and spec.loader is not None
+    example = module_from_spec(spec)
+    spec.loader.exec_module(example)
+    previous = {
+        "canonical_config": {"snapshot_id": "saved"},
+        "metrics": "none",
+        "rerun_existing": False,
+    }
+
+    def loaded(path: object) -> SimpleNamespace:
+        return SimpleNamespace(metadata=previous)
+
+    monkeypatch.setattr(marl_bgs, "load_results", loaded)
+    calls = []
+
+    def resolve(config: object, *, official: bool, saved: object) -> object:
+        assert config is None and official and saved == previous["canonical_config"]
+        return saved
+
+    def prepare(config: object, **kwargs: object) -> dict[str, object]:
+        calls.append((config, kwargs))
+        return {"missing": [], "config": config}
+
+    def stop(**kwargs: object) -> None:
+        assert kwargs["config"] == previous["canonical_config"]
+        raise RuntimeError("ready to execute")
+
+    monkeypatch.setattr(tournament_config, "resolve_tournament_config", resolve)
+    monkeypatch.setattr(tournament_assets, "prepare_tournament_assets", prepare)
+    monkeypatch.setattr(marl_bgs, "run_canonical_tournament", stop)
+    args = Namespace(
+        config=None,
+        system=None,
+        games_per_opponent=None,
+        metrics=None,
+        save_replays=None,
+        rerun_existing=None,
+        prepare=True,
+        cache_dir=None,
+        output_dir=None,
+        resume_from=tmp_path,
+        num_envs=32,
+        chunk_size=16,
+    )
+    with pytest.raises(RuntimeError, match="ready to execute"):
+        example.compare(args)
+    assert calls[0][1]["roles"] == ("outcomes_priority",)

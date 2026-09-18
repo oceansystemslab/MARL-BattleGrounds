@@ -1,3 +1,15 @@
+/**
+ * @file Validate live debugger transport and audience-specific scene projections.
+ * The live client calls normalizeLiveDebuggerFrameV2; replay normalization reuses
+ * normalizeDebuggerAudienceProjectionV2 for matching scene/event rules. Researcher
+ * records may contain global identities and phase evidence. Actor POV records carry
+ * only the selected actor's allowed observations and recipient-local cues.
+ * Helpers check owned fields and joins, then return frozen records/arrays and display
+ * aliases without rerunning simulator rules. They perform no network/file I/O. A valid
+ * transport frame is separate from the authorized-presentation approval marker.
+ * Geometric coordinates/radii are map units, speeds are map units per tick, and
+ * durations/countdowns are ticks unless a field says otherwise.
+ */
 import { CANONICAL_STATUS_ORDER, statusTokenIdFromCatalogId } from "./vocabulary.js";
 
 const RESEARCHER_EVENT_TYPES_V2 = new Set([
@@ -482,6 +494,9 @@ const DIAGNOSTIC_FACT_KEYS_V1 = Object.freeze([
 ]);
 
 /**
+ * Return whether value is a non-null object that is not an array.
+ * This is a container check, not a schema or authority check.
+ *
  * @param {unknown} value
  * @returns {value is Record<string, any>}
  */
@@ -490,6 +505,9 @@ function isRecord(value) {
 }
 
 /**
+ * Return value unchanged if it is a non-array record; otherwise throw TypeError
+ * with the caller's message. The caller validates its fields separately.
+ *
  * @param {unknown} value
  * @param {string} message
  * @returns {Record<string, any>}
@@ -502,6 +520,10 @@ function requireRecord(value, message) {
 }
 
 /**
+ * Check value's enumerable string keys against the already sorted expected list.
+ * Return undefined on success; throw TypeError with message for missing or extra keys.
+ * The caller must supply a record and sorted expected names; no values are checked.
+ *
  * @param {Record<string, any>} value
  * @param {readonly string[]} expected
  * @param {string} message
@@ -516,7 +538,15 @@ function requireExactKeys(value, expected, message) {
   }
 }
 
-/** @param {unknown} value */
+/**
+ * Validate value and return a frozen team-controller/information-mode record.
+ * Team A accepts manual, reactive_tdm, or random_valid; Team B also accepts scenario_5.
+ * Information mode is shared_obs or no_shared_obs. Reactive and scenario_5 controllers
+ * require shared_obs. Throw TypeError for extra/missing fields or an unsupported pair.
+ * This describes controller setup; it does not instantiate or call a policy.
+ *
+ * @param {unknown} value
+ */
 function normalizeCombatConfigurationV1(value) {
   const configuration = requireRecord(
     value,
@@ -552,7 +582,10 @@ function normalizeCombatConfigurationV1(value) {
 }
 
 /**
- * Validate one raw scenario menu row before any presentation code consumes it.
+ * Validate menu row value and return a frozen name/title/description/mode/audience.
+ * name is 1 through 64 lowercase letters, digits, or underscores; mode is interactive
+ * or scripted and audience is researcher or stress. Title/description are strings.
+ * Throw TypeError naming label for invalid fields. No scenario is loaded or executed.
  *
  * @param {unknown} value
  * @param {string} label
@@ -587,9 +620,12 @@ function normalizeScenarioOptionV1(value, label) {
 }
 
 /**
- * Validate exact raw ScenarioMetadataV1, including cursor coherence, before
- * exposing the same names as presentation aliases. JSON integer-valued
- * numbers remain numbers in JavaScript and are valid; coercion is forbidden.
+ * Validate value as live researcher scenario metadata and return a frozen copy.
+ * Require the exact menu fields plus coherent completed/frame counts, optional next
+ * frame index/label/description, and script_complete. Live movement scale must equal 1.
+ * Interactive mode has no script frames or next cursor; scripted next index equals
+ * the completed count when present. Throw TypeError for wrong shapes or contradictions.
+ * Values are checked without string-to-number coercion; source strings remain intact.
  *
  * @param {unknown} value
  * @returns {Readonly<Record<string, any>>}
@@ -658,9 +694,14 @@ function normalizeScenarioMetadataV1(value) {
 }
 
 /**
- * Strictly normalize the path-free recording lifecycle shared by both live
- * audiences. Availability is joined here rather than inferred later by the
- * UI, so malformed or over-disclosing state never reaches a control surface.
+ * Validate path-free live recording status value at artifact frameIndex.
+ * Return null when value is null; otherwise require exact schema-1 lifecycle fields.
+ * Captured transitions must equal frameIndex and stay within the positive horizon.
+ * Completion, reason, persistence error, and action-availability flags must match the
+ * recorded lifecycle: finishing while recording, reviewing after save, and retry/save-as
+ * after persistence failure. Restart is fenced after captured work or sealing.
+ * Return a frozen status record, or throw TypeError for a field/count/lifecycle mismatch.
+ * The caller supplies the current frame index; this does not save, discard, or reopen files.
  *
  * @param {unknown} value
  * @param {number} frameIndex
@@ -784,6 +825,9 @@ export function normalizeRecordingStatusV1(value, frameIndex) {
 }
 
 /**
+ * Return value unchanged when it is an array; otherwise throw TypeError with
+ * message. Element shape, ordering, and ownership are caller responsibilities.
+ *
  * @param {unknown} value
  * @param {string} message
  * @returns {any[]}
@@ -1193,6 +1237,9 @@ const RESEARCHER_EVENT_PHASE_RANK_V2 = Object.freeze({
 });
 
 /**
+ * Return true only for an array of exactly two finite JavaScript numbers.
+ * The pair is x/y in map units where used for geometry; this helper checks no bounds.
+ *
  * @param {unknown} value
  * @returns {value is readonly [number, number]}
  */
@@ -1206,7 +1253,12 @@ function isFinitePoint(value) {
   );
 }
 
-/** @param {unknown} value @param {string} label @returns {string} */
+/**
+ * Return value unchanged if it is a string with non-whitespace content; otherwise
+ * throw TypeError naming label. Accepted strings are not trimmed.
+ *
+ * @param {unknown} value @param {string} label @returns {string}
+ */
 function requireNonemptyString(value, label) {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new TypeError(`${label} must be a nonempty string.`);
@@ -1214,7 +1266,13 @@ function requireNonemptyString(value, label) {
   return value;
 }
 
-/** @param {unknown} value @param {string} label @param {number} [minimum] @returns {number} */
+/**
+ * Return numeric value if it is an integer at least minimum, which defaults to 0.
+ * Throw TypeError naming label otherwise. No coercion or safe-integer upper bound is
+ * added; callers impose any category or signed-int32 bound they require.
+ *
+ * @param {unknown} value @param {string} label @param {number} [minimum] @returns {number}
+ */
 function requireInteger(value, label, minimum = 0) {
   if (typeof value !== "number" || !Number.isInteger(value) || value < minimum) {
     throw new TypeError(`${label} must be an integer at least ${minimum}.`);
@@ -1222,7 +1280,13 @@ function requireInteger(value, label, minimum = 0) {
   return value;
 }
 
-/** @param {unknown} value @param {string} label @param {number} [minimum] @returns {number} */
+/**
+ * Return numeric value if finite and at least minimum, default -Infinity.
+ * Throw TypeError naming label otherwise. The default admits negative finite values;
+ * NaN, infinities, and numeric strings are always rejected.
+ *
+ * @param {unknown} value @param {string} label @param {number} [minimum] @returns {number}
+ */
 function requireFinite(value, label, minimum = -Infinity) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < minimum) {
     throw new TypeError(`${label} must be a finite number at least ${minimum}.`);
@@ -1230,7 +1294,12 @@ function requireFinite(value, label, minimum = -Infinity) {
   return value;
 }
 
-/** @param {unknown} value @param {string} label @returns {boolean} */
+/**
+ * Return value unchanged when it is a boolean; otherwise throw TypeError naming
+ * label. Truthy numbers or strings are not accepted.
+ *
+ * @param {unknown} value @param {string} label @returns {boolean}
+ */
 function requireBoolean(value, label) {
   if (typeof value !== "boolean") {
     throw new TypeError(`${label} must be a boolean.`);
@@ -1238,7 +1307,12 @@ function requireBoolean(value, label) {
   return value;
 }
 
-/** @param {unknown} value @param {string} label @returns {readonly [number, number]} */
+/**
+ * Return a frozen x/y copy of finite two-number array value, or throw TypeError
+ * naming label. Geometry is in map units; no map-boundary check is made here.
+ *
+ * @param {unknown} value @param {string} label @returns {readonly [number, number]}
+ */
 function requirePoint(value, label) {
   if (!isFinitePoint(value)) {
     throw new TypeError(`${label} must be a finite two-coordinate point.`);
@@ -1247,6 +1321,10 @@ function requirePoint(value, label) {
 }
 
 /**
+ * Return a frozen copy of value when it contains exactly length boolean entries.
+ * Throw TypeError naming label for a wrong shape or entry type. The caller gives the
+ * axis meaning and required length.
+ *
  * @param {unknown} value
  * @param {number} length
  * @param {string} label
@@ -1259,7 +1337,15 @@ function requireBooleanVector(value, length, label) {
   return Object.freeze(/** @type {boolean[]} */ ([...vector]));
 }
 
-/** @param {unknown} value */
+/**
+ * Validate value and return a frozen terminal-state record.
+ * All flags are booleans. Sealing reason uses priority terminated, then truncated,
+ * then declared_horizon, otherwise null; is_sealed must agree. Throw TypeError for
+ * unknown fields or contradictory flags/reason. This reports server truth; it does not
+ * infer termination from the displayed score.
+ *
+ * @param {unknown} value
+ */
 function normalizeTerminalStateV2(value) {
   const terminal = requireRecord(value, "Terminal state must be an object.");
   requireExactKeys(
@@ -1296,7 +1382,14 @@ function normalizeTerminalStateV2(value) {
   });
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Validate target disclosure value and return a frozen {disclosure, global_slot}.
+ * public requires an integer slot 0 through 9. target_none, redacted, and invalid require
+ * null slots and stay distinct. Throw TypeError naming label on invalid input.
+ * This record alone does not prove that a target category joins the roster.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function normalizeResearcherTargetReference(value, label) {
   const target = requireRecord(value, `${label} must be an object.`);
   requireExactKeys(
@@ -1321,6 +1414,12 @@ function normalizeResearcherTargetReference(value, label) {
 }
 
 /**
+ * Check normalized target against targetAction and the global-slot roster Map.
+ * Public disclosure needs a positive category and an existing roster slot; target_none
+ * needs category 0; redacted needs null. invalid is admitted only when allowInvalid is
+ * true and a category is present. Return undefined or throw TypeError naming label.
+ * This checks disclosure consistency, not the exact actor-relative category mapping.
+ *
  * @param {Readonly<Record<string, any>>} target
  * @param {number | null} targetAction
  * @param {ReadonlyMap<number, Readonly<Record<string, any>>>} roster
@@ -1348,6 +1447,13 @@ function requireResearcherTargetJoin(
 }
 
 /**
+ * Validate pending-action record raw for submission scope and normalized roster.
+ * The actor must exist in the roster; target disclosure must join its category. scope
+ * scripted_playback selects the inspection-only label; other supported callers use the
+ * pending-submit label. Movement is nonnegative, armed lane is null/0/1, arm origin is
+ * null/automatic/explicit, and redacted target legality remains null. Return a frozen
+ * row with copied mask truth and summary, or throw TypeError. Does not submit the action.
+ *
  * @param {Record<string, any>} raw
  * @param {string} scope
  * @param {ReadonlyMap<number, Readonly<Record<string, any>>>} roster
@@ -1418,6 +1524,12 @@ function normalizeResearcherPendingAction(raw, scope, roster) {
 }
 
 /**
+ * Validate recorded action raw against roster and return a frozen action/target/summary.
+ * label names errors. Signed integer submitted categories remain representable without
+ * category bounds; target_action can be null only with matching redaction. Invalid
+ * target disclosure is admitted here. Throw TypeError for malformed fields or joins.
+ * Accepted-category bounds are applied by the containing action-result normalizer.
+ *
  * @param {Record<string, any>} raw
  * @param {ReadonlyMap<number, Readonly<Record<string, any>>>} roster
  * @param {string} label
@@ -1451,6 +1563,13 @@ function normalizeResearcherActionTuple(raw, roster, label) {
 }
 
 /**
+ * Validate raw submitted/accepted result for an actor in roster.
+ * Return a frozen result with both normalized tuples, movement/pair-mask truth,
+ * movement_accepted, and combat_result. Accepted categories must fit 9/11/2 action
+ * heads; combat_result is accepted, canonical_noop, or rejected. Throw TypeError for
+ * invalid fields, unknown actor, or out-of-domain accepted actions. A null pair mask
+ * stays distinct from false.
+ *
  * @param {Record<string, any>} raw
  * @param {ReadonlyMap<number, Readonly<Record<string, any>>>} roster
  */
@@ -1515,6 +1634,14 @@ function normalizeResearcherActionResult(raw, roster) {
 }
 
 /**
+ * Validate rawHud against normalized scene and enclosing live frame.
+ * Require exact roster/selection joins, pending action rows matching joint_turn,
+ * controlled_actor, or scripted_playback scope, nine ordered movement legalities,
+ * consistent candidate target coverage, and any latest transition's incoming identity.
+ * Return a frozen HUD with normalized pending/result rows, legalities, and diagnostics.
+ * Throw TypeError for invalid fields or joins. Missing latest_transition remains null;
+ * this helper copies recorded mask/results and does not recompute simulator legality.
+ *
  * @param {Record<string, any>} rawHud
  * @param {Readonly<Record<string, any>>} scene
  * @param {Record<string, any>} frame
@@ -1799,9 +1926,11 @@ function normalizeResearcherHud(rawHud, scene, frame) {
 }
 
 /**
- * Compose a live-only pending route from exact researcher HUD identity and the
- * already-authorized settled-scene body anchors. This projection never enters
- * the renderer-neutral SceneV2 wire contract.
+ * Build a live researcher route from scene bodies and frame.hud.pending_action.
+ * Return a frozen map-unit source/target anchor-and-radius record only for a public
+ * target, armed lane 0/1, true pair mask, and valid matching bodies; otherwise null.
+ * Malformed required scene arrays throw TypeError. Inputs must already be normalized.
+ * This browser-only affordance does not enter the saved SceneV2 schema.
  *
  * @param {Record<string, any>} scene
  * @param {Record<string, any>} frame
@@ -1865,8 +1994,11 @@ function researcherPendingRoute(scene, frame) {
 }
 
 /**
- * Compose the same live-only affordance for a recipient POV without assigning
- * global identities to visible observation rows.
+ * Build a live POV route from normalized scene and frame.hud.pending_action.
+ * Resolve the source by public ID and the target only among self/visible observed
+ * bodies. Require a positive target category, armed lane 0/1, true pair mask, and valid
+ * anchors/radii. Return a frozen route in map units or null when unavailable; malformed
+ * scene arrays throw TypeError. No global identity is assigned to observation rows.
  *
  * @param {Record<string, any>} scene
  * @param {Record<string, any>} frame
@@ -1929,9 +2061,13 @@ function povPendingRoute(scene, frame) {
 }
 
 /**
- * Preserve the complete V2 agent row while publishing the stable names used
- * by the SVG/HUD presentation layer. These aliases are display vocabulary;
- * they do not recompute health, cooldown, status, or lifecycle truth.
+ * Validate agent and return {authorized, presentation} as two frozen row objects.
+ * roster supplies identities used by status-source evidence. Require fixed team/global/
+ * local/class identity, finite body/health values, life/respawn evidence, ordered unique
+ * statuses, and both ordered aura modifiers. Keep cooldown, shield, and combat counters
+ * as nonnegative ticks. authorized preserves the scientific row; presentation adds
+ * alive, effective_speed, ultimate_cooldown, and status/modifier display aliases.
+ * Throw TypeError for invalid fields or joins. No health/status dynamics are recomputed.
  *
  * @param {Record<string, any>} agent
  * @param {readonly Record<string, any>[]} roster
@@ -2150,7 +2286,12 @@ const CLASS_AURA_MECHANIC_KEYS_V2 = Object.freeze([
   "stacking_rule",
 ]);
 
-/** @param {unknown} value @param {string} message */
+/**
+ * Return finite numeric value unchanged, otherwise throw TypeError with message.
+ * This helper imposes no sign or range bound.
+ *
+ * @param {unknown} value @param {string} message
+ */
 function requireFiniteNumber(value, message) {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new TypeError(message);
@@ -2158,7 +2299,16 @@ function requireFiniteNumber(value, message) {
   return value;
 }
 
-/** @param {unknown} rawMechanics */
+/**
+ * Validate rawMechanics and return a frozen public class mechanics record.
+ * Require real class ID/name, valid nonnegative numeric settings, positive health/body
+ * radius, regeneration fraction at most 1, integer tick durations, known target modes,
+ * and status/aura identities tied to their source class. Nested mechanics gain display
+ * token IDs and frozen arrays. Throw TypeError for invalid fields or catalog joins.
+ * This validates the stated record; it does not run or recreate Core mechanics.
+ *
+ * @param {unknown} rawMechanics
+ */
 function normalizeClassMechanicsV2(rawMechanics) {
   const mechanics = requireRecord(rawMechanics, "Invalid class mechanics row.");
   requireExactKeys(
@@ -2296,7 +2446,15 @@ function normalizeClassMechanicsV2(rawMechanics) {
   );
 }
 
-/** @param {Record<string, any>} raw @param {readonly Record<string, any>[]} roster */
+/**
+ * Validate raw direct-source evidence against roster and return a frozen row.
+ * Source global/public IDs must name the same roster entry. episodeId and frameIndex
+ * both default to null; when both are supplied, also require a canonical event ID from
+ * that episode at an earlier transition. Throw TypeError for invalid fields or joins.
+ * Without both optional values, event text is checked only for nonempty string shape.
+ *
+ * @param {Record<string, any>} raw @param {readonly Record<string, any>[]} roster
+ */
 function normalizeResearcherStatusSourceEvidence(
   raw,
   roster,
@@ -2350,7 +2508,15 @@ function normalizeResearcherStatusSourceEvidence(
   });
 }
 
-/** @param {Record<string, any>} status @param {readonly Record<string, any>[]} roster */
+/**
+ * Validate status and return a frozen row with display token_id and duration aliases.
+ * roster resolves direct-source evidence. Require a real status channel/ID, positive
+ * remaining ticks, valid family/source class/action and magnitude vocabulary, and
+ * ordered unique source-event evidence. Throw TypeError for malformed fields or joins.
+ * The returned nested evidence array is frozen; no hidden source is inferred.
+ *
+ * @param {Record<string, any>} status @param {readonly Record<string, any>[]} roster
+ */
 function normalizeResearcherStatus(status, roster) {
   requireExactKeys(
     status,
@@ -2421,7 +2587,13 @@ function normalizeResearcherStatus(status, roster) {
   });
 }
 
-/** @param {Record<string, any>} modifier */
+/**
+ * Validate modifier as a known aura ID and finite nonnegative multiplier.
+ * Return a frozen copy with its display token_id, or throw TypeError. This is a copied
+ * resolved multiplier; stacking is not recalculated.
+ *
+ * @param {Record<string, any>} modifier
+ */
 function normalizeResearcherAuraModifier(modifier) {
   requireExactKeys(
     modifier,
@@ -2441,7 +2613,15 @@ function normalizeResearcherAuraModifier(modifier) {
   return Object.freeze({ ...modifier, token_id: tokenId });
 }
 
-/** @param {Record<string, any>} field @param {readonly Record<string, any>[]} roster */
+/**
+ * Validate field against its source in roster and return a frozen display field.
+ * Require exact source identity/class/life and center position, positive radius,
+ * same-team beneficiaries, nonnegative multiplier/clamp, and multiply_then_clamp with
+ * ceiling/floor semantics. Add token_id and a copied frozen center. Throw TypeError
+ * for invalid fields or source joins; positions/radii are map units.
+ *
+ * @param {Record<string, any>} field @param {readonly Record<string, any>[]} roster
+ */
 function normalizeResearcherAuraField(field, roster) {
   requireExactKeys(
     field,
@@ -2483,7 +2663,15 @@ function normalizeResearcherAuraField(field, roster) {
   });
 }
 
-/** @param {Record<string, any>} rawMap */
+/**
+ * Validate rawMap and return a frozen map with frozen obstacle rows and centers.
+ * Map dimensions are positive. Obstacle IDs are unique; pillars have a positive radius
+ * and null width/height, while walls have positive width/height and null radius.
+ * Coordinates/dimensions are map units and theta is the recorded angle in radians.
+ * Throw TypeError for malformed fields or geometry. No collision or visibility is run.
+ *
+ * @param {Record<string, any>} rawMap
+ */
 function normalizeResearcherMap(rawMap) {
   requireExactKeys(
     rawMap,
@@ -2549,6 +2737,11 @@ function normalizeResearcherMap(rawMap) {
 }
 
 /**
+ * Validate raw range against its owner in agents and return a frozen circle.
+ * Require observation/basic/ultimate kind, a matching global slot and exact owner
+ * center, and finite nonnegative radius in map units. Throw TypeError for invalid
+ * fields or joins. The owner supplies the position; this does not recompute range.
+ *
  * @param {Record<string, any>} raw
  * @param {readonly Record<string, any>[]} agents
  */
@@ -2579,7 +2772,14 @@ function normalizeResearcherRange(raw, agents) {
   });
 }
 
-/** @param {unknown} raw @param {readonly Record<string, any>[]} agents */
+/**
+ * Return null when raw is null; otherwise validate controlled/selected global slots
+ * against agents and return a frozen selection. Controlled must name a roster entry;
+ * selected may be null or another roster entry. Throw TypeError for invalid fields or
+ * unknown identities. This does not change the server's selected actor.
+ *
+ * @param {unknown} raw @param {readonly Record<string, any>[]} agents
+ */
 function normalizeResearcherSelection(raw, agents) {
   if (raw === null) {
     return null;
@@ -2610,7 +2810,15 @@ function normalizeResearcherSelection(raw, agents) {
   });
 }
 
-/** @param {unknown} raw @param {Readonly<Record<string, any>> | null} selection */
+/**
+ * Return null for null raw, otherwise validate its join to normalized selection.
+ * Controlled/target global slots must match the selection, target_action is 1 through
+ * 10, lane availability is boolean, and armed_lane is null/0/1. Return a frozen legality
+ * row or throw TypeError. armed_pair_legal remains the supplied boolean; this helper
+ * does not derive it from lane values or run the action mask.
+ *
+ * @param {unknown} raw @param {Readonly<Record<string, any>> | null} selection
+ */
 function normalizeResearcherSelectedLegality(raw, selection) {
   if (raw === null) {
     return null;
@@ -2666,7 +2874,14 @@ function normalizeResearcherSelectedLegality(raw, selection) {
   });
 }
 
-/** @param {Record<string, any>} raw @param {readonly Record<string, any>[]} agents */
+/**
+ * Validate raw pad against its assigned identity in agents and return a frozen row.
+ * Global slot, public ID, Team 1/2, and local slot 0 through 4 must agree. Position is a
+ * frozen finite x/y pair in map units. Throw TypeError for invalid fields or identity.
+ * The pad is recorded public configuration, not a predicted respawn position.
+ *
+ * @param {Record<string, any>} raw @param {readonly Record<string, any>[]} agents
+ */
 function normalizeResearcherSpawnPad(raw, agents) {
   requireExactKeys(
     raw,
@@ -2705,7 +2920,13 @@ function normalizeResearcherSpawnPad(raw, agents) {
   });
 }
 
-/** @param {Record<string, any>} raw */
+/**
+ * Validate raw wave and return a frozen team/countdown/period record.
+ * Team index 0/1 must match Team ID 1/2. Period is positive integer ticks; countdown
+ * is an integer from zero up to but excluding period. Throw TypeError for a mismatch.
+ *
+ * @param {Record<string, any>} raw
+ */
 function normalizeResearcherRespawnWave(raw) {
   requireExactKeys(
     raw,
@@ -2727,7 +2948,14 @@ function normalizeResearcherRespawnWave(raw) {
   });
 }
 
-/** @param {Record<string, any>} raw @param {Readonly<Record<string, any>> | null} selection @param {readonly Record<string, any>[]} agents @param {number} index */
+/**
+ * Validate raw visibility row at index in ordered agents for normalized selection.
+ * Observer must be the controlled global slot, candidate must match agents[index], and
+ * visible must be boolean. Return a frozen row or throw TypeError. The recorded flag is
+ * copied; visibility is not recalculated from geometry.
+ *
+ * @param {Record<string, any>} raw @param {Readonly<Record<string, any>> | null} selection @param {readonly Record<string, any>[]} agents @param {number} index
+ */
 function normalizeResearcherVisibility(raw, selection, agents, index) {
   requireExactKeys(
     raw,
@@ -2752,7 +2980,15 @@ function normalizeResearcherVisibility(raw, selection, agents, index) {
   });
 }
 
-/** @param {Record<string, any>} raw @param {Record<string, any>} frame @param {readonly Record<string, any>[]} roster */
+/**
+ * Validate raw source-history state against frame and roster.
+ * Require schema 2 and matching episode/frame identity, then canonical unique recipient/
+ * status rows and direct source evidence from earlier transitions. Return a frozen
+ * record with frozen channel/evidence arrays, or throw TypeError for invalid joins or
+ * ordering. This preserves known evidence; it does not guess who caused an unknown effect.
+ *
+ * @param {Record<string, any>} raw @param {Record<string, any>} frame @param {readonly Record<string, any>[]} roster
+ */
 function normalizeResearcherStatusSourceState(raw, frame, roster) {
   requireExactKeys(
     raw,
@@ -2844,7 +3080,14 @@ function normalizeResearcherStatusSourceState(raw, frame, roster) {
   });
 }
 
-/** @param {Record<string, any>} raw @param {readonly Record<string, any>[]} roster */
+/**
+ * Validate raw phase anchor against roster and return a frozen identity/position row.
+ * Require a matching global/public ID, phase transition_start, post_charge, or successor,
+ * and a finite x/y position in map units. Throw TypeError for invalid fields or identity.
+ * Position is not compared with the settled body until the enclosing phase join.
+ *
+ * @param {Record<string, any>} raw @param {readonly Record<string, any>[]} roster
+ */
 function normalizeResearcherAgentAnchor(raw, roster) {
   requireExactKeys(
     raw,
@@ -2868,7 +3111,14 @@ function normalizeResearcherAgentAnchor(raw, roster) {
   });
 }
 
-/** @param {Record<string, any>} raw @param {readonly Record<string, any>[]} roster */
+/**
+ * Validate raw three-phase trajectory against roster and return a frozen record.
+ * transition_start, post_charge, and successor anchors must name the same actor and
+ * their exact phases. Throw TypeError for malformed fields or mismatched joins.
+ * The saved anchors are copied; movement is not simulated or interpolated here.
+ *
+ * @param {Record<string, any>} raw @param {readonly Record<string, any>[]} roster
+ */
 function normalizeResearcherTrajectory(raw, roster) {
   requireExactKeys(
     raw,
@@ -2916,7 +3166,14 @@ function normalizeResearcherTrajectory(raw, roster) {
   });
 }
 
-/** @param {unknown} value @param {string} label @returns {unknown} */
+/**
+ * Copy JSON-like event value recursively, freezing each array.
+ * Accept null, strings, booleans, finite numbers, and nested arrays of those values.
+ * Reject objects, undefined, and non-finite numbers with TypeError naming label.
+ * The caller supplies an acyclic tree; no event semantics are inferred.
+ *
+ * @param {unknown} value @param {string} label @returns {unknown}
+ */
 function normalizeResearcherEventValue(value, label) {
   if (value === null || ["string", "number", "boolean"].includes(typeof value)) {
     if (typeof value === "number" && !Number.isFinite(value)) {
@@ -2934,7 +3191,13 @@ function normalizeResearcherEventValue(value, label) {
   throw new TypeError(`${label} has an invalid value shape.`);
 }
 
-/** @param {number} left @param {number} right */
+/**
+ * Return whether finite numeric left and right differ by at most the larger of
+ * absolute tolerance 1e-5 and relative tolerance 1e-6. Callers validate numbers first.
+ * This tolerance is used for recorded researcher event arithmetic.
+ *
+ * @param {number} left @param {number} right
+ */
 function researcherNumbersClose(left, right) {
   return (
     Math.abs(left - right) <=
@@ -2942,12 +3205,23 @@ function researcherNumbersClose(left, right) {
   );
 }
 
-/** @param {readonly number[]} left @param {readonly number[]} right */
+/**
+ * Return whether left and right have exactly equal first and second coordinates.
+ * Callers supply finite two-coordinate arrays. This does not check array lengths or
+ * apply the numeric-event tolerance.
+ *
+ * @param {readonly number[]} left @param {readonly number[]} right
+ */
 function researcherPointsEqual(left, right) {
   return left[0] === right[0] && left[1] === right[1];
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Return integer value from 0 through 9, otherwise throw TypeError naming label.
+ * This validates the fixed simulator-global axis, not whether the slot is active.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function requireResearcherEventSlot(value, label) {
   const slot = requireInteger(value, label);
   if (slot >= 10) {
@@ -2956,7 +3230,12 @@ function requireResearcherEventSlot(value, label) {
   return slot;
 }
 
-/** @param {unknown} value @param {string} label */
+/**
+ * Return integer value from -(2**31) through 2**31 - 1, otherwise throw TypeError
+ * naming label. Used for exact submitted categories, including invalid action IDs.
+ *
+ * @param {unknown} value @param {string} label
+ */
 function requireResearcherSignedInt32(value, label) {
   const decoded = requireInteger(value, label, -(2 ** 31));
   if (decoded >= 2 ** 31) {
@@ -2966,6 +3245,10 @@ function requireResearcherSignedInt32(value, label) {
 }
 
 /**
+ * Validate value as a strictly increasing array of global slots 0 through 9.
+ * Return a frozen numeric copy, including an empty array when supplied. Throw TypeError
+ * naming label for wrong types, out-of-range slots, duplicates, or unordered entries.
+ *
  * @param {unknown} value
  * @param {string} label
  * @returns {readonly number[]}
@@ -2981,6 +3264,12 @@ function normalizeResearcherEventSlotTuple(value, label) {
 }
 
 /**
+ * Return anchor value only when it matches trajectories at globalSlot and phase.
+ * The global/public IDs and exact two-coordinate position must join the expected
+ * normalized trajectory. phase is transition_start, post_charge, or successor.
+ * Throw TypeError naming label on mismatch. The caller supplies already shaped anchors;
+ * this does not copy or independently freeze the returned record.
+ *
  * @param {unknown} value
  * @param {number} globalSlot
  * @param {"transition_start" | "post_charge" | "successor"} phase
@@ -3013,6 +3302,11 @@ function requireResearcherTrajectoryAnchor(
 }
 
 /**
+ * Return null only when both value and globalSlot are null. Otherwise validate value
+ * against trajectories at the supplied globalSlot and phase, returning the matching
+ * anchor unchanged. Throw TypeError naming label when nullable presence or the phase
+ * join disagrees. No missing anchor is synthesized.
+ *
  * @param {unknown} value
  * @param {number | null} globalSlot
  * @param {"transition_start" | "post_charge" | "successor"} phase
@@ -3035,6 +3329,15 @@ function requireResearcherOptionalTrajectoryAnchor(
 }
 
 /**
+ * Validate raw as the event at ordinal within transitionId and return a frozen row.
+ * roster and trajectories provide active actor identities and exact phase anchors;
+ * publicIds and active are the full ten-slot identity/activity axes, including padding.
+ * Require the event-specific keys, canonical ID, phase rank, category/scalar constraints,
+ * and relevant anchor joins. Check recorded displacement and score arithmetic where
+ * specified. Throw TypeError for a malformed event, wrong order, or inconsistent join.
+ * Inactive rejected actions remain feed-only with no body anchor. This validates
+ * recorded facts; it does not rerun Core events or add information to a POV.
+ *
  * @param {Record<string, any>} raw
  * @param {number} ordinal
  * @param {string} transitionId
@@ -3129,10 +3432,20 @@ function normalizeResearcherEvent(
       normalized[key] = normalizeResearcherEventValue(value, `Researcher event ${key}`);
     }
   }
-  /** @param {string} key */
+  /**
+   * Read normalized event field key as a simulator-global slot 0 through 9.
+   * Return the slot or throw TypeError naming the event field.
+   *
+   * @param {string} key
+   */
   const eventSlot = (key) =>
     requireResearcherEventSlot(normalized[key], `Researcher event ${key}`);
-  /** @param {string} key @param {number} slot @param {"transition_start" | "post_charge" | "successor"} phase */
+  /**
+   * Return normalized event field key after joining it to slot at phase in the
+   * containing event's trajectory map. Throw TypeError for an identity/position mismatch.
+   *
+   * @param {string} key @param {number} slot @param {"transition_start" | "post_charge" | "successor"} phase
+   */
   const eventAnchor = (key, slot, phase) =>
     requireResearcherTrajectoryAnchor(
       normalized[key],
@@ -3141,9 +3454,19 @@ function normalizeResearcherEvent(
       trajectories,
       `Researcher event ${key}`,
     );
-  /** @param {string} key */
+  /**
+   * Return null for a null normalized event field key, otherwise validate and return
+   * its global slot. Missing or invalid numeric fields throw TypeError.
+   *
+   * @param {string} key
+   */
   const optionalSlot = (key) => (normalized[key] === null ? null : eventSlot(key));
-  /** @param {string} key */
+  /**
+   * Return normalized event field key as a finite nonnegative number, or throw
+   * TypeError naming that field.
+   *
+   * @param {string} key
+   */
   const nonnegative = (key) =>
     requireFinite(normalized[key], `Researcher event ${key}`, 0);
   const rosterBySlot = new Map(roster.map((agent) => [agent.global_slot, agent]));
@@ -3439,7 +3762,16 @@ function normalizeResearcherEvent(
   return /** @type {Readonly<Record<string, any>>} */ (Object.freeze(normalized));
 }
 
-/** @param {Record<string, any>} batch @param {Record<string, any>} frame @param {readonly Record<string, any>[]} roster */
+/**
+ * Validate batch against its successor frame and active roster.
+ * Require schema 2, adjacent simulator ticks, canonical frame/transition joins, exact
+ * ten-slot public/activity axes, trajectories covering the ordered roster, and events
+ * with gap-free IDs and nondecreasing phase ranks. Each trajectory's successor position
+ * must equal the scene body. Return {authorized, presentation}; both records are frozen,
+ * and presentation adds simulator_step. Throw TypeError for invalid values or joins.
+ *
+ * @param {Record<string, any>} batch @param {Record<string, any>} frame @param {readonly Record<string, any>[]} roster
+ */
 function normalizeResearcherEventBatch(batch, frame, roster) {
   requireExactKeys(
     batch,
@@ -3558,6 +3890,14 @@ function normalizeResearcherEventBatch(batch, frame, roster) {
 }
 
 /**
+ * Validate researcher projection against enclosing frame and build its display view.
+ * Check schema-2 scene identity, complete class/status/aura catalog axes, ordered active
+ * roster, spawn/wave/visibility joins, exact status-source evidence, and any incoming
+ * event batch. Only frame zero may omit incoming events. Return {projection, scene,
+ * eventBatch}; the owned records/arrays are frozen and eventBatch is null at frame zero.
+ * The scene includes display aliases, while projection retains scientific field names.
+ * Throw TypeError for invalid data. Pending routes are left null for the live HUD layer.
+ *
  * @param {Record<string, any>} projection
  * @param {Record<string, any>} frame
  */
@@ -3936,9 +4276,12 @@ function normalizeResearcherProjection(projection, frame) {
 }
 
 /**
- * Decode only recipient-visible V1 status-duration columns. The fixed effect
- * class follows from the published feature channel; no source actor identity
- * or researcher-only attribution enters this boundary.
+ * Decode the allowed status-duration columns from rawValues, a 14-entry vector.
+ * Every entry must be finite and nonnegative; published duration columns must be integer
+ * ticks. Return a frozen array for positive durations only, with token ID, feature index,
+ * fixed effect class, and effect_channel_only evidence. Zero durations are omitted.
+ * Throw TypeError for invalid values. The effect class names the public channel;
+ * no source actor or researcher-only attribution is inferred.
  *
  * @param {unknown} rawValues
  */
@@ -3982,7 +4325,15 @@ function normalizePovStatuses(rawValues) {
   );
 }
 
-/** @param {Record<string, any>} rawMap */
+/**
+ * Validate rawMap and return frozen positive dimensions and obstacle rows.
+ * Require unique obstacle IDs and finite x/y centers and angles. Pillars have positive
+ * radius and null width/height; walls have positive width/height and null radius.
+ * Dimensions/coordinates are map units, theta is radians. Throw TypeError for invalid
+ * fields or geometry. This uses the already authorized public map, not hidden bodies.
+ *
+ * @param {Record<string, any>} rawMap
+ */
 function normalizePovMap(rawMap) {
   requireExactKeys(rawMap, ACTOR_POV_MAP_KEYS_V1, "POV map has unknown fields.");
   const width = requireFinite(rawMap.width, "POV map width", Number.EPSILON);
@@ -4037,7 +4388,15 @@ function normalizePovMap(rawMap) {
   return Object.freeze({ width, height, obstacles: Object.freeze(obstacles) });
 }
 
-/** @param {Record<string, any>} actor */
+/**
+ * Validate actor as the selected recipient's own observation row.
+ * Return a frozen row with bounded global/local/team/class identities, finite body and
+ * health values, life flag, nonnegative speed, integer tick counters, and the exact
+ * 14-entry status vector. Throw TypeError for malformed fields or axis/body mismatches.
+ * The selected actor may be dead. No status source or unobserved actor is added.
+ *
+ * @param {Record<string, any>} actor
+ */
 function normalizePovSelf(actor) {
   requireExactKeys(
     actor,
@@ -4114,6 +4473,12 @@ function normalizePovSelf(actor) {
 }
 
 /**
+ * Validate visible observation body at list index relative to selfTeamId 1 or 2.
+ * Require ally/enemy relation, observation row 0 through 4, matching relative team,
+ * valid class/body/health/life values, finite speed, tick counters, and status vector.
+ * Return a frozen row with public ID but no global slot. index is used in error labels.
+ * Throw TypeError for invalid fields. The caller owns proof that the body is visible.
+ *
  * @param {Record<string, any>} body
  * @param {number} index
  * @param {number} selfTeamId
@@ -4192,7 +4557,15 @@ function normalizePovBody(body, index, selfTeamId) {
   });
 }
 
-/** @param {Record<string, any>} pad @param {number} index */
+/**
+ * Validate pad in the public actor-relative spawn list; index names errors.
+ * Team axis 0/1 must match Own Team/Opponent Team labels and local slot 0 through 4.
+ * Return a frozen row with finite position in map units, activity/life booleans, and
+ * nonnegative shield ticks. Throw TypeError for malformed fields or axis labels.
+ * List coverage and ordering are checked by the containing projection.
+ *
+ * @param {Record<string, any>} pad @param {number} index
+ */
 function normalizePovSpawnPad(pad, index) {
   requireExactKeys(
     pad,
@@ -4238,7 +4611,14 @@ function normalizePovSpawnPad(pad, index) {
   });
 }
 
-/** @param {Record<string, any>} wave @param {number} index */
+/**
+ * Validate wave at actor-relative team index, normally 0 for own and 1 for opponent.
+ * Require matching relation/label, a positive integer period, and nonnegative countdown
+ * in ticks. Return a frozen record or throw TypeError. The containing projection enforces
+ * two team rows; this helper does not independently bound countdown below period.
+ *
+ * @param {Record<string, any>} wave @param {number} index
+ */
 function normalizePovRespawnWave(wave, index) {
   requireExactKeys(
     wave,
@@ -4273,7 +4653,15 @@ function normalizePovRespawnWave(wave, index) {
   });
 }
 
-/** @param {Record<string, any>} mask */
+/**
+ * Validate mask and return a frozen actor POV schema-1 action mask.
+ * Movement has 9 booleans, target 11, Ultimate 2, and joint target/Ultimate shape (11, 2).
+ * Both combat marginals must equal any-true reductions of the joint mask. Throw TypeError
+ * for wrong fields, shapes, or marginals. True means permitted; this checks recorded
+ * consistency and does not recompute legality from the scene.
+ *
+ * @param {Record<string, any>} mask
+ */
 function normalizePovActionMask(mask) {
   requireExactKeys(
     mask,
@@ -4317,6 +4705,13 @@ function normalizePovActionMask(mask) {
 }
 
 /**
+ * Validate cue at ordinal in transitionId and return a frozen local cue record.
+ * Require the exact schema-1 type-specific fields and canonical cue identity. Validate
+ * real observed changes for position, health, status, cooldown, lifecycle, or visible
+ * body cues, and require a done flag for episode_ended. Throw TypeError for invalid
+ * payloads or joins. No privileged cause is inferred. The surrounding projection checks
+ * sequence identity; this helper does not rederive every cue from source observations.
+ *
  * @param {Record<string, any>} cue
  * @param {number} ordinal
  * @param {string} transitionId
@@ -4530,7 +4925,15 @@ function normalizePovCue(cue, ordinal, transitionId) {
   });
 }
 
-/** @param {Record<string, any>} value @param {string} label */
+/**
+ * Validate target record value and return its frozen category/public-ID pair.
+ * label names errors. target_action is an integer at least -1,000,000; categories 1
+ * through 10 require a nonempty public ID, while zero and out-of-domain categories
+ * require null. Throw TypeError for invalid fields. Upper action-domain enforcement
+ * belongs to pending/accepted callers; this helper preserves invalid submitted targets.
+ *
+ * @param {Record<string, any>} value @param {string} label
+ */
 function normalizePovTarget(value, label) {
   requireExactKeys(
     value,
@@ -4560,6 +4963,12 @@ function normalizePovTarget(value, label) {
 }
 
 /**
+ * Validate action card value against targetIds, the recipient's 11-category ID axis.
+ * label names errors. Movement/Ultimate integers may be invalid submitted categories
+ * but cannot be below -1,000,000; in-domain target IDs must equal their axis entry.
+ * Return a frozen card with target and summary, or throw TypeError. Accepted action
+ * bounds are checked by the result normalizer, not this shared submitted-card helper.
+ *
  * @param {Record<string, any>} value
  * @param {string} label
  * @param {readonly (string | null)[]} targetIds
@@ -4595,6 +5004,13 @@ function normalizePovActionCard(value, label, targetIds) {
 }
 
 /**
+ * Validate recorded action result value for selfId using targetIds.
+ * Return a frozen own-actor row with submitted/accepted cards and rejection truth.
+ * Accepted categories must fit 9/11/2; submitted domain flag, movement acceptance, and
+ * combat result must agree with the recorded rejection flags and canonical no-op.
+ * Throw TypeError for invalid fields or contradictions. This checks the reported
+ * acceptance relationships; it does not run a transition.
+ *
  * @param {Record<string, any>} value
  * @param {readonly (string | null)[]} targetIds
  * @param {string} selfId
@@ -4673,6 +5089,14 @@ function normalizePovActionResult(value, targetIds, selfId) {
 }
 
 /**
+ * Validate rawHud against selfActor, mask, visibleBodies, and enclosing frame.
+ * Require the recipient identity, joint_turn/scripted scope, all 9 movement and 11
+ * candidate rows with exact mask values, and public target IDs aligned with self and
+ * visible observation rows. Pending lane/origin/mask fields must agree. Any latest
+ * result must enter the enclosing frame and belong to this recipient.
+ * Return a frozen HUD with pending action, optional latest result, legalities, and
+ * diagnostics, or throw TypeError. Axis-only target IDs do not authorize body geometry.
+ *
  * @param {Record<string, any>} rawHud
  * @param {Readonly<Record<string, any>>} selfActor
  * @param {Readonly<Record<string, any>>} mask
@@ -4895,8 +5319,14 @@ function normalizePovHud(rawHud, selfActor, mask, visibleBodies, frame) {
 }
 
 /**
- * Convert the already recipient-sliced POV projection into the common visual
- * shell without assigning global identities to visible observation rows.
+ * Validate recipient-sliced projection against frame and build its display shell.
+ * Require exact NoSharedObs V1 roots, matching episode/frame/recipient identity,
+ * ordered unique visible-body and spawn keys, two team-wave rows, and a coherent action
+ * mask. Incoming cues are absent only at frame zero and otherwise join the canonical
+ * recipient transition. Return {projection, scene, eventBatch}; owned records are frozen,
+ * and eventBatch is null initially. The display shell contains self plus observed bodies,
+ * empty aura/range/observer arrays, and no selected legality or pending route.
+ * Throw TypeError for invalid fields or joins. Never derive POV by filtering Oracle.
  *
  * @param {Record<string, any>} projection
  * @param {Record<string, any>} frame
@@ -5106,10 +5536,14 @@ function normalizePovProjection(projection, frame) {
 }
 
 /**
- * Normalize an audience-owned projection for a non-live presentation adapter.
- * This intentionally accepts only the identity/join fields consumed by the
- * strict projection normalizers; replay adapters never fabricate live
- * scenario, recording, or presentation-control authority.
+ * Validate an audience-owned projection adapter value for live or replay reuse.
+ * Accept only researcher_live_debugger or actor_pov_live_debugger adapter shapes with
+ * canonical episode/frame identity, nonnegative indices/ticks, matching incoming
+ * identity, projection, and the adapter HUD field. Return a frozen {projection, scene,
+ * eventBatch}; eventBatch is null at frame zero. The scene helpers validate their
+ * owned content. Throw TypeError for a bad envelope or projection.
+ * This deliberately omits live scenario, recording, and command-control authority.
+ * SharedObs uses the separately joined authorized-presentation path.
  *
  * @param {unknown} value
  * @returns {{projection: Readonly<Record<string, any>>, scene: Readonly<Record<string, any>>, eventBatch: Readonly<Record<string, any>> | null}}
@@ -5172,9 +5606,13 @@ export function normalizeDebuggerAudienceProjectionV2(value) {
 }
 
 /**
- * Normalize the projection-free SharedObs live recipient transport. Battlefield
- * and decision authority arrive only through the separately joined authorized
- * presentation.
+ * Validate the projection-free SharedObs live transport record frame.
+ * Require schema 2, POV mode, nonnegative revision/generation/indices, canonical global
+ * and recipient frame/transition IDs, joint_turn or scripted_playback scope, and
+ * SharedObs controller configuration. Normalize terminal and recording truth.
+ * Return a frozen transport with analysis preset and simulator/transition aliases,
+ * or throw TypeError. It contains no scene or decision projection; those require the
+ * separate authorized-presentation join before rendering.
  *
  * @param {Record<string, any>} frame
  * @returns {Readonly<Record<string, any>>}
@@ -5270,13 +5708,16 @@ function normalizeSharedObsAgentPovLiveFrameV2(frame) {
 }
 
 /**
- * Normalize one validated LiveDebuggerFrameV2 at the API boundary.
- *
- * All downstream browser components consume only `scene` and `event_batch`.
- * The rebuilt audience-specific `projection` remains available for the
- * Technical panel, so no downstream component needs to guess projection
- * aliases, consume raw wire roots, or filter a privileged researcher frame
- * into a POV frame.
+ * Validate one live debugger wire value at the browser API boundary.
+ * Accept schema-2 researcher, NoSharedObs POV, or projection-free SharedObs POV frames.
+ * Require exact audience fields, canonical identities/indices, terminal/recording truth,
+ * and compatible controller information mode. Researcher frames also validate scenario
+ * metadata/menu; projected frames validate scene, event/cue, and HUD joins.
+ * Return a frozen normalized transport with analysis preset and stable timing aliases.
+ * Researcher/NoSharedObs returns scene, event_batch, projection, and HUD; SharedObs
+ * returns only its transport facts and needs the separate authorized-presentation join.
+ * Throw TypeError for invalid fields, unsupported versions, or inconsistent authority.
+ * No network request, command, simulator step, or recording write occurs here.
  *
  * @param {unknown} value
  * @returns {Readonly<Record<string, any>>}
@@ -5470,9 +5911,10 @@ export function normalizeLiveDebuggerFrameV2(value) {
 export const researcherEventTypesV2 = Object.freeze([...RESEARCHER_EVENT_TYPES_V2]);
 
 /**
- * Resolve live scripted authority from the audience-owned envelope. POV
- * deliberately omits researcher scenario metadata and exposes this fact only
- * through its recipient-safe HUD submission scope.
+ * Return whether value declares scripted playback in its audience-owned field.
+ * NoSharedObs POV uses HUD pending_submission_scope; SharedObs uses its top-level scope;
+ * other records use scenario.mode. Non-record input returns false. This is a small
+ * query for already normalized data, not a complete frame validator or permission check.
  *
  * @param {unknown} value
  */
@@ -5492,8 +5934,9 @@ export function liveDebuggerFrameIsScripted(value) {
 }
 
 /**
- * Researcher scenario controls are intentionally absent from recipient POV.
- * This answers only transport authority; it never infers scenario metadata.
+ * Return true when value is a record naming researcher_live_debugger; otherwise false.
+ * Recipient POV does not expose scenario controls. This is only a dispatch check for
+ * already normalized transport and does not validate the complete frame.
  *
  * @param {unknown} value
  */

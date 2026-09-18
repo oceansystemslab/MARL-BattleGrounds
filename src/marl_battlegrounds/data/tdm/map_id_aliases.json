@@ -1,0 +1,422 @@
+{
+  "schema_id": "marl_battlegrounds.tdm_map_id_aliases",
+  "schema_version": 1,
+  "maps": [
+    {
+      "map_id": 0,
+      "current_map_id": 12,
+      "name": "tdm-map-id-0-foxhole-training",
+      "asset_id": "tdm_map_id_0_foxhole_training",
+      "revision": 7,
+      "semantic_digest": "41a2db347837a5b9815050b14c5c6004b7792cc792347e32e43ffb8ac935dc72"
+    },
+    {
+      "map_id": 1,
+      "current_map_id": 13,
+      "name": "tdm-map-id-1-pyramids-of-giza-training",
+      "asset_id": "tdm_map_id_1_pyramids_of_giza_training",
+      "revision": 5,
+      "semantic_digest": "50e80ae09cceb7cf8b58b8cf75a6ba7ead7f3fa9aff83bceaa51f6baa774e163"
+    },
+    {
+      "map_id": 2,
+      "current_map_id": 14,
+      "name": "tdm-map-id-2-crossroads-training",
+      "asset_id": "tdm_map_id_2_crossroads_training",
+      "revision": 2,
+      "semantic_digest": "1710a44d62bfc1aac53fb1de274d56516f4088ae085044457f301a52334046f7"
+    },
+    {
+      "map_id": 3,
+      "current_map_id": 15,
+      "name": "tdm-map-id-3-esmeralda-training",
+      "asset_id": "tdm_map_id_3_esmeralda_training",
+      "revision": 3,
+      "semantic_digest": "41c2b7ada8cee1854e4af4e0a50ebd3d95edca55a2a218588ea1728be49fcdc7"
+    },
+    {
+      "map_id": 4,
+      "current_map_id": 16,
+      "name": "tdm-map-id-4-nimbus-class-v-wing-training",
+      "asset_id": "tdm_map_id_4_nimbus_class_v_wing_training",
+      "revision": 2,
+      "semantic_digest": "2bb91516eb5174b6873bf4c166600cfffbce4b43ea4b54b9197ef3e8ea9ee7a7"
+    },
+    {
+      "map_id": 5,
+      "current_map_id": 17,
+      "name": "tdm-map-id-5-x-wing-starfighter-training",
+      "asset_id": "tdm_map_id_5_x_wing_starfighter_training",
+      "revision": 2,
+      "semantic_digest": "be3be04888f660da692706cf787d32c44fa9b05d6693d6ccae580c214b1a089f"
+    },
+    {
+      "map_id": 6,
+      "current_map_id": 18,
+      "name": "tdm-map-id-6-jaws-training",
+      "asset_id": "tdm_map_id_6_jaws_training",
+      "revision": 2,
+      "semantic_digest": "2c30cd2cf286a335d8a334c8d78e7962d5613ec64723a36aa7dbb44f18d87173"
+    },
+    {
+      "map_id": 7,
+      "current_map_id": 19,
+      "name": "tdm-map-id-7-nzoth-the-corruptor-training",
+      "asset_id": "tdm_map_id_7_nzoth_the_corruptor_training",
+      "revision": 2,
+      "semantic_digest": "d6c02ab015e60892aa0bb67abfb6095826191d14f64ef852b45dbfa4fbe96321"
+    },
+    {
+      "map_id": 8,
+      "current_map_id": 20,
+      "name": "tdm-map-id-8-pillar-play-training",
+      "asset_id": "tdm_map_id_8_pillar_play_training",
+      "revision": 2,
+      "semantic_digest": "eea0f1e81a386a014330afb9dfcdf0668d54ffcc9933e277c29b006c44f35d3a"
+    },
+    {
+      "map_id": 9,
+      "current_map_id": 21,
+      "name": "tdm-map-id-9-krabby-patty-training",
+      "asset_id": "tdm_map_id_9_krabby_patty_training",
+      "revision": 2,
+      "semantic_digest": "363a2a3b08ba889616880ef239ca1b2db656f0732f2309787db84a0e7a152f19"
+    },
+    {
+      "map_id": 10,
+      "current_map_id": 22,
+      "name": "tdm-map-id-10-kawaii-training",
+      "asset_id": "tdm_map_id_10_kawaii_training",
+      "revision": 4,
+      "semantic_digest": "18a4ad37be215802ba59372c535722bee88ce0e9387358f92cb699e47de115e6"
+    },
+    {
+      "map_id": 11,
+      "current_map_id": 23,
+      "name": "tdm_map_id_11_sea_turtle_training",
+      "asset_id": "tdm_map_id_11_sea_turtle_training",
+      "revision": 2,
+      "semantic_digest": "983454a929c9f000a9291cbcd895d9036a82b33d862df3a6921f87c05ad34f9a"
+    },
+    {
+      "map_id": 12,
+      "current_map_id": 24,
+      "name": "tdm_map_id_12_greyhound_training",
+      "asset_id": "tdm_map_id_12_greyhound_training",
+      "revision": 2,
+      "semantic_digest": "78e604d3bfd5c44c09abf2a49e7a5fce6c27456feb4447eb868ea429b99760ad"
+    },
+    {
+      "map_id": 13,
+      "current_map_id": 25,
+      "name": "tdm_map_id_13_crows_nest_training",
+      "asset_id": "tdm_map_id_13_crows_nest_training",
+      "revision": 3,
+      "semantic_digest": "2a4e49f7dd08cb796db9d57010d08f0402768dc29c311b161ea5e9b358f3f30d"
+    },
+    {
+      "map_id": 14,
+      "current_map_id": 26,
+      "name": "tdm_map_id_14_candlesticks_training",
+      "asset_id": "tdm_map_id_14_candlesticks_training",
+      "revision": 1,
+      "semantic_digest": "7515598f7ad95557818feab292104e3e08729d4f7766d0e6cbb6d1f7d53c773a"
+    },
+    {
+      "map_id": 15,
+      "current_map_id": 27,
+      "name": "tdm_map_id_15_stairway_to_heaven_training",
+      "asset_id": "tdm_map_id_15_stairway_to_heaven_training",
+      "revision": 3,
+      "semantic_digest": "e521c0e98ce651e83b79105a393c06ccb11cfcc13fcee685c60d89496c69c1f4"
+    },
+    {
+      "map_id": 16,
+      "current_map_id": 28,
+      "name": "tdm_map_id_16_red_dot_sight_training",
+      "asset_id": "tdm_map_id_16_red_dot_sight_training",
+      "revision": 2,
+      "semantic_digest": "4a331ddce3c85a833c1c2b44e85c7d44b484e4aea5480a807f37d7fa1d7207c1"
+    },
+    {
+      "map_id": 17,
+      "current_map_id": 47,
+      "name": "tdm_map_id_17_teutoburg_forest_test",
+      "asset_id": "tdm_map_id_17_teutoburg_forest_test",
+      "revision": 3,
+      "semantic_digest": "d1f23693d555e4e4408c96d6cc892c07eb548ba97d4933c1a73a3911a487b702"
+    },
+    {
+      "map_id": 18,
+      "current_map_id": 29,
+      "name": "tdm_map_id_18_portal_room_training",
+      "asset_id": "tdm_map_id_18_portal_room_training",
+      "revision": 3,
+      "semantic_digest": "a847275557fc7ecdf7b6a9d0b5e1721964a9732c5befe45ee58b2c959ae2fab6"
+    },
+    {
+      "map_id": 19,
+      "current_map_id": 30,
+      "name": "tdm_map_id_19_mars_training",
+      "asset_id": "tdm_map_id_19_mars_training",
+      "revision": 2,
+      "semantic_digest": "f924faaa34cb1742081f669c729e0a497cd64df749aaf24f3f709355721bd72b"
+    },
+    {
+      "map_id": 20,
+      "current_map_id": 48,
+      "name": "tdm_map_id_20_three_body_problem_test",
+      "asset_id": "tdm_map_id_20_three_body_problem_test",
+      "revision": 3,
+      "semantic_digest": "902b2a7dee57667381639dbb78c90d7bf8c2ebf73bdc612b7937c365b93e8824"
+    },
+    {
+      "map_id": 21,
+      "current_map_id": 31,
+      "name": "tdm_map_id_21_chinese_dragon_training",
+      "asset_id": "tdm_map_id_21_chinese_dragon_training",
+      "revision": 1,
+      "semantic_digest": "8007877a03d223abc08db71322359c72351c044df6643660af80c3db085fda1e"
+    },
+    {
+      "map_id": 22,
+      "current_map_id": 32,
+      "name": "tdm_map_id_22_predator_training",
+      "asset_id": "tdm_map_id_22_predator_training",
+      "revision": 3,
+      "semantic_digest": "3d370ece245e4ae3464d14bfa036c3ee00d46966944105d1f254712abd19c61d"
+    },
+    {
+      "map_id": 23,
+      "current_map_id": 33,
+      "name": "tdm_map_id_23_darkspear_training",
+      "asset_id": "tdm_map_id_23_darkspear_training",
+      "revision": 4,
+      "semantic_digest": "8cf2fc8fbfd8c436e539e97d777428a404606c0d73d701b2fc65087fabad2473"
+    },
+    {
+      "map_id": 24,
+      "current_map_id": 42,
+      "name": "tdm_map_id_24_cheshire_cat_validation",
+      "asset_id": "tdm_map_id_24_cheshire_cat_validation",
+      "revision": 2,
+      "semantic_digest": "5d8f2e729708716d3a17012db10a9eb6cd3309d2ee9d45eab6aa436d281e185c"
+    },
+    {
+      "map_id": 25,
+      "current_map_id": 49,
+      "name": "tdm_map_id_25_space_invader_test",
+      "asset_id": "tdm_map_id_25_space_invader_test",
+      "revision": 3,
+      "semantic_digest": "372d05df94fae2e6282ee2f26d7430335f822ae2155f657f474cbd2d14f92b72"
+    },
+    {
+      "map_id": 26,
+      "current_map_id": 34,
+      "name": "tdm_map_id_26_infinity_training",
+      "asset_id": "tdm_map_id_26_infinity_training",
+      "revision": 3,
+      "semantic_digest": "14fb6ae68e73f1e540726e40b5323716cfb8a6571246f638256f76815793e2c0"
+    },
+    {
+      "map_id": 27,
+      "current_map_id": 35,
+      "name": "tdm_map_id_27_binary_training",
+      "asset_id": "tdm_map_id_27_binary_training",
+      "revision": 2,
+      "semantic_digest": "02a029a279d4cb72a5db3dbd04d9e5bca357b035c4f58eca277f2f89b46566b8"
+    },
+    {
+      "map_id": 28,
+      "current_map_id": 36,
+      "name": "tdm_map_id_28_chokepoint_training",
+      "asset_id": "tdm_map_id_28_chokepoint_training",
+      "revision": 2,
+      "semantic_digest": "271a832ada6121b0ba7d08adc0473d75030294f29c77c8c687d7eed0a3c7207b"
+    },
+    {
+      "map_id": 29,
+      "current_map_id": 43,
+      "name": "tdm_map_id_29_twin_stars_validation",
+      "asset_id": "tdm_map_id_29_twin_stars_validation",
+      "revision": 2,
+      "semantic_digest": "b6280269e07009e272d88ff8657a682eb4af9b139465e029b93ef8f69c4a79bf"
+    },
+    {
+      "map_id": 30,
+      "current_map_id": 44,
+      "name": "tdm_map_id_30_mosh_pit_validation",
+      "asset_id": "tdm_map_id_30_mosh_pit_validation",
+      "revision": 2,
+      "semantic_digest": "2a14b8cf75fd0c5ebd28e47e4f98c4b901a034831efd738fa7b16012c0ca6e34"
+    },
+    {
+      "map_id": 31,
+      "current_map_id": 37,
+      "name": "tdm_map_id_31_subway_training",
+      "asset_id": "tdm_map_id_31_subway_training",
+      "revision": 1,
+      "semantic_digest": "466689ea3067de8ce73414fbe1e4a7bf08c99c0c464fee6185fc6f6532ce56ce"
+    },
+    {
+      "map_id": 32,
+      "current_map_id": 45,
+      "name": "tdm_map_id_32_split_push_validation",
+      "asset_id": "tdm_map_id_32_split_push_validation",
+      "revision": 3,
+      "semantic_digest": "5b61036ad6237db8d5f2d31aacac825cb3c3ac262c6b785a93e6f1676169c03e"
+    },
+    {
+      "map_id": 33,
+      "current_map_id": 38,
+      "name": "tdm_map_id_33_blades_edge_training",
+      "asset_id": "tdm_map_id_33_blades_edge_training",
+      "revision": 2,
+      "semantic_digest": "b7d0fdfaad56fa7f677b9bb7315cbd384531c60cc52b621207a18ee378c156f9"
+    },
+    {
+      "map_id": 34,
+      "current_map_id": 39,
+      "name": "tdm_map_id_34_ufo_training",
+      "asset_id": "tdm_map_id_34_ufo_training",
+      "revision": 3,
+      "semantic_digest": "8137910a6c47de2ba0fab073c37baae8ca60cfa7955e6147330f42606b89bb21"
+    },
+    {
+      "map_id": 35,
+      "current_map_id": 50,
+      "name": "tdm_map_id_35_jamylas_grove_test",
+      "asset_id": "tdm_map_id_35_jamylas_grove_test",
+      "revision": 2,
+      "semantic_digest": "009b7b4b3a6aac352392ea1daf21e7255a19d9c4b7efe0e5cffcdfad91e7e1b3"
+    },
+    {
+      "map_id": 36,
+      "current_map_id": 40,
+      "name": "tdm_map_id_36_warhall_training",
+      "asset_id": "tdm_map_id_36_warhall_training",
+      "revision": 2,
+      "semantic_digest": "0c46cb6a9c80b4d9197a1063c900a32205063968e4bde4f92f06c1060ef287e4"
+    },
+    {
+      "map_id": 37,
+      "current_map_id": 46,
+      "name": "tdm_map_id_37_wall_e_validation",
+      "asset_id": "tdm_map_id_37_wall_e_validation",
+      "revision": 3,
+      "semantic_digest": "ea0746bd3d3440568a1f79e528e494679e298232b358ee08882a922b45e100f0"
+    },
+    {
+      "map_id": 38,
+      "current_map_id": 41,
+      "name": "tdm_map_id_38_sai_training",
+      "asset_id": "tdm_map_id_38_sai_training",
+      "revision": 1,
+      "semantic_digest": "6811c0b3dbceeff0469de8ee5d1e9250f0955313f7492c612fafed340a7ca37a"
+    },
+    {
+      "map_id": 39,
+      "current_map_id": 51,
+      "name": "tdm_map_id_39_king_crab_test",
+      "asset_id": "tdm_map_id_39_king_crab_test",
+      "revision": 2,
+      "semantic_digest": "6cdd5d71bafc63519e12cd297cd6b1406ee4db38f97ca90fd862c6b3e561fd22"
+    },
+    {
+      "map_id": 40,
+      "current_map_id": 0,
+      "name": "tdm_map_id_40_curriculum_map_0_training",
+      "asset_id": "tdm_map_id_40_curriculum_map_0_training",
+      "revision": 1,
+      "semantic_digest": "637a24eb44986ffb9cc54b97e911c089c7747a49dc1beafaf92ae9fe99f0100d"
+    },
+    {
+      "map_id": 41,
+      "current_map_id": 1,
+      "name": "tdm_map_id_41_curriculum_map_1_training",
+      "asset_id": "tdm_map_id_41_curriculum_map_1_training",
+      "revision": 1,
+      "semantic_digest": "6b288fe076b8973bf030bdd6bd5faa127b40d6f513522f35737adab23abdbddb"
+    },
+    {
+      "map_id": 42,
+      "current_map_id": 2,
+      "name": "tdm_map_id_42_curriculum_map_2_training",
+      "asset_id": "tdm_map_id_42_curriculum_map_2_training",
+      "revision": 1,
+      "semantic_digest": "65b0882ecaf5121c3ca1e22677a4f563eec4a59db1580d1238e20fb7014bf80a"
+    },
+    {
+      "map_id": 43,
+      "current_map_id": 3,
+      "name": "tdm_map_id_43_curriculum_map_3_training",
+      "asset_id": "tdm_map_id_43_curriculum_map_3_training",
+      "revision": 1,
+      "semantic_digest": "5b4535d6a435efabc8e42b0f8caed1b2585d19f35b7a753ac1539262741ebf86"
+    },
+    {
+      "map_id": 44,
+      "current_map_id": 4,
+      "name": "tdm_map_id_44_curriculum_map_4_training",
+      "asset_id": "tdm_map_id_44_curriculum_map_4_training",
+      "revision": 1,
+      "semantic_digest": "79bb4d6f2cfbbe8bddde576981c09db81cc5a0be2d1c1966468dbc27481e2fa5"
+    },
+    {
+      "map_id": 45,
+      "current_map_id": 5,
+      "name": "tdm_map_id_45_curriculum_map_5_training",
+      "asset_id": "tdm_map_id_45_curriculum_map_5_training",
+      "revision": 1,
+      "semantic_digest": "d5c7d68b831b5a0512d746b5fb0b519bae5d08e1914af3daf7a9c97c6623b279"
+    },
+    {
+      "map_id": 46,
+      "current_map_id": 6,
+      "name": "tdm_map_id_46_curriculum_map_6_training",
+      "asset_id": "tdm_map_id_46_curriculum_map_6_training",
+      "revision": 1,
+      "semantic_digest": "af5db276d22d0e078c91091fd41e2e93604c39ed3e18253f3226469cb634eaac"
+    },
+    {
+      "map_id": 47,
+      "current_map_id": 7,
+      "name": "tdm_map_id_47_curriculum_map_7_training",
+      "asset_id": "tdm_map_id_47_curriculum_map_7_training",
+      "revision": 1,
+      "semantic_digest": "9e1d3404321539536b931021ba2df9d749a15bd7c4cc9f261b977f2378fdd98c"
+    },
+    {
+      "map_id": 48,
+      "current_map_id": 8,
+      "name": "tdm_map_id_48_curriculum_map_8_training",
+      "asset_id": "tdm_map_id_48_curriculum_map_8_training",
+      "revision": 1,
+      "semantic_digest": "c6979e4c7efc9bee4f3585c35f5226d99028860f149c4823622a79488250e8cc"
+    },
+    {
+      "map_id": 49,
+      "current_map_id": 9,
+      "name": "tdm_map_id_49_curriculum_map_9_training",
+      "asset_id": "tdm_map_id_49_curriculum_map_9_training",
+      "revision": 1,
+      "semantic_digest": "ee4864a9d088e4b655215be334709137122dfe1cd8f58d4921272dad7cda8eb9"
+    },
+    {
+      "map_id": 50,
+      "current_map_id": 10,
+      "name": "tdm_map_id_50_curriculum_map_10_training",
+      "asset_id": "tdm_map_id_50_curriculum_map_10_training",
+      "revision": 1,
+      "semantic_digest": "10cacb32954c712e23bf1916ecd1f1dbfc072b734a0432ed38ce1931df5b6019"
+    },
+    {
+      "map_id": 51,
+      "current_map_id": 11,
+      "name": "tdm_map_id_51_curriculum_map_11_training",
+      "asset_id": "tdm_map_id_51_curriculum_map_11_training",
+      "revision": 1,
+      "semantic_digest": "06cfe37e72855ec0cfbb65f3542d8b2b6e30666ec18038ff6f3f01f8cfe36431"
+    }
+  ]
+}

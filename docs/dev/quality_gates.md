@@ -1,99 +1,104 @@
 # Quality Gates
 
-Use the smallest check that can disprove the change being made. A green command
-is not rerun until a later edit creates a plausible impact path to it.
+Use focused checks while editing and complete gates when qualifying a finished
+candidate. Each check must answer a concrete question: does the behavior work,
+do callers remain compatible, is the information boundary intact, or is the GPU
+workflow efficient? A passing syntax check proves none of the other results.
 
 ## Lean validation contract
 
-Excellence and efficiency are complementary requirements. Every review, test,
-or audit must answer a distinct question that could change an engineering
-decision. Do not add ceremony merely to increase the volume of evidence.
+Pair each implementation checkpoint with its nearest correctness proof, affected
+cost measurements and [documentation review](documentation_standard.md). Avoid
+rerunning unchanged evidence unless a later edit can invalidate it. Follow the
+active packet's review requirements; M8 requires two independent component
+reviews and a separate complete-workflow review. Reviewers inspect fresh source
+and raw evidence before reading each other's verdicts.
 
-- Define each checkpoint by one observable user or system outcome.
-- During implementation, run one focused regression and one adjacent
-  compatibility check. Run the literal CI gate once, after the candidate is
-  frozen.
-- Use one independent reviewer at the checkpoint boundary. Do not commission
-  overlapping audits, repeat hash freezes, or rerun unchanged evidence.
-- Stop a broad gate at its first actionable failure when possible. Diagnose and
-  repair that failure before spending time on the remainder.
-- Do not call a checkpoint complete until the exact applicable CI commands pass
-  on the candidate bytes. A candidate push may exercise hosted CI, but it is
-  evidence collection—not acceptance—until every required aggregate is green.
-- Prefer a smaller proof with a precise failure signal over a larger proof that
-  obscures failures or consumes time without covering a new risk.
-- Treat every test as an ongoing maintenance and runtime liability as well as
-  an asset. If it has no serious purpose, duplicates cheaper evidence, or its
-  marginal protection does not justify its cost, delete it. Historical effort,
-  incidental uniqueness, and fear of reducing a test count are not reasons to
-  keep it.
+Check all four North Stars:
 
-Evaluate every product checkpoint against the four North Stars, briefly and
-concretely:
+- **Researcher Usability:** the complete public task has clear names, sensible
+  defaults, accurate hover text and no unnecessary setup.
+- **Sample Efficiency:** actors receive their permitted information at the right
+  decision time, without avoidable input or action ambiguity. Actual learning
+  curves are still needed to prove sample efficiency.
+- **Tactical Depth:** supported choices can express meaningful team behavior.
+  A successful scripted example does not prove that a policy learned it.
+- **Software Engineering:** behavior, ownership, compatibility and evidence are
+  clear. The implementation avoids unnecessary work and storage.
 
-- **Researcher Usability:** can a researcher understand and complete the public
-  task without misleading controls or hidden prerequisites?
-- **Sample Efficiency:** does the policy receive the necessary authorized,
-  same-epoch information without avoidable ambiguity or noise?
-- **Tactical Depth:** are all advertised and unmasked decisions meaningful,
-  reachable, and strategically distinct?
-- **Software Engineering:** is the result correct, maintainable, reproducible,
-  and validated with the least costly sufficient evidence?
-
-Efficiency is part of the Software Engineering North Star. Duplicate proof and
-unbounded serialized test time are process defects, not signs of rigor.
+GPU execution with JAX is the performance target. CPU tests check correctness,
+compatibility and contributor CI; their elapsed times guide shard balancing,
+not simulator speed claims. GPU cost evidence separates setup, compilation and
+synchronized warmed execution and includes affected memory, transfer, recording
+and serialization costs. Use the same inputs and retained outputs for a fair
+comparison. Future GPU environment batches are 32, 64, 128, 512 and 1024 only;
+standalone scalar and odd-batch edge checks remain on CPU. Follow the shared
+[GPU efficiency protocol](gpu_sanity.md#gpu-efficiency-protocol), including its
+required alignment of older GPU test routes before their next run.
+Report absolute numbers as well as changes from the reference. A speedup alone
+does not resolve a known material waste of computation, memory, transfers or
+storage; use proportionate review and measurements to resolve it before acceptance.
+The user's 2026-09-16 clarification rejects automatic multi-hour GPU campaigns
+at each step. Reuse unaffected evidence, choose the smallest useful workload and
+profile only when a concrete unresolved cost warrants it. The five GPU sizes are
+allowed choices, not a compulsory matrix for every packet. Separate commit and
+release gates remain required.
+Every future closeout must give an honest interpretation: what the tests and
+absolute numbers establish, practical strengths and concerns, missing evidence
+and the next useful check. Counts, PASS labels and percentage changes alone are
+not an assessment of the project's goals.
 
 ## Mandatory Codex candidate qualification
 
-Immediately before every Codex-authored commit, stage the exact final
-candidate and run:
+Do not commit while implementing or reviewing an unfinished packet. When a commit
+is explicitly authorized, finish all mutating fixes, stage exactly the intended
+candidate and leave no tracked unstaged or nonignored untracked candidate files.
+Private milestone documents remain ignored and unstaged. Then run:
 
 ```bash
 scripts/dev/check_before_commit.sh
 ```
 
-The wrapper requires a fully staged candidate with no tracked unstaged changes
-or nonignored untracked candidate files. It fingerprints those bytes, runs the
-complete CPU Python and frontend/browser inventories, and rejects any candidate
-mutation during validation. Any byte change after a pass invalidates that pass
-and requires the complete command to be run again before committing.
+This wrapper fingerprints the frozen candidate and runs the full Python and
+frontend gates. It rejects missing prerequisites, failures and candidate changes.
+Any later byte change invalidates that pass. Run the full gate again before a
+commit; never substitute a partial check or `--no-verify`.
 
-Dependency installation remains a separate preparation step. The validation
-scripts use the existing Python sharder and browser profile manifest as their
-only test-inventory authorities; the wrapper does not define another scheduler
-or duplicate test membership. Both ordinary gates force the CPU backend so a
-GPU-equipped workstation cannot accidentally execute broad contributor tests
-through CUDA. Both canonical gates reject deprecated platform selectors and JIT
-disablement that could conflict with CPU selection or replace compiled proofs
-with eager execution. The Python gate also rejects ambient pytest options that
-could omit tests. The frontend gate forces Playwright's CI-only checks and rejects
-ambient selector or capture variables that could reduce or alter the executed
-browser inventory.
-
-Before Codex pushes a commit, opens a PR, merges, or qualifies a release, the
-exact clean commit must also pass the maintainer-only local GPU gate:
+Before pushing, opening a PR, merging or qualifying a release, the exact clean
+commit must also pass:
 
 ```bash
 scripts/dev/check_gpu.sh
 ```
 
-Ordinary contributors do not need an NVIDIA GPU. `--allow-dirty` is useful for
-diagnosis but is explicitly not release-qualification evidence. A local pass
-is strong CI-parity evidence, not a guarantee that GitHub-hosted runners or the
-service itself will succeed; after publication, every required hosted aggregate
-must still be checked.
+`--allow-dirty` is a diagnostic route, not clean-commit qualification. Ordinary
+contributors need no NVIDIA GPU. Hosted aggregate checks must still pass after
+publication; a local pass cannot guarantee a remote service's result.
 
 ## Evidence economics and CI runtime budget
 
-The required push/PR pipeline initially targets an approximately six-minute
-repository-controlled critical path, measured from the first hosted job's
-`started_at` timestamp through the later stable aggregate's `completed_at`
-timestamp. GitHub queue delay before runner start is external and reported
-separately. Sharding is explicitly permitted—and expected—when it preserves an
-exact, non-overlapping test inventory. Aggregate jobs retain the stable
-required-check names; twenty implementation jobs may run concurrently under
-the current GitHub-hosted account limit. Local validation may use the developer
-workstation's additional CPU concurrency.
+Keep twelve nonempty Python shards and eight nonempty browser profiles. Their
+sole assignment authorities are [pytest_shard.py](../../scripts/dev/pytest_shard.py)
+and [ci-shards.json](../../web/visual_debugger/e2e/ci-shards.json). Do not copy
+membership into another scheduler.
+
+Every test addition, removal, rename, move, split or parametrization change must
+include an exact-cover audit and review of measured per-shard/profile times.
+Preserve deterministic assignment, complete disjoint coverage, parameter-family
+atomicity, fixture affinity and browser file/serial order. Rebalance measured
+intact units first. Split a proven oversized file only into coherent groups,
+without changing or weakening its assertions.
+
+The current hosted target is about six minutes across the repository-controlled
+critical path at the twenty-job ceiling. Measure from the first job start to the
+last required aggregate completion; report queue delay separately. If safe
+balancing cannot meet that target, document the evidence and raise it by exactly
+one minute. Never omit tests, duplicate them or cancel unchanged valid work to
+meet a timing target. Cancel only when a concrete correction is ready for rerun.
+
+The following historical timing and CI records explain the scheduler's evolution.
+Their test counts and individual distributions are historical, not the current
+collection. Current candidate qualification must collect and measure again.
 
 CI jobs deliberately configure no explicit job timeout. Hosted runner setup,
 dependency installation, cache handling, and teardown are variable and count
@@ -149,274 +154,149 @@ no further safe redistribution exists. Never omit tests, duplicate execution,
 weaken assertions, or cancel a valid run merely because it crossed the target.
 Cancel only when a concrete corrective change is ready to apply before rerun.
 
+
 ## Authoritative Replay and DevClient integration baseline
 
-Commit `82077d275caef8bc3d08322e6c9f55c8d5242aec` is the accepted Replay Viewer
-and Combat Debugger product baseline beneath the DevClient. A later integration
-into `main` must keep this commit as an ancestor and run the Replay/DevClient
-presentation, control, Oracle/Agent parity, privacy, and real-browser gates
-against the integrated tree. Conflict resolution must not replace these product
-bytes wholesale or silently restore older behavior from another branch.
+Commit `82077d275caef8bc3d08322e6c9f55c8d5242aec` is the accepted product baseline
+beneath DevClient. Keep it as an ancestor during integration and verify that its
+supported presentation, control, audience and replay behavior survives. This is
+a regression guard, not a ban on approved later changes. Ancestry alone is not a
+behavioral test.
 
-This is a regression guard, not a permanent feature freeze. Changes explicitly
-requested by the user, or deliberate additions required by later `main`
-features, remain allowed. Any intentional departure from the baseline behavior
-must be identified, reviewed, tested, and approved; ancestry alone is not
-evidence that the accepted behavior survived the merge.
+Place tests at the lowest layer that can prove the requirement:
 
-Put each assertion at the cheapest layer that can genuinely disprove the risk:
+| Layer | Responsibility |
+| --- | --- |
+| Python | Simulator trajectories, numerical wrappers, information boundaries, schemas, recording and scientific calculations |
+| Node unit tests | Normalization, planning, display inputs, formatting, controls and DOM-independent accessibility |
+| Playwright | Real focus/hit testing, browser geometry, complete client/server flows, authority clearing, recovery and selected visual baselines |
+| Local GPU | Focused compiled JAX correctness plus separately declared workflow cost measurements |
 
-- Python owns simulator, trajectory, replay, schema, and scientific semantics.
-- Node unit tests own deterministic normalization, planning, rendering inputs,
-  formatting, control state, and DOM-independent accessibility contracts.
-- Playwright owns only facts that require a real browser or real browser/server
-  boundary: native focus, hit testing, responsive geometry, authority clearing,
-  public causal flows, privacy across rendered surfaces, exact-once recovery,
-  and a small representative visual baseline.
-- Local maintainer GPU qualification owns CUDA backend discovery plus focused
-  compiled JAX compatibility. The complete CPU suite is never rerun on the GPU
-  as part of this gate, and no full GPU regression is required.
+Do not duplicate an exhaustive numerical cross-product in browser tests. Each
+browser case must protect behavior that needs a real browser. The GPU correctness
+gate does not run the complete CPU suite again.
 
-Do not keep a browser test merely because one incidental CSS value or catalog
-member is unique. Exhaustive mechanic cross-products, repeated viewport tours,
-wall-clock animation thresholds, and raw-only synthetic main-path fixtures are
-not required-gate evidence when a lower layer proves the contract more directly.
-A browser case must protect a named North Star, require browser-native behavior,
-and justify its process/setup cost. Otherwise move it down or delete it.
-
-Required gates fail fast on the first actionable test failure. Missing-element
-actions use a short timeout instead of consuming the whole test timeout. Green
-coverage remains complete because fail-fast changes only red-run work, not the
-test inventory executed on a passing candidate.
+Keep Playwright `timeout: 0` for whole tests. Individual actions, assertions,
+requests and startup/cleanup retain bounded waits so failures identify the stuck
+operation. Canonical gates stop a red shard at its first failure; successful
+runs still execute the complete inventory.
 
 ## Development selection
 
+Choose the proof from the changed contract and its callers. Preserve generic
+custom research even when official eligibility is stricter. For example,
 [Amendment A25](../design/specification_amendments.md#a25-sharedobs-only-canonical-benchmark-execution)
-gives official benchmark and controlled-scenario evidence one actor-information
-qualification gate. The episode must record mode `shared_obs`, actor projection
-`base-observation-plus-authorized-sensor-source-bank@1`, and an availability
-matrix on every replay frame exactly equal to the configured-active, same-team,
-off-diagonal matrix derived from the frozen roster. Expected availability does
-not depend on living state, health, visibility, score, controller, or frame
-index; configured-but-dead sources remain authorized while their ordinary
-sensor material remains lifecycle-zeroed.
+requires official SharedObs availability to equal the configured active,
+same-team, off-diagonal roster matrix in every frame. Dead configured teammates
+remain authorized sources, with lifecycle-zeroed sensor material.
 
-`build_scenario_evaluation_record_v2()` and
-`validate_official_scenario_evaluation_record_v2()` must both reach the same
-replay-level gate. Required hostile proofs include a stable all-false or
-partially disabled multi-agent topology and a canonical frame zero followed by
-one changed permitted cell; generic validation must still accept each
-structurally permitted SharedObs subset while official validation rejects it
-with the offending frame index. A 1v1 all-false matrix must remain officially
-valid when it exactly matches the roster. Generic NoSharedObs validation and
-its tests remain compatibility protection, not official-baseline
-qualification. Random is likewise a diagnostic/quality-control policy, not an
-official baseline.
+The scenario builder and validator must reach one replay-level authority.
+Prove rejection of forbidden modes/projections, stable unauthorized subsets and
+later-frame changes, with the offending frame identified. A 1v1 all-false matrix
+is valid when it exactly matches the roster. Generic allowed subsets and
+NoSharedObs remain supported custom/historical paths, not official evidence.
+Use recorded projection versions; do not reinterpret old feature columns.
 
 ### Reactive controller replacement gates
 
-[Amendment A30](../design/specification_amendments.md#a30-reactive-tdm-and-specialist-scenario-controllers)
-and [A34](../design/specification_amendments.md#a34-reactive-tdm-alpha-and-beta)
-require one general Reactive TDM ALPHA implementation and one BETA variant,
-with no executable legacy TDM, MRP or standalone Scenario 3 aliases. Generic
-SharedObs/NoSharedObs, exact masks, RNG-sensitive rollout, capture, and historical
-replay proof must survive removal of the old scorer/profile/trace tests.
+The supported controllers are Reactive TDM ALPHA and BETA under the recorded
+versions of [A30](../design/specification_amendments.md#a30-reactive-tdm-and-specialist-scenario-controllers),
+[A34](../design/specification_amendments.md#a34-reactive-tdm-alpha-and-beta) and
+[A35](../design/specification_amendments.md#a35-reactive-tdm-wall-steering).
+Older version-specific witness results remain historical evidence. Use the
+current implementation and descriptors when qualifying a new candidate.
 
-Reactive TDM must prove every class boundary and tie, peaceful Priest spacing
-independent of healing, unchanged enemy-visible Mage/Rogue target intentions,
-and unchanged retreat/Stay and combat choices. The approach refinement follows
-[A35](../design/specification_amendments.md#a35-reactive-tdm-wall-steering):
-test mirrored vertical faces, boundary fallback, corner release, slowed speed,
-mask restrictions and actual movement, while preserving scenario witnesses.
-Residual diagnostic congestion must be disclosed, not labelled deadlock-free.
-Shared-controller
-proof must retain independent legal combat, segment-based body screening,
-prey/self exclusion, tangency, overlap-reducing escape and deterministic detours.
-Actual stationary- and moving-blocker trajectories verify reactivity rather
-than promise an unbeatable pursuer. No proof silently qualifies an
-official scenario or changes a saved physical setup.
+Check each class's choices, tie handling, exact action masks, permitted inputs
+and RNG use. BETA preserves non-Rogue ALPHA behavior and uses its declared
+observed-class pursuit priority; generic behavior must not branch on scenario ID.
+Test wall steering, boundary/corner behavior, slowed movement, body screening,
+prey/self exclusion, overlap escape and stationary/moving blockers through real
+trajectories. Scenario 5's accepted glancing contact includes the 45-degree
+boundary and geometry-tolerance cases. Disclose remaining congestion; these
+checks do not prove unbeatable pursuit or deadlock-free navigation.
 
-[Amendment A31](../design/specification_amendments.md#a31-scenario-5-priest-pursuit-controller)
-and [A34](../design/specification_amendments.md#a34-reactive-tdm-alpha-and-beta)
-require BETA proof: non-Rogue action parity with ALPHA; observed
-Priest-first, otherwise Mage, otherwise Hunter pursuit with HP/slot selection
-within class; ordinary ALPHA movement when no priority class is observed alive;
-independent legal combat within Basic radius; and hidden/unavailable information
-noninterference. Retire obsolete standalone Scenario 3 tests; retain meaningful
-geometry/mask/information proof and physical fixtures. Old strict-steering
-measurements remain historical evidence, not an executable policy copy.
-
-Scenario 5's glancing-contact proof must cover the inclusive 45-degree threshold
-at first contact, head-on rejection at full/slowed/tiny strides, static-world
-clipping, multiple blockers, walls, and initial overlap on both sides of the
-geometry tolerance. Pair local admission checks with actual stationary- and
-moving-blocker simulator trajectories: admitted shoulder contact must resolve
-through ordinary collision handling and produce useful progress past the
-defender. Inspect repeated stalls/reversals; a moving defender may re-block.
-Do not infer guaranteed navigation or official qualification from these probes.
-
-Cover all nine general controller pairs plus the three Team A choices against
-the single shared specialist under SharedObs. Under NoSharedObs, cover the
-four Manual/Random pairs and reject reactive choices. The specialist on Team A
-and the retired scenario_3 live literal are also rejected.
-Service/HTTP/browser tests must preserve exact reset, authoritative selector
-confirmation, healthy nonfatal rejection, and one same-epoch bank/joint action/
-simulator step. Record installed identities accurately: V5 only for Scenario 5
-combinations, binding BETA behavior v4 without changing the V5 payload structure;
-unchanged V4 structure for other surviving combinations, with ALPHA behavior v2.
-Exercise descriptor/version/source
-digest binding and saved-recording reopen. Retain fixed-frame diagnostic payloads
-and readable historical recordings. Both recording recognition paths must be exercised.
-
-Retain the exact Scenario 1/2 witness outcomes through the replacement. A
-divergence blocks acceptance rather than authorizing fixture or expected-result
-changes. Measure cold/warm and representative 32-obstacle policy cost. An
-independent raw-diff/runtime audit must confirm Core, Random, Replay behavior,
-and historical asset bytes are unchanged before the frozen-candidate gate.
+Keep selector rejection, exact resets, current input/action epochs and saved
+controller identities coherent through service, HTTP and browser callers.
+Reject unsupported reactive NoSharedObs choices and retired live literals.
+Existing witness divergence requires investigation, not automatic replacement
+of expected results. Measure affected policy cost on GPU with representative
+obstacles. Preserve separately qualified geometry and replay semantics.
 
 ### Scenario-ablation activation gates
 
-[Amendment A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
-requires controlled scenarios to qualify as matched behavioral-ablation
-instruments before they support a scientific claim. These are future M7/M11/M12
-gates, not claims that the present debugger controller or unfinished scenario
-assets already satisfy them.
+[A26](../design/specification_amendments.md#a26-scenario-pressure-controllers-and-behavioral-ablations)
+and [A36](../design/specification_amendments.md#a36-submission-roadmap-approved-tdm-content-and-m7-closeout)
+separate accepted TDM content from later learning evidence. The accepted content
+is eight scenarios; older twelve-scenario wording is historical. Scenario schema
+validity must not hard-code one suite's horizon or population.
 
-Each scenario pressure controller must prove all of the following:
+Before a confirmatory ablation, freeze one behavior claim, primary endpoint,
+at most two supporting margins, full method and one ablation, scenario revision,
+exact start/roster, controller, actor-input contract, seeds, spawn conditions,
+training budget and checkpoint-selection rule. Use independent trained pairs;
+agents, steps and episodes are nested observations, not independent learners.
+The same immutable deterministic reactive pressure controller and permitted
+inputs must apply to both treatments. A recorded action tape is insufficient.
 
-- one immutable version and content digest binds through the resolved
-  `pressure_protocol`;
-- behavior is deterministic and reactive, not a recorded action tape;
-- every decision consumes only the current canonical SharedObs inputs and
-  authoritative action mask;
-- controlled slots, target selection, tie-breaking, and legal fallback are
-  explicit and deterministic;
-- the same controller identity, configuration, and seed binding are used for
-  the full method and matched ablation; and
-- scenario behavior does not enter the generic TDM controller through a branch
-  on scenario name or ID.
-
-The scenario definition must preserve its existing exact fixed-slot roster and
-focal/cooperative/adversarial role joins. Saved DevClient scenarios remain
-controller-independent. The current intended twelve-scenario suite uses
-five-transition horizons, but no validator may turn that suite choice into a
-global scenario-schema restriction.
-
-Each confirmatory scenario comparison predeclares one behavioral claim and
-primary endpoint, at most two supporting margins, the full method and one
-ablation, the same scenario revision, initial state, controller, SharedObs
-contract, evaluation seeds, sides, training budget, and checkpoint-selection
-rule. Multiple independently trained treatment/control pairs are required; the
-training run is the replication unit. Agents, ticks, episodes, and teams are
-nested observations. Scenario results cannot enter Elo or be reinterpreted as
-general-strength evidence.
-
-Accepted scenarios are public and protocol-frozen, not secret. Before training
-or validation starts, content-addressed manifests must fail closed if they
-intersect the protected scenario closure: embedded map, initial state,
-roster/configuration, controller, seeds, endpoints, replays, or result feedback.
-That closure may not influence gradients, online or offline learning,
-imitation, distillation, curricula, opponent adaptation, architecture,
-hyperparameters, rewards, heuristics, prompts, decoding, checkpoint selection,
-early stopping, repeated-submission selection, population weights, or any other
-adaptive decision. An embedded scenario map is therefore also excluded from
-official training and validation manifests.
-
-Maintainer reproduction, immutable manifests, and complete training and
-selection provenance are the proportionate integrity controls. A result that
-cannot be reproduced under the frozen protocol is ineligible. Non-reproduction
-alone is not proof of fraud, while intentional undisclosed evaluation training
-is misconduct; open-source code cannot make such conduct universally
-impossible.
+Protect the complete scenario content closure from adaptive training and model
+selection: maps, starts, configurations, controllers, seeds, endpoints, replays
+and feedback. Check content-addressed manifests, including embedded maps. This
+restriction covers gradients, imitation, curricula, prompts, tuning, checkpoint
+selection and other adaptation. Scenarios are public, not secret. Reproduction
+and honest provenance enforce eligibility; failed reproduction alone does not
+prove misconduct. Scenario results never supply tournament Elo credit.
 
 ### Big 12 activation gates
 
-[Amendment A27](../design/specification_amendments.md#a27-rolling-big-12-and-baseline-library-governance)
-defines a planned tournament and governance contract. Before any snapshot is
-activated, automated inventory proof must show exactly twelve method entrants,
-twelve fixed executable systems, 66 unordered pairings, 100 episodes per
-pairing, all 6,600 scheduled episode coordinates, and one Elo value per method.
+The accepted future design uses a monthly immutable snapshot containing exactly
+twelve controller versions, or those twelve plus one challenger. A growing
+Baseline Library does not enlarge the official tournament. Larger populations
+belong to custom configurations. The older weekly/100-game plan in
+[A27](../design/specification_amendments.md#a27-rolling-big-12-and-baseline-library-governance)
+is historical where it conflicts with this direction. This design is not a
+claim that the official runner or a qualified released bundle exists today.
 
-For each learned method in tentative rows 1–11, retain three independent
-training runs and their checkpoint histories. A rule frozen before training
-must select one eligible checkpoint per run from validation information alone;
-the validation-highest of those three becomes the method's only tournament
-system. Freeze the validation metric, cadence, eligibility, and tie-breaking in
-advance, and prove that scenario and tournament evidence cannot affect the
-choice. Qwen-Five remains inactive until measured throughput, latency,
-resources, reproducibility, and protocol compatibility pass its explicit cost
-gate. A failed gate leaves the twelfth position unresolved; it does not silently
-activate a substitute.
+Prove 66 unordered incumbent matchups and, with a challenger, 12 additional
+matchups. Verify compatible saved games and requested report coverage before
+execution. Resolve one uniform budget for every matchup, balanced over maps
+and complete spawn pairs. The official numerical budget remains an approval
+gate. A different research budget cannot qualify promotion. Reuse selection
+must be declared independently of outcomes; insufficient coverage stops with
+an explicit fresh-run route.
 
-The complete win/draw/loss matrix is the tournament authority. Before the
-secondary compact rating activates, freeze and test the jointly fitted,
-draw-aware Bradley–Terry–Davidson estimator, 1000 centring, parameterization,
-uncertainty, convergence and failure behavior, software identity, and rounding.
-Test schedule construction independently from rating computation.
+Recompute ratings jointly from qualifying game records; old Elo values are not
+credit. Preserve original game identities/seeds/roles and count each once.
+Use unrounded ratings for shared competition ranks. Test analysis equality from
+identical records; fresh random draws need not reproduce the same games.
 
-Every weekly review publishes an immutable dated roster and result snapshot.
-No qualified challenger means no roster change. Before weekly operation,
-governance must settle challenge scheduling, ties, simultaneous challengers,
-promotion/relegation, and rating refits. Cross-snapshot pool-centred ratings may
-not be compared longitudinally without a separately qualified model, and the
-Paper 1 snapshot remains frozen.
+Admission runs collect full metrics for every challenger game. Public calls keep
+priority metrics by default. Promotion publishes only after all 66 retained
+matchups have complete outcomes, priority and full records; selected replays
+remain separate. Failed/incomplete admission leaves membership unchanged.
+Refit the retained twelve after promotion, retain removed entrants historically,
+and keep active researcher runs bound to their resolved snapshot.
 
-The cumulative Baseline Library must retain every current and former Big 12
-method's implementation, official configuration, provenance, designated
-checkpoints, selected system, compatibility metadata, and membership/results
-history. Training consumers use immutable manifests with exact identities and
-weights and must reject mutable `latest_big_12` resolution. Scenario pressure
-controllers, general Reactive TDM, Random, privileged policies, unqualified
-intermediate checkpoints, and PSRO internal members are never counted as Big 12
-entrants. Each admitted fixed system must pass maintainer reproduction before
-publication.
-
-| Change | Smallest justified proof |
-| --- | --- |
-| Core or Python semantics | Nearest Python unit/integration tests, then targeted Ruff/Pyright |
-| Team Deathmatch task semantics | Configuration/state validation, score/termination/reward transition tests, evaluation capture/replay/event tests, rollout tests, canonical SharedObs policy integration, and NoSharedObs compatibility coverage |
-| Official scenario eligibility | Mode/projection rejection, exact configured-roster matrix acceptance, stable subset rejection, later-frame drift rejection, legitimate 1v1 all-false acceptance, generic compatibility, purity, and single semantic replay-scan proof |
-| DevClient map/scenario authoring | Strict draft parsing, compile/validation joins, digest/persistence/tamper tests, browser authoring units, and the smallest persisted reopen/load Playwright flow |
-| DevClient controller or information mode | Protocol/input/service/frame tests, same-start causal proofs, truthful capture/provenance tests, and the affected real-browser selector flow |
-| Actor projection version change | Projection/capture tests, explicit older-version rejection, exact actor-input export tests for the new version, and Oracle/Agent privacy parity before enabling that version in Replay Agent POV |
-| Debugger scene/event schema | Scene/Event V2, live-frame, audience-boundary, and choreography tests |
-| Command/service/server behavior | Protocol, input, service, server, and affected real-browser case |
-| Scenario trajectory | Scenario preflight/reference tests |
-| Scenario pressure controller | Deterministic repeated execution, same-epoch SharedObs and exact-mask checks, target/tie/fallback cases, treatment/ablation identity equality, and proof that generic TDM has no scenario-ID branch |
-| Specialist body steering | BETA's first-contact angle and overlap tolerance; self/prey exclusion, deterministic detours, actual stationary and moving-blocker trajectories, preserved ALPHA class/combat rules and A35 wall refinement |
-| Matched scenario ablation | Frozen one-variable contrast, paired independent-run accounting, one primary endpoint plus no more than two supporting margins, replay evidence, and rejection from Elo/training/selection inputs |
-| Training/evaluation manifest boundary | Content-digest closure expansion, fail-closed overlap tests including embedded maps and result feedback, immutable population identities, and restart/reproduction proof |
-| Big 12 final-system selection | Three independent runs for each learned method, validation-only per-run and cross-run selection, frozen cadence/eligibility/ties, and hostile locked-result noninterference |
-| Big 12 tournament | Exact twelve-system/66-pair/6,600-episode inventory, side/map/coordinate coverage, complete raw matrix, independently qualified rating estimator, and Qwen cost gate |
-| Weekly Big 12 and Baseline Library | Immutable dated snapshots, no-challenger no-op, promotion/relegation history, cross-pool comparability warning, monotonic retained artifacts, and rejection of mutable `latest_big_12` inputs |
-| Replay/POV/scenario artifact | Focused semantic, canonical-I/O, tamper, privacy, and import-isolation tests |
-| Read-only replay viewer | Replay protocol/service/server/launcher tests, strict browser normalizer/controller units, and a real canonical-artifact Playwright flow |
-| Live replay recording/handoff | Recording/replay-I/O/service/router/launcher tests, strict lifecycle controls, and real T0/prefix/endpoint/recovery/Exit/Ctrl-C/two-tab/POV Playwright flows |
-| Evaluation-to-scene projection | Researcher/POV adapter tests plus static replay launcher smoke |
-| Static Matplotlib path | Launcher plus relevant renderer smoke/scene-painter tests with `viz` |
-| SVG/CSS/layout | Affected JavaScript unit test and selected Playwright case |
-| Choreography/effects | Effect/animation unit tests and relevant scenario browser case |
-| Tracked prose only | Link, command, and stale-text inspection; no simulator tests |
-
-Do not run the complete Python or browser suite after every local edit. Focused
-checks are the fast feedback loop. Execute the complete required inventory once
-for the frozen candidate, using the parallel CI shards when a local monolithic
-run would only duplicate coverage and delay feedback. A candidate commit may be
-pushed to exercise those isolated runners, but the checkpoint is not accepted
-until every aggregate gate is green. Do not repeat an unchanged suite or visual
-comparison merely for reassurance.
+Keep tied-incumbent eviction, revised-method admission, scientific eligibility,
+resource limits and the official numerical budget as explicit later gates.
+Do not invent their values during implementation or treat fixture snapshots as
+released qualification. Frozen learned systems require validation-only model
+selection and independent learning evidence; provider feasibility has its own
+measurement gate. Local execution cannot publish or admit a system.
 
 ## Focused commands
 
-Python formatting, linting, and types can target the changed paths:
+After preparing dependencies, run the relevant Python files, static checks or
+one existing shard:
 
 ```bash
-uv run ruff format --check <paths>
-uv run ruff check <paths>
-uv run pyright <paths>
+JAX_PLATFORMS=cpu uv run --no-sync pytest tests/test_environment.py
+uv run --no-sync ruff format --check src tests scripts examples
+uv run --no-sync ruff check src tests scripts examples
+uv run --no-sync pyright
+scripts/dev/check.sh --shard 1/12
 ```
 
-Frontend source checks:
+For browser source changes, use the existing commands:
 
 ```bash
 npm run format:check --prefix web/visual_debugger
@@ -425,153 +305,79 @@ npm run typecheck --prefix web/visual_debugger
 npm run test:unit --prefix web/visual_debugger
 ```
 
-Select one browser case with the Playwright CLI or `--grep` when only one
-interaction/layout path changed.
-
-Replay changes should include a real canonical-artifact browser case rather
-than only synthetic JavaScript objects. That case must exercise the injected
-replay HTTP routes, audience-matching frame/timeline roots, settled seek and
-reconnect behavior, exact-next animation, endpoint pause, and actor-POV
-non-disclosure. Keep the replay subprocess on the CPU/import-isolation path so
-an accidental simulator or JAX import fails the test.
-
-Recording changes must exercise the production `--record-replay` launcher, not
-only an in-memory recorder fixture. The real-browser gate must load the saved
-replay and metric sidecar through public contracts and prove frame-zero handoff,
-complete versus open-prefix closeout, restart/discard fencing, immutable-byte
-Retry/Save As recovery, durable Exit and Ctrl-C, two-tab stale authority, POV
-non-disclosure, strict console/page-error collection, and subprocess/temp-file
-cleanup. A mocked provenance test does not replace one real host discovery run;
-runtime strings may differ across CPU/CUDA/PJRT installations.
+Select an affected Playwright case for a browser-specific change. Replay or
+recording changes need a real saved-artifact flow through public routes, including
+relevant initial/terminal/prefix behavior, exact identity, recovery, audience
+limits and cleanup. Synthetic objects alone do not prove that boundary. Preserve
+historical sidecar readers; current V3 replay saving does not require a metric
+sidecar. Cold launcher/subprocess checks catch setup assumptions hidden by a
+warm development environment.
 
 ## Complete local closeout gates
 
-These scripts are the canonical complete local inventories. Codex runs both
-through `check_before_commit.sh` immediately before every commit; a human may
-also invoke either gate independently for release closeout or manual full
-verification.
-
-After Python changes have stopped, prepare the locked environment and run the
-complete Python gate once:
+Prepare the locked dependencies separately, then run the complete inventories:
 
 ```bash
 uv sync --locked --extra dev --extra viz
 scripts/dev/check.sh
-```
-
-`scripts/dev/check.sh` forces `JAX_PLATFORMS=cpu`, runs all twelve Python shards
-as an exact cover, and runs Ruff format checking, Ruff lint, and Pyright once
-after the environment is prepared. It does not install or update dependencies.
-
-CI performs ordinary pytest collection in every Python shard and identifies
-each atomic test family by test path, exact parent collector node ID, and
-pytest's unparameterized `originalname`. Ordinary files remain single affinity
-units so file-local fixtures and compiled execution paths are not repeated
-across workers. A small, explicit runtime profile may extract a measured slow
-family from a declared hotspot file while keeping that parameterized family
-indivisible and all residual families together. A measured whole-file hotspot
-may instead split at function-family boundaries only when every parameterized
-family remains indivisible. Module-scoped fixtures remain affinity barriers
-unless the runtime profile names one exact fixture as safe to reconstruct: that
-exception requires fixed inputs, deterministic output, immutable returned
-data leaves, read-only consumers, and no I/O, dynamic fixture selection, or
-global mutation. Collection
-rejects stale exceptions, same-name fixtures from another definition site, and
-every other shared module fixture. Pytest's dynamic `request` fixture API is
-prohibited inside profiled split files; collection rejects a split if a test or
-any non-pytest fixture in its resolved chain declares `request`.
-The hosted semantic-inventory and service-preflight
-families, plus the sample-replay fixture residual, have deliberately dominant
-scheduling weights so each intact proof receives a dedicated worker. Twelve
-nonempty workers use deterministic weighted longest-processing-time packing,
-including reserved capacity for a static gate. Collection fails closed if a
-configured file or family disappears, moves, or would be assigned twice. The
-profile changes CI scheduling only; it never selects a smaller test inventory.
-
-The historical post-M7 profile split the legacy Team Deathmatch NoSharedObs
-suite and explicitly allowed its pure fixed-key module fixture to repeat.
-A30 retires that algorithm suite and its stale scheduling/fixture exceptions;
-it does not retire generic policy-execution proof. Current assignments remain
-solely in the Python sharder, with exact-cover tests rejecting stale units.
-Reprofiling must use per-work-unit and hosted job timings. A timing
-change may adjust only measured affinity weights or intact family membership;
-it must not omit a test, split a parameterized family, exceed twelve Python
-workers, or displace a static gate.
-
-After frontend changes have stopped, install the locked contributor toolchain
-and pinned Chromium, then run the complete frontend/browser gate once:
-
-```bash
 npm ci --prefix web/visual_debugger
 npm run install:browser --prefix web/visual_debugger
 scripts/dev/check_frontend.sh
 ```
 
-With no arguments, the frontend script runs format check, lint, typecheck, unit
-tests, and the required Playwright E2E/visual inventory. CI runs the combined
-frontend format/lint/type/unit gate inside one short browser profile, then
-distributes the exact browser inventory across eight validated, nonempty
-profiles. The long serial authorized-presentation install suite is split by
-exact collected test title without changing its serial mode. Its causal/privacy
-proof is divided only at existing scenario boundaries into three collected
-tests; every original assertion remains, and each slice independently guards
-the checked sample bytes. The three slices are distributed across existing
-profiles and use the same setup-isolation flag. An executable list-only proof
-requires the eight profiles to be a disjoint, complete cover. Each profile
-retains one worker and file-local ordering.
-Required CI does not retry deterministic failures, stops a red shard after its
-first failure, and does not impose explicit job timeouts. Rebalance measured
-work instead of cancelling unchanged valid work merely to enforce the
-performance target. When safe balancing is exhausted, raise the target by one
-minute with recorded evidence rather than repeatedly terminating the same valid
-workload. The script does not install dependencies or update snapshots. Run it
-from the exact frozen commit candidate. When a changed helper spawns a package
-manager, interpreter,
-generated-artifact exporter, or browser, also exercise that path once from a
-clean worktree with cold local environment state; a warm developer
-environment can suppress first-run output and setup behavior that CI will
-encounter.
+The scripts do not install dependencies, change snapshots or commit. Python
+forces CPU and rejects ambient selectors/JIT settings that can weaken coverage.
+Frontend forces its CI inventory and rejects conflicting selectors/capture
+settings. Both retain per-task status and elapsed time. A missing prerequisite
+or failed shard blocks qualification.
 
-If a later fix occurs, rerun only the affected gate:
+The Python plugin collects ordinary pytest nodes and groups parameter families
+by path, parent collector and original function name. Files normally remain
+intact. Explicit measured exceptions may split a hotspot only while keeping
+families and required fixture affinity intact. Pure fixture-reconstruction
+exceptions require exact source identity, immutable deterministic data, read-only
+consumers and no hidden I/O or mutable state. Stale exceptions fail collection.
+Do not use dynamic fixture lookup to bypass these checks. The sharder alone owns
+weights and reservations for static checks.
 
-- CSS-only fix: frontend static checks and affected browser cases;
-- protocol fix: focused Python protocol/service tests, frontend contract
-  checks, and affected E2E;
-- documentation fix: inspection only;
-- cross-cutting fix: repeat every gate it can invalidate.
+Browser profiles retain one worker and declared ordering. Split serial tests
+only at approved complete scenario boundaries, keeping their full assertions and
+setup isolation. Exact list-only coverage must show every required test once.
+Do not use retries or whole-job timeouts to conceal deterministic failures or
+poor balance. Keep the stable hosted aggregate names.
+
+After a later edit, repeat the checks it can invalidate. A documentation-only
+change needs source-equivalence, example/link and reflection checks; it may also
+need schema/help tests when documentation is consumed at runtime. It does not
+justify an unrelated benchmark campaign. Any candidate-byte change still
+invalidates the separate frozen pre-commit qualification.
 
 ## Visual baselines
 
-Normal comparison:
+Compare first:
 
 ```bash
 npm run test:visual --prefix web/visual_debugger
 ```
 
-Intentional update:
+Only after approving an intentional visual change, update:
 
 ```bash
 npm run test:visual:update --prefix web/visual_debugger
 ```
 
-Snapshot update is never an automatic repair. Review each diff at original
-resolution, confirm the paired semantic assertions, and commit only deliberate
-changes. CI uploads Playwright failure artifacts.
+Review each image at its original resolution and retain its semantic assertions.
+Updating snapshots is not an automatic test repair. Keep failure artifacts in
+ignored outputs and tracked baselines within the repository file-size limit.
 
 ## Automation
 
-GitHub Actions runs:
+[CI](../../.github/workflows/ci.yml) runs twelve Python shards with the static
+checks distributed across the matrix, plus eight browser profiles containing
+the frontend unit/static inventory and real Chromium tests. It uses locked
+Python `dev`/`viz` and frontend dependencies. Hosted jobs do not qualify CUDA;
+that is the separate [local GPU gate](gpu_sanity.md).
 
-- twelve deterministic weighted-affinity Python shards with atomic
-  parameterized families, fail-closed runtime-profile validation, and Ruff
-  formatting, Ruff lint, and Pyright distributed across the matrix using
-  locked `dev` and `viz` extras;
-- eight isolated browser profiles with pinned Playwright Chromium,
-  shard-qualified failure artifacts, and the combined frontend
-  format/lint/type/unit gate folded into a short profile.
-
-GitHub Actions does not target a self-hosted GPU. GPU qualification is a
-deliberate local maintainer gate described in `docs/dev/gpu_sanity.md`.
-
-Pre-commit hooks remain fast hygiene, not a substitute for the affected
-behavioral proof or final closeout gates.
+Pre-commit hooks provide fast hygiene and may mutate files. Run them before
+freezing a candidate. They never replace behavioral, documentation, full
+candidate or clean GPU qualification.

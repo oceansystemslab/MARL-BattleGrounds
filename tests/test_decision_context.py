@@ -1,4 +1,4 @@
-"""Decision-context observation contract tests."""
+"""Check the public context features available when an actor chooses an action."""
 # pyright: reportPrivateUsage=false
 
 from typing import cast
@@ -35,7 +35,6 @@ def _config(
     map_width: float = 24.0,
     map_height: float = 16.0,
 ) -> EnvConfig:
-    """Build a deterministic config with an explicitly asymmetric roster."""
     profile = resolve_agent_profile(
         jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32),
         jnp.asarray(team_sizes, dtype=jnp.int32),
@@ -74,7 +73,6 @@ def _config(
 
 
 def _stay_action() -> Action:
-    """Return an effect-inert action for every fixed agent slot."""
     return Action(
         move=jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32),
         select_target=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
@@ -93,7 +91,6 @@ def _assert_context_row(
     expected_ally_team_size: int,
     expected_enemy_team_size: int,
 ) -> None:
-    """Assert one active row's populated fields and reserved zero suffix."""
     expected_populated_features = jnp.asarray(
         (
             expected_timestep,

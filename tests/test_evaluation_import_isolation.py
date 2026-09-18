@@ -1,4 +1,4 @@
-"""Import-boundary proof for host-only evaluation artifact modules."""
+"""Check that reading evaluation artifacts does not import simulator execution."""
 
 from __future__ import annotations
 
@@ -39,7 +39,6 @@ _FORBIDDEN_DIRECT_MODULES = (
 
 
 def test_evaluation_v1_wire_shapes_match_current_core_contract() -> None:
-    """V1 stays explicit while current capture and wire dimensions agree exactly."""
     assert all(
         wire_value == core_value for wire_value, core_value in _WIRE_SHAPE_PARITY
     )
@@ -58,7 +57,6 @@ def test_evaluation_v1_wire_shapes_match_current_core_contract() -> None:
 def test_replay_modules_import_without_array_or_capture_dependencies(
     module_name: str,
 ) -> None:
-    """A fresh artifact reader must not initialize simulator capture dependencies."""
     script = f"""
 import annotationlib
 import importlib
@@ -99,7 +97,6 @@ for loaded_name in sys.modules:
 
 
 def test_v2_scenario_public_exports_are_host_only() -> None:
-    """Resolving host-only V2 APIs must not activate their lazy core bridge."""
     export_names = (
         "build_scenario_evaluation_record_v2",
         "canonical_scenario_evaluation_record_json_bytes_v2",

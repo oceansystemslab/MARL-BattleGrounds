@@ -1,4 +1,12 @@
-"""Renderer-independent debugger input normalization and dispatch."""
+"""Turn validated browser input into host edits or one explicit simulator action.
+
+``dispatch_command`` handles keyboard, pointer, roster and view commands for the
+live service. Pointer selection uses the currently authorized scene. Draft edits
+leave simulator state and random keys unchanged; submissions and resets call the
+control layer. Results explicitly identify transitions and episode restarts so
+recording can follow the correct endpoint. No HTTP response or replay file is
+written here.
+"""
 
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -29,6 +37,9 @@ from marl_battlegrounds.rendering.pov_scene import (
     build_actor_pov_analyzer_projection_v1,
 )
 from marl_battlegrounds.rendering.scene import AgentSceneV1, AgentSceneV2
+from marl_battlegrounds.viewer.no_shared_visual import (
+    build_live_no_shared_obs_visual_current_slice_v1,
+)
 from scripts.dev.visual_debugger.control import (
     CombatConfigurationRejectedError,
     DebuggerTransitionFailureV1,
@@ -46,9 +57,6 @@ from scripts.dev.visual_debugger.control import (
     submit_next_script_frame,
 )
 from scripts.dev.visual_debugger.model import DebuggerSession, RawContinuationIdentity
-from scripts.dev.visual_debugger.no_shared_visual import (
-    build_live_no_shared_obs_visual_current_slice_v1,
-)
 from scripts.dev.visual_debugger.protocol import (
     ActorPovTargetActionCommandV1,
     BattlefieldPointerCommandV1,
@@ -91,7 +99,29 @@ def recording_restart_intent_v1(
     view_mode: ViewMode,
     include_stress: bool,
 ) -> RecordingRestartIntentV1 | None:
-    """Classify the sole public episode replacement before dispatch constructs it."""
+    """Classify a command that would replace the current recording episode.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Current controller choices and recorded execution mode.
+    command : DebuggerCommandV1
+        Parsed command to classify before constructing a replacement session.
+    view_mode : ViewMode
+        Retained dispatch-context argument; it does not change restart classification.
+    include_stress : bool
+        Retained dispatch-context argument; it does not change restart classification.
+
+    Returns
+    -------
+    {"reset", "combat_configuration"} or None
+        Reset intent, a changed combat configuration, or None for other/no-change
+        commands. Modified keyboard shortcuts that are not reset requests stay None.
+
+    Notes
+    -----
+    This only describes intent. It does not construct a session or discard a recording.
+    """
     del view_mode, include_stress
     if isinstance(command, SetCombatConfigurationCommandV1):
         if (
@@ -153,6 +183,12 @@ class InputDispatchResult:
     shutdown_requested: bool = False
 
     def __post_init__(self) -> None:
+        """Require transition/restart markers to match the returned session and exact
+        raw inputs.
+
+        A result cannot both step and restart. UI-only edits must not claim a new raw
+        simulator continuation.
+        """
         transition = self.transition_applied
         if transition is not None:
             if type(transition) is not EvaluationTransitionViewV1:
@@ -197,7 +233,21 @@ def normalize_key(
     *,
     shift_key: bool | None = None,
 ) -> str | None:
-    """Normalize supported keyboard aliases to debugger commands."""
+    """Normalize browser key aliases without applying an action.
+
+    Parameters
+    ----------
+    key : str or None
+        Browser key text, including supported historical spellings.
+    shift_key : bool or None, optional
+        Explicit Shift state. None leaves modifier interpretation to the key text.
+
+    Returns
+    -------
+    str or None
+        Lowercase normalized key. None represents a missing key or the disabled
+        Shift+R shortcut. Unknown names remain lowercase for dispatch to ignore.
+    """
     if key is None:
         return None
     normalized = key.lower()
@@ -234,6 +284,12 @@ def _hit_test_rows(
     x: float,
     y: float,
 ) -> int | None:
+    """Choose the hit with smallest distance divided by body radius, breaking ties by
+    slot.
+
+    Ignore inactive rows, nonpositive radii and nonfinite pointer coordinates.
+    Callers must supply only rows authorized for the current view.
+    """
     if not isfinite(x) or not isfinite(y):
         return None
     candidates: list[tuple[float, int]] = []
@@ -253,7 +309,28 @@ def hit_test_scene_agents(
     x: float,
     y: float,
 ) -> int | None:
-    """Hit-test only agents authorized in the current serialized scene."""
+    """Find an authorized scene agent whose body contains the pointer.
+
+    Parameters
+    ----------
+    agents : iterable of AgentSceneV1 or AgentSceneV2
+        Agents already authorized in the selected serialized scene.
+    x : float
+        Pointer x coordinate in map units.
+    y : float
+        Pointer y coordinate in map units.
+
+    Returns
+    -------
+    int or None
+        Global slot of the closest relative body hit, or None when nothing is hit.
+        Overlaps choose the lowest distance/body-radius ratio, then the lowest slot.
+        Nonfinite coordinates, inactive rows and nonpositive radii cannot be hit.
+
+    Notes
+    -----
+    This performs no hidden-world lookup; the caller owns the authorized input list.
+    """
     return _hit_test_rows(
         (
             (
@@ -281,6 +358,7 @@ def _result(
     notice: str | None = None,
     shutdown_requested: bool = False,
 ) -> InputDispatchResult:
+    """Package one dispatch result and bind raw inputs only for a step or restart."""
     return InputDispatchResult(
         session=session,
         view_mode=view_mode,
@@ -331,6 +409,9 @@ def _pending_edit_result(
     view_mode: ViewMode,
     preset: Preset,
 ) -> InputDispatchResult:
+    """Mark whether the pending draft changed without claiming a simulator
+    transition.
+    """
     changed = (
         before.controlled_global_slot != after.controlled_global_slot
         or before.pending_actions != after.pending_actions
@@ -345,10 +426,14 @@ def _pending_edit_result(
 
 
 def _is_terminal(session: DebuggerSession) -> bool:
+    """Report whether the current session is terminated, truncated or at its declared
+    horizon.
+    """
     return session.episode_sealed
 
 
 def _terminal_notice(session: DebuggerSession) -> str:
+    """Explain why the current sealed endpoint cannot accept another simulator step."""
     reason = (
         "terminated"
         if session.terminated
@@ -364,6 +449,7 @@ def _target_action(
     actor_global_slot: int,
     target_global_slot: int | None,
 ) -> int:
+    """Resolve a global target through the recorded actor-relative target mapping."""
     if target_global_slot is None:
         return 0
     catalog = session.evaluation_context.static_mechanics_catalog
@@ -381,6 +467,9 @@ def _authorized_pointer_rows(
     *,
     view_mode: ViewMode,
 ) -> tuple[tuple[int, tuple[float, float], float, bool], ...]:
+    """Build hit-test rows only from the selected researcher or actor-authorized
+    scene.
+    """
     if view_mode == "researcher":
         projection = build_researcher_analyzer_projection_v2(
             session.evaluation_context,
@@ -474,6 +563,9 @@ def _dispatch_keyboard(
     preset: Preset,
     include_stress: bool,
 ) -> InputDispatchResult:
+    """Apply supported unmodified keys while preserving draft, terminal and playback
+    boundaries.
+    """
     if command.ctrl_key or command.alt_key or command.meta_key:
         return _result(
             session,
@@ -750,6 +842,9 @@ def _dispatch_pointer(
     view_mode: ViewMode,
     preset: Preset,
 ) -> InputDispatchResult:
+    """Resolve an authorized pointer hit and apply the requested control or target
+    edit.
+    """
     if command.ctrl_key or command.alt_key or command.meta_key:
         return _result(
             session,
@@ -798,6 +893,9 @@ def _dispatch_roster_selection(
     view_mode: ViewMode,
     preset: Preset,
 ) -> InputDispatchResult:
+    """Apply researcher roster selection and reject its use as an actor-view
+    disclosure.
+    """
     authorized_slots = {
         row.global_slot
         for row in session.evaluation_context.roster
@@ -888,7 +986,38 @@ def dispatch_command(
     preset: Preset,
     include_stress: bool,
 ) -> InputDispatchResult:
-    """Apply one validated input without owning RNG or simulator semantics."""
+    """Apply one parsed live command through the correct host or control helper.
+
+    Parameters
+    ----------
+    session : DebuggerSession
+        Current immutable simulator endpoint and pending joint draft.
+    command : DebuggerCommandV1
+        Strict command model already parsed by the HTTP boundary.
+    view_mode : ViewMode
+        Current researcher or actor view, used to preserve input authorization.
+    preset : Preset
+        Current presentation choice, copied or updated by the command.
+    include_stress : bool
+        Whether the surrounding launcher permits stress demonstrations.
+
+    Returns
+    -------
+    InputDispatchResult
+        Candidate session and presentation settings, handled/changed flags, notice,
+        shutdown request, and explicit transition or restart markers where applicable.
+
+    Raises
+    ------
+    DebuggerTransitionFailureV1
+        If a delegated simulator submission or its capture/packaging fails.
+
+    Notes
+    -----
+    Scripted sessions accept only their supported playback and presentation commands.
+    Input handling delegates RNG and simulator semantics to the control layer; it does
+    not write files or publish the candidate endpoint itself.
+    """
     scripted_inspection = session.scenario.mode == "scripted"
     if scripted_inspection and not _scripted_inspection_command_is_allowed(command):
         return _result(

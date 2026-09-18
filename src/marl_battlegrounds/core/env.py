@@ -1,4 +1,15 @@
-"""Functional reset and step entry points for the core JAX simulator."""
+"""Build and advance one fixed-slot game with pure JAX transition code.
+
+reset creates an ordinary pad-based start. step accepts actions using the
+paired current mask, resolves simultaneous effects and movement phases, then
+returns the successor state with matching decision inputs and transition facts.
+initialize_scenario_state is the separate host-validated authored-start path.
+
+Core owns action acceptance, observations, health/status/death/respawn rules,
+task rewards and event facts. Geometry and combat catalogs remain shared
+authorities in their own modules. Policies, native environment batching,
+episode scheduling, logging, metrics collection and persistence live outside
+this module. Numerical entry points do not auto-reset terminal states."""
 
 from typing import NamedTuple, cast
 
@@ -63,11 +74,12 @@ from marl_battlegrounds.core.config import (
     validate_scenario_initial_state,
 )
 from marl_battlegrounds.core.geometry import (
-    DEFAULT_AGENT_PROJECTION_PASSES,
     has_clear_line_of_sight,
+    project_charge_endpoints_with_geometry,
     project_movement_with_geometry,
 )
 from marl_battlegrounds.core.types import (
+    AGENT_FEATURE_IS_ENEMY,
     CONTEXT_FEATURE_ALLY_TEAM_SIZE,
     CONTEXT_FEATURE_CURRENT_TIMESTEP,
     CONTEXT_FEATURE_ENEMY_TEAM_SIZE,
@@ -146,54 +158,209 @@ _GLOBAL_AGENT_SLOT_INDICES = jnp.arange(MAX_AGENT_SLOTS, dtype=jnp.int32)
 
 
 class _CombatEffectAggregationResult(NamedTuple):
-    """Internal effect arrays shared by successor state and transition facts."""
+    """Share accepted effect totals between health updates and transition facts.
+
+    Fields describe one current transition in fixed global-slot order. Boolean
+    source/recipient vectors have shape (10,); damage, healing and modifier
+    vectors are float32 (10,). Source fields retain who applied an effect;
+    recipient totals retain the sums used for simultaneous health resolution.
+    The record is immutable, requires every field and performs no validation.
+    """
 
     hunter_basic_slow_applied_this_tick_by_global_recipient_slot: Array
+    """Accepted Hunter Basic slow recipients.
+
+    Bool (10,) in global recipient order; used to merge successor durations.
+    """
     priest_freedom_applied_this_tick_by_global_recipient_slot: Array
+    """Accepted Priest Basic movement-floor recipients.
+
+    Bool (10,) in global recipient order; used to merge successor durations.
+    """
     accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot: Array
+    """Recipients of accepted positive raw damage.
+
+    Bool (10,). This breaks the aged remainder of an old Hunter Trap, independently
+    of net health loss.
+    """
     hunter_basic_slow_applied_this_tick_by_global_actor_slot: Array
+    """Hunter sources that applied an accepted Basic slow.
+
+    Bool (10,) retained by source for application facts.
+    """
     basic_effect_is_activated_by_source: Array
+    """Whether each source applies an accepted targeted Basic.
+
+    Bool (10,) in global source order. Target None or accepted Ultimate use makes
+    this False.
+    """
     ultimate_effect_is_activated_by_source: Array
+    """Whether each source uses an accepted Ultimate.
+
+    Bool (10,), including no-target Mage Burst. Activation does not imply a routed
+    health recipient.
+    """
     raw_damage_output_by_source: Array
+    """Accepted catalog damage before any source or recipient modifier.
+
+    Float32 (10,) nonnegative health units. Sources without a damage payload are
+    zero.
+    """
     source_modified_damage_output_by_source: Array
+    """Damage after source Burst and Mage aura modifiers.
+
+    Float32 (10,) nonnegative health units, before recipient mitigation or health
+    clipping.
+    """
     recipient_damage_modifier_by_source: Array
+    """The chosen recipient's damage factor for each damage source.
+
+    Float32 (10,) dimensionless Warrior mitigation factors. Sources without positive
+    raw routed damage use zero, not an identity factor.
+    """
     total_effective_damage_by_recipient: Array
+    """Gross incoming damage after source and recipient modifiers.
+
+    Float32 (10,) nonnegative health units in global recipient order. Totals precede
+    net healing and health clipping; they are not realized health loss.
+    """
     raw_healing_output_by_source: Array
+    """Accepted catalog healing before recipient modification.
+
+    Float32 (10,) nonnegative health units. Sources without a healing payload are
+    zero.
+    """
     source_modified_healing_output_by_source: Array
+    """Healing after source modification and before recipient modification.
+
+    Float32 (10,) nonnegative health units. Current mechanics have no healing
+    amplifier, so this equals raw healing.
+    """
     recipient_healing_modifier_by_source: Array
+    """The chosen recipient's healing factor for each healing source.
+
+    Float32 (10,) dimensionless current Poison factors. Sources without positive raw
+    routed healing use zero.
+    """
     total_effective_healing_by_recipient: Array
+    """Gross incoming healing after recipient modifiers.
+
+    Float32 (10,) nonnegative health units in global recipient order, before net
+    damage and maximum-health clipping.
+    """
     priest_blessing_of_freedom_is_applied_by_source: Array
+    """Accepted Priest Basic movement-floor applications.
+
+    Bool (10,) in global source order, routed to the source's accepted recipient.
+    """
     is_combat_participant_this_tick_by_source: Array
+    """Actors whose accepted combat participation resets the delay.
+
+    Bool (10,) covering damage sources/recipients and healing routes whose recipient
+    was already in combat at transition start.
+    """
 
 
 class _CombatStatusAggregationResult(NamedTuple):
-    """Successor status memory, application facts, and lifecycle causes."""
+    """Carry successor status durations and the causes recorded during this step.
+
+    Next slow and stun durations are int32 (10, 3); other next durations are
+    int32 (10,). Source/channel application masks are bool (10, 3), and source
+    flags are bool (10,). status_lifecycle_facts keeps the separate recipient
+    causes. Applications remain recorded even when death clears successor
+    durations. This immutable record requires every field and validates nothing.
+    """
 
     next_slow_durations: Array
+    """Successor slow memory after ageing, applications and death clearing.
+
+    Int32 (10, 3), in Warrior Charge, Hunter Basic, Rogue Poison order.
+    """
     next_stun_durations: Array
+    """Successor stun memory after ageing, break, applications and death.
+
+    Int32 (10, 3), in Warrior Charge, Hunter Trap, Rogue Poison order.
+    """
     next_rogue_anti_heal_durations: Array
+    """Successor Rogue Poison healing-reduction memory.
+
+    Nonnegative int32 (10,) after ageing, applications and death clearing.
+    """
     next_mage_burst_durations: Array
+    """Successor Mage Burst memory.
+
+    Nonnegative int32 (10,) after ageing, source-local applications and death
+    clearing.
+    """
     next_priest_freedom_slow_floor_durations: Array
+    """Successor Priest movement-floor memory.
+
+    Nonnegative int32 (10,) after ageing, applications and death clearing.
+    """
     next_spawn_shield_durations: Array
+    """Aged shield memory before the end-of-transition respawn override.
+
+    Nonnegative int32 (10,). Dead and unused rows are zero.
+    """
     slow_is_applied_by_source_and_channel: Array
+    """Accepted slow applications by source and mechanic channel.
+
+    Bool (10, 3), with Warrior Charge, Hunter Basic and Rogue Poison columns. These
+    record applications, even if successor death clears the duration.
+    """
     stun_is_applied_by_source_and_channel: Array
+    """Accepted stun applications by source and mechanic channel.
+
+    Bool (10, 3), with Warrior Charge, Hunter Trap and Rogue Poison columns. The
+    chosen global recipient is stored separately.
+    """
     rogue_poison_anti_heal_is_applied_by_source: Array
+    """Accepted Rogue Poison anti-heal applications.
+
+    Bool (10,) in global source order, routed to the source's accepted recipient.
+    """
     mage_burst_damage_amplification_is_applied_by_source: Array
+    """Accepted Mage Burst applications to the source itself.
+
+    Bool (10,) in global source order. This self-buff has no routed recipient
+    target.
+    """
     status_lifecycle_facts: StatusLifecycleTransitionFacts
+    """Separate recipient causes retained before final duration packaging."""
 
 
 class _CombatAuraAggregationResult(NamedTuple):
-    """Reduced aura modifiers and their exact coverage provenance."""
+    """Carry current aura strengths and the coverage that produced them.
+
+    Mage and Warrior multipliers are float32 (10,) in global beneficiary order.
+    aura_facts contains bool (10, 10) emitter-to-beneficiary relations from the
+    same snapshot. Empty coverage yields multiplier one. The immutable record
+    packages these required fields without validation or further reduction.
+    """
 
     mage_damage_amplification_aura_multipliers: Array
+    """Current bounded outgoing-damage factors by beneficiary.
+
+    Float32 (10,) from one shared snapshot; no eligible aura yields 1.0.
+    """
     warrior_damage_mitigation_aura_multipliers: Array
+    """Current bounded incoming-damage factors by beneficiary.
+
+    Float32 (10,) from one shared snapshot; no eligible aura yields 1.0.
+    """
     aura_facts: AuraTransitionFacts
+    """Coverage relations that produced the two bounded factor vectors."""
 
 
 def _compute_global_pairwise_distances_from_agent_positions(
     agent_positions: Array,
 ) -> Array:
-    """Return the dense Euclidean distance matrix for fixed-slot positions."""
+    """Return world distances for every pair of fixed global slots.
+
+    Float32 agent_positions (10, 2) produce a float32 (10, 10) matrix with
+    observer/source rows and candidate columns. Padding is not masked here;
+    downstream visibility and interaction rules decide which pairs participate.
+    """
     return cast(
         Array,
         jnp.linalg.norm(
@@ -205,22 +372,14 @@ def _compute_global_pairwise_distances_from_agent_positions(
 def _build_global_visibility_mask_and_distances(
     state: EnvState, config: EnvConfig
 ) -> tuple[Array, Array]:
-    """Build LOS-gated visibility and distances between all global slots.
+    """Build current directed visibility and reuse its pairwise distances.
 
-    Entry ``[i, j]`` is true when observer slot ``i`` can currently observe
-    candidate slot ``j``. The mask is directed because each observer owns its
-    own effective observation radius. Pairwise distances are returned alongside
-    the mask so targetability can reuse the same observer-candidate geometry.
-
-    Visibility requires:
-    1. observer is active and alive;
-    2. candidate is active and alive;
-    3. candidate center is within observer i's observation radius;
-    4. static line of sight from observer to candidate is clear.
-    5. an opposing candidate does not have an active spawn shield.
-
-    Spawn shield concealment is directional: self and allied visibility retain
-    the ordinary range and line-of-sight rules.
+    state and matching config describe one ten-slot decision. Return bool
+    visibility (10, 10), then float32 world distances (10, 10). Entry [i, j]
+    describes observer i and candidate j. Both must be configured and alive,
+    the candidate must be within i's observation radius, and static sight must
+    be clear. Shielded opponents are hidden; self and allies still use ordinary
+    range and sight rules. Returning distances avoids rebuilding them for masks.
     """
     # Pairwise observer-candidate validity from active/alive state.
     alive_active_mask = jnp.logical_and(
@@ -244,7 +403,12 @@ def _build_global_visibility_mask_and_distances(
         candidate_centers: Array,
         obstacles: Array,
     ) -> Array:
-        """Build one observer's LOS row against all candidate centers."""
+        """Return one observer's clear-sight flags for all ten candidate centers.
+
+        observer_center is float32 (2,), candidate_centers is float32 (10, 2),
+        and obstacles is the shared float32 (32, 8) table. Map the authoritative
+        sight helper over candidates to return bool (10,); no radius gate is added.
+        """
         candidate_los_vmap = jax.vmap(
             has_clear_line_of_sight,
             in_axes=(None, 0, None),
@@ -310,16 +474,12 @@ def _build_global_visibility_mask_and_distances(
 
 
 def _build_ally_enemy_masks(global_mask: Array) -> tuple[Array, Array]:
-    """Project a global observer-candidate matrix into relation slots.
+    """Reorder a global pair matrix into each observer's ally and enemy rows.
 
-    ``global_mask[i, j]`` stores a directed boolean relation from observer
-    global slot ``i`` to candidate global slot ``j``. The returned masks keep
-    candidate slots relation-local so they align with unit-feature and
-    target-selection heads.
-
-    Slot layout is fixed:
-    - Team A occupies global slots ``0..MAX_AGENTS_PER_TEAM - 1``;
-    - Team B occupies global slots ``MAX_AGENTS_PER_TEAM..MAX_AGENT_SLOTS - 1``.
+    global_mask is bool (10, 10), with Team A in slots 0..4 and Team B in 5..9.
+    Return ally then enemy masks, both bool (10, 5). Each relation retains its
+    stable team-roster order so masks align with unit features and target IDs.
+    The input is not changed and no visibility rule is recomputed.
     """
     ally_mask_team_a = global_mask[
         TEAM_A_START:TEAM_A_END,
@@ -346,7 +506,12 @@ def _build_ally_enemy_masks(global_mask: Array) -> tuple[Array, Array]:
 
 
 def _build_global_pairwise_team_masks(team_ids: Array) -> tuple[Array, Array]:
-    """Return dense same-team and opposing-team masks for real team IDs."""
+    """Return same-team and opposing-team relations for configured team IDs.
+
+    team_ids is int32 (10,), with 0 unused, 1 Team A and 2 Team B. Return two
+    bool (10, 10) matrices in ally then enemy order. Pairs involving ID zero
+    are False. These relations do not include alive, sight or distance gates.
+    """
     has_real_team = team_ids != NO_TEAM_ID
     both_slots_have_real_teams = jnp.logical_and(
         has_real_team[:, None], has_real_team[None, :]
@@ -371,13 +536,15 @@ def _build_select_target_use_ultimate_joint_mask(
     global_visibility_mask: Array,
     global_pairwise_distances: Array,
 ) -> Array:
-    """Build authoritative legality for every target/ultimate action pair.
+    """Build the current authority for every target and Ultimate pair.
 
-    The returned axes are actor slot, actor-relative target action, and
-    ultimate-use choice. Lane zero preserves class-aware basic legality; lane
-    one applies class-specific ultimate relation, range, cooldown, and control
-    gates. Both lanes reuse the supplied visibility and distance truth, so this
-    helper performs no geometry or LOS work itself.
+    state and config match the same decision. global_visibility_mask is bool
+    (10, 10) and global_pairwise_distances is float32 (10, 10) in world units.
+    Return bool (10, 11, 2), ordered by actor, actor-relative target, Ultimate.
+    Lane zero checks Basic relation/range/control rules; lane one also checks
+    Ultimate mode and cooldown. Both reuse the supplied spatial truth.
+    Dead and unused actors admit only (Target None, no Ultimate); shield and
+    stun prevent nonneutral combat. Marginal head masks are derived separately.
     """
     class_ids = config.agent_profile.class_ids
     active_and_alive_mask = jnp.logical_and(
@@ -517,7 +684,12 @@ def _build_select_target_use_ultimate_joint_mask(
 def _build_marginal_action_masks(
     select_target_use_ultimate_joint_mask: Array,
 ) -> tuple[Array, Array]:
-    """Derive per-head masks from authoritative target/ultimate pair legality."""
+    """Derive target and Ultimate head masks from exact combat-pair legality.
+
+    The bool joint mask is (10, 11, 2). Return target mask (10, 11), then
+    Ultimate mask (10, 2), using whether any compatible partner exists.
+    Two True marginal entries need not form an allowed joint pair.
+    """
     select_target_mask = jnp.any(select_target_use_ultimate_joint_mask, axis=-1)
     use_ultimate_mask = jnp.any(select_target_use_ultimate_joint_mask, axis=1)
 
@@ -525,11 +697,12 @@ def _build_marginal_action_masks(
 
 
 def _build_move_mask(state: EnvState, config: EnvConfig) -> Array:
-    """Build protocol-admissible movement choices for every fixed slot.
+    """Return current admitted movement categories for every fixed slot.
 
-    Active, living, unstunned actors may submit every movement category.
-    Currently stunned, dead, or inactive slots expose only ``MOVE_STAY``, the
-    effect-inert canonical submission required for direct categorical sampling.
+    state and config describe one decision. Return bool (10, 9): active,
+    living and unstunned actors may submit every category. Stunned, dead or
+    unused actors may submit only Stay. This checks submission, not whether
+    geometry will allow the requested displacement.
     """
     active_and_alive_mask = jnp.logical_and(
         config.agent_profile.active_mask, state.alive_mask
@@ -547,11 +720,12 @@ def _build_move_mask(state: EnvState, config: EnvConfig) -> Array:
 
 
 def _build_context_features(state: EnvState, config: EnvConfig) -> Array:
-    """Build raw actor-relative episode context for configured policy slots.
+    """Pack public current-step and episode context in each observer's team order.
 
-    The simulator exposes semantic facts without learner-specific scaling.
-    Mode-owned columns remain zero until their battleground contracts exist,
-    and configured-but-dead actors retain context while padded rows stay zero.
+    Matching state and config produce raw float32 (10, 19) values following
+    CONTEXT_FEATURE_* columns. Scores and sizes use own team before opponent;
+    map coordinates are not reflected. Reserved task/objective fields are zero,
+    as are unused observer rows. Configured dead observers retain context.
     """
 
     team_a_ally_team_size = jnp.sum(
@@ -645,12 +819,12 @@ def _build_context_features(state: EnvState, config: EnvConfig) -> Array:
 def _build_ally_enemy_one_hot_action_tensors(
     previous_joint_action_head_one_hot: Array, num_actions: int
 ) -> tuple[Array, Array]:
-    """Project global actor rows into fixed ally and enemy relation blocks.
+    """Place one action-head history into stable ally and enemy observation rows.
 
-    ``previous_joint_action_head_one_hot`` has one row per global actor slot.
-    The returned tensors add the observer axis while preserving the same stable
-    relation-row convention used by ally and enemy unit features. Visibility is
-    applied later by the complete previous-action observation builder.
+    previous_joint_action_head_one_hot is float32 (10, num_actions), already
+    encoded in the desired category convention. Static num_actions is the last
+    axis size. Return ally then enemy tensors (10, 5, num_actions). This only
+    reorders rows; it does not remap target categories or apply visibility.
     """
     ally_actions_one_hot_team_a = jnp.broadcast_to(
         previous_joint_action_head_one_hot[TEAM_A_START:TEAM_A_END, :],
@@ -682,16 +856,17 @@ def _build_ally_enemy_one_hot_action_tensors(
 def _build_visibility_masked_previous_timestep_action_observation(
     state: EnvState, ally_visibility_mask: Array, enemy_visibility_mask: Array
 ) -> PreviousTimestepActionObservation:
-    """Build policy-facing history using current actor visibility.
+    """Expose accepted action history using the current observed-actor visibility.
 
-    State stores compact accepted categories in each actor's own action
-    convention. Movement and ultimate-use categories need only relation-row
-    projection. Target categories additionally swap ally/enemy category blocks
-    when actor and observer belong to opposing teams so every observer decodes
-    the same stable target identity.
+    state holds compact accepted int32 heads (10,) and a scalar history-valid
+    flag. ally_visibility_mask and enemy_visibility_mask are bool (10, 5) from
+    that state's observation. Return PreviousTimestepActionObservation with
+    float32 (10, 5, 9), (10, 5, 11) and (10, 5, 2) one-hot families.
 
-    History validity and visibility of the observed actor gate complete rows.
-    Target visibility does not gate the accepted target identity.
+    Reset and hidden-actor rows are zero. A visible accepted category zero has
+    a one in category zero. Movement and Ultimate only need row projection;
+    opposing observers also swap target relation blocks to retain physical
+    target identity. Target visibility does not hide a visible actor's target.
     """
     previous_joint_move_actions = state.previous_timestep_move_actions
     previous_joint_use_ultimate_actions = state.previous_timestep_use_ultimate_actions
@@ -847,11 +1022,15 @@ def _build_visibility_masked_previous_timestep_action_observation(
 def _build_spawn_lifecycle_observation(
     state: EnvState, config: EnvConfig
 ) -> SpawnLifecycleObservation:
-    """Build actor-relative public spawn pads, shield rules, and lifecycle truth.
+    """Expose public spawn and roster truth for the current decision.
 
-    Team row zero is the observer's team and row one is its opponent. Configured
-    living and dead observers receive the same public roster, spawn-shield
-    counters, and configured rules; padded observer rows remain zero.
+    Matching state and config produce SpawnLifecycleObservation. Every leaf
+    starts with ten observers; its team axis is [own team, opponent], with
+    five roster rows where present. Pads and speed are float32, durations,
+    clocks and classes int32, and membership/alive flags bool.
+    Configured living and dead observers see the same public roster/rules and
+    current clocks. Unused observer rows are zero. Coordinates remain in the
+    world frame; no visibility filtering or simulator time advance occurs.
     """
     spawn_pad_positions_team_a_view = jnp.concatenate(
         (
@@ -1096,11 +1275,14 @@ def _build_spawn_lifecycle_observation(
 def _build_observation_and_action_mask(
     state: EnvState, config: EnvConfig
 ) -> tuple[Observation, ActionMask]:
-    """Build the current observation contract from one slot-aligned state.
+    """Build an observation and action mask from the same current snapshot.
 
-    Self rows are canonical fixed-slot agent rows. Ally and enemy unit rows use
-    the same agent-feature schema in relation-local candidate order, with
-    nonvisible candidate rows zeroed by the visibility masks.
+    state and config describe one scalar ten-slot game. Return Observation,
+    then ActionMask, with the schemas documented on those types. Stable ally
+    and enemy feature rows are zeroed by current visibility; public geometry
+    is broadcast to every observer. Previous actions remain a separate family
+    and use current actor visibility. Reuse pair distances and aura values
+    within this construction so the returned input and mask agree in time.
     """
     global_visibility_mask, global_pairwise_distances = (
         _build_global_visibility_mask_and_distances(state, config)
@@ -1175,6 +1357,11 @@ def _build_observation_and_action_mask(
         enemy_visibility_mask=enemy_visibility_mask,
         previous_timestep_actions=visibility_masked_previous_timestep_action_observation,
         spawn_lifecycle=spawn_lifecycle_observation,
+        self_ally_index=jnp.where(
+            config.agent_profile.active_mask,
+            jnp.arange(MAX_AGENT_SLOTS, dtype=jnp.int32) % MAX_AGENTS_PER_TEAM,
+            0,
+        ),
     )
 
     return current_observation, current_action_mask
@@ -1185,15 +1372,13 @@ def _build_intended_movement_deltas(
     config: EnvConfig,
     accepted_joint_action: Action,
 ) -> Array:
-    """Build voluntary movement intent from current public control truth.
+    """Convert accepted moves and current visible speed into requested travel.
 
-    Status durations in ``current_state`` must be the values visible when the
-    policy selects the current action. Statuses accepted during this transition
-    are packaged for the next action and must not retroactively change this
-    movement intent. For a host-valid unshielded actor, current stun yields zero
-    intent; spawn shield and stun cannot coexist at the host boundary. Death or
-    inactivity also yields zero intent as defense in depth. Geometry remains
-    free to displace a zero-intent body during collision resolution.
+    current_state and config describe the action's decision. The accepted
+    Action has int32 heads (10,). Return float32 world deltas (10, 2), using
+    the shared effective-speed authority and unchanged compass directions.
+    Charge relocation and geometry are separate phases; new statuses from this
+    transition do not retroactively alter this precommitted movement.
     """
     intended_movement_deltas_unscaled = _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE[
         accepted_joint_action.move
@@ -1218,7 +1403,12 @@ def _build_intended_movement_deltas(
 
 
 def _active_mage_class_mask(config: EnvConfig) -> Array:
-    """Return the fixed-slot mask of active Mage agents."""
+    """Return configured Mage slots from the resolved profile.
+
+    config supplies int32 classes and bool membership (10,). Return bool (10,).
+    This identifies roster membership, not current alive, control or shield status;
+    callers add the eligibility checks needed by their mechanic.
+    """
     return jnp.logical_and(
         config.agent_profile.class_ids == MAGE_CLASS_ID,
         config.agent_profile.active_mask,
@@ -1226,7 +1416,12 @@ def _active_mage_class_mask(config: EnvConfig) -> Array:
 
 
 def _active_warrior_class_mask(config: EnvConfig) -> Array:
-    """Return the fixed-slot mask of active Warrior agents."""
+    """Return configured Warrior slots from the resolved profile.
+
+    config supplies int32 classes and bool membership (10,). Return bool (10,).
+    This identifies roster membership, not current alive, control or shield status;
+    callers add the eligibility checks needed by their mechanic.
+    """
     return jnp.logical_and(
         config.agent_profile.class_ids == WARRIOR_CLASS_ID,
         config.agent_profile.active_mask,
@@ -1234,7 +1429,12 @@ def _active_warrior_class_mask(config: EnvConfig) -> Array:
 
 
 def _active_hunter_class_mask(config: EnvConfig) -> Array:
-    """Return the fixed-slot mask of active Hunter agents."""
+    """Return configured Hunter slots from the resolved profile.
+
+    config supplies int32 classes and bool membership (10,). Return bool (10,).
+    This identifies roster membership, not current alive, control or shield status;
+    callers add the eligibility checks needed by their mechanic.
+    """
     return jnp.logical_and(
         config.agent_profile.class_ids == HUNTER_CLASS_ID,
         config.agent_profile.active_mask,
@@ -1242,7 +1442,12 @@ def _active_hunter_class_mask(config: EnvConfig) -> Array:
 
 
 def _active_rogue_class_mask(config: EnvConfig) -> Array:
-    """Return the fixed-slot mask of active Rogue agents."""
+    """Return configured Rogue slots from the resolved profile.
+
+    config supplies int32 classes and bool membership (10,). Return bool (10,).
+    This identifies roster membership, not current alive, control or shield status;
+    callers add the eligibility checks needed by their mechanic.
+    """
     return jnp.logical_and(
         config.agent_profile.class_ids == ROGUE_CLASS_ID,
         config.agent_profile.active_mask,
@@ -1250,7 +1455,12 @@ def _active_rogue_class_mask(config: EnvConfig) -> Array:
 
 
 def _active_priest_class_mask(config: EnvConfig) -> Array:
-    """Return the fixed-slot mask of active Priest agents."""
+    """Return configured Priest slots from the resolved profile.
+
+    config supplies int32 classes and bool membership (10,). Return bool (10,).
+    This identifies roster membership, not current alive, control or shield status;
+    callers add the eligibility checks needed by their mechanic.
+    """
     return jnp.logical_and(
         config.agent_profile.class_ids == PRIEST_CLASS_ID,
         config.agent_profile.active_mask,
@@ -1263,7 +1473,16 @@ def _build_self_features(
     mage_damage_amplification_aura_multipliers: Array,
     warrior_damage_mitigation_aura_multipliers: Array,
 ) -> Array:
-    """Build slot-aligned self rows from the shared agent-feature schema."""
+    """Pack each observer's own current state and class capabilities.
+
+    Matching state/config and the two current float32 aura multiplier vectors
+    (10,) produce raw float32 (10, 58) rows following AGENT_FEATURE_* columns.
+    mage_damage_amplification_aura_multipliers modify outgoing damage;
+    warrior_damage_mitigation_aura_multipliers modify incoming damage.
+    Current speed uses the same authority as movement. Derived capabilities
+    are included without adding duplicate fields to EnvState. No unit-visibility
+    filtering occurs here; relation builders apply it to candidate rows later.
+    """
     class_ids = config.agent_profile.class_ids
 
     (
@@ -1291,7 +1510,7 @@ def _build_self_features(
         (
             state.agent_positions,
             config.agent_profile.agent_radii[:, None],
-            config.agent_profile.team_ids[:, None],
+            jnp.zeros((MAX_AGENT_SLOTS, 1), dtype=jnp.float32),
             config.agent_profile.active_mask[:, None],
             state.alive_mask[:, None],
             class_ids[:, None],
@@ -1473,7 +1692,11 @@ def _build_self_features(
 
 
 def _build_ally_features(self_features: Array) -> Array:
-    """Project global self rows into relation-local ally candidate rows."""
+    """Repeat each team's agent features in its own observers' stable roster order.
+
+    self_features is float32 (10, 58), Team A before Team B. Return float32
+    (10, 5, 58) ally rows, including self. Visibility is applied afterward.
+    """
     ally_features = jnp.zeros(
         (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES), dtype=jnp.float32
     )
@@ -1489,7 +1712,12 @@ def _build_ally_features(self_features: Array) -> Array:
 
 
 def _build_enemy_features(self_features: Array) -> Array:
-    """Project global self rows into relation-local enemy candidate rows."""
+    """Repeat opposing-team features in each observer's stable enemy roster order.
+
+    self_features is float32 (10, 58), Team A before Team B. Return float32
+    (10, 5, 58) rows with the enemy indicator set. Visibility is applied later;
+    coordinates retain the world frame.
+    """
     enemy_features = jnp.zeros(
         (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES), dtype=jnp.float32
     )
@@ -1501,11 +1729,16 @@ def _build_enemy_features(self_features: Array) -> Array:
         self_features[TEAM_A_START:TEAM_A_END, :]
     )
 
-    return enemy_features
+    return enemy_features.at[:, :, AGENT_FEATURE_IS_ENEMY].set(1.0)
 
 
 def _mask_unit_features(unit_features: Array, visibility_mask: Array) -> Array:
-    """Zero relation-local candidate rows that are hidden from each observer."""
+    """Zero hidden candidate rows without changing visible feature values.
+
+    unit_features is float32 (10, 5, 58) and visibility_mask is bool (10, 5)
+    for the same decision and relation order. Return the same feature shape;
+    no rows are removed, so target and observation indices stay stable.
+    """
     return jnp.where(
         visibility_mask[:, :, None],
         unit_features,
@@ -1516,18 +1749,32 @@ def _mask_unit_features(unit_features: Array, visibility_mask: Array) -> Array:
 def _build_accepted_joint_action_from_submitted_joint_action(
     current_action_mask: ActionMask, submitted_joint_action: Action
 ) -> tuple[Action, ActionAcceptanceFacts]:
-    """Canonicalize one submitted action from authoritative pre-state masks.
+    """Accept or replace submitted categories using the current authoritative mask.
 
-    Each submitted category is replaced with a safe neutral gather index before
-    any mask access. If any head is outside its categorical domain, that actor's
-    complete tuple becomes the canonical no-op without affecting other actors.
-    Out-of-domain IDs indicate an upstream policy or sampler defect; categorical
-    domain validation is the first debugging step.
+    Parameters
+    ----------
+    current_action_mask : ActionMask
+        Bool mask arrays from the same pre-state as the submission. The joint
+        target/Ultimate mask, not its marginals, owns combat acceptance.
+    submitted_joint_action : Action
+        Three int32 arrays (10,). Normal domains are movement 0..8, target
+        0..10 and Ultimate 0..1. Out-of-range IDs are handled as rejection.
 
-    For wholly in-domain tuples, movement acceptance is independent of combat
-    acceptance. Target and ultimate-use heads are accepted together from the
-    authoritative joint mask so an invalid ultimate attempt cannot fall back to
-    a valid basic action.
+    Returns
+    -------
+    tuple of Action and ActionAcceptanceFacts
+        Accepted heads (10,), then submitted/accepted values and bool rejection
+        flags (10,). Out-of-domain input clears that actor's whole tuple to
+        (Stay, Target None, no Ultimate), without affecting other actors.
+        For in-domain input, movement is accepted separately from the combat
+        pair. A rejected Ultimate pair never falls back to a Basic action.
+
+    Notes
+    -----
+    Replace unsafe indices before gathering any mask entry; JAX indexing alone
+    does not reject negative or excessive categories. This pure numerical
+    helper does not validate storage shapes/dtypes or rebuild mask provenance.
+    Out-of-domain facts point to a policy or sampler defect for host inspection.
     """
     # Domain containment must precede every indexed mask access because negative
     # and upper-out-of-domain JAX indices are not semantic rejection.
@@ -1635,7 +1882,13 @@ def _build_accepted_joint_action_from_submitted_joint_action(
 def _build_global_pairwise_actor_and_recipient_target_one_hot_matrix(
     accepted_select_target_joint_action: Array,
 ) -> tuple[Array, Array, Array]:
-    """Map actor-relative accepted targets to dense global recipient rows."""
+    """Route accepted actor-relative targets to fixed global recipients.
+
+    accepted_select_target_joint_action is int32 (10,) in 0..10. Return the
+    float32 source/recipient one-hot matrix (10, 10), bool has-recipient flags
+    (10,), then int32 recipient IDs (10,). Target None has an all-zero route,
+    False flag and ID -1. Each other source has exactly one recipient.
+    """
     # Translate actor-relative selections once for every accepted effect lane.
     accepted_global_target_slot_by_actor_slot = (
         _ACTOR_RELATIVE_SELECT_TARGET_ACTION_TO_GLOBAL_AGENT_SLOT_LOOKUP_TABLE[
@@ -1668,16 +1921,38 @@ def _aggregate_health_effects_and_basic_passives_by_global_slot(
     mage_damage_amplification_aura_multipliers: Array,
     warrior_damage_mitigation_aura_multipliers: Array,
 ) -> _CombatEffectAggregationResult:
-    """Aggregate accepted health effects and basic-passive applications.
+    """Sum simultaneous health effects and retain their accepted-action causes.
 
-    The accepted target categories are actor-relative. After fixed-slot
-    translation, dense one-hot rows route every actor's catalog payload to its
-    recipient. Basic and ultimate contributions share this routing boundary.
-    Reducing the complete matrices before health mutation preserves simultaneous,
-    actor-order-independent resolution. The result retains the exact recipient
-    totals consumed by health resolution alongside the source-aligned values
-    needed for public facts. Its boolean vectors preserve passive and Trap-break
-    causes without inferring them from successor state.
+    Parameters
+    ----------
+    current_state : EnvState
+        Transition-start health, status and combat countdowns for ten slots.
+    config : EnvConfig
+        Matching resolved roster and class capabilities.
+    accepted_joint_action : Action
+        Current accepted int32 action heads (10,).
+    accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix : jax.Array
+        Float32 (10, 10) source/recipient routes; Target None rows are zero.
+    mage_damage_amplification_aura_multipliers : jax.Array
+        Current float32 (10,) outgoing-damage factors by source.
+    warrior_damage_mitigation_aura_multipliers : jax.Array
+        Current float32 (10,) incoming-damage factors by recipient.
+
+    Returns
+    -------
+    _CombatEffectAggregationResult
+        Source values, recipient health totals and bool application/participation
+        causes. All vectors have shape (10,); magnitudes are float32.
+
+    Notes
+    -----
+    Basic and Ultimate routes are mutually exclusive after acceptance. Reduce
+    all source contributions before changing health so agents resolve together.
+    Current Burst and aura values affect damage; current Poison affects healing.
+    Trap break uses accepted positive raw damage, not realized health loss.
+    Healing resets combat only when its recipient was already in combat at
+    transition start, preventing same-transition propagation through heal chains.
+    Inputs are not mutated and successor status applications are handled later.
     """
     # Pre-state source and recipient modifiers affect this transition's payloads.
     mage_burst_damage_amplification_multipliers = jnp.where(
@@ -1963,7 +2238,14 @@ def _compute_health_after_simultaneous_damage_and_healing(
     current_state: EnvState,
     config: EnvConfig,
 ) -> Array:
-    """Net simultaneous health effects and clamp each fixed-slot health value."""
+    """Apply net simultaneous health effects and clip to each class maximum.
+
+    Damage and healing totals are float32 (10,) in global recipient order.
+    current_state supplies starting health; config supplies maxima. Return
+    float32 (10,) health after their net change, clipped to [0, max_health].
+    This precedes regeneration, death resolution and respawn; no source is
+    chosen as a killer and no individual effect is clipped before summation.
+    """
     health_delta_by_slot = (
         total_healing_received_by_global_slot - total_damage_received_by_global_slot
     )
@@ -1982,13 +2264,15 @@ def _derive_aura_damage_multipliers(
     alive_mask: Array,
     is_not_under_spawn_shield: Array,
 ) -> _CombatAuraAggregationResult:
-    """Derive bounded Mage outgoing and Warrior incoming aura modifiers.
+    """Compute current Mage outgoing and Warrior incoming aura multipliers.
 
-    Rows represent aura emitters and columns represent beneficiary slots.
-    Only interaction-eligible active, living allies with real team IDs
-    participate as emitters or beneficiaries. Auras include eligible emitters,
-    use inclusive radius boundaries, and stack multiplicatively before the
-    completed vectors are bounded.
+    config provides classes and teams; global_pairwise_distances is float32
+    (10, 10). alive_mask and is_not_under_spawn_shield are bool (10,) from the
+    same snapshot. Return two float32 multiplier vectors (10,) plus bool
+    emitter/beneficiary coverage matrices (10, 10) in _CombatAuraAggregationResult.
+    Only configured living unshielded allies participate. Eligible emitters
+    benefit from their own aura. Inclusive range gates precede multiplication
+    and catalog caps; no sight gate is applied to auras.
     """
     global_pairwise_ally_mask, _ = _build_global_pairwise_team_masks(
         config.agent_profile.team_ids
@@ -2080,15 +2364,45 @@ def _resolve_status_duration_lifecycle(
     next_alive_mask: Array,
     is_newly_dead: Array,
 ) -> _CombatStatusAggregationResult:
-    """Resolve successor transient durations and status-application facts.
+    """Build successor durations and separate status-application causes.
 
-    Current durations age once toward zero. Accepted positive raw damage then
-    clears only the aged successor of a pre-existing Hunter Trap, after which
-    fresh source-local applications merge at full configured duration. A fresh
-    application never shortens a longer aged remainder and first governs the
-    next policy action. The spawn-shield counter also ages once after movement.
-    Dead successor slots retain status-application facts but carry no transient
-    duration into the next state.
+    Parameters
+    ----------
+    current_state : EnvState
+        Current durations and shields for the decision that just acted.
+    config : EnvConfig
+        Matching configured classes and participation mask.
+    accepted_use_ultimate_by_actor_slot : jax.Array
+        Int32 (10,) accepted Ultimate categories, zero or one.
+    accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix : jax.Array
+        Float32 (10, 10) accepted source/recipient routes.
+    hunter_basic_slow_applied_this_tick_by_global_recipient_slot : jax.Array
+        Bool (10,) recipients of an accepted Hunter Basic slow.
+    priest_freedom_applied_this_tick_by_global_recipient_slot : jax.Array
+        Bool (10,) recipients of an accepted Priest Basic movement floor.
+    accepted_positive_raw_damage_received_this_tick_by_global_recipient_slot : jax.Array
+        Bool (10,) recipients of positive raw damage, used for old Trap break.
+    hunter_basic_slow_applied_this_tick_by_global_actor_slot : jax.Array
+        Bool (10,) Hunter sources, retained separately for application facts.
+    next_alive_mask : jax.Array
+        Bool (10,) alive status after health/death resolution, before respawn.
+    is_newly_dead : jax.Array
+        Bool (10,) actors that died in this transition.
+
+    Returns
+    -------
+    _CombatStatusAggregationResult
+        Int32 successor durations, bool source application masks, and the
+        bool (10, 9) recipient lifecycle causes in their shared channel order.
+
+    Notes
+    -----
+    Age old durations once. Positive raw damage then clears the aged remainder
+    of an old Hunter Trap. Merge fresh applications at full duration without
+    shortening a longer remainder. They first govern the next policy decision.
+    Death clears successor durations but retains application facts. Shields age
+    after movement; a later respawn creates its new shield without ageing it.
+    Expiry, damage break, refresh and death clearing remain independent facts.
     """
     current_status_durations = jnp.concatenate(
         (
@@ -2419,7 +2733,14 @@ def _derive_accepted_ultimate_status_applications(
     accepted_use_ultimate_by_actor_slot: Array,
     accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix: Array,
 ) -> tuple[Array, Array, Array, Array, Array, Array, Array]:
-    """Derive source-local and recipient-routed accepted ultimate statuses."""
+    """Identify accepted Ultimate sources and their status recipients.
+
+    config supplies configured classes, accepted_use_ultimate_by_actor_slot is
+    int32 (10,), and the float32 (10, 10) matrix routes accepted targets.
+    Return seven bool (10,) arrays in order: Mage, Warrior, Hunter and Rogue
+    source flags; then Warrior Charge, Hunter Trap and Rogue Poison recipient
+    flags. Mage Burst stays on its source. No durations are changed here.
+    """
     uses_ultimate_this_tick = accepted_use_ultimate_by_actor_slot == 1
 
     # Mage Burst applies to its source; targeted ultimates reduce by recipient.
@@ -2482,11 +2803,14 @@ def _return_unchanged_agent_positions(
     obstacles: Array,
     always_participates_in_agent_agent_collision: Array,
     participates_in_agent_agent_collision_at_final_position: Array,
-    agent_agent_overlap_projection_passes: int,
-    collision_projection_passes: int,
-    movement_substeps: int,
 ) -> Array:
-    """Return unchanged positions when the conditional Charge phase is inactive."""
+    """Return agent_positions unchanged when no accepted Charge needs projection.
+
+    Positions are float32 (10, 2). All remaining operands match the Charge
+    geometry call but are unused: radii/deltas, active/alive flags, map bounds,
+    obstacle rows and traversal/final-contact masks. Matching operands lets
+    lax.cond skip that numerical branch without changing its return structure.
+    """
     del (
         agent_radii,
         intended_movement_deltas,
@@ -2495,9 +2819,6 @@ def _return_unchanged_agent_positions(
         map_width,
         map_height,
         obstacles,
-        agent_agent_overlap_projection_passes,
-        collision_projection_passes,
-        movement_substeps,
         always_participates_in_agent_agent_collision,
         participates_in_agent_agent_collision_at_final_position,
     )
@@ -2512,12 +2833,15 @@ def _resolve_post_charge_agent_positions(
     accepted_global_pairwise_actor_and_recipient_target_one_hot_matrix: Array,
     always_participates_in_agent_agent_collision: Array,
 ) -> Array:
-    """Resolve all accepted Warrior Charge relocations from one pre-state.
+    """Resolve all accepted Warrior Charge arrivals from one transition start.
 
-    Every desired endpoint is the source-facing tangent point around the
-    accepted recipient. The fixed-shape batch then receives one endpoint
-    placement pass through the shared geometry boundary. Ordinary voluntary
-    movement is deliberately excluded and resolves afterward.
+    current_state and config supply positions, bodies and map geometry.
+    accepted_joint_action has int32 heads (10,); its float32 (10, 10) routing
+    matrix gives each source at most one recipient. The bool (10,) collision
+    mask controls both Charge contact stages. Return float32 positions (10, 2).
+    Aim at the source-facing tangent around each accepted recipient, then use
+    shared endpoint geometry. No accepted Charge returns the input positions.
+    Already chosen ordinary movement resolves from these arrivals afterward.
     """
 
     # Accepted ultimate use is already validated against the current mask.
@@ -2569,16 +2893,13 @@ def _resolve_post_charge_agent_positions(
         post_charge_current_agent_position_deltas, axis=1
     )
 
-    agent_agent_overlap_projection_passes = 1
-    collision_projection_passes = DEFAULT_AGENT_PROJECTION_PASSES
-    movement_substeps = 1
     there_is_a_charging_warrior = jnp.any(accepted_warrior_charge_by_actor)
 
     return cast(
         Array,
         jax.lax.cond(
             there_is_a_charging_warrior,
-            project_movement_with_geometry,
+            project_charge_endpoints_with_geometry,
             _return_unchanged_agent_positions,
             current_state.agent_positions,
             config.agent_profile.agent_radii,
@@ -2590,9 +2911,6 @@ def _resolve_post_charge_agent_positions(
             config.obstacles,
             always_participates_in_agent_agent_collision,
             always_participates_in_agent_agent_collision,
-            agent_agent_overlap_projection_passes,
-            collision_projection_passes,
-            movement_substeps,
         ),
     )
 
@@ -2607,7 +2925,15 @@ def _build_combat_transition_facts(
     mage_burst_damage_amplification_is_applied_by_source: Array,
     next_health_after_effective_damage_and_healing: Array,
 ) -> CombatTransitionFacts:
-    """Package existing combat intermediates as authoritative public facts."""
+    """Package existing combat results without recomputing effect semantics.
+
+    combat_effect_aggregation_result supplies source values and recipient totals.
+    has-recipient flags are bool (10,) and recipient IDs int32 (10,), with -1
+    for none. Slow/stun application masks are bool (10, 3); Poison and Burst
+    flags are bool (10,). The final float32 (10,) health argument is the result
+    after combat and before regeneration. Return CombatTransitionFacts carrying
+    these same arrays; this packaging does not advance state or filter policies.
+    """
     return CombatTransitionFacts(
         basic_effect_is_activated_by_source=(
             combat_effect_aggregation_result.basic_effect_is_activated_by_source
@@ -2666,12 +2992,16 @@ def _build_death_transition_facts(
     source_modified_damage_output_by_source: Array,
     recipient_damage_modifier_by_source: Array,
 ) -> DeathTransitionFacts:
-    """Derive new successor deaths and source-aligned damage attribution.
+    """Identify new deaths and preserve each source's gross damage contribution.
 
-    A recipient dies only when it was active and alive at transition start
-    and its final clamped successor health is zero. Each contributing source
-    retains its gross post-source, post-recipient effective damage; simultaneous
-    healing and health clamping do not redistribute or select a killer.
+    current_state/config determine who was configured and alive at the start.
+    The float32 health vector (10,) is the successor value after combat and
+    regeneration but before respawn. Recipient IDs are int32 (10,), with -1
+    for none. Source-modified damage and recipient factors are float32 (10,).
+    Return bool new-death and contributor vectors, then float32 attributed
+    damage in DeathTransitionFacts. Contributors retain positive effective
+    damage to newly dead recipients; healing and health clipping do not select
+    a killer or apportion realized health loss between sources.
     """
 
     was_active_and_alive = jnp.logical_and(
@@ -2710,11 +3040,27 @@ def _build_death_transition_facts(
 
 
 def build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
-    """Return neutral facts for initialization or fixed-storage padding.
+    """Build neutral diagnostic facts for initialization or fixed-storage padding.
 
-    The supplied step count remains available only through the state itself.
-    Transition facts use their canonical sentinel because no action was
-    accepted and no simulator transition occurred.
+    Parameters
+    ----------
+    initial_state : EnvState
+        A ten-slot state supplying slow/stun and position array shapes.
+        Its values, including its current step, are not copied into event facts.
+
+    Returns
+    -------
+    Info
+        Fixed-shape neutral facts: has_transition is False, start step is -1,
+        recipient IDs are -1, actions are neutral, and event values are zero
+        or False. The actual initial step remains available on the state.
+
+    Notes
+    -----
+    This pure JAX builder does not validate or advance the state. It creates
+    diagnostics, not a policy observation or evidence that an event occurred.
+    A zero measurement here is padding for an absent transition, not an observed
+    zero event. Consumers must check has_transition.
     """
 
     all_false_vector = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.bool_)
@@ -2843,7 +3189,12 @@ def build_canonical_no_transition_info_object(initial_state: EnvState) -> Info:
 def _build_was_respawned_this_transition_by_agent_array(
     current_state: EnvState, config: EnvConfig
 ) -> Array:
-    """Return transition-start dead slots whose team wave is currently due."""
+    """Select configured start-dead actors whose team wave is due now.
+
+    current_state and config describe the transition start. Return bool (10,)
+    in global slot order, using each team's zero countdown. Actors newly killed
+    during this transition are absent, so they wait for a later wave.
+    """
     is_active_but_dead = jnp.logical_and(
         config.agent_profile.active_mask, jnp.logical_not(current_state.alive_mask)
     )
@@ -2875,7 +3226,16 @@ def _handle_end_of_transition_respawn_wave_event(
     next_spawn_shield_durations: Array,
     next_agent_positions: Array,
 ) -> tuple[Array, Array, Array, Array]:
-    """Apply the simultaneous end-of-transition respawn state override."""
+    """Override eligible successor rows with simultaneous respawn values.
+
+    config supplies class health, shield duration and fixed ordered pads.
+    was_respawned_this_transition_by_agent is bool (10,), selected from the
+    start-dead due-wave rule. The remaining next arrays are alive bool (10,),
+    health float32 (10,), shield int32 (10,) and positions float32 (10, 2).
+    Return those four arrays in the same order. Respawn sets full health and
+    full shield duration at the slot's pad; occupancy does not select a new pad.
+    The new shield is not decremented by the already completed ageing phase.
+    """
     updated_next_alive_mask = jnp.where(
         was_respawned_this_transition_by_agent,
         jnp.ones_like(next_alive_mask),
@@ -2932,7 +3292,13 @@ def _return_original_next_state_items(
     next_spawn_shield_durations: Array,
     next_agent_positions: Array,
 ) -> tuple[Array, Array, Array, Array]:
-    """Return unchanged successor leaves when neither team wave is due."""
+    """Return unchanged alive, health, shield and position arrays when no wave is due.
+
+    The returned order is next_alive_mask bool (10,), health float32 (10,),
+    next_spawn_shield_durations int32 (10,), next_agent_positions float32
+    (10, 2). config and was_respawned_this_transition_by_agent are unused operands
+    retained to match the active lax.cond branch.
+    """
     del config, was_respawned_this_transition_by_agent
     return (
         next_alive_mask,
@@ -2948,7 +3314,13 @@ def _compute_next_steps_until_out_of_combat(
     is_combat_participant_this_tick_by_agent: Array,
     next_alive_mask: Array,
 ) -> Array:
-    """Reset, decrement, or clear each successor combat countdown."""
+    """Reset, age or clear each successor combat countdown.
+
+    current_state holds the old int32 (10,) countdown; config holds each
+    class delay. Bool (10,) participation resets the delay, otherwise it ages
+    once toward zero. Bool next_alive_mask is checked before respawn; dead or
+    unused rows return zero. Return int32 (10,) without changing the inputs.
+    """
     next_steps_until_ooc_active_masked = jnp.where(
         is_combat_participant_this_tick_by_agent,
         config.agent_profile.out_of_combat_delay_steps,
@@ -2968,7 +3340,17 @@ def _compute_health_after_out_of_combat_health_regeneration(
     next_health_after_effective_damage_and_healing: Array,
     is_combat_participant_this_tick: Array,
 ) -> tuple[Array, Array]:
-    """Apply eligible post-combat regeneration and return its actual amount."""
+    """Apply eligible recovery after combat and report actual health gained.
+
+    current_state supplies start-alive flags, recovery countdowns and Poison;
+    config supplies maximum health and recovery fractions. Post-combat health
+    is float32 (10,) and current combat participation is bool (10,). Return
+    float32 (10,) health, then actual recovery amounts (10,), clipped by maximum
+    health. Eligibility requires start-alive, an already-zero countdown and no
+    participation this transition. Current Poison reduces the recovery amount.
+    A countdown that reaches zero only in the successor does not grant recovery
+    early; respawn health restoration is not counted here.
+    """
     raw_health_regen_deltas = (
         config.agent_profile.max_health
         * config.agent_profile.out_of_combat_health_regen_fraction_per_step
@@ -3016,7 +3398,17 @@ def _compute_health_after_out_of_combat_health_regeneration(
 def _handle_team_deathmatch_outcome_and_rewards(
     next_state: EnvState, config: EnvConfig
 ) -> tuple[Reward, DoneFlags, Array]:
-    """Resolve TDM completion, shared outcome, and one sparse reward pulse."""
+    """Resolve Team Deathmatch completion from successor scores and step count.
+
+    next_state and config describe one game after death scoring. Return Reward
+    with float32 (10,) values, DoneFlags with bool scalars, then int32 outcomes
+    (4,) with the TDM entry set. A higher score at or above threshold wins;
+    simultaneous threshold ties and horizon expiry without a threshold winner
+    draw. Termination and truncation may both be True. Configured winner/loser
+    slots receive +1/-1 even when dead; ongoing, draw and unused slots get zero.
+    The caller must stop at done; this helper does not suppress repeated calls
+    on an already-complete state or latch a one-time reward.
+    """
 
     team_a_score = next_state.team_deathmatch_scores[TEAM_A_ID - 1]
     team_b_score = next_state.team_deathmatch_scores[TEAM_B_ID - 1]
@@ -3086,7 +3478,12 @@ def _handle_team_deathmatch_outcome_and_rewards(
 def _canonical_no_outcome_and_rewards(
     next_state: EnvState, config: EnvConfig
 ) -> tuple[Reward, DoneFlags, Array]:
-    """Return neutral task output while retaining ordinary horizon truncation."""
+    """Return neutral task values while preserving the successor horizon check.
+
+    next_state supplies the step and config the horizon. Return zero float32
+    Reward (10,), DoneFlags with terminated False and the horizon bool, then
+    zero int32 outcomes (4,). No winner or draw is inferred for neutral mode.
+    """
     reward = Reward(rewards=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32))
     done_flags = DoneFlags(
         terminated=jnp.asarray(False, dtype=jnp.bool_),
@@ -3101,38 +3498,65 @@ def _canonical_no_outcome_and_rewards(
 def _handle_no_task_outcome_and_rewards(
     next_state: EnvState, config: EnvConfig
 ) -> tuple[Reward, DoneFlags, Array]:
-    """Return canonical neutral-mode task output."""
+    """Route neutral-mode successor state and config to the shared neutral output.
+
+    Return zero Reward (10,), bool DoneFlags and zero outcomes (4,), retaining
+    only the horizon truncation check. Inputs are not changed.
+    """
     return _canonical_no_outcome_and_rewards(next_state, config)
 
 
 def _handle_capture_the_flag_outcome_and_rewards(
     next_state: EnvState, config: EnvConfig
 ) -> tuple[Reward, DoneFlags, Array]:
-    """Reserve the fixed Capture the Flag branch until that task is implemented."""
+    """Keep the reserved Capture the Flag branch structurally compatible.
+
+    next_state and config are passed to the shared neutral-output helper.
+    Return its zero Reward, horizon-only DoneFlags and zero outcomes (4,).
+    Host validation rejects this mode; this branch is not implemented CTF play.
+    """
     return _canonical_no_outcome_and_rewards(next_state, config)
 
 
 def _handle_king_of_the_hill_outcome_and_rewards(
     next_state: EnvState, config: EnvConfig
 ) -> tuple[Reward, DoneFlags, Array]:
-    """Reserve the fixed King of the Hill branch until that task is implemented."""
+    """Keep the reserved King of the Hill branch structurally compatible.
+
+    next_state and config are passed to the shared neutral-output helper.
+    Return its zero Reward, horizon-only DoneFlags and zero outcomes (4,).
+    Host validation rejects this mode; this branch is not implemented KOTH play.
+    """
     return _canonical_no_outcome_and_rewards(next_state, config)
 
 
 def _handle_task_rewards_ongoing(config: EnvConfig) -> Reward:
-    """Return zero reward for an ongoing task transition."""
+    """Return float32 zero rewards (10,) for an ongoing task transition.
+
+    config is unused but keeps the same operand structure as winner branches
+    in lax.switch. The Reward record covers all fixed slots, including padding.
+    """
     del config
     return Reward(rewards=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32))
 
 
 def _handle_task_rewards_draw(config: EnvConfig) -> Reward:
-    """Return the canonical zero reward for a drawn task."""
+    """Return float32 zero rewards (10,) for a drawn task.
+
+    config is unused but keeps the same operand structure as winner branches
+    in lax.switch. A draw has no positive or negative terminal reward.
+    """
     del config
     return Reward(rewards=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32))
 
 
 def _handle_task_rewards_team_a_win(config: EnvConfig) -> Reward:
-    """Broadcast Team A's terminal result over configured roster slots."""
+    """Return Team A's terminal reward for every configured roster slot.
+
+    config supplies bool membership (10,). Return Reward with float32 (10,):
+    +1 for Team A, -1 for Team B and zero for unused slots. Alive status is
+    deliberately not an input, so configured dead agents share the team result.
+    """
     zero_vector = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32)
     incomplete_reward_vector = zero_vector.at[TEAM_A_START:TEAM_A_END].set(
         REWARD_FOR_WINNING
@@ -3144,7 +3568,12 @@ def _handle_task_rewards_team_a_win(config: EnvConfig) -> Reward:
 
 
 def _handle_task_rewards_team_b_win(config: EnvConfig) -> Reward:
-    """Broadcast Team B's terminal result over configured roster slots."""
+    """Return Team B's terminal reward for every configured roster slot.
+
+    config supplies bool membership (10,). Return Reward with float32 (10,):
+    +1 for Team B, -1 for Team A and zero for unused slots. Alive status is
+    deliberately not an input, so configured dead agents share the team result.
+    """
     zero_vector = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32)
     incomplete_reward_vector = zero_vector.at[TEAM_B_START:TEAM_B_END].set(
         REWARD_FOR_WINNING
@@ -3158,7 +3587,13 @@ def _handle_task_rewards_team_b_win(config: EnvConfig) -> Reward:
 def _compute_next_team_deathmatch_scores(
     current_scores: Array, new_deaths: Array
 ) -> Array:
-    """Add one opposing-team point for each authoritative new recipient death."""
+    """Add one point to the opposing team for each newly dead recipient.
+
+    current_scores is int32 (2,) in Team A, Team B order. new_deaths is bool
+    (10,) in global slot order, already restricted to new configured deaths.
+    Return int32 (2,) updated scores. Both teams can score in the same step;
+    source attribution and individual killer selection do not affect totals.
+    """
 
     team_a_deaths = jnp.sum(new_deaths[TEAM_A_START:TEAM_A_END], dtype=jnp.int32)
     team_b_deaths = jnp.sum(new_deaths[TEAM_B_START:TEAM_B_END], dtype=jnp.int32)
@@ -3173,7 +3608,11 @@ def _compute_next_team_deathmatch_scores(
 
 
 def _not_team_deathmatch(current_scores: Array, new_deaths: Array) -> Array:
-    """Return canonical zero TDM scores for every non-TDM task branch."""
+    """Return zero int32 Team Deathmatch scores (2,) for another task mode.
+
+    current_scores and new_deaths are unused operands matching the active
+    scoring branch. Neutral play does not accumulate Team Deathmatch scores.
+    """
     del current_scores, new_deaths
     return jnp.zeros((NUM_TEAMS,), dtype=jnp.int32)
 
@@ -3184,7 +3623,39 @@ def _not_team_deathmatch(current_scores: Array, new_deaths: Array) -> Array:
 def initialize_scenario_state(
     initial_state: EnvState, config: EnvConfig
 ) -> tuple[EnvState, Observation, ActionMask, Info]:
-    """Validate and expose one authored state without advancing the simulator."""
+    """Validate and expose an authored state without advancing the simulator.
+
+    Parameters
+    ----------
+    initial_state : EnvState
+        One authored ten-slot state in the EnvState schema. Living bodies must
+        not overlap, and accepted history must satisfy scenario shield rules.
+    config : EnvConfig
+        Matching scalar configuration with concrete host settings and JAX arrays.
+
+    Returns
+    -------
+    tuple of EnvState, Observation, ActionMask and Info
+        The same initial_state, its current observation and mask, then neutral
+        no-transition diagnostics. Position, health, counters and step count
+        are preserved, including an authored nonzero starting step.
+
+    Raises
+    ------
+    TypeError
+        Configuration or scenario storage/type checks fail.
+    ValueError
+        Configuration, state, geometry, start-limit or history checks fail.
+    AssertionError
+        A validated nonzero history target violates the internal mapping rule.
+
+    Notes
+    -----
+    This is a host entry point: it validates configuration and authored state,
+    may read device values and must stay outside jit/vmap/scan. It draws no
+    randomness and does not treat the authored start as a simulator transition.
+    Ordinary pad-based starts use reset instead.
+    """
     validate_env_config(config)
     validate_scenario_initial_state(config, initial_state)
     obs, action_mask = _build_observation_and_action_mask(initial_state, config)
@@ -3195,7 +3666,36 @@ def initialize_scenario_state(
 def reset(
     config: EnvConfig, key: Array
 ) -> tuple[EnvState, Observation, ActionMask, Info]:
-    """Create initial fixed-slot state from a host-validated configuration."""
+    """Build the initial state and decision inputs from fixed ordered spawn pads.
+
+    Parameters
+    ----------
+    config : EnvConfig
+        One episode configuration already checked on the host. It supplies
+        ten-slot class facts, ordered pads, map geometry and episode rules.
+        Under JAX, its array and scalar values are dynamic inputs.
+    key : jax.Array
+        Explicit PRNG key retained by the Core reset interface. This ordinary
+        reset currently ignores it: randomized task builders choose the resolved
+        setup before reset, and reset does not resample positions or classes.
+
+    Returns
+    -------
+    tuple of EnvState, Observation, ActionMask and Info
+        New state at step zero; its initial observation; its matching action
+        mask; and neutral no-transition facts. Configured agents start alive
+        at their ordered pads with full health. Cooldowns, statuses, shields,
+        combat delays and history are zero. Each team clock starts at period
+        minus one. Unused state rows are zero and inactive.
+
+    Notes
+    -----
+    This pure numerical function handles one game and performs no host
+    validation, I/O or mutation. It supports jit and an outer vmap for games.
+    Carry the returned state and mask together into step. Configured sizes
+    below five retain all ten array slots; active_mask marks participation.
+    Authored nonstandard starts use initialize_scenario_state instead.
+    """
     # Reset keeps all arrays at MAX_AGENT_SLOTS length. Smaller tasks use the
     # resolved profile's active mask to distinguish agents from padded slots.
     # Ordinary reset starts all active agents alive. Scenario loaders may later
@@ -3263,12 +3763,57 @@ def step(
     joint_action: Action,
     key: Array,
 ) -> tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]:
-    """Advance from one paired state/mask snapshot and build the next snapshot.
+    """Advance one paired state and action-mask snapshot by one simulator step.
 
-    ``current_action_mask`` is the mask produced with ``current_state`` by
-    reset or the preceding step. It is the sole source of submitted-action
-    acceptance; the returned observation and mask describe ``next_state``.
+    All actions are chosen from the current observation/mask before this call.
+    Combat reads current positions and current status strengths. Charge places
+    its arrivals first; the already chosen voluntary moves then resolve from
+    those positions. Fresh statuses enter the successor and first govern the
+    next decision. Due respawns happen at the end for actors already dead at
+    transition start. New deaths wait for a later wave.
+
+    Parameters
+    ----------
+    config : EnvConfig
+        Matching validated one-game configuration. Keep episode rules fixed
+        within the game; their JAX values remain dynamic inputs.
+    current_state : EnvState
+        Current ten-slot state returned by reset or the preceding step.
+    current_action_mask : ActionMask
+        The mask produced with current_state. It is the sole authority for
+        accepting this submission; Core does not rebuild or validate its origin.
+    joint_action : Action
+        Int32 movement, target and Ultimate arrays (10,). Target IDs are
+        actor-relative. In-domain masked movement becomes Stay; a masked combat
+        pair becomes (Target None, no Ultimate). Any out-of-domain head clears
+        that actor's entire tuple. Rejections are recorded in Info.
+    key : jax.Array
+        Explicit PRNG key retained by the interface. Current transitions are
+        deterministic from the other arguments and ignore this key.
+
+    Returns
+    -------
+    tuple of EnvState, Observation, Reward, DoneFlags, ActionMask and Info
+        Successor state; its observation; float32 rewards (10,); scalar bool
+        termination/truncation flags; its matching mask; and privileged facts
+        about the transition just completed. State step_count increases once.
+        Observation history contains the accepted action, not the rejected
+        submission. Carry successor state and mask into the next step.
+
+    Notes
+    -----
+    This pure JAX function handles one game. It performs no host validation,
+    policy call, I/O, random draw or input mutation. Use jit/scan and an outer
+    vmap for games. Stop or reset when DoneFlags.done becomes True: Core does
+    not auto-reset, absorb terminal states or suppress rewards if called again.
+    Team Deathmatch can terminate and truncate together. Threshold ties draw;
+    horizon expiry without a threshold winner also draws. Configured agents
+    share their team's +1/-1 result even when dead; unused slots receive zero.
+    Ongoing transitions and draws give every slot zero reward.
+    Info is global simulator truth and does not grant policy information rights.
     """
+    del key
+
     accepted_joint_action, action_acceptance_facts = (
         _build_accepted_joint_action_from_submitted_joint_action(
             current_action_mask=current_action_mask, submitted_joint_action=joint_action

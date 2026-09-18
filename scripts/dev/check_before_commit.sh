@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+
+# Check an already frozen, nonempty staged candidate before a Codex commit.
+# Usage: scripts/dev/check_before_commit.sh (no arguments). Requires Git, the
+# prepared uv environment, Node/npm and installed browser dependencies. Reject
+# tracked unstaged changes and nonignored untracked files. Run the complete Python
+# and frontend gates, then recheck HEAD, the index tree and worktree cleanliness.
+# The script reports success only for that unchanged candidate. It never stages
+# or commits. git write-tree may write Git tree objects while fingerprinting.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -7,6 +15,9 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
 # shellcheck source=scripts/dev/validation_parallel.sh
 source "${SCRIPT_DIR}/validation_parallel.sh"
 
+# Print HEAD:index-tree for this repository. No arguments. Return nonzero if
+# Git cannot read HEAD or write the index tree. Tree-object creation is allowed;
+# this function does not stage files or create a commit.
 candidate_fingerprint() {
   local head_revision=""
   local staged_tree=""
@@ -16,10 +27,15 @@ candidate_fingerprint() {
   printf '%s:%s\n' "${head_revision}" "${staged_tree}"
 }
 
+# Print untracked paths that Git does not ignore, one per line. No arguments.
+# Return Git status; ignored private milestone files are excluded.
 nonignored_untracked_files() {
   git -C "${REPO_ROOT}" ls-files --others --exclude-standard
 }
 
+# Require staged changes, no tracked unstaged changes, no nonignored untracked
+# files and no staged whitespace errors. No arguments. Print a reason and return
+# nonzero on failure; inspect only, with no staging or worktree changes.
 require_frozen_staged_candidate() {
   local untracked=""
 

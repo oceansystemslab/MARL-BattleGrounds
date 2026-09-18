@@ -1,4 +1,4 @@
-"""Combat contract tests for Milestone 5 class setup."""
+"""Check class setup and the shared combat data contract."""
 
 import subprocess
 import sys
@@ -20,9 +20,9 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_BASE_MOVEMENT_SPEED,
     AGENT_FEATURE_BASIC_INTERACTION_RADIUS,
     AGENT_FEATURE_CLASS_ID,
+    AGENT_FEATURE_IS_ENEMY,
     AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
-    AGENT_FEATURE_TEAM_ID,
     AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
     AGENT_FEATURE_X,
     AGENT_FEATURE_Y,
@@ -126,14 +126,12 @@ _CatalogHelper = Callable[[int | Array], Array]
 
 
 def _empty_obstacles() -> Array:
-    """Return a zero-filled obstacle feature table."""
     return jnp.zeros(shape=(MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32)
 
 
 def _config(
     team_size: int = 3, class_ids: Array = _CONFIG_DEFAULT_5_CLASS_MIRROR
 ) -> EnvConfig:
-    """Return a deterministic combat-contract test config."""
     profile = resolve_agent_profile(
         class_ids, jnp.asarray((team_size, team_size), dtype=jnp.int32)
     )
@@ -171,7 +169,6 @@ def _config(
 
 
 def _canonical_class_ids() -> tuple[int, ...]:
-    """Return neutral plus M5 canonical class IDs in catalog row order."""
     return (
         CLASS_NEUTRAL,
         MAGE_CLASS_ID,
@@ -183,17 +180,14 @@ def _canonical_class_ids() -> tuple[int, ...]:
 
 
 def _catalog_array(name: str) -> Array:
-    """Return a named class catalog as a typed JAX array."""
     return cast(Array, getattr(combat, name))
 
 
 def _catalog_helper(name: str) -> _CatalogHelper:
-    """Return a named class catalog lookup helper."""
     return cast(_CatalogHelper, getattr(combat, name))
 
 
 def test_basic_interaction_radii_match_the_approved_combat_catalog() -> None:
-    """The approved class-specific Basic ranges stay exact."""
     expected = jnp.asarray(
         (0.0, 3.0, 1.5, 3.5, 1.5, 3.0),
         dtype=jnp.float32,
@@ -207,7 +201,6 @@ def test_basic_interaction_radii_match_the_approved_combat_catalog() -> None:
 
 
 def _expected_active_mask(team_size: int) -> Array:
-    """Return the fixed-slot active mask for a symmetric two-team task."""
     indices = jnp.arange(MAX_AGENT_SLOTS)
 
     team_0_active = indices < team_size
@@ -219,25 +212,21 @@ def _expected_active_mask(team_size: int) -> Array:
 
 
 def _expected_resolved_class_ids(class_ids: Array, team_size: int) -> Array:
-    """Return class IDs after reset neutralizes inactive padded slots."""
     active_mask = _expected_active_mask(team_size)
     return jnp.where(active_mask, class_ids, NEUTRAL_CLASS_ID).astype(jnp.int32)
 
 
 def _assert_array_equal(actual: Array, expected: Array, name: str) -> None:
-    """Assert exact JAX array equality with a readable failure name."""
     assert actual.shape == expected.shape, name
     assert bool(jnp.array_equal(actual, expected)), name
 
 
 def _assert_float_array_close(actual: Array, expected: Array, name: str) -> None:
-    """Assert floating-point JAX array equality with a readable failure name."""
     assert actual.shape == expected.shape, name
     assert bool(jnp.allclose(actual, expected)), name
 
 
 def _assert_reset_combat_state_is_inert(state: EnvState) -> None:
-    """Assert dynamic combat effect fields start inert at reset."""
     _assert_array_equal(
         state.ultimate_cooldowns,
         jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
@@ -273,7 +262,6 @@ def _assert_reset_combat_state_is_inert(state: EnvState) -> None:
 def _assert_self_features_project_state(
     obs: Observation, state: EnvState, config: EnvConfig
 ) -> None:
-    """Assert self rows project dynamic state and the resolved profile."""
     profile = config.agent_profile
     assert obs.self_features.shape == (MAX_AGENT_SLOTS, SELF_FEATURES)
 
@@ -288,9 +276,9 @@ def _assert_self_features_project_state(
         "obs.self_features.radius",
     )
     _assert_float_array_close(
-        obs.self_features[:, AGENT_FEATURE_TEAM_ID],
-        profile.team_ids.astype(jnp.float32),
-        "obs.self_features.team_id",
+        obs.self_features[:, AGENT_FEATURE_IS_ENEMY],
+        jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32),
+        "obs.self_features.is_enemy",
     )
     _assert_float_array_close(
         obs.self_features[:, AGENT_FEATURE_ACTIVE],
@@ -453,7 +441,6 @@ def test_mage_burst_is_representable_as_no_target_self_buff() -> None:
 
 
 def test_ultimate_target_modes_are_distinct_and_class_aligned() -> None:
-    """Prove neutral, no-target, ally, and enemy semantics cannot collapse."""
     modes = (
         combat.NO_ULTIMATE_MODE,
         combat.ONLY_NONE_TARGET_ULTIMATE_MODE,
@@ -643,7 +630,6 @@ def test_derive_status_magnitudes_matches_jit_for_mixed_active_durations() -> No
 def test_effective_movement_speed_aligns_status_and_participation_control(
     movement_scale: float,
 ) -> None:
-    """Prove one derived speed represents every current voluntary-speed gate."""
     base_movement_speeds = jnp.full((MAX_AGENT_SLOTS,), 2.0, dtype=jnp.float32)
     active_and_alive_mask = jnp.arange(MAX_AGENT_SLOTS) < 5
     slow_durations = jnp.zeros((MAX_AGENT_SLOTS, NUM_SLOW_CHANNELS), dtype=jnp.int32)

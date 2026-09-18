@@ -1,10 +1,19 @@
-"""Strict authority-safe replay inspection and live draft presentation.
+"""Build separate inspection records for outgoing replay actions and live drafts.
 
-Replay inspection describes the recorded action chosen from the displayed
-decision epoch ``s_n/m_n`` and accepted in outgoing transition ``T_n``.  Live
-draft inspection describes editable intent before submission.  The two roots
-are deliberately disjoint, and neither builder accepts browser, service,
-simulator, JAX, NumPy, or successor-state objects.
+Replay builders show the action chosen from the displayed frame and mask,
+then accepted by its outgoing transition. Live builders show editable intent
+before submission. The roots keep those meanings separate, with distinct
+route bases and no fabricated acceptance for drafts.
+
+Oracle, NoSharedObs and SharedObs builders each validate their own authority.
+Recipient views use recipient-local identities and masks. A target-axis ID
+may be public even when no body anchor is disclosed; exact joint masks own
+combat-pair legality. Shared inspection deliberately reads only the fixed
+recipient's action surface, not unrelated transition events or source history.
+
+These are host record builders. They accept no browser/service objects,
+simulator states, JAX/NumPy arrays or successor-state objects, and perform
+no action execution, file I/O or input mutation.
 """
 
 from __future__ import annotations
@@ -19,18 +28,25 @@ from pydantic import ConfigDict, Field
 from marl_battlegrounds.evaluation.models import (
     ActionAcceptanceFactsV1,
     ActionMaskV1,
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContext,
+    EvaluationFrame,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     EvaluationTransitionV1,
     JointActionV1,
     TransitionFactsV1,
+    evaluation_context_type,
 )
 from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
+    ActorPovAxisMapping,
     ActorPovAxisMappingV1,
+    ActorPovAxisMappingV2,
+    ActorPovCurrentSlice,
     ActorPovCurrentSliceV1,
+    ActorPovCurrentSliceV2,
     ActorPovTransitionV1,
-    validate_actor_pov_replay_content_v1,
+    validate_actor_pov_replay_content,
 )
 from marl_battlegrounds.evaluation.wire_shapes import (
     MAX_AGENT_SLOTS_V1,
@@ -50,10 +66,12 @@ from marl_battlegrounds.rendering.authorized_presentation import (
     SubmittedActionTupleV1,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
-    SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION,
     SharedObsBaseSensorFrameV1,
+    SharedObsBaseSensorFrameV2,
     SharedObsBaseSensorSceneV1,
+    SharedObsSourceMaterialProjection,
     SharedObsSourceMaterialProjectionV1,
+    SharedObsSourceMaterialProjectionV2,
 )
 from marl_battlegrounds.rendering.evaluation_wire_features import (
     AGENT_FEATURE_ACTIVE_V1,
@@ -82,11 +100,20 @@ type DraftArmedLaneV1 = Literal["none", "basic", "ultimate"]
 
 
 def _require_text(value: str, *, name: str) -> None:
+    """Require value to be a nonblank exact Python string.
+
+    name labels ValueError; return None without trimming or coercion.
+    """
     if type(value) is not str or not value.strip():
         raise ValueError(f"{name} must be a non-empty Python string.")
 
 
 def _require_ascii_identifier(value: str, *, name: str) -> None:
+    """Check value uses the exact public ASCII identifier alphabet.
+
+    Require an initial letter/digit, then letters, digits or . _ : / + -.
+    name labels ValueError; return None without normalization.
+    """
     if type(value) is not str or _ASCII_IDENTIFIER_PATTERN.fullmatch(value) is None:
         raise ValueError(f"{name} must be an exact ASCII identifier.")
 
@@ -98,6 +125,12 @@ def _require_python_int(
     minimum: int = 0,
     maximum_exclusive: int | None = None,
 ) -> None:
+    """Check an exact Python int against lower and optional upper bounds.
+
+    value must be at least minimum (default zero) and below maximum_exclusive
+    when supplied. name labels ValueError. Return None without conversion;
+    bool and array scalar inputs are not accepted.
+    """
     if type(value) is not int or value < minimum:
         raise ValueError(f"{name} must be a Python int >= {minimum}.")
     if maximum_exclusive is not None and value >= maximum_exclusive:
@@ -105,6 +138,11 @@ def _require_python_int(
 
 
 def _require_point(value: Point2D, *, name: str) -> None:
+    """Check value is a pair of finite Python floats in world coordinates.
+
+    name labels ValueError for invalid tuple shape/type. Return None; no map
+    bounds or collision rule is checked.
+    """
     if type(value) is not tuple or len(value) != 2:
         raise ValueError(f"{name} must be a two-coordinate Python tuple.")
     if any(type(item) is not float or not isfinite(item) for item in value):
@@ -117,6 +155,11 @@ def _require_text_tuple(
     name: str,
     length: int,
 ) -> None:
+    """Check values is an exact tuple of length unique nonblank strings.
+
+    length is the required axis size and name labels ValueError. Preserve input
+    order and return None without converting the tuple.
+    """
     if type(values) is not tuple or len(values) != length:
         raise ValueError(f"{name} must be a {length}-row Python tuple.")
     for value in values:
@@ -131,6 +174,11 @@ def _require_bool_tuple(
     name: str,
     length: int,
 ) -> None:
+    """Check values is an exact tuple of length Python booleans.
+
+    length fixes the axis size; name labels ValueError. Return None without
+    coercing numeric truth values.
+    """
     if type(values) is not tuple or len(values) != length:
         raise ValueError(f"{name} must be a {length}-row Python tuple.")
     if any(type(value) is not bool for value in values):
@@ -139,15 +187,42 @@ def _require_bool_tuple(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedNoTargetActionV1:
-    """The recorded target-action-zero axis row."""
+    """Describe the Target None row of the public action axis.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    target_kind : Literal['no_target']
+        The literal no_target.
+    target_action : int
+        Exact Python int 0.
+    display_name : str
+        Nonblank public label for Target None.
+
+    Raises
+    ------
+    ValueError
+        Discriminator/category does not identify zero or display_name is invalid.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     target_kind: Literal["no_target"]
+    """The literal no_target."""
     target_action: int
+    """Exact Python int 0."""
     display_name: str
+    """Nonblank public label for Target None."""
 
     def __post_init__(self) -> None:
+        """Check AuthorizedNoTargetActionV1 during host construction.
+
+        Raise ValueError if discriminator/category does not identify zero or
+        display_name is invalid.
+        Return None without changing valid fields.
+        """
         if self.target_kind != "no_target" or self.target_action != 0:
             raise ValueError("the no-target variant must identify target action zero.")
         if type(self.target_action) is not int:
@@ -157,18 +232,60 @@ class AuthorizedNoTargetActionV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedVisibleTargetActionV1:
-    """One positive target-axis row joined to the authorized current scene."""
+    """Join a positive target category to a currently authorized body.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    target_kind : Literal['visible_authorized_agent']
+        The literal visible_authorized_agent.
+    target_action : int
+        Python actor-relative target category in 1..10.
+    display_name : str
+        Nonblank public label for this target category.
+    target_presentation_key : str
+        Nonblank current-scene key for the disclosed body.
+    target_public_agent_id : str
+        Nonblank public ID supplied by the authorized target-axis mapping.
+    target_anchor : Point2D
+        Finite Python world (x, y) tuple from the current scene.
+
+    Raises
+    ------
+    ValueError
+        Discriminator, category range, nonblank labels/IDs or anchor shape/type
+        is invalid.
+
+    Notes
+    -----
+    Visibility here means a body is present in the authorized scene; action
+    legality is stored separately in the decision mask.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     target_kind: Literal["visible_authorized_agent"]
+    """The literal visible_authorized_agent."""
     target_action: int
+    """Python actor-relative target category in 1..10."""
     display_name: str
+    """Nonblank public label for this target category."""
     target_presentation_key: str
+    """Nonblank current-scene key for the disclosed body."""
     target_public_agent_id: str
+    """Nonblank public ID supplied by the authorized target-axis mapping."""
     target_anchor: Point2D
+    """Finite Python world (x, y) tuple from the current scene."""
 
     def __post_init__(self) -> None:
+        """Check AuthorizedVisibleTargetActionV1 during host construction.
+
+        Raise ValueError if discriminator, category range, nonblank labels/IDs
+        or anchor shape/type is invalid.
+        Return None without changing valid fields.
+        """
         if self.target_kind != "visible_authorized_agent":
             raise ValueError("unknown visible-target discriminator.")
         _require_python_int(
@@ -188,16 +305,51 @@ class AuthorizedVisibleTargetActionV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedAxisOnlyTargetActionV1:
-    """One authorized positive target axis whose body anchor is not disclosed."""
+    """Describe an authorized target ID without disclosing its body position.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    target_kind : Literal['axis_only_authorized_agent']
+        The literal axis_only_authorized_agent.
+    target_action : int
+        Python actor-relative target category in 1..10.
+    display_name : str
+        Nonblank public label for this target category.
+    target_public_agent_id : str
+        Nonblank public ID supplied by the authorized target-axis mapping.
+
+    Raises
+    ------
+    ValueError
+        Discriminator, category range, label or public ID is invalid.
+
+    Notes
+    -----
+    The public action axis retains identity even when the current scene has no
+    body. This variant contains no body key or anchor.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     target_kind: Literal["axis_only_authorized_agent"]
+    """The literal axis_only_authorized_agent."""
     target_action: int
+    """Python actor-relative target category in 1..10."""
     display_name: str
+    """Nonblank public label for this target category."""
     target_public_agent_id: str
+    """Nonblank public ID supplied by the authorized target-axis mapping."""
 
     def __post_init__(self) -> None:
+        """Check AuthorizedAxisOnlyTargetActionV1 during host construction.
+
+        Raise ValueError if discriminator, category range, label or public ID is
+        invalid.
+        Return None without changing valid fields.
+        """
         if self.target_kind != "axis_only_authorized_agent":
             raise ValueError("unknown axis-only-target discriminator.")
         _require_python_int(
@@ -223,22 +375,83 @@ type AuthorizedTargetActionV1 = Annotated[
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorizedDecisionMaskV1:
-    """One complete owner-bound 9/11/2/11x2 decision surface."""
+    """Describe one actor's complete current decision mask and target axis.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    schema_version : Literal[1]
+        Exact Python int 1.
+    owner_presentation_key : str
+        Nonblank current-scene key of the mask owner.
+    owner_public_agent_id : str
+        Nonblank public ID of that same actor.
+    movement_action_display_names : tuple[str, ...]
+        Tuple (9,) of unique nonblank public movement labels.
+    movement_action_mask : tuple[bool, ...]
+        Exact Python bool tuple (9,) for movement categories.
+    target_actions : tuple[AuthorizedTargetActionV1, ...]
+        Tuple (11,) of exact target variants in category order 0..10; positive
+        public IDs and visible body keys are unique.
+    target_action_mask : tuple[bool, ...]
+        Exact Python bool tuple (11,), equal to the row marginal of the joint mask.
+    use_ultimate_action_display_names : tuple[str, ...]
+        Tuple (2,) of unique nonblank Basic/Ultimate lane labels.
+    use_ultimate_action_mask : tuple[bool, ...]
+        Exact Python bool tuple (2,), equal to the column marginal of the joint mask.
+    target_use_ultimate_joint_mask : tuple[tuple[bool, ...], ...]
+        Exact Python bool tuples (11, 2), indexed by target category then
+        Basic/Ultimate lane.
+
+    Raises
+    ------
+    ValueError
+        Version, owner text, exact axes, target identities/order, unique labels
+        or marginal/joint agreement fails.
+
+    Notes
+    -----
+    The joint mask is the combat-pair authority. Legal individual marginals do
+    not prove a chosen pair is legal. The builder binds these values to the
+    displayed decision epoch.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     schema_version: Literal[1]
+    """Exact Python int 1."""
     owner_presentation_key: str
+    """Nonblank current-scene key of the mask owner."""
     owner_public_agent_id: str
+    """Nonblank public ID of that same actor."""
     movement_action_display_names: tuple[str, ...]
+    """Tuple (9,) of unique nonblank public movement labels."""
     movement_action_mask: tuple[bool, ...]
+    """Exact Python bool tuple (9,) for movement categories."""
     target_actions: tuple[AuthorizedTargetActionV1, ...]
+    """Tuple (11,) of exact target variants in category order 0..10; positive
+    public IDs and visible body keys are unique.
+    """
     target_action_mask: tuple[bool, ...]
+    """Exact Python bool tuple (11,), equal to the row marginal of the joint mask."""
     use_ultimate_action_display_names: tuple[str, ...]
+    """Tuple (2,) of unique nonblank Basic/Ultimate lane labels."""
     use_ultimate_action_mask: tuple[bool, ...]
+    """Exact Python bool tuple (2,), equal to the column marginal of the joint mask."""
     target_use_ultimate_joint_mask: tuple[tuple[bool, ...], ...]
+    """Exact Python bool tuples (11, 2), indexed by target category then
+    Basic/Ultimate lane.
+    """
 
     def __post_init__(self) -> None:
+        """Check AuthorizedDecisionMaskV1 during host construction.
+
+        Raise ValueError if version, owner text, exact axes, target
+        identities/order, unique labels or marginal/joint agreement fails.
+        Return None without changing valid fields.
+        """
         if (
             type(self.schema_version) is not int
             or self.schema_version != AUTHORIZED_INSPECTION_SCHEMA_VERSION
@@ -343,16 +556,52 @@ class AuthorizedDecisionMaskV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class OracleReplayTransitionReferenceV1:
-    """Canonical Oracle identity for one recorded outgoing transition."""
+    """Identify one privileged Oracle outgoing transition.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    reference_kind : Literal['oracle_recorded_transition']
+        The literal oracle_recorded_transition.
+    transition_id : str
+        Nonblank outgoing transition ID in this reference's namespace.
+    start_frame_id : str
+        Nonblank ID of the displayed decision frame.
+    successor_frame_id : str
+        Nonblank ID of the adjacent successor frame.
+
+    Raises
+    ------
+    ValueError
+        Reference discriminator or required nonblank identity text is invalid.
+
+    Notes
+    -----
+    The containing inspection record checks canonical episode/index/recipient
+    relationships. This reference alone does not prove that a recorded
+    transition exists.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     reference_kind: Literal["oracle_recorded_transition"]
+    """The literal oracle_recorded_transition."""
     transition_id: str
+    """Nonblank outgoing transition ID in this reference's namespace."""
     start_frame_id: str
+    """Nonblank ID of the displayed decision frame."""
     successor_frame_id: str
+    """Nonblank ID of the adjacent successor frame."""
 
     def __post_init__(self) -> None:
+        """Check OracleReplayTransitionReferenceV1 during host construction.
+
+        Raise ValueError if reference discriminator or required nonblank
+        identity text is invalid.
+        Return None without changing valid fields.
+        """
         if self.reference_kind != "oracle_recorded_transition":
             raise ValueError("unknown Oracle transition-reference discriminator.")
         for name in ("transition_id", "start_frame_id", "successor_frame_id"):
@@ -361,17 +610,56 @@ class OracleReplayTransitionReferenceV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NoSharedObsReplayTransitionReferenceV1:
-    """Recipient-local NoSharedObs identity for an outgoing transition."""
+    """Identify one recipient-local NoSharedObs outgoing transition.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    reference_kind : Literal['no_shared_obs_actor_pov_transition']
+        The literal no_shared_obs_actor_pov_transition.
+    recipient_public_agent_id : str
+        Nonblank public ID of the one recipient owning this namespace.
+    transition_id : str
+        Nonblank outgoing transition ID in this reference's namespace.
+    start_frame_id : str
+        Nonblank ID of the displayed decision frame.
+    successor_frame_id : str
+        Nonblank ID of the adjacent successor frame.
+
+    Raises
+    ------
+    ValueError
+        Reference discriminator or required nonblank identity text is invalid.
+
+    Notes
+    -----
+    The containing inspection record checks canonical episode/index/recipient
+    relationships. This reference alone does not prove that a recorded
+    transition exists.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     reference_kind: Literal["no_shared_obs_actor_pov_transition"]
+    """The literal no_shared_obs_actor_pov_transition."""
     recipient_public_agent_id: str
+    """Nonblank public ID of the one recipient owning this namespace."""
     transition_id: str
+    """Nonblank outgoing transition ID in this reference's namespace."""
     start_frame_id: str
+    """Nonblank ID of the displayed decision frame."""
     successor_frame_id: str
+    """Nonblank ID of the adjacent successor frame."""
 
     def __post_init__(self) -> None:
+        """Check NoSharedObsReplayTransitionReferenceV1 during host construction.
+
+        Raise ValueError if reference discriminator or required nonblank
+        identity text is invalid.
+        Return None without changing valid fields.
+        """
         if self.reference_kind != "no_shared_obs_actor_pov_transition":
             raise ValueError("unknown NoSharedObs transition-reference discriminator.")
         for name in (
@@ -385,17 +673,56 @@ class NoSharedObsReplayTransitionReferenceV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsReplayTransitionReferenceV1:
-    """Recipient-local visual-union identity for an outgoing transition."""
+    """Identify one recipient-local SharedObs visual-union outgoing transition.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    reference_kind : Literal['shared_obs_visual_union_transition']
+        The literal shared_obs_visual_union_transition.
+    recipient_public_agent_id : str
+        Nonblank public ID of the one recipient owning this namespace.
+    transition_id : str
+        Nonblank outgoing transition ID in this reference's namespace.
+    start_frame_id : str
+        Nonblank ID of the displayed decision frame.
+    successor_frame_id : str
+        Nonblank ID of the adjacent successor frame.
+
+    Raises
+    ------
+    ValueError
+        Reference discriminator or required nonblank identity text is invalid.
+
+    Notes
+    -----
+    The containing inspection record checks canonical episode/index/recipient
+    relationships. This reference alone does not prove that a recorded
+    transition exists.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     reference_kind: Literal["shared_obs_visual_union_transition"]
+    """The literal shared_obs_visual_union_transition."""
     recipient_public_agent_id: str
+    """Nonblank public ID of the one recipient owning this namespace."""
     transition_id: str
+    """Nonblank outgoing transition ID in this reference's namespace."""
     start_frame_id: str
+    """Nonblank ID of the displayed decision frame."""
     successor_frame_id: str
+    """Nonblank ID of the adjacent successor frame."""
 
     def __post_init__(self) -> None:
+        """Check SharedObsReplayTransitionReferenceV1 during host construction.
+
+        Raise ValueError if reference discriminator or required nonblank
+        identity text is invalid.
+        Return None without changing valid fields.
+        """
         if self.reference_kind != "shared_obs_visual_union_transition":
             raise ValueError("unknown SharedObs transition-reference discriminator.")
         for name in (
@@ -416,6 +743,11 @@ type ReplayTransitionReferenceV1 = Annotated[
 
 
 def _expected_combat_lane(action: AcceptedActionTupleV1) -> CombatLaneV1:
+    """Name the combat lane represented by a bounded accepted action.
+
+    action.use_ultimate_action equal to one returns ultimate. Otherwise target
+    zero returns none, and a positive target returns basic. No mask is read.
+    """
     if action.use_ultimate_action == 1:
         return "ultimate"
     if action.target_action == 0:
@@ -430,6 +762,14 @@ def _validate_reference_epoch(
     transition_index: int,
     actor_public_agent_id: str,
 ) -> None:
+    """Join a replay reference to its exact authority namespace and epoch.
+
+    episode_id, transition_index and actor_public_agent_id are the containing
+    inspection identity. Require Oracle IDs or the matching recipient-local
+    NoSharedObs/SharedObs prefix and adjacent frame indices. Return None or
+    raise ValueError on disagreement; unsupported variants are an assertion
+    failure because the caller validates the union first.
+    """
     if type(reference) is OracleReplayTransitionReferenceV1:
         prefix = episode_id
     elif type(reference) is NoSharedObsReplayTransitionReferenceV1:
@@ -455,27 +795,109 @@ def _validate_reference_epoch(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReplayInspectionPresentationV1:
-    """Recorded accepted outgoing route and exact current decision surface."""
+    """Describe an accepted outgoing action using the displayed current mask.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    schema_version : Literal[1]
+        Exact Python int 1.
+    inspection_kind : Literal['replay_recorded_outgoing_action']
+        The literal replay_recorded_outgoing_action.
+    route_display_basis : Literal['accepted_action']
+        The literal accepted_action; routes never use rejected submitted intent.
+    episode_id : str
+        ASCII episode identifier matching the allowed public ID alphabet.
+    outgoing_transition_index : int
+        Nonnegative Python outgoing transition index, equal to its decision-frame index.
+    current_simulator_step_count : int
+        Nonnegative Python simulator count at the displayed decision.
+    transition_reference : ReplayTransitionReferenceV1
+        Exact Oracle, NoSharedObs or SharedObs reference with canonical adjacent
+        frame IDs.
+    actor_presentation_key : str
+        Nonblank current-scene key of the inspected actor.
+    actor_public_agent_id : str
+        Nonblank public ID of the inspected actor.
+    actor_anchor : Point2D
+        Finite Python world (x, y) tuple at the displayed decision.
+    decision_mask : AuthorizedDecisionMaskV1
+        Exact AuthorizedDecisionMaskV1 owned by this same actor.
+    submitted_action : SubmittedActionTupleV1
+        Exact SubmittedActionTupleV1 preserving the recorded request.
+    accepted_action : AcceptedActionTupleV1
+        Exact AcceptedActionTupleV1; movement and joint combat pair must be
+        legal under decision_mask.
+    combat_lane : CombatLaneV1
+        ultimate when use_ultimate is one, none for target zero without
+        Ultimate, otherwise basic.
+    accepted_target : AuthorizedTargetActionV1
+        Exact target-axis row indexed by accepted_action.target_action.
+
+    Raises
+    ------
+    ValueError
+        Fixed tags/version, identity/counters, owner/action/target roots,
+        accepted legality, lane or reference epoch is invalid.
+
+    Notes
+    -----
+    This describes the action selected at the displayed frame and applied by its
+    outgoing transition. It is separate from incoming transition events and live
+    draft intent.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     schema_version: Literal[1]
+    """Exact Python int 1."""
     inspection_kind: Literal["replay_recorded_outgoing_action"]
+    """The literal replay_recorded_outgoing_action."""
     route_display_basis: Literal["accepted_action"]
+    """The literal accepted_action; routes never use rejected submitted intent."""
     episode_id: str
+    """ASCII episode identifier matching the allowed public ID alphabet."""
     outgoing_transition_index: int
+    """Nonnegative Python outgoing transition index, equal to its decision-frame
+    index.
+    """
     current_simulator_step_count: int
+    """Nonnegative Python simulator count at the displayed decision."""
     transition_reference: ReplayTransitionReferenceV1
+    """Exact Oracle, NoSharedObs or SharedObs reference with canonical adjacent
+    frame IDs.
+    """
     actor_presentation_key: str
+    """Nonblank current-scene key of the inspected actor."""
     actor_public_agent_id: str
+    """Nonblank public ID of the inspected actor."""
     actor_anchor: Point2D
+    """Finite Python world (x, y) tuple at the displayed decision."""
     decision_mask: AuthorizedDecisionMaskV1
+    """Exact AuthorizedDecisionMaskV1 owned by this same actor."""
     submitted_action: SubmittedActionTupleV1
+    """Exact SubmittedActionTupleV1 preserving the recorded request."""
     accepted_action: AcceptedActionTupleV1
+    """Exact AcceptedActionTupleV1; movement and joint combat pair must be legal
+    under decision_mask.
+    """
     combat_lane: CombatLaneV1
+    """ultimate when use_ultimate is one, none for target zero without Ultimate,
+    otherwise basic.
+    """
     accepted_target: AuthorizedTargetActionV1
+    """Exact target-axis row indexed by accepted_action.target_action."""
 
     def __post_init__(self) -> None:
+        """Check ReplayInspectionPresentationV1 during host construction.
+
+        Raise ValueError if fixed tags/version, identity/counters,
+        owner/action/target roots, accepted legality, lane or reference epoch is
+        invalid.
+        Return None without changing valid fields.
+        """
         if (
             type(self.schema_version) is not int
             or self.schema_version != AUTHORIZED_INSPECTION_SCHEMA_VERSION
@@ -548,15 +970,46 @@ class ReplayInspectionPresentationV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LiveDraftActionTupleV1:
-    """Editable category-bounded intent before submission."""
+    """Keep category-bounded editable intent before submission.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    move_action : int
+        Python movement category in 0..8.
+    target_action : int
+        Python actor-relative target category in 0..10.
+    armed_lane : DraftArmedLaneV1
+        none, basic or ultimate. none means no combat lane has been armed.
+
+    Raises
+    ------
+    ValueError
+        Movement/target categories are outside their domains or armed_lane is unknown.
+
+    Notes
+    -----
+    A valid draft can still be masked out. This object makes no claim of acceptance.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     move_action: int
+    """Python movement category in 0..8."""
     target_action: int
+    """Python actor-relative target category in 0..10."""
     armed_lane: DraftArmedLaneV1
+    """none, basic or ultimate. none means no combat lane has been armed."""
 
     def __post_init__(self) -> None:
+        """Check LiveDraftActionTupleV1 during host construction.
+
+        Raise ValueError if movement/target categories are outside their domains
+        or armed_lane is unknown.
+        Return None without changing valid fields.
+        """
         _require_python_int(
             self.move_action,
             name="move_action",
@@ -573,16 +1026,51 @@ class LiveDraftActionTupleV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LiveDraftLegalityV1:
-    """Marginal and exact-pair legality for one live draft."""
+    """Keep the separate marginal and exact-pair checks for a draft.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    move_action_is_legal : bool
+        Exact Python bool from the selected movement entry.
+    target_action_is_legal : bool
+        Exact Python bool from the selected target marginal.
+    armed_lane_is_legal : bool | None
+        Exact Python bool from the chosen lane marginal, or None when unarmed.
+    combat_pair_is_legal : bool | None
+        Exact Python bool from the chosen target/lane entry, or None when unarmed.
+
+    Raises
+    ------
+    ValueError
+        Boolean types are invalid or lane/pair checks are not absent together.
+
+    Notes
+    -----
+    None means no armed lane, not an illegal pair. The containing draft
+    inspection checks the values against its exact mask.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     move_action_is_legal: bool
+    """Exact Python bool from the selected movement entry."""
     target_action_is_legal: bool
+    """Exact Python bool from the selected target marginal."""
     armed_lane_is_legal: bool | None
+    """Exact Python bool from the chosen lane marginal, or None when unarmed."""
     combat_pair_is_legal: bool | None
+    """Exact Python bool from the chosen target/lane entry, or None when unarmed."""
 
     def __post_init__(self) -> None:
+        """Check LiveDraftLegalityV1 during host construction.
+
+        Raise ValueError if boolean types are invalid or lane/pair checks are
+        not absent together.
+        Return None without changing valid fields.
+        """
         if (
             type(self.move_action_is_legal) is not bool
             or type(self.target_action_is_legal) is not bool
@@ -598,23 +1086,80 @@ class LiveDraftLegalityV1:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LiveDraftInspectionPresentationV1:
-    """Editable live intent with no recorded-transition or acceptance identity."""
+    """Describe editable live intent without recorded acceptance identity.
+
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    schema_version : Literal[1]
+        Exact Python int 1.
+    inspection_kind : Literal['live_draft_action']
+        The literal live_draft_action.
+    route_display_basis : Literal['draft_action']
+        The literal draft_action.
+    current_simulator_step_count : int
+        Nonnegative Python simulator count at the displayed decision.
+    actor_presentation_key : str
+        Nonblank current-scene key of the inspected actor.
+    actor_public_agent_id : str
+        Nonblank public ID of the inspected actor.
+    actor_anchor : Point2D
+        Finite Python world (x, y) tuple at the displayed decision.
+    decision_mask : AuthorizedDecisionMaskV1
+        Exact AuthorizedDecisionMaskV1 owned by this same actor.
+    draft_action : LiveDraftActionTupleV1
+        Exact LiveDraftActionTupleV1 with category-bounded intent.
+    draft_target : AuthorizedTargetActionV1
+        Exact target-axis row indexed by the draft target category.
+    draft_legality : LiveDraftLegalityV1
+        Exact LiveDraftLegalityV1 matching this draft and decision mask.
+
+    Raises
+    ------
+    ValueError
+        Fixed tags/version, actor identity, mask ownership, target joins or
+        draft legality values disagree.
+
+    Notes
+    -----
+    Unarmed drafts have no lane/pair result. Masked drafts remain representable
+    for editing. Constructing this record does not submit an action.
+    """
 
     __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_CONFIG
+    """Class-level strict wire validation: no extra fields or nonfinite numbers."""
 
     schema_version: Literal[1]
+    """Exact Python int 1."""
     inspection_kind: Literal["live_draft_action"]
+    """The literal live_draft_action."""
     route_display_basis: Literal["draft_action"]
+    """The literal draft_action."""
     current_simulator_step_count: int
+    """Nonnegative Python simulator count at the displayed decision."""
     actor_presentation_key: str
+    """Nonblank current-scene key of the inspected actor."""
     actor_public_agent_id: str
+    """Nonblank public ID of the inspected actor."""
     actor_anchor: Point2D
+    """Finite Python world (x, y) tuple at the displayed decision."""
     decision_mask: AuthorizedDecisionMaskV1
+    """Exact AuthorizedDecisionMaskV1 owned by this same actor."""
     draft_action: LiveDraftActionTupleV1
+    """Exact LiveDraftActionTupleV1 with category-bounded intent."""
     draft_target: AuthorizedTargetActionV1
+    """Exact target-axis row indexed by the draft target category."""
     draft_legality: LiveDraftLegalityV1
+    """Exact LiveDraftLegalityV1 matching this draft and decision mask."""
 
     def __post_init__(self) -> None:
+        """Check LiveDraftInspectionPresentationV1 during host construction.
+
+        Raise ValueError if fixed tags/version, actor identity, mask ownership,
+        target joins or draft legality values disagree.
+        Return None without changing valid fields.
+        """
         if (
             type(self.schema_version) is not int
             or self.schema_version != AUTHORIZED_INSPECTION_SCHEMA_VERSION
@@ -684,22 +1229,38 @@ class LiveDraftInspectionPresentationV1:
 
 
 def _validated_context(
-    context: EvaluationEpisodeContextV1,
-) -> EvaluationEpisodeContextV1:
-    if type(context) is not EvaluationEpisodeContextV1:
-        raise TypeError("context must be the exact EvaluationEpisodeContextV1 root.")
-    return EvaluationEpisodeContextV1.model_validate(context.model_dump(mode="python"))
+    context: EvaluationEpisodeContext,
+) -> EvaluationEpisodeContext:
+    """Revalidate the exact supported context from its Python payload.
+
+    context must have a recognized evaluation root. Return a validated copy;
+    wrong roots raise TypeError and invalid contents raise ValueError.
+    """
+    evaluation_context_type(context)
+    return evaluation_context_type(context).model_validate(
+        context.model_dump(mode="python")
+    )
 
 
-def _validated_frame(frame: EvaluationFrameV1) -> EvaluationFrameV1:
-    if type(frame) is not EvaluationFrameV1:
+def _validated_frame(frame: EvaluationFrame) -> EvaluationFrame:
+    """Revalidate an exact V1 or V2 current evaluation frame.
+
+    Return a copy from frame's Python payload. Raise TypeError for another root
+    or ValueError for invalid recorded structure. No successor frame is read.
+    """
+    if type(frame) is not EvaluationFrameV1 and type(frame) is not EvaluationFrameV2:
         raise TypeError("current_frame must be the exact EvaluationFrameV1 root.")
-    return EvaluationFrameV1.model_validate(frame.model_dump(mode="python"))
+    return type(frame).model_validate(frame.model_dump(mode="python"))
 
 
 def _validated_transition(
     transition: EvaluationTransitionV1,
 ) -> EvaluationTransitionV1:
+    """Revalidate the exact recorded outgoing transition root.
+
+    Return a copy of transition after schema checks. Raise TypeError for a
+    wrong root or ValueError for malformed values. Epoch joining is separate.
+    """
     if type(transition) is not EvaluationTransitionV1:
         raise TypeError("outgoing_transition must be EvaluationTransitionV1.")
     return EvaluationTransitionV1.model_validate(transition.model_dump(mode="python"))
@@ -710,7 +1271,15 @@ def _shared_recipient_action_rows(
     *,
     recipient_global_slot: int,
 ) -> tuple[SubmittedActionTupleV1, AcceptedActionTupleV1]:
-    """Validate only the Shared recipient-owned action surface of ``T_n``."""
+    """Read only the fixed SharedObs recipient's submitted and accepted actions.
+
+    transition supplies exact V1 headers, action-fact roots and ten-row action
+    containers. recipient_global_slot is already validated in 0..9. Return
+    (SubmittedActionTupleV1, AcceptedActionTupleV1) for that slot only. Invalid
+    roots raise TypeError; malformed headers/axes/recipient values raise
+    ValueError. Other actors' values, events and unrelated facts are not
+    revalidated as authority for this recipient's inspection.
+    """
     if type(transition) is not EvaluationTransitionV1:
         raise TypeError("outgoing_transition must be EvaluationTransitionV1.")
     if (
@@ -782,18 +1351,34 @@ def _shared_recipient_action_rows(
 
 
 def _validated_pov_mask(mask: ActorPovActionMaskV1) -> ActorPovActionMaskV1:
+    """Revalidate and return the exact recipient mask from its Python payload.
+
+    mask must be ActorPovActionMaskV1; wrong roots raise TypeError and malformed
+    values raise ValueError. No global mask or other actor is consulted.
+    """
     if type(mask) is not ActorPovActionMaskV1:
         raise TypeError("POV decision mask must use its exact V1 root.")
     return ActorPovActionMaskV1.model_validate(mask.model_dump(mode="python"))
 
 
 def _validated_oracle_mask(mask: ActionMaskV1) -> ActionMaskV1:
+    """Revalidate and return the exact ten-slot Oracle action mask.
+
+    mask must be ActionMaskV1; wrong roots raise TypeError and malformed values
+    raise ValueError. The caller selects the inspected actor row afterward.
+    """
     if type(mask) is not ActionMaskV1:
         raise TypeError("Oracle decision mask must use its exact V1 root.")
     return ActionMaskV1.model_validate(mask.model_dump(mode="python"))
 
 
 def _validated_scene(scene: AuthorizedBattlefieldSceneV1) -> None:
+    """Run the exact neutral scene root's own structural checks.
+
+    scene must be AuthorizedBattlefieldSceneV1. Raise TypeError for another
+    root or ValueError from scene validation; return None. Frame/authority
+    joins remain the caller's responsibility.
+    """
     if type(scene) is not AuthorizedBattlefieldSceneV1:
         raise TypeError("current_scene must be the exact authorized scene root.")
     scene.__post_init__()
@@ -805,6 +1390,12 @@ def _scene_agent(
     public_agent_id: str,
     relation: Literal["oracle", "self"] | None = None,
 ) -> AuthorizedAgentV1:
+    """Find the single authorized body with public_agent_id in scene.
+
+    relation=None accepts its existing relation; oracle or self requires that
+    exact relation. Return the existing AuthorizedAgentV1 or raise ValueError
+    for missing/repeated identity or the wrong relation. No hidden row is read.
+    """
     matches = tuple(
         row for row in scene.agents if row.public_agent_id == public_agent_id
     )
@@ -822,6 +1413,14 @@ def _target_axis(
     target_display_names: tuple[str, ...],
     scene: AuthorizedBattlefieldSceneV1,
 ) -> tuple[AuthorizedTargetActionV1, ...]:
+    """Build target variants without inventing undisclosed body positions.
+
+    target_public_agent_id_by_action is an eleven-entry tuple beginning with
+    None and ten unique public IDs. target_display_names supplies eleven
+    unique labels. scene contributes body keys/anchors only where a body exists.
+    Return category-ordered no-target, visible or axis-only variants. Raise
+    ValueError for invalid axis shape, identity or labels.
+    """
     if (
         type(target_public_agent_id_by_action) is not tuple
         or len(target_public_agent_id_by_action) != NUM_TARGET_ACTIONS_V1
@@ -885,6 +1484,15 @@ def _decision_mask(
     joint_mask: tuple[tuple[bool, ...], ...],
     scene: AuthorizedBattlefieldSceneV1,
 ) -> AuthorizedDecisionMaskV1:
+    """Package one mask owner, named action axes and exact legality values.
+
+    owner supplies public identity. Movement/target/Ultimate display names
+    have lengths 9/11/2; target_public_agent_id_by_action has eleven entries.
+    move_mask, target_mask and use_ultimate_mask are bool tuples of those sizes;
+    joint_mask is (11, 2). scene supplies authorized target anchors. Return
+    AuthorizedDecisionMaskV1; its validator checks marginals and target joins.
+    No legality is recomputed from geometry.
+    """
     return AuthorizedDecisionMaskV1(
         schema_version=AUTHORIZED_INSPECTION_SCHEMA_VERSION,
         owner_presentation_key=owner.presentation_key,
@@ -904,10 +1512,16 @@ def _decision_mask(
 
 
 def _oracle_target_public_axis(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     *,
     actor_internal_slot: int,
 ) -> tuple[str | None, ...]:
+    """Map one Oracle actor's recorded target categories to public IDs.
+
+    context owns roster/catalog mapping; actor_internal_slot is already valid
+    in 0..9. Return eleven entries beginning with None. Raise ValueError for
+    changed axis shape or invalid target slots; keep unused public IDs.
+    """
     catalog = context.static_mechanics_catalog
     target_axis_by_actor = catalog.global_recipient_slot_by_actor_and_target_action
     target_slots = target_axis_by_actor[actor_internal_slot]
@@ -922,10 +1536,18 @@ def _oracle_target_public_axis(
 
 
 def _oracle_current_join(
-    context: EvaluationEpisodeContextV1,
-    frame: EvaluationFrameV1,
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrame,
     scene: AuthorizedBattlefieldSceneV1,
 ) -> dict[int, AuthorizedAgentV1]:
+    """Join the current Oracle scene to its recorded frame and active roster.
+
+    context, frame and scene are already validated roots. Require the same
+    episode, complete active Oracle identities, team/class, position and alive
+    facts. Return a dictionary from global slot to authorized body. Raise
+    ValueError on mismatch. This checks displayed actor joins, not every
+    possible dynamic scene field against the snapshot.
+    """
     if frame.episode_id != context.identity.episode_id:
         raise ValueError("Oracle current frame and context must join one episode.")
     active_roster = tuple(row for row in context.roster if row.configured_active)
@@ -954,13 +1576,20 @@ def _oracle_current_join(
 
 
 def _oracle_decision_mask(
-    context: EvaluationEpisodeContextV1,
-    frame: EvaluationFrameV1,
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrame,
     scene: AuthorizedBattlefieldSceneV1,
     *,
     actor_internal_slot: int,
     owner: AuthorizedAgentV1,
 ) -> AuthorizedDecisionMaskV1:
+    """Copy one Oracle actor's current exact mask and public action names.
+
+    context supplies mappings, frame supplies the global mask, scene supplies
+    visible bodies, and actor_internal_slot/owner identify the inspected actor.
+    Return AuthorizedDecisionMaskV1 after mask validation; preserve its exact
+    joint pairs and current epoch.
+    """
     mask = _validated_oracle_mask(frame.action_mask)
     catalog = context.static_mechanics_catalog
     return _decision_mask(
@@ -983,13 +1612,23 @@ def _oracle_decision_mask(
 def _pov_decision_mask(
     *,
     owner: AuthorizedAgentV1,
-    axis_mapping: ActorPovAxisMappingV1,
+    axis_mapping: ActorPovAxisMapping,
     mask: ActorPovActionMaskV1,
     scene: AuthorizedBattlefieldSceneV1,
 ) -> AuthorizedDecisionMaskV1:
-    if type(axis_mapping) is not ActorPovAxisMappingV1:
+    """Bind a recipient mask to its authorized public axis and current scene.
+
+    owner is the recipient body; axis_mapping must be an exact V1/V2 POV map;
+    mask must be the exact recipient root. scene supplies visible anchors.
+    Return AuthorizedDecisionMaskV1 after revalidation. Wrong roots raise
+    TypeError; invalid axis/mask/identity data raise ValueError.
+    """
+    if (
+        type(axis_mapping) is not ActorPovAxisMappingV1
+        and type(axis_mapping) is not ActorPovAxisMappingV2
+    ):
         raise TypeError("axis_mapping must be the exact ActorPovAxisMappingV1 root.")
-    validated_axis = ActorPovAxisMappingV1.model_validate(
+    validated_axis = type(axis_mapping).model_validate(
         axis_mapping.model_dump(mode="python")
     )
     validated_mask = _validated_pov_mask(mask)
@@ -1022,6 +1661,14 @@ def _replay_root(
     submitted_action: SubmittedActionTupleV1,
     accepted_action: AcceptedActionTupleV1,
 ) -> ReplayInspectionPresentationV1:
+    """Package a recorded outgoing action for one displayed actor.
+
+    episode_id, transition_index, current_tick and transition_reference fix the
+    decision epoch. actor and decision_mask fix ownership. submitted_action
+    preserves intent; accepted_action chooses the route, lane and target row.
+    Return ReplayInspectionPresentationV1, whose constructor checks accepted
+    legality and joins. This helper never applies an action.
+    """
     return ReplayInspectionPresentationV1(
         schema_version=AUTHORIZED_INSPECTION_SCHEMA_VERSION,
         inspection_kind="replay_recorded_outgoing_action",
@@ -1049,6 +1696,12 @@ def _validate_outgoing_epoch(
     frame_id: str,
     simulator_step_count: int,
 ) -> None:
+    """Require transition to start at the displayed decision frame.
+
+    episode_id, frame_index, frame_id and simulator_step_count identify that
+    frame. Check canonical outgoing/successor IDs and the transition-start step.
+    Return None or raise ValueError; do not read successor state contents.
+    """
     if (
         transition.episode_id != episode_id
         or transition.transition_index != frame_index
@@ -1061,15 +1714,50 @@ def _validate_outgoing_epoch(
 
 
 def build_replay_oracle_inspection_v1(
-    context: EvaluationEpisodeContextV1,
-    current_frame: EvaluationFrameV1,
+    context: EvaluationEpisodeContext,
+    current_frame: EvaluationFrame,
     current_scene: AuthorizedBattlefieldSceneV1,
     *,
     inspection_internal_slot: int | None,
     outgoing_transition: EvaluationTransitionV1 | None,
     final_frame_index: int,
 ) -> ReplayInspectionPresentationV1 | None:
-    """Build one Oracle outgoing inspection from exact ``s_n/m_n/T_n`` facts."""
+    """Inspect the recorded outgoing action of one selected Oracle actor.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact recorded context, revalidated on entry.
+    current_frame : EvaluationFrameV1 or EvaluationFrameV2
+        Exact displayed decision frame; its current mask owns legality.
+    current_scene : AuthorizedBattlefieldSceneV1
+        Exact Oracle scene containing every configured agent joined to the frame.
+    inspection_internal_slot : int or None
+        Configured-active global slot in 0..9, or None for no selection.
+    outgoing_transition : EvaluationTransitionV1 or None
+        Exact transition leaving current_frame. Required for a selected nonfinal
+        frame; must be None when unselected or at the final retained frame.
+    final_frame_index : int
+        Nonnegative final frame index of the retained replay prefix.
+
+    Returns
+    -------
+    ReplayInspectionPresentationV1 or None
+        Current decision mask, recorded request and accepted outgoing route.
+        None means no selection or no outgoing transition at the retained end.
+
+    Raises
+    ------
+    TypeError
+        An owned input has the wrong exact supported record type.
+    ValueError
+        Identity, current epoch, action domains, masks or authority joins fail.
+
+    Notes
+    -----
+    The route uses accepted action, not rejected submitted intent. This host
+    builder does not apply an action or inspect successor-state objects.
+    """
     context = _validated_context(context)
     current_frame = _validated_frame(current_frame)
     _validated_scene(current_scene)
@@ -1146,14 +1834,22 @@ def build_replay_oracle_inspection_v1(
 
 
 def _validate_no_shared_current(
-    source: ActorPovCurrentSliceV1 | ActorPovProjectionIndexV1,
+    source: ActorPovCurrentSlice | ActorPovProjectionIndexV1,
     current: NoSharedObsAuthorizedScenePartsV1,
-) -> tuple[ActorPovAxisMappingV1, ActorPovActionMaskV1, AuthorizedAgentV1]:
+) -> tuple[ActorPovAxisMapping, ActorPovActionMaskV1, AuthorizedAgentV1]:
+    """Join a current NoSharedObs scene and mask to recipient-only content.
+
+    source is an exact replay index or current slice; current is the exact
+    NoSharedObs scene-parts record. Revalidate owned source/scene data and
+    require matching recipient, frame, count, mask, key and self position.
+    Return (axis mapping, recipient mask, self actor). Invalid roots raise
+    TypeError and mismatched authority/epoch raises ValueError.
+    """
     if type(current) is not NoSharedObsAuthorizedScenePartsV1:
         raise TypeError("current must be exact NoSharedObs scene parts.")
     current.__post_init__()
     if type(source) is ActorPovProjectionIndexV1:
-        validate_actor_pov_replay_content_v1(source.content)
+        validate_actor_pov_replay_content(source.content)
         content = source.content
         index = current.source_frame_index
         if not 0 <= index < len(content.frames):
@@ -1162,10 +1858,10 @@ def _validate_no_shared_current(
         axis_mapping = content.axis_mapping
         source_episode_id = content.episode_id
         source_public_id = content.public_agent_id
-    elif type(source) is ActorPovCurrentSliceV1:
-        validated = ActorPovCurrentSliceV1.model_validate(
-            source.model_dump(mode="python")
-        )
+    elif (
+        type(source) is ActorPovCurrentSliceV1 or type(source) is ActorPovCurrentSliceV2
+    ):
+        validated = type(source).model_validate(source.model_dump(mode="python"))
         frame = validated.frame
         axis_mapping = validated.axis_mapping
         source_episode_id = validated.episode_id
@@ -1203,7 +1899,33 @@ def build_replay_no_shared_obs_inspection_v1(
     source: ActorPovProjectionIndexV1,
     current: NoSharedObsAuthorizedScenePartsV1,
 ) -> ReplayInspectionPresentationV1 | None:
-    """Build fixed-recipient replay inspection from exact NoSharedObs content."""
+    """Inspect one recipient's recorded outgoing NoSharedObs action.
+
+    Parameters
+    ----------
+    source : ActorPovProjectionIndexV1
+        Exact validated POV replay index; its content is rechecked at this boundary.
+    current : NoSharedObsAuthorizedScenePartsV1
+        Matching recipient scene/mask for the displayed source frame.
+
+    Returns
+    -------
+    ReplayInspectionPresentationV1 or None
+        Recipient-local outgoing action inspection, or None at the retained final
+        frame. No global transition identity or another actor's action is exported.
+
+    Raises
+    ------
+    TypeError
+        An owned input has the wrong exact supported record type.
+    ValueError
+        Identity, current epoch, action domains, masks or authority joins fail.
+
+    Notes
+    -----
+    Read the outgoing transition at the current frame index, never the incoming
+    transition that created that frame. Inputs remain unchanged.
+    """
     if type(source) is not ActorPovProjectionIndexV1:
         raise TypeError("source must be the exact ActorPovProjectionIndexV1 root.")
     axis_mapping, mask, actor = _validate_no_shared_current(source, current)
@@ -1258,13 +1980,26 @@ def build_replay_no_shared_obs_inspection_v1(
 
 def _validate_shared_current(
     current: SharedObsAuthorizedScenePartsV1,
-    recipient_source_material: SharedObsSourceMaterialProjectionV1,
+    recipient_source_material: SharedObsSourceMaterialProjection,
     *,
     authorized_recipient_global_slot: int,
-) -> tuple[ActorPovAxisMappingV1, ActorPovActionMaskV1, AuthorizedAgentV1, int]:
+) -> tuple[ActorPovAxisMapping, ActorPovActionMaskV1, AuthorizedAgentV1, int]:
+    """Join only the SharedObs recipient-owned outgoing-decision surface.
+
+    current supplies authorized scene/mask; recipient_source_material supplies
+    used current identity, axis and mask fields. authorized_recipient_global_slot
+    is a host-owned fixed recipient slot in 0..9, not a browser selection.
+    Return (axis mapping, frame mask, self actor, authorized slot). Raise
+    TypeError/ValueError for invalid roots or owner/epoch/topology/anchor joins.
+    Deliberately do not validate wider incoming history, availability or
+    contributor branches: they are not authority for this outgoing decision.
+    """
     if type(current) is not SharedObsAuthorizedScenePartsV1:
         raise TypeError("current must be exact SharedObs authorized scene parts.")
-    if type(recipient_source_material) is not SharedObsSourceMaterialProjectionV1:
+    if (
+        type(recipient_source_material) is not SharedObsSourceMaterialProjectionV1
+        and type(recipient_source_material) is not SharedObsSourceMaterialProjectionV2
+    ):
         raise TypeError("recipient source material must use its exact SharedObs root.")
     _require_python_int(
         authorized_recipient_global_slot,
@@ -1292,26 +2027,36 @@ def _validate_shared_current(
     if (
         type(recipient_source_material.schema_version) is not int
         or recipient_source_material.schema_version
-        != SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION
+        != (
+            2
+            if type(recipient_source_material) is SharedObsSourceMaterialProjectionV2
+            else 1
+        )
         or recipient_source_material.observation_materialization
         != "source_material_only"
         or recipient_source_material.exact_actor_input_export_available is not False
     ):
         raise ValueError("SharedObs recipient declaration is not canonical.")
-    if type(recipient_source_material.axis_mapping) is not ActorPovAxisMappingV1:
+    if (
+        type(recipient_source_material.axis_mapping) is not ActorPovAxisMappingV1
+        and type(recipient_source_material.axis_mapping) is not ActorPovAxisMappingV2
+    ):
         raise ValueError("SharedObs axis mapping must use its exact V1 root.")
-    axis_mapping = ActorPovAxisMappingV1.model_validate(
+    axis_mapping = type(recipient_source_material.axis_mapping).model_validate(
         recipient_source_material.axis_mapping.model_dump(mode="python")
     )
     frame = recipient_source_material.base_sensor_frame
     source_scene = recipient_source_material.base_sensor_scene
-    if type(frame) is not SharedObsBaseSensorFrameV1:
+    if (
+        type(frame) is not SharedObsBaseSensorFrameV1
+        and type(frame) is not SharedObsBaseSensorFrameV2
+    ):
         raise ValueError("SharedObs base frame must use its exact scalar root.")
     if type(source_scene) is not SharedObsBaseSensorSceneV1:
         raise ValueError("SharedObs base scene must use its exact scalar root.")
     if (
         type(frame.schema_version) is not int
-        or frame.schema_version != SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION
+        or frame.schema_version != recipient_source_material.schema_version
         or frame.observation_materialization != "source_material_only"
     ):
         raise ValueError("SharedObs base-frame declaration is not canonical.")
@@ -1420,7 +2165,12 @@ def _validate_shared_current(
     ):
         raise ValueError("SharedObs self features do not retain identity columns.")
     if (
-        frame.self_features[AGENT_FEATURE_TEAM_ID_V1] != float(self_actor.team_id)
+        frame.self_features[AGENT_FEATURE_TEAM_ID_V1]
+        != (float(self_actor.team_id) if frame.schema_version == 1 else 0.0)
+        or (
+            type(frame) is SharedObsBaseSensorFrameV2
+            and frame.self_ally_index != authorized_team_local_slot
+        )
         or frame.self_features[AGENT_FEATURE_ACTIVE_V1] != 1.0
         or frame.self_features[AGENT_FEATURE_CLASS_ID_V1] != float(self_actor.class_id)
     ):
@@ -1467,13 +2217,49 @@ def _validate_shared_current(
 
 def build_replay_shared_obs_inspection_v1(
     current: SharedObsAuthorizedScenePartsV1,
-    recipient_source_material: SharedObsSourceMaterialProjectionV1,
+    recipient_source_material: SharedObsSourceMaterialProjection,
     *,
     authorized_recipient_global_slot: int,
     outgoing_transition: EvaluationTransitionV1 | None,
     final_frame_index: int,
 ) -> ReplayInspectionPresentationV1 | None:
-    """Build a recipient-only SharedObs inspection with no canonical IDs."""
+    """Inspect only the fixed SharedObs recipient's recorded outgoing action.
+
+    Parameters
+    ----------
+    current : SharedObsAuthorizedScenePartsV1
+        Authorized scene and recipient-owned mask for the displayed frame.
+    recipient_source_material : SharedObsSourceMaterialProjectionV1 or V2
+        Matching current recipient source material. Only outgoing-decision-owned
+        fields are checked; unrelated incoming/history branches are not authority.
+    authorized_recipient_global_slot : int
+        Host-owned fixed recipient slot in 0..9. It must match current self identity.
+    outgoing_transition : EvaluationTransitionV1 or None
+        Exact transition leaving the displayed frame. Only its header and the
+        recipient's submitted/accepted action entries are used as authority.
+        Required before the retained end; must be None at the final frame.
+    final_frame_index : int
+        Nonnegative final frame index of the retained prefix.
+
+    Returns
+    -------
+    ReplayInspectionPresentationV1 or None
+        Recipient-only action and current mask using visual-union-local IDs,
+        or None at the final retained frame.
+
+    Raises
+    ------
+    TypeError
+        An owned input has the wrong exact supported record type.
+    ValueError
+        Identity, current epoch, action domains, masks or authority joins fail.
+
+    Notes
+    -----
+    The global transition is an input container, not permission to expose other
+    actors' actions, events or Oracle IDs. Its unrelated facts are not validated
+    as dependencies of this recipient output. No action is executed.
+    """
     axis_mapping, mask, actor, actor_internal_slot = _validate_shared_current(
         current,
         recipient_source_material,
@@ -1538,6 +2324,14 @@ def _draft_root(
     draft_target_action: int,
     draft_armed_lane: DraftArmedLaneV1,
 ) -> LiveDraftInspectionPresentationV1:
+    """Build a draft record and its separate marginal/pair legality values.
+
+    current_tick and actor identify the displayed decision; decision_mask owns
+    legality. draft_move_action is 0..8 and draft_target_action 0..10.
+    draft_armed_lane is none/basic/ultimate. Return a new live inspection;
+    none leaves lane/pair checks as None. Invalid categories raise ValueError.
+    A masked draft is retained for editing, not repaired or submitted.
+    """
     draft = LiveDraftActionTupleV1(
         move_action=draft_move_action,
         target_action=draft_target_action,
@@ -1575,11 +2369,18 @@ def _draft_root(
 
 
 def _oracle_target_action_for_internal_slot(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     *,
     actor_internal_slot: int,
     target_internal_slot: int | None,
 ) -> int:
+    """Translate a selected Oracle target slot into the actor's target category.
+
+    context owns the mapping and actor_internal_slot is validated. A None
+    target_internal_slot returns zero; otherwise require a slot in 0..9 that
+    matches one positive action. Return that category or raise ValueError.
+    This resolves identity only, not legality or active membership.
+    """
     if target_internal_slot is None:
         return 0
     _require_python_int(
@@ -1601,8 +2402,8 @@ def _oracle_target_action_for_internal_slot(
 
 
 def build_live_oracle_draft_inspection_v1(
-    context: EvaluationEpisodeContextV1,
-    current_frame: EvaluationFrameV1,
+    context: EvaluationEpisodeContext,
+    current_frame: EvaluationFrame,
     current_scene: AuthorizedBattlefieldSceneV1,
     *,
     controlled_internal_slot: int,
@@ -1610,7 +2411,43 @@ def build_live_oracle_draft_inspection_v1(
     draft_target_internal_slot: int | None,
     draft_armed_lane: DraftArmedLaneV1,
 ) -> LiveDraftInspectionPresentationV1:
-    """Build one live Oracle draft without recorded acceptance identity."""
+    """Describe an editable Oracle action draft using the current exact mask.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact recorded context, revalidated on entry.
+    current_frame : EvaluationFrameV1 or EvaluationFrameV2
+        Exact displayed decision frame; its current mask owns legality.
+    current_scene : AuthorizedBattlefieldSceneV1
+        Exact Oracle scene containing every configured agent joined to the frame.
+    controlled_internal_slot : int
+        Configured-active global slot in 0..9 controlled by this draft.
+    draft_move_action : int
+        Exact Python movement category in 0..8.
+    draft_target_internal_slot : int or None
+        Target global slot in 0..9, or None for Target None. Identity is mapped
+        to the controlled actor's target category; legality is shown separately.
+    draft_armed_lane : str
+        none, basic or ultimate.
+
+    Returns
+    -------
+    LiveDraftInspectionPresentationV1
+        New draft, authorized target display and marginal/exact-pair legality.
+        A category-valid but masked draft remains represented.
+
+    Raises
+    ------
+    TypeError
+        An owned input has the wrong exact supported record type.
+    ValueError
+        Identity, current epoch, action domains, masks or authority joins fail.
+
+    Notes
+    -----
+    This performs no submission, acceptance, transition, I/O or input mutation.
+    """
     context = _validated_context(context)
     current_frame = _validated_frame(current_frame)
     _validated_scene(current_scene)
@@ -1647,15 +2484,49 @@ def build_live_oracle_draft_inspection_v1(
 
 
 def build_live_no_shared_obs_draft_inspection_v1(
-    source: ActorPovCurrentSliceV1,
+    source: ActorPovCurrentSlice,
     current: NoSharedObsAuthorizedScenePartsV1,
     *,
     draft_move_action: int,
     draft_target_action: int,
     draft_armed_lane: DraftArmedLaneV1,
 ) -> LiveDraftInspectionPresentationV1:
-    """Build one fixed-recipient NoSharedObs live draft."""
-    if type(source) is not ActorPovCurrentSliceV1:
+    """Describe editable intent for the fixed NoSharedObs recipient.
+
+    Parameters
+    ----------
+    source : ActorPovCurrentSliceV1 or ActorPovCurrentSliceV2
+        Exact recipient current slice, revalidated on entry.
+    current : NoSharedObsAuthorizedScenePartsV1
+        Matching authorized recipient scene and current decision mask.
+    draft_move_action : int
+        Exact Python movement category in 0..8.
+    draft_target_action : int
+        Exact Python actor-relative target category in 0..10.
+    draft_armed_lane : str
+        none, basic or ultimate. none leaves combat legality absent, not False.
+
+    Returns
+    -------
+    LiveDraftInspectionPresentationV1
+        New recipient draft with separate marginal and exact-pair legality.
+
+    Raises
+    ------
+    TypeError
+        An owned input has the wrong exact supported record type.
+    ValueError
+        Identity, current epoch, action domains, masks or authority joins fail.
+
+    Notes
+    -----
+    No recorded acceptance identity is fabricated. Masked intent can be shown
+    for editing, and no action is submitted or applied.
+    """
+    if (
+        type(source) is not ActorPovCurrentSliceV1
+        and type(source) is not ActorPovCurrentSliceV2
+    ):
         raise TypeError("source must be the exact ActorPovCurrentSliceV1 root.")
     axis_mapping, mask, actor = _validate_no_shared_current(source, current)
     decision_mask = _pov_decision_mask(
@@ -1676,14 +2547,49 @@ def build_live_no_shared_obs_draft_inspection_v1(
 
 def build_live_shared_obs_draft_inspection_v1(
     current: SharedObsAuthorizedScenePartsV1,
-    recipient_source_material: SharedObsSourceMaterialProjectionV1,
+    recipient_source_material: SharedObsSourceMaterialProjection,
     *,
     authorized_recipient_global_slot: int,
     draft_move_action: int,
     draft_target_action: int,
     draft_armed_lane: DraftArmedLaneV1,
 ) -> LiveDraftInspectionPresentationV1:
-    """Build one fixed-recipient SharedObs live draft."""
+    """Describe editable intent for the fixed SharedObs recipient.
+
+    Parameters
+    ----------
+    current : SharedObsAuthorizedScenePartsV1
+        Authorized scene and recipient-owned mask for the displayed frame.
+    recipient_source_material : SharedObsSourceMaterialProjectionV1 or V2
+        Matching current recipient source material. Only outgoing-decision-owned
+        fields are checked; unrelated incoming/history branches are not authority.
+    authorized_recipient_global_slot : int
+        Host-owned fixed recipient slot in 0..9. It must match current self identity.
+    draft_move_action : int
+        Exact Python movement category in 0..8.
+    draft_target_action : int
+        Exact Python actor-relative target category in 0..10.
+    draft_armed_lane : str
+        none, basic or ultimate. none leaves combat legality absent, not False.
+
+    Returns
+    -------
+    LiveDraftInspectionPresentationV1
+        New recipient draft using its exact mask and only authorized target
+        anchors. Masked intent remains available for editing.
+
+    Raises
+    ------
+    TypeError
+        An owned input has the wrong exact supported record type.
+    ValueError
+        Identity, current epoch, action domains, masks or authority joins fail.
+
+    Notes
+    -----
+    Incoming history and another actor's mask do not control this output.
+    No action is submitted, accepted or applied; inputs remain unchanged.
+    """
     axis_mapping, mask, actor, _actor_internal_slot = _validate_shared_current(
         current,
         recipient_source_material,

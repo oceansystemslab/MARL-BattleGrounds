@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+
+# Launch the Replay Viewer from this checkout, from any working directory.
+# Usage: scripts/dev/run_replay_viewer.sh --help. Forward all arguments to
+# scripts/dev/replay_viewer.py. A literal --static argument asks uv to include
+# the viz extra. Requires uv; uv may install/sync dependencies. The Python entry
+# point owns replay loading, server and output effects. Missing project/entrypoint
+# files exit 2; missing uv exits 127. exec passes the final process status back.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"

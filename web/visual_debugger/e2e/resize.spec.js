@@ -1,3 +1,7 @@
+/**
+ * @file Check real browser resizing, installed authority, exact debugger grid and
+ * independently scrolling panels.
+ */
 import { expect, test } from "@playwright/test";
 
 import { startDebugger, stopDebugger } from "./support/live-debugger.js";
@@ -19,12 +23,7 @@ test.afterAll(async () => {
   await stopDebugger(child);
 });
 
-/**
- * Wait for font metrics, ResizeObserver delivery, and its requestAnimationFrame
- * redraw to settle.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function settleResponsiveLayout(page) {
   await page.evaluate(async () => {
     await document.fonts.ready;
@@ -38,12 +37,7 @@ async function settleResponsiveLayout(page) {
   });
 }
 
-/**
- * Measure the supported split layout and the SVG size consumed by the real
- * renderer after ResizeObserver delivery.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function responsiveSnapshot(page) {
   return page.evaluate(() => {
     const workspace = document.querySelector(".workspace");
@@ -77,12 +71,7 @@ async function responsiveSnapshot(page) {
   });
 }
 
-/**
- * Measure the unit grid installed by the actual Debugger service and perform a
- * browser hit test at one line midpoint.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function debuggerGridSnapshot(page) {
   return page.locator("#battlefield").evaluate((battlefield) => {
     if (!(battlefield instanceof SVGSVGElement)) {
@@ -159,13 +148,8 @@ async function debuggerGridSnapshot(page) {
   });
 }
 
-/**
- * Prove that real disclosure bodies, rather than the shared HUD or document,
- * own vertical scrolling at one supported viewport.
- *
- * @param {import("@playwright/test").Page} page
- * @param {{width: number, height: number}} viewport
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {{width: number, height: number}} viewport */
 async function expectIndependentDisclosureLayout(page, viewport) {
   await page.setViewportSize(viewport);
   await settleResponsiveLayout(page);

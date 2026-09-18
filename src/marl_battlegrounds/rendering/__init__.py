@@ -1,4 +1,15 @@
-"""Optional stateless presentation helpers for MARL-BattleGrounds."""
+"""Expose host presentation records, adapters and drawing helpers.
+
+This package brings together validated battlefield scenes, visual events,
+authorized actor inspection/incoming views, replay adapters and stable visual
+tokens. Scene builders project already supplied evaluation truth; they do not
+advance Core or grant an actor access to Oracle data.
+
+draw_scene_geometry, render_scene_geometry and redraw_scene_geometry provide
+optional Matplotlib drawing. Matplotlib is loaded when drawing is requested;
+importing these exports does not create a figure. Backend-specific replay and
+debugger code remains separate from simulator transitions.
+"""
 
 from marl_battlegrounds.rendering.authorized_incoming import (
     AgentIncomingObservationV1,

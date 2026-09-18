@@ -1,4 +1,4 @@
-"""Recipient-sliced actor-POV export, privacy, and validation proofs."""
+"""Check actor-POV exports, input validation and private-information boundaries."""
 
 from __future__ import annotations
 
@@ -407,7 +407,6 @@ def test_exact_shared_obs_export_fails_closed() -> None:
 def test_actor_pov_replay_v1_rejects_actor_projection_v2(
     trajectory: CapturedEvaluationTrajectory,
 ) -> None:
-    """POV V1 export cannot serialize the class metadata added by projection V2."""
     projection_v2_trajectory = CapturedEvaluationTrajectory(
         context=trajectory.context.model_copy(
             update={"actor_projection": NO_SHARED_OBS_ACTOR_PROJECTION_V2}

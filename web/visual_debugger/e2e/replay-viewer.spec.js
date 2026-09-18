@@ -1,13 +1,21 @@
+/**
+ * @file Exercise artifact loading, replay endpoints, playback controls, reconnect
+ * boundaries and exported views in a real browser.
+ */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { copyFile, mkdir, readFile, rm } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 import { expect, test } from "@playwright/test";
+import { buildMetricSearchIndex, findMeasurements } from "../src/metric-search.js";
+import { VISUAL_FILTER_IDS } from "../src/visual-filters.js";
+import { installWaapiAutopause } from "./support/choreography.js";
 import {
   currentReplayFrame,
   currentReplayTimeline,
   expectReplayFrameIndex,
+  exportReplayAcceptanceArtifacts,
   exportReplayArtifacts,
   removeReplayArtifacts,
   startReplayViewer,
@@ -24,9 +32,70 @@ const CP9_REPLAY_ARTIFACT_TEST_TITLE =
   "all replay authorities preserve battlefield fog and canonical metric access";
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const PNG_PROVENANCE_KEYWORD = "MARL-BattleGrounds Replay Provenance";
-const METRIC_REPORT_ROUTE = "/api/replay/metric-report";
+const EPISODE_DETAILS_ROUTE = "/api/replay/details";
 const REPLAY_SUFFIX = ".marlbg-replay.json";
 const METRIC_SUFFIX = ".marlbg-metrics.json";
+const METRIC_PREPARATION_TIMEOUT_MS = 60_000;
+const EXPECTED_METRIC_TOPICS = Object.freeze([
+  ["priority", "Episode Results"],
+  ["abilities", "Ability Activations"],
+  ["action_acceptance", "Accepted and Rejected Actions"],
+  ["damage_done", "Damage Done"],
+  ["damage_received", "Damage Received"],
+  ["controlled_damage", "Damage to Enemies With Harmful Effects"],
+  ["healing_done", "Healing Done"],
+  ["healing_received", "Healing Received"],
+  ["excess_healing", "Excess Healing"],
+  ["controlled_healing", "Healing to Allies With Harmful Effects"],
+  ["priest_rescue", "Priest Healing Saves"],
+  ["kill_contributions", "Kill Contributions"],
+  ["controlled_kills", "Kills of Enemies With Harmful Effects"],
+  ["deaths", "Deaths and Time Dead"],
+  ["respawn", "Respawning"],
+  ["coordination", "Team Coordination"],
+  ["formation", "Team Formation"],
+  ["aura_coverage", "Aura Coverage"],
+  ["aura_benefits", "Damage Added or Blocked by Auras"],
+  ["status_applications", "Status Applications"],
+  ["status_active_steps", "Time With Status Effects"],
+  ["freedom", "Freedom Against Slows"],
+  ["ultimate_mage", "Burst (Mage Ultimate)"],
+  ["ultimate_warrior", "Charge (Warrior Ultimate)"],
+  ["ultimate_hunter", "Freezing Trap (Hunter Ultimate)"],
+  ["ultimate_rogue", "Crippling Poison (Rogue Ultimate)"],
+  ["ultimate_priest", "Holy Word: Salvation (Priest Ultimate)"],
+]);
+const PAIRED_METRIC_TOPICS = new Set([
+  "abilities",
+  "damage_done",
+  "controlled_damage",
+  "healing_done",
+  "excess_healing",
+  "controlled_healing",
+  "priest_rescue",
+  "kill_contributions",
+  "controlled_kills",
+  "aura_coverage",
+  "status_applications",
+  "ultimate_mage",
+  "ultimate_warrior",
+  "ultimate_hunter",
+  "ultimate_rogue",
+  "ultimate_priest",
+]);
+
+/** @param {import("@playwright/test").Page} page @param {string} topic @param {string} [view] */
+async function selectMetricTable(page, topic, view = "totals") {
+  await page.locator("#metric-selection").selectOption(topic);
+  if (PAIRED_METRIC_TOPICS.has(topic)) {
+    await expect(page.locator("#metric-view-field")).toBeVisible();
+    await page.locator("#metric-view").selectOption(view);
+  } else {
+    await expect(page.locator("#metric-view-field")).toBeHidden();
+    await expect(page.locator("#metric-view")).toHaveValue("single");
+  }
+}
+
 const FIXED_EXPORT_FONT_PATHS = new Set([
   "/assets/fonts/AtkinsonHyperlegible-Regular.woff2",
   "/assets/fonts/AtkinsonHyperlegible-Bold.woff2",
@@ -34,26 +103,6 @@ const FIXED_EXPORT_FONT_PATHS = new Set([
 const REPRESENTATIVE_DISABLED_FILTERS = Object.freeze([
   "aura_fields",
   "ultimate_ability_effects",
-  "scrolling_battle_text",
-]);
-const CP9_VISUAL_FILTER_IDS = Object.freeze([
-  "aura_fields",
-  "aura_modifier_badges",
-  "duration_status_badges",
-  "spawn_shield",
-  "target_selection_visuals",
-  "basic_ability_effects",
-  "ultimate_ability_effects",
-  "regeneration_effects",
-  "cooldown_effects",
-  "status_application",
-  "natural_status_expiry",
-  "freezing_trap_break",
-  "status_clear_on_death",
-  "death_effects",
-  "respawn_wave",
-  "resurrection_effects",
-  "spawn_shield_expiry",
   "scrolling_battle_text",
 ]);
 
@@ -153,10 +202,8 @@ function captureBrowserErrors(page) {
   }
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} url
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} url */
 async function openReplay(page, url) {
   captureBrowserErrors(page);
   await page.goto(url);
@@ -173,13 +220,8 @@ function expectNoBrowserErrors(page) {
   expect(browserErrors.get(page) ?? []).toEqual([]);
 }
 
-/**
- * Chromium reports an HTTP failure at the network-console layer even when the
- * application intentionally handles the exact replay conflict response.
- *
- * @param {import("@playwright/test").Page} page
- * @param {import("@playwright/test").Response} response
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {import("@playwright/test").Response} response */
 function expectOnlyHandledReplayConflictConsole(page, response) {
   expect(response.status()).toBe(409);
   expect(response.request().method()).toBe("POST");
@@ -189,9 +231,7 @@ function expectOnlyHandledReplayConflictConsole(page, response) {
   ]);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 function nextReplayResponse(page) {
   return page.waitForResponse(
     (response) =>
@@ -201,10 +241,8 @@ function nextReplayResponse(page) {
   );
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} selector
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} selector */
 async function clickReplayCommand(page, selector) {
   const responsePromise = nextReplayResponse(page);
   await page.locator(selector).click();
@@ -213,10 +251,8 @@ async function clickReplayCommand(page, selector) {
   return response.json();
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} key
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {string} key */
 async function pressReplayCommand(page, key) {
   await expect(page.locator("#replay-frame-slider")).toBeEnabled({
     timeout: 30_000,
@@ -229,11 +265,9 @@ async function pressReplayCommand(page, key) {
   return response.json();
 }
 
-/**
- * @param {Record<string, any>} frame
+/** @param {Record<string, any>} frame
  * @param {Record<string, any>} timeline
- * @param {number} frameIndex
- */
+ * @param {number} frameIndex */
 function expectResearcherJoin(frame, timeline, frameIndex) {
   const episodeId = frame.artifact_summary.replay_reference.episode_id;
   const row = timeline.rows[frameIndex];
@@ -270,11 +304,7 @@ function expectResearcherJoin(frame, timeline, frameIndex) {
   }
 }
 
-/**
- * Install frame zero through the user-facing replay keyboard boundary.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function installFirstFrame(page) {
   const slider = page.locator("#replay-frame-slider");
   if ((await slider.inputValue()) !== "0") {
@@ -287,12 +317,7 @@ async function installFirstFrame(page) {
   await expectReplayFrameIndex(page, 0);
 }
 
-/**
- * Prove the public presentation clock has no active replay animation. Motion
- * editing controls are intentionally absent from the product shell.
- *
- * @param {import("@playwright/test").Page} page
- */
+/** @param {import("@playwright/test").Page} page */
 async function expectReplayChoreographySettled(page) {
   await expect(
     page.locator("#battlefield .combat-choreography[data-state=playing]"),
@@ -303,15 +328,8 @@ async function expectReplayChoreographySettled(page) {
   );
 }
 
-/**
- * Freeze and prove the complete replay transport at one supported viewport.
- * The element screenshot is intentionally paired with its semantic ordering,
- * cursor, range, and overflow contract so a visually plausible but incomplete
- * transport cannot refresh the baseline.
- *
- * @param {import("@playwright/test").Page} page
- * @param {{width: number, height: number}} viewport
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {{width: number, height: number}} viewport */
 async function captureReplayTransportBaseline(page, viewport) {
   await page.setViewportSize(viewport);
   await waitForStablePresentation(page);
@@ -392,11 +410,9 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-/**
- * @param {Awaited<ReturnType<typeof startReplayViewer>> | null} viewer
+/** @param {Awaited<ReturnType<typeof startReplayViewer>> | null} viewer
  * @param {string} name
- * @returns {Awaited<ReturnType<typeof startReplayViewer>>}
- */
+ * @returns {Awaited<ReturnType<typeof startReplayViewer>>} */
 function requiredViewer(viewer, name) {
   if (!viewer) {
     throw new Error(`${name} replay viewer was not started.`);
@@ -459,12 +475,7 @@ function independentCanonicalJson(value) {
     .join(",")}}`;
 }
 
-/**
- * Independently validate the downloaded container rather than trusting the
- * production PNG inspector under test.
- *
- * @param {Buffer} bytes
- */
+/** @param {Buffer} bytes */
 function inspectDownloadedReplayPng(bytes) {
   expect(bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)).toBe(true);
   /** @type {Array<{type: string, data: Buffer}>} */
@@ -582,10 +593,8 @@ async function currentReplayPresentation(page) {
   });
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {"researcher" | "pov"} view
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {"researcher" | "pov"} view */
 async function installReplayView(page, view) {
   if ((await page.locator("#view-select").inputValue()) === view) {
     return;
@@ -787,15 +796,10 @@ function expectedReplayPngProvenance(snapshot) {
   };
 }
 
-/**
- * Decode the downloaded file through Chromium and return only bounded pixel
- * evidence rather than transferring the complete RGBA buffer back to Node.
- *
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {Buffer} bytes
  * @param {readonly [number, number, number]} resolvedShellBorderRgb
- * @param {Array<Record<string, any>>} rasterCues
- */
+ * @param {Array<Record<string, any>>} rasterCues */
 async function decodeReplayPngPixels(page, bytes, resolvedShellBorderRgb, rasterCues) {
   return page.evaluate(
     async ({ base64, shellBorderRgb, cues }) => {
@@ -920,15 +924,13 @@ async function decodeReplayPngPixels(page, bytes, resolvedShellBorderRgb, raster
   );
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {{label: string, expectRangeCue?: boolean}} options
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {{label: string, expectRangeCue?: boolean}} options */
 async function exportAndInspectReplayPng(page, options) {
   await waitForSettledReplayArtifactActions(page);
   const before = await replayExportSnapshot(page);
   expect(Object.keys(before.dom.visualFilters).sort()).toEqual(
-    [...CP9_VISUAL_FILTER_IDS].sort(),
+    [...VISUAL_FILTER_IDS].sort(),
   );
   expect(before.dom.shellBorder.top).toBe("1px");
   expect(before.dom.shellBorder.right).toBe("1px");
@@ -1064,16 +1066,14 @@ async function enableAllReplayVisualFilters(page) {
     await enableAll.click();
   }
   await expect(page.locator("#visual-filter-count")).toHaveText(
-    `${CP9_VISUAL_FILTER_IDS.length + 1} enabled`,
+    `${VISUAL_FILTER_IDS.length + 1} enabled`,
   );
   await expect(enableAll).toBeDisabled();
   await expect(page.locator("#disable-all-visual-filters-button")).toBeEnabled();
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {{proveVisibleUltimate?: boolean}} [options]
- */
+/** @param {import("@playwright/test").Page} page
+ * @param {{proveVisibleUltimate?: boolean}} [options] */
 async function installRepresentativeReplayPresentationState(page, options = {}) {
   await page.locator("#visual-filters").evaluate((details) => {
     if (!(details instanceof HTMLDetailsElement)) {
@@ -1107,7 +1107,7 @@ async function installRepresentativeReplayPresentationState(page, options = {}) 
     await input.uncheck();
   }
   await expect(page.locator("#visual-filter-count")).toHaveText(
-    `${CP9_VISUAL_FILTER_IDS.length - REPRESENTATIVE_DISABLED_FILTERS.length + 1} enabled`,
+    `${VISUAL_FILTER_IDS.length - REPRESENTATIVE_DISABLED_FILTERS.length + 1} enabled`,
   );
   if (options.proveVisibleUltimate === true) {
     await expect(ultimateEffects).toHaveCount(0);
@@ -1190,16 +1190,14 @@ async function installRepresentativeReplayPresentationState(page, options = {}) 
   await waitForSettledReplayArtifactActions(page);
 }
 
-/**
- * @param {import("@playwright/test").Page} page
+/** @param {import("@playwright/test").Page} page
  * @param {{
  *   url: string,
  *   view: "researcher" | "pov",
  *   presentationKind: string,
  *   label: string,
  *   repeatRepresentative?: boolean,
- * }} options
- */
+ * }} options */
 async function proveReplayLeafExports(page, options) {
   await openReplay(page, options.url);
   await installReplayView(page, options.view);
@@ -1215,7 +1213,7 @@ async function proveReplayLeafExports(page, options) {
     label: `${options.label} 960x600 all-on`,
   });
   expect(Object.values(allOn.provenance.presentation.visual_filters)).toEqual(
-    CP9_VISUAL_FILTER_IDS.map(() => true),
+    VISUAL_FILTER_IDS.map(() => true),
   );
 
   const laterFrame = await clickReplayCommand(page, "#replay-next-button");
@@ -1238,7 +1236,7 @@ async function proveReplayLeafExports(page, options) {
   expect(representative.provenance.presentation.selected_public_agent_id).toEqual(
     expect.any(String),
   );
-  for (const id of CP9_VISUAL_FILTER_IDS) {
+  for (const id of VISUAL_FILTER_IDS) {
     expect(representative.provenance.presentation.visual_filters[id]).toBe(
       !REPRESENTATIVE_DISABLED_FILTERS.includes(id),
     );
@@ -1257,13 +1255,11 @@ async function proveReplayLeafExports(page, options) {
   return Object.freeze({ allOn, representative, repeated });
 }
 
-/**
- * @param {import("@playwright/test").Page} page
- * @param {string} sourceMetricPath
- */
-async function downloadCanonicalMetricReport(page, sourceMetricPath) {
+/** @param {import("@playwright/test").Page} page
+ * @param {string} sourceMetricPath */
+async function downloadEpisodeDetails(page, sourceMetricPath) {
   await waitForSettledReplayArtifactActions(page);
-  await expect(page.locator("#replay-original-metrics-button")).toBeEnabled();
+  await expect(page.locator("#replay-episode-details-button")).toBeEnabled();
   /** @type {Array<{method: string, path: string}>} */
   const requests = [];
   const record = (/** @type {import("@playwright/test").Request} */ request) => {
@@ -1276,18 +1272,18 @@ async function downloadCanonicalMetricReport(page, sourceMetricPath) {
     const responsePromise = page.waitForResponse(
       (candidate) =>
         candidate.request().method() === "GET" &&
-        new URL(candidate.url()).pathname === METRIC_REPORT_ROUTE,
+        new URL(candidate.url()).pathname === EPISODE_DETAILS_ROUTE,
       { timeout: 30_000 },
     );
     const downloadPromise = page.waitForEvent("download", { timeout: 30_000 });
-    await page.locator("#replay-original-metrics-button").click();
+    await page.locator("#replay-episode-details-button").click();
     [response, download] = await Promise.all([responsePromise, downloadPromise]);
     await expect(page.locator("#notice")).toContainText("Downloaded");
   } finally {
     page.off("request", record);
   }
   expect(response.status()).toBe(200);
-  expect(requests).toEqual([{ method: "GET", path: METRIC_REPORT_ROUTE }]);
+  expect(requests).toEqual([{ method: "GET", path: EPISODE_DETAILS_ROUTE }]);
   const path = await download.path();
   if (path === null) {
     throw new Error("Metric download has no local path.");
@@ -1296,11 +1292,14 @@ async function downloadCanonicalMetricReport(page, sourceMetricPath) {
     readFile(path),
     readFile(sourceMetricPath),
   ]);
-  expect(downloadedBytes.equals(sourceBytes)).toBe(true);
-  expect(sha256(downloadedBytes)).toBe(sha256(sourceBytes));
-  expect(download.suggestedFilename()).toMatch(
-    /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\.marlbg-metrics\.json$/u,
-  );
+  const details = JSON.parse(downloadedBytes.toString("utf8"));
+  const original = JSON.parse(sourceBytes.toString("utf8"));
+  expect(details.schema_id).toBe("marlbg.replay.episode_details");
+  expect(details.context).toEqual(original.report.context);
+  expect(details.completion).toEqual(original.report.completion);
+  expect(details).not.toHaveProperty("frames");
+  expect(details).not.toHaveProperty("statistics");
+  expect(download.suggestedFilename()).toBe("episode-details.json");
   return Object.freeze({
     filename: download.suggestedFilename(),
     sha256: sha256(downloadedBytes),
@@ -1312,53 +1311,22 @@ async function downloadCanonicalMetricReport(page, sourceMetricPath) {
 /** @param {import("@playwright/test").Page} page */
 async function proveMissingMetricUi(page) {
   await waitForSettledReplayArtifactActions(page);
-  const button = page.locator("#replay-original-metrics-button");
-  await expect(button).toBeEnabled();
-  /** @type {Array<{method: string, path: string}>} */
-  const requests = [];
-  let downloadCount = 0;
-  const recordRequest = (/** @type {import("@playwright/test").Request} */ request) => {
-    requests.push({ method: request.method(), path: new URL(request.url()).pathname });
-  };
-  const recordDownload = () => {
-    downloadCount += 1;
-  };
-  const errors = browserErrors.get(page) ?? [];
-  const errorOffset = errors.length;
-  page.on("request", recordRequest);
-  page.on("download", recordDownload);
-  let response;
-  try {
-    const responsePromise = page.waitForResponse(
-      (candidate) =>
-        candidate.request().method() === "GET" &&
-        new URL(candidate.url()).pathname === METRIC_REPORT_ROUTE,
-      { timeout: 30_000 },
-    );
-    await button.click();
-    response = await responsePromise;
-    await expect(page.locator("#notice")).toHaveText(
-      "No metric report is available for this replay.",
-    );
-    await expect(button).toBeEnabled();
-    await page.waitForTimeout(250);
-  } finally {
-    page.off("request", recordRequest);
-    page.off("download", recordDownload);
-  }
-  expect(response.status()).toBe(404);
-  expect(requests).toEqual([{ method: "GET", path: METRIC_REPORT_ROUTE }]);
-  expect(downloadCount).toBe(0);
-  expect(errors.slice(errorOffset)).toEqual([
-    "console: Failed to load resource: the server responded with a status of 404 (Not Found)",
-  ]);
-  errors.splice(errorOffset);
+  const downloaded = page.waitForEvent("download");
+  await page.locator("#replay-episode-details-button").click();
+  const download = await downloaded;
+  expect(download.suggestedFilename()).toBe("episode-details.json");
+  const path = await download.path();
+  if (path === null) throw new Error("Episode details download has no local path.");
+  const details = JSON.parse(await readFile(path, "utf8"));
+  expect(details.schema_id).toBe("marlbg.replay.episode_details");
+  expect(details.context.identity.episode_id).toEqual(expect.any(String));
+  await expect(page.locator("#notice")).toContainText("Downloaded");
 }
 
 /** @param {import("@playwright/test").Page} page */
 async function replayArtifactFactSurface(page) {
   await waitForSettledReplayArtifactActions(page);
-  await expect(page.locator("#replay-original-metrics-button")).toBeEnabled();
+  await expect(page.locator("#replay-episode-details-button")).toBeEnabled();
   return Object.freeze({
     artifact: await page.locator("#replay-artifact-reference").innerText(),
     completion: await page.locator("#replay-completion-badge").innerText(),
@@ -1374,6 +1342,11 @@ test("canonical complete and partial artifacts join their frame-zero and capture
   const complete = requiredViewer(completeViewer, "complete");
   const partial = requiredViewer(partialViewer, "partial");
   await openReplay(page, complete.url);
+
+  await expect(page.locator("#replay-ranges-button")).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
 
   const [frame, timeline] = await Promise.all([
     currentReplayFrame(page),
@@ -2049,12 +2022,1566 @@ test("basic_support Agent POV playback visibly dwells for Hunter and Priest", as
   }
 });
 
+test("SharedObs TDM metrics and numeric identities remain visible across POV changes", async ({
+  page,
+}, testInfo) => {
+  if (artifacts === null) throw new Error("Replay fixtures are unavailable.");
+  const viewer = await startReplayViewer({
+    replayPath: artifacts.tdmShared,
+    frameIndex: 1,
+  });
+  /** @type {string[]} */
+  const requests = [];
+  page.on("request", (request) => {
+    if (/\/api\/replay\/metrics\/.*\.json$/u.test(new URL(request.url()).pathname))
+      requests.push(request.url());
+  });
+  /** @type {(catalog: Record<string, any>) => void} */
+  let recordCatalog = () => {};
+  /** @type {Promise<Record<string, any>>} */
+  const catalogLoaded = new Promise((resolve) => {
+    recordCatalog = resolve;
+  });
+  // Capture the browser's single catalog request before Chromium may evict its
+  // large response body from the inspector cache. No second request is made.
+  await page.route("**/api/replay/metrics/catalog.json", async (route) => {
+    const response = await route.fetch({ timeout: METRIC_PREPARATION_TIMEOUT_MS });
+    expect(response.status()).toBe(200);
+    recordCatalog(await response.json());
+    await route.fulfill({ response });
+  });
+  try {
+    await openReplay(page, viewer.url);
+    // Initial analysis compiles JAX once. Await that specific operation before
+    // applying the ordinary DOM deadline; parallel CPU profiles can share a host.
+    const analysisResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/replay/metrics/1/cursor.json",
+      { timeout: METRIC_PREPARATION_TIMEOUT_MS },
+    );
+    const catalogResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/replay/metrics/catalog.json",
+      { timeout: METRIC_PREPARATION_TIMEOUT_MS },
+    );
+    await page.locator("#evaluation-metrics > summary").click();
+    expect((await analysisResponse).status()).toBe(200);
+    const catalogResult = await catalogResponse;
+    expect(catalogResult.status()).toBe(200);
+    const catalog = await catalogLoaded;
+    expect(catalog.metric_schema_version).toBe(14);
+    expect(catalog.measurements).toHaveLength(11148);
+    expect(
+      catalog.measurements.some((/** @type {Record<string, any>} */ row) =>
+        /^agent_\d_return$/u.test(row.name),
+      ),
+    ).toBe(false);
+    expect(
+      catalog.measurements.every(
+        (/** @type {Record<string, any>} */ row) =>
+          !("value" in row) && !("valid" in row),
+      ),
+    ).toBe(true);
+    // Test the complete catalog, including rows that compete with the right answer.
+    const searchIndex = buildMetricSearchIndex(
+      catalog.measurements,
+      catalog.topics,
+      catalog.agents,
+      catalog.class_names,
+    );
+    for (const row of catalog.measurements) {
+      expect(
+        findMeasurements(searchIndex, row.name).map((found) => found.name),
+      ).toEqual([row.name]);
+    }
+    for (const queries of [
+      ["damage taken by priest from rogue", "damage dealt by rogue to priest"],
+      ["team a priest healing to mage", "team a priest healing mage"],
+      ["mage and priest distance", "priest and mage distance"],
+    ]) {
+      const first = findMeasurements(searchIndex, queries[0])
+        .map((row) => row.name)
+        .sort();
+      expect(first.length).toBeGreaterThan(0);
+      for (const query of queries.slice(1))
+        expect(
+          findMeasurements(searchIndex, query)
+            .map((row) => row.name)
+            .sort(),
+        ).toEqual(first);
+    }
+    const directedDamage = findMeasurements(
+      searchIndex,
+      "damage taken by priest from rogue",
+    );
+    for (const row of directedDamage) {
+      expect(row.scope).toBe("source_recipient");
+      expect(catalog.agents[row.subjects[0]].class_name).toBe("Rogue");
+      expect(catalog.agents[row.subjects[1]].class_name).toBe("Priest");
+      expect(row.stem).toContain("damage");
+      expect([
+        "damage_done",
+        "recipient_damage",
+        "controlled_damage",
+        "burst",
+      ]).toContain(row.family);
+    }
+    for (const query of [
+      "damage after poison",
+      "damage not received",
+      "team a team b priest damage",
+      "agent 10 healing",
+    ])
+      expect(findMeasurements(searchIndex, query)).toEqual([]);
+    await expect(page.locator("#metric-search")).toBeEnabled();
+    await expect(page.locator("#metric-rows table")).toBeVisible();
+    await expect(page.locator("#metric-selection")).toHaveValue("priority");
+    await expect(page.locator("#metric-selection option:checked")).toHaveText(
+      "Episode Results",
+    );
+    await expect(
+      page.locator('#metric-selection option[value="overview"]'),
+    ).toHaveCount(0);
+    await expect(page.locator('#metric-scope option[value="final"]')).toHaveText(
+      "Entire Episode",
+    );
+    expect(
+      await page
+        .locator("#metric-selection option")
+        .evaluateAll((options) =>
+          options.map((option) => [option.getAttribute("value"), option.textContent]),
+        ),
+    ).toEqual(EXPECTED_METRIC_TOPICS);
+    await expect(page.locator("#metric-selection optgroup")).toHaveCount(6);
+    const rows = await page.locator("#metric-rows").innerText();
+    const selection = await page.locator("#metric-selection").inputValue();
+    const scope = await page.locator("#metric-scope").inputValue();
+    const initialRequests = requests.length;
+    for (const view of /** @type {const} */ (["pov", "researcher", "pov"])) {
+      await installReplayView(page, view);
+      await expect(page.locator("#evaluation-metrics")).toBeVisible();
+      await expect(page.locator("#metric-rows table")).toBeVisible();
+      await expect(page.locator("#metric-rows")).toHaveText(rows, {
+        useInnerText: true,
+      });
+      await expect(page.locator("#metric-selection")).toHaveValue(selection);
+      await expect(page.locator("#metric-scope")).toHaveValue(scope);
+      await expect(page.locator("#connection-status")).toHaveText("Online");
+      const labels = await page.locator(".roster-id").allTextContents();
+      expect(labels.every((label) => /^Agent ID [0-9]$/u.test(label))).toBe(true);
+    }
+    expect(requests).toHaveLength(initialRequests);
+    await expect(page.locator("#metric-rows thead th")).toHaveText([
+      "Subject",
+      "Measure",
+      "Value",
+    ]);
+    for (const pov of /** @type {const} */ (["researcher", "pov"])) {
+      await installReplayView(page, pov);
+      let renderedTables = 0;
+      for (const [topic] of EXPECTED_METRIC_TOPICS) {
+        /** @type {Set<string>} */
+        const siblingNames = new Set();
+        for (const view of PAIRED_METRIC_TOPICS.has(topic)
+          ? ["totals", "recipients"]
+          : ["single"]) {
+          await selectMetricTable(page, topic, view);
+          await expect(page.locator("#metric-rows table")).toBeVisible();
+          const shown = await page
+            .locator("#metric-rows tr[data-metric]")
+            .evaluateAll((elements) =>
+              elements.map((element) => [
+                element.getAttribute("data-metric") ?? "",
+                element.querySelector(".metric-measure")?.textContent ?? "",
+              ]),
+            );
+          const declared = catalog.measurements
+            .filter(
+              (/** @type {Record<string, any>} */ row) =>
+                row.applicable &&
+                row.locations.some(
+                  (/** @type {{topic: string, view: string}} */ location) =>
+                    location.topic === topic && location.view === view,
+                ),
+            )
+            .map((/** @type {Record<string, any>} */ row) => [
+              row.name,
+              row.topic_text?.[topic]?.label ?? row.label,
+            ]);
+          // Only the five ability views have approved local wording.
+          expect([...shown].sort()).toEqual(declared.sort());
+          if (view === "totals" && ["healing_done", "excess_healing"].includes(topic)) {
+            expect(
+              shown.filter(([name]) => name.endsWith("_healing_received_fraction")),
+            ).toEqual([]);
+          }
+          expect(shown.every(([name]) => !siblingNames.has(name))).toBe(true);
+          for (const [name] of shown) siblingNames.add(name);
+          // Keep table captures clear when a changed row moves under the pointer.
+          await page.mouse.move(0, 0);
+          await page.keyboard.press("Escape");
+          await expect(page.locator("#visual-tooltip")).toBeHidden();
+          await page.locator("#evaluation-metrics").screenshot({
+            path: testInfo.outputPath(`metric-topic-${topic}-${view}-${pov}.png`),
+          });
+          renderedTables += 1;
+        }
+      }
+      expect(renderedTables).toBe(43);
+    }
+    expect(requests).toHaveLength(initialRequests);
+    await selectMetricTable(page, "abilities");
+    for (const team of ["a", "b"]) {
+      for (const ability of ["basic", "ultimate"]) {
+        await expect(
+          page.locator(
+            `#metric-rows [data-metric="team_${team}_${ability}_activations"]`,
+          ),
+        ).toBeVisible();
+        await expect(
+          page.locator(
+            `#metric-rows [data-metric="team_${team}_${ability}_activations"] .metric-measure`,
+          ),
+        ).toContainText(
+          `${ability === "basic" ? "Basic" : "Ultimate"} Ability Activations`,
+        );
+      }
+    }
+    await expect(
+      page.locator('#metric-rows [data-metric="team_a_priest_ultimate_activations"]'),
+    ).toHaveCount(0);
+    await selectMetricTable(page, "healing_done");
+    await expect(page.locator('[data-metric="agent_2_healing_done"]')).toContainText(
+      "Agent ID 2 · Priest · Team A",
+    );
+    await expect(page.locator('[data-metric="agent_0_healing_done"]')).toHaveCount(0);
+    await expect(
+      page.locator('[data-metric="team_b_ultimate_healing_done"]'),
+    ).toHaveCount(0);
+    await page
+      .locator('[data-metric="agent_2_healing_done_fraction"] .metric-measure')
+      .focus();
+    await expect(page.locator("#visual-tooltip")).toContainText("Numerator");
+    await expect(page.locator("#visual-tooltip")).toContainText("Denominator");
+    await expect(page.locator("#visual-tooltip")).toContainText("Team A");
+    await page.keyboard.press("Escape");
+    await selectMetricTable(page, "healing_done", "recipients");
+    const healingPairs = await page
+      .locator('#metric-rows [data-metric^="agent_"]')
+      .evaluateAll((rows) =>
+        rows
+          .map((row) => row.getAttribute("data-metric"))
+          .filter((name) => /^agent_\d+_to_agent_\d+_/u.test(name ?? "")),
+      );
+    expect(healingPairs.length).toBeGreaterThan(0);
+    expect(healingPairs.every((name) => name?.startsWith("agent_2_to_agent_"))).toBe(
+      true,
+    );
+    await selectMetricTable(page, "damage_done", "recipients");
+    await expect(
+      page.locator('#metric-rows [data-metric^="agent_2_to_agent_"]'),
+    ).toHaveCount(0);
+    await expect(
+      page.locator('[data-metric="agent_0_to_agent_5_damage_done"]'),
+    ).toBeVisible();
+    await selectMetricTable(page, "ultimate_mage");
+    const burstOrder = await page
+      .locator('#metric-rows [data-metric^="team_a_"]')
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-metric")));
+    expect(burstOrder[0]).toBe("team_a_mage_burst_applications");
+    expect(burstOrder.indexOf("team_a_burst_damage")).toBeLessThan(
+      burstOrder.indexOf("team_a_mage_burst_active_steps"),
+    );
+    for (const stem of [
+      "mage_ultimate_damage_done",
+      "mage_ultimate_kills",
+      "mage_ultimate_kill_fraction",
+    ]) {
+      await expect(
+        page.locator(`#metric-rows [data-metric="team_a_${stem}"]`),
+      ).toHaveCount(0);
+    }
+    // This recorded 3v2 roster has exactly one Mage: Agent 0 on Team A.
+    for (const slot of [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
+      for (const measure of ["burst_damage", "burst_kill_contributions"]) {
+        await expect(
+          page.locator(`#metric-rows [data-metric="agent_${slot}_${measure}"]`),
+        ).toHaveCount(0);
+      }
+    }
+    await expect(
+      page.locator('#metric-rows [data-metric="team_b_burst_damage"]'),
+    ).toHaveCount(0);
+    await selectMetricTable(page, "ultimate_mage", "recipients");
+    await expect(
+      page.locator('[data-metric="agent_0_mage_burst_active_steps"]'),
+    ).toBeVisible();
+    for (const slot of [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
+      await expect(
+        page.locator(`[data-metric="agent_${slot}_mage_burst_active_steps"]`),
+      ).toHaveCount(0);
+    }
+    // Only Team A has a Mage. Team B can receive Burst damage; Team A cannot.
+    for (const slot of [5, 6]) {
+      await expect(
+        page.locator(`[data-metric="agent_${slot}_burst_damage_received"]`),
+      ).toBeVisible();
+    }
+    for (const slot of [0, 1, 2]) {
+      await expect(
+        page.locator(`[data-metric="agent_${slot}_burst_damage_received"]`),
+      ).toHaveCount(0);
+    }
+    for (const pov of /** @type {const} */ (["researcher", "pov"])) {
+      await installReplayView(page, pov);
+      // These expectations come from the fixture's agents, not from the catalog.
+      // A shared count keeps its meaning when an Ultimate table shows it.
+      for (const [topic, team, activation, enemy, status] of /** @type {const} */ ([
+        ["ultimate_mage", "a", "team_a_mage_burst_applications", "5", "Mage Burst"],
+        ["ultimate_warrior", "a", "team_a_warrior_charge_applications", "5", null],
+        ["ultimate_hunter", "b", "team_b_hunter_trap_applications", "0", "Hunter Trap"],
+        ["ultimate_rogue", "b", "team_b_rogue_poison_applications", "0", null],
+        [
+          "ultimate_priest",
+          "a",
+          "team_a_priest_holy_word_salvation_applications",
+          "5",
+          null,
+        ],
+      ])) {
+        for (const view of ["totals", "recipients"]) {
+          await selectMetricTable(page, topic, view);
+          const metricNames = await page
+            .locator("#metric-rows tr[data-metric]")
+            .evaluateAll((elements) =>
+              elements.map((element) => element.getAttribute("data-metric")),
+            );
+          expect(new Set(metricNames).size).toBe(metricNames.length);
+          if (view === "totals") {
+            await expect(
+              page.locator(`[data-metric="${activation}"] .metric-measure`),
+            ).toHaveText(
+              `${{ ultimate_mage: "Mage Burst", ultimate_warrior: "Warrior Charge", ultimate_hunter: "Hunter Trap", ultimate_rogue: "Rogue Poison", ultimate_priest: "Priest Salvation" }[topic]} Applications`,
+            );
+            const subtitle = page.locator(
+              `[data-metric="${activation}"] .metric-condition`,
+            );
+            await expect(subtitle).toHaveCount(0);
+            expect(
+              catalog.measurements.find(
+                (/** @type {{name: string}} */ row) => row.name === activation,
+              ).status,
+            ).toBe(status);
+            const teamKills = page.locator(
+              `[data-metric="team_${team}_kills"] .metric-measure`,
+            );
+            if (topic === "ultimate_mage") await expect(teamKills).toHaveCount(0);
+            else await expect(teamKills).toHaveText("Total Kills");
+          } else {
+            await expect(
+              page.locator(`[data-metric="agent_${enemy}_deaths"] .metric-measure`),
+            ).toHaveText("Deaths");
+          }
+          await page.locator("#evaluation-metrics").screenshot({
+            path: testInfo.outputPath(`${topic}-${view}-${pov}.png`),
+          });
+        }
+      }
+      await selectMetricTable(page, "status_applications");
+      for (const [name, effect] of [
+        ["team_a_warrior_charge_slow_applications", "Warrior Charge Slow"],
+        ["team_a_warrior_charge_stun_applications", "Warrior Charge Stun"],
+        ["team_b_rogue_poison_slow_applications", "Rogue Poison Slow"],
+        ["team_b_rogue_poison_stun_applications", "Rogue Poison Stun"],
+        ["team_b_rogue_poison_anti_heal_applications", "Rogue Poison Anti-Heal"],
+        ["team_b_hunter_trap_applications", "Hunter Trap"],
+        ["team_a_mage_burst_applications", "Mage Burst"],
+      ]) {
+        await expect(
+          page.locator(`#metric-rows [data-metric="${name}"] .metric-condition`),
+        ).toHaveText(effect);
+      }
+      await selectMetricTable(page, "ultimate_warrior");
+      await page.setViewportSize({ width: 640, height: 900 });
+      const narrowMeasure = page.locator(
+        '[data-metric="team_a_warrior_charge_applications"] .metric-measure',
+      );
+      if (pov === "researcher") await narrowMeasure.hover();
+      else await narrowMeasure.focus();
+      await expect(page.locator("#visual-tooltip")).toContainText(
+        "How many times Team A's Warriors activated Warrior Charge",
+      );
+      await expect(page.locator("#visual-tooltip")).toContainText(
+        "Each activation counts once",
+      );
+      const narrowTooltip = await page.locator("#visual-tooltip").boundingBox();
+      expect(narrowTooltip).not.toBeNull();
+      if (narrowTooltip === null) throw new Error("The metric help is missing.");
+      expect(narrowTooltip.x).toBeGreaterThanOrEqual(0);
+      expect(narrowTooltip.y).toBeGreaterThanOrEqual(0);
+      expect(narrowTooltip.x + narrowTooltip.width).toBeLessThanOrEqual(640);
+      expect(narrowTooltip.y + narrowTooltip.height).toBeLessThanOrEqual(900);
+      await page.screenshot({
+        path: testInfo.outputPath(`ultimate-activation-narrow-${pov}.png`),
+      });
+      await page.keyboard.press("Escape");
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await selectMetricTable(page, "ultimate_hunter", "recipients");
+      for (const [stem, label] of [
+        ["trap_intervals", "Times This Agent Was Trapped"],
+        ["trap_breaks", "Times a Hunter Trap on This Agent Was Broken"],
+        ["trap_break_rate", "Share of This Agent's Traps Broken by Damage"],
+        [
+          "trap_mean_remaining_steps_at_break",
+          "Mean Hunter Trap Time Left When Broken",
+        ],
+      ]) {
+        const name = `agent_0_${stem}`;
+        const measure = page.locator(`[data-metric="${name}"] .metric-measure`);
+        await expect(measure).toHaveText(label);
+        await measure.focus();
+        await expect(page.locator("#visual-tooltip")).toContainText(name);
+        if (stem === "trap_intervals") {
+          await expect(page.locator("#visual-tooltip")).toContainText(
+            "Two Hunters trapping it on the same tick start one period",
+          );
+          await expect(page.locator("#visual-tooltip")).toContainText(
+            "A later Hunter Trap cast breaks the old Hunter Trap or follows expiry",
+          );
+          await page.screenshot({
+            path: testInfo.outputPath(`trap-period-tooltip-${pov}.png`),
+          });
+        }
+        await page.keyboard.press("Escape");
+      }
+      await selectMetricTable(page, "ultimate_priest", "recipients");
+      for (const slot of [0, 1, 2]) {
+        await expect(
+          page.locator(
+            `[data-metric="agent_${slot}_rescue_opportunities"] .metric-measure`,
+          ),
+        ).toHaveText("Chances to Save This Agent");
+        await expect(
+          page.locator(`[data-metric="agent_${slot}_rescues"] .metric-measure`),
+        ).toHaveText("Times Rescued");
+      }
+      for (const slot of [5, 6]) {
+        await expect(
+          page.locator(`[data-metric="agent_${slot}_rescue_opportunities"]`),
+        ).toHaveCount(0);
+      }
+      await selectMetricTable(page, "ultimate_rogue");
+      const poisonMeasure = page.locator(
+        '[data-metric="team_a_healing_prevented_by_poison"] .metric-measure',
+      );
+      await expect(poisonMeasure).toHaveText("Priest Healing Prevented On Team A");
+      if (pov === "researcher") await poisonMeasure.hover();
+      else await poisonMeasure.focus();
+      await expect(page.locator("#visual-tooltip")).toContainText(
+        "Rogue Poison must already be active at the start of the tick",
+      );
+      await expect(page.locator("#visual-tooltip")).toContainText(
+        "before the maximum-health limit",
+      );
+      await expect(page.locator("#visual-tooltip")).toContainText(
+        "even if the ally was already at full health",
+      );
+      await page.screenshot({
+        path: testInfo.outputPath(`poison-healing-tooltip-${pov}.png`),
+      });
+      await page.keyboard.press("Escape");
+      await selectMetricTable(page, "ultimate_rogue", "recipients");
+      await expect(
+        page.locator(
+          '[data-metric="agent_0_healing_prevented_by_poison"] .metric-measure',
+        ),
+      ).toHaveText("Priest Healing Prevented On This Agent");
+      await selectMetricTable(page, "ultimate_warrior");
+      await expect(
+        page.locator(
+          '[data-metric="team_b_warrior_charge_slow_active_steps"] .metric-measure',
+        ),
+      ).toHaveText("Time With Status On Team B");
+      await selectMetricTable(page, "ultimate_warrior", "recipients");
+      await expect(
+        page.locator(
+          '[data-metric="agent_5_warrior_charge_slow_active_steps"] .metric-measure',
+        ),
+      ).toHaveText("Time With Status On This Agent");
+      await selectMetricTable(page, "respawn");
+      expect(
+        await page
+          .locator("#metric-rows tr[data-metric]")
+          .evaluateAll((elements) =>
+            elements.map((element) => element.getAttribute("data-metric")),
+          ),
+      ).toEqual([
+        "team_a_respawn_waves",
+        "team_a_mean_agents_per_respawn_wave",
+        "team_a_mean_observed_respawn_wait_steps",
+        "team_b_respawn_waves",
+        "team_b_mean_agents_per_respawn_wave",
+        "team_b_mean_observed_respawn_wait_steps",
+      ]);
+      const waitMeasure = page.locator(
+        '[data-metric="team_a_mean_observed_respawn_wait_steps"] .metric-measure',
+      );
+      if (pov === "researcher") await waitMeasure.hover();
+      else await waitMeasure.focus();
+      const waitTooltip = page.locator("#visual-tooltip");
+      await expect(waitTooltip).toContainText("Mean Wait Before Respawn");
+      await expect(waitTooltip).toContainText("How many ticks agents on Team A");
+      await expect(waitTooltip).toContainText("Includes waits still in progress");
+      await expect(waitTooltip).toContainText("Numerator");
+      await expect(waitTooltip).toContainText("Ticks each agent on Team A");
+      await expect(waitTooltip).toContainText("Denominator");
+      await expect(waitTooltip).toContainText("Waits for respawn seen");
+      await expect(waitTooltip).toContainText(
+        "team_a_mean_observed_respawn_wait_steps",
+      );
+      await page.screenshot({
+        path: testInfo.outputPath(`respawn-wait-tooltip-${pov}.png`),
+      });
+      await page.keyboard.press("Escape");
+      // Only Agent 2 can heal. Other classes remain valid patients, and Team B
+      // can regenerate even though it has no Priest. Keep those roles separate.
+      await selectMetricTable(page, "healing_done");
+      for (const slot of [0, 1, 2, 5, 6]) {
+        for (const ability of ["", "basic_", "ultimate_"]) {
+          const row = page.locator(
+            `#metric-rows [data-metric="agent_${slot}_${ability}healing_done"]`,
+          );
+          if (slot === 2) await expect(row).toBeVisible();
+          else await expect(row).toHaveCount(0);
+        }
+      }
+      await page.locator("#evaluation-metrics").screenshot({
+        path: testInfo.outputPath(`healing-done-totals-${pov}.png`),
+      });
+      await selectMetricTable(page, "healing_received");
+      for (const slot of [0, 1, 2, 5, 6]) {
+        const priestHealing = page.locator(
+          `#metric-rows [data-metric="agent_${slot}_priest_healing_received"]`,
+        );
+        if (slot < 5) await expect(priestHealing).toBeVisible();
+        else await expect(priestHealing).toHaveCount(0);
+        for (const measure of ["regenerated_healing", "effective_healing_received"]) {
+          await expect(
+            page.locator(`#metric-rows [data-metric="agent_${slot}_${measure}"]`),
+          ).toBeVisible();
+        }
+      }
+      await page.locator("#evaluation-metrics").screenshot({
+        path: testInfo.outputPath(`healing-received-${pov}.png`),
+      });
+      await selectMetricTable(page, "damage_done");
+      for (const slot of [0, 1, 2, 5, 6]) {
+        for (const ability of ["", "basic_", "ultimate_"]) {
+          const row = page.locator(
+            `#metric-rows [data-metric="agent_${slot}_${ability}damage_done"]`,
+          );
+          if (slot === 2 || (slot === 0 && ability === "ultimate_"))
+            await expect(row).toHaveCount(0);
+          else await expect(row).toBeVisible();
+        }
+      }
+      await page.locator("#metric-search").fill("agent_0_healing_done");
+      const hiddenHealing = page.locator(
+        '#metric-search-results [data-measurement="agent_0_healing_done"]',
+      );
+      await expect(hiddenHealing).toContainText("Not applicable to this roster");
+      await hiddenHealing.click();
+      await expect(page.locator("#metric-search-definition")).toBeFocused();
+      await expect(page.locator("#metric-search-definition")).toContainText(
+        "Agent ID 0 cannot provide this healing with Basic or Ultimate abilities.",
+      );
+      await page.locator("#metric-description").click();
+      await selectMetricTable(page, "priest_rescue");
+      await expect(
+        page.locator('[data-metric="agent_2_ultimate_rescue_contributions"]'),
+      ).toContainText("Agent ID 2 · Priest · Team A");
+      for (const name of [
+        "team_a_basic_rescue_fraction",
+        "agent_2_basic_rescue_participation",
+      ]) {
+        const measure = page.locator(`[data-metric="${name}"] .metric-measure`);
+        await expect(measure).toBeVisible();
+        await measure.focus();
+        await expect(page.locator("#visual-tooltip")).toContainText("Numerator");
+        await expect(page.locator("#visual-tooltip")).toContainText("Denominator");
+        await expect(page.locator("#visual-tooltip")).toContainText("Team A");
+        await expect(page.locator("#visual-tooltip")).toContainText(name);
+        await page.keyboard.press("Escape");
+      }
+      await expect(
+        page.locator('[data-metric="team_b_basic_rescue_fraction"]'),
+      ).toHaveCount(0);
+      for (const slot of [0, 1, 5, 6]) {
+        await expect(
+          page.locator(`[data-metric="agent_${slot}_ultimate_rescue_contributions"]`),
+        ).toHaveCount(0);
+        await expect(
+          page.locator(`[data-metric="agent_${slot}_basic_rescue_participation"]`),
+        ).toHaveCount(0);
+      }
+      await page.locator("#evaluation-metrics").screenshot({
+        path: testInfo.outputPath(`healing-saves-totals-${pov}.png`),
+      });
+      await selectMetricTable(page, "priest_rescue", "recipients");
+      for (const slot of [0, 1, 2]) {
+        await expect(
+          page.locator(`[data-metric="agent_${slot}_rescues"]`),
+        ).toBeVisible();
+        await expect(
+          page.locator(
+            `[data-metric="agent_2_to_agent_${slot}_ultimate_rescue_contributions"]`,
+          ),
+        ).toBeVisible();
+      }
+      await expect(
+        page.locator(
+          '[data-metric="agent_0_to_agent_1_ultimate_rescue_contributions"]',
+        ),
+      ).toHaveCount(0);
+      await page.locator("#evaluation-metrics").screenshot({
+        path: testInfo.outputPath(`healing-saves-recipients-${pov}.png`),
+      });
+      await selectMetricTable(page, "damage_received");
+      for (const [slot, direction, team] of [
+        [0, "Lower is better", "A"],
+        [1, "Context dependent", "A"],
+        [5, "Lower is better", "B"],
+        [6, "Lower is better", "B"],
+      ]) {
+        for (const ability of ["", "basic_", "ultimate_"]) {
+          const name = `agent_${slot}_${ability}damage_received`;
+          await page.locator(`[data-metric="${name}"] .metric-measure`).focus();
+          await expect(page.locator("#visual-tooltip")).toContainText(
+            `${direction} for Team ${team}`,
+          );
+          await expect(page.locator("#visual-tooltip")).toContainText(name);
+          await page.keyboard.press("Escape");
+        }
+      }
+      await page
+        .locator('[data-metric="agent_1_damage_received"] .metric-measure')
+        .hover();
+      await expect(page.locator("#visual-tooltip")).toContainText(
+        "A Warrior may take hits to protect teammates",
+      );
+      await page.screenshot({
+        path: testInfo.outputPath(`damage-guidance-${pov}.png`),
+      });
+      await page.keyboard.press("Escape");
+      for (const [topic, name, expected] of [
+        [
+          "controlled_damage",
+          "team_a_damage_to_hunter_trap_recipient",
+          "Context dependent for Team A",
+        ],
+        [
+          "controlled_damage",
+          "team_a_damage_to_rogue_poison_slow_recipient",
+          "Higher is better for Team A",
+        ],
+        ["excess_healing", "team_a_excess_healing", "Context dependent for Team A"],
+        [
+          "healing_done",
+          "team_a_effective_healing_fraction",
+          "Context dependent for Team A",
+        ],
+        [
+          "healing_done",
+          "team_a_basic_effective_healing_fraction",
+          "Context dependent for Team A",
+        ],
+        [
+          "healing_received",
+          "team_a_effective_priest_healing_received_fraction",
+          "Context dependent for Team A",
+        ],
+        [
+          "healing_received",
+          "team_a_effective_healing_received",
+          "Context dependent for Team A",
+        ],
+        [
+          "excess_healing",
+          "team_a_basic_excess_healing_fraction",
+          "Context dependent for Team A",
+        ],
+        [
+          "excess_healing",
+          "team_a_ultimate_excess_healing_fraction",
+          "Lower is better for Team A",
+        ],
+        [
+          "healing_received",
+          "team_a_regenerated_healing",
+          "Context dependent for Team A",
+        ],
+        ["action_acceptance", "team_a_actions_accepted", "Higher is better for Team A"],
+      ]) {
+        await selectMetricTable(page, topic);
+        await page.locator(`[data-metric="${name}"] .metric-measure`).focus();
+        await expect(page.locator("#visual-tooltip")).toContainText(expected);
+        await expect(page.locator("#visual-tooltip")).toContainText(name);
+        if (name === "team_a_basic_effective_healing_fraction") {
+          await expect(page.locator("#visual-tooltip")).toContainText("Freedom");
+          await page.screenshot({
+            path: testInfo.outputPath(`healing-fraction-guidance-${pov}.png`),
+          });
+        }
+        await page.keyboard.press("Escape");
+      }
+    }
+    await selectMetricTable(page, "ultimate_priest");
+    await expect(
+      page.locator('#metric-rows [data-metric="team_a_priest_ultimate_activations"]'),
+    ).toHaveCount(0);
+    for (const measure of [
+      "ultimate_healing_done",
+      "ultimate_effective_healing_done",
+      "ultimate_effective_healing_fraction",
+      "ultimate_excess_healing_fraction",
+      "ultimate_excess_healing",
+      "ultimate_rescues",
+      "ultimate_rescue_fraction",
+    ]) {
+      await expect(
+        page.locator(`#metric-rows [data-metric="team_a_${measure}"]`),
+      ).toBeVisible();
+      await expect(
+        page.locator(`#metric-rows [data-metric="team_b_${measure}"]`),
+      ).toHaveCount(0);
+    }
+    await selectMetricTable(page, "kill_contributions");
+    for (const team of ["a", "b"]) {
+      await expect(
+        page.locator(`#metric-rows [data-metric="team_${team}_kills"]`),
+      ).toBeVisible();
+    }
+    await selectMetricTable(page, "kill_contributions", "recipients");
+    await page
+      .locator('[data-metric="agent_2_to_agent_5_kill_contributions"] .metric-measure')
+      .focus();
+    await expect(page.locator("#visual-tooltip")).toContainText("From");
+    await expect(page.locator("#visual-tooltip")).toContainText("Agent ID 2");
+    await expect(page.locator("#visual-tooltip")).toContainText("To");
+    await expect(page.locator("#visual-tooltip")).toContainText("Agent ID 5");
+    await expect(page.locator("#visual-tooltip")).not.toContainText(
+      /About|Who Acts|Who Is Affected|Who This Describes/u,
+    );
+    await page.keyboard.press("Escape");
+    await selectMetricTable(page, "deaths");
+    for (const team of ["a", "b"]) {
+      await expect(
+        page.locator(`#metric-rows [data-metric="team_${team}_deaths"]`),
+      ).toBeVisible();
+    }
+    await selectMetricTable(page, "controlled_damage");
+    await expect(page.locator("#metric-selection option:checked")).toHaveText(
+      "Damage to Enemies With Harmful Effects",
+    );
+    await expect(page.locator("#metric-description")).toContainText(
+      "Damage to enemies who already had each named harmful effect at the start of the tick.",
+    );
+    await expect(page.locator("#metric-description")).toContainText(
+      /\d+ of \d+ measurements available/u,
+    );
+    await expect(
+      page.locator('[data-metric="team_a_damage_to_warrior_charge_slow_recipient"]'),
+    ).toContainText("Warrior Charge Slow");
+    await expect(
+      page.locator('[data-metric="team_a_damage_to_hunter_trap_recipient"]'),
+    ).toContainText("Hunter Trap");
+    const controlsBefore = await page.locator("#metric-scope").boundingBox();
+    await page.locator("#metric-rows tbody").evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    expect(await page.locator("#metric-scope").boundingBox()).toEqual(controlsBefore);
+    await page.locator("#metric-rows tbody").evaluate((element) => {
+      element.scrollTop = 0;
+    });
+    await page
+      .locator(
+        '[data-metric="team_a_damage_to_warrior_charge_slow_recipient"] .metric-measure',
+      )
+      .focus();
+    await expect(page.locator("#visual-tooltip")).toBeVisible();
+    await expect(page.locator("#visual-tooltip")).toContainText(
+      "Higher is better for Team A",
+    );
+    await expect(page.locator("#visual-tooltip")).toContainText("CSV Column");
+    await expect(page.locator("#visual-tooltip")).toContainText(
+      "team_a_damage_to_warrior_charge_slow_recipient",
+    );
+    await page.keyboard.press("Escape");
+    expect(requests).toHaveLength(initialRequests);
+
+    const metricSearch = page.locator("#metric-search");
+    const searchResults = page.locator("#metric-search-results button");
+    const selectedResult = page.locator(
+      '#metric-search-results [aria-selected="true"]',
+    );
+    for (const query of ["warrior deaths", "warrior death", "warrior death counts"]) {
+      await metricSearch.fill(query);
+      await expect(searchResults.first()).toHaveAttribute(
+        "data-measurement",
+        "agent_1_deaths",
+      );
+    }
+    /** @type {number[]} */
+    const searchPaintMs = [];
+    for (let repeat = 0; repeat < 6; repeat++) {
+      for (const query of [
+        "damage taken by priest from rogue",
+        "team a priest healing to mage",
+        "regen",
+        "crippling poison",
+      ]) {
+        const elapsed = await metricSearch.evaluate(async (element, text) => {
+          const start = performance.now();
+          const input = /** @type {HTMLInputElement} */ (element);
+          input.value = text;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          await new Promise((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve)),
+          );
+          return performance.now() - start;
+        }, query);
+        if (repeat > 0) searchPaintMs.push(elapsed);
+      }
+    }
+    const searchTimingPath = testInfo.outputPath("search-first-paint-ms.json");
+    await writeFile(
+      searchTimingPath,
+      JSON.stringify({
+        samples: searchPaintMs,
+        definition:
+          "Input event through two animation frames, after one warm pass. Includes matching and painting results.",
+      }),
+    );
+    await testInfo.attach("search-first-paint-ms", {
+      path: searchTimingPath,
+      contentType: "application/json",
+    });
+    let slowedDamageResults;
+    for (const query of [
+      "damage received while slowed rogue poison",
+      "damage received while slowed by rogue poison",
+      "damage taken while slowed by rogue poison",
+    ]) {
+      await metricSearch.fill(query);
+      await expect(searchResults).toHaveCount(10);
+      const names = await searchResults.evaluateAll((buttons) =>
+        buttons.map((button) => button.getAttribute("data-measurement")),
+      );
+      expect(
+        names.every((name) =>
+          /^agent_\d_damage_received_while_rogue_poison_slow$/u.test(name ?? ""),
+        ),
+      ).toBe(true);
+      if (slowedDamageResults) expect(names).toEqual(slowedDamageResults);
+      slowedDamageResults = names;
+    }
+    await metricSearch.press("ArrowDown");
+    await expect(selectedResult).toHaveCount(1);
+    await page.locator("#evaluation-metrics").screenshot({
+      path: testInfo.outputPath("metric-search-connecting-words.png"),
+    });
+    await metricSearch.fill("crippling poison");
+    await expect(metricSearch).toHaveAttribute("role", "combobox");
+    await expect(metricSearch).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator("#metric-search-results")).toHaveAttribute(
+      "role",
+      "listbox",
+    );
+    await expect(searchResults).toHaveCount(20);
+    await expect(searchResults.first()).toHaveAttribute(
+      "data-measurement",
+      "team_b_rogue_poison_applications",
+    );
+    const poisonResults = await searchResults.allTextContents();
+    await metricSearch.fill("crip pois");
+    await expect(searchResults).toHaveText(poisonResults);
+    await metricSearch.press("ArrowDown");
+    await expect(metricSearch).toBeFocused();
+    await expect(searchResults.first()).toHaveAttribute("aria-selected", "true");
+    await expect(selectedResult).toHaveCount(1);
+    await expect(metricSearch).toHaveAttribute(
+      "aria-activedescendant",
+      (await searchResults.first().getAttribute("id")) ?? "",
+    );
+    await page.mouse.move(0, 0);
+    for (const width of [1440, 640]) {
+      await page.setViewportSize({ width, height: 900 });
+      await metricSearch.press("ArrowUp");
+      await expect(selectedResult).toBeInViewport();
+      await page.locator("#evaluation-metrics").screenshot({
+        path: testInfo.outputPath(`metric-search-keyboard-${width}.png`),
+      });
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await metricSearch.press("ArrowUp");
+    await expect(searchResults.first()).toHaveAttribute("aria-selected", "true");
+    await metricSearch.press("ArrowDown");
+    await expect(searchResults.nth(1)).toHaveAttribute("aria-selected", "true");
+    await metricSearch.press("ArrowUp");
+    await expect(searchResults.first()).toHaveAttribute("aria-selected", "true");
+    await metricSearch.press("Escape");
+    await expect(metricSearch).toBeFocused();
+    await expect(metricSearch).toHaveAttribute("aria-expanded", "false");
+    await expect(metricSearch).not.toHaveAttribute("aria-activedescendant");
+    await expect(selectedResult).toHaveCount(0);
+    await expect(page.locator("#metric-search-results")).toBeHidden();
+    await expect(metricSearch).toHaveValue("crip pois");
+    await metricSearch.press("ArrowUp");
+    await expect(metricSearch).toHaveAttribute("aria-expanded", "true");
+    await expect(searchResults.last()).toHaveAttribute("aria-selected", "true");
+    await metricSearch.press("ArrowDown");
+    await expect(searchResults.last()).toHaveAttribute("aria-selected", "true");
+    await expect(metricSearch).toBeFocused();
+    await page.keyboard.type("on");
+    await expect(metricSearch).toHaveValue("crip poison");
+    await expect(searchResults).toHaveText(poisonResults);
+    await expect(selectedResult).toHaveCount(0);
+    await expect(metricSearch).not.toHaveAttribute("aria-activedescendant");
+    // Search also lists absent classes. Choose Team B's real Rogue for the
+    // navigation check, rather than assuming the first general match applies.
+    await metricSearch.fill("team_b_rogue_ultimate_kills");
+    await metricSearch.press("ArrowDown");
+    const selectedName = await selectedResult.getAttribute("data-measurement");
+    expect(selectedName).toBe("team_b_rogue_ultimate_kills");
+    const selectedMeasurement = catalog.measurements.find(
+      (/** @type {{name: string}} */ row) => row.name === selectedName,
+    );
+    expect(selectedMeasurement.applicable).toBe(true);
+    expect(
+      selectedMeasurement.locations.some(
+        (/** @type {{topic: string}} */ location) =>
+          location.topic === "ultimate_rogue",
+      ),
+    ).toBe(true);
+    await metricSearch.press("Enter");
+    await expect(page.locator("#metric-selection")).toHaveValue(
+      selectedMeasurement.primary_topic,
+    );
+    await expect(page.locator("#metric-view")).toHaveValue(
+      selectedMeasurement.primary_view,
+    );
+    await expect(
+      page.locator(`[data-metric="${selectedName}"] .metric-measure`),
+    ).toBeFocused();
+    await expect(page.locator(`[data-metric="${selectedName}"]`)).toHaveClass(
+      /metric-search-match/u,
+    );
+    await page.keyboard.press("Escape");
+    await metricSearch.fill("no matching measurement xyz");
+    await expect(searchResults).toHaveCount(0);
+    for (const key of ["ArrowDown", "ArrowUp", "Enter"]) {
+      await metricSearch.press(key);
+    }
+    await expect(metricSearch).toBeFocused();
+    await expect(metricSearch).not.toHaveAttribute("aria-activedescendant");
+    await expect(page.locator("#metric-selection")).toHaveValue(
+      selectedMeasurement.primary_topic,
+    );
+    for (const { query, topics } of [
+      { query: "overhealing", topics: ["excess_healing", "healing_received"] },
+      { query: "spread out", topics: ["formation"] },
+    ]) {
+      await metricSearch.fill(query);
+      await expect(searchResults.first()).toBeVisible();
+      const firstName = await searchResults.first().getAttribute("data-measurement");
+      const firstMeasurement = catalog.measurements.find(
+        (/** @type {{name: string}} */ row) => row.name === firstName,
+      );
+      expect(
+        firstMeasurement.locations.some((/** @type {{topic: string}} */ location) =>
+          topics.includes(location.topic),
+        ),
+      ).toBe(true);
+      if (query === "overhealing") expect(firstMeasurement.stem).toContain("excess");
+    }
+    await metricSearch.fill("regen");
+    await expect(searchResults.first()).toBeVisible();
+    while (await page.locator("#metric-search-more").isVisible()) {
+      await page.locator("#metric-search-more").click();
+    }
+    const regenerationResults = await searchResults.evaluateAll((buttons) =>
+      buttons.map((button) => button.getAttribute("data-measurement") ?? ""),
+    );
+    expect(regenerationResults.length).toBeGreaterThan(0);
+    expect(
+      regenerationResults.every((name) =>
+        /_(regenerated_healing|regeneration_healing_received_fraction)$/u.test(name),
+      ),
+    ).toBe(true);
+
+    await page.locator("#metric-search").fill("healing");
+    await expect(page.locator("#metric-search-results button")).toHaveCount(20);
+    await expect(page.locator("#metric-search-more")).toBeVisible();
+    await page.locator("#metric-search-more").click();
+    await expect(page.locator("#metric-search-results button")).toHaveCount(40);
+    const healingResults = await page
+      .locator("#metric-search-results button")
+      .allTextContents();
+    await metricSearch.focus();
+    await metricSearch.press("ArrowDown");
+    await expect(selectedResult).toHaveCount(1);
+    await page.locator("#metric-description").click();
+    await expect(page.locator("#metric-search-results")).toBeHidden();
+    await expect(page.locator("#metric-search-more")).toBeHidden();
+    await expect(page.locator("#metric-search-definition")).toBeHidden();
+    await expect(page.locator("#metric-search")).toHaveValue("healing");
+    await expect(metricSearch).toHaveAttribute("aria-expanded", "false");
+    await expect(metricSearch).not.toHaveAttribute("aria-activedescendant");
+    await expect(selectedResult).toHaveCount(0);
+    await page.mouse.move(0, 0);
+    await expect(page.locator("#visual-tooltip")).toBeHidden();
+    await page.locator("#evaluation-metrics").screenshot({
+      path: testInfo.outputPath("metric-search-collapsed.png"),
+    });
+    await page.locator("#metric-search").click();
+    await expect(page.locator("#metric-search-results")).toBeVisible();
+    await expect(page.locator("#metric-search-results button")).toHaveText(
+      healingResults,
+    );
+    await expect(page.locator("#metric-search-more")).toBeVisible();
+    await page.locator("#evaluation-metrics").screenshot({
+      path: testInfo.outputPath("metric-search-reopened.png"),
+    });
+    await page.locator("#metric-search-more").click();
+    await expect(page.locator("#metric-search-results")).toBeVisible();
+    await expect(page.locator("#metric-search-results button")).toHaveCount(60);
+    await page.locator("#metric-description").click();
+    await expect(page.locator("#metric-search-results")).toBeHidden();
+    await page.locator("#metric-search").focus();
+    await expect(page.locator("#metric-search-results")).toBeVisible();
+    await expect(page.locator("#metric-search-results button")).toHaveCount(60);
+    await expect(page.locator("#metric-search-more")).toBeVisible();
+    await expect(page.locator("#metric-search")).toHaveValue("healing");
+    await page.locator("#metric-search-status").click();
+    await expect(page.locator("#metric-search-results")).toBeVisible();
+    await expect(page.locator("#metric-search-more")).toBeVisible();
+    for (const view of /** @type {const} */ (["researcher", "pov"])) {
+      const oldTopic = await page.locator("#metric-selection").inputValue();
+      const oldView = await page.locator("#metric-view").inputValue();
+      const oldQuery = await page.locator("#metric-search").inputValue();
+      await installReplayView(page, view);
+      await expect(page.locator("#metric-selection")).toHaveValue(oldTopic);
+      await expect(page.locator("#metric-view")).toHaveValue(oldView);
+      await expect(page.locator("#metric-search")).toHaveValue(oldQuery);
+      await page.emulateMedia({
+        reducedMotion: view === "pov" ? "reduce" : "no-preference",
+      });
+      const name = "agent_2_to_agent_5_kill_contributions";
+      await page.locator("#metric-search").fill(name);
+      await expect(
+        page.locator("#metric-search-results button").first(),
+      ).toHaveAttribute("data-measurement", name);
+      await page.locator(`#metric-search-results [data-measurement="${name}"]`).click();
+      await expect(page.locator("#metric-selection")).toHaveValue("kill_contributions");
+      await expect(page.locator("#metric-view")).toHaveValue("recipients");
+      await expect(
+        page.locator(`[data-metric="${name}"] .metric-measure`),
+      ).toBeFocused();
+      await expect(page.locator(`[data-metric="${name}"]`)).toHaveClass(
+        /metric-search-match/u,
+      );
+      await page.keyboard.press("Escape");
+      const destination = page.locator(`[data-metric="${name}"]`);
+      await expect(page.locator(".metric-search-match")).toHaveCount(1);
+      await expect(destination).toHaveCSS("outline-color", "rgb(240, 255, 79)");
+      await expect(destination).toHaveCSS("outline-width", "2px");
+      await expect(destination).toHaveCSS("outline-offset", "-2px");
+      await expect(destination).toHaveCSS(
+        "background-color",
+        "rgba(240, 255, 79, 0.1)",
+      );
+      await page.locator("#evaluation-metrics").screenshot({
+        path: testInfo.outputPath(`search-destination-${view}.png`),
+      });
+      if (view === "researcher") {
+        // Picking the same row gives it a fresh three seconds.
+        await page.waitForTimeout(1600);
+        await page.locator("#metric-search").click();
+        await page
+          .locator(`#metric-search-results [data-measurement="${name}"]`)
+          .click();
+        await page.keyboard.press("Escape");
+        await page.waitForTimeout(1600);
+        await expect(destination).toHaveClass(/metric-search-match/u);
+      }
+      await expect(destination).not.toHaveClass(/metric-search-match/u, {
+        timeout: 4000,
+      });
+      await expect(destination.locator(".metric-measure")).toBeFocused();
+      await expect(page.locator(".metric-search-match")).toHaveCount(0);
+      const tableBefore = await page.locator("#metric-rows").innerText();
+      const unavailable = "agent_9_ultimate_kill_contributions";
+      await page.locator("#metric-search").fill(unavailable);
+      await expect(
+        page.locator("#metric-search-results button").first(),
+      ).toHaveAttribute("data-measurement", unavailable);
+      await page
+        .locator(`#metric-search-results [data-measurement="${unavailable}"]`)
+        .click();
+      await expect(page.locator("#metric-search-definition")).toBeFocused();
+      await expect(page.locator("#metric-search-definition")).toContainText(
+        unavailable,
+      );
+      await expect(page.locator("#metric-search-definition")).toContainText(
+        "Agent ID 9 is inactive in this replay.",
+      );
+      await expect(page.locator("#metric-search-definition")).toContainText(
+        "Primary location: Kill Contributions: Totals.",
+      );
+      await page.locator("#metric-search-definition").click();
+      await expect(page.locator("#metric-search-definition")).toBeVisible();
+      await expect(page.locator("#metric-search-results")).toBeVisible();
+      await page.locator("#metric-description").click();
+      await expect(page.locator("#metric-search-results")).toBeHidden();
+      await expect(page.locator("#metric-search-more")).toBeHidden();
+      await expect(page.locator("#metric-search-definition")).toBeHidden();
+      await expect(page.locator("#metric-search")).toHaveValue(unavailable);
+      await page.locator("#metric-search").click();
+      await expect(page.locator("#metric-search-results")).toBeVisible();
+      await expect(
+        page.locator("#metric-search-results button").first(),
+      ).toHaveAttribute("data-measurement", unavailable);
+      await page
+        .locator(`#metric-search-results [data-measurement="${unavailable}"]`)
+        .click();
+      await expect(page.locator("#metric-search-definition")).toBeFocused();
+      await expect(page.locator("#metric-search-definition")).toContainText(
+        unavailable,
+      );
+      await expect(page.locator("#metric-rows")).toHaveText(tableBefore, {
+        useInnerText: true,
+      });
+      await expect(page.locator(`[data-metric="${unavailable}"]`)).toHaveCount(0);
+      await page.locator("#evaluation-metrics").screenshot({
+        path: testInfo.outputPath(`metric-search-inactive-${view}.png`),
+      });
+    }
+    expect(requests).toHaveLength(initialRequests);
+    expect(
+      requests.filter((url) => new URL(url).pathname.endsWith("/catalog.json")),
+    ).toHaveLength(1);
+    await page.locator("#metric-search").fill("");
+    await selectMetricTable(page, "controlled_damage");
+
+    await page.locator("#enable-all-visual-filters-button").click();
+    await page.locator("#default-visual-filters-button").focus();
+    await page.keyboard.press("Enter");
+    const checkboxes = await page
+      .locator("[data-visual-filter-id]")
+      .evaluateAll((inputs) =>
+        inputs.map((input) => {
+          if (!(input instanceof HTMLInputElement))
+            throw new Error("Expected a native filter checkbox.");
+          return { checked: input.checked, defaultChecked: input.defaultChecked };
+        }),
+      );
+    expect(checkboxes.every((input) => input.checked === input.defaultChecked)).toBe(
+      true,
+    );
+    await expect(page.locator("#visual-filter-death-announcer")).toBeChecked();
+    await expect(page.locator("#replay-ranges-button")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    await page.locator("#metric-rows tbody").focus();
+    await page.mouse.move(0, 0);
+    await expect(page.locator("#visual-tooltip")).toBeHidden();
+    for (const width of [1440, 820, 640]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(
+        page.locator("#metric-rows thead").getByRole("columnheader"),
+      ).toHaveCount(3);
+      const geometry = await page.locator("#metric-rows table").evaluate((table) => {
+        const head = table.querySelector("thead");
+        const body = table.querySelector("tbody");
+        if (!head || !body) throw new Error("Expected the native table sections.");
+        return {
+          headerBottom: head.getBoundingClientRect().bottom,
+          bodyTop: body.getBoundingClientRect().top,
+          width: body.clientWidth,
+          contentWidth: body.scrollWidth,
+          headerColumns: [...head.querySelectorAll("th")].map(
+            (cell) => cell.getBoundingClientRect().left,
+          ),
+          valueColumns: [...body.querySelectorAll("tr[data-metric]")[0].children].map(
+            (cell) => cell.getBoundingClientRect().left,
+          ),
+        };
+      });
+      expect(geometry.headerBottom).toBeLessThanOrEqual(geometry.bodyTop);
+      expect(geometry.contentWidth).toBeLessThanOrEqual(geometry.width + 1);
+      geometry.headerColumns.forEach((left, index) => {
+        expect(Math.abs(left - geometry.valueColumns[index])).toBeLessThan(1);
+      });
+      await page.screenshot({
+        path: testInfo.outputPath(`viewer-controls-${width}.png`),
+        fullPage: true,
+      });
+      await page
+        .locator("#evaluation-metrics")
+        .screenshot({ path: testInfo.outputPath(`metric-panel-${width}.png`) });
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(() => {
+      document.documentElement.style.zoom = "2";
+    });
+    await page.locator("#metric-rows tbody").focus();
+    await page.keyboard.press("End");
+    await expect
+      .poll(() => page.locator("#metric-rows tbody").evaluate((body) => body.scrollTop))
+      .toBeGreaterThan(0);
+    await page
+      .locator("#evaluation-metrics")
+      .screenshot({ path: testInfo.outputPath("metric-panel-200-percent.png") });
+    await page.evaluate(() => {
+      document.documentElement.style.zoom = "";
+    });
+    await page.locator("#visual-filter-death-announcer").check();
+    await page.locator("#replay-playback-rate").selectOption("0.25");
+    for (const view of /** @type {const} */ (["researcher", "pov"])) {
+      await installReplayView(page, view);
+      await clickReplayCommand(page, "#replay-first-button");
+      await expect(page.locator(".combat-death-announcement")).toHaveCount(0);
+      await page.locator("#replay-play-pause-button").click();
+      const announcements = page.locator(".combat-death-announcement");
+      await expect(announcements.first()).toBeVisible();
+      await expect
+        .poll(() =>
+          announcements
+            .first()
+            .evaluate((card) =>
+              Number(
+                getComputedStyle(/** @type {Element} */ (card.parentElement)).opacity,
+              ),
+            ),
+        )
+        .toBeGreaterThan(0.5);
+      const presentation = await currentReplayPresentation(page);
+      await expect(page.locator(".combat-death-announcement__agent")).toHaveCount(
+        presentation.match_summary.deaths.length,
+      );
+      await expect(announcements).toHaveCount(
+        new Set(
+          presentation.match_summary.deaths.map(
+            (/** @type {{team_id: number, killing_team_id: number | null}} */ death) =>
+              death.killing_team_id ?? death.team_id,
+          ),
+        ).size,
+      );
+      await page.screenshot({
+        path: testInfo.outputPath(`death-announcer-${view}.png`),
+        fullPage: true,
+      });
+      await page.locator("#replay-play-pause-button").click();
+      // The established Replay Pause behavior settles the recorded snapshot.
+      await expect(page.locator("#replay-transport-status")).toContainText("SETTLED");
+      await expect(announcements.first()).toBeVisible();
+      expect((await currentReplayPresentation(page)).match_summary.deaths).toEqual(
+        presentation.match_summary.deaths,
+      );
+      await page.locator("#replay-play-pause-button").click();
+      await expect(
+        page.locator("#battlefield .combat-choreography[data-state=playing]"),
+      ).toHaveCount(1);
+      await expect(announcements.first()).toBeVisible();
+      await expectReplayChoreographySettled(page);
+      // Reaching the end also installs the final static transition summary.
+      await expect(page.locator("html")).toHaveAttribute(
+        "data-render-policy",
+        "replay_static",
+      );
+      await expect(announcements.first()).toBeVisible();
+      await clickReplayCommand(page, "#replay-first-button");
+      await expect(announcements).toHaveCount(0);
+    }
+    expectNoBrowserErrors(page);
+  } finally {
+    await stopDebugger(viewer.process);
+  }
+});
+
+test("all eight scenario identities and dense authoritative deaths render in both POVs", async ({
+  page,
+}, testInfo) => {
+  const acceptance = await exportReplayAcceptanceArtifacts();
+  const classes = ["", "Mage", "Warrior", "Hunter", "Rogue", "Priest"];
+  /** @type {Awaited<ReturnType<typeof startReplayViewer>> | null} */
+  let viewer = null;
+  try {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    for (const [index, replayPath] of acceptance.scenarios.entries()) {
+      const scenarioId = index + 1;
+      const source = JSON.parse(await readFile(replayPath, "utf8"));
+      const roster = source.header.context.roster.filter(
+        (/** @type {{configured_active: boolean}} */ row) => row.configured_active,
+      );
+      const expected = roster.map(
+        (
+          /** @type {{global_slot: number, class_id: number, configured_team_id: number}} */ row,
+        ) =>
+          `Agent ID ${row.global_slot} · ${classes[row.class_id]} · Team ${row.configured_team_id === 1 ? "A" : "B"}`,
+      );
+      const variant = [3, 5, 8].includes(scenarioId) ? "beta" : "alpha";
+      const initialPov = scenarioId <= 2;
+      viewer = await startReplayViewer({
+        replayPath,
+        view: initialPov ? "pov" : "researcher",
+        ranges: initialPov ? scenarioId === 1 : undefined,
+      });
+      await openReplay(page, viewer.url);
+      await expect(page.locator("#replay-ranges-button")).toHaveAttribute(
+        "aria-pressed",
+        scenarioId === 1 ? "true" : "false",
+      );
+      for (const view of /** @type {const} */ (["researcher", "pov"])) {
+        await installReplayView(page, view);
+        await expect(page.locator("#match-team-b")).toContainText(
+          `tdm-scenario-${scenarioId}-controller-${variant}`,
+        );
+        const identities = await page
+          .locator(".roster-identity")
+          .evaluateAll((rows) =>
+            rows.map(
+              (row) =>
+                `${row.querySelector(".roster-id")?.textContent} · ${row.querySelector(".roster-class")?.textContent}`,
+            ),
+          );
+        expect(identities.sort()).toEqual(expected.sort());
+        await expect(page.locator("#connection-status")).toHaveText("Online");
+        await page.screenshot({
+          path: testInfo.outputPath(`scenario-${scenarioId}-${view}.png`),
+          fullPage: true,
+        });
+      }
+      await page.goto("about:blank");
+      await stopDebugger(viewer.process);
+      viewer = null;
+    }
+
+    const source = JSON.parse(await readFile(acceptance.dense, "utf8"));
+    const deaths = source.transitions[0].events.filter(
+      (/** @type {{event_type: string}} */ event) => event.event_type === "agent_died",
+    );
+    expect(
+      deaths.map(
+        (/** @type {{recipient_global_slot: number}} */ death) =>
+          death.recipient_global_slot,
+      ),
+    ).toEqual(Array.from({ length: 10 }, (_, slot) => slot));
+    await installWaapiAutopause(page);
+    viewer = await startReplayViewer({ replayPath: acceptance.dense });
+    await openReplay(page, viewer.url);
+    await page.locator("#visual-filter-death-announcer").check();
+    for (const width of [1440, 820]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const view of /** @type {const} */ (["researcher", "pov"])) {
+        await installReplayView(page, view);
+        await clickReplayCommand(page, "#replay-first-button");
+        await expect(page.locator(".combat-death-announcement")).toHaveCount(0);
+        await page.locator("#replay-play-pause-button").click();
+        const cards = page.locator(".combat-death-announcement");
+        await expect(cards).toHaveCount(2);
+        await cards.first().evaluate(async (card) => {
+          const owner = card.parentElement;
+          const battlefield = card.closest("svg");
+          const animation = owner?.getAnimations()[0];
+          if (!animation?.effect || !battlefield)
+            throw new Error("The authoritative death animation is unavailable.");
+          const timing = animation.effect.getTiming();
+          const time = Number(timing.delay) + Number(timing.duration) / 2;
+          const animations = battlefield
+            .getAnimations({ subtree: true })
+            .filter(({ id }) => id.startsWith("mbg:"));
+          await document.fonts.ready;
+          for (const owned of animations) {
+            owned.pause();
+            owned.currentTime = time;
+          }
+          await Promise.all(animations.map(({ ready }) => ready));
+          await new Promise((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(resolve)),
+          );
+        });
+        const presentation = await currentReplayPresentation(page);
+        expect(presentation.match_summary.scores).toEqual([5, 5]);
+        expect(presentation.match_summary.deaths).toHaveLength(10);
+        for (const [team, start] of /** @type {const} */ ([
+          ["a", 5],
+          ["b", 0],
+        ])) {
+          await expect(
+            page.locator(
+              `.combat-death-announcement--team-${team} .combat-death-announcement__agent`,
+            ),
+          ).toHaveText(
+            Array.from(
+              { length: 5 },
+              (_, slot) =>
+                `Agent ID ${start + slot} · Mage · Team ${team === "a" ? "B" : "A"}`,
+            ),
+          );
+        }
+        await expect(
+          page.locator(".combat-death-announcement__contributor"),
+        ).toHaveCount(0);
+        const geometry = await cards.evaluateAll((elements) =>
+          elements.map((card) => {
+            const panel = card.querySelector("rect")?.getBoundingClientRect();
+            const field = card.closest("svg")?.getBoundingClientRect();
+            if (!panel || !field) throw new Error("Missing death card geometry.");
+            return {
+              left: panel.left,
+              right: panel.right,
+              contained:
+                panel.left >= field.left &&
+                panel.right <= field.right &&
+                panel.top >= field.top &&
+                panel.bottom <= field.bottom,
+              readable: Array.from(card.querySelectorAll("text")).every((text) => {
+                const box = text.getBoundingClientRect();
+                return (
+                  box.left >= panel.left &&
+                  box.right <= panel.right &&
+                  box.top >= panel.top &&
+                  box.bottom <= panel.bottom
+                );
+              }),
+              opacity: Number(
+                getComputedStyle(/** @type {Element} */ (card.parentElement)).opacity,
+              ),
+            };
+          }),
+        );
+        expect(
+          geometry.every(
+            (card) => card.contained && card.readable && card.opacity > 0.5,
+          ),
+        ).toBe(true);
+        expect(geometry[0].right).toBeLessThan(geometry[1].left);
+        for (const team of ["a", "b"]) {
+          const victims = page.locator(
+            `.combat-death-announcement--team-${team} .combat-death-announcement__victim`,
+          );
+          await expect(victims).toHaveCount(5);
+          for (let slot = 0; slot < 5; slot++) {
+            const victim = victims.nth(slot);
+            await expect(victim).toHaveAttribute("tabindex", "0");
+            await victim.locator("rect").hover();
+            await expect(page.locator("#visual-tooltip")).toBeVisible();
+            await expect(page.locator("#visual-tooltip")).toContainText(
+              "Kill Contributors",
+            );
+            await expect(page.locator("#visual-tooltip")).toContainText(
+              `Agent ID ${slot + (team === "a" ? 5 : 0)} · Mage · Team ${team === "a" ? "B" : "A"}`,
+            );
+            await expect(page.locator("#visual-tooltip")).toContainText(
+              `Agent ID ${slot + (team === "a" ? 0 : 5)} · Mage · Team ${team.toUpperCase()}`,
+            );
+            await expect(page.locator("#visual-tooltip")).not.toContainText(
+              `Agent ID ${((slot + 1) % 5) + (team === "a" ? 0 : 5)} · Mage · Team ${team.toUpperCase()}`,
+            );
+          }
+        }
+        await page.mouse.move(0, 0);
+        await cards
+          .first()
+          .locator(".combat-death-announcement__victim")
+          .first()
+          .focus();
+        await expect(page.locator("#visual-tooltip")).toBeVisible();
+        await expect(page.locator("#visual-tooltip")).toContainText(
+          "Agent ID 5 · Mage · Team B",
+        );
+        await expect(page.locator("#visual-tooltip")).toContainText(
+          "Agent ID 0 · Mage · Team A",
+        );
+        // Escape also clears the replay reference and pauses that user command.
+        // Transfer focus without issuing a command before testing Pause itself.
+        await page.locator("#replay-play-pause-button").focus();
+        await page.screenshot({
+          path: testInfo.outputPath(`dense-deaths-${width}-${view}.png`),
+          fullPage: true,
+        });
+        await expect(page.locator("#replay-play-pause-button")).toHaveAttribute(
+          "aria-pressed",
+          "true",
+        );
+        await page.locator("#replay-play-pause-button").click();
+        await expect(page.locator("html")).toHaveAttribute(
+          "data-render-policy",
+          "replay_static",
+        );
+        // Pausing keeps this transition's evidence, like the other static cues.
+        await expect(cards).toHaveCount(2);
+        expect((await currentReplayPresentation(page)).match_summary.deaths).toEqual(
+          presentation.match_summary.deaths,
+        );
+        expect(
+          await page.evaluate(
+            () =>
+              document.getAnimations().filter(({ id }) => id.startsWith("mbg:")).length,
+          ),
+        ).toBe(0);
+        const textOverlaps = await page.locator("#battlefield").evaluate((field) => {
+          const panels = [
+            ...field.querySelectorAll(".combat-death-announcement rect"),
+          ].map((panel) => panel.getBoundingClientRect());
+          const labels = [
+            ...field.querySelectorAll(".combat-net__recipient, .combat-net__label"),
+          ];
+          if (labels.length === 0)
+            throw new Error("The dense replay has no scrolling text.");
+          return labels
+            .filter((label) => {
+              const text = label.getBoundingClientRect();
+              return panels.some(
+                (panel) =>
+                  text.left < panel.right &&
+                  text.right > panel.left &&
+                  text.top < panel.bottom &&
+                  text.bottom > panel.top,
+              );
+            })
+            .map((label) => label.textContent);
+        });
+        expect(textOverlaps).toEqual([]);
+        await page.screenshot({
+          path: testInfo.outputPath(`dense-deaths-paused-${width}-${view}.png`),
+          fullPage: true,
+        });
+        await clickReplayCommand(page, "#replay-first-button");
+        await expect(cards).toHaveCount(0);
+      }
+    }
+    expectNoBrowserErrors(page);
+  } finally {
+    await page.goto("about:blank").catch(() => {});
+    await stopDebugger(viewer?.process ?? null);
+    await removeReplayArtifacts(acceptance.outputDirectory);
+  }
+});
+
 test("TDM scores and offline metric exports follow the cursor across POV changes", async ({
   page,
 }) => {
-  test.setTimeout(180_000);
   if (artifacts === null) throw new Error("Replay fixtures are unavailable.");
   const viewer = await startReplayViewer({ replayPath: artifacts.tdm });
+  /** @type {string[]} */
+  const catalogRequests = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/replay/metrics/catalog.json")
+      catalogRequests.push(request.url());
+  });
   /** @param {string} pattern @param {boolean} [malformed] */
   async function holdMetricResponse(pattern, malformed = false) {
     let releaseResponse = () => {};
@@ -2070,11 +3597,17 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
       recordHandled = () => resolve(null);
     });
     await page.route(pattern, async (route) => {
-      const response = await route.fetch();
       recordRequest();
-      await delayed;
-      await route.fulfill(malformed ? { json: { invalid: true } } : { response });
-      recordHandled();
+      try {
+        // This request may compile the first analysis; it is not an interaction
+        // governed by Playwright's shorter click/hover deadline.
+        const response = await route.fetch({ timeout: METRIC_PREPARATION_TIMEOUT_MS });
+        expect(response.status()).toBe(200);
+        await delayed;
+        await route.fulfill(malformed ? { json: { invalid: true } } : { response });
+      } finally {
+        recordHandled();
+      }
     });
     return {
       requested,
@@ -2087,7 +3620,7 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
   }
   try {
     await openReplay(page, viewer.url);
-    await expect(page.locator("#match-task")).toHaveText("Task mode: TDM");
+    await expect(page.locator("#match-task")).toContainText("Task mode: TDM");
     await expect(page.locator("#match-team-a")).toContainText(
       "policy-0 / policy-1 / policy-2",
     );
@@ -2119,11 +3652,21 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
     } finally {
       await initialMetrics.release();
     }
-    await expect(page.locator("#metric-status")).toContainText("At cursor · frame 0");
+    await expect(page.locator("#metric-status")).toContainText(
+      "Up to Current Tick · tick 0",
+    );
     await expect(page.locator("#metric-progress")).toBeHidden();
     await expect(page.locator("#metric-rows")).toHaveAttribute("aria-busy", "false");
-    expect(await page.locator("#metric-selection option").count()).toBeGreaterThan(1);
-    await expect(page.locator("#metric-rows")).toContainText("Pending");
+    expect(
+      await page
+        .locator("#metric-selection option")
+        .evaluateAll((options) =>
+          options.map((option) => [option.getAttribute("value"), option.textContent]),
+        ),
+    ).toEqual(EXPECTED_METRIC_TOPICS);
+    await expect(
+      page.locator("#metric-rows [aria-label^=Unavailable]"),
+    ).not.toHaveCount(0);
 
     for (const [scope, frameIndex] of /** @type {const} */ ([
       ["cursor", 0],
@@ -2131,7 +3674,7 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
     ])) {
       await page.locator("#metric-scope").selectOption(scope);
       await expect(page.locator("#metric-status")).toContainText(
-        `${scope === "cursor" ? "At cursor" : "Final episode"} · frame ${frameIndex}`,
+        `${scope === "cursor" ? "Up to Current Tick" : "Entire Episode"} · tick ${frameIndex}`,
       );
       await waitForSettledReplayArtifactActions(page);
       const heldCsv =
@@ -2167,7 +3710,7 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
             "aria-busy",
             "true",
           );
-          await expect(page.locator("#replay-original-metrics-button")).toHaveAttribute(
+          await expect(page.locator("#replay-episode-details-button")).toHaveAttribute(
             "aria-busy",
             "false",
           );
@@ -2185,14 +3728,72 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
       );
       if (heldCsv !== null) await page.locator("#evaluation-metrics > summary").click();
       expect(download.suggestedFilename()).toBe(
-        `tdm-metrics-${scope}-frame-${frameIndex}.csv`,
+        `tdm-metrics__episode-episode-001__schema-14__${scope}__frame-${frameIndex}.csv`,
       );
       const path = await download.path();
       if (path === null) throw new Error("Metric CSV has no local path.");
       const csv = await readFile(path, "utf8");
       const [header, ...rows] = csv.trim().split(/\r?\n/u);
-      expect(header).toMatch(/^episode_id,scope,frame_index,metric_id,/u);
-      expect(rows.length).toBeGreaterThan(0);
+      expect(header).toMatch(
+        /^episode_id,scope,frame_index,simulator_step_count,metric_schema_id,/u,
+      );
+      expect(rows).toHaveLength(1);
+      const names = header.split(",");
+      const cells = rows[0].split(",");
+      expect(names).toContain("agent_9_class_id");
+      // Replay exports retain their 49 replay/agent identity fields. The run
+      // writer's separate CSV uses 30; both expose the same 11,148 measurements.
+      const replayIdentity = [
+        "episode_id",
+        "scope",
+        "frame_index",
+        "simulator_step_count",
+        "metric_schema_id",
+        "metric_schema_version",
+        "source_replay_digest",
+        "analysis_source_digest",
+        "completion_state",
+        ...Array.from({ length: 10 }, (_, slot) =>
+          ["active", "class_id", "class", "policy_id"].map(
+            (field) => `agent_${slot}_${field}`,
+          ),
+        ).flat(),
+      ];
+      expect(names.slice(0, 49)).toEqual(replayIdentity);
+      expect(names.slice(49)).toHaveLength(11148);
+      expect(new Set(names).size).toBe(11197);
+      expect(cells[names.indexOf("metric_schema_version")]).toBe("14");
+      expect(names.some((name) => /^agent_\d_return$/u.test(name))).toBe(false);
+      const selectedTopic = await page.locator("#metric-selection").inputValue();
+      const selectedView = await page.locator("#metric-view").inputValue();
+      let checkedTables = 0;
+      for (const [topic] of EXPECTED_METRIC_TOPICS) {
+        for (const view of PAIRED_METRIC_TOPICS.has(topic)
+          ? ["totals", "recipients"]
+          : ["single"]) {
+          await selectMetricTable(page, topic, view);
+          const visible = await page
+            .locator("#metric-rows tbody tr[data-metric]")
+            .evaluateAll((elements) =>
+              elements.map((element) => ({
+                name: element.getAttribute("data-metric"),
+                value: element
+                  .querySelector(".metric-value")
+                  ?.getAttribute("data-value"),
+              })),
+            );
+          for (const metric of visible) {
+            const position = names.indexOf(metric.name ?? "");
+            expect(position).toBeGreaterThan(-1);
+            if (metric.value === "") expect(cells[position]).toBe("");
+            else expect(Number(cells[position])).toBe(Number(metric.value));
+          }
+          checkedTables += 1;
+        }
+      }
+      expect(checkedTables).toBe(43);
+      await selectMetricTable(page, selectedTopic, selectedView);
+
       expect(new Set(rows.map((row) => row.split(",").slice(1, 3).join(",")))).toEqual(
         new Set([`${scope},${frameIndex}`]),
       );
@@ -2203,15 +3804,23 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
       "Score: 0/1",
     ]);
     await expect(page.locator(".match-scoreboard__result")).toHaveCount(0);
-    await downloadCanonicalMetricReport(
+    await downloadEpisodeDetails(
       page,
       artifacts.tdm.replace(REPLAY_SUFFIX, METRIC_SUFFIX),
     );
+    await selectMetricTable(page, "kill_contributions", "recipients");
     await page.locator("#metric-scope").selectOption("cursor");
-    await expect(page.locator("#metric-status")).toContainText("At cursor · frame 0");
+    await expect(page.locator("#metric-status")).toContainText(
+      "Up to Current Tick · tick 0",
+    );
+    await expect(page.locator("#metric-selection")).toHaveValue("kill_contributions");
+    await expect(page.locator("#metric-view")).toHaveValue("recipients");
     await installReplayView(page, "pov");
-    await expect(page.locator("#match-task")).toHaveText("Task mode: TDM");
-    await expect(page.locator("#metric-status")).toContainText("At cursor · frame 0");
+    await expect(page.locator("#evaluation-metrics")).toBeVisible();
+    await expect(page.locator("#match-task")).toContainText("Task mode: TDM");
+    await expect(page.locator("#metric-status")).toContainText(
+      "Up to Current Tick · tick 0",
+    );
 
     const staleMetrics = await holdMetricResponse(
       "**/api/replay/metrics/1/cursor.json",
@@ -2234,10 +3843,12 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
       await expect(page.locator("#metric-rows")).toHaveAttribute("aria-busy", "false");
       await expect(page.locator(".match-scoreboard__result")).toHaveCount(0);
       await expect(page.locator("#metric-status")).not.toContainText(
-        "At cursor · frame 1",
+        "Up to Current Tick · tick 1",
       );
       await staleMetrics.release();
-      await expect(page.locator("#metric-status")).toContainText("At cursor · frame 0");
+      await expect(page.locator("#metric-status")).toContainText(
+        "Up to Current Tick · tick 0",
+      );
     } finally {
       await staleMetrics.release();
     }
@@ -2251,7 +3862,9 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
       await expect(page.locator("#metric-progress")).toBeVisible();
       await clickReplayCommand(page, "#replay-first-button");
       await staleFailure.release();
-      await expect(page.locator("#metric-status")).toContainText("At cursor · frame 0");
+      await expect(page.locator("#metric-status")).toContainText(
+        "Up to Current Tick · tick 0",
+      );
       await expect(page.locator("#metric-progress")).toBeHidden();
       await clickReplayCommand(page, "#replay-last-button");
       await expect(page.locator("#metric-status")).toContainText(
@@ -2267,6 +3880,9 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
     await installReplayView(page, "researcher");
     await expect(page.locator("#connection-status")).toHaveText("Online");
     await expect(page.locator(".match-scoreboard__result")).toHaveCount(0);
+    await expect(page.locator("#metric-selection")).toHaveValue("kill_contributions");
+    await expect(page.locator("#metric-view")).toHaveValue("recipients");
+    expect(catalogRequests).toHaveLength(1);
     expectNoBrowserErrors(page);
   } finally {
     await page.goto("about:blank");
@@ -2277,7 +3893,6 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
 test("nonzero replay view changes preserve the cursor and playing intent", async ({
   page,
 }) => {
-  test.setTimeout(180_000);
   if (artifacts === null) throw new Error("Replay fixtures are unavailable.");
   for (const replayPath of [artifacts.complete, artifacts.shared]) {
     const viewer = await startReplayViewer({ replayPath, frameIndex: 1 });
@@ -2861,6 +4476,11 @@ test("Actor POV keeps battlefield fog while exposing artifact-wide facts", async
   }
   expect(surfaces.technicalFacts).toEqual([
     {
+      id: "episode",
+      label: "Episode",
+      value: "browser-replay-complete",
+    },
+    {
       id: "frame",
       label: "Frame",
       value: String(povFrame.cursor.frame_index),
@@ -2875,6 +4495,11 @@ test("Actor POV keeps battlefield fog while exposing artifact-wide facts", async
       label: "Incoming Transition",
       value: povFrame.incoming_pov_transition_id,
     },
+    { id: "task_mode", label: "Task Mode", value: "Combat diagnostic" },
+    { id: "map", label: "Map", value: "layout" },
+    { id: "observation_mode", label: "Observation Mode", value: "NoSharedObs" },
+    { id: "episode_limit", label: "Episode Limit", value: "5 ticks" },
+    { id: "seeds", label: "Seeds", value: "Root 1 · Episode stream 2" },
   ]);
   expect(completeSurfaceBytes).not.toContain("technical_kind");
   expect(completeSurfaceBytes).not.toContain("replay_no_shared_obs_technical_frame");
@@ -2960,12 +4585,9 @@ test(CP9_REPLAY_ARTIFACT_TEST_TITLE, async ({ page }) => {
     );
     const completeStableUrl = page.url();
     const oracleArtifactSurface = await replayArtifactFactSurface(page);
-    const oracleMetricDownload = await downloadCanonicalMetricReport(
-      page,
-      sourceMetricPath,
-    );
+    const oracleMetricDownload = await downloadEpisodeDetails(page, sourceMetricPath);
     expect(oracleMetricDownload.requests).toEqual([
-      { method: "GET", path: METRIC_REPORT_ROUTE },
+      { method: "GET", path: EPISODE_DETAILS_ROUTE },
     ]);
 
     await openReplay(page, missingViewer.url);
@@ -2993,10 +4615,7 @@ test(CP9_REPLAY_ARTIFACT_TEST_TITLE, async ({ page }) => {
       expect(artifact.filename).not.toMatch(/[0-9a-f]{8}__frame-/u);
     }
     const noSharedArtifactSurface = await replayArtifactFactSurface(page);
-    const noSharedMetricDownload = await downloadCanonicalMetricReport(
-      page,
-      sourceMetricPath,
-    );
+    const noSharedMetricDownload = await downloadEpisodeDetails(page, sourceMetricPath);
     expect(noSharedArtifactSurface).toEqual(oracleArtifactSurface);
     expect(noSharedMetricDownload).toEqual(oracleMetricDownload);
 
@@ -3005,7 +4624,7 @@ test(CP9_REPLAY_ARTIFACT_TEST_TITLE, async ({ page }) => {
     await installReplayView(page, "researcher");
     await installFirstFrame(page);
     const sharedOracleArtifactSurface = await replayArtifactFactSurface(page);
-    const sharedOracleMetricDownload = await downloadCanonicalMetricReport(
+    const sharedOracleMetricDownload = await downloadEpisodeDetails(
       page,
       sharedSourceMetricPath,
     );
@@ -3027,7 +4646,7 @@ test(CP9_REPLAY_ARTIFACT_TEST_TITLE, async ({ page }) => {
       expect(artifact.filename).not.toMatch(/[0-9a-f]{8}__frame-/u);
     }
     const sharedArtifactSurface = await replayArtifactFactSurface(page);
-    const sharedMetricDownload = await downloadCanonicalMetricReport(
+    const sharedMetricDownload = await downloadEpisodeDetails(
       page,
       sharedSourceMetricPath,
     );

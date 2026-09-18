@@ -1,10 +1,10 @@
-"""Live packaging seams for the authorized presentation resource.
+"""Package committed live endpoints for the authorized browser presentation API.
 
-The Combat Debugger owns the full researcher Oracle and selected-recipient
-NoSharedObs or SharedObs Agent POVs. Agent battlefields remain authorized while
-a separate geometry-free researcher branch owns global controls and panels.
-This module packages only already-committed live epochs. It does not step the
-simulator, retain history, or read replay artifacts.
+The live service calls the Oracle, NoSharedObs, or SharedObs presentation builder
+for its selected view. Agent battlefields contain only authorized facts; separate
+researcher controls may carry nonspatial match data. Builders return immutable
+presentation models. They do not step the simulator, save history, read replay
+files, or perform HTTP I/O.
 """
 
 from __future__ import annotations
@@ -13,13 +13,20 @@ from dataclasses import replace
 
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContext,
+    EvaluationFrame,
     EvaluationFrameV1,
+    EvaluationFrameV2,
     StaticMechanicsCatalogV1,
+    evaluation_context_type,
 )
 from marl_battlegrounds.evaluation.pov import (
+    ActorPovAdjacentTransitionSlice,
     ActorPovAdjacentTransitionSliceV1,
+    ActorPovAdjacentTransitionSliceV2,
+    ActorPovCurrentSlice,
     ActorPovCurrentSliceV1,
+    ActorPovCurrentSliceV2,
 )
 from marl_battlegrounds.rendering.authorized_incoming import (
     build_live_no_shared_obs_incoming_summary_v1,
@@ -47,7 +54,7 @@ from marl_battlegrounds.rendering.authorized_presentation import (
     oracle_presentation_key_v1,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
-    SharedObsSourceMaterialProjectionV1,
+    SharedObsSourceMaterialProjection,
     build_shared_obs_authority_source_material_projection_v1,
     build_visual_event_batch_v2,
 )
@@ -59,9 +66,8 @@ from marl_battlegrounds.rendering.scene import (
     ResearcherAnalyzerProjectionV2,
     VisualEventBatchV2,
 )
-from scripts.dev.visual_debugger.match_summary import build_match_summary_v1
-from scripts.dev.visual_debugger.model import PendingAction
-from scripts.dev.visual_debugger.presentation_protocol import (
+from marl_battlegrounds.viewer.match_summary import build_match_summary_v1
+from marl_battlegrounds.viewer.presentation_protocol import (
     AgentPovActionAxisV1,
     LatestTransitionActionRowV1,
     LiveEditableDraftInspectionV1,
@@ -95,6 +101,7 @@ from scripts.dev.visual_debugger.presentation_protocol import (
     build_shared_obs_authorized_current_endpoint_v1,
     build_shared_obs_latest_transition_v1,
 )
+from scripts.dev.visual_debugger.model import PendingAction
 from scripts.dev.visual_debugger.protocol import (
     ActorPovHudFrameV1,
     ActorPovLiveDebuggerFrameV2,
@@ -113,6 +120,9 @@ def _require_live_header(
     *,
     researcher: bool,
 ) -> None:
+    """Require the exact live root, schema, canonical frame ID, and nonnegative
+    epoch.
+    """
     expected_type = (
         ResearcherLiveDebuggerFrameV2 if researcher else ActorPovLiveDebuggerFrameV2
     )
@@ -153,6 +163,7 @@ def _require_live_header(
 
 
 def _require_oracle_used_containers(raw_frame: ResearcherLiveDebuggerFrameV2) -> None:
+    """Check the exact Oracle projection and pending-action model types before use."""
     if type(raw_frame.projection) is not ResearcherAnalyzerProjectionV2:
         raise TypeError("raw Oracle projection must use its exact V2 root.")
     if type(raw_frame.hud) is not ResearcherHudFrameV2:
@@ -167,6 +178,9 @@ def _require_oracle_used_containers(raw_frame: ResearcherLiveDebuggerFrameV2) ->
 def _require_no_shared_used_containers(
     raw_frame: ActorPovLiveDebuggerFrameV2,
 ) -> None:
+    """Check the exact NoSharedObs projection and pending-action model types before
+    use.
+    """
     if type(raw_frame.projection) is not ActorPovAnalyzerProjectionV1:
         raise TypeError("raw POV projection must use its exact V1 root.")
     if type(raw_frame.hud) is not ActorPovHudFrameV1:
@@ -181,6 +195,9 @@ def _require_no_shared_used_containers(
 def _require_shared_live_header(
     raw_frame: SharedObsAgentPovLiveDebuggerFrameV2,
 ) -> None:
+    """Require the exact SharedObs live root, canonical identity, and nonnegative
+    epoch.
+    """
     if type(raw_frame) is not SharedObsAgentPovLiveDebuggerFrameV2:
         raise TypeError(
             "raw_frame must be the exact SharedObsAgentPovLiveDebuggerFrameV2 root."
@@ -210,13 +227,20 @@ def _require_shared_live_header(
 
 
 def _canonical_live_view(
-    context: EvaluationEpisodeContextV1,
-    current_frame: EvaluationFrameV1,
+    context: EvaluationEpisodeContext,
+    current_frame: EvaluationFrame,
     incoming_transition_view: EvaluationTransitionViewV1 | None,
 ) -> EvaluationTransitionViewV1 | None:
-    if type(context) is not EvaluationEpisodeContextV1:
-        raise TypeError("context must be the exact EvaluationEpisodeContextV1 root.")
-    if type(current_frame) is not EvaluationFrameV1:
+    """Revalidate the incoming transition and require it to enter the current endpoint.
+
+    Frame zero has no incoming transition. Every later frame must have one whose
+    context and successor match the selected live frame.
+    """
+    evaluation_context_type(context)
+    if (
+        type(current_frame) is not EvaluationFrameV1
+        and type(current_frame) is not EvaluationFrameV2
+    ):
         raise TypeError("current_frame must be the exact EvaluationFrameV1 root.")
     if current_frame.frame_index == 0:
         if incoming_transition_view is not None:
@@ -236,14 +260,19 @@ def _canonical_live_view(
 
 
 def _shared_obs_source_materials(
-    context: EvaluationEpisodeContextV1,
-    frame: EvaluationFrameV1,
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrame,
     *,
     recipient_global_slot: int,
 ) -> tuple[
-    SharedObsSourceMaterialProjectionV1,
-    tuple[SharedObsSourceMaterialProjectionV1, ...],
+    SharedObsSourceMaterialProjection,
+    tuple[SharedObsSourceMaterialProjection, ...],
 ]:
+    """Build active-actor source projections and identify the selected recipient.
+
+    These compact sources feed the shared observation authority; they do not grant
+    a recipient permission to read another actor's private data directly.
+    """
     sources = tuple(
         build_shared_obs_authority_source_material_projection_v1(
             context,
@@ -285,7 +314,7 @@ def _draft_lane_v1(
 
 
 def _pending_joint_action_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     raw_frame: ResearcherLiveDebuggerFrameV2,
 ) -> LivePendingJointActionV1 | None:
     """Project the exact next joint submission without slots or geometry."""
@@ -332,11 +361,17 @@ def _pending_joint_action_v1(
 
 
 def _oracle_latest_transition_v1(
-    context: EvaluationEpisodeContextV1,
+    context: EvaluationEpisodeContext,
     incoming_view: EvaluationTransitionViewV1 | None,
     *,
     authority_session_id: str,
 ) -> OracleLatestTransitionV1 | None:
+    """Package recorded submitted and accepted joint actions for the incoming
+    transition.
+
+    Return None at reset. Actor rows use fixed roster identity and catalog target
+    mappings; no action acceptance is recomputed here.
+    """
     if incoming_view is None:
         return None
     transition = incoming_view.transition
@@ -393,10 +428,15 @@ def _oracle_latest_transition_v1(
 
 
 def _no_shared_latest_transition_v1(
-    carrier: ActorPovAdjacentTransitionSliceV1 | None,
+    carrier: ActorPovAdjacentTransitionSlice | None,
     *,
     endpoint_action_axis: AgentPovActionAxisV1,
 ) -> NoSharedObsLatestTransitionV1 | None:
+    """Describe the selected actor's submitted and accepted incoming action only.
+
+    The authorized carrier supplies the transition. Target references use the
+    endpoint action axis, and reset endpoints return None.
+    """
     if carrier is None:
         return None
     action_axis = endpoint_action_axis
@@ -437,12 +477,45 @@ def _no_shared_latest_transition_v1(
 
 
 def build_live_oracle_authorized_presentation_v1(
-    context: EvaluationEpisodeContextV1,
-    current_frame: EvaluationFrameV1,
+    context: EvaluationEpisodeContext,
+    current_frame: EvaluationFrame,
     incoming_transition_view: EvaluationTransitionViewV1 | None,
     raw_frame: ResearcherLiveDebuggerFrameV2,
 ) -> LiveOracleAuthorizedPresentationFrameV1:
-    """Package one committed live Oracle ``s_n`` and its incoming/draft siblings."""
+    """Build a global live display with incoming history and the current action
+    draft.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact supported episode context declaring roster, rules, and information mode.
+    current_frame : EvaluationFrame
+        Exact current captured frame, matching the context and raw response identity.
+    incoming_transition_view : EvaluationTransitionViewV1 | None
+        Checked adjacent start/transition/successor records, or None at frame zero.
+    raw_frame : ResearcherLiveDebuggerFrameV2
+        Exact mode-specific service response for the committed source revision.
+
+    Returns
+    -------
+    LiveOracleAuthorizedPresentationFrameV1
+        Checked immutable presentation for the supplied source frame.
+
+    Raises
+    ------
+    TypeError
+        A required source or nested model has an unsupported exact type.
+    ValueError
+        Source identity, epoch, action meaning, or display authorization is
+        inconsistent.
+
+    Notes
+    -----
+    Validate source identity and rebuild incoming visual facts before packaging
+    them. Scripted playback exposes no editable pending joint action.
+    This performs host projection and model validation, with no simulator step
+    or file write.
+    """
     _require_live_header(
         raw_frame,
         researcher=True,
@@ -585,7 +658,33 @@ def build_live_oracle_authorized_presentation_v1(
 def build_live_researcher_space_v1(
     oracle: LiveOracleAuthorizedPresentationFrameV1,
 ) -> LiveResearcherSpaceV1:
-    """Project one validated Oracle epoch into non-battlefield researcher UI."""
+    """Extract global researcher panels from a validated live Oracle display.
+
+    Parameters
+    ----------
+    oracle : LiveOracleAuthorizedPresentationFrameV1
+        Exact validated global live presentation from the same service revision.
+
+    Returns
+    -------
+    LiveResearcherSpaceV1
+        Checked immutable presentation for the supplied source frame.
+
+    Raises
+    ------
+    TypeError
+        A required source or nested model has an unsupported exact type.
+    ValueError
+        Source identity, epoch, action meaning, or display authorization is
+        inconsistent.
+
+    Notes
+    -----
+    Target rows keep action meaning while removing battlefield anchors. This
+    prevents the panels from becoming a second global scene in an actor view.
+    This performs host projection and model validation, with no simulator step
+    or file write.
+    """
     if type(oracle) is not LiveOracleAuthorizedPresentationFrameV1:
         raise TypeError("oracle must be an exact live Oracle presentation.")
     endpoint = oracle.current_endpoint
@@ -689,19 +788,64 @@ def build_live_researcher_space_v1(
 
 
 def build_live_no_shared_obs_authorized_presentation_v1(
-    current_slice: ActorPovCurrentSliceV1,
-    incoming_carrier: ActorPovAdjacentTransitionSliceV1 | None,
+    current_slice: ActorPovCurrentSlice,
+    incoming_carrier: ActorPovAdjacentTransitionSlice | None,
     raw_frame: ActorPovLiveDebuggerFrameV2,
     *,
-    global_context: EvaluationEpisodeContextV1,
-    current_global_frame: EvaluationFrameV1,
-    previous_global_frame: EvaluationFrameV1 | None,
+    global_context: EvaluationEpisodeContext,
+    current_global_frame: EvaluationFrame,
+    previous_global_frame: EvaluationFrame | None,
     public_catalog: StaticMechanicsCatalogV1,
     incoming_visual_events: VisualEventBatchV2 | None,
     researcher_space: LiveResearcherSpaceV1,
 ) -> LiveNoSharedObsAuthorizedPresentationFrameV1:
-    """Package one committed live NoSharedObs battlefield and researcher UI."""
-    from scripts.dev.visual_debugger.local_oracle_corpse_overlay import (
+    """Build a live own-observation display and separately scoped researcher panels.
+
+    Parameters
+    ----------
+    current_slice : ActorPovCurrentSlice
+        Exact current actor slice with its own observation, masks, and recorded axis.
+    incoming_carrier : ActorPovAdjacentTransitionSlice | None
+        Exact adjacent actor transition slice entering current_slice, or None at frame
+        zero.
+    raw_frame : ActorPovLiveDebuggerFrameV2
+        Exact mode-specific service response for the committed source revision.
+    global_context : EvaluationEpisodeContext
+        Trusted global episode context used only by the authorized host projection.
+    current_global_frame : EvaluationFrame
+        Trusted global frame at the selected cursor, used to validate local display
+        facts.
+    previous_global_frame : EvaluationFrame | None
+        Trusted immediately preceding frame, or None at frame zero.
+    public_catalog : StaticMechanicsCatalogV1
+        Exact recorded public class-mechanics catalog for these source frames.
+    incoming_visual_events : VisualEventBatchV2 | None
+        Visual events for the immediately preceding transition, or None at frame zero.
+    researcher_space : LiveResearcherSpaceV1
+        Separately authorized global panels for this same frame, without a global
+        battlefield scene.
+
+    Returns
+    -------
+    LiveNoSharedObsAuthorizedPresentationFrameV1
+        Checked immutable presentation for the supplied source frame.
+
+    Raises
+    ------
+    TypeError
+        A required source or nested model has an unsupported exact type.
+    ValueError
+        Source identity, epoch, action meaning, or display authorization is
+        inconsistent.
+
+    Notes
+    -----
+    Recheck the actor slice and incoming carrier. Trusted global state is used
+    only for authorized host display work, including paint-only corpse facts.
+    This performs host projection and model validation, with no simulator step
+    or file write.
+    """
+    from marl_battlegrounds.viewer.local_oracle_corpse_overlay import (
         build_local_oracle_corpse_overlay_v1,
         compose_local_oracle_corpse_scene_v1,
         validate_local_oracle_corpse_overlay_against_source_v1,
@@ -712,11 +856,14 @@ def build_live_no_shared_obs_authorized_presentation_v1(
         researcher=False,
     )
     _require_no_shared_used_containers(raw_frame)
-    if type(current_slice) is not ActorPovCurrentSliceV1:
+    if (
+        type(current_slice) is not ActorPovCurrentSliceV1
+        and type(current_slice) is not ActorPovCurrentSliceV2
+    ):
         raise TypeError("current_slice must be the exact ActorPovCurrentSliceV1 root.")
     if type(public_catalog) is not StaticMechanicsCatalogV1:
         raise TypeError("public_catalog must be the exact V1 catalog root.")
-    current_slice = ActorPovCurrentSliceV1.model_validate(
+    current_slice = type(current_slice).model_validate(
         current_slice.model_dump(mode="python")
     )
     expected_projection = build_actor_pov_analyzer_projection_v1(current_slice)
@@ -737,9 +884,12 @@ def build_live_no_shared_obs_authorized_presentation_v1(
             raise ValueError("live NoSharedObs frame zero cannot carry a carrier.")
         carrier = None
     else:
-        if type(incoming_carrier) is not ActorPovAdjacentTransitionSliceV1:
+        if (
+            type(incoming_carrier) is not ActorPovAdjacentTransitionSliceV1
+            and type(incoming_carrier) is not ActorPovAdjacentTransitionSliceV2
+        ):
             raise TypeError("nonzero live NoSharedObs frames require an exact carrier.")
-        carrier = ActorPovAdjacentTransitionSliceV1.model_validate(
+        carrier = type(incoming_carrier).model_validate(
             incoming_carrier.model_dump(mode="python")
         )
         if (
@@ -805,7 +955,10 @@ def build_live_no_shared_obs_authorized_presentation_v1(
             authority_session_id=raw_frame.session_id,
             frame_index=carrier.start_frame.frame_index,
         )
-        if type(previous_global_frame) is not EvaluationFrameV1:
+        if (
+            type(previous_global_frame) is not EvaluationFrameV1
+            and type(previous_global_frame) is not EvaluationFrameV2
+        ):
             raise TypeError(
                 "non-initial live NoSharedObs frames require the exact prior "
                 "global frame."
@@ -960,8 +1113,8 @@ def build_live_no_shared_obs_authorized_presentation_v1(
 
 
 def build_live_shared_obs_authorized_presentation_v1(
-    context: EvaluationEpisodeContextV1,
-    current_frame: EvaluationFrameV1,
+    context: EvaluationEpisodeContext,
+    current_frame: EvaluationFrame,
     incoming_transition_view: EvaluationTransitionViewV1 | None,
     raw_frame: SharedObsAgentPovLiveDebuggerFrameV2,
     *,
@@ -969,8 +1122,48 @@ def build_live_shared_obs_authorized_presentation_v1(
     pending_action: PendingAction,
     researcher_space: LiveResearcherSpaceV1,
 ) -> LiveSharedObsAuthorizedPresentationFrameV1:
-    """Package one committed live SharedObs visual union and researcher UI."""
-    from scripts.dev.visual_debugger.local_oracle_corpse_overlay import (
+    """Build a live SharedObs visual union and the recipient's current draft.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact supported episode context declaring roster, rules, and information mode.
+    current_frame : EvaluationFrame
+        Exact current captured frame, matching the context and raw response identity.
+    incoming_transition_view : EvaluationTransitionViewV1 | None
+        Checked adjacent start/transition/successor records, or None at frame zero.
+    raw_frame : SharedObsAgentPovLiveDebuggerFrameV2
+        Exact mode-specific service response for the committed source revision.
+    authorized_recipient_global_slot : int
+        Configured-active recipient slot supplied by the trusted service, from 0 through
+        9.
+    pending_action : PendingAction
+        Exact recipient draft action, used only for current live inspection.
+    researcher_space : LiveResearcherSpaceV1
+        Separately authorized global panels for this same frame, without a global
+        battlefield scene.
+
+    Returns
+    -------
+    LiveSharedObsAuthorizedPresentationFrameV1
+        Checked immutable presentation for the supplied source frame.
+
+    Raises
+    ------
+    TypeError
+        A required source or nested model has an unsupported exact type.
+    ValueError
+        Source identity, epoch, action meaning, or display authorization is
+        inconsistent.
+
+    Notes
+    -----
+    Derive current and preceding sensor source material from the trusted live
+    frames. Display authorization does not replace the policy information contract.
+    This performs host projection and model validation, with no simulator step
+    or file write.
+    """
+    from marl_battlegrounds.viewer.local_oracle_corpse_overlay import (
         build_local_oracle_corpse_overlay_v1,
         compose_local_oracle_corpse_scene_v1,
         validate_local_oracle_corpse_overlay_against_source_v1,

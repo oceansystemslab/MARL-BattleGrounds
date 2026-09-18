@@ -1,4 +1,7 @@
-"""Focused config/state ownership and retained spawn-lifecycle proofs."""
+"""Check which values belong to configuration and which belong to live state.
+
+The tests also check that spawn behavior keeps using the episode's configuration.
+"""
 # pyright: reportPrivateUsage=false
 
 from typing import cast
@@ -20,11 +23,11 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_DELAY_STEPS,
     AGENT_FEATURE_CAPABILITY_OUT_OF_COMBAT_HEALTH_REGEN_FRACTION_PER_STEP,
     AGENT_FEATURE_CLASS_ID,
+    AGENT_FEATURE_IS_ENEMY,
     AGENT_FEATURE_MAX_HEALTH,
     AGENT_FEATURE_OBSERVATION_RADIUS,
     AGENT_FEATURE_RADIUS,
     AGENT_FEATURE_STEPS_UNTIL_OUT_OF_COMBAT,
-    AGENT_FEATURE_TEAM_ID,
     AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS,
     ENVIRONMENT_DIMENSIONS,
     MAGE_CLASS_ID,
@@ -140,7 +143,6 @@ def _zero_action() -> Action:
 
 
 def _current_action_mask(config: EnvConfig, state: EnvState) -> ActionMask:
-    """Return the action mask paired with an explicitly built test state."""
     _, action_mask = _build_observation_and_action_mask(state, config)
     return action_mask
 
@@ -201,7 +203,7 @@ def test_reset_initializes_dynamic_state_from_resolved_profile() -> None:
 
     static_columns = (
         (AGENT_FEATURE_RADIUS, profile.agent_radii),
-        (AGENT_FEATURE_TEAM_ID, profile.team_ids.astype(jnp.float32)),
+        (AGENT_FEATURE_IS_ENEMY, jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.float32)),
         (AGENT_FEATURE_ACTIVE, profile.active_mask.astype(jnp.float32)),
         (AGENT_FEATURE_CLASS_ID, profile.class_ids.astype(jnp.float32)),
         (AGENT_FEATURE_BASE_MOVEMENT_SPEED, profile.base_movement_speeds),
@@ -232,7 +234,6 @@ def test_reset_initializes_dynamic_state_from_resolved_profile() -> None:
 
 
 def test_spawn_lifecycle_is_team_relative_and_available_to_dead_observers() -> None:
-    """Expose team-relative counters and rules to living and dead observers."""
     configured_duration = 4
     configured_speed = 1.75
     config = _config(
@@ -405,7 +406,6 @@ def test_spawn_lifecycle_is_team_relative_and_available_to_dead_observers() -> N
 
 
 def test_disabled_spawn_shield_lifecycle_keeps_public_speed_and_zero_timing() -> None:
-    """Represent duration-zero ablation without hiding its configured speed."""
     configured_speed = 1.25
     config = _config(
         (1, 1),

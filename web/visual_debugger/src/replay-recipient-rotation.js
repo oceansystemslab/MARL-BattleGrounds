@@ -1,3 +1,9 @@
+/**
+ * @file Recognize a replay view that changes only its authorized agent recipient.
+ * The helpers compare already joined transport/presentation identities. Both
+ * recipient identifiers must change while artifact, cursor and display
+ * conditions remain equal. They do not load a replay or grant access to one.
+ */
 import { isJoinedTransportAndAuthorizedPresentationV1 } from "./authorized-presentation-normalizer.js";
 
 /**
@@ -8,15 +14,25 @@ import { isJoinedTransportAndAuthorizedPresentationV1 } from "./authorized-prese
  * }>} ReplayAgentRecipientRotationIdentity
  */
 
-/** @param {unknown} value @returns {value is Record<string, any>} */
+/**
+ * Return true for a non-null, non-array object. value is otherwise unchecked;
+ * this helper alone does not establish a valid replay identity.
+ *
+ * @param {unknown} value @returns {value is Record<string, any>}
+ */
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
- * Extract the immutable replay identity that may survive one recipient
- * rotation. The input must already be an unforgeable transport/presentation
- * pair, so this projection never accepts a raw wire root on its own.
+ * Extract the continuity key and recipient IDs from a joined replay Agent view.
+ *
+ * value must be a registered transport/presentation pair for a SharedObs or
+ * NoSharedObs agent-POV replay. Return null for another kind or a missing/wrongly
+ * typed required field. Success returns a frozen record: scope serializes the
+ * artifact, source, cursor and display conditions in a fixed order; the two
+ * recipient strings are separate. Inputs are unchanged and nothing is fetched.
+ * Nested scientific validation belongs to the normalizer that made the join.
  *
  * @param {unknown} value
  * @returns {ReplayAgentRecipientRotationIdentity | null}
@@ -108,8 +124,13 @@ export function replayAgentRecipientRotationIdentity(value) {
 }
 
 /**
- * Compare two validated replay installation identities. Every continuity field
- * must remain byte-identical while both recipient identities rotate.
+ * Compare two extracted identities for a recipient-only change.
+ *
+ * previous and next may be any inputs. Return true only when their scope
+ * strings match and both recipientPublicAgentId and recipientPresentationKey
+ * are strings that differ. This checks the supplied identity records, not
+ * their provenance; use isReplayAgentRecipientRotation for joined frames.
+ * No values are changed.
  *
  * @param {unknown} previous
  * @param {unknown} next
@@ -131,7 +152,12 @@ export function isReplayAgentRecipientIdentityRotation(previous, next) {
 }
 
 /**
- * Recognize only a same-artifact, same-cursor Replay Agent recipient rotation.
+ * Return whether two joined replay frames differ only by agent recipient.
+ *
+ * previous and next are each checked by replayAgentRecipientRotationIdentity.
+ * An invalid/non-replay input returns false. Both recipient IDs must change
+ * while every extracted continuity field remains equal. This pure check does
+ * not install the new view or change playback.
  *
  * @param {unknown} previous
  * @param {unknown} next

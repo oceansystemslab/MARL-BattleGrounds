@@ -1,4 +1,10 @@
-"""Safe fixed-root persistence for private DevClient authoring assets."""
+"""Save private DevClient map and scenario drafts under one fixed root.
+
+Use ``DevAssetStore`` from the host authoring service. Saves create immutable
+numbered JSON revisions. Mutations share a process lock and reject links or path
+escapes. Revision fences remember deleted identities so stale clients cannot
+reuse an old revision. This module has no command-line entry point.
+"""
 
 from __future__ import annotations
 
@@ -50,6 +56,9 @@ class DevAssetIntegrityError(DevAssetStoreError):
         *,
         problems: tuple[DevAuthoringProblemV1, ...] = (),
     ) -> None:
+        """Keep the user-facing failure message and any field-specific authoring
+        problems.
+        """
         self.problems = problems
         super().__init__(message)
 
@@ -60,12 +69,17 @@ class DevAssetAlreadyExistsError(DevAssetStoreError):
 
 @dataclass(frozen=True, slots=True)
 class DevDraftReferenceV1:
+    """Identify one saved map or scenario by asset kind, safe ID, and positive
+    revision.
+    """
+
     asset_kind: DevAssetKind
     asset_id: str
     revision: int
 
 
 def _validate_asset_id(value: str) -> str:
+    """Require a nonempty lowercase snake_case ID of at most 64 characters."""
     if (
         type(value) is not str
         or len(value) > 64
@@ -76,6 +90,7 @@ def _validate_asset_id(value: str) -> str:
 
 
 def _stored_revision(path: Path) -> int | None:
+    """Read a positive revision from a regular rN.json filename, or return None."""
     match = re.fullmatch(r"r([1-9][0-9]*)\.json", path.name)
     if not path.is_file() or match is None:
         return None
@@ -88,6 +103,9 @@ def _stored_revision(path: Path) -> int | None:
 
 
 def _serialized(model: BaseModel) -> bytes:
+    """Encode the complete model as indented UTF-8 JSON with aliases and a final
+    newline.
+    """
     return (
         model.model_dump_json(
             by_alias=True,
@@ -176,7 +194,22 @@ def _atomic_no_clobber(root: Path, path: Path, payload: bytes) -> None:
 
 
 class DevAssetStore:
-    """Own revisioned ignored DevClient map and scenario drafts."""
+    """Read and write revisioned local map and scenario drafts.
+
+    Parameters
+    ----------
+    repository_root : Path
+        Existing repository directory, resolved when the store is created.
+    artifact_root : Path or None, optional
+        Storage root. None uses ``artifacts/dev_client`` inside the repository.
+
+    Notes
+    -----
+    Construction resolves paths but does not create directories. Mutations create
+    needed directories and use a shared lock. Public methods raise
+    ``DevAssetStoreError`` subclasses for expected storage conflicts or invalid data.
+    Operating-system errors can also propagate.
+    """
 
     def __init__(
         self,
@@ -184,6 +217,9 @@ class DevAssetStore:
         *,
         artifact_root: Path | None = None,
     ) -> None:
+        """Resolve the repository and chosen artifact root without writing draft
+        files.
+        """
         root = repository_root.resolve(strict=True)
         if not root.is_dir():
             raise ValueError("repository_root must be an existing directory")
@@ -196,6 +232,7 @@ class DevAssetStore:
 
     @property
     def artifact_root(self) -> Path:
+        """Return the fixed storage root without creating it."""
         return self._artifact_root
 
     @contextmanager
@@ -228,6 +265,9 @@ class DevAssetStore:
         kind: DevAssetKind,
         asset_id: str,
     ) -> Path:
+        """Resolve the protected directory that remembers an asset's saved revision
+        range.
+        """
         safe_id = _validate_asset_id(asset_id)
         collection = "maps" if kind == "map" else "scenarios"
         return _guard_store_path(
@@ -240,6 +280,7 @@ class DevAssetStore:
         kind: DevAssetKind,
         asset_id: str,
     ) -> int | None:
+        """Read the greatest saved revision marker, rejecting unexpected entries."""
         directory = self._revision_fence_directory(kind, asset_id)
         if not directory.exists():
             return None
@@ -270,6 +311,7 @@ class DevAssetStore:
         asset_id: str,
         revision: int,
     ) -> None:
+        """Record a new greatest revision without replacing an existing marker."""
         latest = self._latest_revision_fence(kind, asset_id)
         if latest is not None and latest >= revision:
             return
@@ -277,6 +319,7 @@ class DevAssetStore:
         _atomic_no_clobber(self._artifact_root, path, b"")
 
     def _draft_directory(self, kind: DevAssetKind, asset_id: str) -> Path:
+        """Resolve a validated asset ID inside its fixed map or scenario collection."""
         safe_id = _validate_asset_id(asset_id)
         collection = "maps" if kind == "map" else "scenarios"
         return _guard_store_path(
@@ -290,12 +333,14 @@ class DevAssetStore:
         asset_id: str,
         revision: int,
     ) -> Path:
+        """Build the path for one positive saved revision within the supported range."""
         if type(revision) is not int or not 1 <= revision <= MAX_DEV_ASSET_SEQUENCE:
             raise ValueError("saved draft revision must be a positive 32-bit integer")
         return self._draft_directory(kind, asset_id) / f"r{revision}.json"
 
     @staticmethod
     def _latest_revision(root: Path, directory: Path) -> int | None:
+        """Find the greatest valid saved revision while rejecting unsafe paths."""
         _guard_store_path(root, directory)
         if not directory.is_dir():
             return None
@@ -313,7 +358,35 @@ class DevAssetStore:
         *,
         expected_revision: int,
     ) -> DevDraft:
-        """Atomically save the next whole revision or fail on stale state."""
+        """Save one new immutable revision after checking the caller's current revision.
+
+        Parameters
+        ----------
+        draft : DevMapDraftV1 or DevScenarioDraftV1
+            Complete validated draft whose revision matches ``expected_revision``.
+        expected_revision : int
+            Current revision, from zero through one less than the maximum sequence
+            value.
+            Zero creates a new asset that has no earlier saved or deleted identity.
+
+        Returns
+        -------
+        DevMapDraftV1 or DevScenarioDraftV1
+            Saved draft with its revision increased by one.
+
+        Raises
+        ------
+        ValueError
+            If the expected revision is invalid.
+        DevDraftRevisionConflictError
+            If the draft is stale or its identity was deleted.
+        DevAssetIntegrityError
+            If stored paths or revision records are inconsistent.
+
+        Notes
+        -----
+        Writes one JSON revision and a revision marker under an exclusive store lock.
+        """
         with self._exclusive_store_lock():
             return self._save_draft_locked(
                 draft,
@@ -327,6 +400,11 @@ class DevAssetStore:
         expected_revision: int,
         allow_deleted_identity_reuse: bool = False,
     ) -> DevDraft:
+        """Save the next revision while the caller holds the store lock.
+
+        Check both stored content and deletion fences before publishing. Only Save As
+        may reuse a deleted identity, and its next revision still increases.
+        """
         if (
             type(expected_revision) is not int
             or not 0 <= expected_revision < MAX_DEV_ASSET_SEQUENCE
@@ -369,7 +447,33 @@ class DevAssetStore:
         *,
         asset_id: SafeAssetId,
     ) -> DevDraft:
-        """Create the next safe revision under a new identity without overwriting."""
+        """Save a copy under an identity that has no currently saved draft.
+
+        Parameters
+        ----------
+        draft : DevMapDraftV1 or DevScenarioDraftV1
+            Complete source content to copy.
+        asset_id : str
+            Safe lowercase snake_case destination ID, at most 64 characters.
+
+        Returns
+        -------
+        DevMapDraftV1 or DevScenarioDraftV1
+            Saved copy. A deleted destination continues after its retained revision
+            fence.
+
+        Raises
+        ------
+        ValueError
+            If the destination ID is invalid.
+        DevAssetAlreadyExistsError
+            If the destination already has saved revisions.
+
+        Notes
+        -----
+        Writes a new JSON revision under the store lock; it never replaces saved
+        content.
+        """
         with self._exclusive_store_lock():
             _validate_asset_id(asset_id)
             kind: DevAssetKind = (
@@ -402,7 +506,31 @@ class DevAssetStore:
         *,
         revision: int | None = None,
     ) -> DevDraft:
-        """Strictly reopen one exact saved revision, defaulting to latest."""
+        """Read and validate one saved revision without changing the store.
+
+        Parameters
+        ----------
+        kind : {"map", "scenario"}
+            Saved asset collection.
+        asset_id : str
+            Safe lowercase snake_case asset ID.
+        revision : int or None, optional
+            Positive saved revision. None selects the greatest currently saved revision.
+
+        Returns
+        -------
+        DevMapDraftV1 or DevScenarioDraftV1
+            Parsed immutable draft whose ID and revision match its file path.
+
+        Raises
+        ------
+        DevAssetNotFoundError
+            If no requested draft exists.
+        DevAssetIntegrityError
+            If the path, saved JSON, or embedded identity is invalid.
+        ValueError
+            If the requested ID or revision is invalid.
+        """
         directory = self._draft_directory(kind, asset_id)
         selected_revision = revision
         if selected_revision is None:
@@ -436,6 +564,31 @@ class DevAssetStore:
         *,
         latest_only: bool = False,
     ) -> tuple[DevDraftReferenceV1, ...]:
+        """List saved revision identities in stable asset-ID and revision order.
+
+        Parameters
+        ----------
+        kind : {"map", "scenario"}
+            Collection to inspect.
+        latest_only : bool, optional
+            False returns every revision. True returns only the greatest for each asset.
+
+        Returns
+        -------
+        tuple of DevDraftReferenceV1
+            Matching identities, or an empty tuple if the collection has no saved
+            drafts.
+
+        Raises
+        ------
+        DevAssetIntegrityError
+            If an inspected path escapes the root, is linked, or has an invalid
+            revision.
+
+        Notes
+        -----
+        Reads directory entries without loading draft JSON or writing files.
+        """
         collection = "maps" if kind == "map" else "scenarios"
         root = _guard_store_path(
             self._artifact_root,
@@ -471,7 +624,39 @@ class DevAssetStore:
         *,
         expected_revision: int,
     ) -> tuple[DevDraftReferenceV1, ...]:
-        """Delete one exact saved identity after a complete, fail-closed preflight."""
+        """Delete all saved revisions of one unchanged asset identity.
+
+        Parameters
+        ----------
+        kind : {"map", "scenario"}
+            Collection containing the asset.
+        asset_id : str
+            Safe asset ID to delete.
+        expected_revision : int
+            Positive latest revision the caller last observed.
+
+        Returns
+        -------
+        tuple of DevDraftReferenceV1
+            Exact revision identities removed after successful preflight.
+
+        Raises
+        ------
+        DevAssetNotFoundError
+            If the asset does not exist.
+        DevDraftRevisionConflictError
+            If a newer saved revision exists.
+        DevAssetIntegrityError
+            If any content or path check fails, or deletion/rollback cannot finish
+            safely.
+        ValueError
+            If the asset ID or expected revision is invalid.
+
+        Notes
+        -----
+        Takes the store lock, checks every saved byte, and preserves revision fences.
+        On a deletion error, restoration is attempted before the error is reported.
+        """
         with self._exclusive_store_lock():
             return self._delete_draft_locked(
                 kind,
@@ -486,6 +671,11 @@ class DevAssetStore:
         *,
         expected_revision: int,
     ) -> tuple[DevDraftReferenceV1, ...]:
+        """Delete an asset after validating every revision under the store lock.
+
+        Preserve revision fences and verify directory identities before deleting. If
+        deletion fails, try to restore the exact prior bytes and report rollback errors.
+        """
         if (
             type(expected_revision) is not int
             or not 1 <= expected_revision <= MAX_DEV_ASSET_SEQUENCE

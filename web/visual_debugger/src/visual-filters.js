@@ -1,11 +1,9 @@
 /**
- * Browser-local visual presentation controls.
- *
- * These values never authorize, redact, or mutate scientific presentation
- * data. The registry order is part of the local paint-key contract and must
- * remain stable.
+ * @file Keep page-local visibility preferences separate from scientific authority.
+ * The fixed registry maps each drawable part to a filter. Helpers validate
+ * filter states and produce display keys/updates; they never authorize hidden
+ * facts, change a simulation or enter scientific result fingerprints.
  */
-
 /**
  * @typedef {
  *   | "aura_fields"
@@ -26,6 +24,7 @@
  *   | "resurrection_effects"
  *   | "spawn_shield_expiry"
  *   | "scrolling_battle_text"
+ *   | "death_announcer"
  * } VisualFilterId
  * @typedef {Readonly<Record<VisualFilterId, boolean>>} VisualFilterState
  * @typedef {Readonly<Record<string, string>>} VisualPaintPart
@@ -44,6 +43,7 @@ const INITIAL_VISUAL_FILTER_IDS = new Set([
   "resurrection_effects",
   "scrolling_battle_text",
   "respawn_wave",
+  "death_announcer",
 ]);
 
 export const VISUAL_FILTER_REGISTRY = Object.freeze(
@@ -66,6 +66,7 @@ export const VISUAL_FILTER_REGISTRY = Object.freeze(
     ["resurrection_effects", "Resurrection Effects"],
     ["spawn_shield_expiry", "Spawn-Shield Expiry"],
     ["scrolling_battle_text", "Scrolling Battle Text"],
+    ["death_announcer", "Death Announcer"],
   ].map(([id, label]) =>
     Object.freeze({
       id: /** @type {VisualFilterId} */ (id),
@@ -245,6 +246,7 @@ export const VISUAL_PAINT_PART_REGISTRY = Object.freeze([
     "status_clear_on_death",
   ),
   paintPart({ surface: "transient", kind: "death_effect" }, "death_effects"),
+  paintPart({ surface: "transient", kind: "death_announcement" }, "death_announcer"),
   paintPart({ surface: "transient", kind: "respawn_wave" }, "respawn_wave"),
   paintPart(
     { surface: "transient", kind: "resurrection_effect" },
@@ -266,7 +268,10 @@ for (const registration of VISUAL_PAINT_PART_REGISTRY) {
 }
 
 /**
- * Return whether one registered filter is enabled in an exact state.
+ * Return the boolean for filterId in state. Require the registered filter
+ * name and exactly the expected enumerable state keys with boolean values.
+ * Invalid state throws TypeError; unknown filter IDs throw RangeError. No
+ * state copy, freeze or mutation occurs.
  *
  * @param {unknown} state
  * @param {unknown} filterId
@@ -278,7 +283,11 @@ export function isVisualFilterEnabled(state, filterId) {
 }
 
 /**
- * Return a new frozen state with exactly one registered filter changed.
+ * Set one filter without mutating the supplied state. Validate state and
+ * filterId, and require enabled to be boolean. Return the original object for
+ * a no-op; otherwise return a new frozen state. A valid input need not itself
+ * be frozen, so the no-op return is not promised to be frozen. Invalid input
+ * throws TypeError or RangeError through the shared validators.
  *
  * @param {unknown} state
  * @param {unknown} filterId
@@ -305,7 +314,10 @@ export function setVisualFilterEnabled(state, filterId, enabled) {
 }
 
 /**
- * Enable every visual filter after validating the current state.
+ * Validate state and return a state with every filter enabled. If all are
+ * already true, reuse the input unchanged; otherwise return the shared frozen
+ * all-enabled state. Invalid state throws TypeError. A reused input is not
+ * automatically frozen.
  *
  * @param {unknown} state
  * @returns {VisualFilterState}
@@ -318,7 +330,10 @@ export function enableAllVisualFilters(state) {
 }
 
 /**
- * Disable every visual filter after validating the current state.
+ * Validate state and return a state with every filter disabled. If all are
+ * already false, reuse the input unchanged; otherwise return the shared frozen
+ * all-disabled state. Invalid state throws TypeError. No input is mutated or
+ * automatically frozen.
  *
  * @param {unknown} state
  * @returns {VisualFilterState}
@@ -331,7 +346,14 @@ export function disableAllVisualFilters(state) {
 }
 
 /**
- * Strict reducer for the local checkbox surface.
+ * Apply one validated page-local filter action and return the resulting state.
+ *
+ * state uses the shared state validator. action.type is set, enable_all,
+ * disable_all or restore_defaults. set requires exactly type, filterId and
+ * enabled; other actions require only type. Invalid shape/value throws
+ * TypeError and unknown action/filter names throw RangeError. No-op updates
+ * may reuse the input; changed/default states are frozen. This function does
+ * not edit the DOM or scientific data.
  *
  * @param {unknown} state
  * @param {unknown} action
@@ -354,12 +376,18 @@ export function reduceVisualFilterState(state, action) {
     assertExactKeys(action, ["type"], "disable-all action");
     return disableAllVisualFilters(normalized);
   }
+  if (action.type === "restore_defaults") {
+    assertExactKeys(action, ["type"], "restore-defaults action");
+    return DEFAULT_VISUAL_FILTER_STATE;
+  }
   throw new RangeError(`Unknown visual filter action ${action.type}.`);
 }
 
 /**
- * Serialize an exact state in locked registry order. The result is local
- * presentation identity only; it must never enter scientific fingerprints.
+ * Validate state and encode its booleans in the fixed registry order. Return
+ * a visual-filters-v2 string for local redraw/cache decisions. Invalid state
+ * throws TypeError. The key describes display preferences, not scientific
+ * conditions or information rights, and must not enter result fingerprints.
  *
  * @param {unknown} state
  */
@@ -371,8 +399,11 @@ export function visualFilterPaintKey(state) {
 }
 
 /**
- * Classify one exact tagged paint part. Unknown or malformed future parts fail
- * closed so a new visual cannot bypass the registry silently.
+ * Return the registered filter ID for an exact drawable-part tag record.
+ * part must contain nonempty string tags including surface and kind. The
+ * canonical sorted key must be registered; malformed input throws TypeError
+ * and an unknown combination throws RangeError. No future/unrecognized part
+ * is silently enabled.
  *
  * @param {unknown} part
  * @returns {VisualFilterId}
@@ -387,6 +418,10 @@ export function classifyVisualPaintPart(part) {
 }
 
 /**
+ * Classify part, validate state and return that part's enabled flag.
+ * The classification runs first. Propagate TypeError/RangeError for malformed
+ * or unregistered inputs. This controls drawing only and changes nothing.
+ *
  * @param {unknown} state
  * @param {unknown} part
  */
@@ -395,6 +430,10 @@ export function isVisualPaintPartEnabled(state, part) {
 }
 
 /**
+ * Create a frozen registry entry from tag and filterId. Copy and freeze the
+ * tag's string properties, then freeze the outer record. The authored caller
+ * owns validity; this helper does not look up filterId or mutate tag.
+ *
  * @param {Record<string, string>} tag
  * @param {VisualFilterId} filterId
  * @returns {VisualPaintPartRegistration}
@@ -403,7 +442,15 @@ function paintPart(tag, filterId) {
   return Object.freeze({ tag: Object.freeze({ ...tag }), filterId });
 }
 
-/** @param {unknown} value */
+/**
+ * Sort value's enumerable string entries and serialize a drawable-part key.
+ * Require a non-array object, at least two entries, string surface/kind and
+ * nonempty string keys/values. Throw TypeError otherwise. This is not a safe
+ * parser for hostile accessors; callers pass normalized/local data. It does
+ * not itself check registry membership.
+ *
+ * @param {unknown} value
+ */
 function paintPartKey(value) {
   if (!isRecord(value)) {
     throw new TypeError("Visual paint part must be a tagged object.");
@@ -426,7 +473,14 @@ function paintPartKey(value) {
   return JSON.stringify(entries);
 }
 
-/** @param {unknown} value @returns {VisualFilterState} */
+/**
+ * Validate value's enumerable string keys and registered boolean fields.
+ * Return the same object; do not copy or freeze it. Missing/extra enumerable
+ * keys or nonboolean fields throw TypeError. This local-state check does not
+ * reject inherited/symbol fields or inspect property descriptors.
+ *
+ * @param {unknown} value @returns {VisualFilterState}
+ */
 function assertVisualFilterState(value) {
   if (!isRecord(value)) {
     throw new TypeError("Visual filter state must be an object.");
@@ -440,7 +494,12 @@ function assertVisualFilterState(value) {
   return /** @type {VisualFilterState} */ (value);
 }
 
-/** @param {unknown} value @returns {VisualFilterId} */
+/**
+ * Return value when it is an exact registered filter-name string. Otherwise
+ * throw RangeError. No trimming or coercion is used for membership.
+ *
+ * @param {unknown} value @returns {VisualFilterId}
+ */
 function assertVisualFilterId(value) {
   if (typeof value !== "string" || !VISUAL_FILTER_ID_SET.has(value)) {
     throw new RangeError(`Unknown visual filter ${String(value)}.`);
@@ -449,6 +508,10 @@ function assertVisualFilterId(value) {
 }
 
 /**
+ * Require value's enumerable string keys to equal expected, ignoring order.
+ * Throw TypeError using label when they differ; return undefined on success.
+ * This does not validate values or reject symbols/non-enumerable fields.
+ *
  * @param {Record<string, unknown>} value
  * @param {ReadonlyArray<string>} expected
  * @param {string} label
@@ -464,12 +527,22 @@ function assertExactKeys(value, expected, label) {
   }
 }
 
-/** @param {Record<string, boolean>} value @returns {VisualFilterState} */
+/**
+ * Return a frozen shallow copy of value. The caller supplies the complete
+ * boolean filter record; this helper does not validate its keys or values.
+ *
+ * @param {Record<string, boolean>} value @returns {VisualFilterState}
+ */
 function freezeVisualFilterState(value) {
   return /** @type {VisualFilterState} */ (Object.freeze({ ...value }));
 }
 
-/** @param {unknown} value @returns {value is Record<string, any>} */
+/**
+ * Return true when value is a non-null object that is not an array.
+ * This is a shape check only; no prototype, descriptor or authority validation.
+ *
+ * @param {unknown} value @returns {value is Record<string, any>}
+ */
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

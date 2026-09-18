@@ -1,3 +1,7 @@
+/**
+ * @file Run one browser CI profile using the shared profile manifest. The command
+ * owns profile selection and environment setup, not a second test inventory.
+ */
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -25,11 +29,9 @@ function validatedNonemptyStrings(value, label) {
   return /** @type {string[]} */ (value);
 }
 
-/**
- * @param {string} directory
+/** @param {string} directory
  * @param {string} [relativeDirectory]
- * @returns {string[]}
- */
+ * @returns {string[]} */
 function discoveredPlaywrightSpecFiles(directory, relativeDirectory = "") {
   const currentDirectory = path.join(directory, relativeDirectory);
   const discovered = [];
@@ -146,10 +148,8 @@ export function playwrightArgumentsForShard(shard) {
   return args;
 }
 
-/**
- * @param {CiShard} shard
- * @param {NodeJS.ProcessEnv} inherited
- */
+/** @param {CiShard} shard
+ * @param {NodeJS.ProcessEnv} inherited */
 export function playwrightEnvironmentForShard(shard, inherited) {
   return { ...inherited, ...(shard.env ?? {}) };
 }

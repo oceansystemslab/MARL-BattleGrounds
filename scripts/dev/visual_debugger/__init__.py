@@ -1,4 +1,10 @@
-"""Lazy public entry surface for the repository-local visual debugger."""
+"""Expose local debugger discovery helpers through lazy imports.
+
+``iter_scenario_summaries`` uses metadata only. ``get_scenario`` and
+``list_scenarios`` load live scenario definitions when requested. Importing this
+package alone does not initialize the simulator or an array backend. Launch the
+product through its development shell scripts.
+"""
 
 from importlib import import_module
 from typing import TYPE_CHECKING
@@ -18,7 +24,23 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
-    """Load live-simulator scenario helpers only when explicitly requested."""
+    """Resolve one advertised helper without eagerly loading live scenario modules.
+
+    Parameters
+    ----------
+    name : str
+        Exported helper name requested by Python attribute access.
+
+    Returns
+    -------
+    object
+        The requested callable from the metadata or live scenario module.
+
+    Raises
+    ------
+    AttributeError
+        If the name is not in the public export list.
+    """
     if name not in __all__:
         raise AttributeError(name)
     module_name = (

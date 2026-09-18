@@ -1,4 +1,8 @@
-"""Test-only scenario snapshots; never open the user's authoring store."""
+"""Build isolated scenario snapshots for controller tests.
+
+These helpers use test-owned state and do not open or change the user's
+DevClient authoring store.
+"""
 
 from pathlib import Path
 
@@ -24,14 +28,12 @@ SCENARIO_1_STATE_DIGEST = (
 
 
 def load_scenario_1_draft() -> DevScenarioDraftV1:
-    """Read a fresh strict copy of the approved revision-34 test fixture."""
     return DevScenarioDraftV1.model_validate_json(
         SCENARIO_1_FIXTURE_PATH.read_text(encoding="utf-8"),
     )
 
 
 def load_scenario_1() -> CompiledDevScenarioV1:
-    """Compile the physical fixture through unchanged authoring authorities."""
     return compile_dev_scenario(load_scenario_1_draft())
 
 
@@ -42,14 +44,12 @@ SCENARIO_3_SEMANTIC_DIGEST = (
 
 
 def load_scenario_3_draft() -> DevScenarioDraftV1:
-    """Read the approved r9 physical setup, not an official evaluation release."""
     return DevScenarioDraftV1.model_validate_json(
         SCENARIO_3_FIXTURE_PATH.read_text(encoding="utf-8"),
     )
 
 
 def load_scenario_3() -> CompiledDevScenarioV1:
-    """Compile Scenario 3 through the unchanged authoring authorities."""
     return compile_dev_scenario(load_scenario_3_draft())
 
 
@@ -60,14 +60,12 @@ SCENARIO_5_SEMANTIC_DIGEST = (
 
 
 def load_scenario_5_draft() -> DevScenarioDraftV1:
-    """Read the approved r9 physical setup, not an official evaluation release."""
     return DevScenarioDraftV1.model_validate_json(
         SCENARIO_5_FIXTURE_PATH.read_text(encoding="utf-8"),
     )
 
 
 def load_scenario_5() -> CompiledDevScenarioV1:
-    """Compile Scenario 5 through the unchanged authoring authorities."""
     return compile_dev_scenario(load_scenario_5_draft())
 
 
@@ -82,14 +80,12 @@ SCENARIO_6_SEMANTIC_DIGEST = (
 
 
 def load_scenario_6_draft() -> DevScenarioDraftV1:
-    """Read the r10-derived 17-19 regression, not an official suite release."""
     return DevScenarioDraftV1.model_validate_json(
         SCENARIO_6_FIXTURE_PATH.read_text(encoding="utf-8"),
     )
 
 
 def load_scenario_6() -> CompiledDevScenarioV1:
-    """Compile Scenario 6 through the unchanged authoring authorities."""
     return compile_dev_scenario(load_scenario_6_draft())
 
 
@@ -100,14 +96,12 @@ SCENARIO_7_SEMANTIC_DIGEST = (
 
 
 def load_scenario_7_draft() -> DevScenarioDraftV1:
-    """Read the approved r25 physical setup, not an official evaluation release."""
     return DevScenarioDraftV1.model_validate_json(
         SCENARIO_7_FIXTURE_PATH.read_text(encoding="utf-8"),
     )
 
 
 def load_scenario_7() -> CompiledDevScenarioV1:
-    """Compile Scenario 7 through the unchanged authoring authorities."""
     return compile_dev_scenario(load_scenario_7_draft())
 
 
@@ -118,12 +112,10 @@ SCENARIO_8_SEMANTIC_DIGEST = (
 
 
 def load_scenario_8_draft() -> DevScenarioDraftV1:
-    """Read the approved r14 physical setup, not an official evaluation release."""
     return DevScenarioDraftV1.model_validate_json(
         SCENARIO_8_FIXTURE_PATH.read_text(encoding="utf-8"),
     )
 
 
 def load_scenario_8() -> CompiledDevScenarioV1:
-    """Compile Scenario 8 through the unchanged authoring authorities."""
     return compile_dev_scenario(load_scenario_8_draft())

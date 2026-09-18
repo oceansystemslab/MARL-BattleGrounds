@@ -1,5 +1,7 @@
-"""Focused same-process recording-to-replay coordinator proofs."""
+"""Check the in-process handoff from live recording to replay."""
 
+import csv
+import io
 import json
 import stat
 from http import HTTPStatus
@@ -31,7 +33,6 @@ from scripts.dev.visual_debugger.protocol import (
     SetPresetCommandV1,
 )
 from scripts.dev.visual_debugger.recording import (
-    DebuggerReplayRecorderV1,
     build_debugger_recording_specification_v1,
 )
 from scripts.dev.visual_debugger.recording_coordinator import (
@@ -51,6 +52,7 @@ from scripts.dev.visual_debugger.replay_protocol import (
     SharedObsAgentPovReplayTimelineV1,
     SharedObsAgentPovReplayViewerFrameV1,
 )
+from scripts.dev.visual_debugger.replay_recorder import DebuggerReplayRecorder
 from scripts.dev.visual_debugger.replay_service import ReplayViewerService
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.server import DebuggerHTTPServer, create_server
@@ -59,16 +61,18 @@ from tests.export_visual_debugger_replay_artifacts import export_artifacts
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.evaluation.actor_projection import (
-    NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+    NO_SHARED_OBS_ACTOR_PROJECTION_V3,
 )
+from marl_battlegrounds.evaluation.metrics import EvaluationEpisodeObserverV1
 from marl_battlegrounds.evaluation.models import (
-    EvaluationFrameV1,
+    EvaluationFrameV2,
     EvaluationTransitionV1,
 )
 from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 from marl_battlegrounds.evaluation.replay_io import (
+    load_replay,
     load_replay_bundle_v1,
-    preflight_replay_bundle_destination_v1,
+    preflight_replay_destination,
 )
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -101,7 +105,7 @@ def _coordinator_and_recorder(
     *,
     scenario_name: str = "arena_5v5",
     controlled_global_slot: int | None = None,
-) -> tuple[RecordingDebuggerCoordinator, DebuggerReplayRecorderV1]:
+) -> tuple[RecordingDebuggerCoordinator, DebuggerReplayRecorder]:
     debug_launch = debugger_test_launch_specification()
     launch = build_debugger_evaluation_launch_specification_v1(
         root_seed=debug_launch.root_seed,
@@ -117,14 +121,14 @@ def _coordinator_and_recorder(
         show_ranges=True,
         verbose_logging=False,
     )
-    recorder = DebuggerReplayRecorderV1(
+    recorder = DebuggerReplayRecorder(
         specification=build_debugger_recording_specification_v1(
             action_source_kind=(
                 "scripted" if scenario.mode == "scripted" else "manual"
             ),
             runtime_provenance=_runtime_provenance(),
         ),
-        destination=preflight_replay_bundle_destination_v1(
+        destination=preflight_replay_destination(
             tmp_path / f"coordinator-{scenario_name}.marlbg-replay.json"
         ),
         context=session.evaluation_context,
@@ -255,17 +259,16 @@ def test_finish_installs_replay_before_return_and_starts_settled_at_zero(
     assert presentation_frame.source.source_revision == typed_frame.revision
     assert presentation_frame.source.source_frame_id == typed_frame.frame_id
     metric_result = metric_report()
-    assert metric_result.outcome == "available"
-    assert metric_result.payload
-    assert metric_result.filename is not None
-    assert metric_result.filename.endswith(".marlbg-metrics.json")
+    assert metric_result.outcome == "missing"
+    assert metric_result.payload is None
+    assert metric_result.filename is None
 
     assert replay.binding.apply_command is not None
     viewer = cast(ReplayViewerService, replay.service)
     assert recorder.verified_loaded_bundle is not None
     assert (
         recorder.verified_loaded_bundle.replay.header.context.actor_projection
-        == NO_SHARED_OBS_ACTOR_PROJECTION_V2
+        == NO_SHARED_OBS_ACTOR_PROJECTION_V3
     )
     opened = viewer.apply_command(
         _replay_request(
@@ -284,7 +287,7 @@ def test_finish_installs_replay_before_return_and_starts_settled_at_zero(
         is ReplayNoSharedObsAuthorizedPresentationFrameV1
     )
     assert (
-        agent_presentation.payload.authority.exact_actor_input_export_available is False
+        agent_presentation.payload.authority.exact_actor_input_export_available is True
     )
 
 
@@ -327,10 +330,10 @@ def test_random_policy_recording_publishes_reloads_and_opens_in_replay(
     viewer = cast(ReplayViewerService, installed.service)
     assert finished.replay_handoff is viewer
     assert installed.binding.mode == "replay"
+    assert installed.binding.metric_catalog == viewer.metric_catalog
 
-    loaded = load_replay_bundle_v1(
+    loaded = load_replay(
         tmp_path / "coordinator-arena_5v5.marlbg-replay.json",
-        require_metric_report=True,
     )
     context = loaded.replay.header.context
     aggregation = {row.name: row.value for row in context.aggregation_keys}
@@ -481,14 +484,13 @@ def test_registered_capture_round_trip_preserves_exact_researcher_presentation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Prove one real capture survives persistence and same-process review."""
     append_units: list[tuple[str, str]] = []
-    actual_append = DebuggerReplayRecorderV1.append
+    actual_append = DebuggerReplayRecorder.append
 
     def tracked_append(
-        recorder: DebuggerReplayRecorderV1,
+        recorder: DebuggerReplayRecorder,
         transition: EvaluationTransitionV1,
-        successor_frame: EvaluationFrameV1,
+        successor_frame: EvaluationFrameV2,
     ) -> None:
         append_units.append((transition.transition_id, successor_frame.frame_id))
         actual_append(recorder, transition, successor_frame)
@@ -496,10 +498,10 @@ def test_registered_capture_round_trip_preserves_exact_researcher_presentation(
     def reject_parallel_debug_observer(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("recording constructed a parallel debug observer")
 
-    monkeypatch.setattr(DebuggerReplayRecorderV1, "append", tracked_append)
+    monkeypatch.setattr(DebuggerReplayRecorder, "append", tracked_append)
     monkeypatch.setattr(
-        DebuggerService,
-        "_new_evaluation_observer",
+        EvaluationEpisodeObserverV1,
+        "__init__",
         reject_parallel_debug_observer,
     )
     replay_viewer_factory = Mock(wraps=ReplayViewerService)
@@ -558,31 +560,25 @@ def test_registered_capture_round_trip_preserves_exact_researcher_presentation(
         final_live.frame_id,
     )
 
-    prepared = recorder.prepared_bundle
+    prepared = recorder.prepared_replay
     saved = recorder.saved_bundle
     verified = recorder.verified_loaded_bundle
     assert prepared is not None
     assert saved is not None
     assert verified is not None
     assert stat.S_ISREG(saved.replay_path.lstat().st_mode)
-    assert stat.S_ISREG(saved.metric_report_path.lstat().st_mode)
     assert saved.replay_path.parent == tmp_path
-    assert saved.metric_report_path.parent == tmp_path
     assert saved.replay_path.read_bytes() == prepared.replay_json_bytes
-    assert saved.metric_report_path.read_bytes() == prepared.metric_report_json_bytes
-    assert prepared.replay_byte_length <= prepared.max_file_size_bytes
-    assert prepared.metric_report_byte_length <= prepared.max_file_size_bytes
+    assert len(prepared.replay_json_bytes) <= prepared.max_file_size_bytes
 
-    public_loaded = load_replay_bundle_v1(
+    public_loaded = load_replay(
         saved.replay_path,
-        require_metric_report=True,
         max_file_size_bytes=prepared.max_file_size_bytes,
     )
     assert public_loaded == verified
-    assert public_loaded.replay == prepared.bundle.replay
-    assert (
-        public_loaded.metric_report_artifact == prepared.bundle.metric_report_artifact
-    )
+    assert public_loaded.replay == prepared.replay
+    assert public_loaded.status == "not_recorded"
+    assert tuple(tmp_path.iterdir()) == (saved.replay_path,)
 
     artifact = public_loaded.replay
     episode_id = artifact.header.context.identity.episode_id
@@ -672,28 +668,27 @@ def test_registered_capture_round_trip_preserves_exact_researcher_presentation(
     assert (
         replay_final.completion.completion_bases == artifact.completion.completion_bases
     )
-    assert replay_final.processing.status == artifact.processing_status.status
-    assert (
-        replay_final.processing.processed_transition_count
-        == artifact.processing_status.processed_transition_count
-        == 2
-    )
+    assert replay_final.processing.status == "not_requested"
+    assert replay_final.processing.processed_transition_count == 0
+    assert viewer.current_metric_report().outcome == "missing"
+    metrics_json, _ = viewer.metric_analysis(2, "final", "json")
+    metrics_csv, metrics_filename = viewer.metric_analysis(2, "final", "csv")
+    summary = json.loads(metrics_json)
+    csv_rows = list(csv.DictReader(io.StringIO(metrics_csv.decode())))
+    assert len(csv_rows) == 1
+    assert metrics_filename is not None and metrics_filename.endswith(".csv")
+    assert summary["episode_id"] == csv_rows[0]["episode_id"] == episode_id
+    for statistic in summary["statistics"]:
+        saved_value = csv_rows[0][statistic["name"]]
+        if statistic["valid"]:
+            assert float(saved_value) == statistic["value"]
+        else:
+            assert saved_value == ""
 
-    report_artifact = public_loaded.metric_report_artifact
-    assert report_artifact is not None
-    report_reference = artifact.metric_report_reference
-    assert report_reference.report_artifact_id == report_artifact.report_artifact_id
-    assert report_reference.metric_report_id == report_artifact.report.report_id
-    assert (
-        report_reference.canonical_digest_sha256
-        == report_artifact.canonical_digest_sha256
+    assert replay_final.artifact_summary.replay_reference.canonical_byte_length == len(
+        prepared.replay_json_bytes
     )
-    assert report_reference.canonical_byte_length == prepared.metric_report_byte_length
-    assert (
-        replay_final.artifact_summary.replay_reference.canonical_byte_length
-        == prepared.replay_byte_length
-    )
-    assert replay_final.artifact_summary.metric_report_availability == "available"
+    assert replay_final.artifact_summary.metric_report_availability == "not_recorded"
 
     generic_frame = cast(
         ResearcherReplayViewerFrameV1,
@@ -743,10 +738,8 @@ def test_registered_capture_round_trip_preserves_exact_researcher_presentation(
     for forbidden_path in (
         str(tmp_path),
         saved.replay_path.name,
-        saved.metric_report_path.name,
         "replay_path",
         "metric_report_path",
     ):
         assert forbidden_path not in public_text
         assert forbidden_path.encode() not in prepared.replay_json_bytes
-        assert forbidden_path.encode() not in prepared.metric_report_json_bytes
