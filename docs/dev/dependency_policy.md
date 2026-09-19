@@ -24,8 +24,11 @@ CI and qualification; the check scripts assume dependencies are already prepared
 Do not move optional tool behavior into Core to avoid a dependency boundary.
 
 DevClient and Replay Viewer use the base environment for their browser mode.
-Their shell launchers select `viz` only with `--static`. Contributor CI includes
-`dev` and `viz` so the static route is tested. Replay listing and existing-file
+Their shell launchers select `viz` only with `--static`. Contributor Python CI
+includes `dev`, `viz` and `training` so it can run the complete test inventory,
+including numerical baseline checks. Browser CI includes `dev` only.
+Training libraries remain optional for environment and browser users. A separate
+base-only installation check proves that boundary. Replay listing and existing-file
 validation remain import-light. Scripted demos materialize separately on CPU
 before the immutable replay enters the Viewer; that is preparation, not a CPU
 simulation performance claim.

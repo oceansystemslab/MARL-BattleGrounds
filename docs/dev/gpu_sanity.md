@@ -158,11 +158,12 @@ Historical commands and results keep their original workload sizes.
 Install dependencies before validation:
 
 ```bash
-uv sync --locked --extra cuda13 --extra dev
+uv sync --locked --extra cuda13 --extra dev --extra viz --extra training
 ```
 
 The check uses `uv run --no-sync`, so it does not silently replace the installed
-environment. It requires a working NVIDIA driver and `nvidia-smi`.
+environment. The setup command also retains the optional libraries used by the
+complete contributor suite. It requires a working NVIDIA driver and `nvidia-smi`.
 
 ## Qualify a Commit
 

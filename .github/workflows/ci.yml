@@ -36,23 +36,23 @@ jobs:
         run: uv python install
 
       - name: Sync environment
-        run: uv sync --locked --extra dev --extra viz
+        run: uv sync --locked --extra dev --extra viz --extra training
 
       - name: Check formatting
         if: matrix.shard == 10
-        run: uv run ruff format --check .
+        run: uv run --no-sync ruff format --check .
 
       - name: Run linter
         if: matrix.shard == 11
-        run: uv run ruff check .
+        run: uv run --no-sync ruff check .
 
       - name: Run type checker
         if: matrix.shard == 12
-        run: uv run pyright
+        run: uv run --no-sync pyright
 
       - name: Run Python test shard
         run: >-
-          uv run pytest
+          uv run --no-sync pytest
           -p scripts.dev.pytest_shard
           --ci-shard=${{ matrix.shard }}/12
           --maxfail=1

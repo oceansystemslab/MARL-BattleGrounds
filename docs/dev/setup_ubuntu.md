@@ -12,7 +12,7 @@ the `cuda13` extra supplies its CUDA 13 dependencies. These are recorded setup
 conditions, not a promise that every driver or GPU combination is qualified.
 
 ```bash
-uv sync --locked --extra cuda13 --extra dev --extra viz
+uv sync --locked --extra cuda13 --extra dev --extra viz --extra training
 scripts/doctor/host_info.sh
 ```
 
@@ -20,7 +20,9 @@ A working NVIDIA driver is required for GPU execution. `host_info.sh` prints the
 selected JAX backend and devices. Review the output before sharing machine
 information. A CPU fallback is not a successful GPU check.
 
-The `training` extra adds learner/optimizer/checkpoint packages. The `interop`
+The `training` extra adds learner/optimizer/checkpoint packages and is required
+for the complete contributor test suite. Ordinary environment and browser use
+does not require it. The `interop`
 extra adds Gymnasium/PettingZoo dependencies; installing them does not by itself
 implement every adapter. See the [dependency policy](dependency_policy.md).
 

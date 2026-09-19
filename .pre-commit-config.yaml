@@ -12,6 +12,8 @@ repos:
       - id: check-merge-conflict
       - id: check-added-large-files
         args: ["--maxkb=1024"]
+        # The hashed donor fixture retains full gradients and Adam state.
+        exclude: ^tests/fixtures/baseline_donor/recurrent_mappo\.npz$
 
   - repo: local
     hooks:

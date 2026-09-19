@@ -1,0 +1,229 @@
+{
+  "commit": "9f67e612654ecb7b7d45ff8052ce9ccfc6c68d93",
+  "donor_lock_sha256": "c83137d6d6cc47f71194fd0dc303b1e64ba7239fea49f2a32098a2bb6790445d",
+  "extractions": [
+    {
+      "first_line": 127,
+      "last_line": 137,
+      "path": "mava/types.py",
+      "source_lines_sha256": "9f689299890e982cf510a260b8128a0b823176021452604f6acbeb22e62936c6",
+      "symbol": "Observation"
+    },
+    {
+      "first_line": 140,
+      "last_line": 150,
+      "path": "mava/types.py",
+      "source_lines_sha256": "a85015b527c2e6ca5d424d2e97af6c67f17ef7ecb1450cf2c66db185b2432599",
+      "symbol": "ObservationGlobalState"
+    },
+    {
+      "first_line": 26,
+      "last_line": 30,
+      "path": "mava/systems/ppo/types.py",
+      "source_lines_sha256": "8240fb73fc479f9f2d9f20f24c79135a0e667d1ab976546fd599d160ee884672",
+      "symbol": "Params"
+    },
+    {
+      "first_line": 33,
+      "last_line": 37,
+      "path": "mava/systems/ppo/types.py",
+      "source_lines_sha256": "04040801b5c93ca65af1ef766ba0948e8fc9579a9fcf26e3d26bbcf3e5045d2f",
+      "symbol": "OptStates"
+    },
+    {
+      "first_line": 40,
+      "last_line": 44,
+      "path": "mava/systems/ppo/types.py",
+      "source_lines_sha256": "b68c1fc7af9b3cd1ac336d8b5bfbeb41f2e730d73955630965ce7ba4e0def929",
+      "symbol": "HiddenStates"
+    },
+    {
+      "first_line": 91,
+      "last_line": 100,
+      "path": "mava/systems/ppo/types.py",
+      "source_lines_sha256": "ac99ef2955f5a06dd4c3d78c082807894179d036a40311ab8dbe6fd903ba280c",
+      "symbol": "RNNPPOTransition"
+    },
+    {
+      "first_line": 101,
+      "last_line": 107,
+      "path": "mava/networks/torsos.py",
+      "source_lines_sha256": "37fce25ff294caaf676f2a1c8e00ed20eaee74b3712475dc6e502ca38f14127d",
+      "symbol": "_parse_activation_fn"
+    },
+    {
+      "first_line": 23,
+      "last_line": 46,
+      "path": "mava/networks/torsos.py",
+      "source_lines_sha256": "fa615d93b5ac98de5f424c92b27e45cbcd7f3876ec43416c0675a751df5d1dd1",
+      "symbol": "MLPTorso"
+    },
+    {
+      "first_line": 146,
+      "last_line": 165,
+      "path": "mava/networks/distributions.py",
+      "source_lines_sha256": "325e3ca77b57eeb5bdb98755dd60c3f495bbe2f034c616fd90b95bc7cf0b0b10",
+      "symbol": "IdentityTransformation"
+    },
+    {
+      "first_line": 25,
+      "last_line": 62,
+      "path": "mava/networks/heads.py",
+      "source_lines_sha256": "d05cb9bd69fdeda9eaca2bbd2299471271d846a51e7f4b3759b9549104ec4111",
+      "symbol": "DiscreteActionHead"
+    },
+    {
+      "first_line": 120,
+      "last_line": 148,
+      "path": "mava/networks/base.py",
+      "source_lines_sha256": "896f1eb22db9b4accfabb8a2dc829b8f6be896b0f0a35ca99f47545460bed9e8",
+      "symbol": "ScannedRNN"
+    },
+    {
+      "first_line": 151,
+      "last_line": 183,
+      "path": "mava/networks/base.py",
+      "source_lines_sha256": "cffe62d3ca3e1d72e5adba6aeed12d6f6f6f1447c426210aa5f45418ad1decec",
+      "symbol": "RecurrentActor"
+    },
+    {
+      "first_line": 186,
+      "last_line": 225,
+      "path": "mava/networks/base.py",
+      "source_lines_sha256": "ee0ab8453af3aae4470b564bc706f977efd9a4a62665998e586fe18e73d4dbfd",
+      "symbol": "RecurrentValueNet"
+    },
+    {
+      "first_line": 23,
+      "last_line": 67,
+      "path": "mava/utils/multistep.py",
+      "source_lines_sha256": "bf87c350afc8103d7971872e5499797acb4f5db999e4e8b90c861ffb871746c7",
+      "symbol": "calculate_gae"
+    },
+    {
+      "first_line": 168,
+      "last_line": 336,
+      "path": "mava/systems/ppo/anakin/rec_mappo.py",
+      "source_lines_sha256": "eb2f17d1f56ced7bf76da0dd75ffb882708ad2440a1c3c769363cc53a6a0bb9b",
+      "symbol": "get_learner_fn._update_step._update_epoch"
+    },
+    {
+      "first_line": 176,
+      "last_line": 209,
+      "path": "mava/systems/ppo/anakin/rec_mappo.py",
+      "source_lines_sha256": "c9fd85767d77e0fefd3078780adc9ac60a89c30db3a6bd750ed72780be7126b1",
+      "symbol": "get_learner_fn._update_step._update_epoch._update_minibatch._actor_loss_fn"
+    },
+    {
+      "first_line": 211,
+      "last_line": 232,
+      "path": "mava/systems/ppo/anakin/rec_mappo.py",
+      "source_lines_sha256": "e5fbc2ecf43712500f6d227b754ae08f7dd3923c38ff4c8160a08d0a469fb1de",
+      "symbol": "get_learner_fn._update_step._update_epoch._update_minibatch._critic_loss_fn"
+    },
+    {
+      "first_line": 435,
+      "last_line": 438,
+      "path": "mava/systems/ppo/anakin/rec_mappo.py",
+      "source_lines_sha256": "03ab31618258649d9bcb7ab1a82e85e0287cecc0bbb9b67db19878e5b76f5897",
+      "symbol": "learner_setup.actor_optim"
+    },
+    {
+      "first_line": 439,
+      "last_line": 442,
+      "path": "mava/systems/ppo/anakin/rec_mappo.py",
+      "source_lines_sha256": "7197a198e7a5e903b4b2ce99c21c098c5492f30e3c8016a68409cbe6681199b0",
+      "symbol": "learner_setup.critic_optim"
+    }
+  ],
+  "files": {
+    "LICENSE": {
+      "git_blob": "0810f0b960495773d642da4a3f69cfc4adeab915",
+      "sha256": "17b4239974011679f9e018ee245b50d4bf419dafd969ead7c2af93300be81df7",
+      "stored_path": "source/LICENSE.txt"
+    },
+    "mava/configs/arch/anakin.yaml": {
+      "git_blob": "b026cc90ef584a35ada77f06c80637d771ad8379",
+      "sha256": "ea7873e70059f465dc1a6aa773c36bd9a3e01f969bc59a0077634e99abde8758",
+      "stored_path": "source/mava/configs/arch/anakin.yaml.txt"
+    },
+    "mava/configs/default/rec_mappo.yaml": {
+      "git_blob": "a14eb6f55d4e33693da773c11e51aa4f4cb11a20",
+      "sha256": "e346a576c7dc182e38bef8fe90edab1babef5eb21ef4a77e0ffce0b1fac1b009",
+      "stored_path": "source/mava/configs/default/rec_mappo.yaml.txt"
+    },
+    "mava/configs/network/rnn.yaml": {
+      "git_blob": "1ca30fb6f3a46e8cb3b2f9940d53814475024121",
+      "sha256": "e2f7cc77ddc92d1467a57750f5b636fc567f807fb3f87bed5e1e1924ca52f9e5",
+      "stored_path": "source/mava/configs/network/rnn.yaml.txt"
+    },
+    "mava/configs/system/ppo/rec_mappo.yaml": {
+      "git_blob": "c0d4208efaa52aba436cb0d8eac3bc83daca541a",
+      "sha256": "2395f1d59da5b082227ba2711d0534c3e84632894de4a3028caeb1d31761116d",
+      "stored_path": "source/mava/configs/system/ppo/rec_mappo.yaml.txt"
+    },
+    "mava/networks/base.py": {
+      "git_blob": "ffcd174933dfec239eec023fefaa3233e36ce371",
+      "sha256": "7174b65c9a67966c6e100b0f7972ed1637f6a0b413e891936a144e29c986dc7f",
+      "stored_path": "source/mava/networks/base.py.txt"
+    },
+    "mava/networks/distributions.py": {
+      "git_blob": "41e5103f2a895083a2aa3f250ae14e81334a882b",
+      "sha256": "bf15a0fa6333b1a492cc3f4a88bd547f74ff480bea916e69e5d34e3bb603886c",
+      "stored_path": "source/mava/networks/distributions.py.txt"
+    },
+    "mava/networks/heads.py": {
+      "git_blob": "3fe1732a46925c6451274edabdc5824846647359",
+      "sha256": "8ea4ad2de8ae22bd293afe83057005419b7351af1ed42b1f1a67de86331fb41e",
+      "stored_path": "source/mava/networks/heads.py.txt"
+    },
+    "mava/networks/torsos.py": {
+      "git_blob": "eae88787d6e667d55002e1912edd49927d103f4c",
+      "sha256": "1e99356017e45f288fcd39dd3515a8922ef45c95f6bd5659c4a4a95d07f0197c",
+      "stored_path": "source/mava/networks/torsos.py.txt"
+    },
+    "mava/systems/ppo/anakin/rec_mappo.py": {
+      "git_blob": "cee2367955c80b1884a66b456290d64dfae2c195",
+      "sha256": "193cf1d3c9aa812ea38dd12b0eaf19aedc9bc36b65e14c9888d0de67a2cdf606",
+      "stored_path": "source/mava/systems/ppo/anakin/rec_mappo.py.txt"
+    },
+    "mava/systems/ppo/types.py": {
+      "git_blob": "355bf487fa83f7e3d085304f4f6aae28954476b8",
+      "sha256": "c54b87e433c8019d90a53934fd1869d729735ca9db8013ba6332b2b6309e062d",
+      "stored_path": "source/mava/systems/ppo/types.py.txt"
+    },
+    "mava/types.py": {
+      "git_blob": "d0f2cadb351ae7370948eb572056b0f23e7993ff",
+      "sha256": "5a4deed5c51d3857837749ea7617b31ce44e0386ec6468aa34c084c52625661e",
+      "stored_path": "source/mava/types.py.txt"
+    },
+    "mava/utils/config.py": {
+      "git_blob": "31d01d48b3386afe07c26f6d21f3af3f97bccc90",
+      "sha256": "93a62cea24b86f02b3aad19f3d392162b55ed48df785bab4a0d993fda0106adf",
+      "stored_path": "source/mava/utils/config.py.txt"
+    },
+    "mava/utils/multistep.py": {
+      "git_blob": "72ecd250b4958d4bb38e67932a4219fcb6a5bc63",
+      "sha256": "03aa3cd43ef57a54aa34b87731c3c52d79072efd07421d45908e38a464114a1b",
+      "stored_path": "source/mava/utils/multistep.py.txt"
+    },
+    "mava/utils/network_utils.py": {
+      "git_blob": "fd8294a0ed3931bc8dd925fa9b67efb979462f41",
+      "sha256": "74e52819a9137eabd6993cc4bc9fd8da9875867433c95b5923b3768ae191d9c1",
+      "stored_path": "source/mava/utils/network_utils.py.txt"
+    },
+    "mava/utils/training.py": {
+      "git_blob": "77aa98fc62f5b60b0bff1071a48a251d4234bc29",
+      "sha256": "48982a29e7b6ff8f3107d0f33ac6a79087a6c9e9a8960442961671bea4824bb4",
+      "stored_path": "source/mava/utils/training.py.txt"
+    },
+    "pyproject.toml": {
+      "git_blob": "9547a28a5fef145ab7804d3b3a8bc3720f217dfd",
+      "sha256": "e207188a44a6a7380b4af1f89a8d72d952f6f757d8e3dba119cda6b7a695b365",
+      "stored_path": "source/pyproject.toml.txt"
+    }
+  },
+  "repository": "https://github.com/instadeepai/Mava",
+  "schema_version": 1,
+  "tree": "f47f19aa124c460ce9dc23e63288ed765d5cdd47"
+}

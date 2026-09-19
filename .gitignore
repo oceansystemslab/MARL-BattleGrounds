@@ -73,3 +73,6 @@ Thumbs.db
 
 # Local Codex milestone planning docs
 docs/dev/milestone*.md
+
+# Offline, source-verified baseline numerical reference.
+!tests/fixtures/baseline_donor/recurrent_mappo.npz

@@ -61,8 +61,12 @@ scripts/dev/check_before_commit.sh
 
 This wrapper fingerprints the frozen candidate and runs the full Python and
 frontend gates. It rejects missing prerequisites, failures and candidate changes.
-Any later byte change invalidates that pass. Run the full gate again before a
-commit; never substitute a partial check or `--no-verify`.
+Run the complete gate once for unchanged candidate files and relevant test inputs.
+Before committing, verify that the staged files match the tested files, the base
+revision and dependencies still match, and no intended file was omitted. Staging
+or committing the same files does not require another run. Changed candidate files
+or relevant test inputs require a new complete gate. Private notes and evidence
+alone do not invalidate it. Never substitute a partial check or `--no-verify`.
 
 Before pushing, opening a PR, merging or qualifying a release, the exact clean
 commit must also pass:
@@ -318,7 +322,7 @@ warm development environment.
 Prepare the locked dependencies separately, then run the complete inventories:
 
 ```bash
-uv sync --locked --extra dev --extra viz
+uv sync --locked --extra dev --extra viz --extra training
 scripts/dev/check.sh
 npm ci --prefix web/visual_debugger
 npm run install:browser --prefix web/visual_debugger
