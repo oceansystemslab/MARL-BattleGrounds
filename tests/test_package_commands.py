@@ -29,6 +29,8 @@ from marl_battlegrounds.evaluation.results import EvaluationResult, TournamentRe
     (
         (),
         ("evaluate",),
+        ("train",),
+        ("analyze-training",),
         ("canonical",),
         ("tournament",),
         ("models",),

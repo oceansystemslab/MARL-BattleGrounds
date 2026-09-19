@@ -1,8 +1,9 @@
-"""Load optional training setup and collection helpers only when requested.
+"""Load optional training and collection helpers only when requested.
 
 Content preparation, schedules, shaping, self-play and compact collection use
 base dependencies. The package alone imports no JAX or PPO. Baseline actors need
-the existing training extra. These helpers perform no critic or optimizer work.
+the existing training extra. train owns complete MAPPO runs; load_system reads
+frozen actors and analyze uses the optional viz extra for saved-result plots.
 """
 
 # pyright: reportUnsupportedDunderAll=false
@@ -19,6 +20,8 @@ if TYPE_CHECKING:
     from marl_battlegrounds.training._content import (
         prepare_training_content as prepare_training_content,
     )
+    from marl_battlegrounds.training.analysis import analyze as analyze
+    from marl_battlegrounds.training.checkpoints import load_system as load_system
     from marl_battlegrounds.training.collection import TrainingCarry as TrainingCarry
     from marl_battlegrounds.training.collection import (
         TrainingCollection as TrainingCollection,
@@ -81,12 +84,20 @@ if TYPE_CHECKING:
     from marl_battlegrounds.training.opponents import (
         refresh_opponents as refresh_opponents,
     )
+    from marl_battlegrounds.training.runner import TrainConfig as TrainConfig
+    from marl_battlegrounds.training.runner import TrainResult as TrainResult
+    from marl_battlegrounds.training.runner import train as train
     from marl_battlegrounds.training.shaping import (
         team_potential_shaping as team_potential_shaping,
     )
     from marl_battlegrounds.training.shaping import validate_shaping as validate_shaping
 
 _OWNERS = {
+    "TrainConfig": "runner",
+    "TrainResult": "runner",
+    "train": "runner",
+    "load_system": "checkpoints",
+    "analyze": "analysis",
     "PreparedTrainingContent": "_content",
     "TrainingContentBinding": "_content",
     "prepare_training_content": "_content",
@@ -125,6 +136,8 @@ __all__ = [
     "SampledTrainingConfigs",
     "ScheduleArrays",
     "SnapshotEvent",
+    "TrainConfig",
+    "TrainResult",
     "TrainingCarry",
     "TrainingCollection",
     "TrainingContentBinding",
@@ -133,10 +146,12 @@ __all__ = [
     "TrainingSchedule",
     "TrainingTransition",
     "advance_training_step",
+    "analyze",
     "assign_opponents",
     "collect_training_rollout",
     "init_opponent_history",
     "init_training_collection",
+    "load_system",
     "make_opponent_system",
     "make_training_schedule",
     "prepare_training_content",
@@ -144,6 +159,7 @@ __all__ = [
     "sample_training_configs",
     "scan_training_rollout",
     "team_potential_shaping",
+    "train",
     "training_keys",
     "training_summary",
     "validate_shaping",

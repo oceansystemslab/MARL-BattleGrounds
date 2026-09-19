@@ -46,6 +46,7 @@ from marl_battlegrounds.evaluation.recording_identity import (
     ordered_source_bank_identity,
 )
 from marl_battlegrounds.policies.input import Observations
+from marl_battlegrounds.training._compilation import training_compiler_options
 from marl_battlegrounds.training._content import (
     PreparedTrainingContent,
     TrainingContentBinding,
@@ -267,10 +268,13 @@ def _validate_training_continuation(  # pyright: ignore[reportUnusedFunction]
     carry: TrainingCarry,
     *,
     expected_root_bits: tuple[int, ...] | None = None,
+    recheck_installed_content: bool = True,
 ) -> None:
     """Check an immutable in-memory continuation before reopening its writer.
 
-    Reverify installed content against the descriptor, then check the bank,
+    By default, reverify installed content against the descriptor. Periodic
+    learner saves may set recheck_installed_content=False to reuse the descriptor
+    verified at setup or restore. Both routes check the actual carried bank,
     fixed settings, key schema/root, numerical structure and paired counters.
     expected_root_bits optionally adds the caller's saved root identity. This
     host check reads files and small arrays but changes no state or recording.
@@ -279,7 +283,8 @@ def _validate_training_continuation(  # pyright: ignore[reportUnusedFunction]
     learner resume. Preserve descriptor and carry together, with lane order
     unchanged. Packet 4 owns serializing and validating a full learner checkpoint.
     """
-    prepare_training_content(expected=collection.binding)
+    if recheck_installed_content:
+        prepare_training_content(expected=collection.binding)
     if carry.tracking.source_configs is None or (
         ordered_source_bank_identity(carry.tracking.source_configs)[0]
         != collection.binding.source_bank.canonical_digest
@@ -947,8 +952,15 @@ def scan_training_rollout(
 
 @lru_cache(maxsize=32)
 def _compiled_rollout(collection: TrainingCollection, length: int) -> Tree:
-    """Cache a stable direct callable by descriptor and structural time length."""
-    return jax.jit(partial(scan_training_rollout, collection, length=length))
+    """Cache the host-owned outer JIT with the shared training compiler policy.
+
+    The pure scan stays usable under callers' own jit/scan transformations.
+    Only this host collector selects the built-in continuation compiler options.
+    """
+    return jax.jit(
+        partial(scan_training_rollout, collection, length=length),
+        compiler_options=training_compiler_options(),
+    )
 
 
 @lru_cache(maxsize=32)
@@ -979,6 +991,7 @@ def collect_training_rollout(
     compact TrainingRollout as scan. The real prefix stops at the exact budget;
     padding reaches neither callback nor writer. Host failure checks precede
     success. Writer exceptions propagate through its existing recovery route.
+    Recorded and unrecorded paths use the same training compiler policy.
     This function synchronizes small counters and is not itself jittable.
     """
     length = _length(length)
@@ -999,6 +1012,7 @@ def collect_training_rollout(
             writer=writer,
             source_configs=carry.tracking.source_configs,
             output_steps=length,
+            compiler_options=training_compiler_options(),
         )
         # The generic collector owns zero storage, not learner mask semantics.
         padding = _padding(collection, initial)

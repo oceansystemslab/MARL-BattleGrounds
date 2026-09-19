@@ -1,12 +1,14 @@
-# Training Setup And Baseline Components
+# Training And Baseline Components
 
 The `marl_battlegrounds.training` package prepares verified maps, samples
 configurations and collects exact experience budgets with optional curriculum,
 score shaping and self-play history. The `marl_battlegrounds.baselines` package
 provides input encoders, exact action helpers and recurrent MAPPO calculations.
-The collector supplies data for a learner; it does not apply optimizer updates
-or provide a complete trainer or trained policy. Training helpers and ordinary
-environment use need only base dependencies; the MAPPO actor needs `training`.
+The optional trainer joins these components into complete recurrent MAPPO runs,
+with learner checkpoints, frozen actor loading, validation and analysis.
+Collection alone still performs no optimizer update. Ordinary environment and
+collection helpers need only base dependencies; MAPPO needs `training` and its
+automatic plots need `viz`. A working trainer is not a claim of learned skill.
 
 Install the existing `training` extra to use PPO. In a prepared contributor
 checkout, run the example with:
@@ -562,3 +564,615 @@ future trajectories across every execution layout.
 These checks establish a numerical and integration foundation. They do not
 prove sample efficiency, learned team behavior, complete training throughput
 or a competent policy within one GPU day. Those need later learning trials.
+
+## Train, Resume, Load And Analyze
+
+Install both `training` and `viz` extras for the complete workflow. The package
+keeps one training loop for Python and the CLI. External methods may still use
+ordinary environment calls and the collection helpers without this trainer.
+
+From a contributor checkout, install the needed dependencies with:
+
+```bash
+uv sync --locked --extra dev --extra training --extra viz
+```
+
+This small CPU example checks training, saving, loading and reporting. It is too
+short to show useful learning. With no validation panel, `selected_actor` is `None`:
+
+```bash
+JAX_PLATFORMS=cpu uv run --no-sync python examples/mappo_training.py \
+  --output-dir artifacts/mappo-example
+```
+
+The same route from Python is:
+
+```python
+import marl_battlegrounds as marl_bgs
+from marl_battlegrounds import training
+from marl_battlegrounds.baselines.ppo import PPOConfig
+
+result = training.train(
+    training.TrainConfig(
+        seed=42, num_envs=4, total_env_steps=32,
+        ppo=PPOConfig(rollout_length=4, epochs=1),
+    ),
+    output_dir="artifacts/mappo-python-example",
+)
+system = training.load_system(result.selected_actor or result.final_actor)
+reports = training.analyze([result.run_dir], output_dir="artifacts/mappo-report")
+```
+
+Set `JAX_PLATFORMS=cpu` before starting Python for this four-environment example.
+For the declared GPU recipe use B32, T128, native K20/H300 and unchanged donor
+settings. The source package and internal GPU must be qualified before a real
+demonstration; this example does not select a GPU or launch that experiment.
+
+`TrainConfig` defaults to plain recurrent MAPPO, 32 environments, rollout length
+128 and 10,000,000 real transitions. `curriculum` and `shaping` are independent
+Boolean choices. `recording=False` skips episode-table drains; update records,
+learner checkpoints and final reports still save. Other learners are rejected.
+
+A new run requires a new or empty exact output directory. Resume requires the
+path of a complete learner checkpoint, not an actor export or run directory:
+
+```python
+resumed = training.train(resume_from="RUN/checkpoints/CHECKPOINT_ID")
+```
+
+Omit config to inherit it. Supplying one asserts exact equality; resume cannot
+change the seed, budget, panel or method. Checkpoint and content validation
+happen before any writer rewind. Failures preserve the last published checkpoint
+and report an error; no run silently replaces a seed or increases its budget.
+
+CLI configuration is a JSON object with `schema_version: 1` and the same
+`TrainConfig` field names. PPO options belong in a nested `ppo` object. Omitted
+fields use the same defaults; unknown fields fail. These commands call the same
+Python functions. For a small CPU development run, save this as `CONFIG.json`:
+
+```json
+{
+  "schema_version": 1,
+  "seed": 42,
+  "num_envs": 4,
+  "total_env_steps": 32,
+  "ppo": {"rollout_length": 4, "epochs": 1}
+}
+```
+
+Choose a new `RUN` directory for the first command. The resume command needs an
+actual checkpoint path from that run's `status.json` or `latest_checkpoint.json`;
+replace `CHECKPOINT_ID` with its saved identity. `REPORT` holds derived reports:
+
+```bash
+JAX_PLATFORMS=cpu uv run --no-sync python -m marl_battlegrounds train \
+  --config CONFIG.json --output-dir RUN
+JAX_PLATFORMS=cpu uv run --no-sync python -m marl_battlegrounds train \
+  --resume-from RUN/checkpoints/CHECKPOINT_ID
+uv run --no-sync python -m marl_battlegrounds analyze-training RUN --output-dir REPORT
+```
+
+The [complete example](../../examples/mappo_training.py) also accepts `--config`
+or `--resume-from`. Adding `--evaluate` loads the saved actor, plays two CPU
+diagnostic games against Random and saves ordinary M8 results. These are wiring
+checks, not useful-learning evidence or checkpoint-selection results.
+
+### Progress And Costs
+
+With `verbose=True`, readable progress appears at completed updates, at most once
+per 10 seconds, plus phase changes and errors. It reports real transitions,
+updates, percentage, elapsed time, recent/average training throughput, estimated
+training time remaining and available learning summaries. Whole-run ETA also
+includes estimated pending validation, saving and final diagnostics when their
+measured costs are available. Unknown estimates say **Estimating**. Estimates
+are not promised finish times. Training throughput excludes validation and saving.
+
+Training Speed is the measured average, including compilation. Training ETA
+uses a separate estimate for the current attempt: it skips the first update,
+waits for two warm updates, then uses up to the last five completed updates.
+It divides their real transitions by their measured collection and update time.
+Resume resets this estimate, so it shows Estimating again until enough warm
+samples exist. Once the training budget is complete, Training ETA is zero;
+whole-run work can still remain.
+
+The display uses host records already required by training. It adds no model
+calls, GPU synchronization, device transfers or evaluation games. Its full-run
+use is conditional on the matched reporting-cost check showing no measurable
+slowdown; otherwise use `verbose=False` and the existing logs/status command.
+Quiet mode skips terminal display and the extra ETA calculations. Required
+counters, raw timings and durable status still update. The status command shows
+**Estimating** for forecasts without timing estimates; completed work shows zero
+remaining time.
+Loss, entropy and changing self-play reward help diagnose learning, but fixed
+opponent task scores are the main progress evidence.
+
+Reports label `elapsed_seconds` as Recorded Active Time. Resume carries forward
+the larger saved checkpoint or same-run status value, then adds the current
+attempt. Interrupted work without a durable timing record may be missing, so
+this is not a complete total of every attempt's active cost. `wall_seconds`
+measures time since run creation, including pauses and recovery gaps. Reports
+keep both fields separate. The elapsed-time plot uses Recorded Active Time;
+training throughput still excludes validation and saving. The phase-cost table
+uses completed event records from all attempts and also names missing costs.
+
+### Saved State And Reports
+
+`run_details.json` holds immutable settings and source, dependency, content and
+panel identities, plus schema versions and the initial M8 runtime record. That
+runtime record names the backend, device, precision and batch. Declared environment
+selectors are saved too; they do not verify the physical GPU's UUID or PCI bus.
+The frozen launch package owns that hardware check.
+The saved execution identity also records the training compiler policy, backend,
+device kind, numerical settings and declared `XLA_FLAGS`. Resume checks it before
+rewinding recordings or logs. A different or missing identity rejects learner
+continuation; older actor exports and reports remain readable.
+`training_updates.jsonl` holds accepted updates; `run_events.jsonl` retains each
+attempt's runtime, failures and evaluation execution segments.
+`status.json` is the current view, not the scientific source of truth. A missing
+process is not proof of successful completion.
+
+Completion and failure record a best-effort memory snapshot in status and the
+terminal event. Process peak RAM includes earlier work in the same Python
+process. JAX allocator counters exclude driver/display memory and CPU worker
+processes; they are not guaranteed whole-process VRAM. Missing counters and read
+errors remain explicit. Reports use these saved records without making new
+measurements. Earlier terminal snapshots remain historical and their peaks must
+not be added together. Older records without runtime, schema or memory fields
+remain unknown.
+
+Recovery preserves abandoned update records and report bytes under `attempts/`.
+It then rebuilds the active summaries from the restored boundary. A torn event
+line stays preserved and is reported as unknown work; it never becomes a
+successful update or validation result. Training-update prefixes remain strict.
+
+Full checkpoints retain actor/critic parameters, both optimizers, random streams,
+game state, separate memories, tracking, curriculum, opponent history and host
+selection state. They bind exact log prefixes and optional recording tokens.
+They publish at initialization, every 25 updates, declared capture/validation
+points and the final update. An immutable checkpoint ID includes its actual
+payload and continuation ancestry; an update number alone is not an identity.
+Ordinary local filesystem rename/fsync semantics are required.
+
+Setup and restore verify the installed training content. Periodic saves reuse
+that checked descriptor instead of rebuilding the installed content each time.
+Every save still checks the actual source bank carried by the learner, its
+numerical state and its counters. Restore places every array on the selected
+device, including empty recording and metric IDs.
+
+Built-in MAPPO fixes GPU kernel selection with `xla_gpu_autotune_level=0` on its
+outer collection and update compilations, including recorded collection. This
+avoids choosing different kernels from fresh timing trials after a restart.
+It changes no process-wide JAX setting. Raw numerical helpers remain usable in
+researchers' own compiled loops; the M8 evaluator keeps its existing settings.
+See [the compiler policy and its limits](source_reuse.md#training-compiler-policy).
+Fresh-process public training checks matched continued state, actions and actor
+exports exactly, with and without recording, using this built-in policy and no
+global autotune flag. See the [measured engineering checks](#measured-mappo-engineering-checks).
+This evidence does not promise equality across hardware or library changes.
+
+Frozen actor exports contain only deployment data and provenance. They load as
+sampled M8 Systems without critic state, optimizer state or training maps. Death
+and respawn preserve actor memory; episode resets clear it. The training-only
+critic view never enters actor decisions or exported actor memory.
+
+Automatic reports include `run_summary.md`, `learning_curve.csv`,
+`learning_curves.png`, `learning_curves.svg` and validation cell results. Analysis
+reads saved evidence without changing original scores or checkpoints. Interrupted
+final validation, selection, export and reporting can resume after training has
+used its exact budget, without collecting another transition.
+
+The summary links actual stage/map/opponent exposure in `exposure.json`. It
+separates task reward per active-agent sample from shaping per real environment
+transition. Missing validation stays missing, and plots identify their frozen
+panel. Failure updates the Markdown status without rerunning games or plots.
+
+### Provisional Validation And Selection
+
+A development run may omit a panel and returns no selected actor. A demonstration
+requires the qualified frozen two-member panel. Its members are the declared
+halfway/final actors from a separate Plain development seed; their Random checks
+may reject the whole panel but cannot select replacement checkpoints afterward.
+This provisional panel is separate from the later four-family comparison panel.
+
+`training.validation.validate_random` runs each member's declared 100-game
+usefulness check. `create_panel` accepts the two saved actor paths and those
+complete results. It checks ten spawn pairs on each of maps 42–46, the fixed
+Random seed root, exact actor and learner-checkpoint identities, finite scores,
+and complete per-map counts. Both members must score above 0.5 overall and have
+a positive mean Team A score on at least two maps. The panel file retains both
+checked summaries and their task identities, so copying the panel does not lose
+its qualification evidence. These modest gates do not prove general competence.
+
+For a separate check of an existing saved actor and an existing qualified panel,
+use the same validation owner as the trainer. Replace the two input paths below
+with those artifacts, and use a new output directory for this exact task:
+
+```python
+from marl_battlegrounds.training.validation import validate_checkpoint
+
+validation = validate_checkpoint(
+    "RUN/actors/CHECKPOINT_ID",
+    "PANEL/panel.json",
+    output_dir="artifacts/standalone-validation",
+)
+print(validation["score"], validation["ci_low"], validation["ci_high"])
+```
+
+Repeating this call with the same artifacts and output directory resumes its
+saved task. Changing its actor, panel or purpose requires a different task
+directory. This check does not update the actor or resume training. The trainer
+owns the fresh confirmation schedule and final checkpoint selection.
+
+Validation uses maps 42–46, canonical 5v5, K20/H300 and both spawn ends. Each
+routine check has 200 games; each confirmation has 1,000. Initialization is
+diagnostic only. Ten progress thresholds round up to real completed updates,
+with exact final included. The best two eligible routine checkpoints plus final
+when distinct receive fresh confirmation. Highest confirmation score wins;
+exact ties use the earlier training step. Missing cells block selection.
+
+Scores give each map/opponent cell equal weight, with win 1, draw 0.5 and loss 0.
+Uncertainty resamples each shared-seed block's two opponents and two spawn ends
+together. These intervals describe fixed-system game sampling, not variation
+across independent training seeds. Validation uses separate frozen state and
+randomness; the learner remains paused.
+
+GPU evaluation uses B32. A resumed pass with fewer than 32 pending games finishes
+in a separate CPU process through the same evaluator and pinned environment.
+All backend segments remain recorded. No extra games are added to pad a batch.
+
+The trained-model slot diagnostic runs after the full training budget, using the
+fixed development-final and full-run-final actors. Its machinery is tested before
+launch. The declared 3,200 games compare global team-slot assignments while
+controlling physical side. This diagnostic and useful-learning conclusions remain
+separate from a formal competence or one-GPU/one-day claim.
+
+## A Panel-Backed MAPPO Demonstration
+
+This reusable example trains plain recurrent MAPPO with 32 environments,
+128 transitions per environment per rollout and 10,000,000 real environment
+transitions. It uses seed 19042001, the default PPO settings, priority metrics
+and no episode-table recording. Curriculum and shaping are off. The declared
+slot diagnostic runs after training finishes.
+
+You need an existing qualified two-member `panel.json`. Its fixed members must
+have passed their declared Random checks. A test-only panel is not accepted for
+a demonstration. Qualification does not mean the panel proves broad competence.
+If the declared panel fails its checks, the scientific launch is not qualified.
+Keep the failed results. Choosing different members or changing development
+settings is a separate development decision; do not replace the panel silently.
+
+These are alternative ways to run the same experiment. Choose one route. The
+prepared package is the route for an unattended run whose source and dependencies
+must stay fixed while the development checkout changes.
+
+### Save The Settings
+
+Save the following as `/absolute/path/mappo-demo.json`. Replace the panel path
+with the absolute path of the existing qualified panel. The other values below
+fully state this example's settings. Changing a value creates a different
+experiment and may need new qualification.
+
+```json
+{
+  "schema_version": 1,
+  "seed": 19042001,
+  "method": "mappo",
+  "num_envs": 32,
+  "total_env_steps": 10000000,
+  "curriculum": false,
+  "shaping": false,
+  "shaping_coefficient": 0.01,
+  "ppo": {
+    "actor_lr": 0.00025,
+    "critic_lr": 0.00025,
+    "rollout_length": 128,
+    "epochs": 4,
+    "minibatches": 2,
+    "groups": 2,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_epsilon": 0.2,
+    "entropy_coefficient": 0.01,
+    "value_coefficient": 0.5,
+    "max_grad_norm": 0.5,
+    "adam_epsilon": 0.00001
+  },
+  "metrics": "priority",
+  "recording": false,
+  "validation_panel": "/absolute/path/qualified-panel/panel.json",
+  "validation_fractions": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+  "routine_seed_pairs": 10,
+  "confirmation_seed_pairs": 50,
+  "checkpoint_interval_updates": 25,
+  "checkpoint_env_steps": [],
+  "slot_diagnostic": true,
+  "purpose": "demonstration",
+  "verbose": true
+}
+```
+
+The trainer keeps native K20/H300 games. Initialization is a diagnostic check.
+Progress checks round up to completed updates, and final is always included.
+Routine checks use 200 games; fresh confirmation uses 1,000 games per candidate.
+The best two eligible routine actors plus final, when different, receive
+confirmation. The slot diagnostic adds its declared 3,200 games after training.
+These games are separate from the 10,000,000 training transitions.
+
+Use `verbose: true` only when the reporting-cost check supports it for the
+qualified workflow. Progress reuses existing host records; the cost check cannot
+prove literally zero overhead. Automatic saved reports remain available with
+`verbose: false`.
+
+### Prepare An Unattended Run
+
+Use an already qualified local commit and the verified internal RTX 5090 UUID.
+The [preparation tool](../../scripts/dev/prepare_mappo_run.py) reads that commit,
+copies its source and panel into a new package, and installs a separate
+environment from that source's lockfile. It does not start training or create a
+commit. Installation may use the package cache or download locked dependencies.
+
+From the contributor checkout, install the tool's dependencies if needed:
+
+```bash
+uv sync --locked --extra dev --extra training --extra viz
+```
+
+Replace every `/absolute/path/...` value below. `QUALIFIED_COMMIT_SHA` must be the
+reviewed implementation's commit. `GPU-INTERNAL-UUID` must be the verified full
+hardware UUID, not a device ordinal such as `0`. The package destination must
+not already exist.
+
+```bash
+uv run --no-sync python scripts/dev/prepare_mappo_run.py \
+  --repository /absolute/path/MARL-BattleGrounds \
+  --commit QUALIFIED_COMMIT_SHA \
+  --config /absolute/path/mappo-demo.json \
+  --destination /absolute/path/mappo-run-package \
+  --gpu-uuid GPU-INTERNAL-UUID
+```
+
+Preparation prints exact absolute launch, status and resume commands. For the
+example destination above, they are:
+
+```bash
+bash /absolute/path/mappo-run-package/launch.sh
+bash /absolute/path/mappo-run-package/status.sh
+bash /absolute/path/mappo-run-package/resume.sh
+```
+
+Run `launch.sh` once to start a new experiment. It detaches training, closes its
+input and sends output to the package's log. The terminal or conversation may
+close while the run continues. Use `status.sh` to read progress and process
+state. To follow the saved output, use:
+
+```bash
+tail -f /absolute/path/mappo-run-package/logs/process.log
+```
+
+Press Ctrl+C in that log-following terminal to stop following the log; this does
+not stop training. The run writes results under
+`/absolute/path/mappo-run-package/run`. It completes validation, selection,
+exports, the declared slot diagnostic and reports before reporting success.
+A process disappearing by itself is not proof of success.
+
+After an interruption, use `resume.sh`. It uses the last published complete
+checkpoint, or the exact checkpoint named by an unfinished recovery marker.
+It does not silently substitute a different checkpoint after a failed check.
+To request a particular complete checkpoint, use its absolute path:
+
+```bash
+bash /absolute/path/mappo-run-package/resume.sh \
+  --checkpoint /absolute/path/mappo-run-package/run/checkpoints/CHECKPOINT_ID
+```
+
+Resume keeps the same source, environment, settings, panel and run identity.
+It finishes pending output work without adding training transitions after the
+budget. Launch and resume check package files, imports and hardware identity.
+Keep the package in its prepared location, and keep its files unchanged. Its
+commands and copied configuration contain absolute paths.
+
+The final handoff must give the actual checked commands, output path and cost
+estimate. These reusable examples do not qualify a current scientific launch.
+Training-only throughput cannot predict total cost without measured setup,
+checkpoint, validation, diagnostic and report costs.
+
+### Use The Same Settings From Python
+
+For an ordinary foreground run in a qualified environment, save this as
+`mappo_demo.py`. Replace the paths. Set the verified GPU selection before starting
+Python, and use a new output directory. This is an alternative to the prepared
+launch above; do not start both for the same declared experiment.
+
+```python
+import marl_battlegrounds as marl_bgs
+from marl_battlegrounds import training
+from marl_battlegrounds.training.runner import read_config
+
+config = read_config("/absolute/path/mappo-demo.json")
+result = training.train(config, output_dir="/absolute/path/mappo-direct-run")
+if result.selected_actor is None:
+    raise RuntimeError("This demonstration did not produce a selected actor")
+system = training.load_system(result.selected_actor)
+reports = training.analyze(
+    [result.run_dir], output_dir="/absolute/path/mappo-direct-report"
+)
+print(result.selected_actor)
+print(reports["artifacts"]["summary"])
+```
+
+The returned `system` is an ordinary frozen M8 System that can be passed to
+`marl_bgs.evaluate` or other compatible evaluation tools. Loading performs no
+training or games. To resume from Python, replace the new-run call with:
+
+```python
+result = training.train(
+    resume_from="/absolute/path/mappo-direct-run/checkpoints/CHECKPOINT_ID"
+)
+```
+
+No config is needed on resume; it inherits the saved settings. Passing a config
+asserts exact equality and cannot change the experiment.
+
+### Use The Same Settings From The CLI
+
+The direct GPU route needs the locked `training`, `viz` and `cuda13` extras.
+Install them in the qualified checkout before running it:
+
+```bash
+uv sync --locked --extra dev --extra training --extra viz --extra cuda13
+```
+
+The CLI calls the same trainer and reads the same JSON. Replace the hardware
+UUID and paths. The Python example above can be launched with the same environment
+settings by replacing `-m marl_battlegrounds train ...` with `mappo_demo.py`.
+
+```bash
+CUDA_VISIBLE_DEVICES=GPU-INTERNAL-UUID JAX_PLATFORMS=cuda,cpu \
+  uv run --no-sync python -m marl_battlegrounds train \
+  --config /absolute/path/mappo-demo.json \
+  --output-dir /absolute/path/mappo-direct-run
+
+CUDA_VISIBLE_DEVICES=GPU-INTERNAL-UUID JAX_PLATFORMS=cuda,cpu \
+  uv run --no-sync python -m marl_battlegrounds train \
+  --resume-from /absolute/path/mappo-direct-run/checkpoints/CHECKPOINT_ID
+
+uv run --no-sync python -m marl_battlegrounds analyze-training \
+  /absolute/path/mappo-direct-run \
+  --output-dir /absolute/path/mappo-direct-report
+```
+
+Use the resume command only for an existing run. For the prepared package, use
+its own interpreter when making a new analysis report:
+
+```bash
+/absolute/path/mappo-run-package/.venv/bin/python -I \
+  -m marl_battlegrounds analyze-training \
+  /absolute/path/mappo-run-package/run \
+  --output-dir /absolute/path/mappo-run-package/report
+```
+
+There is no separate model-loading CLI. Use the public Python loader. This
+terminal command reads the completed run's saved selected path and loads it
+through the prepared package's own interpreter; it does not run games:
+
+```bash
+JAX_PLATFORMS=cpu /absolute/path/mappo-run-package/.venv/bin/python -I - <<'PY'
+import json
+from pathlib import Path
+
+import marl_battlegrounds as marl_bgs
+from marl_battlegrounds import training
+
+run_dir = Path("/absolute/path/mappo-run-package/run")
+if (run_dir / "checkpoint_recovery.json").exists():
+    raise RuntimeError("Finish checkpoint recovery before loading a selected actor")
+status = json.loads((run_dir / "status.json").read_text())
+if status.get("status") != "complete" or not status.get("selected_actor"):
+    raise RuntimeError("This run has no completed selected actor")
+system = training.load_system(status["selected_actor"])
+print(status["selected_actor"])
+PY
+```
+
+Start with `run/run_summary.md`, `run/learning_curve.csv` and the learning-curve
+figures. The summary links identities, validation, actor paths, exposure and
+measured costs. Final and selected actors can differ. Results describe the
+declared fixed panel; neither successful execution nor a single seed establishes
+general competence, sample efficiency or learned team tactics.
+
+### Measured MAPPO Engineering Checks
+
+The final compiler-policy check used the internal RTX 5090, B32/T128, four PPO
+epochs, native K20/H300 and priority metrics, with episode recording disabled.
+The production update and independent reference matched all 354 output leaves
+exactly for initial, continued and changed-seed inputs. Changing
+ordinary weights, keys, maps and recurrent values reused the compiled programs.
+
+| Measured Work | Time |
+| --- | ---: |
+| Content Preparation | 14.78 seconds |
+| Learner Initialization | 11.77 seconds |
+| Collection Compilation | 12.64 seconds, plus 0.82 seconds lowering |
+| Update Compilation | 10.18 seconds, plus 0.68 seconds lowering |
+| Warm Collection | 1.00491 seconds per block |
+| Warm Update | 0.17172 seconds per block |
+| Warm Collection Plus Update | 1.17672 seconds per block; 3,480.87 real transitions per second |
+
+Warm figures are medians of five samples. Collection and update were synchronized
+separately. In three reversed-order pairs on identical fixed inputs, the fixed
+compiler policy took 1.17888 seconds per block versus 1.17619 with ordinary
+compiler settings, about 0.23% more. This small measured difference supports the
+simpler fixed policy. The two settings produced different floating-point values;
+this comparison does not establish equal sampled trajectories.
+
+Peak process RAM was 5.17 GB. GPU process polling observed 5.30 GB; sampling every
+0.2 seconds can miss short peaks and began after the initial production/reference
+compilations. JAX recorded 2.70 GB peak live allocations and a 4.43 GB pool. These
+figures include reference and compiler-comparison states/programs, so they are not
+the memory requirement of a lone trainer. The logical rollout held 229.84 MB and
+the learner 80.37 MB; logical sizes may count shared buffers more than once.
+The required compact result transfer was 695 bytes and took about 0.67 milliseconds.
+
+Two reversed-order quiet/verbose pairs used real output files and 12 updates
+each. Each verbose pass emitted a periodic progress line with a warm ETA at the
+real ten-second cadence. Verbose elapsed time differed by +13.26 milliseconds and
+-0.054 milliseconds over roughly 14.56-second passes. The differences were within
+observed timing variation; no repeatable slowdown was measured. This is not a
+zero-cost guarantee. Final states passed the declared numerical comparison.
+
+The actual panel ETA helper separately took median batch means of 0.413–0.571
+microseconds per call over 20,000-call batches. The slowest observed batch mean
+projects to 1.71 milliseconds over 2,442 updates plus 512 phase records. That is
+an illustrative allowance, not a limit on retries or worst-case delays. Its
+0.38-second CPU import/setup cost was outside timing; the measured helper made
+no JAX calls. This small host calculation does not measure full reporting or
+validation cost.
+
+Separate public-trainer checks restarted from update 8 and completed updates 9
+and 10 in a fresh process, adding exactly 8,192 transitions each. All 332 state
+leaves without recording, and 333 with recording, matched bit for bit. Actor
+arrays, action/log-probability witnesses, scientific logs, exposure and exported
+actor digests matched too. With recording, original registrations and every CSV
+byte matched, including 32 newly completed episode rows. No global `XLA_FLAGS`
+was set. The earlier default-compiler failure and an attempt rejected after a
+source change remain preserved; neither is counted as successful continuation.
+
+These are bounded engineering checks on the recorded hardware and software.
+The cost benchmark excludes checkpoint save/restore, loaded validation and
+plotting; it does not estimate a complete scientific run or prove useful learning.
+Generated evidence is in `artifacts/m9-m10/packet-4/gpu-final-policy-costs/` and
+`artifacts/m9-m10/packet-4/support/`, including
+`final-fresh-process-resume-results.json` and `pending_eta_host_cost.json`.
+
+### Measured Integration Results
+
+The four declared local development runs used the internal RTX 5090, B32/T128,
+four PPO epochs and native K20/H300. They completed their exact budgets:
+
+| Setting | Real Transitions | Recorded Active Time |
+| --- | ---: | ---: |
+| Plain | 1,048,576 | 364.26 seconds |
+| Curriculum | 655,360 | 244.29 seconds |
+| Reward Shaping | 131,072 | 93.72 seconds |
+| Curriculum And Reward Shaping | 655,360 | 242.75 seconds |
+
+These separate seeds and budgets check integration; they are not a controlled
+treatment comparison. All 8,256 completed training games drew, and every logged
+terminal task-reward mean was zero. Both curriculum runs reached all 17 stages.
+The fixed Plain initialization, halfway and final actors then drew all 300
+declared Random games. Each scored 0.5, so the fixed panel is **not qualified**.
+No full scientific run was launched, and no mini budget was extended.
+
+Warm training measured about 3,479–3,513 real transitions per second. Repeated
+Random checks took about 13.5 seconds per 100 games after the first call and
+reused the measured compiled evaluator cache. This does not measure two-learner
+panel validation or the full experiment's cost. These measurements predate the
+fixed training compiler policy above; they retain their original source and
+execution settings. Later host-only progress and process-ownership fixes leave
+that measured numerical path unchanged. Successful execution and these costs
+do not establish useful learning.
+
+Generated local evidence lives under `artifacts/m9-m10/packet-4/`:
+`mini_qualification.json`, `curriculum-evidence/curriculum_evidence.json`, and
+`early-panel-check/panel_attempt.json` with `validation_costs.jsonl`. These are
+local run outputs, not files required to use the public API.

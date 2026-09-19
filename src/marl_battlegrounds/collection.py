@@ -7,7 +7,7 @@ changes game rules. Use direct scan when no files or outer differentiation are
 needed; this optional host entry point is not itself jittable.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache, partial
 from numbers import Integral
@@ -47,6 +47,7 @@ type StepFunction = Callable[
     [Any, None], tuple[Any, tuple[Any, EpisodeInfo, PolicyTrace | None]]
 ]
 type DrainFunction = Callable[[CollectedBatch], None]
+type CompilerOptions = tuple[tuple[str, bool | int | float | str], ...]
 
 _MAX_COUNT = int(np.iinfo(np.int32).max)
 
@@ -94,6 +95,30 @@ def _integer(value: object, name: str, minimum: int = 0) -> int:
     if not minimum <= integer <= _MAX_COUNT:
         raise ValueError(f"{name} must be an integer in [{minimum}, {_MAX_COUNT}]")
     return integer
+
+
+def _compiler_options(
+    value: Mapping[str, bool | int | float | str] | None,
+) -> CompilerOptions:
+    """Copy optional scalar JAX compiler settings into an immutable cache key.
+
+    None preserves ordinary JAX defaults. Names must be nonempty strings and
+    values must be Python bool, int, finite float or str. Reject malformed
+    scalar settings before tracing a callback or changing a writer. JAX checks
+    supported names and values later, when the kernel is compiled.
+    """
+    if value is None:
+        return ()
+    if not isinstance(cast(object, value), Mapping):
+        raise TypeError("compiler_options must be a mapping or None")
+    for name, option in value.items():
+        if not isinstance(cast(object, name), str) or not name:
+            raise ValueError("Compiler option names must be nonempty strings")
+        if type(option) not in (bool, int, float, str):
+            raise TypeError("Compiler option values must be Python scalar values")
+        if isinstance(option, float) and not np.isfinite(option):
+            raise ValueError("Compiler option floats must be finite")
+    return tuple(sorted(value.items()))
 
 
 def _array_spec(
@@ -575,11 +600,12 @@ def _compiled_chunk(
     capacity: int,
     replay_capacity: int,
     scalar: bool,
+    compiler_options: CompilerOptions = (),
 ) -> Any:  # noqa: ANN401 - JAX returns a callable with lowering/cache methods.
     """Build a reusable chunk with dynamic carry, outputs, buffers and counters.
 
-    Only the callback and structural sizes enter this bounded cache. Numerical
-    inputs are arguments. JAX owns any additional shape/dtype specializations.
+    Only the callback, structural sizes and compiler settings enter this cache.
+    Numerical inputs are arguments. JAX owns any additional shape/dtype specializations.
     Only collector-owned learner/output buffers are donated; user carry is not.
     """
 
@@ -647,7 +673,9 @@ def _compiled_chunk(
             condition, body, (carry, output, buffers, counts, errors, cursor)
         )
 
-    return jax.jit(run, donate_argnums=(1, 2))
+    return jax.jit(
+        run, donate_argnums=(1, 2), compiler_options=dict(compiler_options) or None
+    )
 
 
 def _raise_errors(errors: CollectionErrors) -> None:
@@ -693,6 +721,7 @@ def _collect(
     drain: DrainFunction,
     record_capacity: int | None = None,
     output_steps: int | None = None,
+    compiler_options: CompilerOptions = (),
 ) -> tuple[Any, Any]:
     """Run the bounded numerical engine through a supplied internal drain.
 
@@ -702,6 +731,7 @@ def _collect(
     is returned. Exactly num_steps callback executions occur on success.
     output_steps optionally reserves a larger returned tree; its suffix is zero
     and never reaches the drain. The real stopping cursor stays dynamic.
+    compiler_options is the already checked immutable outer-JIT option list.
     """
     total = _integer(num_steps, "num_steps")
     capacity = (
@@ -712,13 +742,18 @@ def _collect(
     if not total:
         return carry, output
     batch = _empty_batch(prepared)
-    chunk = _compiled_chunk(
+    arguments = (
         _StepIdentity(step_fn),
         capacity,
         prepared.batch_size,
         prepared.capacity,
         prepared.replay_capacity,
         prepared.scalar,
+    )
+    chunk = (
+        _compiled_chunk(*arguments, compiler_options=compiler_options)
+        if compiler_options
+        else _compiled_chunk(*arguments)
     )
     cursor = jnp.asarray(0, jnp.int32)
     offset = 0
@@ -757,6 +792,7 @@ def collect_rollout(
     record_capacity: int | None = None,
     source_configs: EnvConfig | None = None,
     output_steps: int | None = None,
+    compiler_options: Mapping[str, bool | int | float | str] | None = None,
 ) -> tuple[Any, Any]:
     """Run an exact JAX rollout and write optional records using bounded buffers.
 
@@ -787,6 +823,13 @@ def collect_rollout(
         calling the callback or writing records. Booleans are rejected. Reusing
         a capacity and callback allows different real prefixes to share a
         compiled chunk. This option does not label learner-specific padding.
+    compiler_options : mapping or None, default None
+        Optional settings passed to the outer jax.jit compiler. None preserves
+        its defaults. Names omit the leading "--" and map to Python bool, int,
+        finite float or str values. JAX checks supported names and values at
+        compilation. Settings enter the compiled-chunk cache key; changing
+        them creates a separate kernel. Callbacks stay pure and composable.
+        Built-in training uses this route to keep recovery compilation stable.
 
     Returns
     -------
@@ -815,6 +858,7 @@ def collect_rollout(
     """
     from marl_battlegrounds.evaluation.run_writer import RunWriter
 
+    options = _compiler_options(compiler_options)
     total = _integer(num_steps, "num_steps")
     capacity = (
         total if output_steps is None else _integer(output_steps, "output_steps", total)
@@ -839,6 +883,7 @@ def collect_rollout(
             num_steps=total,
             record_capacity=record_capacity,
             output_steps=capacity,
+            compiler_options=options,
             drain=partial(writer._write_collected, source_configs=source_configs),  # pyright: ignore[reportPrivateUsage]
         )
     except BaseException as error:

@@ -101,6 +101,24 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run experiments, prepare assets and view recorded replays.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    training = commands.add_parser(
+        "train", allow_abbrev=False, help="Run or resume a declared MAPPO experiment"
+    )
+    training.add_argument("--config", help="Versioned JSON training settings")
+    training_output = training.add_mutually_exclusive_group(required=True)
+    training_output.add_argument(
+        "--output-dir", help="Exact new or empty run directory"
+    )
+    training_output.add_argument(
+        "--resume-from", help="Complete learner checkpoint path"
+    )
+    analysis = commands.add_parser(
+        "analyze-training",
+        allow_abbrev=False,
+        help="Plot saved training and validation results",
+    )
+    analysis.add_argument("run_dirs", nargs="+", help="Saved training run directories")
+    analysis.add_argument("--output-dir", required=True, help="Report output directory")
     evaluate = commands.add_parser(
         "evaluate", allow_abbrev=False, help="Evaluate two frozen methods"
     )
@@ -403,6 +421,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if command in {"evaluate", "canonical", "tournament"}:
             _run_experiment(command, arguments)
+        elif command == "train":
+            from marl_battlegrounds.training.runner import read_config, train
+
+            if not arguments["resume_from"] and not arguments["config"]:
+                parser.error("train requires --config for a new run")
+            config = (
+                read_config(arguments.pop("config")) if arguments["config"] else None
+            )
+            arguments.pop("config", None)
+            result = train(config, **arguments)
+            print(f"Training Complete: {result.run_dir}")
+        elif command == "analyze-training":
+            from marl_battlegrounds.training.analysis import analyze
+
+            result = analyze(**arguments)
+            print(f"Training Reports: {result['artifacts']['summary']}")
         elif command == "models":
             from marl_battlegrounds._cli_assets import run_models
 

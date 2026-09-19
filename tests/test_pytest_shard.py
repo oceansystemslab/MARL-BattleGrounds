@@ -603,6 +603,9 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
         "tests/test_tdm_scenarios.py": 105,
         "tests/test_visual_debugger_replay_service.py": 400,
         "tests/test_training_collection.py": 287,
+        "tests/test_training_learner.py": 193,
+        "tests/test_training_checkpoints.py": 131,
+        "tests/test_training_runner.py": 219,
     }
     assert CI_SHARD_COST_PROFILE.split_file_family_cost_floors == {}
     assert CI_SHARD_COST_PROFILE.extracted_family_costs == {
@@ -637,12 +640,11 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
     )
     assert set(CI_SHARD_COST_PROFILE.relocations_by_shard_count) == {12}
     assert CI_SHARD_COST_PROFILE.relocations_by_shard_count[12] == (
-        ("residual:tests/test_visual_debugger_service.py", 7, 4),
-        ("file:tests/test_shared_obs_runtime.py", 11, 3),
-        ("file:tests/test_combat_ultimate_effects.py", 12, 5),
-        ("file:tests/test_combat_effects.py", 8, 11),
-        ("file:tests/test_tdm_scenarios.py", 10, 8),
-        ("file:tests/test_canonical_tournament.py", 1, 7),
+        ("residual:tests/test_visual_debugger_service.py", 8, 4),
+        ("file:tests/test_shared_obs_runtime.py", 8, 3),
+        ("file:tests/test_combat_ultimate_effects.py", 4, 5),
+        ("file:tests/test_tdm_scenarios.py", 12, 8),
+        ("file:tests/test_canonical_tournament.py", 11, 7),
     )
     assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset()
 

@@ -12,7 +12,7 @@ durability, which has separate integration tests.
 import csv
 from functools import partial
 from pathlib import Path
-from typing import NamedTuple, Never, cast
+from typing import Any, NamedTuple, Never, cast
 
 import jax
 import jax.numpy as jnp
@@ -23,6 +23,7 @@ from jax import Array
 from marl_battlegrounds.collection import (
     _collect,  # pyright: ignore[reportPrivateUsage]
     _compiled_chunk,  # pyright: ignore[reportPrivateUsage]
+    _compiler_options,  # pyright: ignore[reportPrivateUsage]
     _empty_batch,  # pyright: ignore[reportPrivateUsage]
     _prepare,  # pyright: ignore[reportPrivateUsage]
     _StepIdentity,  # pyright: ignore[reportPrivateUsage]
@@ -353,8 +354,12 @@ def test_changed_values_reuse_the_numerical_kernel(source: EnvConfig) -> None:
 
 
 @pytest.mark.parametrize("output_steps", [None, 7, 11])
+@pytest.mark.parametrize("compiler_options", [None, {}, {"xla_gpu_autotune_level": 0}])
 def test_public_collector_saves_each_required_outcome_once(
-    source: EnvConfig, tmp_path: Path, output_steps: int | None
+    source: EnvConfig,
+    tmp_path: Path,
+    output_steps: int | None,
+    compiler_options: dict[str, int] | None,
 ) -> None:
     initial = _initial(source)
     function = partial(_step, starts=False, traces=False, metrics="none")
@@ -367,6 +372,7 @@ def test_public_collector_saves_each_required_outcome_once(
             writer=writer,
             record_capacity=2,
             output_steps=output_steps,
+            compiler_options=compiler_options,
         )
         _assert_tree(actual, expected)
         for full, real in zip(
@@ -563,3 +569,56 @@ def test_invalid_capacity_fails_before_callback(
             record_capacity=cast(int, capacity),
             drain=lambda _: None,
         )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [[], {"": 0}, {3: 0}, {"xla_gpu_autotune_level": []}, {"x": float("nan")}],
+)
+def test_invalid_compiler_settings_reject_before_callback_and_writer(
+    source: EnvConfig, tmp_path: Path, options: object
+) -> None:
+    def unexpected_step(_carry: object, _unused: None) -> Never:
+        raise AssertionError("Invalid compiler settings must reject before tracing")
+
+    with RunWriter(tmp_path) as writer:
+        before = (writer.run_dir / "run_details.json").read_bytes()
+        with pytest.raises((TypeError, ValueError), match=r"[Cc]ompiler"):
+            collect_rollout(
+                unexpected_step,
+                _initial(source),
+                num_steps=1,
+                writer=writer,
+                compiler_options=cast(Any, options),
+            )
+        assert (writer.run_dir / "run_details.json").read_bytes() == before
+        assert writer.completed_episode_ids == frozenset()
+        assert not list(writer.run_dir.glob("*.csv"))
+
+
+def test_compiler_options_copy_values_and_separate_cached_kernels() -> None:
+    options = {"xla_gpu_autotune_level": 0}
+    frozen = _compiler_options(options)
+    first = _compiled_chunk(
+        _StepIdentity(_step), 5, 2, 8, 0, False, compiler_options=frozen
+    )
+    options["xla_gpu_autotune_level"] = 4
+    assert frozen == (("xla_gpu_autotune_level", 0),)
+    assert first is _compiled_chunk(
+        _StepIdentity(_step),
+        5,
+        2,
+        8,
+        0,
+        False,
+        compiler_options=_compiler_options({"xla_gpu_autotune_level": 0}),
+    )
+    assert first is not _compiled_chunk(
+        _StepIdentity(_step),
+        5,
+        2,
+        8,
+        0,
+        False,
+        compiler_options=_compiler_options(options),
+    )

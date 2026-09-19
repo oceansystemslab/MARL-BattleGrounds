@@ -84,6 +84,10 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
         "tests/test_visual_debugger_replay_service.py": 400,
         # Packet 3's 38-case collection suite measured 286.39 s on CPU.
         "tests/test_training_collection.py": 287,
+        # Packet 4 focused CPU suites: 192.54 s, 130.82 s and 218.72 s.
+        "tests/test_training_learner.py": 193,
+        "tests/test_training_checkpoints.py": 131,
+        "tests/test_training_runner.py": 219,
     },
     extracted_family_costs={
         (
@@ -114,17 +118,16 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
     },
     reserved_costs_by_shard_count={12: (0,) * 11 + (50,)},
     # Keep measured twelve-worker destinations while refreshing source owners
-    # from actual collection after test additions (M9-M10 Packet 3, 2026-09-19).
+    # from actual collection after test additions (M9-M10 Packet 4, 2026-09-19).
     # Source IDs are owners after weighted packing, before these intact moves.
     # Keep the existing split/fixture rules and each unit's collection order.
     relocations_by_shard_count={
         12: (
-            ("residual:tests/test_visual_debugger_service.py", 7, 4),
-            ("file:tests/test_shared_obs_runtime.py", 11, 3),
-            ("file:tests/test_combat_ultimate_effects.py", 12, 5),
-            ("file:tests/test_combat_effects.py", 8, 11),
-            ("file:tests/test_tdm_scenarios.py", 10, 8),
-            ("file:tests/test_canonical_tournament.py", 1, 7),
+            ("residual:tests/test_visual_debugger_service.py", 8, 4),
+            ("file:tests/test_shared_obs_runtime.py", 8, 3),
+            ("file:tests/test_combat_ultimate_effects.py", 4, 5),
+            ("file:tests/test_tdm_scenarios.py", 12, 8),
+            ("file:tests/test_canonical_tournament.py", 11, 7),
         )
     },
     strict=True,

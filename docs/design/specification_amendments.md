@@ -2939,3 +2939,57 @@ game. Critic memory, learner targets, optimization, model selection and durable
 learner restart remain outside this collection boundary. Correct collection,
 cost measurements and learning results need their own evidence. See the
 [training guide](../training/README.md#collect-an-exact-experience-budget).
+
+## A41. Complete Recurrent MAPPO Runs
+
+**Accepted training-workflow rule — 2026-09-19.** Reuse A39 content admission
+and A40 collection. The optional trainer joins the existing donor PPO update,
+separate training-only critic, exact budgets, curriculum and opponent history.
+Actor information rights and simulator rules remain unchanged.
+
+The public owners are `training.train`, `training.load_system` and
+`training.analyze`. CLI commands call those same functions. A run owns its
+settings, source/content identities, complete learner checkpoints, optional
+episode recording, validation tasks and reports. Default training uses plain
+recurrent MAPPO, B32/T128 and the recorded donor settings. Other learners remain
+separate implementation work.
+
+Keep action-time actor outputs. Real endings receive zero bootstrap; ordinary
+collection cutoffs retain it. Critic bootstrap reads the true successor without
+advancing retained recurrent memory twice. Death/respawn does not clear memory.
+Padding contributes no experience or samples, and empty updates change no state.
+Each accepted update refreshes current self-play/history exactly once.
+
+Save complete state at initialization and completed update boundaries. Validate
+all payloads, scientific settings and continuation state before recording rewind.
+Checkpoint identities include their actual payload and continuation ancestry.
+Preserve the original training-writer registrations. Frozen actor exports retain
+sampled deployment behavior and exact parameter identity without critic data.
+
+Built-in MAPPO fixes GPU autotuning at level zero on the outer collection and
+update compilations, including recorded collection. It changes no global JAX
+setting and leaves raw numerical helpers composable. Checkpoints bind the
+compiler policy and numerical runtime before any recording or log recovery.
+Historical actors and reports remain readable; missing old execution identity
+does not qualify strict learner continuation. See the
+[compiler policy](../training/source_reuse.md#training-compiler-policy) for the
+reason, evidence and limits. This does not promise equality across hardware or
+library changes.
+
+The provisional panel contains fixed halfway/final actors from a separate Plain
+development run. Validation uses maps 42–46, equal map/opponent weights and paired
+spawn ends. Routine checks use 200 games; fresh confirmations use 1,000. Confirm
+the best two eligible routine checkpoints plus final when distinct, then select
+by confirmation score and earlier step. Incomplete results cannot select a model.
+Keep shared-seed opponent/spawn vectors together when estimating uncertainty.
+This smaller panel does not replace the later four-family comparison panel.
+
+An unattended command must finish declared validation, selection, export, final
+diagnostics and reports after the exact training budget. It must resume pending
+work without duplicate games or extra training. The trained-model slot diagnostic
+runs only after the full-run final actor exists. Progress uses existing host
+records; added terminal output is retained only with no measurable slowdown.
+
+Working execution, efficient computation, sample efficiency and learned team
+behavior need separate evidence. See the complete
+[training workflow](../training/README.md#train-resume-load-and-analyze).

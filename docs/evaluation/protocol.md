@@ -223,6 +223,24 @@ defines the callable workflow, returned data, padding and recording boundary.
 These execution contracts do not establish useful stage exposure, sample
 efficiency, learned teamwork or the one-GPU/one-day competence claim.
 
+The optional recurrent MAPPO trainer follows
+[A41](../design/specification_amendments.md#a41-complete-recurrent-mappo-runs).
+Its early two-member panel uses fixed halfway/final actors from a separate
+development seed. This provisional panel is not the later four-family comparison
+panel or a protected competence test. Routine checks use ten seed pairs per map
+and opponent (200 games); fresh confirmation uses fifty (1,000 games).
+Initialization is diagnostic only. Confirm the best two eligible routine
+checkpoints plus final when distinct, then choose the highest confirmation score,
+breaking exact ties by earlier training step. Missing cells block selection.
+
+These passes share seed coordinates across opponents. Keep each map/seed block's
+two opponents and two spawn ends together when estimating game uncertainty.
+One training seed supplies no estimate of training-seed variation. Resume must
+retain exact actor/panel identities and all actual CPU/GPU execution segments.
+The declared trained-model slot comparison runs after the full training budget,
+using the fixed development-final and full-run-final actors; it changes neither
+the selected model nor the training budget.
+
 An evaluation suite fixes its configuration population and policy assignments.
 A scenario fixes its episode configuration, slot-by-slot roster, initial state,
 roles, horizon, matched seeds, and measured endpoints. The schedule is a stable multi-attempt definition;

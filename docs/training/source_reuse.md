@@ -175,3 +175,84 @@ separate from these all-valid comparisons. A fixed-input donor match does not
 establish training throughput, complete save/resume, sample efficiency, learned
 tactics or competence. The smaller synthetic tensor shapes do not measure the
 memory cost of BG's complete input encoder.
+
+## Complete MAPPO Integration
+
+The complete trainer reuses these verified networks and update equations.
+Its learner adapter reconstructs compact permitted actor inputs only where
+needed by the existing PPO update. It reads old values with the fixed rollout
+critic, keeps separate critic memory and discards bootstrap-only memory advance.
+Action-time categorical choices and log probabilities come from collection;
+the adapter makes no second behavior-policy call or duplicate GAE calculation.
+
+Model initialization folds tag `0x4D415050` into the run's Threefry seed. The
+separate learner shuffle root uses `0x50504F55` and folds in the next accepted
+update index. Empty updates consume no shuffle step. This is learner-key schema
+version 1; collection's existing independent streams retain their own version.
+
+Synchronous Orbax checkpoints replace donor checkpoint orchestration. The pinned
+handler cannot store zero-element arrays; their paths/shapes/dtypes remain in
+the checked schema and known code reconstructs those empty leaves on restore.
+They contain no numerical bytes. Typed keys use Orbax's native handling.
+This adaptation changes neither an optimizer equation nor a learned parameter.
+
+Validation, recording, deployment loading and analysis reuse MARL-BGs owners.
+The early two-member panel is provisional. Complete-workflow tests and measured
+costs supplement the original numerical comparisons; actual learning quality
+still needs the declared development and demonstration evidence.
+
+## Training Compiler Policy
+
+Built-in MAPPO passes `xla_gpu_autotune_level=0` to its outer collection and update
+compilations, including collection with recording. The shared owner is
+[`training._compilation`](../../src/marl_battlegrounds/training/_compilation.py).
+It changes no process-wide environment or JAX setting. The raw scan and learner
+functions remain usable inside callers' own compiled loops. Generic collection
+keeps JAX defaults unless its caller supplies compiler options. Evaluation keeps
+its existing compiler settings.
+
+GPU autotuning times several kernel choices while compiling. Separate timing
+trials can select different choices, whose floating-point calculations round
+differently. Turning autotuning off fixes these compilation choices; it does
+not remove every possible source of runtime variation. This distinction follows
+[OpenXLA's determinism guide](https://openxla.org/xla/determinism).
+JAX requires these options on the outermost compiled call, so inner numerical
+helpers do not set them. See [JAX compiler controls](https://docs.jax.dev/en/latest/201/controlling-xla.html).
+
+The fixed choice removes a restart dependency on live timing trials without a
+saved compiler-cache lifecycle. A persisted autotuning cache is an alternative,
+but it needs version, hardware and completeness checks. Missing entries can
+otherwise trigger new timing trials. See [OpenXLA's cache rules](https://openxla.org/xla/persisted_autotuning).
+The policy changes GPU execution choices, not the donor's equations, learning
+settings, actor information or random-key rules. Different rounding can still
+change a later sampled trajectory, so results from an earlier policy keep their
+original identity.
+
+New learner checkpoints bind this policy and the active backend, device kind,
+runtime version, JAX precision, random-number and JIT settings, the profile-guided
+compilation switch, and declared `XLA_FLAGS`. Resume requires
+the saved identity to match before recording or log recovery. The environment
+string records what was declared; changing it after JAX starts does not prove
+the compiler changed. Historical descriptions, frozen actor loading and reports
+remain readable; a missing old execution identity is not treated as the new one.
+
+The first fresh-process GPU check restored all 332 array leaves exactly but
+later chose different actions under ordinary compiler settings. Setting the
+global autotune flag to zero produced exact continuation in two fresh child
+processes on the internal RTX 5090. The final per-compilation policy then passed
+the actual public trainer's fresh-process checks with global `XLA_FLAGS` absent.
+From update 8 through updates 9 and 10, all 332 state leaves without recording
+and 333 with recording matched bit for bit, as did actor arrays, action-time
+witnesses, scientific logs, exposure and export digests. The recorded case also
+matched original registrations and every CSV byte, with 32 new completed rows.
+The original failure and the separate attempt rejected for changing source bytes
+remain preserved.
+
+The final B32/T128, four-epoch numerical comparison matched all 354 output leaves
+exactly in initial, continued and changed-seed cases. A fixed-input compiler
+comparison measured 1.17888 seconds per block for this policy versus 1.17619 for
+ordinary settings, about 0.23% more. It preserved their floating-point differences
+and makes no trajectory-equivalence claim. Full costs and memory limits are in
+[the measured engineering checks](README.md#measured-mappo-engineering-checks).
+The evidence concerns the declared workload and software stack, not equality
+across devices, library upgrades, arbitrary compiler flags or all JAX programs.

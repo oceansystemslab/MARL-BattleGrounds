@@ -141,12 +141,17 @@ def _initialize_actor(seed: int) -> Tree:
 
 
 def _compile(
-    function: Callable[..., Tree], value: Tree
+    function: Callable[..., Tree],
+    value: Tree,
+    *,
+    compiler_options: dict[str, Tree] | None = None,
 ) -> tuple[Tree, list[int], dict[str, Tree]]:
     """Separate lowering/compilation and inspect temporary bytes and callbacks.
 
     The returned callable counts Python traces without adding device callbacks.
     memory_analysis describes this executable, not live process-wide allocation.
+    compiler_options passes optional settings to this outer JIT. None preserves
+    JAX's current defaults; this helper does not change global compiler settings.
     """
     traces: list[int] = []
 
@@ -155,7 +160,7 @@ def _compile(
         traces.append(1)
         return function(argument)
 
-    compiled = jax.jit(counted)
+    compiled = jax.jit(counted, compiler_options=compiler_options)
     started = time.perf_counter()
     lowered = compiled.lower(value)
     lowering = time.perf_counter() - started
