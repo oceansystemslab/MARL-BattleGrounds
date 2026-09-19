@@ -570,7 +570,7 @@ def _has_errors(errors: CollectionErrors) -> Array:
 @lru_cache(maxsize=16)
 def _compiled_chunk(
     identity: _StepIdentity,
-    total: int,
+    output_steps: int,
     batch_size: int,
     capacity: int,
     replay_capacity: int,
@@ -590,6 +590,7 @@ def _compiled_chunk(
         counts: CollectedCounts,
         errors: CollectionErrors,
         cursor: Array,
+        total: Array,
     ) -> tuple[Any, Any, CollectedBuffers, CollectedCounts, CollectionErrors, Array]:
         """Advance until the next complete step would exceed a buffer or T."""
 
@@ -691,6 +692,7 @@ def _collect(
     num_steps: int,
     drain: DrainFunction,
     record_capacity: int | None = None,
+    output_steps: int | None = None,
 ) -> tuple[Any, Any]:
     """Run the bounded numerical engine through a supplied internal drain.
 
@@ -698,16 +700,21 @@ def _collect(
     internal seam also lets tests compare numerical collection without inventing
     a public no-op writer. Exceptions propagate; no successful partial rollout
     is returned. Exactly num_steps callback executions occur on success.
+    output_steps optionally reserves a larger returned tree; its suffix is zero
+    and never reaches the drain. The real stopping cursor stays dynamic.
     """
     total = _integer(num_steps, "num_steps")
+    capacity = (
+        total if output_steps is None else _integer(output_steps, "output_steps", total)
+    )
     prepared = _prepare(step_fn, carry, record_capacity)
-    output = _zeros_from_shape(prepared.transition, total, 0)
+    output = _zeros_from_shape(prepared.transition, capacity, 0)
     if not total:
         return carry, output
     batch = _empty_batch(prepared)
     chunk = _compiled_chunk(
         _StepIdentity(step_fn),
-        total,
+        capacity,
         prepared.batch_size,
         prepared.capacity,
         prepared.replay_capacity,
@@ -717,7 +724,13 @@ def _collect(
     offset = 0
     while offset < total:
         carry, output, buffers, counts, errors, cursor = chunk(
-            carry, output, batch.buffers, batch.counts, batch.errors, cursor
+            carry,
+            output,
+            batch.buffers,
+            batch.counts,
+            batch.errors,
+            cursor,
+            jnp.asarray(total, jnp.int32),
         )
         host_cursor, host_counts, host_errors = jax.device_get((cursor, counts, errors))
         _raise_errors(host_errors)
@@ -743,6 +756,7 @@ def collect_rollout(
     writer: RunWriter,
     record_capacity: int | None = None,
     source_configs: EnvConfig | None = None,
+    output_steps: int | None = None,
 ) -> tuple[Any, Any]:
     """Run an exact JAX rollout and write optional records using bounded buffers.
 
@@ -767,11 +781,18 @@ def collect_rollout(
     source_configs : EnvConfig or None, default None
         Immutable source bank referenced by start records. Required for a new
         known source; the writer owns verified reuse. Never mutate or donate it.
+    output_steps : int or None, default None
+        Returned transition capacity, at least num_steps and at most the int32
+        limit. None uses num_steps. A larger capacity adds zero rows without
+        calling the callback or writing records. Booleans are rejected. Reusing
+        a capacity and callback allows different real prefixes to share a
+        compiled chunk. This option does not label learner-specific padding.
 
     Returns
     -------
     tuple
-        Latest carry and the transition tree with leading num_steps. Drains do
+        Latest carry and the transition tree with leading output_steps (or
+        num_steps when omitted). Drains do
         not change actions, random keys, resets, memory or learning updates.
         No wide info history is returned. Zero steps makes no writer changes.
 
@@ -795,6 +816,9 @@ def collect_rollout(
     from marl_battlegrounds.evaluation.run_writer import RunWriter
 
     total = _integer(num_steps, "num_steps")
+    capacity = (
+        total if output_steps is None else _integer(output_steps, "output_steps", total)
+    )
     if not isinstance(cast(object, writer), RunWriter):
         raise TypeError("writer must be RunWriter")
     writer._check_open()  # pyright: ignore[reportPrivateUsage]
@@ -806,7 +830,7 @@ def collect_rollout(
         )
     if not total:
         prepared = _prepare(step_fn, carry, record_capacity)
-        return carry, _zeros_from_shape(prepared.transition, 0, 0)
+        return carry, _zeros_from_shape(prepared.transition, capacity, 0)
     writer._collection_active = True  # pyright: ignore[reportPrivateUsage]
     try:
         return _collect(
@@ -814,6 +838,7 @@ def collect_rollout(
             carry,
             num_steps=total,
             record_capacity=record_capacity,
+            output_steps=capacity,
             drain=partial(writer._write_collected, source_configs=source_configs),  # pyright: ignore[reportPrivateUsage]
         )
     except BaseException as error:

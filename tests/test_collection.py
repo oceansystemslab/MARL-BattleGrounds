@@ -3,8 +3,10 @@
 Synthetic numerical callbacks isolate collector behavior from simulator cost.
 Direct scan is the independent trajectory reference. Tests check scalar/native
 shapes, dynamic inputs, sparse/full records, first starts, padding, errors and
-capacity pressure. A test-only drain consumes every admitted record; it does not
-stand in for writer durability, which has separate integration tests.
+capacity pressure. Fixed output capacity must keep real prefixes exact, suffixes
+zero and writer records unchanged while reusing the same compiled chunk. A
+test-only drain consumes every admitted record; it does not stand in for writer
+durability, which has separate integration tests.
 """
 
 import csv
@@ -350,18 +352,29 @@ def test_changed_values_reuse_the_numerical_kernel(source: EnvConfig) -> None:
     )
 
 
+@pytest.mark.parametrize("output_steps", [None, 7, 11])
 def test_public_collector_saves_each_required_outcome_once(
-    source: EnvConfig, tmp_path: Path
+    source: EnvConfig, tmp_path: Path, output_steps: int | None
 ) -> None:
     initial = _initial(source)
     function = partial(_step, starts=False, traces=False, metrics="none")
     expected, (transitions, _, _) = jax.lax.scan(function, initial, None, length=7)
     with RunWriter(tmp_path, buffer_size=2) as writer:
         actual, output = collect_rollout(
-            function, initial, num_steps=7, writer=writer, record_capacity=2
+            function,
+            initial,
+            num_steps=7,
+            writer=writer,
+            record_capacity=2,
+            output_steps=output_steps,
         )
         _assert_tree(actual, expected)
-        _assert_tree(output, transitions)
+        for full, real in zip(
+            jax.tree.leaves(output), jax.tree.leaves(transitions), strict=True
+        ):
+            assert full.shape == (output_steps or 7, *real.shape[1:])
+            np.testing.assert_array_equal(full[:7], real)
+            np.testing.assert_array_equal(full[7:], jnp.zeros_like(full[7:]))
         run_dir = writer.run_dir
     with (run_dir / "episodes.csv").open(newline="", encoding="utf-8") as stream:
         rows = list(csv.DictReader(stream))
@@ -371,8 +384,14 @@ def test_public_collector_saves_each_required_outcome_once(
     assert not (run_dir / "metrics.csv").exists()
 
 
+@pytest.mark.parametrize("output_steps", [None, 0, 5])
+@pytest.mark.parametrize("pending_starts", [False, True])
 def test_zero_steps_leave_writer_files_and_pending_buffers_unchanged(
-    source: EnvConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    source: EnvConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output_steps: int | None,
+    pending_starts: bool,
 ) -> None:
     initial = _initial(source)
 
@@ -380,21 +399,106 @@ def test_zero_steps_leave_writer_files_and_pending_buffers_unchanged(
         raise AssertionError("zero steps must never drain")
 
     with RunWriter(tmp_path) as writer:
+        if pending_starts:
+            _, (_, info, _) = _step(initial, None)
+            assert info.episode_start_records is not None
+            writer.register_episodes(info.episode_start_records)
+        assert writer.has_pending_numerical_starts == pending_starts
         before = {
             path.relative_to(writer.run_dir): path.read_bytes()
             for path in writer.run_dir.rglob("*")
             if path.is_file()
         }
         monkeypatch.setattr(writer, "_write_collected", unexpected_drain)
-        actual, output = collect_rollout(_step, initial, num_steps=0, writer=writer)
+        actual, output = collect_rollout(
+            _step, initial, num_steps=0, output_steps=output_steps, writer=writer
+        )
         assert actual is initial
-        assert all(row.shape[0] == 0 for row in jax.tree.leaves(output))
+        for row in jax.tree.leaves(output):
+            assert row.shape[0] == (output_steps or 0)
+            np.testing.assert_array_equal(row, jnp.zeros_like(row))
+        assert writer.has_pending_numerical_starts == pending_starts
+        assert writer.completed_episode_ids == frozenset()
         after = {
             path.relative_to(writer.run_dir): path.read_bytes()
             for path in writer.run_dir.rglob("*")
             if path.is_file()
         }
         assert before == after
+
+
+@pytest.mark.parametrize("batch", [None, 2])
+def test_fixed_output_suffix_adds_no_start_completion_or_assignment_records(
+    source: EnvConfig, batch: int | None
+) -> None:
+    initial = _initial(source, batch)
+    records: list[CollectedBatch] = []
+    expected, real = _collect(
+        _step, initial, num_steps=3, drain=partial(_sink, records)
+    )
+    padded_records: list[CollectedBatch] = []
+    actual, output = _collect(
+        _step,
+        initial,
+        num_steps=3,
+        output_steps=8,
+        drain=partial(_sink, padded_records),
+    )
+    _assert_tree(actual, expected)
+    assert int(actual.rounds) == 3
+    for padded, prefix in zip(
+        jax.tree.leaves(output), jax.tree.leaves(real), strict=True
+    ):
+        assert padded.shape == (8, *prefix.shape[1:])
+        np.testing.assert_array_equal(padded[:3], prefix)
+        np.testing.assert_array_equal(padded[3:], jnp.zeros_like(padded[3:]))
+    assert len(padded_records) == len(records)
+    for padded, prefix in zip(padded_records, records, strict=True):
+        _assert_tree(padded, prefix)
+
+
+def test_public_fixed_capacity_reuses_compilation_for_different_real_prefixes(
+    source: EnvConfig, tmp_path: Path
+) -> None:
+    initial = _initial(source)
+    function = partial(_step, starts=False, traces=False, metrics="none")
+    kernel = _compiled_chunk(_StepIdentity(function), 8, 2, 8, 0, False)
+    cache_size = 0
+    for steps in (3, 5, 1):
+        with RunWriter(tmp_path / str(steps)) as writer:
+            actual, output = collect_rollout(
+                function, initial, num_steps=steps, output_steps=8, writer=writer
+            )
+        assert int(actual.rounds) == steps
+        assert kernel._cache_size() > 0
+        if cache_size:
+            assert kernel._cache_size() == cache_size
+        cache_size = kernel._cache_size()
+        for row in jax.tree.leaves(output):
+            assert row.shape[0] == 8
+            np.testing.assert_array_equal(row[steps:], jnp.zeros_like(row[steps:]))
+
+
+@pytest.mark.parametrize("output_steps", [True, np.bool_(False), -1, 0, 1.5, 2**31])
+def test_invalid_output_capacity_fails_before_callback_and_writer_changes(
+    source: EnvConfig, tmp_path: Path, output_steps: object
+) -> None:
+    def unexpected_step(_carry: object, _unused: None) -> Never:
+        raise AssertionError("invalid output capacity must reject before tracing")
+
+    with RunWriter(tmp_path) as writer:
+        before = (writer.run_dir / "run_details.json").read_bytes()
+        with pytest.raises(ValueError, match="output_steps"):
+            collect_rollout(
+                unexpected_step,
+                _initial(source),
+                num_steps=1,
+                output_steps=cast(int, output_steps),
+                writer=writer,
+            )
+        assert (writer.run_dir / "run_details.json").read_bytes() == before
+        assert writer.completed_episode_ids == frozenset()
+        assert not list(writer.run_dir.glob("*.csv"))
 
 
 def test_repeated_preparation_reuses_abstract_trace_for_changed_values(

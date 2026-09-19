@@ -1,10 +1,12 @@
 # Training Setup And Baseline Components
 
-The `marl_battlegrounds.training` package prepares verified maps and samples
-configurations for episode resets. The `marl_battlegrounds.baselines` package
+The `marl_battlegrounds.training` package prepares verified maps, samples
+configurations and collects exact experience budgets with optional curriculum,
+score shaping and self-play history. The `marl_battlegrounds.baselines` package
 provides input encoders, exact action helpers and recurrent MAPPO calculations.
-Neither package supplies a training loop or a trained policy. Preparation,
-sampling and ordinary environment use need only base dependencies.
+The collector supplies data for a learner; it does not apply optimizer updates
+or provide a complete trainer or trained policy. Training helpers and ordinary
+environment use need only base dependencies; the MAPPO actor needs `training`.
 
 Install the existing `training` extra to use PPO. In a prepared contributor
 checkout, run the example with:
@@ -136,7 +138,7 @@ and step streams then fold in the local decision step.
 | --- | ---: | --- |
 | `map` | 0 | Omitted |
 | `roster` | 1 | Omitted |
-| `opponent` | 2 | Omitted; reserved here |
+| `opponent` | 2 | Omitted; used when a new game selects its opponent |
 | `action` | 3 | Required |
 | `reset` | 4 | Omitted |
 | `step` | 5 | Required |
@@ -204,6 +206,168 @@ has no transition evidence yet. Historical records without a class field keep
 their original meaning; the reader does not invent a roster claim.
 See [tracking and recording](../evaluation/workflows.md#track-experience-and-reset-finished-games)
 for the optional low-level route.
+
+## Collect An Exact Experience Budget
+
+The [collection example](../../examples/training_collection.py) uses the existing
+untrained recurrent MAPPO actor. It prepares content once, uses current self-play
+and collects the requested number of real transitions. Defaults are 32 games,
+128 rounds per returned block and 4,096 total transitions. A round advances each
+game once. These are collection examples; no optimizer updates are performed.
+
+```bash
+# Small CPU check, including a padded final block.
+JAX_PLATFORMS=cpu uv run --no-sync python examples/training_collection.py \
+  --mode Plain --num-envs 2 --total-env-steps 4 --length 4
+
+# Ordinary batch and block sizes; select the GPU as described in the GPU guide.
+JAX_PLATFORMS=cuda,cpu uv run --no-sync python examples/training_collection.py \
+  --mode C-RS
+```
+
+`--mode Plain` enables neither curriculum nor shaping. `C` enables curriculum,
+`RS` enables shaping, and `C-RS` enables both. All four keep the installed K20
+score threshold and H300 horizon. `--total-env-steps` must divide exactly by the
+positive even `--num-envs`. A curriculum budget must give each of its 17 requested
+stages at least one round. The library rejects insufficient budgets.
+
+The example's `run(...)` function is also callable from Python. Its CLI delegates
+to that function. Add `--output-dir artifacts/training-collection` to save a
+training run through the existing `RunWriter`. The default creates no files.
+Saved outcomes remain canonical; shaping does not change CSV scores or metrics.
+This example creates no learner checkpoint and offers no restart command.
+
+The library route uses four calls:
+
+1. `make_training_schedule(total_env_steps=..., num_envs=..., curriculum=...)`
+   resolves exact stage budgets on the host.
+2. `init_training_collection(actor, actor_variables, schedule=schedule, ...)`
+   returns a stable `TrainingCollection` and its numerical `TrainingCarry`.
+   Supply a native JAX `System` whose lanes are independent and whose memory
+   has a leading game axis. Actor-only weights stay dynamic. Policy adapters,
+   host methods, custom memory-reset hooks and frozen checkpoint labels are
+   unsupported by this collector; ordinary environment/System loops remain
+   available for those methods.
+3. `collect_training_rollout(collection, carry, length=128, writer=None)`
+   returns the next carry and a `TrainingRollout`. Reuse the same collection
+   descriptor and block length. The final block stops at the exact total and
+   returns invalid padding without extra actions, resets or writer records.
+4. `training_summary(collection, carry)` reads small counters on the host. It
+   reports requested rounding, games started, played transitions, active living
+   Team A decisions, maps, opponent assignments and unfinished games.
+
+Setup defaults to `shaping=False`, `discount=0.99`, `coefficient=0.01`,
+`collect_training_state=False`, `metrics="priority"` and `recording=False`.
+Pass `prepared=prepared` to reuse verified content. Public setup keeps that bank
+exact; a synthetic horizon override is not a supported training input.
+With recording enabled, supply the same healthy writer on every collection
+call, starting before the first action. Register the descriptors as
+`policies={"team_a": collection.actor, "team_b": collection.opponent}` with
+`phase="training"`. Training policy versions are evolving weights, not frozen
+checkpoint labels. The example saves the content binding and requested schedule.
+
+`scan_training_rollout(collection, carry, length=...)` is the pure JAX route
+for a larger compiled loop. Keep the descriptor and length fixed outside the
+dynamic carry. It sets sticky failure flags and stops further actions; check
+the returned carry on the host before learning. The host collection helper does
+this check automatically. `advance_training_step` is the shared one-round
+building block and requires remaining budget. Neither path applies a learner
+update or owns critic memory.
+
+### Requested Stages And Played Exposure
+
+Plain and RS request canonical 5v5 on all 42 training maps. C and C-RS request:
+
+| Stages, Zero-Based | Requested Budget | Games Chosen At Reset |
+| --- | --- | --- |
+| 0–4 | 4% each | Map 0, sizes 1v1 through 5v5 |
+| 5–15 | 20/11% each | 5v5, pools 0–1 through 0–11 |
+| 16 | 60% | 5v5, maps 0–41 |
+
+The schedule assigns whole rounds by largest remainders; earlier stages win
+exact ties. It never increases the total budget. The tracker checks exact real
+advances and equal use of the two fixed spawn arrangements at each stage end.
+Continuing games keep the distribution chosen at their reset, even after the
+requested stage changes. Finished games reset immediately before their next
+real action, using the latest requested stage and opponent bank.
+
+The summary therefore separates `steps_by_episode_stage` from requested stage
+budgets. A stage may complete its accounting budget while receiving no new
+games and no played exposure of its own. The short example can show this under
+H300. A reset alone is not a played game; `starts_by_episode_stage` counts the
+first real decision. Actor decisions are active, living Team A decisions.
+`learner_samples` stays `None`: collection counts do not establish which samples
+a future learner used, sample efficiency or learned tactics.
+
+### Optional Score Shaping
+
+`team_potential_shaping(before_scores, info, discount=..., coefficient=0.01)`
+returns float32 `(B,2)` adjustments in Team A/Team B order. The potential is the
+coefficient times own score minus opponent score. The adjustment is the exact
+learner discount times the next potential, minus the previous potential.
+Wins, losses and horizon draws set the next potential to zero. A rollout or
+stage cutoff, death or respawn does not. Padding returns zero.
+
+Read int32 `(B,2)` `before_scores` before the action. Use the matching producing
+`EpisodeInfo`, whose score remains correct even after AutoReset returns a new
+game. `validate_shaping` checks finite host settings: discount in `[0,1]` and a
+nonnegative coefficient, excluding Boolean values. Numerical execution uses
+dynamic scalar float32 settings and checks static shapes/dtypes.
+
+Complete discounted adjustments sum to minus the starting potential, including
+authored nonzero scores. They sum to zero from a tied start. This preserves the
+declared discounted objective for fixed starts. It does not prove faster
+learning or preservation of an undiscounted win-rate objective. The coefficient
+0.01 is a starting setting, not a qualified learning choice.
+
+The collector stores one Team A `shaping_reward` per game and keeps native
+`task_rewards` separately. A learner may add the team signal to each active
+Team A value target; dead active agents retain that signal and inactive slots
+remain excluded. Do not sum repeated actor copies into a larger team bonus.
+Disabled shaping skips the calculation entirely. Shaping never enters actor
+inputs or changes official rewards, scores or metric definitions.
+
+### Current And Historical Self-Play
+
+Each new opponent game uses current actor weights until history exists. After
+that, its assignment is 80% current and 20% uniformly sampled from stored
+snapshots. Assignment probabilities are not promises about observed episode or
+transition shares. A historical game keeps its chosen weights until it ends.
+Current-policy games use newly published actor weights while retaining their
+own recurrent memory. Team A and Team B never share memory.
+
+Call `refresh_opponents` once after each completed learner update and before
+the next block. Supply already-updated actor-only variables, the exact next
+`update_index`, the carry's completed real rounds and its numerical schedule.
+Keep the returned history in the carry. The helper performs no learning.
+It captures one immutable actor when an unmet 5%, 10%, ..., 100% threshold has
+been reached. Several thresholds crossed by one update share one stored
+snapshot. The bank has room for 20 snapshots, with no eviction. Record actual
+capture rounds/updates from `SnapshotEvent`; a final snapshot may see no play.
+
+Opponent slots use `-1` for current and zero-based snapshot indices otherwise.
+Invalid update notifications or assignments set a sticky error and block further
+collection. The actor must keep its variable tree, shapes, dtypes and information
+rights. Critic and optimizer state stay outside the bank. The supplied example
+does not refresh weights, so it creates no historical snapshots or update claims.
+
+### Compact Data For A Learner
+
+`TrainingRollout.transitions` uses `(T,B,...)` axes. It keeps compact permitted
+observations, Team A masks, submitted joint actions, same-call Team A learning
+outputs, task/shaping rewards, active/alive flags and exact producing identities.
+Completion outcomes, lengths, scores and optional priority values are present
+only on completed rows. Team B learning outputs are discarded.
+
+`valid` excludes padding. Padding has zero payloads, `-1` identities and a
+neutral-only action mask. `real_steps` counts rounds, not total transitions.
+The rollout keeps Team A's starting memory and the true final observations,
+masks and ending flags before a pending reset. Use that successor for a cutoff's
+value estimate. A real task ending, including H300, stops the value estimate.
+With `collect_training_state=True`, the separate 919-value physical view is
+stored once per game, with a matching final view. It never enters the actor.
+Critic values, GAE, complete `PPOBatch` construction, optimization, checkpoint
+selection and durable learner restart remain the learner's responsibility.
 
 ## Inputs And Information Limits
 
@@ -351,6 +515,49 @@ Warmed loops allowed no host/device transfers or callbacks. Changed same-shaped
 inputs reused compiled work. These are bounded workflow measurements, not a
 general speed guarantee. The benchmark writes setup, compilation, all five
 samples, transfers, memory, output sizes and source hashes to `measurement.json`.
+
+The [collection benchmark](../../scripts/dev/benchmark_training_collection.py)
+adds untrained recurrent MAPPO actors, compact learning outputs and current or
+historical self-play. Its internal RTX 5090 checks also used B32/T128 and five
+synchronized warm samples. Each case matched its equivalent direct public-call
+loop exactly:
+
+| Case | Collector Median | Direct Median | Real Transitions Per Second |
+| --- | ---: | ---: | ---: |
+| Current, no reset | 1.010 s | 1.002 s | 4,055 |
+| Mixed history, no reset | 1.033 s | 1.026 s | 3,965 |
+| Mixed history, native episode continuation | 1.030 s | 1.024 s | 3,977 |
+| Mixed history, synthetic reset/stage stress | 1.041 s | 1.033 s | 3,936 |
+
+Native continuation reset 32 games. The labelled stress case reset 1,590 games;
+its shortened horizons are test inputs, not training settings. Current and mixed
+cases start at different states, so their difference is not isolated opponent
+cost. A separate comparison holding inputs, weights, memory and keys fixed gave
+0.117 ms for shared current inference and 0.179 ms for mapped history inference.
+Those small calls are noisy: the five samples span 0.101–0.180 ms and
+0.173–0.560 ms respectively. No optimizer runs in any of these checks.
+
+The actor has 3.21 MB of variables and the twenty-slot bank uses 64.16 MB.
+The bank is not stored along the rollout time axis. Each compact rollout uses
+214.67 MB; a fresh device-to-host copy took 23.42 ms. Collection compilation
+took 10.37–13.58 s and temporary executable storage was about 86.79 MB.
+Sampled process GPU memory reached 3.12 GB; process RAM reached 5.05–5.52 GB.
+These peaks include setup and both comparison paths, not a learner's memory
+requirement. Warm execution forbade host/device transfers and callbacks;
+same-shaped changing values reused the compiled program.
+
+One canonical 5v5 recorded block took 16.11 s including its compilation,
+with 1.18 s in writer drains and 0.21 MB of durable output. It recorded starts,
+not completed games. It does not resolve the new-roster recording costs above.
+Earlier cached transfer timings were excluded and replaced with the fresh-copy
+measurement. Failed measurement-probe attempts remain in the local evidence.
+
+Shared-batch and per-lane GPU matrix calls can round differently. In the matched
+probe, actions agreed while recurrent memory differed by at most 0.000165
+(root-mean-square difference 0.00000213). A separate highest-precision check
+reduced the maximum to 0.00000891. Production precision stays unchanged. This
+supports numerical agreement for these inputs, not bitwise equality or identical
+future trajectories across every execution layout.
 
 These checks establish a numerical and integration foundation. They do not
 prove sample efficiency, learned team behavior, complete training throughput

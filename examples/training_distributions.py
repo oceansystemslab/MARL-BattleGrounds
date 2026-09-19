@@ -6,7 +6,8 @@ canonical 300-transition horizon reaches a reset. No files or learner updates
 are produced. ``--output-dir PATH`` records through the existing collector and
 demonstrates a rewind using an in-memory continuation. ``--mappo`` requires the
 training extra and uses explicitly untrained MAPPO actor weights for Team A.
-Use JAX_PLATFORMS=cpu for correctness or cuda on the selected internal GPU.
+Use JAX_PLATFORMS=cpu for correctness or cuda,cpu on the internal GPU;
+recording host validation uses the CPU backend.
 """
 
 from __future__ import annotations
@@ -43,6 +44,10 @@ from marl_battlegrounds.training import (
     sample_training_configs,
     training_keys,
     validate_training_distribution,
+)
+from marl_battlegrounds.training._execution import (  # pyright: ignore[reportPrivateUsage]
+    _apply_and_track,  # pyright: ignore[reportPrivateUsage]
+    _reset_finished,  # pyright: ignore[reportPrivateUsage]
 )
 from marl_battlegrounds.types import System
 
@@ -343,20 +348,18 @@ def _advance(
         if preselected is None
         else preselected.step_keys
     )
-    actions, memory, learning = marl_bgs.apply_systems(
-        actor,
-        opponent,
-        carry.memory,
+    actions, memory, learning, tracking, result = _apply_and_track(
+        carry.env,
         carry.observations,
         before,
-        action_keys,
-        variables_a=carry.variables_a,
-    )
-    result = carry.env.step(step_keys, before, actions)
-    tracking, result = marl_bgs.track_episode_step(
+        carry.memory,
         carry.tracking,
-        before,
-        result,
+        actor=actor,
+        opponent=opponent,
+        variables_a=carry.variables_a,
+        variables_b=None,
+        action_keys=action_keys,
+        step_keys=step_keys,
         source_indices=carry.source_indices,
         source_class_ids=carry.source_class_ids,
     )
@@ -375,46 +378,25 @@ def _advance(
         observations=observations, state=after, memory=memory, tracking=tracking
     )
 
-    def reset_finished(current: Carry) -> Carry:
-        """Draw once, reset finished games and retain all continuing declarations."""
-        generations, _ = _checked_increment(current.state.reset_generation, 1)
-        assert current.tracking.source_configs is not None
-        sampled = (
-            sample_training_configs(
-                current.tracking.source_configs,
-                current.root_key,
-                generations,
-                eligible_maps=current.eligible_maps,
-                team_size=current.team_size,
-            )
-            if preselected is None
-            else preselected.sampled
-        )
-        keys = (
-            training_keys(current.root_key, generations, stream="reset")
-            if preselected is None
-            else preselected.reset_keys
-        )
-        reset_mask = current.state.done.done
-        obs, state = current.env.reset_done(keys, current.state, sampled.config)
-        return current._replace(
-            observations=obs,
-            state=state,
-            source_indices=jnp.where(
-                reset_mask, sampled.source_indices, current.source_indices
-            ),
-            source_class_ids=jnp.where(
-                reset_mask[:, None], sampled.source_class_ids, current.source_class_ids
-            ),
-        )
-
-    def retain(current: Carry) -> Carry:
-        """Return continuing games without sampling or resetting."""
-        return current
-
-    next_carry = cast(
-        Carry,
-        jax.lax.cond(jnp.any(after.done.done), reset_finished, retain, next_carry),
+    assert next_carry.tracking.source_configs is not None
+    observations, state, source_indices, source_class_ids = _reset_finished(
+        next_carry.env,
+        next_carry.observations,
+        next_carry.state,
+        next_carry.source_indices,
+        next_carry.source_class_ids,
+        source_configs=next_carry.tracking.source_configs,
+        root_key=next_carry.root_key,
+        eligible_maps=next_carry.eligible_maps,
+        team_size=next_carry.team_size,
+        sampled=None if preselected is None else preselected.sampled,
+        reset_keys=None if preselected is None else preselected.reset_keys,
+    )
+    next_carry = next_carry._replace(
+        observations=observations,
+        state=state,
+        source_indices=source_indices,
+        source_class_ids=source_class_ids,
     )
     return next_carry, (transition, info, memory.policy_trace)
 

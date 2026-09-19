@@ -89,6 +89,7 @@ The examples expose the editable pieces of an experiment without a Trainer:
 | Model and action sampling | [Systems](../../examples/systems.py) and [research factories](../../examples/research_methods.py) |
 | Compiled rollout and curriculum | [Episode tracking](../../examples/episode_tracking.py) |
 | Verified maps, sampled rosters and recorded restart | [Training distributions](../../examples/training_distributions.py) |
+| Exact budgets, optional shaping and self-play collection | [Training collection](../../examples/training_collection.py) |
 | Illustrative update and complete numerical save/load | [Recorded rollout](../../examples/recorded_rollout.py) |
 | Validation and checkpoint selection | [Evaluation results](../../examples/evaluation_results.py) |
 | Custom or canonical testing | [Evaluation](../../examples/evaluation.py) and [canonical tournaments](canonical_tournaments.md) |
@@ -445,6 +446,32 @@ recorded policy/configuration context through the writer's documented methods.
 Training episodes spanning updates must be labelled as evolving policies,
 not assigned falsely to a single checkpoint.
 
+For the built-in training distribution, the optional
+[training collector](../training/README.md#collect-an-exact-experience-budget)
+handles exact stage budgets, reset-time map/roster choices, self-play assignments
+and compact learner data. It keeps ordinary environment calls available.
+`make_training_schedule` and `init_training_collection` run once on the host;
+reuse their descriptor and carry with `collect_training_rollout`. The default
+uses priority metrics and writes no files. Its pure `scan_training_rollout`
+route can be part of your larger compiled loop.
+
+Run `python examples/training_collection.py --mode Plain` after installing the
+training extra. Choose `C`, `RS` or `C-RS` for curriculum, shaping or both.
+`--output-dir PATH` attaches the existing writer with `phase="training"`.
+The example uses untrained MAPPO weights without optimizer updates. It prints
+requested stages beside actual played exposure; a short completed budget is
+not proof that the requested distributions received useful practice.
+`training_summary` also separates active, living Team A decisions from learner
+samples, which remain unknown until a learner counts them.
+
+The collector keeps task reward and optional score shaping separate. Actor
+inputs and official scores keep their existing meanings. Only completed learner
+updates can refresh current weights or create historical opponents. The example
+has no such updates, so it uses current self-play only. The
+[training guide](../training/README.md#current-and-historical-self-play) explains
+the history and model-update boundary. These collection tools are not a complete
+trainer, model-selection workflow or durable learner checkpoint format.
+
 Each step also returns required outcome fields independently of the metric mode:
 `info.decision_step` is the submitted action's index within its episode;
 `info.episode_length` counts played transitions; and `info.team_scores` gives
@@ -646,6 +673,14 @@ replace terminal padding. It returns the same latest carry and learner transitio
 tree as direct scan. Keep all changing parameters, keys and source values in the
 carry. After returning, unpack the latest environment and tracker before calling
 `stage_summary(state)` or `begin_stage(state, ...)`.
+
+Optionally set `output_steps` to a fixed returned capacity at least `num_steps`.
+For example, `num_steps=3, output_steps=128` performs three callbacks and returns
+three real rows followed by 125 zero rows. It writes no suffix records. Reusing
+the same callback and capacity lets different real prefixes share a compiled
+chunk. This generic helper does not assign learner-specific validity flags or
+neutral action masks; your consumer must handle the zero suffix. Zero real
+steps preserve carry and writer state even when output capacity is positive.
 
 The collector runs on the host and calls reusable compiled chunks. Do not wrap
 `collect_rollout` itself in `jit`, `vmap` or differentiation. Use direct scan when

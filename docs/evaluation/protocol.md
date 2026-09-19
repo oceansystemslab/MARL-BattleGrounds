@@ -189,9 +189,39 @@ It does not restrict the simulator's wider roster support.
 
 Maps and rosters may change only when an episode resets. A continuing game
 keeps its configuration and recurrent memory. An optional curriculum selects
-the team size and eligible training maps over time; its schedule, shaping and
-opponent history belong to later curriculum work. Sampling helpers alone do
-not implement a curriculum, a learner or a training run.
+the team size and eligible training maps over time. The implemented training
+collector composes that schedule with exact whole-batch budgets, optional team
+score shaping and same-run opponent history under
+[A40](../design/specification_amendments.md#a40-training-collection-boundaries).
+It performs no optimizer update and is not a complete trainer.
+
+Every accounting round advances each lane once; the total transition budget
+must divide by the positive even batch size. Requested stage boundaries do not
+replace games already in progress. Report their requested budgets separately
+from the distributions actually played, including games started, transitions,
+active living Team A decisions and unfinished games. Actor decisions are not a
+claim about learner sample use. Keep K20/H300 fixed in these four starting
+settings: Plain, curriculum only, shaping only, and curriculum plus shaping.
+
+Potential shaping uses the learner's exact discount and the producing game's
+team score difference. True wins, losses and horizon draws cancel the next
+potential; collection/stage cutoffs and actor death do not. Keep these training
+adjustments separate from canonical task rewards, scores and saved metrics.
+Shaping grants actors no extra information and proves no learning benefit.
+
+Opponent assignments occur at reset. With stored history, a new game chooses
+current weights with probability 0.8, otherwise one stored snapshot uniformly.
+Empty history means current self-play. Historical variables stay fixed for
+that game. Current variables refresh after a completed learner update, before
+the next collection block; each team's recurrent memory stays separate.
+Requested snapshot thresholds and actual capture updates/experience must both
+be recorded. Several thresholds crossed by one update share one snapshot.
+Assignment probabilities do not fix the realized proportion of transitions.
+
+The [training guide](../training/README.md#collect-an-exact-experience-budget)
+defines the callable workflow, returned data, padding and recording boundary.
+These execution contracts do not establish useful stage exposure, sample
+efficiency, learned teamwork or the one-GPU/one-day competence claim.
 
 An evaluation suite fixes its configuration population and policy assignments.
 A scenario fixes its episode configuration, slot-by-slot roster, initial state,

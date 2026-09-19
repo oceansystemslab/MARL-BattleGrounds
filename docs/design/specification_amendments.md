@@ -2880,3 +2880,62 @@ do not establish a working trainer or a learning result. Curriculum schedules,
 shaping and opponent history are separate implementation work. The
 [evaluation protocol](../evaluation/protocol.md#episode-training-evaluation-and-scenario-ownership)
 states the active experiment contract.
+
+## A40. Training Collection Boundaries
+
+**Accepted training-execution rule — 2026-09-19.** This extends A39's reset-time
+selection with curriculum accounting, optional team potential shaping and
+same-run self-play history. It changes no Core transition, observation, action,
+reward or metric rule. Basic environment/System loops remain available.
+
+Plain and RS request canonical 5v5 on all 42 training maps. C and C-RS request
+17 stages: sizes 1–5 on map 0 at 4% each; eleven 5v5 pools from maps 0–1 through
+0–11 at 20/11% each; then all 42 maps at 60%. C denotes curriculum; RS denotes
+shaping. All four keep K20/H300. These are starting experiment settings whose
+learning value remains unproven.
+
+A round advances every lane once. The positive even batch stays fixed, and the
+total real-transition budget must divide by it exactly. Assign all requested
+shares together using largest remainders, with earlier stages winning exact
+ties. Reject a budget that gives any active stage zero rounds. Do not enlarge
+the total or silently remove stages. Stage completion checks exact real counts
+and equal exposure to the two fixed spawn arrangements.
+
+Stage changes apply to future resets. Existing games retain their configuration
+and memory. Reset finished games immediately before their next real action,
+after any intervening stage change or completed learner update. A final budget
+cutoff performs no replacement reset. Report requested budgets separately from
+played distributions; a requested stage can receive no new games. Reset calls
+and output padding count as neither experience nor played games.
+
+Optional shaping uses coefficient times own score minus opponent score as the
+team potential. The adjustment is the configured learner discount times next
+potential, minus current potential. Real wins, losses and horizon draws set
+next potential to zero; collection/stage cutoffs and actor death do not. Use
+the producing game's pre-action and after-action scores, including authored
+starts. Keep one team-scale signal, task rewards and official scores separate.
+The default coefficient 0.01 is a starting setting. Full discounted adjustment
+is constant for a fixed start; this is not a faster-learning or undiscounted
+win-rate claim. Disabled shaping skips its calculation.
+
+With empty history, opponents use current self-play. Otherwise each reset picks
+current weights with probability 0.8 or a uniformly chosen occupied historical
+slot with probability 0.2. Historical weights and all inference variables remain
+fixed for that game. Current weights refresh only after a completed learner
+update, before the next block, while game memory continues. Teams own separate
+memory and retain existing actor information limits.
+
+The bank holds at most 20 immutable snapshots without eviction. Requested
+thresholds are 5%, 10%, ..., 100% of the exact real budget, rounded upward to
+whole rounds. The first completed update reaching unmet thresholds captures
+one actor and maps all those thresholds to it. Report the actual capture round
+and update; do not create duplicate stored entries to fill threshold labels.
+The final capture may receive no later training exposure.
+
+Collection returns compact permitted inputs, same-call actor outputs, separate
+rewards, real-row masks, producing identities and the true final successor.
+An optional separate physical-state view is training-only and stored once per
+game. Critic memory, learner targets, optimization, model selection and durable
+learner restart remain outside this collection boundary. Correct collection,
+cost measurements and learning results need their own evidence. See the
+[training guide](../training/README.md#collect-an-exact-experience-budget).

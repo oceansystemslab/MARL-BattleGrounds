@@ -2,7 +2,8 @@
 
 Initialize on the host, carry the immutable tracker beside EnvironmentState, and
 call track_episode_step once for each submitted step result. Numerical updates
-work in JAX loops. Stage boundaries inspect only small counters on the host.
+work in JAX loops. Public stage methods inspect only small counters on the host;
+training uses the shared numerical reset after its own compiled boundary checks.
 Recording is optional; disabled recording performs no hashing or disk work.
 """
 
@@ -179,14 +180,7 @@ class EpisodeTrackingState:
             )
         if ordinal == _MAX_COUNT:
             raise ValueError("stage ordinal has exhausted its int32 capacity")
-        return replace(
-            self,
-            stage_ordinal=jnp.asarray(ordinal + 1, jnp.int32),
-            stage_round_budget=jnp.asarray(rounds, jnp.int32),
-            stage_rounds=jnp.asarray(0, jnp.int32),
-            stage_counts=jnp.zeros_like(self.stage_counts),
-            full_batch_rounds_valid=jnp.asarray(True),
-        )
+        return _begin_stage_numerical(self, round_budget=jnp.asarray(rounds, jnp.int32))
 
     def stage_summary(self, state: EnvironmentState) -> dict[str, int | str | None]:
         """Read exact stage totals after checking the latest environment state.
@@ -220,6 +214,29 @@ class EpisodeTrackingState:
         older matching state/tracker pair or discarded execution branch.
         """
         return _summary(self, _boundary_snapshot(self, state))
+
+
+def _begin_stage_numerical(
+    tracking: EpisodeTrackingState, *, round_budget: Array
+) -> EpisodeTrackingState:
+    """Clear stage counters after the caller has checked a stage boundary.
+
+    tracking is the latest numerical tracker. round_budget is a positive int32
+    scalar giving real rounds in the next stage. The caller must first check
+    prior completion, matching environment counts, pending failures and enough
+    room in all counters and the stage ordinal. No checks or host reads occur
+    here, so this helper can run inside JAX loops. Return a new tracker with the
+    next ordinal and cleared stage fields; preserve all episode bindings and
+    cumulative counters. Inputs are unchanged.
+    """
+    return replace(
+        tracking,
+        stage_ordinal=tracking.stage_ordinal + jnp.int32(1),
+        stage_round_budget=round_budget,
+        stage_rounds=jnp.asarray(0, jnp.int32),
+        stage_counts=jnp.zeros_like(tracking.stage_counts),
+        full_batch_rounds_valid=jnp.asarray(True),
+    )
 
 
 def _lane_shape(num_envs: int | None) -> tuple[int, ...]:
