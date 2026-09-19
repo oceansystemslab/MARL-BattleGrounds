@@ -27,6 +27,7 @@ from jax.core import Tracer
 
 from marl_battlegrounds._tdm_assets import (
     MapGeometry,
+    ScenarioContent,
     TDMAssetSource,
     TDMMapInfo,
     TDMScenarioInfo,
@@ -49,6 +50,7 @@ from marl_battlegrounds.core.types import (
     MAX_AGENTS_PER_TEAM,
     MAX_OBSTACLE_SLOTS,
     NEUTRAL_CLASS_ID,
+    NUM_CLASSES,
     NUM_TEAMS,
     OBSTACLE_FEATURES,
     PRIEST_CLASS_ID,
@@ -524,6 +526,108 @@ def spawn_locations_for_source(
     return matches_source, spawn_choice
 
 
+def _source_config_with_class_ids(  # pyright: ignore[reportUnusedFunction]
+    source: EnvConfig, source_class_ids: Array
+) -> tuple[EnvConfig, Array]:
+    """Rebuild a declared source roster from Core's class catalog.
+
+    Parameters
+    ----------
+    source : EnvConfig
+        Scalar source or native batch. Its profile sets the expected lane shape.
+        Physical validation belongs to setup; this helper changes no other field.
+    source_class_ids : integer array
+        Same-leading-shape ten-slot declaration. Each team's nonzero classes
+        1..5 must precede zero padding. Repeated classes and empty teams are
+        allowed. Ten -1 values retain the complete original profile, including
+        its capability values. This helper does not broadcast declarations.
+
+    Returns
+    -------
+    tuple[EnvConfig, Array]
+        Rebuilt source and Boolean validity with the source's lane shape.
+        Inputs stay unchanged. A malformed traced row retains the original
+        profile and returns False; the caller must keep that failure evidence.
+
+    Raises
+    ------
+    TypeError
+        Source types or declaration integer dtype are invalid.
+    ValueError
+        Shapes differ or a concrete row has invalid classes or padding. Values
+        are checked before int32 narrowing and before catalog indexing.
+
+    Notes
+    -----
+    Supports jit and external vmap. It uses Core's resolver, not copied class
+    tables. Training's no-duplicate, canonical order and Priest rules belong to
+    the sampler; generic recording declarations need only compact valid rows.
+    """
+    shape = jnp.shape(source.agent_profile.active_mask)
+    batch = shape[0] if len(shape) == 2 else None
+    _config_has_batch(source, batch)
+    if isinstance(source_class_ids, Tracer):
+        values = cast(Array, source_class_ids)
+        if not jnp.issubdtype(values.dtype, jnp.integer) or jnp.issubdtype(
+            values.dtype, jnp.bool_
+        ):
+            raise TypeError("source_class_ids must contain integers")
+    else:
+        raw = np.asarray(source_class_ids)
+        if raw.dtype.kind not in "iu":
+            raise TypeError("source_class_ids must contain integers")
+        if raw.shape != shape:
+            raise ValueError(f"source_class_ids must have shape {shape}")
+        sentinel = np.all(raw == -1, axis=-1) if raw.dtype.kind == "i" else False
+        teams = raw.reshape((*shape[:-1], NUM_TEAMS, MAX_AGENTS_PER_TEAM))
+        active = teams > 0
+        compact = np.all(
+            active == (np.arange(MAX_AGENTS_PER_TEAM) < active.sum(-1)[..., None]),
+            axis=(-2, -1),
+        )
+        in_range = np.all(raw < NUM_CLASSES, axis=-1)
+        if raw.dtype.kind == "i":
+            in_range &= np.all(raw >= NEUTRAL_CLASS_ID, axis=-1)
+        if not np.all(sentinel | (in_range & compact)):
+            raise ValueError(
+                "source_class_ids require compact classes 0..5 or ten -1 values"
+            )
+        values = jnp.asarray(raw.astype(np.int32))
+    if values.shape != shape:
+        raise ValueError(f"source_class_ids must have shape {shape}")
+    sentinel = (
+        jnp.all(values == -1, axis=-1)
+        if jnp.issubdtype(values.dtype, jnp.signedinteger)
+        else jnp.zeros(shape[:-1], dtype=jnp.bool_)
+    )
+    teams = values.reshape((*shape[:-1], NUM_TEAMS, MAX_AGENTS_PER_TEAM))
+    active = teams > 0
+    sizes = jnp.sum(active, axis=-1, dtype=jnp.int32)
+    compact = jnp.all(
+        active == (jnp.arange(MAX_AGENTS_PER_TEAM) < sizes[..., None]),
+        axis=(-2, -1),
+    )
+    valid = sentinel | (
+        jnp.all((values >= NEUTRAL_CLASS_ID) & (values < NUM_CLASSES), axis=-1)
+        & compact
+    )
+    replace_profile = valid & ~sentinel
+    safe = jnp.where(replace_profile[..., None], values, 0).astype(jnp.int32)
+    sizes = jnp.where(replace_profile[..., None], sizes, 0)
+    profile = (
+        resolve_agent_profile(safe, sizes)
+        if batch is None
+        else jax.vmap(resolve_agent_profile)(safe, sizes)
+    )
+
+    def choose_profile(new: Array, old: Array) -> Array:
+        """Retain original profile rows for absent or invalid declarations."""
+        return jnp.where(replace_profile[..., None], new, old)
+
+    profile = jax.tree.map(choose_profile, profile, source.agent_profile)
+    return source._replace(agent_profile=profile), valid
+
+
 def _map_info(map_id: int) -> TDMMapInfo:
     """Return the current catalog entry for a plain Python map ID.
 
@@ -778,6 +882,18 @@ def load_tdm_scenario(scenario_id: int) -> TDMScenario:
         raise ValueError("scenario_id must be an approved integer from 1 through 8")
     info = list_tdm_scenarios()[scenario_id - 1]
     content = scenario_content(info)
+    return _load_tdm_scenario(info, content)
+
+
+def _load_tdm_scenario(info: TDMScenarioInfo, content: ScenarioContent) -> TDMScenario:
+    """Resolve one scenario whose installed bytes were already verified.
+
+    info is its current catalog entry; content comes from scenario_content(info).
+    This shared host path performs the public loader's exact configuration,
+    state and horizon checks without reading those bytes again. Return the
+    validated TDMScenario. Validation errors propagate; no episode is advanced.
+    Internal setup callers own the byte verification and must keep this pair.
+    """
     resolved = content.configuration
     geometry = MapGeometry(
         map_width=resolved.map_width,

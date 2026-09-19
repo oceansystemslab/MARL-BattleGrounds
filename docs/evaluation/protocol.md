@@ -166,18 +166,32 @@ evaluation population it belongs to. [Amendment A15](../design/specification_ame
 defines structural validity and the permissive Team Deathmatch roster
 contract.
 
-Milestone 9 owns the planned training-selection layer. The default direct Team
-Deathmatch training contract uses the canonical mirrored five-class 5v5 roster and the same task
-mechanics, lifecycle rules, score threshold `K`, horizon `H`, and canonical
-reward as official evaluation, but it samples from the separately approved
-training-map distribution and training seed schedule. Researchers may replace
-that default with any distribution over structurally valid episode
-configurations. An optional curriculum is a checkpointable, stateful selector
-over the same contract; its benchmark 1v1–5v5 path uses explicitly approved,
-handpicked rosters rather than an exhaustive composition grid. Map identities
-selected into the training distribution and the exact curriculum roster, map,
-weight, retention, opponent, and transition choices remain future Milestone 9
-decisions.
+Milestone 9 owns training selection. The approved direct Team Deathmatch
+training contract uses the canonical mirrored five-class 5v5 roster and the
+same task mechanics, lifecycle rules, score threshold `K`, horizon `H`, and
+canonical reward as official evaluation. It draws maps uniformly from the
+verified training set, maps 0–41. Maps 42–46 belong to validation; maps 47–51
+belong to the locked test set. Content identity and declared use enforce these
+boundaries; changing a name or map number does not make held-out content
+eligible for training. Researchers may define other distributions over
+structurally valid episode configurations, subject to the experiment's
+declared content-separation rules.
+
+The approved benchmark 1v1–5v5 roster rule uses equal team sizes. Each team
+draws its own class subset independently and uniformly, without duplicate
+classes. A 1v1 draw excludes Priest. Draws at 2v2–4v4 allow all five classes.
+Selected classes fill each team's first slots in canonical relative order;
+the remaining slots are inactive. At 5v5, both teams use exactly Mage, Warrior,
+Hunter, Rogue, Priest in that order. This rule replaces the earlier handpicked
+roster proposal, as recorded in
+[A39](../design/specification_amendments.md#a39-sampled-training-maps-and-rosters).
+It does not restrict the simulator's wider roster support.
+
+Maps and rosters may change only when an episode resets. A continuing game
+keeps its configuration and recurrent memory. An optional curriculum selects
+the team size and eligible training maps over time; its schedule, shaping and
+opponent history belong to later curriculum work. Sampling helpers alone do
+not implement a curriculum, a learner or a training run.
 
 An evaluation suite fixes its configuration population and policy assignments.
 A scenario fixes its episode configuration, slot-by-slot roster, initial state,

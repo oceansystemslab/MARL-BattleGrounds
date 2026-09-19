@@ -88,6 +88,7 @@ The examples expose the editable pieces of an experiment without a Trainer:
 | --- | --- |
 | Model and action sampling | [Systems](../../examples/systems.py) and [research factories](../../examples/research_methods.py) |
 | Compiled rollout and curriculum | [Episode tracking](../../examples/episode_tracking.py) |
+| Verified maps, sampled rosters and recorded restart | [Training distributions](../../examples/training_distributions.py) |
 | Illustrative update and complete numerical save/load | [Recorded rollout](../../examples/recorded_rollout.py) |
 | Validation and checkpoint selection | [Evaluation results](../../examples/evaluation_results.py) |
 | Custom or canonical testing | [Evaluation](../../examples/evaluation.py) and [canonical tournaments](canonical_tournaments.md) |
@@ -537,13 +538,33 @@ unknown coverage. Padding cannot be offset by later steps. Terminal transitions
 count; reset calls do not. Summary includes requested/actual steps, each spawn
 category, status and an incomplete reason. Accounting errors raise instead.
 
-For a curriculum, supply one immutable `source_configs` bank and initial
-`source_indices` at initialization. Sample from `tracking.source_configs`; pass
-new indices to tracking after explicit reset of the affected games. The helper
-owns reset masks, clearing and source checks. An undeclared override clears its
-previous binding. Unknown, ambiguous and authored starts do not earn balance
-credit. Exact supplied configurations remain exact. Keep changing source values
-and method parameters dynamic; do not recreate compiled closures each update.
+For changing training distributions, first use
+[`prepare_training_content`](../training/README.md#verified-training-content).
+It checks the installed training split and returns one immutable source bank.
+The [sampling helpers](../training/README.md#sample-maps-and-rosters-at-reset)
+select eligible maps and independent equal-size rosters. They use base
+dependencies and supply no learner or curriculum schedule.
+
+Pass the bank as `source_configs`, and pass the sampled `source_indices` and
+`source_class_ids` to `init_episode_tracking`. Class declarations use int32
+`(B,10)` rows, or one `(10,)` row broadcast across lanes. Each team's active
+classes occupy its first slots, followed by zero padding. Ten `-1` values mean
+the original source roster. Omitted declarations mean no roster override; the
+tracker never guesses one from the current configuration.
+
+Select new configurations only at reset. Pass new declarations to
+`track_episode_step` for the first transition after that reset. Continuing lanes
+retain their prior source and roster. A reset that reuses the same configuration
+origin retains its declaration when both arguments are omitted. A changed origin
+without declarations clears source ownership. An explicit source index without
+class IDs claims the original source roster. The tracker rebuilds only the
+declared profile through the class catalog, then compares the full configuration
+and ordered spawn banks. Altered rules, capabilities or geometry fail that check.
+
+Unknown, ambiguous and authored starts do not earn balance credit. Invalid
+traced declarations set persistent tracking errors and receive no balance credit.
+Exact supplied configurations remain exact. Keep changing values and method
+parameters dynamic; do not recreate compiled closures each update.
 
 The runnable tracking example grows pools from the first training map through
 the first twelve, then includes all 42 training maps, in catalog order.
@@ -581,10 +602,20 @@ info.episode_start_records, source_configs=tracking.source_configs)`, then
 first transition's actual configuration before dependent output. Empty unchanged
 registration does not flush other buffered data. Use `writer.flush()` for that.
 Disabled start recording performs no source hashing or start serialization.
+`EpisodeStartRecords.source_class_ids` has trailing shape `(10,)` after any
+scalar, batch or time/batch axes. Unknown and padded rows use ten `-1` values.
+Its default `None` preserves existing nine-argument producers and means that
+no roster override was declared. It does not infer a roster or change old
+recorded claims. Bounded collection preserves this trailing ten-slot axis.
 
-The example's `--output-dir PATH` enables this host recording route. It does not
-provide bounded compiled collection. Save complete numerical carries to continue
-unrecorded execution; do not treat that as coordinated recorded-training recovery.
+The tracking example's `--output-dir PATH` enables this host recording route.
+It does not provide bounded compiled collection. Save complete numerical carries
+to continue its unrecorded execution; that alone does not coordinate recovery
+with recorded output.
+
+The separate [training-distribution example](../../examples/training_distributions.py)
+combines verified content, sampled rosters, bounded collection and an in-memory
+recorded restart. Random is the default; its optional MAPPO actor is untrained.
 Each independent seed needs its own environment, memory, RNG, tracker, budget and
 recording pass. Validation uses a separate context and leaves training untouched.
 
@@ -653,7 +684,26 @@ model or optimizer. A zero-progress initial boundary is allowed. Keep every bund
 while a retained learner checkpoint refers to it; a token without its files is
 not a backup. Retaining many checkpoints can duplicate unfinished replay history.
 
-Restore the learner carry and its token together, then open:
+Restore the learner carry and its token together. For experiments using the
+built-in training distribution, save the content binding with that state and
+check it before creating any resumed writer:
+
+```python
+from marl_battlegrounds.training import prepare_training_content
+
+# saved_binding comes from the same saved experiment state as the carry/token.
+prepared = prepare_training_content(expected=saved_binding)
+```
+
+This is a resume fragment: the researcher owns loading the saved experiment
+state. Content verification compares scientific identities, approved uses and
+source-bank order. It must run before collection, updates or writer construction,
+including ordinary resume without a recording token. Harmless display labels or
+authored-file locations may change; incompatible scientific content fails.
+See the [training setup guide](../training/README.md#verified-training-content)
+for the supported content boundary.
+
+After successful verification, open:
 
 ```python
 writer = marl_bgs.RunWriter(
@@ -668,6 +718,14 @@ writer = marl_bgs.RunWriter(
 Keep the original registered System descriptions. Restored learned weights remain
 in your carry and enter action calls through `variables_a`/`variables_b`. Do not
 rebuild the registration with different weights and label it as the old identity.
+Both ordinary resume and token restore verify saved start declarations before
+changing run files. The writer reconstructs any declared roster from the source
+catalog, then checks the full configuration and ordered spawn banks. Source-bank
+identity and resolved episode identity remain separate. Verified/custom starts
+must contain resolved configuration evidence. Ordinary resume may keep a pending
+start only when no transition evidence has been recorded for it. A historical
+missing class field still means no roster override; no claim is inferred.
+
 The writer validates the entire selected boundary before changing run files.
 It then makes that boundary authoritative, removes later CSV suffixes and restores
 unfinished replay streams. Later unreferenced replay files remain on disk but do

@@ -9,7 +9,7 @@ plumbing and is not a manuscript sampling plan.
 
 from __future__ import annotations
 
-from marl_battlegrounds._tdm_assets import scenario_content
+from marl_battlegrounds._tdm_assets import ScenarioContent, scenario_content
 from marl_battlegrounds.evaluation.catalog import build_roster_v1
 from marl_battlegrounds.evaluation.models import (
     ContentAddressedIdentityV1,
@@ -36,7 +36,7 @@ from marl_battlegrounds.policies.reactive_tdm_alpha import (
 from marl_battlegrounds.policies.reactive_tdm_beta import (
     reactive_tdm_beta_controller_descriptor,
 )
-from marl_battlegrounds.tasks import load_tdm_scenario
+from marl_battlegrounds.tasks import TDMScenario, load_tdm_scenario
 
 TDM_SCENARIO_PUBLIC_AGENT_IDS = tuple(
     f"agent-{team}{slot}" for team in ("a", "b") for slot in range(1, 6)
@@ -79,6 +79,16 @@ def tdm_scenario_pressure_identity(scenario_id: int) -> ContentAddressedIdentity
     controller rules, not learned weights or a claim about their performance.
     """
     load_tdm_scenario(scenario_id)
+    return _pressure_identity(scenario_id)
+
+
+def _pressure_identity(scenario_id: int) -> ContentAddressedIdentityV1:
+    """Identify pressure rules for an already validated packaged scenario ID.
+
+    scenario_id must be 1 through 8, checked by the owning scenario loader.
+    Return the current ALPHA/BETA descriptor identity without loading or running
+    the scenario again. Only validated preparation paths call this helper.
+    """
     descriptor = (
         reactive_tdm_beta_controller_descriptor()
         if scenario_id in TDM_BETA_SCENARIO_IDS
@@ -173,6 +183,27 @@ def build_tdm_scenario_specification(
     """
     scenario = load_tdm_scenario(scenario_id)
     content = scenario_content(scenario.info)
+    return _prepared_scenario_specification(
+        scenario, content, seed_schedule, initial_frame=initial_frame
+    )
+
+
+def _prepared_scenario_specification(
+    scenario: TDMScenario,
+    content: ScenarioContent,
+    seed_schedule: ScenarioSeedScheduleV3,
+    *,
+    initial_frame: EvaluationFrame | None = None,
+) -> ResolvedScenarioSpecificationV3:
+    """Build the shared specification from an already verified scenario pair.
+
+    scenario and content must come from the same validated loader call. Use the
+    exact authored snapshot, not a newly rounded copy. seed_schedule and the
+    optional initial_frame have the public builder's contracts. Return the same
+    frozen specification without resource reads or repeated scenario validation.
+    Reject a supplied frame that differs from the exact authored start.
+    """
+    scenario_id = scenario.info.scenario_id
     if initial_frame is not None and (
         initial_frame.frame_index != 0
         or initial_frame.simulator_step_count != content.step_count
@@ -216,7 +247,7 @@ def build_tdm_scenario_specification(
         ),
         "seed_schedule": seed_schedule,
         "horizon": scenario.info.horizon,
-        "pressure_protocol": tdm_scenario_pressure_identity(scenario_id),
+        "pressure_protocol": _pressure_identity(scenario_id),
         "primary_measurement": ScenarioMeasurementDefinitionV1(
             measurement_id="tdm.terminal_team_a_reward",
             measurement_version=1,

@@ -5,6 +5,8 @@ Tests cover sparse metric tables, source starts, policy choices, replay ownershi
 evidence-only padding, bad later rows and errors without emitted records. The
 writer must publish no dependent output from a rejected drain and must not copy
 learner data or flush merely because an unchanged evidence row was inspected.
+Source roster rows retain their ten-slot axis through scalar/native collection
+and repeated drains; absent legacy fields and disabled starts stay absent.
 """
 
 import csv
@@ -501,9 +503,9 @@ def test_start_verification_reuses_only_exact_successful_config_relationships(
             both_spawn_choices=cast(bool, kwargs["both_spawn_choices"]),
         )
 
-    def compared(a: EnvConfig, b: EnvConfig) -> object:
+    def compared(a: EnvConfig, b: EnvConfig, classes: jax.Array) -> object:
         relationships.append(a)
-        return relationship(a, b)
+        return relationship(a, b, classes)
 
     monkeypatch.setattr(tasks, "_validate_config_choices", checked)
     monkeypatch.setattr(writer_module, "_source_relationship_check", lambda: compared)
@@ -867,3 +869,178 @@ def test_staged_replay_conflicts_are_checked_before_any_final_link(
     assert final_first.stat().st_ino == first.stat().st_ino
     _publish_staged_replays(files)
     assert final_second.read_bytes() == b"second"
+
+
+@pytest.mark.parametrize("batch", [None, 2])
+@pytest.mark.parametrize("roster", ["legacy", "explicit", "disabled"])
+def test_collection_preserves_source_class_rows_across_time_and_drains(
+    terminal: EpisodeInfo,
+    batch: int | None,
+    roster: str,
+) -> None:
+    from marl_battlegrounds.collection import (
+        _collect,  # pyright: ignore[reportPrivateUsage]
+        _empty_batch,  # pyright: ignore[reportPrivateUsage]
+        _prepare,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    size = 1 if batch is None else batch
+    leading = () if batch is None else (batch,)
+    source_start = _start(terminal)
+    assert source_start.source_class_ids is None
+
+    def broadcast(value: jax.Array) -> jax.Array:
+        return jnp.broadcast_to(value, (*leading, *value.shape))
+
+    template = jax.tree.map(
+        broadcast,
+        terminal._replace(
+            priority=None,
+            full=None,
+            replay=None,
+            episode_start_records=source_start,
+        ),
+    )
+
+    def step(
+        counter: jax.Array, unused: None
+    ) -> tuple[jax.Array, tuple[object, EpisodeInfo, None]]:
+        del unused
+        episode_ids = (counter * size + jnp.arange(size, dtype=jnp.int32) + 1).reshape(
+            leading
+        )
+        starts = template.episode_start_records
+        assert starts is not None
+        classes = None
+        if roster == "explicit":
+            # Distinct compact declarations expose lane/time reordering. The
+            # collector carries these claims; the writer owns source verification.
+            first = (episode_ids % 5 + 1)[..., None]
+            classes = jnp.concatenate(
+                (
+                    first,
+                    jnp.zeros((*leading, 4), jnp.int32),
+                    first,
+                    jnp.zeros((*leading, 4), jnp.int32),
+                ),
+                axis=-1,
+            )
+        starts = (
+            None
+            if roster == "disabled"
+            else starts._replace(episode_id=episode_ids, source_class_ids=classes)
+        )
+        info = template._replace(episode_id=episode_ids, episode_start_records=starts)
+        return counter + 1, (episode_ids, info, None)
+
+    initial = jnp.int32(0)
+    prepared = _prepare(step, initial, size)
+    empty = _empty_batch(prepared)
+    if roster == "disabled":
+        assert empty.buffers.starts is None
+    else:
+        assert empty.buffers.starts is not None
+        rows = empty.buffers.starts.records.source_class_ids
+        if roster == "legacy":
+            assert rows is None
+        else:
+            assert rows is not None and rows.shape == (size, 10)
+    expected_counter, (expected, direct, _) = jax.lax.scan(
+        step, initial, None, length=3
+    )
+    drains: list[CollectedBatch] = []
+
+    def drain(value: CollectedBatch) -> None:
+        drains.append(cast(CollectedBatch, jax.device_get(value)))
+
+    counter, transitions = _collect(
+        step, initial, num_steps=3, record_capacity=size, drain=drain
+    )
+    np.testing.assert_array_equal(counter, expected_counter)
+    np.testing.assert_array_equal(transitions, expected)
+    if roster == "disabled":
+        assert all(
+            packet.buffers.starts is None and int(packet.counts.starts) == 0
+            for packet in drains
+        )
+        assert direct.episode_start_records is None
+        return
+    direct_starts = direct.episode_start_records
+    assert direct_starts is not None
+    packed = [packet.buffers.starts for packet in drains]
+    assert all(row is not None for row in packed)
+    np.testing.assert_array_equal(
+        np.concatenate([row.records.episode_id for row in packed if row is not None]),
+        np.asarray(direct_starts.episode_id).reshape(-1),
+    )
+    if roster == "legacy":
+        assert direct_starts.source_class_ids is None
+        assert all(
+            row is not None and row.records.source_class_ids is None for row in packed
+        )
+    else:
+        assert direct_starts.source_class_ids is not None
+        assert direct_starts.source_class_ids.shape == (3, *leading, 10)
+        actual = [row.records.source_class_ids for row in packed if row is not None]
+        assert all(value is not None and value.dtype == np.int32 for value in actual)
+        np.testing.assert_array_equal(
+            np.concatenate([value for value in actual if value is not None]),
+            np.asarray(direct_starts.source_class_ids).reshape(-1, 10),
+        )
+
+
+@pytest.mark.parametrize("batch", [None, 2])
+@pytest.mark.parametrize(
+    "fault", ["short", "long", "extra_axis", "float", "bool", "unsigned"]
+)
+def test_collection_rejects_source_class_shape_or_dtype_before_execution(
+    terminal: EpisodeInfo,
+    batch: int | None,
+    fault: str,
+) -> None:
+    from marl_battlegrounds.collection import (
+        _prepare,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    leading = () if batch is None else (batch,)
+
+    def broadcast(value: jax.Array) -> jax.Array:
+        return jnp.broadcast_to(value, (*leading, *value.shape))
+
+    info = jax.tree.map(
+        broadcast,
+        terminal._replace(
+            priority=None,
+            full=None,
+            replay=None,
+            episode_start_records=_start(terminal),
+        ),
+    )
+    starts = info.episode_start_records
+    assert starts is not None
+    shape = (*leading, 9 if fault == "short" else 11 if fault == "long" else 10)
+    if fault == "extra_axis":
+        shape = (*shape, 1)
+    dtype = (
+        jnp.float32
+        if fault == "float"
+        else jnp.bool_
+        if fault == "bool"
+        else jnp.uint32
+        if fault == "unsigned"
+        else jnp.int32
+    )
+    info = info._replace(
+        episode_start_records=starts._replace(source_class_ids=jnp.zeros(shape, dtype))
+    )
+
+    def step(
+        counter: jax.Array, unused: None
+    ) -> tuple[jax.Array, tuple[object, EpisodeInfo, None]]:
+        del unused
+        return counter + 1, ((), info, None)
+
+    with pytest.raises(
+        ValueError, match=r"starts.source_class_ids must have shape.*dtype int32"
+    ):
+        _prepare(step, jnp.int32(0), None)

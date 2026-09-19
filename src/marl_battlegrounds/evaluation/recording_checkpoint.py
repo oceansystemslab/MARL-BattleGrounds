@@ -597,13 +597,15 @@ def _check_tables(
 
 
 def _check_manifest_references(saved: dict[str, Any], pass_key: str) -> None:
-    """Check content IDs and references without re-running past game validation.
+    """Check content identities and saved source relationships before rewind.
 
     The immutable bundle proves bytes; these checks also prove that its saved
-    sources, configurations, starts, completions, traces and schedules join. Physical
-    validity and source-to-spawn relationships remain the existing writer's rule.
+    sources, configurations, starts, completions, traces and schedules join.
+    Reuse RunWriter's saved-start validator for physical configuration validity,
+    optional roster reconstruction and exact source/spawn relationships. Pending
+    starts fail at this token boundary. No physics or file mutation is performed.
     """
-    from marl_battlegrounds.evaluation.run_writer import _json_bytes
+    from marl_battlegrounds.evaluation.run_writer import RunWriter, _json_bytes
 
     configurations = _object(saved.get("configurations"), "saved configurations")
     for identifier, content in configurations.items():
@@ -645,17 +647,7 @@ def _check_manifest_references(saved: dict[str, Any], pass_key: str) -> None:
             raise ValueError("checkpoint config refers to an unfinished episode")
         if not isinstance(value, str) or value not in configurations:
             raise ValueError("checkpoint completion references a missing configuration")
-    for start in entry.get("episode_starts", {}).values():
-        if start.get("verification") == "pending":
-            raise ValueError("checkpoint contains unresolved first-start evidence")
-        resolved = start.get("resolved_config_id")
-        if resolved is not None and resolved not in configurations:
-            raise ValueError("checkpoint start references a missing configuration")
-        if start.get("source_known"):
-            bank = banks.get(start.get("source_table_id"))
-            index = _integer(start.get("source_index"), "start source index")
-            if bank is None or index >= len(bank):
-                raise ValueError("checkpoint start references a missing source")
+    RunWriter._validate_saved_starts(saved, allow_pending=False, pass_key=pass_key)
     for episode in entry.get("episodes", {}).values():
         resolved = episode.get("configuration_digest", episode.get("config_id"))
         if resolved is not None:

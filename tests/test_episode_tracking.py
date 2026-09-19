@@ -23,6 +23,7 @@ from marl_battlegrounds.episode_tracking import (
     track_episode_step,
 )
 from marl_battlegrounds.tasks import (
+    _source_config_with_class_ids,  # pyright: ignore[reportPrivateUsage]
     balanced_spawn_configs,
     make_standard_team_deathmatch_config,
 )
@@ -60,10 +61,17 @@ def _track_jit(
     result: StepResult,
     *,
     source_indices: object = None,
+    source_class_ids: object = None,
 ) -> tuple[EpisodeTrackingState, StepResult]:
     return cast(
         tuple[EpisodeTrackingState, StepResult],
-        _compiled_tracking(tracker, state, result, source_indices=source_indices),
+        _compiled_tracking(
+            tracker,
+            state,
+            result,
+            source_indices=source_indices,
+            source_class_ids=source_class_ids,
+        ),
     )
 
 
@@ -443,3 +451,245 @@ def test_wrong_result_lane_shapes_fail_instead_of_broadcasting(field: str) -> No
     info = result[4]._replace(**{field: getattr(result[4], field)[0]})
     with pytest.raises(ValueError, match="shape"):
         track_episode_step(tracker, state, (*result[:4], info))
+
+
+def _roster_setup(
+    batch: int | None = 2, *, record: bool = True
+) -> tuple[Environment, EnvironmentState, EpisodeTrackingState, Array]:
+    source = _source()
+    classes = jnp.array([1, 3, 0, 0, 0, 2, 5, 0, 0, 0], jnp.int32)
+    resolved, valid = _source_config_with_class_ids(source, classes)
+    assert bool(valid)
+    config = (
+        resolved if batch is None else balanced_spawn_configs(resolved, num_envs=batch)
+    )
+    env = make("tdm", env_config=source, num_envs=batch, metrics="none")
+    _, state = env.reset(jax.random.key(302), config)
+    tracker = init_episode_tracking(
+        env,
+        state,
+        source_configs=source,
+        source_indices=0,
+        source_class_ids=classes,
+        record_starts=record,
+    )
+    return env, state, tracker, classes
+
+
+@pytest.mark.parametrize("batch", [None, 2])
+def test_declared_rosters_emit_once_and_preserve_real_transition_counts(
+    batch: int | None,
+) -> None:
+    env, state, tracker, classes = _roster_setup(batch)
+    expected = np.broadcast_to(classes, (() if batch is None else (batch,)) + (10,))
+    np.testing.assert_array_equal(tracker.source_class_ids, expected)
+    saved_bank = tracker.source_configs
+    for tick in range(3):
+        tracker, result = _track_jit(tracker, state, _step(env, state))
+        starts = result[4].episode_start_records
+        assert starts is not None and starts.source_class_ids is not None
+        np.testing.assert_array_equal(starts.valid, tick == 0)
+        np.testing.assert_array_equal(
+            starts.source_class_ids, expected if tick == 0 else -1
+        )
+        np.testing.assert_array_equal(tracker.error_flags, 0)
+        state = result[1]
+    _assert_tree(tracker.source_configs, saved_bank)
+    assert tracker.stage_summary(state)["env_steps"] == 2 * (batch or 1)
+
+
+def test_partial_reset_rosters_ignore_continuing_values_and_keep_first_ownership() -> (
+    None
+):
+    env, state, tracker, classes = _roster_setup()
+    tracker, result = _track_jit(tracker, state, _step(env, state))
+    state = result[1]
+    new_classes = jnp.array([4, 0, 0, 0, 0, 1, 0, 0, 0, 0], jnp.int32)
+    resolved, _ = _source_config_with_class_ids(_source(), new_classes)
+    _, reset = env.reset(
+        jax.random.key(303),
+        balanced_spawn_configs(resolved, num_envs=2),
+        state=state,
+        reset_mask=jnp.array([True, False]),
+    )
+    supplied = np.stack(
+        (np.asarray(new_classes, np.int64), np.full(10, 2**40, np.int64))
+    )
+    tracker, tracked = track_episode_step(
+        tracker,
+        reset,
+        _step(env, reset),
+        source_indices=np.array([0, 999]),
+        source_class_ids=supplied,
+    )
+    np.testing.assert_array_equal(
+        tracker.source_class_ids, np.stack((new_classes, classes))
+    )
+    np.testing.assert_array_equal(tracker.error_flags, 0)
+    np.testing.assert_array_equal(
+        reset.core_state.agent_positions[1], state.core_state.agent_positions[1]
+    )
+    starts = tracked[4].episode_start_records
+    assert starts is not None and starts.source_class_ids is not None
+    np.testing.assert_array_equal(starts.valid, [True, False])
+    np.testing.assert_array_equal(starts.source_class_ids[0], new_classes)
+    np.testing.assert_array_equal(starts.source_class_ids[1], -1)
+    assert tracker.stage_summary(tracked[1])["env_steps"] == 4
+
+
+@pytest.mark.parametrize(
+    "mode", ["reuse", "changed_origin", "explicit_original", "explicit_roster"]
+)
+def test_roster_rebinding_has_explicit_ownership_rules(mode: str) -> None:
+    env, state, tracker, classes = _roster_setup()
+    config = state.config if mode == "changed_origin" else None
+    _, reset = env.reset(jax.random.key(304), config, state=state)
+    kwargs: dict[str, object] = {}
+    if mode == "explicit_original":
+        kwargs["source_indices"] = 0
+    elif mode == "explicit_roster":
+        kwargs["source_class_ids"] = classes
+    tracker, result = track_episode_step(tracker, reset, _step(env, reset), **kwargs)
+    if mode == "explicit_original":
+        np.testing.assert_array_equal(tracker.error_flags, 1)
+        np.testing.assert_array_equal(tracker.stage_counts, 0)
+    elif mode == "changed_origin":
+        np.testing.assert_array_equal(tracker.source_known, False)
+        np.testing.assert_array_equal(tracker.source_class_ids, -1)
+        assert tracker.stage_summary(result[1])["unreported_spawn_steps"] == 2
+    else:
+        np.testing.assert_array_equal(
+            tracker.source_class_ids, np.broadcast_to(classes, (2, 10))
+        )
+        np.testing.assert_array_equal(tracker.error_flags, 0)
+
+
+@pytest.mark.parametrize(
+    "classes",
+    [
+        np.ones(10, bool),
+        np.ones(10, np.float32),
+        np.ones(9, np.int32),
+        np.full(10, 2**32, np.uint64),
+        np.array([1, -1, 0, 0, 0, 2, 0, 0, 0, 0]),
+        np.array([1, 0, 2, 0, 0, 2, 0, 0, 0, 0]),
+    ],
+)
+def test_bad_initial_roster_declarations_fail_before_narrowing(classes: object) -> None:
+    env, state, _, _ = _roster_setup()
+    with pytest.raises((TypeError, ValueError)):
+        init_episode_tracking(
+            env,
+            state,
+            source_configs=_source(),
+            source_indices=0,
+            source_class_ids=classes,
+        )
+
+
+def test_traced_bad_roster_is_sticky_and_receives_no_balance_credit() -> None:
+    env, state, tracker, classes = _roster_setup()
+    _, reset = env.reset(jax.random.key(305), state=state)
+    rows = jnp.broadcast_to(classes, (2, 10)).at[0, 1].set(-1)
+    tracker, result = _track_jit(
+        tracker,
+        reset,
+        _step(env, reset),
+        source_indices=0,
+        source_class_ids=rows,
+    )
+    np.testing.assert_array_equal(tracker.error_flags, [1, 0])
+    np.testing.assert_array_equal(tracker.stage_counts[0], 0)
+    assert result[4].episode_start_records is not None
+    np.testing.assert_array_equal(result[4].episode_start_records.valid, [False, True])
+    tracker, following = _track_jit(tracker, result[1], _step(env, result[1]))
+    assert int(tracker.error_flags[0]) & 1
+    np.testing.assert_array_equal(tracker.stage_counts[0], 0)
+    with pytest.raises(ValueError, match="accounting failed"):
+        tracker.stage_summary(following[1])
+
+
+@pytest.mark.parametrize("change", ["capability", "geometry", "rule", "spawn", "class"])
+def test_roster_declarations_cannot_change_other_source_facts(change: str) -> None:
+    env, state, _, classes = _roster_setup()
+    config = state.config
+    if change == "capability":
+        config = config._replace(
+            agent_profile=config.agent_profile._replace(
+                max_health=config.agent_profile.max_health + 1,
+            )
+        )
+    elif change == "geometry":
+        config = config._replace(map_width=config.map_width + 1)
+    elif change == "rule":
+        config = config._replace(max_steps=config.max_steps + 1)
+    elif change == "spawn":
+        config = config._replace(
+            team_spawn_pad_positions=config.team_spawn_pad_positions.at[:, :, 0, 0].add(
+                0.1
+            )
+        )
+    else:
+        classes = classes.at[0].set(2)
+    # This test attacks the declaration directly; physical validity is tested by reset.
+    altered = state._replace(config=config)
+    with pytest.raises(ValueError):
+        init_episode_tracking(
+            env,
+            altered,
+            source_configs=_source(),
+            source_indices=0,
+            source_class_ids=classes,
+        )
+
+
+def test_dynamic_roster_declarations_reuse_the_tracker_compilation() -> None:
+    env, state, tracker, classes = _roster_setup()
+    traces: list[int] = []
+
+    @jax.jit
+    def compiled(
+        t: EpisodeTrackingState, s: EnvironmentState, result: StepResult, rows: Array
+    ) -> tuple[EpisodeTrackingState, StepResult]:
+        traces.append(1)
+        return track_episode_step(
+            t, s, result, source_indices=jnp.zeros(2, jnp.int32), source_class_ids=rows
+        )
+
+    for first_class in (1, 4):
+        declared = classes.at[0].set(first_class)
+        resolved, _ = _source_config_with_class_ids(_source(), declared)
+        _, reset = env.reset(
+            jax.random.key(first_class),
+            balanced_spawn_configs(resolved, num_envs=2),
+            state=state,
+        )
+        following, _ = cast(
+            tuple[EpisodeTrackingState, StepResult],
+            compiled(
+                tracker, reset, _step(env, reset), jnp.broadcast_to(declared, (2, 10))
+            ),
+        )
+        np.testing.assert_array_equal(following.error_flags, 0)
+    assert traces == [1]
+
+
+def test_concrete_bad_reset_roster_and_unowned_initial_claim_are_rejected() -> None:
+    env, state, tracker, classes = _roster_setup()
+    with pytest.raises(ValueError, match="source index"):
+        init_episode_tracking(
+            env,
+            state,
+            source_configs=_source(),
+            source_indices=-1,
+            source_class_ids=classes,
+        )
+    _, reset = env.reset(jax.random.key(308), state=state)
+    with pytest.raises(ValueError, match="compact"):
+        track_episode_step(
+            tracker,
+            reset,
+            _step(env, reset),
+            source_indices=0,
+            source_class_ids=classes.at[1].set(-1),
+        )

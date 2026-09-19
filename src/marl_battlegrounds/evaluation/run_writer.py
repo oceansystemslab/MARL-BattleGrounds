@@ -39,6 +39,8 @@ from marl_battlegrounds.evaluation.metric_catalog import (
 )
 
 if TYPE_CHECKING:
+    from jax import Array
+
     from marl_battlegrounds.core.types import EnvConfig
     from marl_battlegrounds.environment import EpisodeInfo
     from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV3
@@ -209,19 +211,76 @@ def _validation_key(config: EnvConfig, identifier: str) -> _ConfigValidationKey:
     )
 
 
+def _roster_declaration(start: Mapping[str, object]) -> tuple[int, ...] | None:
+    """Normalize the optional saved roster without inventing a historical claim.
+
+    Missing source_class_ids returns None. A present field must be a JSON list
+    of ten plain integers, with classes 1..5 before zero padding in each team.
+    Reject null, bool, serialized sentinel rows and malformed compact rows.
+    This host wire check performs no catalog lookup or configuration work.
+    """
+    if "source_class_ids" not in start:
+        return None
+    value = start["source_class_ids"]
+    if not isinstance(value, list):
+        raise ValueError("source_class_ids must contain ten integer classes in 0..5")
+    entries = cast(list[object], value)
+    if len(entries) != 10 or any(
+        type(item) is not int or not 0 <= item <= 5 for item in entries
+    ):
+        raise ValueError("source_class_ids must contain ten integer classes in 0..5")
+    classes = tuple(cast(list[int], value))
+    for team in (classes[:5], classes[5:]):
+        count = sum(item != 0 for item in team)
+        if any(item == 0 for item in team[:count]):
+            raise ValueError("source_class_ids must use compact team prefixes")
+    if not start.get("source_known"):
+        raise ValueError("unknown starts cannot declare source_class_ids")
+    return classes
+
+
+def _same_start(previous: Mapping[str, object], current: Mapping[str, object]) -> bool:
+    """Compare declared start fields symmetrically, including an absent roster.
+
+    current is a normalized declaration without verification/result fields.
+    previous may also contain those later evidence fields. A roster added or
+    removed after declaration conflicts even when every other field agrees.
+    """
+    return _roster_declaration(previous) == _roster_declaration(current) and all(
+        previous.get(key) == value
+        for key, value in current.items()
+        if key != "source_class_ids"
+    )
+
+
 @cache
-def _source_relationship_check() -> Callable[[EnvConfig, EnvConfig], tuple[Any, Any]]:
-    """Compile the existing source comparison once; keep both configs dynamic.
+def _source_relationship_check() -> Callable[
+    [EnvConfig, EnvConfig, Array], tuple[Any, Any]
+]:
+    """Compile profile reconstruction and exact source comparison together.
 
     Only a new verified config/source pair uses this check. A single compiled
     call avoids dispatching a separate device operation for every config leaf.
-    Import JAX and the numerical authority only when start recording needs them.
+    Both configs and the int32 (10,) roster are dynamic. Ten -1 values mean the
+    original source. Invalid traced rows never return a successful relationship.
+    Import numerical code only when start recording needs it.
     """
     import jax
 
-    from marl_battlegrounds.tasks import spawn_locations_for_source
+    from marl_battlegrounds.tasks import (
+        _source_config_with_class_ids,  # pyright: ignore[reportPrivateUsage]
+        spawn_locations_for_source,
+    )
 
-    return jax.jit(spawn_locations_for_source)
+    def compare(
+        actual: EnvConfig, source: EnvConfig, classes: Array
+    ) -> tuple[Array, Array]:
+        """Resolve one declared profile and compare every config field and pad."""
+        resolved, valid = _source_config_with_class_ids(source, classes)
+        matches, choice = spawn_locations_for_source(actual, resolved)
+        return matches & valid, choice
+
+    return jax.jit(compare)
 
 
 def _remember_verification[Key, Value](
@@ -309,6 +368,7 @@ class RunWriter:
         Parent directory for a new uniquely named run. Supply this or resume_from.
     resume_from : str or pathlib.Path, optional
         Existing run directory to recover. Its metric/input schema must match.
+        Saved start/source relationships are checked before table recovery.
     phase : str, default "evaluation"
         Nonempty pass label. "tournament" writes match rows and requires registered
         pairing metadata; it does not change simulator rules.
@@ -357,6 +417,11 @@ class RunWriter:
     Notes
     -----
     Host-only; opening may create files or truncate uncommitted table suffixes.
+    Both resume routes first check saved roster and resolved configuration
+    evidence while holding the directory lock. Ordinary resume permits valid
+    pending starts; an explicit recording checkpoint requires completed evidence.
+    Training callers must run their content preflight before constructing this
+    writer. The generic writer does not choose training content eligibility.
     Use as a context manager or call close. A healthy close flushes; a failed writer
     must be closed and resumed before more writes. Call start_pass to append a
     distinct pass. This class does not allocate episode IDs or execute games.
@@ -426,7 +491,9 @@ class RunWriter:
         self._checkpoint_pass: str | None = None
         self._canonical_records: TournamentRecords | None = None
         self._validated_start_configs: dict[_ConfigValidationKey, None] = {}
-        self._verified_source_choices: dict[tuple[_ConfigValidationKey, str], int] = {}
+        self._verified_source_choices: dict[
+            tuple[_ConfigValidationKey, str, tuple[int, ...] | None], int
+        ] = {}
         self._lock = -1
         if resume_from is None:
             root = Path(cast(str | Path, output_dir))
@@ -511,6 +578,7 @@ class RunWriter:
                             "interrupted recording restore requires its explicit "
                             "recording_checkpoint token before recovery"
                         )
+                    self._validate_saved_starts(self._details, allow_pending=True)
                     self._prepare_pass(phase, pass_id, policies, checkpoint_id, details)
                     self._recover_tables()
             self.run_id = str(self._details["run_id"])
@@ -539,6 +607,195 @@ class RunWriter:
                 restoration.close()
             self._release()
             raise
+
+    @staticmethod
+    def _validate_saved_starts(
+        details: Mapping[str, Any], *, allow_pending: bool, pass_key: str | None = None
+    ) -> None:
+        """Verify saved start claims before either resume route changes output.
+
+        details is the selected saved run manifest. pass_key selects one pass;
+        None checks all passes for ordinary resume. allow_pending permits only
+        unresolved declarations with no recorded transition evidence. Token
+        restore passes False. Every verified/custom start needs resolved config
+        evidence, even when its optional roster field is absent.
+
+        Check identities, wire fields, source profiles and complete spawn/config
+        relationships. Repeated source/roster/resolved combinations are checked
+        once. This host check can compile numerical comparisons and read device
+        results, but never changes details or any file. Invalid evidence raises
+        ValueError or a configuration validation error before recovery starts.
+        """
+        from marl_battlegrounds.evaluation.evaluation_conditions import restore_config
+        from marl_battlegrounds.tasks import (
+            _validate_config_choices,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        configurations = details.get("configurations", {})
+        banks = details.get("source_banks", {})
+        passes = details.get("passes", {})
+        if not all(
+            isinstance(value, dict) for value in (configurations, banks, passes)
+        ):
+            raise ValueError(
+                "saved start references require configuration, bank and pass objects"
+            )
+        restored: dict[str, EnvConfig] = {}
+        valid_configs: set[str] = set()
+        checked_banks: set[str] = set()
+        relationships: dict[tuple[str, str, tuple[int, ...] | None], int] = {}
+
+        def config(identifier: object, *, actual: bool) -> EnvConfig:
+            """Restore and hash one referenced config; validate actual episode data."""
+            if not isinstance(identifier, str) or identifier not in configurations:
+                raise ValueError("saved start references a missing configuration")
+            if identifier not in restored:
+                content = configurations[identifier]
+                if (
+                    not isinstance(content, dict)
+                    or sha256(_json_bytes(cast(dict[str, object], content))).hexdigest()
+                    != identifier
+                ):
+                    raise ValueError(
+                        "saved start configuration content differs from its ID"
+                    )
+                restored[identifier] = restore_config(
+                    cast(dict[str, Any], content), validate=False
+                )
+            result = restored[identifier]
+            if actual and identifier not in valid_configs:
+                _validate_config_choices(
+                    result, batched=False, both_spawn_choices=False
+                )
+                valid_configs.add(identifier)
+            return result
+
+        entries = passes.values() if pass_key is None else (passes[pass_key],)
+        for entry in entries:
+            starts = entry.get("episode_starts", {})
+            if not isinstance(starts, dict):
+                raise ValueError("saved episode_starts must be an object")
+            for episode_id, start in cast(dict[str, Any], starts).items():
+                if not isinstance(start, dict):
+                    raise ValueError("saved start must be an object")
+                start = cast(dict[str, Any], start)
+                identifier = RunWriter._integer(
+                    start.get("episode_id"), "saved start episode_id", minimum=1
+                )
+                if episode_id != str(identifier):
+                    raise ValueError("saved start episode ID differs from its owner")
+                RunWriter._integer(
+                    start.get("reset_generation"), "saved reset_generation", minimum=0
+                )
+                RunWriter._integer(
+                    start.get("episode_start_stage"),
+                    "saved episode_start_stage",
+                    minimum=-1,
+                )
+                source_index = RunWriter._integer(
+                    start.get("source_index"), "saved source_index", minimum=-1
+                )
+                spawn = RunWriter._integer(
+                    start.get("spawn_locations"), "saved spawn_locations", minimum=-1
+                )
+                if spawn not in (-1, 0, 1):
+                    raise ValueError("saved spawn_locations must be -1, 0 or 1")
+                if any(
+                    type(start.get(field)) is not bool
+                    for field in ("source_known", "authored_start")
+                ):
+                    raise ValueError("saved start flags must be Boolean")
+                roster = _roster_declaration(start)
+                known = start["source_known"]
+                verification = start.get("verification")
+                if verification not in ("pending", "verified", "custom"):
+                    raise ValueError("saved start has an invalid verification state")
+                if verification != "pending" and (verification == "verified") != (
+                    known and not start["authored_start"]
+                ):
+                    raise ValueError(
+                        "saved verification state differs from its source claim"
+                    )
+                evidence = (
+                    entry.get("trace_config_ids", {}).get(episode_id),
+                    entry.get("completed_config_ids", {}).get(episode_id),
+                    entry.get("replays", {}).get(episode_id, {}).get("config_id"),
+                )
+                resolved_id = start.get("resolved_config_id")
+                if verification == "pending":
+                    if (
+                        not allow_pending
+                        or any(value is not None for value in evidence)
+                        or identifier in entry.get("completed_episode_ids", ())
+                    ):
+                        raise ValueError(
+                            "saved start contains unresolved first-start evidence"
+                        )
+                elif resolved_id is None:
+                    raise ValueError(
+                        "verified/custom saved start requires resolved_config_id"
+                    )
+                if resolved_id is not None and any(
+                    value is not None and value != resolved_id for value in evidence
+                ):
+                    raise ValueError(
+                        "saved start configuration differs from recorded "
+                        "episode evidence"
+                    )
+                actual = (
+                    None if resolved_id is None else config(resolved_id, actual=True)
+                )
+                table_id = start.get("source_table_id")
+                if not known:
+                    if table_id is not None or source_index != -1 or spawn != -1:
+                        raise ValueError(
+                            "unknown saved starts require unknown source references"
+                        )
+                    continue
+                if not isinstance(table_id, str):
+                    raise ValueError("saved start references a missing source")
+                references = banks.get(table_id)
+                if not isinstance(references, list) or not 0 <= source_index < len(
+                    cast(list[object], references)
+                ):
+                    raise ValueError("saved start references a missing source")
+                references = cast(list[Any], references)
+                if table_id not in checked_banks:
+                    if (
+                        any(
+                            not isinstance(ref, str) or ref not in configurations
+                            for ref in references
+                        )
+                        or sha256(_json_bytes(references)).hexdigest() != table_id
+                    ):
+                        raise ValueError(
+                            "saved source bank content/order differs from its ID"
+                        )
+                    checked_banks.add(table_id)
+                source_id = references[source_index]
+                source = config(source_id, actual=False)
+                if actual is None:
+                    continue
+                relationship = (cast(str, resolved_id), source_id, roster)
+                choice = relationships.get(relationship)
+                if choice is None:
+                    classes = cast(
+                        "Array",
+                        np.asarray(
+                            (-1,) * 10 if roster is None else roster, dtype=np.int32
+                        ),
+                    )
+                    matches, found = _source_relationship_check()(
+                        actual, source, classes
+                    )
+                    if not bool(matches):
+                        raise ValueError(
+                            "saved start configuration differs from its source/roster"
+                        )
+                    choice = int(found)
+                    relationships[relationship] = choice
+                if choice != spawn:
+                    raise ValueError("saved start spawn choice differs from its source")
 
     def _check_open(self) -> None:
         """Reject operations after close or a recorded failure; recovery needs a new
@@ -949,6 +1206,8 @@ class RunWriter:
         schedule : iterable of dict or EpisodeStartRecords
             Host schedule dictionaries contain a positive int32 episode_id.
             Numerical starts carry source-bank references and reset generations.
+            Optional class rows declare a compact catalog roster against that
+            source. Legacy None or ten -1 values mean the exact original source.
             An identical repeated declaration is allowed; a changed one fails.
         source_configs : EnvConfig or None, default None
             One immutable source config or a leading source batch. Required for
@@ -1008,9 +1267,7 @@ class RunWriter:
                 previous = entry["episode_starts"].get(episode_id)
                 if previous is None and self._episode_has_records(int(episode_id)):
                     raise ValueError("register starts before recording an episode")
-                if previous is not None and any(
-                    previous.get(k) != v for k, v in declaration.items()
-                ):
+                if previous is not None and not _same_start(previous, declaration):
                     raise ValueError(
                         f"episode {episode_id} differs from its recorded start"
                     )
@@ -1174,6 +1431,9 @@ class RunWriter:
 
         Invalid rows are padding; every field still has its declared shape/dtype.
         Unknown sources keep unknown indices/choices and a zero source-table ID.
+        Class rows have trailing width ten. Save explicit overrides as lists;
+        omit the field for legacy None or all-minus-one sentinel rows. A stored
+        override requires known source ownership and compact class/zero padding.
         """
         import jax
 
@@ -1185,8 +1445,17 @@ class RunWriter:
         shape = np.shape(host.valid)
         arrays: dict[str, np.ndarray[Any, Any]] = {}
         for name in EpisodeStartRecords._fields:
+            if name == "source_class_ids" and host.source_class_ids is None:
+                continue
             array = np.asarray(getattr(host, name))
-            wanted = (*shape, 8) if name == "source_table_id" else shape
+            width = (
+                8
+                if name == "source_table_id"
+                else 10
+                if name == "source_class_ids"
+                else None
+            )
+            wanted = (*shape, width) if width is not None else shape
             dtype = (
                 np.uint32
                 if name == "source_table_id"
@@ -1196,9 +1465,7 @@ class RunWriter:
             )
             if array.shape != wanted or array.dtype != dtype:
                 raise ValueError(f"start {name} has the wrong shape or dtype")
-            arrays[name] = array.reshape(
-                (-1, 8) if name == "source_table_id" else (-1,)
-            )
+            arrays[name] = array.reshape((-1, width) if width is not None else (-1,))
         result: dict[str, dict[str, object]] = {}
         for index in np.flatnonzero(arrays["valid"]):
             episode_id = str(
@@ -1247,6 +1514,11 @@ class RunWriter:
                 "source_known": known,
                 "authored_start": bool(arrays["authored_start"][index]),
             }
+            if "source_class_ids" in arrays:
+                classes = arrays["source_class_ids"][index]
+                if not np.all(classes == -1):
+                    declaration["source_class_ids"] = classes.tolist()
+                    _roster_declaration(declaration)
             if episode_id in result and result[episode_id] != declaration:
                 raise ValueError("one episode ID has conflicting start declarations")
             result[episode_id] = declaration
@@ -1305,9 +1577,7 @@ class RunWriter:
                 if str(int(starts.episode_id[index])) != episode_id:
                     raise ValueError("start episode ID must match the producing info")
                 declaration = declarations[episode_id]
-                if bound is None or any(
-                    bound.get(k) != v for k, v in declaration.items()
-                ):
+                if bound is None or not _same_start(bound, declaration):
                     raise ValueError(
                         "first-start evidence must match its registered declaration"
                     )
@@ -1336,7 +1606,8 @@ class RunWriter:
                 if known:
                     refs = banks[cast(str, declaration["source_table_id"])]
                     source_id = refs[cast(int, declaration["source_index"])]
-                    relationship_key = (validation_key, source_id)
+                    roster = _roster_declaration(declaration)
+                    relationship_key = (validation_key, source_id, roster)
                     choice = self._verified_source_choices.get(relationship_key)
                     if choice is None:
                         source = configurations[source_id]
@@ -1358,7 +1629,15 @@ class RunWriter:
 
                         source_tree = cast("EnvConfig", restore(config_tree, source))
                         matches, found_choice = _source_relationship_check()(
-                            config_tree, source_tree
+                            config_tree,
+                            source_tree,
+                            cast(
+                                "Array",
+                                np.asarray(
+                                    (-1,) * 10 if roster is None else roster,
+                                    dtype=np.int32,
+                                ),
+                            ),
                         )
                         if not bool(matches):
                             raise ValueError(

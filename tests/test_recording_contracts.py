@@ -23,7 +23,10 @@ from marl_battlegrounds.evaluation.models import canonical_json_bytes
 from marl_battlegrounds.evaluation.policy_execution import PolicyTrace, System
 from marl_battlegrounds.evaluation.recording_types import EpisodeStartRecords
 from marl_battlegrounds.evaluation.run_writer import RunWriter, configuration_identity
-from marl_battlegrounds.tasks import make_standard_team_deathmatch_config
+from marl_battlegrounds.tasks import (
+    canonical_tournament_rosters,
+    make_standard_team_deathmatch_config,
+)
 
 
 def _never_call(*_args: object) -> object:
@@ -110,6 +113,123 @@ def _start(
         jnp.asarray(authored),
         jnp.asarray(True),
     )
+
+
+@pytest.mark.parametrize("spawn,authored", [(0, False), (1, False), (0, True)])
+def test_sampled_roster_records_exact_bank_and_resolved_identity(
+    tmp_path: Path, first_info: EpisodeInfo, spawn: int, authored: bool
+) -> None:
+    a, b = canonical_tournament_rosters()
+    source = make_standard_team_deathmatch_config(
+        map_id=0, team_a_roster=a, team_b_roster=b, max_steps=8
+    )
+    classes = first_info.config.agent_profile.class_ids
+    starts = _start(first_info, source, spawn=spawn, authored=authored)._replace(
+        source_class_ids=classes
+    )
+    actual = first_info.config
+    if spawn:
+        actual = actual._replace(
+            team_spawn_pad_positions=actual.team_spawn_pad_positions[::-1]
+        )
+    with RunWriter(tmp_path) as writer:
+        writer.register_episodes(starts, source_configs=source)
+        writer.write(first_info._replace(config=actual, episode_start_records=starts))
+        writer.flush()
+        path = writer.run_dir
+        saved = _pass(path)["episode_starts"]["1"]
+        assert saved["source_class_ids"] == np.asarray(classes).tolist()
+        assert saved["verification"] == ("custom" if authored else "verified")
+        assert saved["resolved_config_id"] == configuration_identity(actual)[0]
+        source_id = configuration_identity(source)[0]
+        assert _manifest(path)["source_banks"][saved["source_table_id"]] == [source_id]
+    with RunWriter(resume_from=path) as resumed:
+        assert _pass(resumed.run_dir)["episode_starts"]["1"] == saved
+
+
+def test_relationship_cache_cannot_accept_a_changed_roster_or_spawn(
+    tmp_path: Path, first_info: EpisodeInfo
+) -> None:
+    a, b = canonical_tournament_rosters()
+    source = make_standard_team_deathmatch_config(
+        map_id=0, team_a_roster=a, team_b_roster=b, max_steps=8
+    )
+    classes = first_info.config.agent_profile.class_ids
+    for change in ("roster", "spawn"):
+        with RunWriter(tmp_path / change) as writer:
+            start = _start(first_info, source)._replace(source_class_ids=classes)
+            writer.register_episodes(start, source_configs=source)
+            writer.write(first_info._replace(episode_start_records=start))
+            second = _epoch(first_info, 0, episode=2)
+            bad = _start(second, source, spawn=1 if change == "spawn" else 0)._replace(
+                source_class_ids=classes.at[0].set(2) if change == "roster" else classes
+            )
+            writer.register_episodes(bad, source_configs=source)
+            with pytest.raises(ValueError, match="declared source/spawn"):
+                writer.write(second._replace(episode_start_records=bad))
+            saved = _pass(writer.run_dir)["episode_starts"]
+            assert saved["1"]["verification"] == "verified"
+            assert saved["2"]["verification"] == "pending"
+
+
+@pytest.mark.parametrize("initial_override", [False, True])
+@pytest.mark.parametrize("durability", ["pending", "flushed", "resumed"])
+def test_repeated_start_cannot_add_or_remove_explicit_roster(
+    tmp_path: Path, first_info: EpisodeInfo, initial_override: bool, durability: str
+) -> None:
+    base = _start(first_info, first_info.config)
+    explicit = base._replace(source_class_ids=first_info.config.agent_profile.class_ids)
+    first, changed = (explicit, base) if initial_override else (base, explicit)
+    writer = RunWriter(tmp_path)
+    try:
+        writer.register_episodes(first, source_configs=first_info.config)
+        if durability == "flushed":
+            writer.flush()
+        elif durability == "resumed":
+            path = writer.run_dir
+            writer.close()
+            writer = RunWriter(resume_from=path)
+        before = (writer.run_dir / "run_details.json").read_bytes()
+        with pytest.raises(ValueError, match="recorded start"):
+            writer.register_episodes(changed, source_configs=first_info.config)
+        assert (writer.run_dir / "run_details.json").read_bytes() == before
+        with pytest.raises(ValueError, match="registered declaration"):
+            writer.write(first_info._replace(episode_start_records=changed))
+    finally:
+        writer.close()
+
+
+def test_saved_source_relationships_are_checked_once_per_distinct_content(
+    tmp_path: Path, first_info: EpisodeInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from marl_battlegrounds.evaluation import run_writer
+
+    a, b = canonical_tournament_rosters()
+    source = make_standard_team_deathmatch_config(
+        map_id=0, team_a_roster=a, team_b_roster=b, max_steps=8
+    )
+    with RunWriter(tmp_path) as writer:
+        for identifier in (1, 2):
+            info = _epoch(first_info, 0, episode=identifier)
+            start = _start(info, source)._replace(
+                source_class_ids=info.config.agent_profile.class_ids
+            )
+            writer.register_episodes(start, source_configs=source)
+            writer.write(info._replace(episode_start_records=start))
+        path = writer.run_dir
+    checks: list[None] = []
+    compiled = run_writer._source_relationship_check()  # pyright: ignore[reportPrivateUsage]
+
+    def counted(
+        actual: EnvConfig, bank: EnvConfig, classes: jax.Array
+    ) -> tuple[Any, Any]:
+        checks.append(None)
+        return compiled(actual, bank, classes)
+
+    monkeypatch.setattr(run_writer, "_source_relationship_check", lambda: counted)
+    with RunWriter(resume_from=path):
+        pass
+    assert len(checks) == 1
 
 
 @pytest.mark.parametrize("early_resets", [False, True])

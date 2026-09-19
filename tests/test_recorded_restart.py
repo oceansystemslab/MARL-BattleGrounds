@@ -20,14 +20,21 @@ import numpy as np
 import pytest
 
 import marl_battlegrounds as marl_bgs
-from marl_battlegrounds.core.types import Action
+from marl_battlegrounds.core.types import Action, EnvConfig
 from marl_battlegrounds.environment import EpisodeInfo
 from marl_battlegrounds.evaluation import recording_checkpoint
 from marl_battlegrounds.evaluation.policy_execution import PolicyTrace, System
+from marl_battlegrounds.evaluation.recording_identity import (
+    ordered_source_bank_identity,
+)
+from marl_battlegrounds.evaluation.recording_types import EpisodeStartRecords
 from marl_battlegrounds.evaluation.replay_capture import ReplayPackets
 from marl_battlegrounds.evaluation.replay_recording import ReplayCollector
 from marl_battlegrounds.evaluation.run_writer import RunWriter
-from marl_battlegrounds.tasks import make_standard_team_deathmatch_config
+from marl_battlegrounds.tasks import (
+    canonical_tournament_rosters,
+    make_standard_team_deathmatch_config,
+)
 
 
 @pytest.fixture(scope="module")
@@ -100,6 +107,160 @@ def _rewrite_bundle(
     payload = _json_bytes(content)
     target.write_bytes(payload)
     return {**token, "checkpoint_sha256": sha256(payload).hexdigest()}
+
+
+def _sampled_start(info: EpisodeInfo) -> tuple[EnvConfig, EpisodeStartRecords]:
+    team_a, team_b = canonical_tournament_rosters()
+    source = make_standard_team_deathmatch_config(
+        map_id=0, team_a_roster=team_a, team_b_roster=team_b, max_steps=3
+    )
+    bank_id, _, _ = ordered_source_bank_identity(source)
+    words = np.frombuffer(bytes.fromhex(bank_id), dtype=">u4").astype(np.uint32)
+    start = EpisodeStartRecords(
+        info.episode_id,
+        jnp.asarray(0, jnp.int32),
+        jnp.asarray(words),
+        jnp.asarray(0, jnp.int32),
+        jnp.asarray(0, jnp.int32),
+        jnp.asarray(-1, jnp.int32),
+        jnp.asarray(True),
+        jnp.asarray(False),
+        jnp.asarray(True),
+        info.config.agent_profile.class_ids,
+    )
+    return source, start
+
+
+@pytest.mark.parametrize("route", ["ordinary", "token"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "classes",
+        "omit_classes",
+        "omit_both",
+        "null",
+        "bool",
+        "sentinel",
+        "hole",
+        "spawn",
+        "resolved",
+    ],
+)
+def test_saved_roster_tampering_rejects_both_resume_routes_before_mutation(
+    tmp_path: Path, episode_infos: tuple[EpisodeInfo, ...], route: str, change: str
+) -> None:
+    from marl_battlegrounds.evaluation.run_writer import (
+        _json_bytes,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    source, start = _sampled_start(episode_infos[0])
+    with RunWriter(tmp_path, phase="training") as writer:
+        writer.register_episodes(start, source_configs=source)
+        writer.write(
+            episode_infos[0]._replace(replay=None, episode_start_records=start)
+        )
+        writer.write(episode_infos[-1]._replace(replay=None))
+        token = writer.checkpoint_recording()
+        path = writer.run_dir
+    location = path if route == "ordinary" else _bundle(path, token)
+    manifest = _manifest(location)
+    saved = manifest["passes"][token["pass_key"]]["episode_starts"]["1"]
+    if change == "classes":
+        saved["source_class_ids"][0] = 1
+    elif change in ("omit_classes", "omit_both"):
+        del saved["source_class_ids"]
+        if change == "omit_both":
+            del saved["resolved_config_id"]
+    elif change == "null":
+        saved["source_class_ids"] = None
+    elif change == "bool":
+        saved["source_class_ids"][0] = True
+    elif change == "sentinel":
+        saved["source_class_ids"] = [-1] * 10
+    elif change == "hole":
+        saved["source_class_ids"][:3] = [0, 1, 0]
+    elif change == "spawn":
+        saved["spawn_locations"] = 1
+    else:
+        saved["resolved_config_id"] = manifest["source_banks"][
+            saved["source_table_id"]
+        ][0]
+    payload = _json_bytes(manifest)
+    (location / "run_details.json").write_bytes(payload)
+    if route == "token":
+        descriptor = json.loads((location / "checkpoint.json").read_bytes())
+        descriptor["files"]["run_details.json"] = {
+            "bytes": len(payload),
+            "sha256": sha256(payload).hexdigest(),
+        }
+        token = _rewrite_bundle(path, token, descriptor)
+    # An uncommitted suffix makes an early recovery call observably destructive.
+    table = path / "episodes.csv"
+    table.write_bytes(table.read_bytes() + b"uncommitted-suffix\n")
+    before = _files(path)
+    with pytest.raises(ValueError):
+        RunWriter(
+            resume_from=path,
+            phase="training",
+            recording_checkpoint=token if route == "token" else None,
+        )
+    assert _files(path) == before
+
+
+def test_ordinary_resume_preserves_pending_roster_and_later_verifies(
+    tmp_path: Path, episode_infos: tuple[EpisodeInfo, ...]
+) -> None:
+    source, start = _sampled_start(episode_infos[0])
+    with RunWriter(tmp_path, phase="training") as writer:
+        writer.register_episodes(start, source_configs=source)
+        path = writer.run_dir
+    with RunWriter(resume_from=path, phase="training") as resumed:
+        assert resumed.has_pending_numerical_starts
+        with pytest.raises(ValueError, match="start"):
+            resumed.checkpoint_recording()
+        resumed.write(
+            episode_infos[0]._replace(replay=None, episode_start_records=start)
+        )
+        token = resumed.checkpoint_recording()
+    with RunWriter(
+        resume_from=path, phase="training", recording_checkpoint=token
+    ) as restored:
+        assert not restored.has_pending_numerical_starts
+        saved = _manifest(path)["passes"][token["pass_key"]]["episode_starts"]["1"]
+        assert saved["verification"] == "verified"
+        assert saved["source_class_ids"] == np.asarray(start.source_class_ids).tolist()
+
+
+def test_sampled_start_restore_reproduces_uninterrupted_episode_rows(
+    tmp_path: Path, episode_infos: tuple[EpisodeInfo, ...]
+) -> None:
+    source, start = _sampled_start(episode_infos[0])
+    with RunWriter(tmp_path, phase="training") as writer:
+        writer.register_episodes(start, source_configs=source)
+        writer.write(
+            episode_infos[0]._replace(replay=None, episode_start_records=start)
+        )
+        token = writer.checkpoint_recording()
+        path = writer.run_dir
+        for info in episode_infos[1:]:
+            writer.write(info._replace(replay=None))
+        writer.flush()
+        expected = {
+            name: (path / name).read_bytes() for name in _manifest(path)["tables"]
+        }
+        expected_start = _manifest(path)["passes"][token["pass_key"]]["episode_starts"][
+            "1"
+        ]
+    with RunWriter(
+        resume_from=path, phase="training", recording_checkpoint=token
+    ) as resumed:
+        for info in episode_infos[1:]:
+            resumed.write(info._replace(replay=None))
+    assert {name: (path / name).read_bytes() for name in expected} == expected
+    assert (
+        _manifest(path)["passes"][token["pass_key"]]["episode_starts"]["1"]
+        == expected_start
+    )
 
 
 def test_zero_boundary_token_is_small_and_does_not_save_learner(tmp_path: Path) -> None:

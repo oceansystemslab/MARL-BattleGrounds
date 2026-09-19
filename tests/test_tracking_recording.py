@@ -4,6 +4,8 @@ The writer must share the tracker's ordered source-bank identity, validate empty
 start packets without flushing unrelated data, and discard final learning inputs
 before a host transfer. Live tracker tests also check source/start ownership when
 short games finish beside continuing games and curriculum configurations change.
+Legacy nine-argument start producers retain absent roster declarations through
+scalar, batch and time/batch JAX trees and empty writer registration.
 """
 
 import csv
@@ -410,3 +412,35 @@ def test_fresh_immutable_bank_checks_content_before_reusing_digest(
         assert len(hashes) == 2 and hashes[0] != hashes[1]
         assert set(_details(writer)["source_banks"]) == set(hashes)
         assert len(writer._source_cache) == 1  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("leading", [(), (2,), (3, 2)])
+def test_legacy_nine_argument_starts_remain_absent_across_leading_axes(
+    tmp_path: Path,
+    terminal_info: EpisodeInfo,
+    leading: tuple[int, ...],
+) -> None:
+    scalar = _empty_starts()
+    assert scalar.source_class_ids is None
+
+    def broadcast(value: jax.Array) -> jax.Array:
+        return jnp.broadcast_to(value, (*leading, *value.shape))
+
+    starts = jax.tree.map(broadcast, scalar)
+    assert starts.valid.shape == leading
+    assert starts.source_class_ids is None
+
+    def identity(value: EpisodeStartRecords) -> EpisodeStartRecords:
+        return value
+
+    restored = cast(EpisodeStartRecords, jax.jit(identity)(starts))
+    assert restored.source_class_ids is None
+    assert jax.tree.structure(restored) == jax.tree.structure(starts)
+    with RunWriter(tmp_path) as writer:
+        writer.register_episodes(starts, source_configs=terminal_info.config)
+        before = (writer.run_dir / "run_details.json").read_bytes()
+        writer.register_episodes(restored)
+        assert (writer.run_dir / "run_details.json").read_bytes() == before
+        assert not writer.has_pending_numerical_starts
+        saved = next(iter(_details(writer)["passes"].values()))
+        assert saved["episode_starts"] == {}

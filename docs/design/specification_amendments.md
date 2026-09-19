@@ -921,6 +921,12 @@ records the canonical reward-mode identity and other joined provenance because
 training-preset, evaluation-suite, and scenario IDs, if introduced, belong to
 their respective layers rather than a roster-resolving task registry.
 
+**Historical training-selection decision:** the following paragraph records
+A15's original plan. [A39](#a39-sampled-training-maps-and-rosters) replaces its
+handpicked-roster proposal and resolves the training, validation and test map
+selections. [A36](#a36-submission-roadmap-approved-tdm-content-and-m7-closeout)
+maps the old milestone numbers to the current roadmap.
+
 Milestone 11 owns training selection. Default direct Team Deathmatch training
 selects the canonical mirrored five-class 5v5 roster with the same task
 mechanics, lifecycle rules, score threshold `K`, horizon `H`, and canonical
@@ -2838,3 +2844,39 @@ scores and outcomes remain exact. Storage permutations remain exact on the
 same backend. These focused
 results do not claim a complete regression-gate or release-qualification pass;
 those gates must be run on the final candidate.
+
+## A39. Sampled Training Maps And Rosters
+
+**Accepted training-distribution rule — 2026-09-19.** This replaces A15's
+handpicked benchmark curriculum rosters. Its retired exhaustive composition
+grid remains retired. Episode construction and simulator roster validity
+retain A15's wider contract; the rules below belong to training selection.
+
+The approved installed map selections are training 0–41, validation 42–46 and
+locked test 47–51. Eligibility follows verified content and declared use, not
+filenames or numbers alone. Protected scenario content remains separate from
+adaptive training inputs. Shared class catalogs, schemas and simulator rules
+remain permitted dependencies. Direct training draws uniformly from the full
+training set. A curriculum may select an eligible subset; map draws within
+that subset remain uniform.
+
+Both teams have the same selected size. At 1v1, each team independently draws
+one of Mage, Warrior, Hunter and Rogue with equal probability. At 2v2–4v4,
+each team independently draws a uniform subset of the five classes without
+replacement. The teams may share classes. Within a team, selected classes use
+the relative order Mage, Warrior, Hunter, Rogue, Priest and occupy the first
+slots; unused slots remain inactive. At 5v5, both teams use exactly that
+five-class canonical roster. There is no production table of roster
+combinations or handpicked smaller-team roster list.
+
+Maps and rosters change only at episode reset. Continuing games keep their
+configuration, state and recurrent memory. These distribution rules do not
+change task mechanics, action meanings, score thresholds, horizons or the
+simulator's support for custom rosters.
+
+M9 owns the distributions and later curriculum execution. M10 owns learners
+and learning experiments. Preparation, sampling and episode-provenance tools
+do not establish a working trainer or a learning result. Curriculum schedules,
+shaping and opponent history are separate implementation work. The
+[evaluation protocol](../evaluation/protocol.md#episode-training-evaluation-and-scenario-ownership)
+states the active experiment contract.

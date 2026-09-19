@@ -180,6 +180,8 @@ def _prepare(
         if not isinstance(cast(object, starts), EpisodeStartRecords):
             raise TypeError("episode_start_records must be EpisodeStartRecords")
         for name in EpisodeStartRecords._fields:
+            if name == "source_class_ids" and starts.source_class_ids is None:
+                continue
             dtype = (
                 np.bool_
                 if name in {"valid", "source_known", "authored_start"}
@@ -188,6 +190,8 @@ def _prepare(
             shape = leading
             if name == "source_table_id":
                 dtype, shape = np.uint32, (*leading, 8)
+            elif name == "source_class_ids":
+                shape = (*leading, 10)
             _array_spec(getattr(starts, name), shape, dtype, f"starts.{name}")
     if trace is not None:
         if not isinstance(trace, PolicyTrace):

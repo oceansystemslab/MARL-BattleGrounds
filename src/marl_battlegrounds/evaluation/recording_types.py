@@ -44,6 +44,12 @@ class EpisodeStartRecords(NamedTuple):
         configuration has a known source relationship.
     valid : Array
         Bool shape L. True selects a real start record. False is padding.
+    source_class_ids : Array | None, default=None
+        Optional int32 L+(10,) source roster before spawn exchange. Ten -1
+        values mean the original source profile. Otherwise each team's classes
+        1..5 fill its first slots, followed by zeros. Unknown and padded rows
+        use ten -1 values. None preserves historical nine-argument producers;
+        it means no roster override, not an inferred roster.
 
     Notes
     -----
@@ -62,6 +68,7 @@ class EpisodeStartRecords(NamedTuple):
     source_known: Array
     authored_start: Array
     valid: Array
+    source_class_ids: Array | None = None
 
 
 def validate_recording_errors(infos: object) -> None:

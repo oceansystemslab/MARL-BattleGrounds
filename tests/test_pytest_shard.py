@@ -638,10 +638,10 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
     assert CI_SHARD_COST_PROFILE.relocations_by_shard_count[12] == (
         ("residual:tests/test_visual_debugger_service.py", 6, 4),
         ("file:tests/test_shared_obs_runtime.py", 12, 3),
-        ("file:tests/test_combat_ultimate_effects.py", 7, 5),
+        ("file:tests/test_combat_ultimate_effects.py", 11, 5),
         ("file:tests/test_combat_effects.py", 8, 11),
         ("file:tests/test_tdm_scenarios.py", 11, 8),
-        ("file:tests/test_canonical_tournament.py", 11, 7),
+        ("file:tests/test_canonical_tournament.py", 1, 7),
     )
     assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset()
 

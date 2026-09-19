@@ -32,6 +32,7 @@ from marl_battlegrounds.evaluation.recording_types import (
 )
 from marl_battlegrounds.policies.input import Observations
 from marl_battlegrounds.tasks import (
+    _source_config_with_class_ids,  # pyright: ignore[reportPrivateUsage]
     prepare_exact_env_config,
     spawn_locations_for_source,
 )
@@ -66,6 +67,10 @@ class EpisodeTrackingState:
         Int32 L identifying each bound episode and its configuration origin.
     source_index, spawn_locations : Array
         Int32 L source row and spawn choice (0 default, 1 swapped, -1 unknown).
+    source_class_ids : Array
+        Int32 L+(10,) source roster before spawn exchange. Ten -1 values retain
+        the original profile. Explicit rows use compact classes 1..5 with zero
+        padding per team. Unknown sources always carry the -1 sentinel.
     source_known : Array
         Bool L; a checked source relationship exists. Ambiguous banks can have
         source_known=True and spawn_locations=-1.
@@ -103,6 +108,7 @@ class EpisodeTrackingState:
     reset_generation: Array
     config_origin_generation: Array
     source_index: Array
+    source_class_ids: Array
     spawn_locations: Array
     source_known: Array
     first_transition_seen: Array
@@ -272,26 +278,75 @@ def _source_indices(
     return jnp.where(invalid, -1, values).astype(jnp.int32), invalid
 
 
+def _source_classes(values: object, shape: tuple[int, ...], consumed: Array) -> Array:
+    """Normalize ten-slot integer rows before narrowing, ignoring unused lanes.
+
+    A single (10,) row broadcasts to shape+(10,). None means ten -1 values.
+    Shape and integer dtype are always checked. Consumed concrete out-of-range
+    values raise before narrowing. Traced bad rows keep an invalid -2 marker;
+    the shared roster resolver checks compactness and retains a failure flag.
+    """
+    wanted = (*shape, 10)
+    if values is None:
+        return jnp.full(wanted, -1, jnp.int32)
+    if not isinstance(values, Tracer):
+        raw = np.asarray(values)
+        if raw.dtype.kind not in "iu":
+            raise TypeError(
+                "source_class_ids must contain integers, not bool or floats"
+            )
+        if raw.shape not in ((10,), wanted):
+            raise ValueError(f"source_class_ids must have shape (10,) or {wanted}")
+        raw = np.broadcast_to(raw, wanted)
+        invalid = (raw > 5) | ((raw < -1) if raw.dtype.kind == "i" else False)
+        if not isinstance(consumed, Tracer) and np.any(
+            invalid & np.asarray(consumed)[..., None]
+        ):
+            raise ValueError(
+                "source_class_ids must contain classes 0..5 or ten -1 values"
+            )
+        values = jnp.asarray(np.where(invalid, -2, raw).astype(np.int32))
+    else:
+        if not jnp.issubdtype(values.dtype, jnp.integer):
+            raise TypeError(
+                "source_class_ids must contain integers, not bool or floats"
+            )
+        if values.shape not in ((10,), wanted):
+            raise ValueError(f"source_class_ids must have shape (10,) or {wanted}")
+        invalid = values > 5
+        if jnp.issubdtype(values.dtype, jnp.signedinteger):
+            invalid |= values < -1
+        values = jnp.where(invalid, -2, cast(Array, values)).astype(jnp.int32)
+    return jnp.where(consumed[..., None], jnp.broadcast_to(values, wanted), -1)
+
+
 def _bind(
-    bank: EnvConfig | None, config: EnvConfig, indices: Array
-) -> tuple[Array, Array]:
+    bank: EnvConfig | None, config: EnvConfig, indices: Array, classes: Array
+) -> tuple[Array, Array, Array]:
     """Check declared source rows against exact resolved configs numerically.
 
     Safe gather indices never create ownership: a negative declaration remains
-    unknown. Returns known flags and default/swapped/unknown choices; callers
-    separately reject positive declarations whose relationship does not match.
+    unknown. Rebuild only the declared profile through the shared catalog helper,
+    then compare the entire configuration and spawn banks. Return known flags,
+    default/swapped/unknown choices and roster validity. Invalid rows never bind.
     """
     if bank is None:
-        return jnp.zeros(indices.shape, bool), jnp.full(indices.shape, -1, jnp.int32)
+        _, valid = _source_config_with_class_ids(config, classes)
+        return (
+            jnp.zeros(indices.shape, bool),
+            jnp.full(indices.shape, -1, jnp.int32),
+            valid,
+        )
 
     def select(value: Array) -> Array:
         """Gather declared rows with a safe placeholder for unknown sources."""
         return value[jnp.maximum(indices, 0)]
 
     selected = jax.tree.map(select, bank)
+    selected, valid = _source_config_with_class_ids(selected, classes)
     matches, choice = spawn_locations_for_source(config, selected)
-    known = (indices >= 0) & matches
-    return known, jnp.where(known, choice, -1).astype(jnp.int32)
+    known = (indices >= 0) & matches & valid
+    return known, jnp.where(known, choice, -1).astype(jnp.int32), valid
 
 
 def init_episode_tracking(
@@ -300,6 +355,7 @@ def init_episode_tracking(
     *,
     source_configs: EnvConfig | None = None,
     source_indices: object = None,
+    source_class_ids: object = None,
     record_starts: bool = False,
 ) -> EpisodeTrackingState:
     """Attach a tracker to exact current games without taking a simulator step.
@@ -318,6 +374,10 @@ def init_episode_tracking(
         Source row per lane; -1 means unknown. A scalar broadcasts. Explicit banks
         with omitted indices remain unknown. Implicit constructor sources bind
         row zero only while the lane still has untouched constructor provenance.
+    source_class_ids : integer array, optional
+        (10,) or L+(10,) compact class rows, before spawn exchange. None or ten
+        -1 values retain the original source profile. Explicit rows require a
+        known source index and may change only its catalog-derived profile.
     record_starts : bool, default=False
         Emit compact starts on first real transitions. True requires every lane
         to be before its first transition and computes one ordered-bank digest.
@@ -372,7 +432,10 @@ def init_episode_tracking(
         ).astype(jnp.int32)
     else:
         indices, _ = _source_indices(source_indices, shape, size, jnp.ones(shape, bool))
-    known, choices = _bind(bank, state.config, indices)
+    classes = _source_classes(source_class_ids, shape, jnp.ones(shape, bool))
+    if np.any(np.asarray((indices < 0) & jnp.any(classes != -1, axis=-1))):
+        raise ValueError("source_class_ids require a declared source index")
+    known, choices, _ = _bind(bank, state.config, indices, classes)
     if np.any(np.asarray((indices >= 0) & ~known)):
         raise ValueError("source declaration does not match the resolved configuration")
     seen = ~state.episode_start
@@ -402,6 +465,7 @@ def init_episode_tracking(
         state.reset_generation,
         state.config_origin_generation,
         indices,
+        classes,
         choices,
         known,
         seen,
@@ -423,6 +487,7 @@ def track_episode_step(
     step_result: StepResult,
     *,
     source_indices: object = None,
+    source_class_ids: object = None,
 ) -> tuple[EpisodeTrackingState, StepResult]:
     """Account once for an exact step result and attach optional recording claims.
 
@@ -442,6 +507,12 @@ def track_episode_step(
         an override clears it. Continuing-lane values are ignored after shape and
         dtype checks. Invalid concrete consumed indices raise; traced failures
         remain sticky numerical errors.
+    source_class_ids : integer array, optional
+        (10,) or L+(10,) source roster rows used only on changed generations.
+        Continuing lanes retain their rows. When both declarations are omitted,
+        same-origin resets retain the previous roster; changed origins clear it.
+        An explicit source index without classes selects the original source.
+        An explicit roster cannot establish ownership without a source index.
 
     Returns
     -------
@@ -491,36 +562,54 @@ def track_episode_step(
     indices = tracking.source_index
     choices = tracking.spawn_locations
     known = tracking.source_known
+    classes = tracking.source_class_ids
     declaration_error = jnp.zeros(shape, bool)
     size = (
         0
         if tracking.source_configs is None
         else int(tracking.source_configs.agent_profile.active_mask.shape[0])
     )
+    keep = before_state.config_origin_generation == tracking.config_origin_generation
     if source_indices is None:
-        keep = (
-            before_state.config_origin_generation == tracking.config_origin_generation
-        )
         candidate_indices = jnp.where(keep, indices, -1)
     else:
         candidate_indices, invalid_indices = _source_indices(
             source_indices, shape, size, changed
         )
         declaration_error |= changed & invalid_indices
-    rebound_known, rebound_choices = cast(
-        tuple[Array, Array],
+    if source_class_ids is None and source_indices is None:
+        candidate_classes = jnp.where(keep[..., None], classes, -1)
+    else:
+        candidate_classes = _source_classes(source_class_ids, shape, changed)
+    declaration_error |= (
+        changed & (candidate_indices < 0) & jnp.any(candidate_classes != -1, axis=-1)
+    )
+    rebound_known, rebound_choices, roster_valid = cast(
+        tuple[Array, Array, Array],
         jax.lax.cond(
             jnp.any(changed),
             lambda: _bind(
-                tracking.source_configs, before_state.config, candidate_indices
+                tracking.source_configs,
+                before_state.config,
+                candidate_indices,
+                candidate_classes,
             ),
-            lambda: (known, choices),
+            lambda: (known, choices, jnp.ones(shape, bool)),
         ),
     )
+    if not isinstance(roster_valid, Tracer) and np.any(
+        np.asarray(changed & ~roster_valid)
+    ):
+        raise ValueError(
+            "source_class_ids require compact classes 0..5 or ten -1 values"
+        )
+    declaration_error |= changed & ~roster_valid
     declaration_error |= changed & (candidate_indices >= 0) & ~rebound_known
     indices = jnp.where(changed, candidate_indices, indices)
     choices = jnp.where(changed, rebound_choices, choices)
     known = jnp.where(changed, rebound_known, known)
+    classes = jnp.where(changed[..., None], candidate_classes, classes)
+    classes = jnp.where(known[..., None], classes, -1)
     seen = jnp.where(changed, False, tracking.first_transition_seen)
     last_decision = jnp.where(changed, -1, tracking.last_decision_step)
     start_stage = jnp.where(changed, -1, tracking.episode_start_stage)
@@ -609,6 +698,9 @@ def track_episode_step(
             tracking.config_origin_generation,
         ),
         source_index=jnp.where(valid, indices, tracking.source_index),
+        source_class_ids=jnp.where(
+            valid[..., None], classes, tracking.source_class_ids
+        ),
         spawn_locations=jnp.where(valid, choices, tracking.spawn_locations),
         source_known=jnp.where(valid, known, tracking.source_known),
         first_transition_seen=jnp.where(
@@ -643,6 +735,7 @@ def track_episode_step(
             record_known,
             first & before_state.authored_start,
             first,
+            jnp.where(record_known[..., None], classes, -1),
         )
     info = info._replace(episode_start_records=starts, episode_tracking_error=flags)
     return updated, (observations, state, reward, done, info)
