@@ -4,7 +4,7 @@ Preparation reads installed TDM resources and their scientific authorities once
 at host setup. The frozen binding records the finite built-in content closure;
 it admits no external opponents, datasets, replays, feedback or seed schedules.
 It cannot certify a researcher's undeclared outside influences. The returned
-42-row numerical bank is separate from this host evidence and can be shared by
+threshold-major numerical bank is separate from this host evidence and shared by
 compiled samplers. This module uses base dependencies only and runs no episode.
 """
 
@@ -14,12 +14,17 @@ import ast
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.resources import files
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, cast
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from pydantic import StringConstraints, model_validator
+from pydantic import (
+    SerializerFunctionWrapHandler,
+    StringConstraints,
+    model_serializer,
+    model_validator,
+)
 
 from marl_battlegrounds._tdm_assets import (
     MapGeometry,
@@ -98,7 +103,8 @@ class TrainingContentBinding(EvaluationModel):
     Attributes
     ----------
     schema_id, schema_version, eligibility_version
-        Fixed format and use-rule versions. Only version 1 is supported.
+        Version 1 keeps the original 42 K20 sources. Version 2 adds the ordered
+        score_thresholds declaration; the content use rules remain version 1.
     maps
         Ordered 52 verified map records. IDs 0-41 are training, 42-46 validation,
         and 47-51 test. Scientific layouts are distinct across all map roots.
@@ -109,12 +115,16 @@ class TrainingContentBinding(EvaluationModel):
         Ordered identities for mechanics, supported schemas and executable Core
         rules. These shared dependencies are allowed in every content role.
     source_bank
-        Full 256-bit identity of the ordered 42-source configuration bank.
+        Full 256-bit identity of the ordered configuration bank. Each threshold
+        contributes 42 rows in map order; threshold blocks keep declared order.
     source_configurations
         Ordered source configuration identities under the recording bank format.
     canonical_digest
         Canonical SHA-256 of this entire record, excluding this field itself.
         Includes audit metadata. Resume instead compares scientific_projection().
+    score_thresholds
+        Distinct positive integer winning scores, default (20,). Version 1
+        omits this field when saved, preserving its historical bytes and hash.
 
     Notes
     -----
@@ -129,7 +139,7 @@ class TrainingContentBinding(EvaluationModel):
     schema_id: Literal["marl_battlegrounds.training_content"] = (
         "marl_battlegrounds.training_content"
     )
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     eligibility_version: Literal[1] = 1
     maps: tuple[_MapContent, ...]
     protected_scenarios: tuple[_ProtectedScenario, ...]
@@ -137,6 +147,15 @@ class TrainingContentBinding(EvaluationModel):
     source_bank: ContentAddressedIdentityV1
     source_configurations: tuple[_Digest, ...]
     canonical_digest: _Digest
+    score_thresholds: tuple[int, ...] = (20,)
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        """Keep version-1 serialization unchanged, including its original digest."""
+        result = handler(self)
+        if self.schema_version == 1:
+            result.pop("score_thresholds", None)
+        return result
 
     @model_validator(mode="after")
     def _validate_binding(self) -> Self:
@@ -145,6 +164,11 @@ class TrainingContentBinding(EvaluationModel):
         Validation reads no files. Fresh preparation separately verifies current
         resources. Return this frozen record; raise ValueError on disagreement.
         """
+        _validate_score_thresholds(self.score_thresholds)
+        if self.schema_version == 1 and self.score_thresholds != (20,):
+            raise ValueError("Version-1 training content requires K20")
+        if self.schema_version == 2 and self.score_thresholds == (20,):
+            raise ValueError("K20-only training content uses version 1")
         if tuple(row.info.map_id for row in self.maps) != tuple(range(52)):
             raise ValueError("training content requires ordered maps 0 through 51")
         if tuple(row.info.scenario_id for row in self.protected_scenarios) != tuple(
@@ -214,9 +238,11 @@ class TrainingContentBinding(EvaluationModel):
         if (
             self.source_bank.identifier != "ordered-source-bank"
             or self.source_bank.version != 1
-            or len(self.source_configurations) != 42
+            or len(self.source_configurations) != 42 * len(self.score_thresholds)
         ):
-            raise ValueError("source bank requires 42 ordered configuration identities")
+            raise ValueError(
+                "Source bank requires 42 configuration identities per threshold"
+            )
         # This existing recording format hashes compact sorted JSON plus newline.
         from hashlib import sha256
 
@@ -260,7 +286,7 @@ class TrainingContentBinding(EvaluationModel):
                     "specification": specification,
                 }
             )
-        return {
+        result: dict[str, object] = {
             "schema_id": self.schema_id,
             "schema_version": self.schema_version,
             "eligibility_version": self.eligibility_version,
@@ -279,6 +305,9 @@ class TrainingContentBinding(EvaluationModel):
             "source_bank": self.source_bank,
             "source_configurations": self.source_configurations,
         }
+        if self.schema_version == 2:
+            result["score_thresholds"] = self.score_thresholds
+        return result
 
 
 @dataclass(frozen=True)
@@ -288,11 +317,13 @@ class PreparedTrainingContent:
     Attributes
     ----------
     binding : TrainingContentBinding
-        Immutable version-1 setup and resume evidence. Keep outside JAX loops.
+        Immutable version-1 or version-2 setup and resume evidence. Keep outside
+        JAX loops. Only the extended threshold declaration needs version 2.
     source_configs : EnvConfig
-        Canonical 5v5 source bank. Every array leaf starts with axis 42; row i
-        belongs to training map i. Original spawn banks and task defaults remain
-        intact. Both spawn arrangements have passed host validation. Do not
+        Canonical 5v5 source bank. Every array leaf starts with axis 42 times
+        the threshold count. Each threshold block holds maps 0 through 41; row i
+        belongs to training map i % 42. Original spawn banks and other task
+        defaults remain intact. Both spawn arrangements passed host validation. Do not
         mutate or donate the shared bank while samplers or recorders use it.
     """
 
@@ -386,23 +417,47 @@ def _shared_definitions() -> tuple[ContentAddressedIdentityV1, ...]:
     )
 
 
+def _validate_score_thresholds(values: tuple[int, ...]) -> None:
+    """Require a nonempty tuple of distinct supported positive integer scores.
+
+    Reject bool and values outside Core's existing exact-float score range.
+    This host check changes no files and allocates no numerical arrays.
+    """
+    if not isinstance(cast(object, values), tuple) or not values:
+        raise TypeError("score_thresholds must be a nonempty tuple")
+    if any(type(value) is not int for value in values):
+        raise TypeError("score_thresholds must contain Python integers, not bool")
+    if len(set(values)) != len(values) or any(
+        not 1 <= value <= 2**24 - 4 for value in values
+    ):
+        raise ValueError("score_thresholds must be distinct scores in [1, 2**24 - 4]")
+
+
 def prepare_training_content(
-    *, expected: TrainingContentBinding | Mapping[str, object] | None = None
+    *,
+    expected: TrainingContentBinding | Mapping[str, object] | None = None,
+    score_thresholds: tuple[int, ...] | None = None,
 ) -> PreparedTrainingContent:
-    """Verify built-in content and prepare the 42 canonical training sources.
+    """Verify built-in content and prepare canonical sources for declared scores.
 
     Parameters
     ----------
     expected : TrainingContentBinding | Mapping[str, object] | None
-        Saved version-1 binding or its JSON mapping. Defaults to a fresh setup.
+        Saved version-1 or version-2 binding, or its JSON mapping. Defaults to
+        a fresh setup.
         Revalidate its structure and digest, then compare scientific content with
         the installed package. Historical locations and harmless labels may differ.
+    score_thresholds : tuple[int, ...] or None, default=None
+        Distinct supported positive integer winning scores, in source-bank order.
+        None uses expected.score_thresholds when resuming, otherwise (20,).
+        Each score adds maps 0..41 as a complete block. Other rules stay unchanged.
+        K20-only output keeps the original version-1 binding and bank identity.
 
     Returns
     -------
     PreparedTrainingContent
-        Current immutable binding and shared 42-row EnvConfig bank with float32,
-        int32 and Boolean leaves. Source order is map order 0 through 41.
+        Current immutable binding and shared EnvConfig bank with float32,
+        int32 and Boolean leaves. Source order is threshold, then map 0..41.
 
     Raises
     ------
@@ -426,6 +481,9 @@ def prepare_training_content(
         saved = TrainingContentBinding.model_validate_json(
             canonical_json_bytes(expected)
         )
+    if score_thresholds is None:
+        score_thresholds = saved.score_thresholds if saved is not None else (20,)
+    _validate_score_thresholds(score_thresholds)
     manifest = asset_manifest()
     team_a, team_b = canonical_tournament_rosters()
     maps: list[_MapContent] = []
@@ -472,11 +530,17 @@ def prepare_training_content(
                 qualification_specification=specification,
             )
         )
+    if score_thresholds != (20,):
+        configs = [
+            config._replace(team_deathmatch_score_threshold=threshold)
+            for threshold in score_thresholds
+            for config in configs
+        ]
     bank = jax.tree.map(lambda *rows: jnp.stack(rows), *configs)
     bank_digest, references, _ = ordered_source_bank_identity(bank)
     payload: dict[str, object] = {
         "schema_id": "marl_battlegrounds.training_content",
-        "schema_version": 1,
+        "schema_version": 1 if score_thresholds == (20,) else 2,
         "eligibility_version": 1,
         "maps": tuple(maps),
         "protected_scenarios": tuple(scenarios),
@@ -488,6 +552,8 @@ def prepare_training_content(
         ),
         "source_configurations": tuple(references),
     }
+    if score_thresholds != (20,):
+        payload["score_thresholds"] = score_thresholds
     binding = TrainingContentBinding.model_validate(
         {
             **payload,

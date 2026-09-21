@@ -8,6 +8,10 @@ process without treating an older run record as the current process's result.
 Private trainer groups keep validation workers owned through stop signals,
 natural failure, forced shutdown and leader exit. Read-only orphan detection
 blocks restart; cleanup never signals a stale PID or an unrelated group.
+Working-source copies include current staged, unstaged and new public bytes
+without changing Git. Fixed deadlines stop whole trainer groups and cannot be
+reported as success when a child exits cleanly during a stop request.
+Short UTC lifecycle messages keep full process and cleanup facts in saved JSON.
 They do not install real training dependencies or start a learning experiment.
 """
 
@@ -31,6 +35,141 @@ import pytest
 
 from marl_battlegrounds.training import _launch as launch
 from marl_battlegrounds.training._run_io import atomic_json, process_identity
+
+
+def _git(repository: Path, *arguments: str) -> bytes:
+    return subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        check=True,
+        capture_output=True,
+        env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"),
+    ).stdout
+
+
+def _working_repository(tmp_path: Path) -> Path:
+    repository = tmp_path / "working source"
+    repository.mkdir()
+    _git(repository, "init", "--quiet")
+    (repository / ".gitignore").write_text("artifacts/\nignored*\n__pycache__/\n")
+    (repository / "code.py").write_text("version = 'committed'\n")
+    (repository / "deleted.py").write_text("old = True\n")
+    private = repository / "docs/dev/milestone_private.md"
+    private.parent.mkdir(parents=True)
+    private.write_text("Private even if accidentally tracked")
+    _git(repository, "add", ".")
+    _git(
+        repository,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "Initial fixture",
+    )
+    return repository
+
+
+def test_working_export_freezes_actual_candidate_without_git_changes(
+    tmp_path: Path,
+) -> None:
+    repository = _working_repository(tmp_path)
+    (repository / "code.py").write_text("version = 'staged'\n")
+    _git(repository, "add", "code.py")
+    (repository / "code.py").write_text("version = 'current'\n")
+    (repository / "new.py").write_text("new = True\n")
+    (repository / "ignored.txt").write_text("private")
+    (repository / "deleted.py").unlink()
+    (repository / "__pycache__").mkdir()
+    (repository / "__pycache__/cache.pyc").write_bytes(b"bytecode")
+    (repository / "artifacts").mkdir()
+    before = launch._files(repository / ".git")
+    destination = repository / "artifacts/source"
+    record = launch.export_working_source(repository, destination)
+    assert (destination / "code.py").read_text() == "version = 'current'\n"
+    assert (destination / "new.py").read_text() == "new = True\n"
+    assert record["files"] == launch._files(destination)
+    assert set(record["files"]) == {".gitignore", "code.py", "new.py"}
+    assert record["kind"] == "working_tree"
+    assert record["commit"] == _git(repository, "rev-parse", "HEAD").decode().strip()
+    assert (
+        record["git_tree"]
+        == _git(repository, "rev-parse", "HEAD^{tree}").decode().strip()
+    )
+    assert "MM code.py" in record["working_tree"]["status_porcelain"]
+    assert before == launch._files(repository / ".git")
+    assert (repository / "docs/dev/milestone_private.md").is_file()
+    assert not (destination / ".git").exists()
+
+
+@pytest.mark.parametrize("change", ["bytes", "index", "new_file"])
+def test_working_export_rejects_changes_during_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    repository = _working_repository(tmp_path)
+    copy = launch.shutil.copy2
+    changed = False
+
+    def mutate(source: Path, target: Path, *, follow_symlinks: bool = True) -> Path:
+        nonlocal changed
+        result = copy(source, target, follow_symlinks=follow_symlinks)
+        if not changed:
+            changed = True
+            if change == "new_file":
+                (repository / "new.py").write_text("new = True\n")
+            else:
+                (repository / "code.py").write_text("version = 'changed'\n")
+                if change == "index":
+                    _git(repository, "add", "code.py")
+                    (repository / "code.py").write_text("version = 'committed'\n")
+        return Path(result)
+
+    monkeypatch.setattr(launch.shutil, "copy2", mutate)
+    with pytest.raises(ValueError, match="changed while copying"):
+        launch.export_working_source(repository, tmp_path / "copy")
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_working_export_rejects_source_links(tmp_path: Path, kind: str) -> None:
+    repository = _working_repository(tmp_path)
+    target = repository / "code.py" if kind == "file" else repository / "docs"
+    (repository / "linked").symlink_to(target, target_is_directory=kind == "directory")
+    with pytest.raises(ValueError, match="contain links"):
+        launch.export_working_source(repository, tmp_path / "copy")
+
+
+def test_environment_applies_only_explicit_memory_and_cache_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.1")
+    monkeypatch.setenv("JAX_COMPILATION_CACHE_DIR", "/old/cache")
+    monkeypatch.setenv("JAX_ENABLE_COMPILATION_CACHE", "false")
+    cache = tmp_path / "cache"
+    env = launch._environment(
+        "GPU-internal", memory_fraction=0.85, compilation_cache=cache
+    )
+    assert env["XLA_PYTHON_CLIENT_MEM_FRACTION"] == "0.85"
+    assert env["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
+    assert env["JAX_COMPILATION_CACHE_DIR"] == str(cache)
+    assert env["JAX_ENABLE_COMPILATION_CACHE"] == "true"
+    assert env["CUDA_VISIBLE_DEVICES"] == "GPU-internal"
+    assert not cache.exists()
+    default = launch._environment(None)
+    assert "XLA_PYTHON_CLIENT_MEM_FRACTION" not in default
+    assert "JAX_COMPILATION_CACHE_DIR" not in default
+    assert "JAX_ENABLE_COMPILATION_CACHE" not in default
+    assert os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] == "0.1"
+    with pytest.raises(ValueError, match="absolute"):
+        launch._environment(None, compilation_cache=Path("relative"))
+
+
+@pytest.mark.parametrize(
+    "fraction", [True, "0.85", 0, -0.1, 1.1, float("nan"), float("inf")]
+)
+def test_environment_rejects_invalid_memory_fraction(fraction: object) -> None:
+    with pytest.raises(ValueError, match="Memory fraction"):
+        launch._environment(None, memory_fraction=cast(float, fraction))
 
 
 def _package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -348,7 +487,11 @@ def _corrupt(*_args: object) -> None:
 
 
 def _supervisor_command(
-    package: Path, worker: str, *, crash_before_registration: bool = False
+    package: Path,
+    worker: str,
+    *,
+    crash_before_registration: bool = False,
+    deadline_seconds: float | None = None,
 ) -> list[str]:
     injection = ""
     if crash_before_registration:
@@ -373,7 +516,13 @@ def _supervisor_command(
         f"print('Launch module: '+str(module.__file__),flush=True); "
         + injection
         + f"raise SystemExit(module.supervise_command(Path({str(package)!r}),"
-        f"{[sys.executable, '-I', '-c', worker]!r}))"
+        f"{[sys.executable, '-I', '-c', worker]!r},deadline_at="
+        + (
+            "None"
+            if deadline_seconds is None
+            else f"module.time.time()+{deadline_seconds!r}"
+        )
+        + "))"
     )
     return [sys.executable, "-I", "-c", script]
 
@@ -588,10 +737,16 @@ def _family_worker(package: Path, mode: str) -> str:
     )
 
 
-def _start_family(package: Path, mode: str) -> subprocess.Popen[bytes]:
+def _start_family(
+    package: Path, mode: str, *, deadline_seconds: float | None = None
+) -> subprocess.Popen[bytes]:
     with (package / "process.log").open("wb") as log:
         child = subprocess.Popen(
-            _supervisor_command(package, _family_worker(package, mode)),
+            _supervisor_command(
+                package,
+                _family_worker(package, mode),
+                deadline_seconds=deadline_seconds,
+            ),
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -697,6 +852,113 @@ def test_natural_trainer_failure_cleans_worker_after_leader_exit(
         assert after["cleanup"]["remaining_pids"] == []
         assert not launch._alive(after)
         assert not launch._group_members(after["trainer"]["pid"])
+    finally:
+        _cleanup_family(tmp_path, child)
+
+
+@pytest.mark.parametrize("mode", ["wait", "ignore"])
+def test_deadline_stops_owned_descendants_and_records_distinct_failure(
+    tmp_path: Path, mode: str
+) -> None:
+    child = _start_family(tmp_path, mode, deadline_seconds=2.0)
+    try:
+        child.wait(timeout=6)
+        record = launch._read(tmp_path / "process.json")
+        assert child.returncode == record["exit_code"] == 124
+        assert record["stop_reason"] == "deadline"
+        assert record["stop_signal"] == signal.SIGTERM
+        assert record["cleanup"]["remaining_pids"] == []
+        assert record["cleanup"]["trainer_exit_code"] < 0
+        assert not launch._alive(record)
+        assert not launch._group_members(record["trainer"]["pid"])
+        if mode == "ignore":
+            assert record["cleanup"]["signals"] == [signal.SIGTERM, signal.SIGKILL]
+    finally:
+        _cleanup_family(tmp_path, child)
+
+
+def test_expired_deadline_never_starts_a_trainer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    spawn = Mock(side_effect=AssertionError("Expired work must not start"))
+    monkeypatch.setattr(launch.subprocess, "Popen", spawn)
+    assert launch.supervise_command(tmp_path, ["unused"], deadline_at=0.0) == 124
+    record = launch._read(tmp_path / "process.json")
+    assert record["stop_reason"] == "deadline"
+    assert record["exit_code"] == 124
+    assert "trainer" not in record
+    spawn.assert_not_called()
+    output = capsys.readouterr().out
+    assert "Process Started" in output
+    assert "Process Failed" in output
+    assert "Exit Code 124 | Reason Deadline" in output
+    assert "process_event" not in output
+    assert f"[{record['started_at']}]" in output
+    assert f"[{record['finished_at']}]" in output
+
+
+@pytest.mark.parametrize("code", [0, 7])
+def test_supervisor_prints_short_outcome_and_keeps_full_machine_record(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], code: int
+) -> None:
+    command = [sys.executable, "-I", "-c", f"raise SystemExit({code})"]
+    assert launch.supervise_command(tmp_path, command) == code
+    record = launch._read(tmp_path / "process.json")
+    output = capsys.readouterr().out.splitlines()
+    assert len(output) == 2
+    assert "Process Started" in output[0]
+    assert ("Process Finished" if code == 0 else "Process Failed") in output[1]
+    assert f"Exit Code {code}" in output[1]
+    assert all(
+        "process_event" not in line and not line.startswith("{") for line in output
+    )
+    assert record["command"] == command
+    assert record["exit_code"] == code
+    assert record["trainer"] == record["trainer_group"]
+    assert record["cleanup"]["remaining_pids"] == []
+
+
+@pytest.mark.parametrize("deadline", [True, "later", float("nan"), float("inf")])
+def test_invalid_deadline_is_rejected_before_process_record(
+    tmp_path: Path, deadline: object
+) -> None:
+    with pytest.raises(ValueError, match="Deadline"):
+        launch.supervise_command(
+            tmp_path, ["unused"], deadline_at=cast(float, deadline)
+        )
+    assert not (tmp_path / "process.json").exists()
+
+
+@pytest.mark.parametrize("deadline_seconds", [None, 1.5])
+def test_graceful_child_zero_exit_does_not_hide_stop_request(
+    tmp_path: Path, deadline_seconds: float | None
+) -> None:
+    worker = (
+        "import pathlib,signal,sys,time; "
+        "signal.signal(signal.SIGTERM,lambda *_: sys.exit(0)); "
+        f"pathlib.Path({str(tmp_path / 'ready')!r}).touch(); time.sleep(30)"
+    )
+    with (tmp_path / "process.log").open("wb") as log:
+        child = subprocess.Popen(
+            _supervisor_command(tmp_path, worker, deadline_seconds=deadline_seconds),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+    try:
+        until = time.monotonic() + 5
+        while not (tmp_path / "ready").exists() and time.monotonic() < until:
+            time.sleep(0.02)
+        assert (tmp_path / "ready").exists()
+        if deadline_seconds is None:
+            child.send_signal(signal.SIGTERM)
+        child.wait(timeout=5)
+        record = launch._read(tmp_path / "process.json")
+        assert record["cleanup"]["trainer_exit_code"] == 0
+        assert record["exit_code"] == (143 if deadline_seconds is None else 124)
+        assert child.returncode == record["exit_code"]
+        assert record["stop_reason"] == (
+            "signal" if deadline_seconds is None else "deadline"
+        )
     finally:
         _cleanup_family(tmp_path, child)
 

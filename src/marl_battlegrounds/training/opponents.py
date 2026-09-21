@@ -7,6 +7,7 @@ Recurrent memory belongs to SystemState.team_b, never to this bank. These helper
 do not train, load checkpoints, call a critic, or change simulator rules.
 """
 
+import math
 from typing import Any, NamedTuple, cast
 
 import jax
@@ -49,8 +50,10 @@ class OpponentHistory(NamedTuple):
     captured_rounds, captured_updates : Array
         Int32 (20,) actual capture boundaries. Unused entries are -1.
     threshold_to_snapshot : Array
-        Int32 (20,) slot satisfying each requested 5% threshold, or -1 if unmet.
-        Several thresholds can point to one slot after a single completed update.
+        Int32 (20,) slot satisfying each requested history threshold, or -1 if
+        unmet. Thresholds are the 5% steps, or round 1 followed by 5% through
+        95% when the schedule requests early capture of a pinned first-update
+        actor. Several thresholds can point to one slot after one update.
     last_refresh_rounds : Array
         Int32 scalar last accepted real-round count, initially zero. One round
         means one decision across the fixed environment batch.
@@ -122,6 +125,30 @@ def _matching_variables(variables: Tree, expected: Tree) -> None:
     _array_tree(variables, name="Actor variables")
     if _schema(variables) != expected:
         raise ValueError("Actor variables must keep the same tree, shapes and dtypes")
+
+
+def _pinned_share(value: object) -> None:
+    """Require a static Python pinned-opponent share within [0, 0.8].
+
+    Parameters
+    ----------
+    value : object
+        The share to check. Zero means the 80/20 recipe is unchanged.
+
+    Raises
+    ------
+    TypeError
+        value is bool, a traced array or another non-number.
+    ValueError
+        value is not finite or lies outside [0, 0.8].
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(
+            "The pinned opponent share must be a Python number, not bool, string or "
+            "traced"
+        )
+    if not math.isfinite(value) or not 0 <= value <= 0.8:
+        raise ValueError("The pinned opponent share must be finite within [0, 0.8]")
 
 
 def _field(value: Array, shape: tuple[int, ...], dtype: DTypeLike, name: str) -> None:
@@ -249,7 +276,11 @@ def init_opponent_history(actor_variables: Tree, *, num_envs: int) -> OpponentHi
 
 
 def assign_opponents(
-    history: OpponentHistory, reset_mask: Array, keys: Array
+    history: OpponentHistory,
+    reset_mask: Array,
+    keys: Array,
+    *,
+    pinned_share: float = 0.0,
 ) -> OpponentHistory:
     """Draw current or frozen opponents only for lanes starting another game.
 
@@ -263,29 +294,43 @@ def assign_opponents(
         Independent opponent-stream Threefry keys, typed (B,) or uint32 (B,2).
         Each selected lane splits its key for the 20% historical choice and a
         uniform occupied-slot draw. Other sampling/action streams are untouched.
+    pinned_share : float, default=0.0
+        Static Python probability, within [0, 0.8], that a reset lane meets
+        history slot 0, the pinned first-update actor. Zero keeps the 80%
+        current and 20% uniform-history recipe with exactly today's random
+        draws. A positive share requires a schedule whose first history
+        threshold is round 1, so slot 0 holds the actor after the first completed
+        update. Each reset then picks slot 0 with this probability, one of slots
+        1 through count-1 uniformly with total probability 0.2 while at least two
+        slots exist, and current weights otherwise. While only slot 0 exists,
+        that 0.2 goes to current weights. bool and traced values are rejected.
 
     Returns
     -------
     OpponentHistory
         New assignments for selected lanes only. Empty history selects current
         without drawing. Otherwise each reset has 80% current probability and
-        20% historical probability; finite counts and transition shares differ.
+        20% historical probability, or the pinned split above; finite counts
+        and transition shares differ.
         Invalid numerical history preserves every old value and sets error=True.
 
     Raises
     ------
     TypeError, ValueError
-        History, reset-mask or key shapes/dtypes are incompatible.
+        History, reset-mask or key shapes/dtypes are incompatible, or
+        pinned_share is not a Python number within [0, 0.8].
 
     Notes
     -----
     Pure JAX work supports jit/scan. No memory is reset here. The collector must
     stop on error before applying a System, including its memory initializer.
-    The sticky flag cannot be repaired by a later assignment or refresh.
+    The sticky flag cannot be repaired by a later assignment or refresh. The
+    pinned branch is chosen in Python, so a zero share traces today's program.
     """
     size = _history_shapes(history)
     _field(reset_mask, (size,), jnp.bool_, "reset_mask")
     _keys(keys, size)
+    _pinned_share(pinned_share)
     invalid = _history_invalid(history)
 
     def draw(_: None) -> Array:
@@ -298,7 +343,21 @@ def assign_opponents(
             slot = jax.random.randint(slot_key, (), 0, history.count, dtype=jnp.int32)
             return jnp.where(historical, slot, jnp.int32(-1))
 
-        return jnp.where(reset_mask, jax.vmap(one)(keys), history.lane_snapshot)
+        def one_pinned(key: Array) -> Array:
+            """Choose the pinned slot, another occupied slot or current weights."""
+            choose_key, slot_key = jax.random.split(key)
+            chance = jax.random.uniform(choose_key)
+            pinned = chance < pinned_share
+            historical = ~pinned & (chance < pinned_share + 0.2) & (history.count > 1)
+            slot = jax.random.randint(
+                slot_key, (), 1, jnp.maximum(history.count, 2), dtype=jnp.int32
+            )
+            return jnp.where(
+                pinned, jnp.int32(0), jnp.where(historical, slot, jnp.int32(-1))
+            )
+
+        chooser = one if pinned_share == 0 else one_pinned
+        return jnp.where(reset_mask, jax.vmap(chooser)(keys), history.lane_snapshot)
 
     def unchanged(_: None) -> Array:
         """Keep every assignment when no draw is needed or history is invalid."""
@@ -340,8 +399,10 @@ def refresh_opponents(
     update_index : Array
         Int32 scalar exactly one greater than current_update, without overflow.
     schedule : ScheduleArrays
-        Validated numerical schedule with int32 total_rounds and upward-rounded
-        history_threshold_rounds shaped (20,). Structure stays fixed under jit.
+        Validated numerical schedule with int32 total_rounds and
+        history_threshold_rounds shaped (20,) as built by make_training_schedule:
+        the upward-rounded 5% steps, or round 1 then 5% through 95% when early
+        history capture is requested. Structure stays fixed under jit.
 
     Returns
     -------

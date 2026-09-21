@@ -70,11 +70,16 @@ from marl_battlegrounds.training.opponents import (
     OpponentHistory,
     _history_invalid,
     _history_shapes,
+    _pinned_share,
     assign_opponents,
     init_opponent_history,
     make_opponent_system,
 )
-from marl_battlegrounds.training.shaping import team_potential_shaping, validate_shaping
+from marl_battlegrounds.training.shaping import (
+    team_potential_shaping,
+    team_score_delta_shaping,
+    validate_shaping,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -178,10 +183,14 @@ class TrainingCollection:
 
     actor/opponent contain callables, not changing weights. binding is verified
     content evidence; schedule is the host rounding report. shaping, projection,
-    metrics and recording are static choices. learning_spec/info_spec contain
+    shaping_mode, metrics and recording are static choices. shaping_mode is
+    "potential" by default or the explicit "score_delta" combat objective.
+    learning_spec/info_spec contain
     shape-only output trees used for finite padding and failure diagnostics.
     carry_spec records shapes and static settings without retaining arrays;
     root_bits, key_schema and reward_settings bind in-memory continuation.
+    pinned_opponent_share is the static probability that a reset lane meets the
+    pinned first-update actor in history slot 0; zero keeps the 80/20 recipe.
     Reuse this descriptor across blocks to reuse compiled functions. It is not
     a PyTree or a durable checkpoint and must stay outside numerical carry.
     """
@@ -200,6 +209,8 @@ class TrainingCollection:
     root_bits: tuple[int, ...]
     key_schema: int
     reward_settings: tuple[float, float]
+    shaping_mode: str = "potential"
+    pinned_opponent_share: float = 0.0
 
 
 def _zeros(tree: Tree) -> Tree:
@@ -337,6 +348,26 @@ def _validate_training_continuation(  # pyright: ignore[reportUnusedFunction]
         carry.source_indices, carry.tracking.source_index
     ) or not np.array_equal(carry.source_class_ids, carry.tracking.source_class_ids):
         raise ValueError("Continuation source declarations changed")
+    indices = np.asarray(carry.source_indices)
+    bank_thresholds = np.asarray(
+        carry.tracking.source_configs.team_deathmatch_score_threshold
+    )
+    if np.any(indices < 0) or np.any(indices >= len(bank_thresholds)):
+        raise ValueError("Continuation source indices are outside the verified bank")
+    actual_thresholds = np.asarray(carry.state.config.team_deathmatch_score_threshold)
+    episode_stages = np.asarray(carry.progress.episode_stage)
+    if np.any(episode_stages < 0) or np.any(
+        episode_stages >= int(carry.schedule.stage_count)
+    ):
+        raise ValueError("Continuation episode stages are outside the schedule")
+    if not np.array_equal(
+        actual_thresholds, bank_thresholds[indices]
+    ) or not np.array_equal(
+        actual_thresholds, np.asarray(carry.schedule.score_thresholds)[episode_stages]
+    ):
+        raise ValueError(
+            "Continuation score thresholds disagree with their episode sources"
+        )
     count = collection.schedule.num_envs
     expected_spawns = np.concatenate((np.zeros(count // 2), np.ones(count // 2)))
     if not np.array_equal(carry.tracking.spawn_locations, expected_spawns):
@@ -432,11 +463,13 @@ def init_training_collection(
     seed: int = 42,
     prepared: PreparedTrainingContent | None = None,
     shaping: bool = False,
+    shaping_mode: str = "potential",
     discount: float = 0.99,
     coefficient: float = 0.01,
     collect_training_state: bool = False,
     metrics: str = "priority",
     recording: bool = False,
+    pinned_opponent_share: float = 0.0,
 ) -> tuple[TrainingCollection, TrainingCarry]:
     """Verify and initialize one fixed-batch experiment without choosing actions.
 
@@ -456,7 +489,12 @@ def init_training_collection(
         Supplied bank bytes must match its immutable binding. No external bank
         or synthetic horizon is admitted by this public setup.
     shaping : bool, default False
-        Enable team potential feedback. Disabled work is absent from execution.
+        Enable team feedback. Disabled work is absent from execution.
+    shaping_mode : {"potential", "score_delta"}, default="potential"
+        Potential feedback preserves the discounted task objective. Score-delta
+        feedback adds coefficient times new kills minus new deaths, including
+        terminal actions. Both leave native task rewards unchanged. The mode
+        is checked even when shaping is disabled and stays fixed for the run.
     discount, coefficient : float, defaults 0.99, 0.01
         Learner discount in [0,1] and nonnegative finite shaping scale.
     collect_training_state : bool, default False
@@ -465,6 +503,12 @@ def init_training_collection(
         Completed priority results or no metric work/storage.
     recording : bool, default False
         Enable start declarations for a writer supplied at every host collection.
+    pinned_opponent_share : float, default 0.0
+        Static probability, within [0, 0.8], that a reset lane meets the pinned
+        first-update actor kept in history slot 0. Zero keeps the 80% current
+        and 20% uniform-history recipe and traces today's program. A positive
+        share requires schedule.early_history_capture=True, and that flag
+        requires a positive share; the pair is checked here before any reset.
 
     Returns
     -------
@@ -476,8 +520,9 @@ def init_training_collection(
     Raises
     ------
     TypeError, ValueError
-        Unsupported settings, content/bank mismatch, variable structure mismatch
-        or failed initialization. Failures precede any real transition.
+        Unsupported settings, content/bank mismatch, variable structure mismatch,
+        a pinned share outside its contract or disagreeing with the schedule, or
+        failed initialization. Failures precede any real transition.
     """
     if not isinstance(cast(object, actor), System):
         raise TypeError("actor must be a native JAX System")
@@ -487,6 +532,8 @@ def init_training_collection(
         total_env_steps=schedule.total_env_steps,
         num_envs=schedule.num_envs,
         curriculum=schedule.curriculum,
+        score_threshold_curriculum=schedule.score_threshold_curriculum,
+        early_history_capture=schedule.early_history_capture,
     )
     if (
         jax.tree.structure(schedule.arrays)
@@ -506,7 +553,13 @@ def init_training_collection(
         raise TypeError("seed must be an integer and collection switches must be bool")
     if metrics not in ("none", "priority"):
         raise ValueError("training metrics must be priority or none")
-    validate_shaping(discount=discount, coefficient=coefficient)
+    validate_shaping(discount=discount, coefficient=coefficient, mode=shaping_mode)
+    _pinned_share(pinned_opponent_share)
+    if (pinned_opponent_share > 0) != schedule.early_history_capture:
+        raise ValueError(
+            "A positive pinned_opponent_share requires early_history_capture in the "
+            "schedule, and early capture requires a positive share"
+        )
     if actor.checkpoint is not None:
         raise ValueError(
             "An evolving training actor cannot keep a frozen checkpoint label"
@@ -525,7 +578,7 @@ def init_training_collection(
     opponent = make_opponent_system(actor)
     history = init_opponent_history(actor_variables, num_envs=schedule.num_envs)
     if prepared is None:
-        prepared = prepare_training_content()
+        prepared = prepare_training_content(score_thresholds=schedule.score_thresholds)
     elif not isinstance(cast(object, prepared), PreparedTrainingContent):
         raise TypeError("prepared must be verified PreparedTrainingContent")
     elif (
@@ -535,6 +588,8 @@ def init_training_collection(
         raise ValueError(
             "Prepared source bank does not match its verified content identity"
         )
+    if prepared.binding.score_thresholds != schedule.score_thresholds:
+        raise ValueError("Prepared score thresholds differ from the training schedule")
     root = jax.random.key(seed, impl="threefry2x32")
     generation = jnp.zeros(schedule.num_envs, jnp.int32)
     sampled = sample_training_configs(
@@ -543,6 +598,7 @@ def init_training_collection(
         generation,
         eligible_maps=schedule.arrays.eligible_maps[0],
         team_size=schedule.arrays.team_sizes[0],
+        score_threshold=schedule.arrays.score_thresholds[0],
     )
     env = make(
         "tdm",
@@ -605,6 +661,8 @@ def init_training_collection(
         tuple(int(x) for x in np.asarray(jax.random.key_data(root))),
         TRAINING_KEY_SCHEMA_VERSION,
         (float(carry.discount), float(carry.coefficient)),
+        shaping_mode=shaping_mode,
+        pinned_opponent_share=float(pinned_opponent_share),
     )
     return collection, carry
 
@@ -711,8 +769,15 @@ def _failure_result(
     return carry, (_padding(collection, carry), info, trace)
 
 
-def _reset_pending(carry: TrainingCarry) -> TrainingCarry:
-    """Adopt the requested stage/history only for lanes starting a new game."""
+def _reset_pending(
+    collection: TrainingCollection, carry: TrainingCarry
+) -> TrainingCarry:
+    """Adopt the requested stage/history only for lanes starting a new game.
+
+    collection supplies the static settings, here the pinned opponent share
+    passed to assign_opponents; carry is the dynamic state whose finished lanes
+    are reset. Returns the new carry; continuing lanes keep every value.
+    """
     mask = carry.state.done.done
     stage = carry.tracking.stage_ordinal
     assert carry.tracking.source_configs is not None
@@ -726,11 +791,13 @@ def _reset_pending(carry: TrainingCarry) -> TrainingCarry:
         root_key=carry.root_key,
         eligible_maps=carry.schedule.eligible_maps[stage],
         team_size=carry.schedule.team_sizes[stage],
+        score_threshold=carry.schedule.score_thresholds[stage],
     )
     history = assign_opponents(
         carry.history,
         mask,
         training_keys(carry.root_key, state.reset_generation, stream="opponent"),
+        pinned_share=collection.pinned_opponent_share,
     )
     progress = carry.progress._replace(
         episode_stage=jnp.where(mask, stage, carry.progress.episode_stage)
@@ -762,7 +829,7 @@ def _real_step(
     lanes = jnp.arange(before.episode_id.shape[0])
     slot = carry.history.lane_snapshot + 1
     progress = progress._replace(
-        map_steps=progress.map_steps.at[carry.source_indices, lanes].add(
+        map_steps=progress.map_steps.at[carry.source_indices % 42, lanes].add(
             valid.astype(jnp.int32)
         ),
         opponent_starts=progress.opponent_starts.at[slot, lanes].add(
@@ -783,16 +850,21 @@ def _real_step(
         carry.history.current_update,
         carry.history.captured_updates[jnp.maximum(carry.history.lane_snapshot, 0)],
     )
-    shaping = (
-        team_potential_shaping(
+    if not collection.shaping:
+        shaping = jnp.zeros_like(rewards.rewards[:, 0])
+    elif collection.shaping_mode == "potential":
+        shaping = team_potential_shaping(
             before.core_state.team_deathmatch_scores,
             info,
             discount=carry.discount,
             coefficient=carry.coefficient,
         )[:, 0]
-        if collection.shaping
-        else jnp.zeros_like(rewards.rewards[:, 0])
-    )
+    else:
+        shaping = team_score_delta_shaping(
+            before.core_state.team_deathmatch_scores,
+            info,
+            coefficient=carry.coefficient,
+        )[:, 0]
     row = TrainingTransition(
         carry.observations,
         _team_mask(before),
@@ -854,7 +926,10 @@ def advance_training_step(
         values = cast(
             TrainingCarry,
             jax.lax.cond(
-                jnp.any(values.state.done.done), _reset_pending, _retain, values
+                jnp.any(values.state.done.done),
+                partial(_reset_pending, collection),
+                _retain,
+                values,
             ),
         )
         return cast(
@@ -1042,6 +1117,9 @@ def training_summary(
     trajectory. Integers are aggregated with Python precision, not int32 device
     reductions. Failed carry raises ValueError. No learning/sample-use or skill
     claim is inferred; learner_samples is None until a later learner owns it.
+    score_thresholds_by_episode_stage labels active reset-time stages.
+    exposure_by_score_threshold groups starts, env_steps and actor_decisions by
+    the K actually used by each game, including games carried across stage ends.
     """
     _check_carry(carry)
     p = jax.device_get(carry.progress)
@@ -1051,6 +1129,28 @@ def training_summary(
         return [sum(int(x) for x in np.asarray(row).flat) for row in np.asarray(values)]
 
     rounds = int(p.rounds)
+    stages = int(carry.schedule.stage_count)
+    thresholds = np.asarray(carry.schedule.score_thresholds)[:stages].tolist()
+    starts, steps, decisions = (
+        totals(p.starts),
+        totals(p.exposure),
+        totals(p.actor_decisions),
+    )
+    by_threshold = [
+        {
+            "score_threshold": threshold,
+            "starts": sum(
+                starts[i] for i, value in enumerate(thresholds) if value == threshold
+            ),
+            "env_steps": sum(
+                steps[i] for i, value in enumerate(thresholds) if value == threshold
+            ),
+            "actor_decisions": sum(
+                decisions[i] for i, value in enumerate(thresholds) if value == threshold
+            ),
+        }
+        for threshold in dict.fromkeys(thresholds)
+    ]
     return {
         "rounds": rounds,
         "env_steps": rounds * collection.schedule.num_envs,
@@ -1058,9 +1158,11 @@ def training_summary(
         "rounding": dict(collection.schedule.rounding_report),
         "stage_complete": np.asarray(p.stage_complete).tolist(),
         "completed_stage_counts": np.asarray(p.completed_stage_counts).tolist(),
-        "starts_by_episode_stage": totals(p.starts),
-        "steps_by_episode_stage": totals(p.exposure),
-        "actor_decisions_by_episode_stage": totals(p.actor_decisions),
+        "score_thresholds_by_episode_stage": thresholds,
+        "exposure_by_score_threshold": by_threshold,
+        "starts_by_episode_stage": starts,
+        "steps_by_episode_stage": steps,
+        "actor_decisions_by_episode_stage": decisions,
         "steps_by_map": totals(p.map_steps),
         "starts_by_opponent": totals(p.opponent_starts),
         "steps_by_opponent": totals(p.opponent_steps),

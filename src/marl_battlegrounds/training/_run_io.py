@@ -243,7 +243,13 @@ def duration(seconds: float | None) -> str:
     total = max(0, round(seconds))
     hours, remainder = divmod(total, 3600)
     minutes, secs = divmod(remainder, 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return (
+        f"{hours}h {minutes:02d}m {secs:02d}s"
+        if hours
+        else f"{minutes}m {secs:02d}s"
+        if minutes
+        else f"{secs}s"
+    )
 
 
 class TrainingSpeedEstimate:
@@ -285,17 +291,14 @@ class TrainingSpeedEstimate:
 
 
 def progress_text(status: dict[str, Any]) -> str:
-    """Format existing host records without fetching arrays or reading files.
+    """Explain progress using existing host records, with no reads or device work.
 
-    Missing warmed timing or future-phase measurements produce Estimating.
-    estimated_transitions_per_second predicts remaining work; measured training
-    throughput includes compilation and excludes validation/saving. An exhausted
-    budget has zero training time left even after a fresh resume. elapsed_seconds
-    carries the larger
-    saved checkpoint or same-run status value, then adds the current attempt.
-    Interrupted work without a durable timing record may be missing; wall_seconds
-    includes the gaps between attempts.
-    Fields are named by the runner. This display is not a learning verdict.
+    Steps count real environment transitions. Training speed includes the first
+    compilation and excludes validation and saving. Run elapsed time excludes
+    gaps between attempts; wall_seconds includes them. Unknown future costs stay
+    unknown. Raw losses and signed reward averages remain in training_updates.jsonl;
+    they cannot diagnose learning by their size. Saved Random results describe
+    combat per game and are never treated as proof of general competence.
     """
     steps = int(status.get("env_steps", 0))
     total = int(status.get("total_env_steps", 0))
@@ -311,34 +314,100 @@ def progress_text(status: dict[str, Any]) -> str:
     )
     later = status.get("pending_work_seconds")
     eta = remaining + later if remaining is not None and later is not None else None
-    phase = str(status.get("phase", "Starting")).replace("_", " ").capitalize()
-    parts = [
-        f"{phase}: {steps:,}/{total:,} environment transitions ({steps / total:.1%})"
+    phase = str(status.get("phase", "starting"))
+    labels = {
+        "starting": "Starting",
+        "training": "Training",
+        "speed_check": "Speed Check",
+        "validation": "Checking Play Against Fixed Opponents",
+        "random_validation": "Checking Play Against Random",
+        "saving": "Saving Progress",
+        "reporting": "Writing Results",
+        "complete": "Run Finished",
+        "failed": "Run Stopped With An Error",
+        "recovering": "Restoring Saved Progress",
+    }
+    label = labels.get(phase, phase.replace("_", " ").title())
+    lines = [
+        f"{label} | Steps: {steps:,} / {total:,} ({steps / total:.1%})"
         if total
-        else f"{phase}: {steps:,} environment transitions",
-        f"Updates {status.get('completed_updates', 0):,}",
-        f"Elapsed {duration(status.get('elapsed_seconds'))}",
-        f"Training Speed {rate:,.1f}/s" if rate else "Training Speed Estimating",
-        f"Recent {recent:,.1f}/s" if recent else "Recent Estimating",
-        f"Training ETA {duration(remaining)}",
-        f"Whole-Run ETA {duration(eta)}",
+        else f"{label} | Steps: {steps:,}",
+        f"Learning Updates: {status.get('completed_updates', 0):,} | "
+        f"Time Spent In This Run: {duration(status.get('elapsed_seconds'))} | "
+        f"Training Time Left (Estimate): {duration(remaining)} | "
+        f"Whole Run Time Left (Estimate): {duration(eta)}",
     ]
-    for name, label in (
-        ("policy_loss", "Policy Loss"),
-        ("value_loss", "Value Loss"),
-        ("entropy", "Entropy"),
-        ("task_reward_mean", "Task Reward"),
-        ("shaping_mean", "Shaping"),
-        ("validation_score", "Validation Score"),
+    if status.get("score_threshold") is not None:
+        lines.append(
+            f"New Training Games Need {status['score_threshold']} Kills To Win "
+            "| Validation Still Needs 20"
+        )
+    if rate or recent:
+        speeds: list[str] = []
+        if recent:
+            speeds.append(f"{recent:,.0f} steps/s recently")
+        if rate:
+            speeds.append(f"{rate:,.0f} steps/s overall")
+        lines.append(
+            "Training Speed: "
+            + "; ".join(speeds)
+            + " (Includes Compilation; Excludes Checks And Saving)"
+        )
+    check = status.get("random_validation")
+    if isinstance(check, dict) and check.get("games"):
+        check = cast(dict[str, Any], check)
+        captured_at = (
+            duration(check["wall_seconds"])
+            if check.get("wall_seconds") is not None
+            else "Not Recorded"
+        )
+        lines.append(
+            f"Latest Check Against Random: {check['games']:,} Games "
+            f"After {check.get('env_steps', 0):,} Training Steps; "
+            f"Run Time At That Check: {captured_at}"
+        )
+        kills, deaths, margin = (
+            check.get(name)
+            for name in ("mean_kills_for", "mean_kills_against", "kill_margin")
+        )
+        if all(value is not None for value in (kills, deaths, margin)):
+            lines.append(
+                f"Per Game: Our Team Kills {kills:.2f} | "
+                f"Our Team Deaths {deaths:.2f} | "
+                f"Kill Difference {margin:+.2f}"
+            )
+            change = check.get("kill_margin_change")
+            if change is not None:
+                lines.append(
+                    "Change In Kill Difference Since Untrained: "
+                    f"{change:+.2f} Per Game "
+                    "(One Training Run; More Tests Needed)"
+                )
+        else:
+            lines.append("Kills And Deaths: Not Available In This Saved Check")
+        lines.append(
+            f"Game Results: {check['wins']} Wins, {check['draws']} Draws, "
+            f"{check['losses']} Losses | Draws Can Still Show Combat Improvement"
+        )
+    elif all(
+        status.get(f"validation_{name}") is not None
+        for name in ("wins", "draws", "losses")
     ):
-        value = status.get(name)
-        if value is not None:
-            parts.append(f"{label} {value:.5g}")
+        lines.append(
+            f"Latest Opponent Check: {status['validation_wins']} Wins, "
+            f"{status['validation_draws']} Draws, {status['validation_losses']} Losses"
+        )
+    elif status.get("validation_score") is not None:
+        lines.append(
+            "Latest Opponent Check: Average Game Score "
+            f"{status['validation_score']:.3f} "
+            "(Win = 1; Draw = 0.5; Loss = 0)"
+        )
     if status.get("latest_checkpoint"):
-        parts.append(f"Checkpoint {status['latest_checkpoint']}")
+        lines.append("Recovery: Saved Progress Is Available")
     if status.get("error"):
-        parts.append(f"Error {status['error']}")
-    return " | ".join(parts)
+        lines.append(f"Reason For Stopping: {status['error']}")
+    return "\n".join(lines)
 
 
 class ProgressReporter:
@@ -346,7 +415,9 @@ class ProgressReporter:
 
     enabled=False returns before clock reads or formatting. stream defaults to
     stdout. The caller supplies existing host data; this helper starts no thread,
-    file writer, model call, measurement or device transfer.
+    file writer, model call, measurement or device transfer. Screen workers use
+    MARL_BGS_PROGRESS_PHASES_ONLY=1 to leave regular updates to their supervisor;
+    MARL_BGS_PROGRESS_CONTEXT labels those workers as speed checks or trials.
     """
 
     def __init__(self, *, enabled: bool, stream: TextIO | None = None) -> None:
@@ -355,16 +426,87 @@ class ProgressReporter:
         self.stream = sys.stdout if stream is None else stream
         self.last_time = float("-inf")
         self.last_phase: str | None = None
+        self.phases_only = os.environ.get("MARL_BGS_PROGRESS_PHASES_ONLY") == "1"
+        self.context = os.environ.get("MARL_BGS_PROGRESS_CONTEXT", "")
 
     def report(self, status: dict[str, Any], *, force: bool = False) -> None:
         """Print status when due; force also prints completion or failure."""
         if not self.enabled:
             return
-        now = time.monotonic()
         phase = str(status.get("phase"))
+        if self.phases_only and not force and phase == self.last_phase:
+            return
+        now = time.monotonic()
         if force or phase != self.last_phase or now - self.last_time >= 10:
-            print(progress_text(status), file=self.stream, flush=True)
+            stamp = utc_now()[:19].replace("T", " ")
+            print(
+                f"[{stamp} UTC] {self.context}\n{progress_text(status)}",
+                file=self.stream,
+                flush=True,
+            )
             self.last_time, self.last_phase = now, phase
+
+
+def checkpoint_ancestry(
+    run_dir: Path, checkpoint_details: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Read one active chain of signed learner descriptions without model arrays.
+
+    run_dir is the original run directory. checkpoint_details is its already
+    verified latest or selected learner description, read through the checkpoint
+    owner. The caller must bind that first description to the intended run.
+    Return an ID-to-description mapping including the current boundary. Verify
+    each parent belongs to the same run/config/source/dependencies/execution and
+    does not follow its child's experience counters. Reject cycles, linked
+    paths, malformed IDs or inconsistent ancestry with ValueError; missing files
+    raise OSError. Pruned numerical payloads are not needed. No files change and
+    no backend or numerical restore starts.
+    """
+    from marl_battlegrounds.training import checkpoints
+
+    root = run_dir.resolve()
+    metadata = checkpoint_details["metadata"]
+
+    def identifier(item: object) -> str:
+        """Read a lowercase SHA-256 through the existing checkpoint owner."""
+        return checkpoints._digest(item, "Saved artifact identity")  # pyright: ignore[reportPrivateUsage]
+
+    def integer(item: object, name: str) -> int:
+        """Require one nonnegative ancestry counter without accepting bool."""
+        if type(item) is not int or item < 0:
+            raise ValueError(f"Saved {name} must be a nonnegative integer")
+        return item
+
+    ancestry: dict[str, dict[str, Any]] = {}
+    current = checkpoint_details
+    previous_counts = checkpoint_details["counters"]
+    while True:
+        key = identifier(current["checkpoint_id"])
+        if key in ancestry or current["kind"] != "learner":
+            raise ValueError("Saved checkpoint ancestry is cyclic or invalid")
+        context = current["metadata"]
+        for name in ("run_id", "config", "source", "dependencies"):
+            if context[name] != metadata[name]:
+                raise ValueError("Saved ancestor belongs to a different experiment")
+        if context.get("execution") != metadata.get("execution"):
+            raise ValueError("Saved ancestor uses a different execution identity")
+        for name, maximum in previous_counts.items():
+            if integer(current["counters"][name], name) > maximum:
+                raise ValueError("Saved ancestor follows its descendant")
+        previous_counts = current["counters"]
+        ancestry[key] = current
+        parent = context["parent_checkpoint"]
+        if parent is None:
+            break
+        parent = identifier(parent)
+        directory = root / "checkpoints" / parent
+        if directory.resolve() != directory:
+            raise ValueError("Saved ancestry cannot follow a linked directory")
+        current = checkpoints.read_checkpoint_description(directory)
+        if current["checkpoint_id"] != parent:
+            raise ValueError("Ancestor directory and description identities differ")
+
+    return ancestry
 
 
 def validate_host_state(
@@ -389,7 +531,8 @@ def validate_host_state(
     -------
     None
         Saved host counts, timings, pending capture, active ancestry, exported
-        actors, validation records and selection agree. Inputs remain unchanged.
+        actors, panel/Random results and selection agree. Shared initialization
+        evidence is verified at its original paths. Inputs remain unchanged.
 
     Raises
     ------
@@ -398,6 +541,7 @@ def validate_host_state(
         an actor or completed validation artifact is missing or changed; or a
         candidate belongs to an abandoned continuation. A pending current export
         need not exist. Ancestor descriptions remain usable after payload pruning.
+        Exported weights and input scale must match their learner boundary.
 
     Notes
     -----
@@ -442,13 +586,18 @@ def validate_host_state(
         "selection",
         "recovery_checkpoints",
     }
+    random_pairs = config.get("random_diagnostic_seed_pairs")
+    if random_pairs is not None:
+        required.add("random_results")
     stage_shapes = {
         "stage_completed": (17, 3),
         "stage_score_sums": (17, 2),
         "stage_length_sum": (17,),
         "stage_k20_count": (17,),
     }
-    if not required <= set(host) or set(host) - required - stage_shapes.keys():
+    if not required <= set(host) or set(host) - required - stage_shapes.keys() - {
+        "random_results"
+    }:
         raise ValueError("Saved host state fields differ from the runner schema")
 
     def integer(item: object, name: str) -> int:
@@ -555,34 +704,7 @@ def validate_host_state(
         if sum(sum(row) for row in host["stage_completed"]) > steps:
             raise ValueError("Completed games exceed real transitions")
 
-    ancestry: dict[str, dict[str, Any]] = {}
-    current = checkpoint_details
-    previous_counts = checkpoint_details["counters"]
-    while True:
-        key = identifier(current["checkpoint_id"])
-        if key in ancestry or current["kind"] != "learner":
-            raise ValueError("Saved checkpoint ancestry is cyclic or invalid")
-        context = current["metadata"]
-        for name in ("run_id", "config", "source", "dependencies"):
-            if context[name] != metadata[name]:
-                raise ValueError("Saved ancestor belongs to a different experiment")
-        if context.get("execution") != metadata.get("execution"):
-            raise ValueError("Saved ancestor uses a different execution identity")
-        for name, maximum in previous_counts.items():
-            if integer(current["counters"][name], name) > maximum:
-                raise ValueError("Saved ancestor follows its descendant")
-        previous_counts = current["counters"]
-        ancestry[key] = current
-        parent = context["parent_checkpoint"]
-        if parent is None:
-            break
-        parent = identifier(parent)
-        directory = root / "checkpoints" / parent
-        if directory.resolve() != directory:
-            raise ValueError("Saved ancestry cannot follow a linked directory")
-        current = checkpoints.read_checkpoint_description(directory)
-        if current["checkpoint_id"] != parent:
-            raise ValueError("Ancestor directory and description identities differ")
+    ancestry = checkpoint_ancestry(root, checkpoint_details)
 
     recent = host["recovery_checkpoints"]
     if not isinstance(recent, list):
@@ -614,7 +736,8 @@ def validate_host_state(
             or type(actor["env_steps"]) is not int
             or actor["seed"] != config["seed"]
             or actor["env_steps"] != ancestor["counters"]["env_steps"]
-            or actor["actor_digest"] != ancestor["actor_digest"]
+            or actor["weight_digest"] != ancestor["actor_digest"]
+            or actor["input_scale"] != config["ppo"].get("input_scale", 1.0)
             or actor["schemas"] != ancestor["schemas"]
         ):
             raise ValueError("Saved actor identity differs from its learner boundary")
@@ -633,16 +756,51 @@ def validate_host_state(
         if panel is not None
         else set()
     )
+    random_points: set[int] = (
+        {0, total, *config["checkpoint_env_steps"]}
+        if random_pairs is not None
+        else set()
+    )
+    initial_reference = config.get("random_initialization_result")
+    if initial_reference is not None:
+        initial = next(
+            (item for item in ancestry.values() if item["counters"]["env_steps"] == 0),
+            None,
+        )
+        if initial is None or random_pairs is None:
+            raise ValueError(
+                "Shared Random initialization has no initial learner boundary"
+            )
+        validation.read_random_initialization(
+            initial_reference,
+            actor_digest=checkpoints._inference_digest(initial),  # pyright: ignore[reportPrivateUsage]
+            seed_pairs=random_pairs,
+        )
     pending = host["pending"]
     if pending is not None:
+        allowed_flags = (
+            ({"routine", "random"},)
+            if random_pairs is not None
+            else ({"routine", "random"}, {"routine"})
+        )
         if (
             not isinstance(pending, dict)
-            or set(cast(dict[str, Any], pending)) != {"routine"}
+            or set(cast(dict[str, Any], pending)) not in allowed_flags
             or type(cast(dict[str, Any], pending)["routine"]) is not bool
+            or (
+                "random" in pending
+                and type(cast(dict[str, Any], pending)["random"]) is not bool
+            )
         ):
-            raise ValueError("Saved pending work must declare one Boolean routine flag")
+            raise ValueError(
+                "Saved pending work must declare Boolean routine/Random flags"
+            )
         if pending["routine"] != (steps in points):
             raise ValueError("Saved pending validation differs from its schedule")
+        if pending.get("random", False) != (steps in random_points):
+            raise ValueError(
+                "Saved pending Random diagnostic differs from its schedule"
+            )
         if steps not in points | set(config["checkpoint_env_steps"]) | {0, total}:
             raise ValueError("Saved pending capture is outside its declared schedule")
     if host["final_actor"] is not None:
@@ -762,6 +920,62 @@ def validate_host_state(
                         "Saved routine validation schedule is inconsistent"
                     )
                 routine_steps.add(actor["env_steps"])
+    random_steps: set[int] = set()
+    results = host.get("random_results", [])
+    if not isinstance(results, list) or (random_pairs is None and results):
+        raise ValueError("Saved Random results differ from their enabled settings")
+    for result in cast(list[Any], results):
+        if not isinstance(result, dict):
+            raise ValueError("Saved Random result must be an object")
+        result = cast(dict[str, Any], result)
+        point = integer(result.get("env_steps"), "Random env_steps")
+        if point not in random_points or point in random_steps or point > steps:
+            raise ValueError("Saved Random captures differ from their exact schedule")
+        random_steps.add(point)
+        current_actor = next(
+            (actor for actor in actor_records.values() if actor["env_steps"] == point),
+            None,
+        )
+        if current_actor is None:
+            raise ValueError("Saved Random result has no current-run actor capture")
+        reused = point == 0 and initial_reference is not None
+        if result.get("reused_initialization") is not reused or result.get(
+            "reference_path"
+        ) != (str(Path(cast(str, initial_reference)).absolute()) if reused else None):
+            raise ValueError(
+                "Saved Random initialization reference differs from config"
+            )
+        key = current_actor["metadata"]["checkpoint_id"]
+        if not reused and (
+            result.get("actor_path") != actors[key]
+            or result.get("summary_path")
+            != str(root / "validation" / f"random-{key}" / "validation_summary.json")
+        ):
+            raise ValueError("Saved Random evidence is outside its current-run capture")
+        validation.verify_random_result(
+            result,
+            actor_digest=current_actor["actor_digest"],
+            seed_pairs=cast(int, random_pairs),
+            checkpoint_id=None if reused else key,
+            env_steps=point,
+        )
+        if result["task_id"] in seen:
+            raise ValueError("Saved Random task is duplicated")
+        seen.add(result["task_id"])
+        if (
+            seconds(result["elapsed_seconds"], "Random elapsed_seconds")
+            > host["elapsed_seconds"] + 1e-6
+            or seconds(result["training_seconds"], "Random training_seconds")
+            > host["training_seconds"] + 1e-6
+        ):
+            raise ValueError("Saved Random capture follows its checkpoint time")
+        if not reused:
+            validation_games += result["games"]
+    required_random = {point for point in random_points if point <= steps}
+    if pending is not None and pending.get("random"):
+        required_random.discard(steps)
+    if not required_random <= random_steps:
+        raise ValueError("Saved Random diagnostic coverage is incomplete")
     required_points = {point for point in points if point <= steps}
     if pending is not None and pending["routine"]:
         required_points.discard(steps)

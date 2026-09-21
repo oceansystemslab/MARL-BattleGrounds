@@ -6,6 +6,8 @@ real wins, losses, draws, death, respawn, team sizes 1-5 and AutoReset. The publ
 actor loop checks that optional learner feedback changes no actor input, action,
 task reward or simulator transition. These CPU cases do not claim learning gains
 or GPU speed; the composed collector owns proof that disabled work is omitted.
+Score-delta cases keep terminal kill feedback, net simultaneous deaths, ignore
+padding and use reset-local scores without changing native rewards.
 """
 
 from collections.abc import Callable
@@ -35,7 +37,11 @@ from marl_battlegrounds.evaluation.policy_execution import (
     policy,
     shared_policy,
 )
-from marl_battlegrounds.training.shaping import team_potential_shaping, validate_shaping
+from marl_battlegrounds.training.shaping import (
+    team_potential_shaping,
+    team_score_delta_shaping,
+    validate_shaping,
+)
 
 
 def _equal(actual: object, expected: object) -> None:
@@ -128,6 +134,72 @@ def test_padding_uses_existing_real_transition_authority(config: EnvConfig) -> N
     np.testing.assert_array_equal(result, np.zeros((2, 2), np.float32))
 
 
+def test_score_delta_keeps_terminal_kills_and_nets_simultaneous_deaths(
+    config: EnvConfig,
+) -> None:
+    before = jnp.asarray(((0, 0), (19, 7), (6, 8), (4, 4), (5, 3), (3, 9)), jnp.int32)
+    info = _info(
+        config,
+        ((0, 0), (20, 7), (6, 9), (5, 5), (7, 4), (0, 0)),
+        completed=(False, True, False, True, False, False),
+        steps=(0, 4, 2, 0, 4, -1),
+    )
+    actual = team_score_delta_shaping(before, info)
+    expected = np.asarray((0, 0.01, -0.01, 0, 0.01, 0), np.float32)
+    np.testing.assert_array_equal(actual[:, 0], expected)
+    np.testing.assert_array_equal(actual[:, 1], -expected)
+    # A cutoff or a real ending cannot change the same producing kill feedback.
+    np.testing.assert_array_equal(
+        team_score_delta_shaping(before, info._replace(completed=~info.completed)),
+        actual,
+    )
+
+
+def test_score_delta_preserves_small_changes_at_large_authored_scores(
+    config: EnvConfig,
+) -> None:
+    before = jnp.asarray(((16777214, 16777214),), jnp.int32)
+    info = _info(config, ((16777215, 16777216),))
+    np.testing.assert_array_equal(
+        team_score_delta_shaping(before, info),
+        np.asarray(((-0.01, 0.01),), np.float32),
+    )
+
+
+def test_score_delta_jit_reuses_changed_scores_and_coefficient(
+    config: EnvConfig,
+) -> None:
+    traces: list[int] = []
+
+    @jax.jit
+    def run(before: Array, info: EpisodeInfo, coefficient: Array) -> Array:
+        traces.append(1)
+        return team_score_delta_shaping(before, info, coefficient=coefficient)
+
+    for index, coefficient in enumerate((0.01, 0.25, 0.0)):
+        before = jnp.asarray(((index, 3), (8, index)), jnp.int32)
+        info = _info(config, ((index + 2, 4), (8, index + 1)))
+        result = cast(Array, run(before, info, jnp.float32(coefficient)))
+        np.testing.assert_array_equal(
+            result,
+            np.asarray(
+                ((coefficient, -coefficient), (-coefficient, coefficient)), np.float32
+            ),
+        )
+    assert traces == [1]
+
+
+@pytest.mark.parametrize("mode", ["dense", "", None, True, 1, ("potential",)])
+def test_host_validation_rejects_unknown_modes(mode: object) -> None:
+    with pytest.raises(ValueError, match="mode"):
+        validate_shaping(discount=0.99, mode=cast(str, mode))
+
+
+@pytest.mark.parametrize("mode", ["potential", "score_delta"])
+def test_host_validation_accepts_declared_modes(mode: str) -> None:
+    assert validate_shaping(discount=0.99, mode=mode) is None
+
+
 def test_jit_reuses_program_for_changed_scalar_values_and_scores(
     config: EnvConfig,
 ) -> None:
@@ -169,7 +241,10 @@ def test_host_validation_accepts_real_boundary_settings(
 def test_host_validation_rejects_nonreal_settings(field: str, value: object) -> None:
     settings = {"discount": 0.9, "coefficient": 0.01, field: value}
     with pytest.raises(TypeError, match="real scalar"):
-        validate_shaping(**cast(dict[str, float], settings))
+        validate_shaping(
+            discount=cast(float, settings["discount"]),
+            coefficient=cast(float, settings["coefficient"]),
+        )
 
 
 @pytest.mark.parametrize("field", ["discount", "coefficient"])
@@ -177,7 +252,10 @@ def test_host_validation_rejects_nonreal_settings(field: str, value: object) -> 
 def test_host_validation_rejects_invalid_values(field: str, value: object) -> None:
     settings = {"discount": 0.9, "coefficient": 0.01, field: value}
     with pytest.raises(ValueError):
-        validate_shaping(**cast(dict[str, float], settings))
+        validate_shaping(
+            discount=cast(float, settings["discount"]),
+            coefficient=cast(float, settings["coefficient"]),
+        )
 
 
 def test_host_validation_rejects_excess_discount_and_tracing() -> None:
@@ -389,6 +467,18 @@ def test_autoreset_matches_explicit_reset_using_producing_scores(
     np.testing.assert_array_equal(actual[1].core_state.team_deathmatch_scores[:2], 0)
     assert np.all(actual[4].team_scores[:2] != 0)
     np.testing.assert_allclose(expected[:2, 0], (-0.17, 0.17), atol=2e-8)
+    delta = team_score_delta_shaping(before_scores, actual[4])
+    np.testing.assert_array_equal(
+        delta, team_score_delta_shaping(before_scores, manual[4])
+    )
+    np.testing.assert_array_equal(delta[:2, 0], np.asarray((0.01, -0.01), np.float32))
+    next_result = step(env, jax.random.key(42), actual[1], _idle())
+    np.testing.assert_array_equal(
+        team_score_delta_shaping(
+            actual[1].core_state.team_deathmatch_scores, next_result[4]
+        ),
+        0,
+    )
 
 
 def test_public_actor_calls_and_task_trajectory_ignore_shaping(
@@ -399,7 +489,7 @@ def test_public_actor_calls_and_task_trajectory_ignore_shaping(
     actor = shared_policy(policy("random"))
     observations = env.get_observations(state)
     memory = init_systems(actor, actor, observations, state, jax.random.key(51))
-    branches = [(state, observations, memory), (state, observations, memory)]
+    branches = [(state, observations, memory)] * 3
     for tick in range(3):
         outputs: list[object] = []
         for enabled, (before, inputs, carried) in enumerate(branches):
@@ -407,11 +497,17 @@ def test_public_actor_calls_and_task_trajectory_ignore_shaping(
                 actor, actor, carried, inputs, before, jax.random.key(60 + tick)
             )
             result = step(env, jax.random.key(70 + tick), before, actions)
-            if enabled:
+            if enabled == 1:
                 feedback = team_potential_shaping(
                     before.core_state.team_deathmatch_scores, result[4], discount=0.9
+                )
+                assert feedback.shape == (5, 2)
+            elif enabled == 2:
+                feedback = team_score_delta_shaping(
+                    before.core_state.team_deathmatch_scores, result[4]
                 )
                 assert feedback.shape == (5, 2)
             branches[enabled] = (result[1], result[0], updated)
             outputs.append((actions, updated, result))
         _equal(outputs[0], outputs[1])
+        _equal(outputs[0], outputs[2])

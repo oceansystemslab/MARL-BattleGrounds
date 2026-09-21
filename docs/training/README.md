@@ -1,5 +1,9 @@
 # Training And Baseline Components
 
+For saved models, results and manuscript evidence, start with the
+[development checkpoint population](checkpoint_population.md). For tuning
+decisions and their limits, use the [baseline methods record](baseline_methods.md).
+
 The `marl_battlegrounds.training` package prepares verified maps, samples
 configurations and collects exact experience budgets with optional curriculum,
 score shaping and self-play history. The `marl_battlegrounds.baselines` package
@@ -19,6 +23,11 @@ JAX_PLATFORMS=cpu uv run --no-sync python examples/baseline_system.py
 ```
 
 For the qualified local GPU setup, follow the [GPU guide](../dev/gpu_sanity.md).
+The [baseline development record](baseline_methods.md#current-mappo-standard)
+records **512 parallel environments and rollout length 32** as our current
+MAPPO starting configuration, with the measured results and their limits.
+The completed five-minute screen's launcher is described under
+[Configuration Screen](#configuration-screen).
 For the distribution example and its recording benchmark, use
 `JAX_PLATFORMS=cuda,cpu`. The numerical loop uses the GPU; the existing host
 configuration validator uses the CPU. Selecting only `cuda` makes that validator
@@ -126,9 +135,10 @@ System memory. An episode reset clears memory on the next action decision;
 death, respawn and a rollout boundary do not.
 
 Keep one shared source bank and the current per-lane declarations. Do not retain
-full sampled configuration histories. The sampler changes no score threshold,
-horizon or class capability. Curriculum schedules, shaping and opponent history
-remain outside these helpers.
+full sampled configuration histories. By default, the sampler keeps K20. A bank
+prepared with declared score thresholds can select another exact source at
+reset. The sampler does not change the horizon or class capabilities.
+Curriculum schedules, shaping and opponent history remain outside this helper.
 
 ## Own The Training Random Keys
 
@@ -242,7 +252,9 @@ This example creates no learner checkpoint and offers no restart command.
 The library route uses four calls:
 
 1. `make_training_schedule(total_env_steps=..., num_envs=..., curriculum=...)`
-   resolves exact stage budgets on the host.
+   resolves exact stage budgets on the host. Pass `early_history_capture=True`
+   only together with a positive `pinned_opponent_share` in step 2; the
+   collection refuses a mismatched pair.
 2. `init_training_collection(actor, actor_variables, schedule=schedule, ...)`
    returns a stable `TrainingCollection` and its numerical `TrainingCarry`.
    Supply a native JAX `System` whose lanes are independent and whose memory
@@ -301,6 +313,13 @@ first real decision. Actor decisions are active, living Team A decisions.
 `learner_samples` stays `None`: collection counts do not establish which samples
 a future learner used, sample efficiency or learned tactics.
 
+The small-team stages keep K20/H300. Some sampled class pairs cannot reach that
+threshold. For example, Hunter versus Hunter needs at least 2,000 damage for
+20 kills, but even 300 Basics plus ten Ultimates deliver at most 1,900 damage,
+before travel, shields and healing. Hunter+Priest mirrors also have this limit.
+Such games must draw. Played exposure therefore does not establish a useful
+win/loss learning signal; report this limitation when using the curriculum.
+
 ### Optional Score Shaping
 
 `team_potential_shaping(before_scores, info, discount=..., coefficient=0.01)`
@@ -329,6 +348,21 @@ remain excluded. Do not sum repeated actor copies into a larger team bonus.
 Disabled shaping skips the calculation entirely. Shaping never enters actor
 inputs or changes official rewards, scores or metric definitions.
 
+An explicit alternative is `TrainConfig(shaping=True, shaping_mode="score_delta")`.
+It adds `shaping_coefficient` for each new team kill and subtracts the same amount
+for each new team death. The default coefficient is 0.01. Native win/loss reward
+is still added. Simultaneous kills and deaths offset each other. Terminal kills
+count, and there is no cancellation at a real ending. Low-level collection uses
+the same `shaping_mode` argument and `team_score_delta_shaping` helper.
+
+**Score-delta shaping changes the training objective.** It can reward combat
+progress in games that still draw under K20/H300. This is a separate experimental
+baseline option, not a proven improvement or a substitute definition of winning.
+The default remains `"potential"`; old settings without a mode keep that behavior.
+Both modes log task reward and shaping separately, save the mode for exact
+resume, and evaluate with unmodified native rewards. Compare them with declared
+seeds and budgets. A higher shaped return alone does not show better play.
+
 ### Current And Historical Self-Play
 
 Each new opponent game uses current actor weights until history exists. After
@@ -338,12 +372,26 @@ transition shares. A historical game keeps its chosen weights until it ends.
 Current-policy games use newly published actor weights while retaining their
 own recurrent memory. Team A and Team B never share memory.
 
+An optional pinned near-start opponent is available through
+`TrainConfig(pinned_opponent_share=0.1)`. A positive share moves the first
+history capture to the first completed update, so slot 0 holds the actor after
+one update for the whole run, and drops the never-played 100% capture. Each new
+game then meets slot 0 with that probability, one of the other stored snapshots
+with total probability 0.2 once any exist, and current weights otherwise. While
+only slot 0 exists, that 0.2 goes to current weights. The share must lie within
+[0, 0.8]. Leaving it at zero keeps the recipe above with exactly today's random
+draws. Evaluation opponents are unaffected. The realized share of game starts
+and steps that met slot 0 appears in `exposure.json`, row 1 of the opponent
+lists. A pinned opponent is a development setting for the self-play recipe; it
+is not evidence of learning until a declared comparison shows it.
+
 Call `refresh_opponents` once after each completed learner update and before
 the next block. Supply already-updated actor-only variables, the exact next
 `update_index`, the carry's completed real rounds and its numerical schedule.
 Keep the returned history in the carry. The helper performs no learning.
 It captures one immutable actor when an unmet 5%, 10%, ..., 100% threshold has
-been reached. Several thresholds crossed by one update share one stored
+been reached; with a positive pinned share the thresholds are round 1, then 5%
+through 95%. Several thresholds crossed by one update share one stored
 snapshot. The bank has room for 20 snapshots, with no eviction. Record actual
 capture rounds/updates from `SnapshotEvent`; a final snapshot may see no play.
 
@@ -449,6 +497,23 @@ Actor and critic each use Dense(128)/ReLU, GRU(128), Dense(128)/ReLU, then their
 own output head. There is no running normalization or added agent-ID wrapper.
 The [source ledger](source_reuse.md) gives the exact donor, initialization,
 settings, masks and independent offline reference.
+
+`PPOConfig(input_scale=0.01)` explicitly scales actor and critic inputs before
+their first layer. The default `1.0` preserves the donor and old models. Use a
+different scale only as a declared numerical experiment; reduced memory-gate
+saturation does not prove better learning. The runner carries the setting into
+collection, value targets, updates, checkpoints and loaded actors. Low-level
+users must pass the same `input_scale` to `make_recurrent_mappo_system` and
+`critic_values`; pass the original `ppo` config to `build_ppo_batch`.
+The [source ledger](source_reuse.md#optional-input-scale) explains compatibility.
+
+When investigating weak learning, inspect actual task outcomes and fixed-opponent
+validation before increasing the budget. Under native K20/H300, a game without
+a winner at the horizon is a draw even when its kill scores differ. Potential
+shaping preserves that objective; it does not turn such draws into wins. Low
+value loss and a negative actor loss do not prove progress: the actor loss also
+includes its entropy bonus. Compare input scales and update settings on declared
+development seeds, and keep test-map outcomes out of those choices.
 
 `PPOBatch` uses time first: `(T, B, ...)`. Actions, values, rewards and sample
 masks use five Team A slots. `ended[t]` describes the transition produced by
@@ -604,9 +669,12 @@ reports = training.analyze([result.run_dir], output_dir="artifacts/mappo-report"
 ```
 
 Set `JAX_PLATFORMS=cpu` before starting Python for this four-environment example.
-For the declared GPU recipe use B32, T128, native K20/H300 and unchanged donor
-settings. The source package and internal GPU must be qualified before a real
-demonstration; this example does not select a GPU or launch that experiment.
+For new MAPPO development runs, explicitly set `num_envs=512` and
+`PPOConfig(rollout_length=32)`. The [standard recipe record](
+baseline_methods.md#current-mappo-standard) describes the supporting reward and
+input settings and the limits of the evidence. The original Packet 4 example
+below preserves its historical B32/T128 recipe. This small CPU example does not
+select a GPU or launch either experiment.
 
 `TrainConfig` defaults to plain recurrent MAPPO, 32 environments, rollout length
 128 and 10,000,000 real transitions. `curriculum` and `shaping` are independent
@@ -1176,3 +1244,139 @@ Generated local evidence lives under `artifacts/m9-m10/packet-4/`:
 `mini_qualification.json`, `curriculum-evidence/curriculum_evidence.json`, and
 `early-panel-check/panel_attempt.json` with `validation_costs.jsonl`. These are
 local run outputs, not files required to use the public API.
+
+## Configuration Screen
+
+`training.prepare_screen` prepares the declared twelve-case MAPPO screen without
+starting it. It copies current reviewed public source, including uncommitted
+changes, records file hashes and builds an isolated environment from `uv.lock`.
+Private milestone files are excluded. The source directory stays reusable code;
+all generated experiment files live under the chosen `artifacts/` directory.
+
+From the repository, prepare a new package using the explicitly authorized GPU:
+
+```bash
+JAX_PLATFORMS=cpu uv run --no-sync python -m marl_battlegrounds.training.screen prepare \
+  "$PWD/artifacts/m9-m10/packet-4/bt-screen-5min" \
+  --repository "$PWD" \
+  --gpu-uuid GPU-6b11a0c4-14e8-6782-8932-1df56d599796
+```
+
+This UUID identifies the development machine's internal card; use your own
+explicitly verified card when preparing another machine. Preparation prints
+absolute commands. It rejects an existing destination instead of replacing work.
+For a package prepared at the path above:
+
+```bash
+bash artifacts/m9-m10/packet-4/bt-screen-5min/launch.sh
+tail -F artifacts/m9-m10/packet-4/bt-screen-5min/logs/experiment.log
+bash artifacts/m9-m10/packet-4/bt-screen-5min/status.sh
+```
+
+Launch detaches the worker. Closing `tail` with Ctrl+C stops log viewing only.
+Use `stop.sh` to stop the experiment deliberately. Use `resume.sh` after an
+interruption; it checks source, dependencies, GPU and saved identities first.
+Resume preserves the first launch's deadline and every frozen step budget.
+No active assistant session is needed. Status reads files and process identities;
+it does not initialize JAX. The log prints UTC timestamps, steps completed, readable times, training speed
+and estimated time left. Speed checks and comparison trials have separate counts.
+The latest Random check shows kills and deaths per game, the kill difference,
+its change since initialization, and wins/draws/losses. Wins are not expected or
+required in this short screen. An all-draw check may still show combat learning.
+Estimates say `Estimating` until measured costs support them. Raw losses and
+signed training rewards stay in `training_updates.jsonl`; they are not learning
+scores. Process details stay in `process.json`, and screen error tracebacks go
+to `logs/errors.log`. Add `--json` to `status.sh` for machine-readable output.
+
+The screen uses B=32/512/1024 and T=16/32/64/128, curriculum off, score-delta
+shaping 0.01 and input scale 0.01. Its five-minute target covers collection and
+updates. Calibration converts that target into fixed steps before scientific
+training; other work costs extra. One GPU worker runs at a time. The two-hour
+ceiling includes all launched work, with numerical work stopped at 117 minutes.
+Read the [full method record](baseline_methods.md) for seeds, rounding, the shared
+experience checkpoint, validation and the rule for stopping an infeasible run.
+
+Reports live in the package's `reports/` directory. `baseline_trials.csv` retains
+all cases, including failed and unstarted ones. `learning_curve.csv` and
+`validation_cells.csv` link measurements to their original records. PNG/SVG plots
+show combat improvement against Random versus actual elapsed minutes first,
+with native task scores shown separately. Training time and step counts are
+additional views. `run_summary.md` includes kills, deaths, completion state and
+elapsed time. This one-seed screen can suggest promising settings; it cannot
+establish the final best baseline. An all-draw result is not a failed run.
+To regenerate reports without collecting experience:
+
+```python
+from marl_battlegrounds import training
+
+report = training.analyze_screen(
+    "artifacts/m9-m10/packet-4/bt-screen-5min"
+)
+print(report["artifacts"]["summary"])
+```
+
+The optional Random hook is also available through ordinary `TrainConfig`:
+`random_diagnostic_seed_pairs=4` evaluates 40 games at initialization, each
+`checkpoint_env_steps` capture, and final. It is separate from any frozen
+opponent panel. Leaving it unset preserves ordinary training behavior. The
+screen alone manages the shared initialization reference after verifying matching
+inference weights and settings. Interrupted games resume through the existing
+M8 evaluator before more training. Native scores always keep K20/H300 and exclude
+shaping. These Random checks are diagnostics, not a claim of competence.
+
+## Kill-Threshold Curriculum
+
+The optional trainer can start with one kill needed to win, then raise the
+threshold while keeping 5v5 teams and all 42 training maps throughout:
+
+```python
+import marl_battlegrounds as marl_bgs
+from marl_battlegrounds.baselines.ppo import PPOConfig
+from marl_battlegrounds.training import TrainConfig, train
+
+result = train(
+    TrainConfig(
+        seed=19_044_701,
+        num_envs=512,
+        total_env_steps=19_999_744,
+        score_threshold_curriculum=True,
+        shaping=True,
+        shaping_mode="score_delta",
+        shaping_coefficient=0.01,
+        ppo=PPOConfig(rollout_length=32, input_scale=0.01),
+        metrics="none",
+        recording=False,
+    ),
+    output_dir="artifacts/my-threshold-run",
+)
+```
+
+K1 receives the first 10% of the requested experience. K2 through K10 share the
+next 30% equally. K12 and K15 receive 5% each. K20 receives the final 50%.
+Rounding preserves the exact total. Thresholds change only at episode reset;
+continuing games keep their old rules. Actors already see the current threshold.
+`exposure.json` records actual starts and steps under each K, plus outcomes by
+episode stage. A requested stage is not proof that games actually played it.
+
+This option cannot be combined with `curriculum=True`, which selects the older
+team-size/map schedule. False retains the ordinary K20 path. The trainer checks
+and records each threshold/map source using the existing content authority.
+Direct users of the content helper may pass `score_thresholds=(1, 2, 20)` to
+`prepare_training_content`; default calls retain their original 42-source bank
+and identity. A saved extended binding carries its declared threshold order.
+Learner resume uses its original frozen source package. Historical frozen actors
+remain usable through `load_system`.
+
+Validation always has its own fixed rules. `validate_random` keeps maps 42–46,
+canonical 5v5 and K20/H300 even when training uses K1. Its optional `root_seed`
+argument selects the actual paired evaluation streams and is part of the saved
+task identity. The default is 19,043,001. For example, a declared fresh check can
+use `seed_pairs=20, root_seed=19_044_791` for 200 games. Merely raising
+`seed_pairs` with the old root would reuse the earlier games' streams.
+
+For the complete 48-run tuning recipe, read the
+[baseline methods record](baseline_methods.md#twenty-million-step-mappo-tuning-study).
+The study's artifact directory owns its launch/watch/status/resume scripts and
+reports. It checks every 10% boundary, selects a model, confirms it on fresh
+games and writes plots without an active assistant session. It has no automatic
+time limit and starts no longer follow-up run.

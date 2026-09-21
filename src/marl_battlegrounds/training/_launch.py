@@ -1,7 +1,8 @@
 """Prepare and run a fixed local MAPPO package without an active Codex session.
 
-Preparation reads a committed Git tree, builds a separate pinned environment
-and copies the frozen panel. Launching is a separate explicit action. The
+Preparation reads a committed Git tree or freezes current working files, builds
+a separate pinned environment and copies the frozen panel when needed.
+Launching is a separate explicit action. The
 detached supervisor owns process logs and exit status; the ordinary trainer
 still owns learning, its run lock and scientific completion. Status reads files
 and /proc only. This module starts no device when imported.
@@ -13,6 +14,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -93,13 +95,49 @@ def _files(root: Path) -> dict[str, str]:
     return values
 
 
-def _environment(gpu_uuid: str | None) -> dict[str, str]:
+def _environment(
+    gpu_uuid: str | None,
+    *,
+    memory_fraction: float | None = None,
+    compilation_cache: Path | None = None,
+) -> dict[str, str]:
     """Use default JAX settings and explicit hardware, without shell overrides.
 
     Drop inherited JAX/XLA/TF settings as well as mutable Python routing. None
     chooses CPU for import checks; a UUID chooses that GPU for learning. This
     fixed default policy is shared by preparation, launch and resume.
+
+    Parameters
+    ----------
+    gpu_uuid : str or None
+        Explicit GPU UUID, or None for a CPU-only import check.
+    memory_fraction : float or None, optional
+        Optional JAX allocator fraction in (0, 1]. None leaves JAX's default.
+        Preallocation remains off. This is a pool limit, not a memory forecast.
+    compilation_cache : Path or None, optional
+        Absolute directory for JAX's persistent compilation cache. None drops
+        inherited cache settings. This helper does not create the directory.
+
+    Returns
+    -------
+    dict[str, str]
+        A new environment with inherited overrides removed, then the requested
+        memory and cache settings applied. The parent environment is unchanged.
+
+    Raises
+    ------
+    ValueError
+        The fraction is not a finite number in (0, 1], or the cache is relative.
     """
+    if memory_fraction is not None and (
+        isinstance(memory_fraction, bool)
+        or not isinstance(cast(object, memory_fraction), (int, float))
+        or not math.isfinite(memory_fraction)
+        or not 0 < memory_fraction <= 1
+    ):
+        raise ValueError("Memory fraction must be a finite number in (0, 1]")
+    if compilation_cache is not None and not compilation_cache.is_absolute():
+        raise ValueError("Compilation cache must use an absolute directory")
     env = dict(os.environ)
     for key in tuple(env):
         if key.startswith(("JAX_", "XLA_", "TF_")) or key in (
@@ -116,6 +154,11 @@ def _environment(gpu_uuid: str | None) -> dict[str, str]:
     env["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     if gpu_uuid is not None:
         env["CUDA_VISIBLE_DEVICES"] = gpu_uuid
+    if memory_fraction is not None:
+        env["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(float(memory_fraction))
+    if compilation_cache is not None:
+        env["JAX_COMPILATION_CACHE_DIR"] = str(compilation_cache)
+        env["JAX_ENABLE_COMPILATION_CACHE"] = "true"
     return env
 
 
@@ -202,6 +245,124 @@ def _export_source(repository: Path, commit: str, destination: Path) -> Record:
                 raise ValueError("The fixed source archive must not contain links")
             tar.extractall(destination, filter="data")
     return {"commit": resolved, "git_tree": tree, "files": _files(destination)}
+
+
+def export_working_source(repository: Path, destination: Path) -> Record:
+    """Copy the current public candidate without changing its Git repository.
+
+    Parameters
+    ----------
+    repository : Path
+        Git worktree root. Tracked files use their current working bytes, even
+        when the index holds older bytes. Nonignored new files are included.
+        Deleted files, Python bytecode and private docs/dev/milestone*.md files
+        are omitted. Links and special files are rejected.
+    destination : Path
+        New source directory whose parent exists. If it is inside repository,
+        it must be ignored by Git. The copy contains no .git directory.
+
+    Returns
+    -------
+    dict
+        commit and git_tree identify the original HEAD only. files identifies
+        the actual copied candidate. working_tree records the original status,
+        index hashes and file modes. These facts are checked again after copying.
+        The result must not be described as the contents of the HEAD commit.
+
+    Raises
+    ------
+    ValueError
+        A path is unsafe, the destination exists, or source/index/status changes
+        during the copy. An incomplete destination is retained on failure.
+    subprocess.CalledProcessError
+        A read-only Git query fails.
+
+    Notes
+    -----
+    Git optional locks are disabled, so status cannot refresh the index. This
+    helper neither installs packages nor changes file permissions in the source.
+    The caller must keep the completed copy unchanged and verify its imports.
+    """
+    repository = repository.absolute()
+    destination = destination.absolute()
+    for path in (repository, destination, *destination.parents):
+        if path.is_symlink():
+            raise ValueError("Source export paths must not contain links")
+    if destination.exists():
+        raise ValueError("Source export destination must be new")
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+
+    def git(*arguments: str) -> bytes:
+        """Read Git facts without refreshing or writing its index."""
+        return subprocess.run(
+            ["git", "-C", str(repository), *arguments],
+            env=env,
+            check=True,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+        ).stdout
+
+    if Path(os.fsdecode(git("rev-parse", "--show-toplevel")).strip()) != repository:
+        raise ValueError("Source must be the Git worktree root")
+    if destination.is_relative_to(repository):
+        git("check-ignore", "--quiet", "--", str(destination))
+
+    def snapshot() -> Record:
+        """Read source bytes, index bytes and Git state for a stable-copy check."""
+        names = git("ls-files", "--cached", "--others", "--exclude-standard", "-z")
+        files: dict[str, str] = {}
+        modes: dict[str, int] = {}
+        for raw in sorted(set(names.split(b"\0")) - {b""}):
+            relative = Path(os.fsdecode(raw))
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError("Git returned an unsafe source path")
+            if "__pycache__" in relative.parts or (
+                relative.parts[:2] == ("docs", "dev")
+                and relative.match("milestone*.md")
+            ):
+                continue
+            source = repository / relative
+            for part in (source, *source.parents):
+                if part == repository:
+                    break
+                if part.is_symlink():
+                    raise ValueError("A fixed source copy must not contain links")
+            if not source.exists():
+                continue
+            if not source.is_file():
+                raise ValueError("A fixed source copy needs regular source files")
+            name = relative.as_posix()
+            files[name] = _hash(source)
+            modes[name] = source.stat().st_mode & 0o777
+        index = Path(os.fsdecode(git("rev-parse", "--git-path", "index")).strip())
+        if not index.is_absolute():
+            index = repository / index
+        return {
+            "commit": git("rev-parse", "--verify", "HEAD^{commit}").decode().strip(),
+            "git_tree": git("rev-parse", "--verify", "HEAD^{tree}").decode().strip(),
+            "files": files,
+            "working_tree": {
+                "status_porcelain": os.fsdecode(
+                    git("status", "--porcelain=v1", "-z", "--untracked-files=all")
+                ),
+                "index_sha256": _hash(index),
+                "index_entries_sha256": hashlib.sha256(
+                    git("ls-files", "--stage", "-z")
+                ).hexdigest(),
+                "file_modes": modes,
+            },
+        }
+
+    before = snapshot()
+    destination.mkdir()
+    for name in before["files"]:
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(repository / name, target, follow_symlinks=False)
+    copied = _files(destination)
+    if snapshot() != before or copied != before["files"]:
+        raise ValueError("Source or Git state changed while copying the candidate")
+    return {"kind": "working_tree", **before}
 
 
 def _install(source: Path, environment: Path, python: str) -> None:
@@ -599,7 +760,11 @@ def start(
 
 
 def supervise_command(
-    package: Path, command: list[str], *, env: dict[str, str] | None = None
+    package: Path,
+    command: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    deadline_at: float | None = None,
 ) -> int:
     """Run one foreground trainer inside the already detached supervisor.
 
@@ -613,7 +778,50 @@ def supervise_command(
     contract; the built-in validation worker does not detach. A pipe gate stops
     the trainer from running before its group identity is durable; if this
     supervisor dies before release, the waiting child exits on pipe closure.
+    Print short UTC start/outcome lines. Full machine-readable process identity,
+    command, cleanup and exit facts remain in process.json.
+
+    Parameters
+    ----------
+    package : Path
+        Existing job directory. process.json and .launch.lock are written here.
+    command : list[str]
+        Trainer executable and arguments. No shell expands these strings.
+    env : dict[str, str] or None, optional
+        Complete child environment, or None to inherit this process's environment.
+    deadline_at : float or None, optional
+        Absolute UNIX time in seconds. None imposes no deadline. The remaining
+        time is converted once to a monotonic clock, so later wall-clock changes
+        do not extend this attempt. Expiry requests bounded group cleanup even
+        during compilation or evaluation. The caller owns any shared deadline
+        across jobs or resumed attempts; this helper never extends it.
+
+    Returns
+    -------
+    int
+        Child exit code, 124 on deadline expiry, or 128 + signal when a stop
+        request caught a child that exited zero. Cleanup errors return failure.
+        The raw child code stays in the cleanup record. No stopped job returns
+        success merely because its child handled a signal and exited zero.
+
+    Raises
+    ------
+    ValueError
+        deadline_at is not a finite number of UNIX seconds.
+    OSError
+        Child launch or process-record publication fails. Cleanup is still tried.
     """
+    if deadline_at is not None and (
+        isinstance(deadline_at, bool)
+        or not isinstance(cast(object, deadline_at), (int, float))
+        or not math.isfinite(deadline_at)
+    ):
+        raise ValueError("Deadline must be a finite UNIX timestamp")
+    stop_at = (
+        None
+        if deadline_at is None
+        else time.monotonic() + max(0.0, deadline_at - time.time())
+    )
     record: Record = {
         "schema_version": 1,
         "state": "running",
@@ -621,10 +829,12 @@ def supervise_command(
         "process": process_identity(),
         "command": command,
     }
+    if deadline_at is not None:
+        record["deadline_at"] = deadline_at
     with (package / ".launch.lock").open("a+b") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         atomic_json(package / "process.json", record)
-    print(json.dumps({"process_event": record}, sort_keys=True), flush=True)
+    print(f"[{record['started_at']}] Process Started | Job {package.name}", flush=True)
     code = 1
     child: subprocess.Popen[bytes] | None = None
     previous: dict[int, Any] = {}
@@ -632,10 +842,21 @@ def supervise_command(
     def forward(number: int, _frame: object) -> None:
         """Request group cleanup in the main loop without reaping the leader."""
         record.setdefault("stop_signal", number)
+        record.setdefault("stop_reason", "signal")
+
+    def deadline_expired() -> bool:
+        """Request a deadline stop using the attempt's fixed monotonic clock."""
+        if stop_at is not None and time.monotonic() >= stop_at:
+            record.setdefault("stop_reason", "deadline")
+            record.setdefault("stop_signal", signal.SIGTERM)
+            return True
+        return False
 
     try:
         for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             previous[number] = signal.signal(number, forward)
+        if deadline_expired():
+            return 124
         read_fd, write_fd = os.pipe()
         try:
             child = subprocess.Popen(
@@ -648,12 +869,14 @@ def supervise_command(
             record["trainer"] = process_identity(child.pid)
             record["trainer_group"] = record["trainer"]
             atomic_json(package / "process.json", record)
-            if "stop_signal" not in record:
+            if not deadline_expired() and "stop_signal" not in record:
                 os.write(write_fd, b"1")
         finally:
             os.close(read_fd)
             os.close(write_fd)
         while "stop_signal" not in record:
+            if deadline_expired():
+                break
             if (
                 os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
                 is not None
@@ -682,9 +905,22 @@ def supervise_command(
         finally:
             for number, handler in previous.items():
                 signal.signal(number, handler)
+        if "error" in record and code == 0:
+            code = 1
+        if record.get("stop_reason") == "deadline":
+            code = 124
+        elif "stop_signal" in record and code == 0:
+            code = 128 + record["stop_signal"]
         record.update({"state": "exited", "exit_code": code, "finished_at": utc_now()})
         atomic_json(package / "process.json", record)
-        print(json.dumps({"process_event": record}, sort_keys=True), flush=True)
+        outcome = "Process Finished" if code == 0 else "Process Failed"
+        reason = record.get("stop_reason")
+        suffix = f" | Reason {str(reason).capitalize()}" if reason else ""
+        print(
+            f"[{record['finished_at']}] {outcome} | Job {package.name} | "
+            f"Exit Code {code}{suffix}",
+            flush=True,
+        )
     return code
 
 

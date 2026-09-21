@@ -1,13 +1,16 @@
 """Check frozen training opponents, update boundaries and native System execution.
 
 CPU proofs cover independent opponent streams, the 80/20 reset distribution,
-immutable complete actor variables, shared result normalization, selected memory
-resets, stochastic initialization limits and untrained MAPPO on public inputs.
-These tests do not train a learner or establish GPU cost or learned competence.
+the optional pinned first-update share (zero traces today's exact program;
+positive shares match a scalar-key oracle and declared frequencies), immutable
+complete actor variables, shared result normalization, selected memory resets,
+stochastic initialization limits and untrained MAPPO on public inputs. These
+tests do not train a learner or establish GPU cost or learned competence.
 """
 
 from collections.abc import Callable
 from dataclasses import replace
+from functools import partial
 from typing import Any, cast
 
 import jax
@@ -208,6 +211,103 @@ def test_seeded_frequencies_are_consistent_with_eighty_twenty_and_uniform_histor
     counts = np.bincount(np.asarray(result.lane_snapshot) + 1, minlength=5)
     assert 0.78 < counts[0] / 20_000 < 0.82
     assert np.all((counts[1:] / 20_000 > 0.04) & (counts[1:] / 20_000 < 0.06))
+
+
+def test_pinned_share_reaches_the_traced_program_only_when_positive() -> None:
+    # The default and an explicit 0.0 trace one program by construction. That
+    # this program is the pre-change program rests on the diff and on the
+    # package's GPU equivalence job, not on this test; the guarded half is that
+    # a positive share changes the traced program.
+    history = _bank(count=3)
+    mask = jnp.asarray((True, False, True, True))
+    keys = jax.random.split(jax.random.key(7), 4)
+    default = str(jax.make_jaxpr(assign_opponents)(history, mask, keys))
+    explicit = str(
+        jax.make_jaxpr(partial(assign_opponents, pinned_share=0.0))(history, mask, keys)
+    )
+    pinned = str(
+        jax.make_jaxpr(partial(assign_opponents, pinned_share=0.1))(history, mask, keys)
+    )
+    assert default == explicit
+    assert default != pinned
+
+
+@pytest.mark.parametrize("count", [1, 2, 4, 20])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_pinned_draws_match_independent_scalar_key_oracle(
+    count: int, legacy: bool
+) -> None:
+    history = _bank(count=count)
+    root = jax.random.PRNGKey(5) if legacy else jax.random.key(5)
+    keys = training_keys(root, jnp.arange(4, dtype=jnp.int32), stream="opponent")
+    mask = jnp.asarray((True, True, False, True))
+    result = _jit(partial(assign_opponents, pinned_share=0.1))(history, mask, keys)
+    expected: list[int] = []
+    for selected, key in zip(mask, keys, strict=True):
+        chance_key, slot_key = jax.random.split(key)
+        chance = np.float32(jax.random.uniform(chance_key))
+        if not bool(selected):
+            expected.append(-1)
+        elif chance < np.float32(0.1):
+            expected.append(0)
+        elif chance < np.float32(0.1 + 0.2) and count > 1:
+            expected.append(int(jax.random.randint(slot_key, (), 1, count)))
+        else:
+            expected.append(-1)
+    np.testing.assert_array_equal(result.lane_snapshot, expected)
+    assert not bool(result.error)
+
+
+def test_seeded_pinned_frequencies_match_declared_shares() -> None:
+    draw = _jit(partial(assign_opponents, pinned_share=0.1))
+    result = draw(
+        _bank(batch=20_000, count=4),
+        jnp.ones(20_000, jnp.bool_),
+        jax.random.split(jax.random.key(93), 20_000),
+    )
+    shares = np.bincount(np.asarray(result.lane_snapshot) + 1, minlength=5) / 20_000
+    assert 0.68 < shares[0] < 0.72
+    assert 0.085 < shares[1] < 0.115
+    assert np.all((shares[2:] > 0.055) & (shares[2:] < 0.08))
+    single = draw(
+        _bank(batch=20_000, count=1),
+        jnp.ones(20_000, jnp.bool_),
+        jax.random.split(jax.random.key(94), 20_000),
+    )
+    values = np.asarray(single.lane_snapshot)
+    assert set(np.unique(values).tolist()) <= {-1, 0}
+    assert 0.88 < np.mean(values == -1) < 0.92
+
+
+def test_empty_bank_draws_nothing_even_with_a_pinned_share() -> None:
+    history = init_opponent_history(_variables(), num_envs=4)
+    assigned = _jit(partial(assign_opponents, pinned_share=0.1))(
+        history, jnp.ones(4, jnp.bool_), jax.random.split(jax.random.key(3), 4)
+    )
+    _tree_equal(assigned, history)
+
+
+@pytest.mark.parametrize(
+    "share,error",
+    [
+        (True, TypeError),
+        ("0.1", TypeError),
+        (jnp.float32(0.1), TypeError),
+        (0.9, ValueError),
+        (-0.1, ValueError),
+        (float("nan"), ValueError),
+    ],
+)
+def test_pinned_share_contract_rejects_bool_range_and_nonpython_values(
+    share: object, error: type[Exception]
+) -> None:
+    with pytest.raises(error):
+        assign_opponents(
+            _bank(),
+            jnp.ones(4, jnp.bool_),
+            jax.random.split(jax.random.key(2), 4),
+            pinned_share=cast(Any, share),
+        )
 
 
 def test_one_reset_key_or_mask_cannot_change_other_assignments_or_streams() -> None:

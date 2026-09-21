@@ -2921,16 +2921,23 @@ win-rate claim. Disabled shaping skips its calculation.
 With empty history, opponents use current self-play. Otherwise each reset picks
 current weights with probability 0.8 or a uniformly chosen occupied historical
 slot with probability 0.2. Historical weights and all inference variables remain
-fixed for that game. Current weights refresh only after a completed learner
-update, before the next block, while game memory continues. Teams own separate
-memory and retain existing actor information limits.
+fixed for that game. Addition of 2026-09-21: an optional declared
+pinned share, zero by default, makes the first capture follow the first
+completed update and keeps that actor in slot 0 for the run; each reset then
+picks slot 0 with the declared share, another occupied slot with total
+probability 0.2 when any exists, and current weights otherwise. The default
+preserves this rule exactly. Current weights refresh only after a completed
+learner update, before the next block, while game memory continues. Teams own
+separate memory and retain existing actor information limits.
 
 The bank holds at most 20 immutable snapshots without eviction. Requested
 thresholds are 5%, 10%, ..., 100% of the exact real budget, rounded upward to
-whole rounds. The first completed update reaching unmet thresholds captures
-one actor and maps all those thresholds to it. Report the actual capture round
-and update; do not create duplicate stored entries to fill threshold labels.
-The final capture may receive no later training exposure.
+whole rounds; with a positive pinned share (2026-09-21) they are round
+1, then 5% through 95%, and the 100% capture that no later game can play is
+dropped. The first completed update reaching unmet thresholds captures one
+actor and maps all those thresholds to it. Report the actual capture round and
+update; do not create duplicate stored entries to fill threshold labels. The
+final capture may receive no later training exposure.
 
 Collection returns compact permitted inputs, same-call actor outputs, separate
 rewards, real-row masks, producing identities and the true final successor.

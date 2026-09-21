@@ -53,7 +53,8 @@ class SampledTrainingConfigs(NamedTuple):
         Every leaf begins with B. The first half of lanes use source spawn
         order; the second half exchange both full banks. Pass directly to reset.
     source_indices : Array
-        Int32 (B,) rows in the immutable 42-row bank.
+        Int32 (B,) rows in the immutable threshold-major source bank. Each
+        threshold contributes 42 maps; source_indices % 42 gives map IDs.
     source_class_ids : Array
         Int32 (B,10) compact Team A then Team B class declarations, with zero
         padding. These describe the source profile before spawn balancing.
@@ -240,14 +241,15 @@ def sample_training_configs(
     *,
     eligible_maps: Array,
     team_size: Array,
+    score_threshold: Array | None = None,
 ) -> SampledTrainingConfigs:
     """Sample approved maps and independent equal-size teams for reset.
 
     Parameters
     ----------
     bank : EnvConfig
-        Immutable source-order configuration bank with 42 rows on every leaf,
-        prepared by prepare_training_content. Both spawn orders must be valid.
+        Immutable threshold-major bank with 42 rows per declared score, prepared
+        by prepare_training_content. Both spawn orders must be valid.
     root_key : Array
         Scalar typed or legacy Threefry root; see training_keys for ownership.
     reset_generation : Array
@@ -258,6 +260,10 @@ def sample_training_configs(
     team_size : Array
         Scalar int32 in 1..5. Both teams draw independently without replacement;
         Priest is excluded only at size one. Five uses exact canonical rosters.
+    score_threshold : Array or None, default=None
+        Scalar int32 score present in the prepared bank. None selects K20.
+        This changes only the selected source block, not map/roster random keys.
+        Validate concrete values before passing them through jit or scan.
 
     Returns
     -------
@@ -283,6 +289,11 @@ def sample_training_configs(
     or a training loop. It needs base dependencies only.
     """
     _control_shapes(eligible_maps, team_size)
+    threshold = (
+        jnp.asarray(20, jnp.int32) if score_threshold is None else score_threshold
+    )
+    if np.shape(threshold) != () or getattr(threshold, "dtype", None) != jnp.int32:
+        raise TypeError("score_threshold must be scalar int32")
     if not isinstance(eligible_maps, Tracer) and not isinstance(team_size, Tracer):
         validate_training_distribution(eligible_maps=eligible_maps, team_size=team_size)
     eligible_maps = cast(Array, eligible_maps)
@@ -291,8 +302,17 @@ def sample_training_configs(
     batch = reset_generation.shape[0]
     if batch % 2:
         raise ValueError("Training sampling requires a positive even batch")
-    if not _config_has_batch(bank, _MAP_COUNT):
-        raise ValueError("bank must have 42 source rows")
+    count = np.shape(bank.agent_profile.active_mask)[0]
+    if count < _MAP_COUNT or count % _MAP_COUNT or not _config_has_batch(bank, count):
+        raise ValueError("bank must have 42 source rows per threshold")
+    scores = jnp.asarray(bank.team_deathmatch_score_threshold)[::_MAP_COUNT]
+    if (
+        not isinstance(threshold, Tracer)
+        and not isinstance(scores, Tracer)
+        and int(np.asarray(threshold)) not in np.asarray(scores)
+    ):
+        raise ValueError("score_threshold is not present in the prepared bank")
+    block = jnp.argmax(scores == threshold).astype(jnp.int32)
     keys = training_keys(root_key, reset_generation, stream="map")
     logits = jnp.where(eligible_maps, jnp.float32(0), jnp.float32(-jnp.inf))
 
@@ -300,7 +320,7 @@ def sample_training_configs(
         """Select one uniformly eligible source with the lane's map key."""
         return jax.random.categorical(key, logits).astype(jnp.int32)
 
-    indices = jax.vmap(draw_map)(keys)
+    indices = jax.vmap(draw_map)(keys) + block * _MAP_COUNT
 
     def select(value: Array) -> Array:
         """Gather one source value per lane without copying the complete bank."""

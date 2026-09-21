@@ -303,8 +303,10 @@ def init_learner(
     prepared: PreparedTrainingContent | None = None,
     shaping: bool = False,
     shaping_coefficient: float = 0.01,
+    shaping_mode: str = "potential",
     metrics: str = "priority",
     recording: bool = False,
+    pinned_opponent_share: float = 0.0,
 ) -> tuple[TrainingCollection, LearnerState]:
     """Initialize one untrained MAPPO learner and its verified collection setup.
 
@@ -322,13 +324,22 @@ def init_learner(
     prepared : PreparedTrainingContent or None, default=None
         Existing verified content, or None to perform the collection preflight.
     shaping : bool, default=False
-        Enable the existing team potential adjustment, using ppo.gamma.
+        Enable the chosen team reward adjustment. Potential uses ppo.gamma.
     shaping_coefficient : float, default=0.01
         Nonnegative finite weight checked by the existing shaping authority.
+    shaping_mode : {"potential", "score_delta"}, default="potential"
+        Fixed training reward method, used when shaping is enabled. Potential
+        preserves the discounted task objective. Score_delta rewards new team
+        kills minus deaths, including at a real ending, and changes that objective.
     metrics : str, default="priority"
         Collection metrics mode: "priority" or "none".
     recording : bool, default=False
         Retain numerical recording starts for a later caller-owned writer.
+    pinned_opponent_share : float, default=0.0
+        Static probability, within [0, 0.8], that a reset lane meets the pinned
+        first-update actor in history slot 0. Zero keeps the existing 80/20
+        self-play recipe. A positive share needs a schedule built with
+        early_history_capture=True; the collection setup checks that pairing.
 
     Returns
     -------
@@ -369,7 +380,9 @@ def init_learner(
     initialized = initialize_ppo(
         jax.random.fold_in(root, MODEL_INITIALIZATION_TAG), ppo
     )
-    actor = make_recurrent_mappo_system(initialized.actor_params)
+    actor = make_recurrent_mappo_system(
+        initialized.actor_params, input_scale=ppo.input_scale
+    )
     collection, carry = init_training_collection(
         actor,
         initialized.actor_params,
@@ -379,9 +392,11 @@ def init_learner(
         shaping=shaping,
         discount=ppo.gamma,
         coefficient=shaping_coefficient,
+        shaping_mode=shaping_mode,
         collect_training_state=True,
         metrics=metrics,
         recording=recording,
+        pinned_opponent_share=pinned_opponent_share,
     )
     state = LearnerState(
         carry,
@@ -399,7 +414,10 @@ def init_learner(
 
 
 def build_ppo_batch(
-    state: LearnerState, rollout: TrainingRollout
+    state: LearnerState,
+    rollout: TrainingRollout,
+    *,
+    ppo: PPOConfig = DEFAULT_PPO_CONFIG,
 ) -> tuple[PPOBatch, Array]:
     """Pair same-call behavior with fixed pre-update critic values and memory.
 
@@ -412,6 +430,9 @@ def build_ppo_batch(
         Compact MAPPO rollout with positive T capacity, optional suffix padding,
         PPOLearningOutputs and physical-state collection enabled. Its prefix and
         same-epoch fields must obey the existing collector contract.
+    ppo : PPOConfig, default=DEFAULT_PPO_CONFIG
+        Original learner settings. The critic uses its fixed input scale for
+        both sequence values and the final bootstrap value.
 
     Returns
     -------
@@ -444,7 +465,12 @@ def build_ppo_batch(
     def values(_: None) -> tuple[Array, Array, Array]:
         """Read the sequence and value its successor without retaining that carry."""
         memory, old = critic_values(
-            state.critic_params, critic_memory, physical, rows.episode_start, rows.valid
+            state.critic_params,
+            critic_memory,
+            physical,
+            rows.episode_start,
+            rows.valid,
+            input_scale=ppo.input_scale,
         )
         continues = ~rollout.final_ended
 
@@ -456,6 +482,7 @@ def build_ppo_batch(
                 final_physical[None],
                 jnp.zeros((1, games), jnp.bool_),
                 continues[None],
+                input_scale=ppo.input_scale,
             )
             return jnp.where(continues[:, None] & rollout.final_active, final[0], 0.0)
 
@@ -683,7 +710,7 @@ def update_learner(
 
     def nonempty(_: None) -> tuple[LearnerState, UpdateResult]:
         """Build fixed old-value data and conditionally accept the update."""
-        batch, memory = build_ppo_batch(state, rollout)
+        batch, memory = build_ppo_batch(state, rollout, ppo=ppo)
         batch_reason = jnp.where(
             ~_finite((batch, memory)),
             LEARNER_ERROR_NONFINITE_BATCH,

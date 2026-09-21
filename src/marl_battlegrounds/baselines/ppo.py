@@ -27,7 +27,10 @@ Reference settings are starting values, not qualified learning settings for BG.
 """
 
 import functools
+import math
+from collections.abc import Callable
 from dataclasses import dataclass
+from numbers import Real
 from typing import Any, NamedTuple, cast
 
 import jax
@@ -67,6 +70,23 @@ type Tree = Any
 HIDDEN_SIZE = 128
 
 
+def _input_scale(value: float) -> float:
+    """Check a fixed positive finite real input scale and return a Python float.
+
+    This host check accepts real scalar numbers, excluding Booleans. Arrays,
+    traced values, strings and nonpositive/nonfinite values raise ValueError.
+    It performs no device work and stores no normalization statistics.
+    """
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, Real)
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError("input_scale must be a finite positive real number.")
+    return float(value)
+
+
 @dataclass(frozen=True)
 class PPOConfig:
     """Hold static donor update settings, with separate actor/critic optimizers.
@@ -101,12 +121,18 @@ class PPOConfig:
         each network's Adam update.
     adam_epsilon : float, default=0.00001
         Positive offset in Adam's denominator.
+    input_scale : float, default=1.0
+        Positive finite multiplier applied to every actor and critic feature
+        before the first Dense layer. One preserves the donor's raw inputs.
+        Use the same setting for collection, learning and loaded inference.
+        No feature is removed and no running statistics are collected.
 
     Raises
     ------
     ValueError
         A count is not a positive Python int, or a numerical setting is nonfinite
-        or outside its stated range. Boolean counts are rejected.
+        or outside its stated range. Boolean counts and non-real/Boolean input
+        scales are rejected.
 
     Notes
     -----
@@ -128,11 +154,11 @@ class PPOConfig:
     value_coefficient: float = 0.5
     max_grad_norm: float = 0.5
     adam_epsilon: float = 0.00001
+    input_scale: float = 1.0
 
     def __post_init__(self) -> None:
         """Reject invalid static update counts and numerical settings on the host."""
-        import math
-
+        _input_scale(self.input_scale)
         for name in ("rollout_length", "epochs", "minibatches", "groups"):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
@@ -455,7 +481,13 @@ class RecurrentActor(nn.Module):
     masks are bool (T,E,5). The ordinary F is 5164; fixed-input reference tests
     can initialize the same network with another F. Parameters encode that F.
     No critic state or other actor's private row enters a row's calculation.
+
+    input_scale is a fixed positive finite real multiplier, default 1.0, applied
+    to every feature before the first Dense layer. It changes neither parameter
+    shapes nor raw input schemas. Pass the training setting when loading weights.
     """
+
+    input_scale: float = 1.0
 
     @nn.compact
     def __call__(
@@ -486,7 +518,11 @@ class RecurrentActor(nn.Module):
         Shapes, dtypes and information rights are caller preconditions. This
         Flax module works inside jit; its parameters are shared across time and
         actors. It reads no critic state and writes no external state.
+        An invalid input_scale raises ValueError before numerical application.
         """
+        scale = _input_scale(self.input_scale)
+        if scale != 1.0:
+            features = features * scale
         embedding = MLPTorso(name="pre_torso")(features)
         carry, embedding = ScannedRNN()(carry, (embedding, resets, valid))
         embedding = MLPTorso(name="post_torso")(embedding)
@@ -499,7 +535,11 @@ class RecurrentValueNet(nn.Module):
     Carry and masks follow RecurrentActor. Features use (T,E,5,F), normally a
     temporary broadcast of one 919-value physical view per game. Output values
     have shape (T,E,5). This module is never part of the actor-producing System.
+    input_scale is a fixed positive finite real multiplier, default 1.0, applied
+    before the first Dense layer. Use the same setting as the paired actor.
     """
+
+    input_scale: float = 1.0
 
     @nn.compact
     def __call__(
@@ -528,7 +568,11 @@ class RecurrentValueNet(nn.Module):
         -----
         Shapes, dtypes and matching decision epochs are caller preconditions.
         The pure Flax calculation supports jit and performs no action selection.
+        An invalid input_scale raises ValueError before numerical application.
         """
+        scale = _input_scale(self.input_scale)
+        if scale != 1.0:
+            features = features * scale
         embedding = MLPTorso(name="pre_torso")(features)
         carry, embedding = ScannedRNN()(carry, (embedding, resets, valid))
         embedding = MLPTorso(name="post_torso")(embedding)
@@ -565,7 +609,8 @@ def initialize_ppo(key: Array, config: PPOConfig = DEFAULT_PPO_CONFIG) -> PPOTra
         One fresh typed scalar Threefry key or legacy uint32 (2,) key. Legacy
         keys use JAX's configured default implementation, which must be Threefry.
     config : PPOConfig, default=DEFAULT_PPO_CONFIG
-        Static optimizer settings. The default uses the pinned donor settings.
+        Static optimizer and input-scale settings. The default uses the pinned
+        donor settings. Scaling preserves the initialized parameter tree/bytes.
 
     Returns
     -------
@@ -591,10 +636,10 @@ def initialize_ppo(key: Array, config: PPOConfig = DEFAULT_PPO_CONFIG) -> PPOTra
     memory = jnp.zeros((1, 5, HIDDEN_SIZE), jnp.float32)
     starts = jnp.zeros((1, 1, 5), jnp.bool_)
     valid = jnp.ones_like(starts)
-    actor = RecurrentActor().init(
+    actor = RecurrentActor(input_scale=config.input_scale).init(
         actor_key, memory, jnp.zeros((1, 1, 5, ACTOR_FEATURE_SIZE)), starts, valid
     )
-    critic = RecurrentValueNet().init(
+    critic = RecurrentValueNet(input_scale=config.input_scale).init(
         critic_key,
         memory,
         jnp.zeros((1, 1, 5, TRAINING_STATE_FEATURE_SIZE)),
@@ -617,7 +662,12 @@ def _initial_actor_memory(variables: Tree, inputs: SystemInput, keys: Array) -> 
 
 
 def _apply_actor(
-    variables: Tree, memory: Array, inputs: SystemInput, keys: Array
+    variables: Tree,
+    memory: Array,
+    inputs: SystemInput,
+    keys: Array,
+    *,
+    input_scale: float = 1.0,
 ) -> SystemOutput:
     """Apply the actor once using M8's paired current inputs and lane keys.
 
@@ -633,6 +683,9 @@ def _apply_actor(
     keys : Array
         B independent Threefry lane keys, typed (B,) or legacy uint32 (B,2).
         Five actor streams are derived within each lane.
+    input_scale : float, default=1.0
+        Fixed positive finite feature multiplier from the actor's training
+        settings. One keeps raw inputs. The System factory binds this setting.
 
     Returns
     -------
@@ -659,7 +712,7 @@ def _apply_actor(
     starts = jnp.broadcast_to(inputs.episode_start[:, None], inputs.active_mask.shape)
     memory, logits = cast(
         tuple[Array, Array],
-        RecurrentActor().apply(
+        RecurrentActor(input_scale=input_scale).apply(
             variables, memory, features[None], starts[None], valid[None]
         ),
     )
@@ -676,8 +729,43 @@ def _apply_actor(
     )
 
 
+@functools.lru_cache(maxsize=16)
+def _scaled_actor_apply(
+    scale: float,
+) -> Callable[[Tree, Array, SystemInput, Array], SystemOutput]:
+    """Reuse an apply hook whose recorded keyword default identifies its scale.
+
+    scale is an already checked Python float. The returned hook uses the normal
+    actor call and has no captured weights or mutable state. M8 includes its
+    numerical defaults in System identity, distinguishing equal weights used
+    with different scales. Caching preserves callable identity during setup.
+    """
+
+    def apply(
+        variables: Tree,
+        memory: Array,
+        inputs: SystemInput,
+        keys: Array,
+        *,
+        input_scale: float = scale,
+    ) -> SystemOutput:
+        """Apply the actor using the factory-bound scale in the keyword default.
+
+        Arguments, outputs and side effects follow _apply_actor. The optional
+        input_scale default records this hook's fixed inference setting; normal
+        System execution supplies only variables, memory, inputs and keys.
+        """
+        return _apply_actor(variables, memory, inputs, keys, input_scale=input_scale)
+
+    return apply
+
+
 def make_recurrent_mappo_system(
-    actor_params: Tree, *, name: str = "Recurrent MAPPO", checkpoint: str | None = None
+    actor_params: Tree,
+    *,
+    input_scale: float = 1.0,
+    name: str = "Recurrent MAPPO",
+    checkpoint: str | None = None,
 ) -> System:
     """Wrap actor parameters as an existing M8 JAX System, with sampled actions.
 
@@ -686,6 +774,11 @@ def make_recurrent_mappo_system(
     actor_params : PyTree
         Actor variable tree from initialize_ppo or a compatible update. This
         factory does not inspect array shapes; the actor checks them when called.
+    input_scale : float, default=1.0
+        Positive finite feature multiplier used to train these weights. One
+        preserves historical raw-input behavior. The fixed apply hook records
+        this setting in System identity; equal weights with different scales
+        describe different inference. No weights or encoder fields are changed.
     name : str, default="Recurrent MAPPO"
         Nonempty display name. It does not establish a trained model's identity.
     checkpoint : str or None, default=None
@@ -701,7 +794,8 @@ def make_recurrent_mappo_system(
     Raises
     ------
     ValueError
-        The System rejects an empty or invalid display name.
+        The scale is not a positive finite real number, is Boolean, or the
+        System rejects an empty or invalid display name.
 
     Notes
     -----
@@ -711,9 +805,10 @@ def make_recurrent_mappo_system(
     The factory preserves the weights' training status and makes no competence
     claim. Execution accepts Threefry action keys only.
     """
+    scale = _input_scale(input_scale)
     return System(
         name,
-        _apply_actor,
+        _apply_actor if scale == 1.0 else _scaled_actor_apply(scale),
         variables=actor_params,
         init=_initial_actor_memory,
         checkpoint=checkpoint,
@@ -721,7 +816,13 @@ def make_recurrent_mappo_system(
 
 
 def critic_values(
-    params: Tree, memory: Array, features: Array, episode_start: Array, valid: Array
+    params: Tree,
+    memory: Array,
+    features: Array,
+    episode_start: Array,
+    valid: Array,
+    *,
+    input_scale: float = 1.0,
 ) -> tuple[Array, Array]:
     """Apply the critic separately using one physical-state view per game.
 
@@ -738,12 +839,21 @@ def critic_values(
         Boolean (T,B) resets before decisions. Death and respawn are not resets.
     valid : Array
         Boolean (T,B) valid decisions. Invalid rows retain previous memory.
+    input_scale : float, default=1.0
+        Fixed positive finite feature multiplier matching the learner's PPO
+        config. One preserves historical raw-input values; this call applies
+        the scale once inside the network and keeps stored features unchanged.
 
     Returns
     -------
     tuple[Array, Array]
         Final float32 (B,5,128) critic memory and float32 (T,B,5) value
         predictions in the training reward's units. Ignore invalid-row values.
+
+    Raises
+    ------
+    ValueError
+        input_scale is not a positive finite real number or is Boolean.
 
     Notes
     -----
@@ -755,7 +865,7 @@ def critic_values(
     expanded = jnp.broadcast_to(features[..., None, :], (*shape, features.shape[-1]))
     return cast(
         tuple[Array, Array],
-        RecurrentValueNet().apply(
+        RecurrentValueNet(input_scale=input_scale).apply(
             params,
             memory,
             expanded,
@@ -874,7 +984,7 @@ def _actor_loss(
     """
     _, logits = cast(
         tuple[Array, Array],
-        RecurrentActor().apply(
+        RecurrentActor(input_scale=config.input_scale).apply(
             params,
             batch.actor_memory,
             batch.actor_features,
@@ -905,7 +1015,7 @@ def _critic_loss(params: Tree, batch: PPOMinibatch, config: PPOConfig) -> Array:
     """
     _, values = cast(
         tuple[Array, Array],
-        RecurrentValueNet().apply(
+        RecurrentValueNet(input_scale=config.input_scale).apply(
             params,
             batch.critic_memory,
             batch.critic_features,

@@ -3,6 +3,8 @@
 These CPU tests use real-width actor Systems through public environment calls,
 including legal action probabilities, death, respawn, reset and padding. Small
 fixed donor tensors isolate group averaging and complete Adam-state preservation.
+Input-scale checks pair inference and PPO with explicit feature multiplication,
+preserve default parameters, and distinguish recorded inference settings.
 They do not establish GPU speed, learning quality or full learner recovery.
 """
 
@@ -52,6 +54,9 @@ from marl_battlegrounds.evaluation.policy_execution import (
     SystemState,
     apply_systems,
     init_systems,
+)
+from marl_battlegrounds.evaluation.recording_identity import (
+    normalize_system_registration,
 )
 from marl_battlegrounds.policies.actor import ActorAction
 from marl_battlegrounds.policies.input import Observations
@@ -620,3 +625,106 @@ def test_unequal_nonempty_groups_keep_equal_group_weight(
     assert int(first_metrics.actor_samples) == 4 * int(second_metrics.actor_samples)
     weighted = (4 * first_metrics.value_loss + second_metrics.value_loss) / 5
     assert not np.isclose(metrics.value_loss, weighted, atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "scale", [0.0, -0.01, float("nan"), float("inf"), -float("inf"), True, "0.01", None]
+)
+def test_input_scale_rejects_invalid_static_settings(scale: object) -> None:
+    with pytest.raises(ValueError, match="input_scale"):
+        PPOConfig(input_scale=cast(float, scale))
+    with pytest.raises(ValueError, match="input_scale"):
+        make_recurrent_mappo_system({}, input_scale=cast(float, scale))
+
+
+def test_input_scale_keeps_initial_parameter_bytes_and_optimizer_state() -> None:
+    key = jax.random.key(145)
+    default = initialize_ppo(key)
+    explicit = initialize_ppo(key, PPOConfig(input_scale=1.0))
+    scaled = initialize_ppo(key, PPOConfig(input_scale=0.01))
+    _assert_tree_equal(default, explicit)
+    _assert_tree_equal(default, scaled)
+
+
+def test_input_scale_is_part_of_system_identity_and_reuses_its_apply_hook() -> None:
+    raw = make_recurrent_mappo_system({})
+    explicit = make_recurrent_mappo_system({}, input_scale=1.0)
+    scaled = make_recurrent_mappo_system({}, input_scale=0.01)
+    repeated = make_recurrent_mappo_system({}, input_scale=0.01)
+    other = make_recurrent_mappo_system({}, input_scale=0.02)
+    assert raw.apply is explicit.apply
+    assert scaled.apply is repeated.apply
+    records = [
+        normalize_system_registration(value, phase="evaluation", frozen=True)
+        for value in (raw, explicit, scaled, repeated, other)
+    ]
+    assert records[0] == records[1]
+    assert records[2] == records[3]
+    assert len({records[index][0] for index in (0, 2, 4)}) == 3
+    assert len({record[1]["variables_digest"] for record in records}) == 1
+    hooks = [cast(dict[str, Any], record[1]["hooks"])["apply"] for record in records]
+    assert hooks[2]["closure_content"] == "none"
+    assert hooks[2]["defaults_digest"] != hooks[4]["defaults_digest"]
+
+
+def test_scaled_system_and_critic_match_explicit_feature_multiplication(
+    networks: PPOTrainState,
+) -> None:
+    env, observations, state = _setup(batch=1)
+    inputs = env.policy_inputs(observations, state)
+    features = encode_actor_inputs(inputs.actors)[None]
+    starts = jnp.broadcast_to(inputs.episode_start[:, None], inputs.active_mask.shape)
+    valid = jnp.broadcast_to(inputs.valid[:, None], inputs.active_mask.shape)
+    memory = jnp.full((1, 5, HIDDEN_SIZE), 0.1, jnp.float32)
+    system = make_recurrent_mappo_system(networks.actor_params, input_scale=0.01)
+    output = _actor_output(
+        system, memory, inputs, jax.random.split(jax.random.key(146), 1)
+    )
+    expected_memory, logits = cast(
+        tuple[Array, Array],
+        RecurrentActor().apply(
+            networks.actor_params, memory, features * 0.01, starts[None], valid[None]
+        ),
+    )
+    _assert_tree_close(output.next_memory, expected_memory)
+    np.testing.assert_allclose(
+        output.learning_outputs.log_prob,
+        action_log_prob(
+            logits[0],
+            categorical_action_mask(inputs.action_mask),
+            output.learning_outputs.action_indices,
+        ),
+        atol=2e-6,
+        rtol=2e-6,
+    )
+    np.testing.assert_array_equal(encode_actor_inputs(inputs.actors)[None], features)
+    physical = encode_training_state(state.core_state, state.config)[None]
+    flags = jnp.zeros((1, 1), jnp.bool_)
+    present = jnp.ones_like(flags)
+    scaled = critic_values(
+        networks.critic_params, memory, physical, flags, present, input_scale=0.01
+    )
+    expected = critic_values(
+        networks.critic_params, memory, physical * 0.01, flags, present
+    )
+    _assert_tree_equal(scaled, expected)
+    assert _tree_changed(
+        scaled, critic_values(networks.critic_params, memory, physical, flags, present)
+    )
+
+
+def test_scaled_ppo_losses_and_gradients_match_explicit_scaled_features(
+    numerical_batch: tuple[PPOTrainState, PPOMinibatch, PPOConfig],
+) -> None:
+    state, batch, config = numerical_batch
+    actual = _update(state, batch, replace(config, input_scale=0.01))
+    expected = _update(
+        state,
+        batch._replace(
+            actor_features=batch.actor_features * 0.01,
+            critic_features=batch.critic_features * 0.01,
+        ),
+        config,
+    )
+    _assert_tree_close(actual, expected)
+    assert _tree_changed(actual, _update(state, batch, config))

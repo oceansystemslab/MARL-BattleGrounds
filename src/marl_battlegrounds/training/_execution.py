@@ -97,6 +97,7 @@ def _reset_finished(
     root_key: Array,
     eligible_maps: Array,
     team_size: Array,
+    score_threshold: Array | None = None,
     sampled: SampledTrainingConfigs | None = None,
     reset_keys: Array | None = None,
 ) -> tuple[Observations, EnvironmentState, Array, Array]:
@@ -104,6 +105,8 @@ def _reset_finished(
 
     Inputs describe native B-lane games and the immutable source bank. Controls
     have the sampler's bool (42,) and scalar int32 shapes. The root is Threefry.
+    score_threshold is scalar int32, or None for K20, and must name a prepared
+    source block. Only reset lanes adopt it; continuing games retain their K.
     Optional sampled choices and lane reset keys supply an exact benchmark
     reference; ordinary callers omit both. Return observations, state, source
     indices (B,) and class rows (B,10). Continuing lanes stay unchanged. No reset
@@ -124,6 +127,7 @@ def _reset_finished(
                 generations,
                 eligible_maps=eligible_maps,
                 team_size=team_size,
+                score_threshold=score_threshold,
             )
         )
         keys = (

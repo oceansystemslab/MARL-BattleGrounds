@@ -45,6 +45,14 @@ _ROOTS = {
 }
 
 
+def _root_seed(value: object) -> int:
+    """Require one plain uint32 root seed; reject Booleans and invalid numbers."""
+    seed = _integer(value, "root_seed")
+    if seed > 0xFFFFFFFF:
+        raise ValueError("root_seed must fit an unsigned 32-bit integer")
+    return seed
+
+
 def _digest(value: object) -> str:
     """Hash canonical finite JSON, preserving list order and excluding no fields."""
     return sha256(
@@ -269,6 +277,7 @@ def validation_task_description(
     purpose: str,
     seed_pairs: int,
     members: Sequence[tuple[str, str]],
+    root_seed: int | None = None,
 ) -> Record:
     """Describe one exact fixed-map validation task without files or numerical work.
 
@@ -276,7 +285,10 @@ def validation_task_description(
     its frozen weights. env_steps counts real training transitions. panel_digest
     identifies the frozen panel, and members gives its ordered (name, weight digest)
     pairs. purpose is routine, initialization, confirmation or random; seed_pairs
-    is positive. Shared constants supply maps, seed roots and the task schema.
+    is positive. root_seed=None keeps the existing purpose-specific root. An
+    explicit uint32 root is supported for Random diagnostics only; changing it
+    changes actual game keys and task identity. Shared constants supply maps
+    and the task schema. Existing calls retain exactly the same task identity.
     Return a new JSON-ready description including its immutable task_id. Invalid
     counts, purpose or empty/duplicate identities raise ValueError. The caller
     verifies artifact contents and the declared panel; this helper opens nothing.
@@ -285,6 +297,9 @@ def validation_task_description(
     _integer(seed_pairs, "seed_pairs", minimum=1)
     if purpose not in ("routine", "initialization", "confirmation", "random"):
         raise ValueError("Unknown fixed-map validation purpose")
+    if root_seed is not None and purpose != "random":
+        raise ValueError("An explicit root_seed is supported for Random checks only")
+    root = _ROOTS[purpose] if root_seed is None else _root_seed(root_seed)
     if any(
         not isinstance(cast(object, value), str) or not value
         for value in (checkpoint_id, actor_digest, panel_digest)
@@ -311,7 +326,7 @@ def validation_task_description(
         "purpose": purpose,
         "seed_pairs": seed_pairs,
         "maps": list(VALIDATION_MAPS),
-        "root": _ROOTS[purpose],
+        "root": root,
         "members": [{"name": name, "actor_digest": digest} for name, digest in members],
     }
     return {**result, "task_id": _digest(result)}
@@ -744,11 +759,14 @@ def _validate(
     num_envs: int,
     chunk_size: int,
     event_callback: EventCallback | None,
+    root_seed: int | None = None,
 ) -> Record:
     """Own one exact checkpoint/panel task and reduce its complete saved M8 rows."""
     _integer(seed_pairs, "seed_pairs", minimum=1)
     _integer(num_envs, "num_envs", minimum=1)
     _integer(chunk_size, "chunk_size", minimum=1)
+    if root_seed is not None:
+        _root_seed(root_seed)
     identity = _artifact(checkpoint)
     directory = Path(output_dir).resolve()
     task = _task(
@@ -761,6 +779,7 @@ def _validate(
             purpose=purpose,
             seed_pairs=seed_pairs,
             members=tuple((name, digest) for name, _, digest in members),
+            root_seed=root_seed,
         ),
         event_callback,
     )
@@ -780,7 +799,7 @@ def _validate(
             "maps": list(VALIDATION_MAPS),
             "seed_pairs": seed_pairs,
             "total_games": len(VALIDATION_MAPS) * seed_pairs * 2,
-            "root": _ROOTS[purpose],
+            "root": task["root"],
             "num_envs": num_envs,
             "chunk_size": chunk_size,
         }
@@ -859,16 +878,55 @@ def validate_random(
     *,
     output_dir: str | Path,
     seed_pairs: int = 10,
+    root_seed: int = _ROOTS["random"],
     num_envs: int = 32,
     chunk_size: int = 128,
     event_callback: EventCallback | None = None,
 ) -> Record:
-    """Run the fixed Random usefulness diagnostic on five validation maps.
+    """Evaluate a frozen actor against Random on the five validation maps.
 
-    Arguments follow validate_checkpoint; ten pairs per map give 100 games. Random
-    is diagnostic only and never becomes a learned panel member. Return the same
-    summary contract with purpose='random'. No learner or training key is touched.
+    Parameters
+    ----------
+    checkpoint : str or Path
+        Exact saved actor export or complete learner checkpoint to evaluate.
+    output_dir : str or Path
+        Task-owned output folder. Reuse requires unchanged actor, root seed,
+        game count, and other scientific settings; conflicts fail before games.
+    seed_pairs : int, default=10
+        Positive paired seeds per map. Both spawn sides give ten games per pair
+        across maps 42-46: four pairs mean 40 games; 20 pairs mean 200 games.
+    root_seed : int, default=19043001
+        Plain integer in [0, 2**32 - 1] used for actual game and policy keys.
+        The default preserves historical task hashes and games exactly. A
+        different declared root supports fresh confirmation games; use that same
+        root when verifying saved results. It is not a training seed.
+    num_envs : int, default=32
+        Positive worker count. GPU calls require 32; fewer than 32 unfinished
+        games on resume use the existing CPU recovery route.
+    chunk_size : int, default=128
+        Positive number of ticks per evaluator block. Saved Random evidence
+        verification requires the declared 128-tick block setting.
+    event_callback : callable or None, default=None
+        Receives task and execution records, or None for no callback.
+
+    Returns
+    -------
+    dict
+        Complete scientific summary, including actual root, task and actor IDs,
+        native scores, paired-game uncertainty, and saved M8 pass paths.
+
+    Raises
+    ------
+    ValueError, OSError
+        Settings, actor files, saved identity, or output files are invalid.
+
+    Notes
+    -----
+    Keeps canonical 5v5, K20/H300, equal map weights, and unshaped task scores.
+    Random is diagnostic only and does not become a learned panel member.
+    No learner state or training key is accepted or changed.
     """
+    root_seed = _root_seed(root_seed)
     return _validate(
         checkpoint,
         [("Random", "random", "builtin-random")],
@@ -876,10 +934,321 @@ def validate_random(
         output_dir=output_dir,
         purpose="random",
         seed_pairs=seed_pairs,
+        root_seed=root_seed,
         num_envs=num_envs,
         chunk_size=chunk_size,
         event_callback=event_callback,
     )
+
+
+_RANDOM_CAPTURE_FIELDS = frozenset(
+    {
+        "actor_path",
+        "summary_path",
+        "reference_path",
+        "reused_initialization",
+        "elapsed_seconds",
+        "training_seconds",
+        "wall_seconds",
+    }
+)
+
+
+def read_random_initialization(
+    reference: str | Path,
+    *,
+    actor_digest: str,
+    seed_pairs: int,
+    root_seed: int = _ROOTS["random"],
+) -> Record:
+    """Read one original shared initialization result without changing any file.
+
+    reference names the copied original runner record, with unchanged absolute
+    evidence paths. Relative references use the current working directory.
+    actor_digest is the new learner's initial inference identity; seed_pairs is
+    its declared Random game count per map and spawn pair. root_seed is the
+    expected uint32 game root, default 19043001. Verify all original
+    evidence through verify_random_result and require zero training experience.
+    Return the original record unchanged. Missing, linked, chained or mismatched
+    evidence raises ValueError or OSError before any caller-owned recovery.
+    """
+    path = Path(reference).absolute()
+    if path.resolve() != path or not path.is_file():
+        raise ValueError("Shared Random initialization is missing or follows a link")
+    record = _json(path)
+    if (
+        record.get("reused_initialization") is not False
+        or record.get("reference_path") is not None
+    ):
+        raise ValueError("Shared Random initialization must be an original result")
+    verify_random_result(
+        record,
+        actor_digest=actor_digest,
+        seed_pairs=seed_pairs,
+        root_seed=root_seed,
+        env_steps=0,
+    )
+    return record
+
+
+def verify_random_result(
+    result: Mapping[str, Any],
+    *,
+    actor_digest: str,
+    seed_pairs: int,
+    root_seed: int = _ROOTS["random"],
+    checkpoint_id: str | None = None,
+    env_steps: int | None = None,
+    run_id: str | None = None,
+    seed: int | None = None,
+) -> Record:
+    """Verify one saved Random capture and return its original scientific summary.
+
+    result is the runner record with absolute actor/summary paths and capture
+    times. actor_digest and positive seed_pairs declare the expected inference
+    and paired game count. root_seed is the expected uint32 game root, default
+    19043001; a saved root must match it. Optional checkpoint_id/env_steps require
+    that exact originating boundary. Optional run_id/seed bind the original run.
+    Shared initialization retains its original IDs; its caller instead checks
+    the new initial actor identity and omits a different run's ID/seed.
+    Read and verify actor files, task, native M8 options, games and summary;
+    raise ValueError or OSError for missing/changed evidence. No files, learner
+    state or keys change, and no policy or new evaluation runs.
+    """
+    summary, _ = _verified_random_result(
+        result,
+        actor_digest=actor_digest,
+        seed_pairs=seed_pairs,
+        root_seed=root_seed,
+        checkpoint_id=checkpoint_id,
+        env_steps=env_steps,
+        run_id=run_id,
+        seed=seed,
+    )
+    return summary
+
+
+def _verified_random_result(
+    result: Mapping[str, Any],
+    *,
+    actor_digest: str,
+    seed_pairs: int,
+    root_seed: int = _ROOTS["random"],
+    checkpoint_id: str | None = None,
+    env_steps: int | None = None,
+    run_id: str | None = None,
+    seed: int | None = None,
+) -> tuple[Record, list[Record]]:
+    """Verify a runner's Random result against its original complete M8 evidence.
+
+    Parameters
+    ----------
+    result : mapping
+        One random_diagnostics.json entry, including its original actor_path and
+        summary_path, optional reference_path, reuse flag and capture timings.
+        A shared initialization reference must point to an original, unreused
+        entry. Original task, actor, checkpoint and M8 pass identities stay intact.
+    actor_digest : str
+        Expected inference identity, including the input scale. Reused initial
+        results must match the new learner's initial actor exactly.
+    seed_pairs : int
+        Expected positive number of independent seed pairs per validation map.
+    root_seed : int, default=19043001
+        Expected uint32 root used for game and policy keys. Fresh confirmation
+        callers must supply their declared root. Shared initialization requires
+        this same root and retains its original actor, task, and game identities.
+    checkpoint_id, env_steps : str or None, int or None, default=None
+        Optional exact originating learner boundary and experience checks. A
+        shared initialization keeps its original checkpoint_id; require zero
+        env_steps when checking that reference for another run.
+    run_id, seed : str or None, int or None, default=None
+        Optional original training-run identity checks. Shared initialization
+        keeps its original run and seed; callers bind the new initial inference
+        separately instead of passing a different run's identity here.
+
+    Returns
+    -------
+    tuple of dict and list of dict
+        Original scientific summary without runner capture fields, followed by
+        its verified M8 episode rows. Analysis can reuse these host rows without
+        reading or reducing the same files again.
+
+    Raises
+    ------
+    ValueError, OSError
+        Identity, paths, task, native game settings, completed rows or summary
+        differ. Paths must be absolute and must not traverse symbolic links.
+
+    Notes
+    -----
+    Read-only host work. Verify actor file hashes and reduce saved M8 rows through
+    summarize_validation. No policy call, learner change, writer recovery or new
+    evaluation occurs. This is an integrity check, not a usefulness gate.
+    """
+    from marl_battlegrounds.evaluation.results import load_results
+
+    _integer(seed_pairs, "seed_pairs", minimum=1)
+    root_seed = _root_seed(root_seed)
+    if not result.keys() >= _RANDOM_CAPTURE_FIELDS:
+        raise ValueError("Random result is missing its capture evidence")
+    _digest(result)
+
+    def path(value: object, name: str) -> Path:
+        """Require one existing absolute regular path without linked parents."""
+        if not isinstance(value, str):
+            raise ValueError(f"Random {name} must be an absolute path string")
+        target = Path(value)
+        if (
+            not target.is_absolute()
+            or target.resolve() != target
+            or not target.exists()
+        ):
+            raise ValueError(f"Random {name} is missing or follows a symbolic link")
+        return target
+
+    for name in ("elapsed_seconds", "training_seconds", "wall_seconds"):
+        value = result[name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError("Random capture times must be finite nonnegative seconds")
+    if result["training_seconds"] > result["elapsed_seconds"] + 1e-6:
+        raise ValueError("Random training time exceeds its capture time")
+    reused = result["reused_initialization"]
+    if type(reused) is not bool:
+        raise ValueError("Random initialization reuse flag must be bool")
+    if reused != (result["reference_path"] is not None):
+        raise ValueError("Random initialization reuse needs its exact reference")
+    original: Record = {
+        key: value for key, value in result.items() if key not in _RANDOM_CAPTURE_FIELDS
+    }
+    if reused:
+        reference = _json(path(result["reference_path"], "reference_path"))
+        if (
+            reference.get("reused_initialization") is not False
+            or reference.get("reference_path") is not None
+            or result.get("env_steps") != 0
+            or any(
+                reference.get(name) != result[name]
+                for name in ("actor_path", "summary_path")
+            )
+            or {
+                key: value
+                for key, value in reference.items()
+                if key not in _RANDOM_CAPTURE_FIELDS
+            }
+            != original
+        ):
+            raise ValueError(
+                "Shared Random initialization changed or chains references"
+            )
+        if env_steps not in (None, 0):
+            raise ValueError("Shared Random initialization must have zero experience")
+        return _verified_random_result(
+            reference,
+            actor_digest=actor_digest,
+            seed_pairs=seed_pairs,
+            root_seed=root_seed,
+            checkpoint_id=checkpoint_id,
+            env_steps=0,
+            run_id=run_id,
+            seed=seed,
+        )
+    actor = _artifact(path(result["actor_path"], "actor_path"))
+    if (
+        actor["actor_digest"] != actor_digest
+        or (checkpoint_id is not None and actor["checkpoint_id"] != checkpoint_id)
+        or (env_steps is not None and actor["env_steps"] != env_steps)
+        or (run_id is not None and actor["run_id"] != run_id)
+        or (seed is not None and actor["seed"] != seed)
+    ):
+        raise ValueError("Random result differs from the expected actor or boundary")
+    expected = validation_task_description(
+        checkpoint_id=actor["checkpoint_id"],
+        actor_digest=actor_digest,
+        env_steps=actor["env_steps"],
+        panel_digest="random-diagnostic-v1",
+        purpose="random",
+        seed_pairs=seed_pairs,
+        members=(("Random", "builtin-random"),),
+        root_seed=root_seed,
+    )
+    summary_path = path(result["summary_path"], "summary_path")
+    directory = summary_path.parent
+    if (
+        summary_path.name != "validation_summary.json"
+        or _json(summary_path) != original
+        or _json(path(str(directory / "task.json"), "task")) != expected
+        or any(original.get(key) != value for key, value in expected.items())
+    ):
+        raise ValueError("Random summary or task identity changed")
+    raw_paths: object = original.get("pass_paths")
+    if not isinstance(raw_paths, list) or len(cast(list[Any], raw_paths)) != 1:
+        raise ValueError("Random diagnostic needs its one complete M8 pass")
+    paths = cast(list[Any], raw_paths)
+    run_dir = path(paths[0], "pass_path")
+    parent = directory / "opponent-0"
+    if run_dir.parent != parent or sorted(parent.glob("*/run_details.json")) != [
+        run_dir / "run_details.json"
+    ]:
+        raise ValueError("Random M8 pass is outside its original task")
+    pass_id = validation_pass_id(expected["task_id"], "Random")
+    saved = load_results(run_dir, phase="validation", pass_id=pass_id)
+    if saved.status != "complete" or len(saved.metadata["passes"]) != 1:
+        raise ValueError("Random M8 pass is incomplete or ambiguous")
+    entry = next(iter(saved.metadata["passes"].values()))
+    policies, details = entry["policies"], entry["details"]
+    focal, opponent = policies["team_a"], policies["team_b"]
+    contract = details["evaluation_contract"]
+    games = len(VALIDATION_MAPS) * seed_pairs * 2
+    options: Record = {
+        "seed": root_seed,
+        "spawn_mode": "paired",
+        "score_threshold": 20,
+        "max_steps": 300,
+        "metrics": "priority",
+        "save_replays": 0,
+        "system_roster": None,
+        "opponent_roster": None,
+        "full_metrics_episodes": [],
+        "replay_episodes": [],
+    }
+    if (
+        focal["checkpoint"] != actor_digest
+        or focal["variables_digest"] != actor["weight_digest"]
+        or focal["variables_frozen"] is not True
+        or opponent["name"] != "random"
+        or opponent["callable_name"]
+        != "marl_battlegrounds.evaluation.policy_execution._random_apply"
+        or contract["version"] != 1
+        or contract["schedule_kind"] != "generated"
+        or contract["map_selection"] != "explicit"
+        or contract["spawn_mode"] != "paired"
+        or contract["options"] != options
+        or [item["map_id"] for item in contract["source_choices"]]
+        != list(VALIDATION_MAPS)
+        or details["phase"] != "validation"
+        or details["pass_id"] != pass_id
+        or details["seed"] != root_seed
+        or details["num_episodes"] != games
+        or details["metrics"] != "priority"
+        or details["chunk_size"] != 128
+    ):
+        raise ValueError("Random M8 actor or native evaluation settings changed")
+    rows = _rows(run_dir, pass_id=pass_id, opponent="Random")
+    reduced = {
+        **expected,
+        **summarize_validation(
+            rows, maps=VALIDATION_MAPS, opponents=("Random",), seed_pairs=seed_pairs
+        ),
+        "pass_paths": paths,
+    }
+    if reduced != original:
+        raise ValueError("Random summary disagrees with its saved M8 games")
+    return original, rows
 
 
 def make_slot_diagnostic_schedule(

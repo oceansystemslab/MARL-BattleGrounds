@@ -1,12 +1,14 @@
 """Add optional team score feedback without changing simulator rewards.
 
-Validate settings once on the host with validate_shaping. Call
-team_potential_shaping on each producing transition, keeping its pre-action
-scores even when AutoReset returns a replacement game. These pure adjustments
-belong to learner feedback, never actor inputs or official benchmark scores.
+Validate settings once on the host with validate_shaping. Potential feedback
+preserves the discounted task objective; score-delta feedback adds a separate
+combat objective. Both use the producing transition's pre-action scores even
+when AutoReset returns a replacement game. These pure adjustments belong to
+learner feedback, never actor inputs or official benchmark scores.
 """
 
 from numbers import Real
+from typing import cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -17,7 +19,10 @@ from marl_battlegrounds.environment import EpisodeInfo, episode_advanced
 
 
 def validate_shaping(
-    *, discount: float | Array, coefficient: float | Array = 0.01
+    *,
+    discount: float | Array,
+    coefficient: float | Array = 0.01,
+    mode: str = "potential",
 ) -> None:
     """Check score-shaping settings before compiled collection starts.
 
@@ -29,18 +34,23 @@ def validate_shaping(
     coefficient : float or Array, default=0.01
         Finite nonnegative real scalar. It scales the team's score difference.
         Zero produces no adjustment. Boolean and complex values are rejected.
+    mode : {"potential", "score_delta"}, default="potential"
+        Potential feedback preserves the discounted objective. Score-delta
+        feedback rewards new kills minus new deaths, changing that objective.
+        Validate the mode even when the caller disables shaping.
 
     Returns
     -------
     None
-        Both settings satisfy the host contract. Inputs stay unchanged.
+        All settings satisfy the host contract. Inputs stay unchanged.
 
     Raises
     ------
     TypeError
         A value is not real, is Boolean, or is traced inside a JAX transform.
     ValueError
-        A value is not scalar, is not finite, or lies outside its stated range.
+        The mode is unsupported, or a numerical value is not scalar, is not
+        finite, or lies outside its stated range.
 
     Notes
     -----
@@ -48,6 +58,11 @@ def validate_shaping(
     before execution, then pass them as dynamic scalar float32 arrays. This
     function reads no files and creates no reward configuration or history.
     """
+    if not isinstance(cast(object, mode), str) or mode not in (
+        "potential",
+        "score_delta",
+    ):
+        raise ValueError("shaping mode must be potential or score_delta")
     for name, value in (("discount", discount), ("coefficient", coefficient)):
         if isinstance(value, Tracer):
             raise TypeError("Validate shaping on the host before compiled use")
@@ -77,6 +92,27 @@ def _scalar_float32(value: float | Array, *, name: str) -> Array:
     if getattr(value, "dtype", None) != jnp.float32:
         raise TypeError(f"{name} must have float32 dtype")
     return jnp.asarray(value)
+
+
+def _score_shapes(before_scores: Array, info: EpisodeInfo) -> None:
+    """Check shared score and producing-step shapes/dtypes without reading values.
+
+    before_scores and info.team_scores must be int32 (B,2) with positive B.
+    info.decision_step must be int32 (B,). Raise ValueError for a shape mismatch
+    and TypeError for a dtype mismatch. Other EpisodeInfo fields are not read.
+    """
+    shape = np.shape(before_scores)
+    if len(shape) != 2 or shape[0] == 0 or shape[1] != 2:
+        raise ValueError("before_scores must have nonempty shape (B, 2)")
+    for name, value, expected_shape in (
+        ("before_scores", before_scores, shape),
+        ("info.team_scores", info.team_scores, shape),
+        ("info.decision_step", info.decision_step, shape[:1]),
+    ):
+        if np.shape(value) != expected_shape:
+            raise ValueError(f"{name} must have shape {expected_shape}")
+        if getattr(value, "dtype", None) != jnp.int32:
+            raise TypeError(f"{name} must have int32 dtype")
 
 
 def team_potential_shaping(
@@ -137,19 +173,12 @@ def team_potential_shaping(
     repeated actor copies to scale this team signal. A disabled collector must
     skip this helper entirely; a zero coefficient still uses the enabled path.
     """
-    shape = np.shape(before_scores)
-    if len(shape) != 2 or shape[0] == 0 or shape[1] != 2:
-        raise ValueError("before_scores must have nonempty shape (B, 2)")
-    for name, value, expected_shape, dtype in (
-        ("before_scores", before_scores, shape, jnp.int32),
-        ("info.team_scores", info.team_scores, shape, jnp.int32),
-        ("info.completed", info.completed, shape[:1], jnp.bool_),
-        ("info.decision_step", info.decision_step, shape[:1], jnp.int32),
-    ):
-        if np.shape(value) != expected_shape:
-            raise ValueError(f"{name} must have shape {expected_shape}")
-        if getattr(value, "dtype", None) != dtype:
-            raise TypeError(f"{name} must have {jnp.dtype(dtype).name} dtype")
+    _score_shapes(before_scores, info)
+    shape = np.shape(before_scores)[:1]
+    if np.shape(info.completed) != shape:
+        raise ValueError(f"info.completed must have shape {shape}")
+    if getattr(info.completed, "dtype", None) != jnp.bool_:
+        raise TypeError("info.completed must have bool dtype")
     gamma = _scalar_float32(discount, name="discount")
     scale = _scalar_float32(coefficient, name="coefficient")
     before = jnp.asarray(before_scores, jnp.float32)
@@ -157,4 +186,61 @@ def team_potential_shaping(
     current = scale * (before[:, 0] - before[:, 1])
     following = jnp.where(info.completed, 0.0, scale * (after[:, 0] - after[:, 1]))
     adjustment = jnp.where(episode_advanced(info), gamma * following - current, 0.0)
+    return jnp.stack((adjustment, -adjustment), axis=-1)
+
+
+def team_score_delta_shaping(
+    before_scores: Array,
+    info: EpisodeInfo,
+    *,
+    coefficient: float | Array = 0.01,
+) -> Array:
+    """Reward each team's new kills minus new deaths on one transition.
+
+    Parameters
+    ----------
+    before_scores : Array
+        Int32 (B,2) scores immediately before the producing action, with
+        positive B and Team A/Team B columns. Read them after any pending reset
+        and before step. Include authored start scores.
+    info : EpisodeInfo
+        Producing transition with int32 team_scores (B,2) and decision_step
+        (B,). Its scores belong to that transition even when AutoReset returns
+        a new game. Other fields, including completion, are not read.
+    coefficient : float or Array, default=0.01
+        Finite nonnegative amount per net kill. Python real scalars convert to
+        float32; arrays must be scalar float32. Zero gives zero adjustments.
+
+    Returns
+    -------
+    Array
+        Float32 (B,2) Team A/Team B adjustments. A new own kill adds the
+        coefficient; a new own death subtracts it. Simultaneous changes net
+        together. Real endings keep this feedback; they do not cancel it.
+        Non-advancing rows return zero. No score change gives zero even when a
+        team already leads. Inputs and native task rewards remain unchanged.
+
+    Raises
+    ------
+    TypeError
+        A used array or scalar has the wrong dtype.
+    ValueError
+        A used array or scalar has the wrong shape.
+
+    Notes
+    -----
+    Pure JAX arithmetic supports jit, scan and outer vmap. Validate settings
+    with validate_shaping(discount=..., mode="score_delta") before compiled use;
+    this helper checks only static shapes and dtypes. It performs no host transfer,
+    reset, metric calculation or state update. Disabled collectors skip this helper.
+    Keep one team adjustment per game before adding it to active actor rewards.
+    This adds a combat objective and does not preserve the original discounted
+    objective. It makes no claim about learning gains or official task wins.
+    """
+    _score_shapes(before_scores, info)
+    scale = _scalar_float32(coefficient, name="coefficient")
+    changes = jnp.asarray(info.team_scores - before_scores, jnp.float32)
+    adjustment = jnp.where(
+        episode_advanced(info), scale * (changes[:, 0] - changes[:, 1]), 0.0
+    )
     return jnp.stack((adjustment, -adjustment), axis=-1)

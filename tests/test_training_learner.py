@@ -4,7 +4,9 @@ CPU proofs compare the adapter with direct existing numerical calls, including
 reset/cutoff/ending boundaries, final padding, same-call actor data, exact update
 and history counts, masked samples, finite failure guards and compilation reuse.
 Synthetic short horizons are test inputs after content admission, not proposed
-training settings. No test claims useful learning or GPU performance.
+training settings. The default and an explicit zero pinned opponent share give
+identical learner states after real updates. No test claims useful learning or
+GPU performance.
 """
 
 from dataclasses import replace
@@ -165,6 +167,32 @@ def _direct_batch(
     return batch, memory
 
 
+def test_default_and_explicit_zero_pinned_share_give_identical_learners(
+    prepared: PreparedTrainingContent,
+) -> None:
+    ppo = PPOConfig(rollout_length=4, epochs=1)
+    schedule = make_training_schedule(total_env_steps=64, num_envs=4)
+    default = init_learner(
+        schedule=schedule, seed=71, ppo=ppo, prepared=prepared, metrics="none"
+    )
+    explicit = init_learner(
+        schedule=schedule,
+        seed=71,
+        ppo=ppo,
+        prepared=prepared,
+        metrics="none",
+        pinned_opponent_share=0.0,
+    )
+    states: list[LearnerState] = []
+    for collection, state in (default, explicit):
+        assert collection.pinned_opponent_share == 0.0
+        for _ in range(2):
+            carry, rollout = scanner(collection, ppo.rollout_length)(state.carry)
+            state, _ = updater(ppo)(state, carry, rollout)
+        states.append(state)
+    equal(states[0], states[1])
+
+
 def test_initial_state_owns_one_actor_and_separate_deterministic_keys(
     context: Context,
 ) -> None:
@@ -185,16 +213,37 @@ def test_initial_state_owns_one_actor_and_separate_deterministic_keys(
     validate_learner(collection, state, ppo=ppo)
 
 
+@pytest.mark.parametrize("input_scale", (1.0, 0.01))
 def test_collected_values_behavior_and_update_match_direct_composition(
     context: Context,
     collected: tuple[TrainingCarry, TrainingRollout],
+    prepared: PreparedTrainingContent,
+    input_scale: float,
 ) -> None:
     collection, state, ppo = context
     after, rollout = collected
+    if input_scale != 1.0:
+        ppo = replace(ppo, input_scale=input_scale)
+        collection, state = init_learner(
+            schedule=collection.schedule,
+            seed=71,
+            ppo=ppo,
+            prepared=prepared,
+            metrics="none",
+        )
+        after, rollout = scanner(collection, ppo.rollout_length)(state.carry)
     batch, memory = cast(
-        tuple[PPOBatch, Array], jax.jit(build_ppo_batch)(state, rollout)
+        tuple[PPOBatch, Array],
+        jax.jit(partial(build_ppo_batch, ppo=ppo))(state, rollout),
     )
-    direct, direct_memory = _direct_batch(state, rollout)
+    scaled_rollout = rollout._replace(
+        transitions=rollout.transitions._replace(
+            training_state=cast(Array, rollout.transitions.training_state) * input_scale
+        ),
+        final_training_state=cast(Array, rollout.final_training_state) * input_scale,
+    )
+    direct, direct_memory = _direct_batch(state, scaled_rollout)
+    direct = direct._replace(training_state=batch.training_state)
     equal(batch, direct, close=True)
     equal(memory, direct_memory, close=True)
     inputs = jax.vmap(
@@ -206,7 +255,7 @@ def test_collected_values_behavior_and_update_match_direct_composition(
         RecurrentActor().apply(
             state.carry.history.current_variables,
             batch.actor_memory,
-            encode_actor_inputs(inputs),
+            encode_actor_inputs(inputs) * input_scale,
             jnp.broadcast_to(batch.episode_start[..., None], shape),
             jnp.broadcast_to(batch.valid[..., None], shape),
         ),
@@ -767,10 +816,14 @@ def test_wholly_dead_real_block_advances_critic_history_but_not_actor_optimizer(
     finite((updated, result))
 
 
+@pytest.mark.parametrize("dense", (False, True))
 def test_real_win_and_loss_endings_flow_into_terminal_gae_and_complete_update(
     prepared: PreparedTrainingContent,
+    dense: bool,
 ) -> None:
     collection, learner, ppo = _combat_context(prepared, "win-loss")
+    if dense:
+        collection = replace(collection, shaping=True, shaping_mode="score_delta")
     after, rollout = scanner(collection, ppo.rollout_length)(learner.carry)
     np.testing.assert_array_equal(rollout.transitions.valid, True)
     np.testing.assert_array_equal(rollout.transitions.ended, True)
@@ -780,7 +833,14 @@ def test_real_win_and_loss_endings_flow_into_terminal_gae_and_complete_update(
         + (core.TASK_MODE_OUTCOME_TEAM_B_WIN,) * 2,
     )
     batch, _ = build_ppo_batch(learner, rollout)
-    np.testing.assert_array_equal(batch.rewards[0, :, 0], (1, 1, -1, -1))
+    np.testing.assert_array_equal(
+        rollout.transitions.task_rewards[0, :, 0], (1, 1, -1, -1)
+    )
+    np.testing.assert_allclose(
+        batch.rewards[0, :, 0],
+        (1.01, 1.01, -1.01, -1.01) if dense else (1, 1, -1, -1),
+        atol=2e-6,
+    )
     np.testing.assert_array_equal(batch.final_values, 0)
     _, targets = calculate_gae(
         batch.rewards,

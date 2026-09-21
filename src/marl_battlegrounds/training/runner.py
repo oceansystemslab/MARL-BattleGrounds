@@ -36,6 +36,10 @@ from marl_battlegrounds.training._run_io import (
     validate_host_state,
     validate_log_cursor,
 )
+from marl_battlegrounds.training.opponents import (
+    _pinned_share,  # pyright: ignore[reportPrivateUsage]
+)
+from marl_battlegrounds.training.shaping import validate_shaping
 
 if TYPE_CHECKING:
     from marl_battlegrounds.evaluation.run_writer import RunWriter
@@ -69,9 +73,28 @@ class TrainConfig:
         Exact real environment transitions, divisible by num_envs. Resets and
         padding do not count. Per-lane rounds must fit a signed 32-bit integer.
     curriculum, shaping : bool, default=False
-        Enable the existing 17-stage schedule and team potential shaping.
+        Enable the existing 17-stage schedule and chosen team reward adjustment.
+    score_threshold_curriculum : bool, default=False
+        Use K1..10, K12, K15 and K20 at future resets, with 10%, nine shares
+        of 1/30, 5%, 5% and 50% of requested experience. Keeps canonical 5v5
+        and all training maps. Cannot be combined with curriculum=True.
+        Evaluation stays K20/H300. Actual played shares can lag stage changes.
     shaping_coefficient : float, default=0.01
-        Finite nonnegative potential weight. Task reward remains separately logged.
+        Finite nonnegative shaping weight. Task reward remains separately logged.
+    shaping_mode : {"potential", "score_delta"}, default="potential"
+        Potential preserves the discounted task objective. Score_delta adds
+        reward for team kills minus deaths without terminal cancellation; it
+        deliberately changes the training objective. Used only when shaping is
+        True. Evaluation always uses native task rewards and win rules.
+    pinned_opponent_share : float, default=0.0
+        Probability, within [0, 0.8], that each new training game meets the
+        pinned first-update actor instead of drawing from the ordinary self-play
+        recipe. Zero keeps 80% current weights and 20% uniform history with
+        today's exact random draws. A positive share also moves the first
+        history snapshot to the first completed update and drops the never-played
+        100% snapshot, so slot 0 holds that near-untrained actor for the whole
+        run; the remaining probability is 20% other history when any exists and
+        current weights otherwise. Evaluation opponents are unaffected.
     ppo : PPOConfig, default=PPOConfig()
         Immutable donor network update settings, including rollout length.
     metrics : {"priority", "none"}, default="priority"
@@ -91,6 +114,16 @@ class TrainConfig:
         Recovery-save interval. Initialization, validation and final always save.
     checkpoint_env_steps : tuple[int, ...], default=()
         Additional exact actor capture points at completed update boundaries.
+    random_diagnostic_seed_pairs : int or None, default=None
+        Enable fixed Random diagnostics at initialization, checkpoint_env_steps
+        and the final budget. The positive count is paired seeds per each of
+        five validation maps; four gives 40 games. No panel is required and no
+        actor is selected from these results. None skips this optional work.
+    random_initialization_result : str or None, default=None
+        Original runner result copied to a JSON file for initialization reuse.
+        Requires Random diagnostics. Its actor inference, task and complete M8
+        evidence must match before output or recovery changes. Original evidence
+        paths must remain available; later captures still run their own games.
     slot_diagnostic : bool, default=False
         Run the declared diagnostic after final training. Requires a frozen panel.
     purpose : {"development", "demonstration"}, default="development"
@@ -113,8 +146,11 @@ class TrainConfig:
     num_envs: int = 32
     total_env_steps: int = 10_000_000
     curriculum: bool = False
+    score_threshold_curriculum: bool = False
     shaping: bool = False
     shaping_coefficient: float = 0.01
+    shaping_mode: Literal["potential", "score_delta"] = "potential"
+    pinned_opponent_share: float = 0.0
     ppo: PPOConfig = field(default_factory=PPOConfig)
     metrics: Literal["priority", "none"] = "priority"
     recording: bool = False
@@ -124,6 +160,8 @@ class TrainConfig:
     confirmation_seed_pairs: int = 50
     checkpoint_interval_updates: int = 25
     checkpoint_env_steps: tuple[int, ...] = ()
+    random_diagnostic_seed_pairs: int | None = None
+    random_initialization_result: str | None = None
     slot_diagnostic: bool = False
     purpose: Literal["development", "demonstration"] = "development"
     verbose: bool = True
@@ -146,6 +184,7 @@ class TrainConfig:
                 raise ValueError(f"{name} must be a positive Python integer")
         for name in (
             "curriculum",
+            "score_threshold_curriculum",
             "shaping",
             "recording",
             "slot_diagnostic",
@@ -155,6 +194,8 @@ class TrainConfig:
                 raise TypeError(f"{name} must be bool")
         if self.method != "mappo":
             raise ValueError("Only recurrent mappo is implemented")
+        if self.curriculum and self.score_threshold_curriculum:
+            raise ValueError("Choose team/map curriculum or score-threshold curriculum")
         if not isinstance(cast(object, self.ppo), PPOConfig):
             raise TypeError("ppo must be PPOConfig")
         if self.num_envs % 2 or self.num_envs % (
@@ -175,6 +216,12 @@ class TrainConfig:
             or self.shaping_coefficient < 0
         ):
             raise ValueError("shaping_coefficient must be finite and nonnegative")
+        validate_shaping(
+            discount=self.ppo.gamma,
+            coefficient=self.shaping_coefficient,
+            mode=self.shaping_mode,
+        )
+        _pinned_share(self.pinned_opponent_share)
         if self.purpose not in ("development", "demonstration"):
             raise ValueError("purpose must be development or demonstration")
         if self.validation_panel is not None and (
@@ -182,6 +229,22 @@ class TrainConfig:
             or not self.validation_panel
         ):
             raise ValueError("validation_panel must be a nonempty path string or None")
+        if self.random_diagnostic_seed_pairs is not None and (
+            type(self.random_diagnostic_seed_pairs) is not int
+            or self.random_diagnostic_seed_pairs <= 0
+        ):
+            raise ValueError(
+                "random_diagnostic_seed_pairs must be a positive integer or None"
+            )
+        if self.random_initialization_result is not None and (
+            not isinstance(cast(object, self.random_initialization_result), str)
+            or not self.random_initialization_result
+            or self.random_diagnostic_seed_pairs is None
+        ):
+            raise ValueError(
+                "random_initialization_result needs a path and enabled "
+                "Random diagnostics"
+            )
         if (
             self.purpose == "demonstration" or self.slot_diagnostic
         ) and not self.validation_panel:
@@ -297,6 +360,7 @@ def _preserve_reports(root: Path, attempt: str) -> None:
     directory = root / "attempts" / attempt / "reports"
     for name in (
         "validation_results.json",
+        "random_diagnostics.json",
         "selection.json",
         "exposure.json",
         "slot_diagnostic.json",
@@ -420,6 +484,8 @@ def train(
         total_env_steps=config.total_env_steps,
         num_envs=config.num_envs,
         curriculum=config.curriculum,
+        score_threshold_curriculum=config.score_threshold_curriculum,
+        early_history_capture=config.pinned_opponent_share > 0,
     )
     # Setup performs no real action. Resume replaces all template numerical values.
     collection, state = learner.init_learner(
@@ -428,9 +494,26 @@ def train(
         ppo=config.ppo,
         shaping=config.shaping,
         shaping_coefficient=config.shaping_coefficient,
+        shaping_mode=config.shaping_mode,
         metrics=config.metrics,
         recording=config.recording,
+        pinned_opponent_share=config.pinned_opponent_share,
     )
+    if config.random_initialization_result is not None:
+        from marl_battlegrounds.evaluation.recording_identity import tree_digest
+
+        initial_digest = checkpoints._inference_digest(  # pyright: ignore[reportPrivateUsage]
+            {
+                "kind": "actor",
+                "actor_digest": tree_digest(state.carry.history.current_variables),
+                "input_scale": config.ppo.input_scale,
+            }
+        )
+        validation.read_random_initialization(
+            config.random_initialization_result,
+            actor_digest=initial_digest,
+            seed_pairs=cast(int, config.random_diagnostic_seed_pairs),
+        )
     identity = checkpoints.runtime_identity()
     source = cast(dict[str, Any], identity["source"])
     dependencies = identity["dependencies"]
@@ -518,6 +601,8 @@ def train(
                 root / "validation_results.json",
                 host.get("routine_results", []) + host.get("confirmation_results", []),
             )
+            if config.random_diagnostic_seed_pairs is not None:
+                atomic_json(root / "random_diagnostics.json", host["random_results"])
             atomic_json(root / "selection.json", host.get("selection"))
             atomic_json(root / "exposure.json", None)
             atomic_json(root / "slot_diagnostic.json", None)
@@ -685,6 +770,69 @@ def _memory_snapshot() -> dict[str, Any]:
     return result
 
 
+def _random_progress(results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Summarize already verified Random games for the human progress display.
+
+    results contains this run's completed Random captures, including an optional
+    shared initialization. Return the latest capture's game counts, equal-map
+    mean kills and deaths, and its change from initialization. Missing combat
+    scores remain None. Capture times are the times when the actor was saved,
+    not the time when its evaluation finished. Empty results return None.
+    This only reads small host dictionaries; it opens no files, touches no
+    device arrays and changes neither evidence nor checkpoint state.
+    """
+    if not results:
+        return None
+
+    def mean_scores(record: dict[str, Any]) -> tuple[float | None, float | None]:
+        """Average map scores equally; missing or invalid scores stay unavailable."""
+        cells = record.get("cells", [])
+        if not cells:
+            return None, None
+        first = [cell.get("mean_team_a_score") for cell in cells]
+        second = [cell.get("mean_team_b_score") for cell in cells]
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+            for value in (*first, *second)
+        ):
+            return None, None
+        return math.fsum(first) / len(cells), math.fsum(second) / len(cells)
+
+    latest = max(results, key=lambda record: record["env_steps"])
+    initial = next((record for record in results if record["env_steps"] == 0), None)
+    kills, deaths = mean_scores(latest)
+    margin = None if kills is None or deaths is None else kills - deaths
+    initial_margin = None
+    if initial is not None:
+        initial_kills, initial_deaths = mean_scores(initial)
+        if initial_kills is not None and initial_deaths is not None:
+            initial_margin = initial_kills - initial_deaths
+    return {
+        "opponent": "Random",
+        "task_id": latest["task_id"],
+        "initial_task_id": None if initial is None else initial["task_id"],
+        "env_steps": latest["env_steps"],
+        "games": latest["games"],
+        "wall_seconds": latest["wall_seconds"],
+        "training_seconds": latest["training_seconds"],
+        "score": latest["score"],
+        **{
+            name: sum(cell[name] for cell in latest["cells"])
+            for name in ("wins", "draws", "losses")
+        },
+        "mean_kills_for": kills,
+        "mean_kills_against": deaths,
+        "kill_margin": margin,
+        "initial_kill_margin": initial_margin,
+        "kill_margin_change": None
+        if margin is None or initial_margin is None
+        else margin - initial_margin,
+    }
+
+
 class _Run:
     """Own one locked process attempt and its small host bookkeeping.
 
@@ -731,6 +879,7 @@ class _Run:
             "elapsed_seconds": 0.0,
             "routine_results": [],
             "confirmation_results": [],
+            "random_results": [],
             "actors": {},
             "pending": None,
             "selected_actor": None,
@@ -778,7 +927,16 @@ class _Run:
             if panel is not None
             else set()
         )
+        self.random_steps: set[int] = (
+            {0, *config.checkpoint_env_steps, config.total_env_steps}
+            if config.random_diagnostic_seed_pairs is not None
+            else set()
+        )
         self.status: dict[str, Any] = {}
+        if config.random_diagnostic_seed_pairs is not None:
+            self.status["random_validation"] = _random_progress(
+                self.host["random_results"]
+            )
 
     def event(self, event_name: str, **facts: object) -> None:
         """Durably append one lifecycle event without changing scientific counters."""
@@ -795,12 +953,24 @@ class _Run:
         )
 
     def set_status(self, phase: str, **facts: object) -> None:
-        """Publish existing counters and phase; print through the cost-gated display."""
+        """Publish host counters and the requested reset-time K without device reads."""
         self.host["elapsed_seconds"] = (
             self.prior_elapsed + time.monotonic() - self.start
         )
         training_seconds = self.host["training_seconds"]
         rate = self.host["env_steps"] / training_seconds if training_seconds else None
+        report = self.collection.schedule.rounding_report
+        thresholds = report.get("score_thresholds", (20,))
+        ends = cast(tuple[int, ...], report["cumulative_round_ends"])
+        stage = min(
+            sum(end * self.config.num_envs <= self.host["env_steps"] for end in ends),
+            len(ends) - 1,
+        )
+        requested_threshold = (
+            cast(tuple[int, ...], thresholds)[stage]
+            if self.config.score_threshold_curriculum
+            else 20
+        )
         self.status.update(
             {
                 "schema_version": 1,
@@ -811,6 +981,7 @@ class _Run:
                 "status": "running",
                 "total_env_steps": self.config.total_env_steps,
                 "env_steps": self.host["env_steps"],
+                "score_threshold": requested_threshold,
                 "completed_updates": self.host["completed_updates"],
                 "final_actor": self.host["final_actor"],
                 "selected_actor": self.host["selected_actor"],
@@ -855,26 +1026,34 @@ class _Run:
             / self.host["saves"]
             + self.host["report_seconds"]
         )
-        if self.panel is None:
+        random_done = {row["env_steps"] for row in self.host["random_results"]}
+        random_games = (
+            len(self.random_steps - random_done)
+            * 10
+            * (self.config.random_diagnostic_seed_pairs or 0)
+        )
+        if self.panel is None and not random_games:
             return float(estimate)
         if not self.host["validation_games"]:
             return None
         completed = {row["env_steps"] for row in self.host["routine_results"]}
         remaining_points = len(self.validation_steps - completed)
-        games = (
-            remaining_points
-            * 5
-            * len(self.panel.members)
-            * 2
-            * self.config.routine_seed_pairs
-        )
-        games += (
-            max(0, 3 - len(self.host["confirmation_results"]))
-            * 5
-            * len(self.panel.members)
-            * 2
-            * self.config.confirmation_seed_pairs
-        )
+        games = random_games
+        if self.panel is not None:
+            games += (
+                remaining_points
+                * 5
+                * len(self.panel.members)
+                * 2
+                * self.config.routine_seed_pairs
+            )
+            games += (
+                max(0, 3 - len(self.host["confirmation_results"]))
+                * 5
+                * len(self.panel.members)
+                * 2
+                * self.config.confirmation_seed_pairs
+            )
         if self.config.slot_diagnostic and not self.host["slot_complete"]:
             games += 3200
         return float(
@@ -955,6 +1134,7 @@ class _Run:
         export_system(
             self.state.carry.history.current_variables,
             destination,
+            input_scale=self.config.ppo.input_scale,
             metadata={
                 "run_id": self.metadata["run_id"],
                 "seed": self.config.seed,
@@ -1023,11 +1203,96 @@ class _Run:
         actor = self.actor()
         if pending.get("routine"):
             self.validate(actor, "routine")
+        if pending.get("random"):
+            self.validate_random(actor)
         if self.host["env_steps"] == self.config.total_env_steps:
             self.host["final_actor"] = str(actor)
         self.host["pending"] = None
         if pending.get("routine"):
             self.report()
+
+    def validate_random(self, actor: Path) -> None:
+        """Complete one fixed Random capture without changing learner or its keys.
+
+        actor is this saved boundary's immutable export. Initialization may reuse
+        the fully verified original result configured by the caller. Capture
+        timings describe this run just before evaluation/reuse. Original task,
+        actor, checkpoint and M8 pass identities stay unchanged on reuse.
+        Publish the accumulated records and existing host game and combat means.
+        Combat changes compare equal-map mean kills minus deaths with the
+        verified initialization. They are early learning clues, not native wins.
+        """
+        import jax
+
+        from marl_battlegrounds.training import checkpoints, validation
+
+        pairs = self.config.random_diagnostic_seed_pairs
+        assert pairs is not None
+        if any(
+            row["env_steps"] == self.host["env_steps"]
+            for row in self.host["random_results"]
+        ):
+            return
+        self.set_status("random_validation")
+        started = time.monotonic()
+        elapsed = self.prior_elapsed + started - self.start
+        wall = max(0.0, time.time() - self.created_at)
+        reference = (
+            self.config.random_initialization_result
+            if self.host["env_steps"] == 0
+            else None
+        )
+        record: dict[str, Any]
+        if reference is None:
+            directory = self.root / "validation" / f"random-{actor.name}"
+            summary = validation.validate_random(
+                actor,
+                output_dir=directory,
+                seed_pairs=pairs,
+                num_envs=32
+                if jax.default_backend() == "gpu"
+                else min(32, self.config.num_envs),
+                chunk_size=128,
+                event_callback=lambda record: self.event(
+                    "random_validation_segment", **record
+                ),
+            )
+            record = {
+                **summary,
+                "actor_path": str(actor),
+                "summary_path": str(directory / "validation_summary.json"),
+                "reference_path": None,
+                "reused_initialization": False,
+            }
+            self.host["validation_games"] += summary["games"]
+        else:
+            identity = checkpoints.artifact_identity(actor)
+            record = {
+                **validation.read_random_initialization(
+                    reference, actor_digest=identity["actor_digest"], seed_pairs=pairs
+                ),
+                "reference_path": str(Path(reference).absolute()),
+                "reused_initialization": True,
+            }
+        record.update(
+            elapsed_seconds=elapsed,
+            wall_seconds=wall,
+            training_seconds=self.host["training_seconds"],
+        )
+        self.host["random_results"].append(record)
+        seconds = time.monotonic() - started
+        self.host["validation_seconds"] += seconds
+        atomic_json(self.root / "random_diagnostics.json", self.host["random_results"])
+        self.event("random_validation_complete", result=record, seconds=seconds)
+        self.set_status(
+            "random_validation_complete",
+            validation_score=record["score"],
+            random_validation=_random_progress(self.host["random_results"]),
+            **{
+                f"validation_{name}": sum(cell[name] for cell in record["cells"])
+                for name in ("wins", "draws", "losses")
+            },
+        )
 
     def report(self) -> tuple[Path, ...]:
         """Refresh shared reports from durable source records without new evaluation."""
@@ -1064,7 +1329,10 @@ class _Run:
         )
         try:
             if self.checkpoint is None:
-                self.host["pending"] = {"routine": 0 in self.validation_steps}
+                self.host["pending"] = {
+                    "routine": 0 in self.validation_steps,
+                    "random": 0 in self.random_steps,
+                }
                 self.set_status("initializing")
                 self.save()
             self.finish_pending()
@@ -1175,7 +1443,10 @@ class _Run:
                     or steps == self.config.total_env_steps
                 )
                 if capture:
-                    self.host["pending"] = {"routine": steps in self.validation_steps}
+                    self.host["pending"] = {
+                        "routine": steps in self.validation_steps,
+                        "random": steps in self.random_steps,
+                    }
                 if (
                     capture
                     or self.host["completed_updates"]
@@ -1225,6 +1496,26 @@ class _Run:
                     )
                 }
             )
+            thresholds = cast(list[int], exposure["score_thresholds_by_episode_stage"])
+            completed = self.host.get("stage_completed")
+            if completed is not None:
+                for row in cast(
+                    list[dict[str, Any]], exposure["exposure_by_score_threshold"]
+                ):
+                    counts = [
+                        sum(
+                            completed[i][outcome]
+                            for i, threshold in enumerate(thresholds)
+                            if threshold == row["score_threshold"]
+                        )
+                        for outcome in range(3)
+                    ]
+                    row.update(
+                        completed_games=sum(counts),
+                        wins=counts[0],
+                        draws=counts[1],
+                        losses=counts[2],
+                    )
             atomic_json(self.root / "exposure.json", exposure)
             self.set_status("finalizing")
             paths = self.report()

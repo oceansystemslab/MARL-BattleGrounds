@@ -5,6 +5,11 @@ same-call MAPPO data, finite learner padding, optional physical/priority output,
 recording recovery and failure guards. Short-horizon banks are explicit test
 fixtures created after canonical admission; they are never presented as verified
 training content. No case trains a learner or establishes GPU throughput.
+Both shaping modes use the producing game's scores. Disabled shaping traces
+neither reward helper, and invalid modes fail during setup. A zero pinned
+opponent share traces the same rollout program as today; a positive share needs
+early history capture, pins the first-update actor in slot 0 and keeps the
+21-row exposure layout.
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import replace
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -260,6 +265,26 @@ def test_canonical_setup_rejects_changed_bank_and_frozen_actor_before_execution(
             actor.variables,
             schedule=collection.schedule,
             prepared=prepared,
+        )
+
+
+@pytest.mark.parametrize("mode", ["dense", "", None, True])
+def test_unknown_shaping_mode_fails_before_content_preparation(
+    plain: Context, monkeypatch: pytest.MonkeyPatch, mode: object
+) -> None:
+    def forbidden(*_args: Tree, **_kwargs: Tree) -> None:
+        pytest.fail("Invalid shaping mode reached content preparation")
+
+    monkeypatch.setattr(collection_module, "prepare_training_content", forbidden)
+    collection, _ = plain
+    actor = _actor()
+    with pytest.raises(ValueError, match="mode"):
+        init_training_collection(
+            actor,
+            actor.variables,
+            schedule=collection.schedule,
+            shaping=False,
+            shaping_mode=cast(str, mode),
         )
 
 
@@ -571,8 +596,10 @@ def test_post_reset_failure_stops_before_memory_actions_and_writer_drain(
         monkeypatch.setattr(collection_module, "assign_opponents", fail_assignment)
         reset_pending = collection_module._reset_pending  # pyright: ignore[reportPrivateUsage]
 
-        def traced_reset(values: TrainingCarry) -> TrainingCarry:
-            return reset_pending(values)
+        def traced_reset(
+            settings: TrainingCollection, values: TrainingCarry
+        ) -> TrainingCarry:
+            return reset_pending(settings, values)
 
         # Use a fresh branch identity so JAX traces the injected assignment,
         # rather than reusing the earlier successful reset branch program.
@@ -760,18 +787,22 @@ def test_exhausted_one_step_and_future_update_fail_without_applying_actions(
             collect_training_rollout(collection, failed, length=1)
 
 
-def test_disabled_physical_projection_is_absent_from_traced_collection(
-    plain: Context, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("shaping_mode", ["potential", "score_delta"])
+def test_disabled_projection_and_shaping_are_absent_from_traced_collection(
+    plain: Context, monkeypatch: pytest.MonkeyPatch, shaping_mode: str
 ) -> None:
     def forbidden(*_args: Tree, **_kwargs: Tree) -> Array:
-        pytest.fail("Disabled physical projection reached its encoder")
+        pytest.fail("Disabled optional work reached its helper")
 
     monkeypatch.setattr(collection_module, "encode_training_state", forbidden)
+    monkeypatch.setattr(collection_module, "team_potential_shaping", forbidden)
+    monkeypatch.setattr(collection_module, "team_score_delta_shaping", forbidden)
     collection, carry = plain
-    collection = replace(collection)
+    collection = replace(collection, shaping_mode=shaping_mode)
     _, output = _scan((collection, carry), length=1)
     assert output.transitions.training_state is None
     assert output.final_training_state is None
+    np.testing.assert_array_equal(output.transitions.shaping_reward, 0)
 
 
 def test_generic_collection_imports_with_optional_training_packages_blocked() -> None:
@@ -796,11 +827,15 @@ assert make_training_schedule(total_env_steps=2, num_envs=2).num_envs == 2
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize("shaping_mode", ["potential", "score_delta"])
 def test_distinct_score_fixture_keeps_both_completions_across_a_reset(
     rich: Context,
+    shaping_mode: str,
 ) -> None:
     collection, initial = rich
-    current, _ = _scan(rich, length=1)
+    if shaping_mode != "potential":
+        collection = replace(collection, shaping_mode=shaping_mode)
+    current, _ = _scan((collection, initial), length=1)
     scores = jnp.array([[2, 0], [0, 3]], jnp.int32)
     changed = current.state.core_state._replace(team_deathmatch_scores=scores)
     snapshots = []
@@ -838,6 +873,11 @@ def test_distinct_score_fixture_keeps_both_completions_across_a_reset(
     np.testing.assert_array_equal(info.team_scores, scores)
     np.testing.assert_array_equal(row.final_scores, scores)
     np.testing.assert_array_equal(row.ended, True)
+    np.testing.assert_allclose(
+        row.shaping_reward,
+        (-0.02, 0.03) if shaping_mode == "potential" else (0.0, 0.0),
+        atol=2e-9,
+    )
     assert row.priority is not None and info.priority is not None
     expected_valid = info.priority.valid & info.completed[:, None]
     np.testing.assert_array_equal(
@@ -848,6 +888,7 @@ def test_distinct_score_fixture_keeps_both_completions_across_a_reset(
         output.transitions.ended[:2], [[False, False], [True, True]]
     )
     np.testing.assert_array_equal(output.transitions.final_scores[:2], 0)
+    np.testing.assert_array_equal(output.transitions.shaping_reward, 0)
     assert np.all(
         np.asarray(output.transitions.episode_id[:2]) != np.asarray(row.episode_id)
     )
@@ -893,6 +934,132 @@ def test_reset_selects_a_real_frozen_opponent_and_joins_version_exposure(
     summary = training_summary(collection, after)
     assert summary["steps_by_opponent"] == [5, 1] + [0] * 19
     assert summary["starts_by_opponent"] == [3, 1] + [0] * 19
+
+
+def test_pinned_share_and_early_capture_must_be_declared_together(
+    prepared: PreparedTrainingContent,
+) -> None:
+    actor = _actor()
+    plain = make_training_schedule(total_env_steps=12, num_envs=2)
+    early = make_training_schedule(
+        total_env_steps=12, num_envs=2, early_history_capture=True
+    )
+    with pytest.raises(ValueError, match="early_history_capture"):
+        init_training_collection(
+            actor,
+            actor.variables,
+            schedule=plain,
+            prepared=prepared,
+            metrics="none",
+            pinned_opponent_share=0.1,
+        )
+    with pytest.raises(ValueError, match="positive share"):
+        init_training_collection(
+            actor, actor.variables, schedule=early, prepared=prepared, metrics="none"
+        )
+    with pytest.raises(ValueError, match=r"0\.8"):
+        init_training_collection(
+            actor,
+            actor.variables,
+            schedule=early,
+            prepared=prepared,
+            metrics="none",
+            pinned_opponent_share=0.9,
+        )
+    with pytest.raises(TypeError, match="bool"):
+        init_training_collection(
+            actor,
+            actor.variables,
+            schedule=early,
+            prepared=prepared,
+            metrics="none",
+            pinned_opponent_share=cast(Any, True),
+        )
+
+
+def test_pinned_share_reaches_the_rollout_program_only_when_positive(
+    plain: Context,
+) -> None:
+    # Default and explicit 0.0 trace one program by construction; identity with
+    # the pre-change rollout is proven by the diff and the GPU equivalence job.
+    collection, carry = plain
+    default = str(
+        jax.make_jaxpr(partial(scan_training_rollout, collection, length=2))(carry)
+    )
+    explicit = replace(collection, pinned_opponent_share=0.0)
+    assert default == str(
+        jax.make_jaxpr(partial(scan_training_rollout, explicit, length=2))(carry)
+    )
+    pinned = replace(collection, pinned_opponent_share=0.1)
+    assert default != str(
+        jax.make_jaxpr(partial(scan_training_rollout, pinned, length=2))(carry)
+    )
+
+
+def test_early_capture_pins_the_first_update_actor_in_slot_zero(
+    prepared: PreparedTrainingContent,
+) -> None:
+    actor = _actor()
+    context = init_training_collection(
+        actor,
+        actor.variables,
+        schedule=make_training_schedule(
+            total_env_steps=40, num_envs=2, early_history_capture=True
+        ),
+        seed=3,
+        prepared=prepared,
+        metrics="none",
+        pinned_opponent_share=0.5,
+    )
+    collection, real = context
+    assert collection.pinned_opponent_share == 0.5
+    assert int(real.schedule.history_threshold_rounds[0]) == 1
+    # Continuation checks need the verified bank, so prove the early capture on
+    # the real content first; no game ends within one real round here.
+    validate = collection_module._validate_training_continuation  # pyright: ignore[reportPrivateUsage]
+    validate(collection, real, expected_root_bits=collection.root_bits)
+    first, _ = _scan((collection, real), length=1)
+    history, event = refresh_opponents(
+        first.history,
+        {"value": jnp.float32(7)},
+        completed_rounds=first.progress.rounds,
+        update_index=jnp.int32(1),
+        schedule=first.schedule,
+    )
+    assert bool(event.created)
+    assert int(event.slot) == 0
+    assert int(history.captured_rounds[0]) == 1
+    assert int(history.captured_updates[0]) == 1
+    assert int(history.count) == 1
+    validate(collection, first._replace(history=history))
+    # Short synthetic games then show the pinned actor actually being drawn.
+    collection, current = _synthetic(context)
+    current, _ = _scan((collection, current), length=1)
+    history, event = refresh_opponents(
+        current.history,
+        {"value": jnp.float32(7)},
+        completed_rounds=current.progress.rounds,
+        update_index=jnp.int32(1),
+        schedule=current.schedule,
+    )
+    assert bool(event.created)
+    current = current._replace(history=history)
+    seen: set[int] = set()
+    for _ in range(10):
+        current, (row, _, _) = _stepper(collection)(current)
+        seen.update(np.asarray(row.opponent_snapshot).tolist())
+    assert seen == {-1, 0}
+    summary = training_summary(collection, current)
+    steps = cast(list[int], summary["steps_by_opponent"])
+    starts = cast(list[int], summary["starts_by_opponent"])
+    assert len(steps) == 21
+    assert len(starts) == 21
+    assert starts[1] > 0
+    assert steps[1] > 0
+    # Trivial here: the bank holds one snapshot throughout, so no other slot can
+    # be drawn; the count-above-one split is proven at the assign_opponents level.
+    assert starts[2:] == [0] * 19
+    assert sum(steps) == int(current.progress.rounds) * 2
 
 
 def test_canonical_continuation_checks_zero_midpoint_and_final_before_writer_recovery(

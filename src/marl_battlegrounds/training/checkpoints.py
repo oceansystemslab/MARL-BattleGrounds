@@ -130,6 +130,41 @@ def _digest(value: object, name: str) -> str:
     return value
 
 
+def _input_scale(value: object) -> float:
+    """Validate one finite positive network scale through the PPO owner."""
+    return float(PPOConfig(input_scale=cast(float, value)).input_scale)
+
+
+def _config_input_scale(config: object) -> float:
+    """Read a learner's scale; historical configs without it use 1.0."""
+    ppo = _object(_object(config, "Learner config").get("ppo", {}), "PPO config")
+    return _input_scale(ppo.get("input_scale", 1.0))
+
+
+def _actor_input_scale(details: dict[str, Any]) -> float:
+    """Read the saved inference scale without changing historical descriptions."""
+    if details["kind"] == "actor":
+        return _input_scale(details.get("input_scale", 1.0))
+    return _config_input_scale(details["metadata"]["config"])
+
+
+def _inference_digest(details: dict[str, Any]) -> str:
+    """Bind weights and scale while preserving the old identity at scale 1.0."""
+    scale = _actor_input_scale(details)
+    if scale == 1.0:
+        return details["actor_digest"]
+    return sha256(
+        _json_bytes(
+            {
+                "kind": "recurrent_mappo_inference",
+                "version": 1,
+                "actor_digest": details["actor_digest"],
+                "input_scale": scale,
+            }
+        )
+    ).hexdigest()
+
+
 def _directory(path: Path) -> Path:
     """Reject symbolic links along an existing directory's complete path."""
     absolute = path.absolute()
@@ -338,10 +373,15 @@ def _collection_details(collection: TrainingCollection) -> dict[str, Any]:
         {
             "content_binding": collection.binding.model_dump(mode="json"),
             "schedule": dict(collection.schedule.rounding_report),
+            "score_threshold_curriculum": (
+                collection.schedule.score_threshold_curriculum
+            ),
             "root_bits": list(collection.root_bits),
             "key_schema": collection.key_schema,
             "reward_settings": list(collection.reward_settings),
             "shaping": collection.shaping,
+            "shaping_mode": collection.shaping_mode,
+            "pinned_opponent_share": collection.pinned_opponent_share,
             "collect_training_state": collection.collect_training_state,
             "metrics": collection.metrics,
             "recording": collection.recording,
@@ -443,6 +483,8 @@ def save_checkpoint(
 
     root = _directory(Path(run_dir))
     context = _check_context(metadata, require_execution=True)
+    if _config_input_scale(context["config"]) != ppo.input_scale:
+        raise ValueError("Checkpoint config input_scale differs from PPO settings")
     validate_learner(collection, state, ppo=ppo, recheck_installed_content=False)
     if collection.recording != (writer is not None):
         raise ValueError("Checkpoint writer must match collection recording")
@@ -540,6 +582,8 @@ def read_checkpoint_description(path: str | Path) -> dict[str, Any]:
     }
     if details["kind"] == "learner":
         required |= {"collection", "layout", "recording_token", "counters"}
+    elif "input_scale" in details:
+        required.add("input_scale")
     if set(details) != required:
         raise ValueError("Checkpoint description fields differ from its schema")
     _object(details["metadata"], "Checkpoint provenance")
@@ -551,6 +595,7 @@ def read_checkpoint_description(path: str | Path) -> dict[str, Any]:
         _relative(root, relative)
     if details["kind"] == "learner":
         _check_context(details.get("metadata"))
+    _actor_input_scale(details)
     return details
 
 
@@ -589,6 +634,14 @@ def restore_checkpoint(
         Fresh code-built descriptor/state from the saved seed and settings. All
         numerical template values are replaced; its static structure is trusted
         only after comparison with the saved content and settings.
+        Missing historical shaping_mode means potential; score_delta must be
+        saved explicitly and cannot resume a potential checkpoint.
+        Missing historical score_threshold_curriculum means False. New threshold
+        banks and schedules must match exactly; actor-only exports remain usable
+        without reconstructing a training schedule. Missing historical
+        pinned_opponent_share means zero in the saved config, in the expected
+        config and in the saved collection settings, so an older run compares
+        equal to today's default; a positive share must be saved explicitly.
     expected_metadata : mapping
         Required config, source, dependencies and execution discovered for
         this execution. Each must equal its saved value. Additional supplied
@@ -626,9 +679,23 @@ def restore_checkpoint(
         )
     if expected["execution"] != execution_identity():
         raise ValueError("Expected execution identity differs from the current runtime")
-    if any(details["metadata"].get(key) != value for key, value in expected.items()):
+    saved_metadata = dict(details["metadata"])
+    # Configs saved before pinned_opponent_share existed compare at its default.
+    for record in (saved_metadata, expected):
+        config_record = record.get("config")
+        if isinstance(config_record, dict):
+            normalized = dict(cast(dict[str, Any], config_record))
+            normalized.setdefault("pinned_opponent_share", 0.0)
+            record["config"] = normalized
+    if any(saved_metadata.get(key) != value for key, value in expected.items()):
         raise ValueError("Checkpoint execution metadata differs")
-    if details["collection"] != _collection_details(collection):
+    if _actor_input_scale(details) != ppo.input_scale:
+        raise ValueError("Checkpoint input_scale differs from PPO settings")
+    saved_collection = _object(details["collection"], "Saved collection settings")
+    saved_collection.setdefault("shaping_mode", "potential")
+    saved_collection.setdefault("score_threshold_curriculum", False)
+    saved_collection.setdefault("pinned_opponent_share", 0.0)
+    if saved_collection != _collection_details(collection):
         raise ValueError("Checkpoint content or collection settings differ")
     recorded = details["metadata"].get("recording")
     if collection.recording != (recorded is not None):
@@ -758,18 +825,46 @@ def _actor_template() -> Tree:
 
 
 def export_system(
-    actor_variables: Tree, destination: str | Path, *, metadata: dict[str, object]
+    actor_variables: Tree,
+    destination: str | Path,
+    *,
+    metadata: dict[str, object],
+    input_scale: float = 1.0,
 ) -> Path:
     """Publish a standalone immutable sampled-MAPPO actor artifact.
 
-    actor_variables must match the installed 128-wide actor schema and contain
-    finite arrays. destination is an exact new directory with an existing
-    parent. metadata requires run_id, nonnegative integer seed and env_steps,
-    and the complete originating checkpoint_id; extra finite JSON facts are
-    retained. Returns destination after durable publication. Existing matching
-    actor bytes/provenance are reused; conflicting artifacts raise ValueError.
-    No map preparation, critic, optimizer or game state is saved or required.
+    Parameters
+    ----------
+    actor_variables : PyTree
+        Finite variables matching the installed 128-wide actor schema.
+    destination : str or Path
+        Exact output directory with an existing parent. Matching exports are
+        reused; different weights, scale or provenance at this path are rejected.
+    metadata : dict
+        Finite JSON provenance with run_id, nonnegative integer seed and
+        env_steps, and the originating checkpoint_id. Extra facts are retained.
+    input_scale : float, default=1.0
+        Finite positive factor applied before the actor's first Dense layer.
+        Use the originating PPO config's value. It is part of inference identity;
+        changing it does not rewrite weights or the raw input schema.
+
+    Returns
+    -------
+    Path
+        Absolute immutable export directory, after durable publication.
+
+    Raises
+    ------
+    ValueError
+        Variables, scale or provenance are invalid, or the destination conflicts.
+    OSError
+        A required directory or payload cannot be read or written.
+
+    Notes
+    -----
+    Host-only. No map preparation, critic, optimizer or game state is required.
     """
+    input_scale = _input_scale(input_scale)
     context = _object(metadata, "Actor provenance")
     if not {"run_id", "seed", "env_steps", "checkpoint_id"} <= context.keys():
         raise ValueError(
@@ -795,6 +890,7 @@ def export_system(
         if (
             saved["kind"] == "actor"
             and saved["actor_digest"] == digest
+            and _actor_input_scale(saved) == input_scale
             and saved["metadata"] == context
         ):
             return target
@@ -809,6 +905,7 @@ def export_system(
         "metadata": context,
         "actor_layout": _layout(actor_variables),
         "actor_digest": digest,
+        "input_scale": input_scale,
         "files": _inventory(temporary),
     }
     details["checkpoint_id"] = sha256(_json_bytes(details)).hexdigest()
@@ -823,15 +920,20 @@ def artifact_identity(path: str | Path) -> dict[str, Any]:
     """Read verified actor identity/provenance without restoring numerical state.
 
     Accept a standalone export or complete learner checkpoint. Return direct
-    actor_digest, checkpoint_id, schemas, run_id, seed and env_steps fields plus
-    original metadata. Digests identify bytes, not learned competence. All file
-    hashes are checked; this operation may read a full learner payload from disk.
+    actor_digest, weight_digest, input_scale, checkpoint_id, schemas, run_id,
+    seed and env_steps fields plus original metadata. actor_digest binds weights
+    and inference scale; at scale 1.0 it keeps the historical weight digest.
+    weight_digest always identifies only the saved variables. Neither identity
+    proves competence. All file hashes are checked; this operation may read a
+    full learner payload from disk. Missing historical scale means 1.0.
     """
     details = read_checkpoint_details(path)
     metadata = details["metadata"]
     actor = details["kind"] == "actor"
     return {
-        "actor_digest": details["actor_digest"],
+        "actor_digest": _inference_digest(details),
+        "weight_digest": details["actor_digest"],
+        "input_scale": _actor_input_scale(details),
         "checkpoint_id": details["checkpoint_id"],
         "schemas": details["schemas"],
         "metadata": metadata,
@@ -854,8 +956,9 @@ def load_system(checkpoint: str | Path) -> System:
     Returns
     -------
     System
-        Frozen numerical actor variables with the verified actor digest as its
-        checkpoint label. Each evaluator creates fresh recurrent memory. The
+        Frozen numerical actor variables with their saved input scale and verified
+        inference digest as the checkpoint label. Each evaluator creates fresh
+        recurrent memory. The
         actor samples legal masked actions; no critic or training-only input is
         loaded, and no map preparation or full run directory is needed.
 
@@ -871,6 +974,9 @@ def load_system(checkpoint: str | Path) -> System:
     Host-only; reads files and restores actor arrays onto the process's selected
     device. It needs the training extra but does not run an actor or learner.
     A frozen actor identity makes no claim about learned competence.
+    Historical artifacts without an input scale keep their original scale 1.0
+    and weight-digest identity. Learner checkpoints use config.ppo.input_scale;
+    actor exports use their explicit saved scale. Neither route rewrites weights.
     """
     root = _directory(Path(checkpoint))
     details = read_checkpoint_details(root)
@@ -882,7 +988,11 @@ def load_system(checkpoint: str | Path) -> System:
         bool(jnp.all(jnp.isfinite(value))) for value in jax.tree.leaves(actor)
     ):
         raise ValueError("Restored actor is nonfinite or its digest differs")
-    return make_recurrent_mappo_system(actor, checkpoint=details["actor_digest"])
+    return make_recurrent_mappo_system(
+        actor,
+        checkpoint=_inference_digest(details),
+        input_scale=_actor_input_scale(details),
+    )
 
 
 def checkpoint_schemas() -> dict[str, int | str]:

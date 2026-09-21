@@ -43,11 +43,11 @@ def test_progress_distinguishes_training_and_whole_run_eta() -> None:
         "estimated_transitions_per_second": 10,
     }
     text = io_helpers.progress_text(status)
-    assert "50/100 environment transitions (50.0%)" in text
-    assert "Training Speed 5.0/s" in text
-    assert "Training ETA 00:00:05" in text
-    assert "Whole-Run ETA Estimating" in text
-    assert "Whole-Run ETA 00:00:25" in io_helpers.progress_text(
+    assert "50 / 100 (50.0%)" in text
+    assert "5 steps/s overall" in text
+    assert "Training Time Left (Estimate): 5s" in text
+    assert "Whole Run Time Left (Estimate): Estimating" in text
+    assert "Whole Run Time Left (Estimate): 25s" in io_helpers.progress_text(
         {**status, "pending_work_seconds": 20}
     )
 
@@ -62,15 +62,24 @@ def test_eta_waits_for_warm_updates_and_starts_over_after_resume() -> None:
     estimate.observe(4096, 27)
     estimate.observe(4096, 1)
     assert estimate.rate is None
-    assert "Training ETA Estimating" in io_helpers.progress_text(status)
+    assert "Training Time Left (Estimate): Estimating" in io_helpers.progress_text(
+        status
+    )
     estimate.observe(4096, 1)
     assert estimate.rate == 4096
     resumed = io_helpers.TrainingSpeedEstimate()
     resumed.observe(4096, 30)
     assert resumed.rate is None
-    assert "Training ETA 00:00:00" in io_helpers.progress_text(
+    assert "Training Time Left (Estimate): 0s" in io_helpers.progress_text(
         {**status, "env_steps": 1048576, "estimated_transitions_per_second": None}
     )
+
+
+def test_progress_separates_training_threshold_from_validation() -> None:
+    text = io_helpers.progress_text({"score_threshold": 3})
+    assert "New Training Games Need 3 Kills To Win" in text
+    assert "Validation Still Needs 20" in text
+    assert "New Training Games" not in io_helpers.progress_text({})
 
 
 def test_eta_window_uses_recent_real_transitions_and_rejects_invalid_costs() -> None:
@@ -109,7 +118,7 @@ def test_progress_throttles_updates_but_reports_phase_changes(
     reporter = io_helpers.ProgressReporter(enabled=True, stream=output)
     for phase in ("training", "training", "training", "validation"):
         reporter.report({"phase": phase})
-    assert len(output.getvalue().splitlines()) == 3
+    assert output.getvalue().count(" UTC]") == 3
 
 
 def test_log_recovery_rejects_corruption_before_truncation(tmp_path: Path) -> None:
@@ -625,3 +634,66 @@ def test_description_only_read_preserves_pruned_ancestry_without_allowing_restor
     io_helpers.atomic_json(directory / "checkpoint_details.json", details)
     with pytest.raises(ValueError, match="description digest"):
         checkpoints.read_checkpoint_description(directory)
+
+
+def test_readable_progress_separates_combat_from_optimizer_numbers() -> None:
+    status: dict[str, Any] = {
+        "phase": "training",
+        "env_steps": 1000,
+        "total_env_steps": 2000,
+        "policy_loss": -0.02465,
+        "value_loss": 0.000073,
+        "shaping_mean": 0.0000032,
+        "random_validation": {
+            "games": 40,
+            "env_steps": 1000,
+            "wall_seconds": 90,
+            "mean_kills_for": 4.0,
+            "mean_kills_against": 2.0,
+            "kill_margin": 2.0,
+            "kill_margin_change": 1.5,
+            "wins": 0,
+            "draws": 40,
+            "losses": 0,
+        },
+    }
+    text = io_helpers.progress_text(status)
+    assert "Run Time At That Check: 1m 30s" in text
+    assert "Our Team Kills 4.00" in text and "Our Team Deaths 2.00" in text
+    assert "Change In Kill Difference Since Untrained: +1.50 Per Game" in text
+    assert "0 Wins, 40 Draws, 0 Losses" in text
+    assert "Draws Can Still Show Combat Improvement" in text
+    assert "Policy Loss" not in text and "Shaping" not in text
+    missing = {
+        **status,
+        "random_validation": {
+            **status["random_validation"],
+            "mean_kills_for": None,
+            "mean_kills_against": None,
+            "kill_margin": None,
+        },
+    }
+    assert "Not Available" in io_helpers.progress_text(missing)
+    assert "Our Team Kills 0" not in io_helpers.progress_text(missing)
+
+
+def test_screen_worker_leaves_regular_progress_to_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MARL_BGS_PROGRESS_PHASES_ONLY", "1")
+    clock = Mock(return_value=0)
+    monkeypatch.setattr(io_helpers.time, "monotonic", clock)
+    stream = io.StringIO()
+    reporter = io_helpers.ProgressReporter(enabled=True, stream=stream)
+    reporter.report({"phase": "training"})
+    reporter.report({"phase": "training"})
+    reporter.report({"phase": "validation"})
+    reporter.report({"phase": "validation"}, force=True)
+    assert clock.call_count == 3
+    assert stream.getvalue().count(" UTC]") == 3
+
+
+def test_panel_score_remains_visible_without_random_hook() -> None:
+    text = io_helpers.progress_text({"validation_score": 0.75})
+    assert "Average Game Score 0.750" in text
+    assert "Win = 1; Draw = 0.5; Loss = 0" in text

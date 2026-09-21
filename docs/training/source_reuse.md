@@ -70,6 +70,38 @@ unclipped squared errors, followed by the configured value coefficient of 0.5.
 Both factors belong to the checked calculation. Actor and critic gradient
 norms are clipped separately.
 
+### Optional Input Scale
+
+`PPOConfig.input_scale` defaults to `1.0`, preserving the donor calculations and
+historical models. A positive finite value multiplies actor and critic features
+before their first Dense layer. For example, `0.01` makes an input value of 200
+enter that layer as 2. The raw encoder, information limits and network size stay
+the same. There are no learned or running normalization statistics.
+
+This is an explicit numerical adaptation. It can reduce saturation, where a
+memory gate sits near its limit and responds weakly to input changes. Better
+conditioning alone does not establish better learning. Keep the scale fixed
+for a run and compare against the default with declared seeds and budgets.
+Collection, value targets, PPO updates, historical opponents and exported actors
+must all use the saved scale. Old exports without this field use `1.0`; loading
+them never applies a new scale. Equal weights with different inference scales
+have different policy identities.
+
+### Optional Dense Training Reward
+
+The default `shaping_mode="potential"` keeps the original score-potential
+adjustment and terminal cancellation. The explicit `"score_delta"` alternative
+adds coefficient times new team kills minus new team deaths to native reward.
+It retains terminal kills and has no terminal cancellation. Both use actual
+scores from the producing game and keep padding at zero.
+
+This changes the training objective; it is not a donor calculation or a claim
+of policy-invariant shaping. It addresses the absence of lasting feedback in
+drawn games, including some small-team rosters that cannot reach K20 within
+H300. Evaluation keeps native task reward and win rules. Saved configuration
+binds the chosen mode; old configurations continue to mean potential shaping.
+Learning benefit requires a controlled comparison on development seeds.
+
 ## Deliberate BG Adaptations
 
 BG supplies separate, versioned actor and training-only physical-state views.

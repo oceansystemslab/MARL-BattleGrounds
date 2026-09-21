@@ -3,6 +3,8 @@
 The independent allocation oracle uses rational arithmetic. Real public
 environment/tracker loops prove stage crossings, reset-time labels, terminal
 timing, live-game preservation, fixed-lane counts and stopped failure paths.
+Early history capture moves only the first self-play threshold to round one and
+drops the 100% capture; the default threshold list and report stay unchanged.
 These tiny schedules test execution; they do not establish useful learning.
 """
 
@@ -83,6 +85,38 @@ def test_exact_curriculum_allocation_matches_independent_rational_oracle(
     )
     assert report["assigned_round_counts"] == tuple(expected)
     assert json.loads(json.dumps(report))["total_env_steps"] == rounds * 4
+
+
+def test_early_history_capture_moves_first_threshold_to_round_one() -> None:
+    plain = make_training_schedule(total_env_steps=80, num_envs=4)
+    early = make_training_schedule(
+        total_env_steps=80, num_envs=4, early_history_capture=True
+    )
+    expected = [(20 * index + 19) // 20 for index in range(1, 21)]
+    np.testing.assert_array_equal(plain.arrays.history_threshold_rounds, expected)
+    np.testing.assert_array_equal(
+        early.arrays.history_threshold_rounds, [1, *expected[:-1]]
+    )
+    assert not plain.early_history_capture
+    assert early.early_history_capture
+    assert "history_thresholds" not in plain.rounding_report
+    assert early.rounding_report["history_thresholds"] == (
+        "first update, then 5% through 95%"
+    )
+    assert dict(plain.rounding_report) == {
+        key: value
+        for key, value in early.rounding_report.items()
+        if key != "history_thresholds"
+    }
+    for left, right in zip(plain.arrays[:6], early.arrays[:6], strict=True):
+        np.testing.assert_array_equal(left, right)
+    np.testing.assert_array_equal(
+        plain.arrays.score_thresholds, early.arrays.score_thresholds
+    )
+    with pytest.raises(TypeError, match="early_history_capture"):
+        make_training_schedule(
+            total_env_steps=80, num_envs=4, early_history_capture=cast(bool, 1)
+        )
 
 
 def test_exact_ties_favor_earlier_stages_and_report_is_immutable() -> None:

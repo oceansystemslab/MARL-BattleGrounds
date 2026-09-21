@@ -36,6 +36,7 @@ from marl_battlegrounds.training.distributions import validate_training_distribu
 _STAGES = 17
 _MAPS = 42
 _MAX_COUNT = int(np.iinfo(np.int32).max)
+_SCORE_THRESHOLDS = (*range(1, 11), 12, 15, 20)
 
 
 class ScheduleArrays(NamedTuple):
@@ -44,20 +45,25 @@ class ScheduleArrays(NamedTuple):
     Attributes
     ----------
     stage_count : Array
-        Int32 scalar, 1 without curriculum or 17 with it.
+        Int32 scalar: 1 without curriculum, 17 for team/map curriculum, or
+        13 for score-threshold curriculum.
     round_budgets, round_ends : Array
         Int32 (17,) stage round budgets and cumulative ends. Active budgets are
         positive. Unused budgets are zero and ends repeat total_rounds.
     team_sizes : Array
         Int32 (17,) equal team sizes in 1..5; unused rows contain 5.
     eligible_maps : Array
-        Bool (17,42) masks in prepared source-bank order. Unused rows enable
+        Bool (17,42) masks in map order within each source block. Unused rows enable
         all maps. Each active pool contains at least one map.
     total_rounds : Array
         Int32 scalar; one round is one real transition from every lane.
     history_threshold_rounds : Array
         Int32 (20,) 5%, 10%, through 100% thresholds rounded upward to whole
-        rounds. Repeated thresholds are allowed for small schedules.
+        rounds, or round 1 followed by 5% through 95% when early history capture
+        is requested. Repeated thresholds are allowed for small schedules.
+    score_thresholds : Array
+        Int32 (17,) winning scores requested at future resets. Unused rows
+        contain 20. Continuing games keep their previous threshold.
 
     Notes
     -----
@@ -73,6 +79,7 @@ class ScheduleArrays(NamedTuple):
     eligible_maps: Array
     total_rounds: Array
     history_threshold_rounds: Array
+    score_thresholds: Array
 
 
 @dataclass(frozen=True)
@@ -93,7 +100,15 @@ class TrainingSchedule:
         Read-only, JSON-ready report after conversion with dict. Contains the
         requested total and batch, stage shares and ideal rounds as exact
         (numerator, denominator) pairs, assigned round counts, cumulative ends
-        and the rounding rule. Nested values are immutable tuples or scalars.
+        and the rounding rule. Threshold curricula also include the ordered
+        score_thresholds. Nested values are immutable tuples or scalars.
+    score_threshold_curriculum : bool, default=False
+        Use the separate 13-stage score schedule with canonical 5v5 and all
+        training maps. Cannot be combined with the team/map curriculum.
+    early_history_capture : bool, default=False
+        Capture the first self-play snapshot after the first completed update
+        instead of at 5%, keeping the 5% through 95% captures and dropping the
+        never-played 100% capture. Required by a positive pinned opponent share.
 
     Notes
     -----
@@ -107,6 +122,13 @@ class TrainingSchedule:
     curriculum: bool
     arrays: ScheduleArrays
     rounding_report: Mapping[str, object]
+    score_threshold_curriculum: bool = False
+    early_history_capture: bool = False
+
+    @property
+    def score_thresholds(self) -> tuple[int, ...]:
+        """Return the ordered source-bank thresholds required by this schedule."""
+        return _SCORE_THRESHOLDS if self.score_threshold_curriculum else (20,)
 
 
 class TrainingProgress(NamedTuple):
@@ -158,7 +180,12 @@ class TrainingProgress(NamedTuple):
 
 
 def make_training_schedule(
-    *, total_env_steps: int, num_envs: int, curriculum: bool = False
+    *,
+    total_env_steps: int,
+    num_envs: int,
+    curriculum: bool = False,
+    score_threshold_curriculum: bool = False,
+    early_history_capture: bool = False,
 ) -> TrainingSchedule:
     """Allocate exact whole-batch experience to the approved training stages.
 
@@ -174,6 +201,16 @@ def make_training_schedule(
         False requests one 5v5 stage over all 42 maps. True requests sizes 1..5
         on map 0 at 4% each, then 5v5 on pools 0..1 through 0..11 at 20/11%
         each, then 5v5 on all maps for the remaining 60%.
+    score_threshold_curriculum : bool, default=False
+        Request K1 for 10% of transitions, K2..10 for 1/30 each, K12 and K15
+        for 5% each, and K20 for 50%. All stages use canonical 5v5 and all 42
+        training maps. Cannot be combined with curriculum=True. Changes apply
+        at reset, so actual played shares can lag these requested shares.
+    early_history_capture : bool, default=False
+        Make the first self-play history threshold round 1 and keep the 5%
+        through 95% thresholds, dropping the 100% capture that no later game can
+        play. False keeps the 5% through 100% thresholds unchanged. Use True
+        only together with a positive pinned opponent share in collection.
 
     Returns
     -------
@@ -185,7 +222,7 @@ def make_training_schedule(
     Raises
     ------
     TypeError
-        Counts are not Python integers, are bool, or curriculum is not bool.
+        Counts are not Python integers, are bool, or a switch is not bool.
     ValueError
         Counts are nonpositive, the batch is odd, the total is not divisible,
         per-lane rounds exceed int32, or any active stage receives zero rounds.
@@ -202,8 +239,15 @@ def make_training_schedule(
             raise TypeError(f"{name} must be a Python integer, not bool")
         if value <= 0:
             raise ValueError(f"{name} must be positive")
-    if not isinstance(cast(object, curriculum), bool):
-        raise TypeError("curriculum must be bool")
+    for name, value in (
+        ("curriculum", curriculum),
+        ("score_threshold_curriculum", score_threshold_curriculum),
+        ("early_history_capture", early_history_capture),
+    ):
+        if type(value) is not bool:
+            raise TypeError(f"{name} must be bool")
+    if curriculum and score_threshold_curriculum:
+        raise ValueError("Choose team/map curriculum or score-threshold curriculum")
     if num_envs % 2:
         raise ValueError("num_envs must be even")
     if total_env_steps % num_envs:
@@ -212,7 +256,12 @@ def make_training_schedule(
     if rounds > _MAX_COUNT:
         raise ValueError("per-lane total rounds must fit int32")
     shares = (
-        (Fraction(1, 25),) * 5 + (Fraction(1, 55),) * 11 + (Fraction(3, 5),)
+        (Fraction(1, 10),)
+        + (Fraction(1, 30),) * 9
+        + (Fraction(1, 20),) * 2
+        + (Fraction(1, 2),)
+        if score_threshold_curriculum
+        else (Fraction(1, 25),) * 5 + (Fraction(1, 55),) * 11 + (Fraction(3, 5),)
         if curriculum
         else (Fraction(1),)
     )
@@ -228,6 +277,9 @@ def make_training_schedule(
     ends = np.cumsum(budgets, dtype=np.int64).astype(np.int32)
     sizes = np.full(_STAGES, 5, np.int32)
     pools = np.ones((_STAGES, _MAPS), np.bool_)
+    thresholds = np.full(_STAGES, 20, np.int32)
+    if score_threshold_curriculum:
+        thresholds[: len(_SCORE_THRESHOLDS)] = _SCORE_THRESHOLDS
     if curriculum:
         sizes[:5] = np.arange(1, 6, dtype=np.int32)
         pools[:16] = False
@@ -238,6 +290,9 @@ def make_training_schedule(
         validate_training_distribution(
             eligible_maps=pools[index], team_size=sizes[index]
         )
+    history_thresholds = [(rounds * i + 19) // 20 for i in range(1, 21)]
+    if early_history_capture:
+        history_thresholds = [1, *history_thresholds[:-1]]
     arrays = ScheduleArrays(
         jnp.asarray(len(counts), jnp.int32),
         jnp.asarray(budgets),
@@ -245,7 +300,8 @@ def make_training_schedule(
         jnp.asarray(sizes),
         jnp.asarray(pools),
         jnp.asarray(rounds, jnp.int32),
-        jnp.asarray([(rounds * i + 19) // 20 for i in range(1, 21)], jnp.int32),
+        jnp.asarray(history_thresholds, jnp.int32),
+        jnp.asarray(thresholds),
     )
     report: Mapping[str, object] = MappingProxyType(
         {
@@ -258,7 +314,29 @@ def make_training_schedule(
             "rounding_rule": "Largest remainders; earlier stages win exact ties",
         }
     )
-    return TrainingSchedule(total_env_steps, num_envs, curriculum, arrays, report)
+    if score_threshold_curriculum:
+        report = MappingProxyType(
+            {
+                **report,
+                "score_thresholds": _SCORE_THRESHOLDS,
+            }
+        )
+    if early_history_capture:
+        report = MappingProxyType(
+            {
+                **report,
+                "history_thresholds": "first update, then 5% through 95%",
+            }
+        )
+    return TrainingSchedule(
+        total_env_steps,
+        num_envs,
+        curriculum,
+        arrays,
+        report,
+        score_threshold_curriculum,
+        early_history_capture,
+    )
 
 
 def _init_training_progress(  # pyright: ignore[reportUnusedFunction]

@@ -4,7 +4,13 @@ CPU tests cover typed keys, the single stored actor, immutable attempt identity,
 publication interruption, corrupt/schema/runtime rejection before recovery,
 an empty update-zero recording token, strict content checks on restore and real
 collect/update continuation with stable restored-array placement. These tests do
-not establish GPU cost, cross-backend equality or learned competence.
+not establish GPU cost, cross-backend equality or learned competence. Actor
+exports bind input scale to inference identity, preserve historical scale 1.0,
+and reject learner scale mismatches before restoring arrays or changing files.
+Shaping mode is saved with collection settings. Missing historical mode means
+potential, and a different mode cannot reach array restore or output recovery.
+The pinned opponent share is saved the same way: a missing historical key
+restores at zero and a different share is rejected before arrays are restored.
 """
 
 from __future__ import annotations
@@ -12,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 from contextlib import ExitStack
-from dataclasses import replace
+from dataclasses import asdict, replace
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -24,7 +30,7 @@ import pytest
 
 import marl_battlegrounds.training.checkpoints as checkpoints
 import marl_battlegrounds.training.collection as collection_module
-from marl_battlegrounds.baselines.ppo import PPOConfig
+from marl_battlegrounds.baselines.ppo import PPOConfig, make_recurrent_mappo_system
 from marl_battlegrounds.evaluation.policy_execution import apply_systems, init_systems
 from marl_battlegrounds.evaluation.recording_identity import (
     normalize_system_registration,
@@ -90,7 +96,12 @@ def _metadata() -> dict[str, object]:
         "run_id": "checkpoint-test",
         "attempt_id": "first",
         "parent_checkpoint": None,
-        "config": {"seed": 42, "num_envs": 4, "total_env_steps": 20},
+        "config": {
+            "seed": 42,
+            "num_envs": 4,
+            "total_env_steps": 20,
+            "ppo": asdict(PPO),
+        },
         "source": {"scope": "test source identity"},
         "dependencies": {"scope": "test pinned dependencies"},
         "execution": execution_identity(),
@@ -190,6 +201,119 @@ def test_update_zero_roundtrip_and_recording_token(
             resumed.close()
 
 
+def test_pinned_share_is_saved_and_a_missing_key_restores_at_default(
+    context: Context, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collection, state = context
+    metadata = _metadata()
+    writer = _writer(tmp_path, collection, metadata)
+    try:
+        path = save_checkpoint(
+            tmp_path, collection, state, metadata=metadata, writer=writer, ppo=PPO
+        )
+    finally:
+        if writer is not None:
+            writer.close()
+    details = read_checkpoint_details(path)
+    assert details["collection"]["pinned_opponent_share"] == 0.0
+    changed = replace(collection, pinned_opponent_share=0.1)
+
+    def forbidden_restore(*args: object, **kwargs: object) -> None:
+        pytest.fail("Changed pinned share must reject before restoring arrays")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(checkpoints, "_restore_arrays", forbidden_restore)
+        with pytest.raises(ValueError, match="collection settings"):
+            restore_checkpoint(
+                path, changed, state, expected_metadata=_expected(metadata), ppo=PPO
+            )
+    # A checkpoint saved before the key existed must restore at the default.
+    del details["collection"]["pinned_opponent_share"]
+    del details["checkpoint_id"]
+    details["checkpoint_id"] = hashlib.sha256(
+        checkpoints._json_bytes(details)  # pyright: ignore[reportPrivateUsage]
+    ).hexdigest()
+    (path / "checkpoint_details.json").write_text(json.dumps(details))
+    historical = path.with_name(details["checkpoint_id"])
+    path.rename(historical)
+    restored = restore_checkpoint(
+        historical,
+        collection,
+        state,
+        expected_metadata=_expected(metadata),
+        ppo=PPO,
+        device=cast(Any, jax.devices()[0]),
+    )
+    _equal(state, restored.state)
+    # Asymmetric normalization: the saved config lacks the key while the
+    # expected config carries today's default; a positive expected share is
+    # still rejected.
+    expected = _expected(metadata)
+    config = cast(dict[str, object], expected["config"])
+    expected["config"] = {**config, "pinned_opponent_share": 0.0}
+    restored = restore_checkpoint(
+        historical,
+        collection,
+        state,
+        expected_metadata=expected,
+        ppo=PPO,
+        device=cast(Any, jax.devices()[0]),
+    )
+    _equal(state, restored.state)
+    expected["config"] = {**config, "pinned_opponent_share": 0.1}
+    with pytest.raises(ValueError, match="execution metadata differs"):
+        restore_checkpoint(
+            historical, collection, state, expected_metadata=expected, ppo=PPO
+        )
+
+
+def test_saved_and_historical_shaping_mode_reject_incompatible_restore(
+    context: Context, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collection, state = context
+    metadata = _metadata()
+    writer = _writer(tmp_path, collection, metadata)
+    try:
+        path = save_checkpoint(
+            tmp_path, collection, state, metadata=metadata, writer=writer, ppo=PPO
+        )
+    finally:
+        if writer is not None:
+            writer.close()
+    details = read_checkpoint_details(path)
+    assert details["collection"]["shaping_mode"] == "potential"
+    changed = replace(collection, shaping_mode="score_delta")
+
+    def forbidden_restore(*args: object, **kwargs: object) -> None:
+        pytest.fail("Changed shaping mode must reject before restoring arrays")
+
+    for historical in (False, True):
+        if historical:
+            del details["collection"]["shaping_mode"]
+            del details["checkpoint_id"]
+            details["checkpoint_id"] = hashlib.sha256(
+                checkpoints._json_bytes(details)  # pyright: ignore[reportPrivateUsage]
+            ).hexdigest()
+            (path / "checkpoint_details.json").write_text(json.dumps(details))
+            renamed = path.with_name(details["checkpoint_id"])
+            path.rename(renamed)
+            path = renamed
+        before = _files(tmp_path)
+        with monkeypatch.context() as patch:
+            patch.setattr(checkpoints, "_restore_arrays", forbidden_restore)
+            with pytest.raises(ValueError, match="collection settings"):
+                restore_checkpoint(
+                    path, changed, state, expected_metadata=_expected(metadata), ppo=PPO
+                )
+        assert _files(tmp_path) == before
+        assert not (tmp_path / "checkpoint_recovery.json").exists()
+    restored = restore_checkpoint(
+        path, collection, state, expected_metadata=_expected(metadata), ppo=PPO
+    )
+    _equal(state, restored.state)
+    assert _files(tmp_path) == before
+
+
 def test_save_reuses_content_check_but_restore_rechecks_before_recovery(
     context: Context, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -272,10 +396,11 @@ def test_save_checks_actual_source_bank_without_rebuilding_installed_content(
             writer.close()
 
 
+@pytest.mark.parametrize("input_scale", [1.0, 0.01])
 def test_export_load_is_independent_exact_and_immutable(
-    context: Context, tmp_path: Path
+    context: Context, tmp_path: Path, input_scale: float
 ) -> None:
-    collection, state = context
+    _, state = context
     provenance: dict[str, object] = {
         "run_id": "run",
         "seed": 42,
@@ -284,12 +409,113 @@ def test_export_load_is_independent_exact_and_immutable(
     }
     destination = tmp_path / "actor"
     export_system(
-        state.carry.history.current_variables, destination, metadata=provenance
+        state.carry.history.current_variables,
+        destination,
+        metadata=provenance,
+        input_scale=input_scale,
     )
     actor = load_system(destination)
-    assert actor.checkpoint == tree_digest(state.carry.history.current_variables)
+    identity = artifact_identity(destination)
+    weight_digest = tree_digest(state.carry.history.current_variables)
+    assert actor.checkpoint == identity["actor_digest"]
+    assert identity["weight_digest"] == weight_digest
+    assert identity["input_scale"] == input_scale
+    assert (actor.checkpoint == weight_digest) == (input_scale == 1.0)
     _equal(actor.variables, state.carry.history.current_variables)
-    assert artifact_identity(destination)["seed"] == 42
+    assert identity["seed"] == 42
+    observations, env_state = state.carry.observations, state.carry.state
+    memory = init_systems(actor, actor, observations, env_state, jax.random.key(71))
+    expected = apply_systems(
+        make_recurrent_mappo_system(
+            state.carry.history.current_variables, input_scale=input_scale
+        ),
+        actor,
+        memory,
+        observations,
+        env_state,
+        jax.random.key(72),
+        variables_a=state.carry.history.current_variables,
+    )
+    actual = apply_systems(
+        actor, actor, memory, observations, env_state, jax.random.key(72)
+    )
+    _equal(actual, expected)
+    original = _files(destination)
+    assert (
+        export_system(
+            actor.variables, destination, metadata=provenance, input_scale=input_scale
+        )
+        == destination
+    )
+    assert _files(destination) == original
+    with pytest.raises(ValueError, match="different artifact"):
+        export_system(
+            actor.variables,
+            destination,
+            metadata={**provenance, "env_steps": 4},
+            input_scale=input_scale,
+        )
+    changed_scale = 0.5 if input_scale == 1.0 else 1.0
+    with pytest.raises(ValueError, match="different artifact"):
+        export_system(
+            actor.variables,
+            destination,
+            metadata=provenance,
+            input_scale=changed_scale,
+        )
+    other = export_system(
+        actor.variables,
+        tmp_path / "other-scale",
+        metadata=provenance,
+        input_scale=changed_scale,
+    )
+    other_identity = artifact_identity(other)
+    assert other_identity["actor_digest"] != identity["actor_digest"]
+    assert other_identity["checkpoint_id"] != identity["checkpoint_id"]
+    assert other_identity["weight_digest"] == identity["weight_digest"]
+    assert load_system(other).checkpoint == other_identity["actor_digest"]
+
+
+@pytest.mark.parametrize(
+    "input_scale", [0.0, -1.0, float("nan"), float("inf"), True, "0.01"]
+)
+def test_export_rejects_invalid_input_scale_before_writing(
+    tmp_path: Path, input_scale: object
+) -> None:
+    with pytest.raises(ValueError, match="input_scale"):
+        export_system(
+            None, tmp_path / "actor", metadata={}, input_scale=cast(float, input_scale)
+        )
+    assert not list(tmp_path.iterdir())
+
+
+def test_historical_actor_default_and_invalid_saved_scale(
+    context: Context, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collection, state = context
+    provenance: dict[str, object] = {
+        "run_id": "run",
+        "seed": 42,
+        "env_steps": 0,
+        "checkpoint_id": "a" * 64,
+    }
+    path = export_system(
+        state.carry.history.current_variables, tmp_path / "legacy", metadata=provenance
+    )
+    details = read_checkpoint_details(path)
+    del details["input_scale"]
+    del details["checkpoint_id"]
+    details["checkpoint_id"] = hashlib.sha256(
+        checkpoints._json_bytes(details)  # pyright: ignore[reportPrivateUsage]
+    ).hexdigest()
+    (path / "actor_details.json").write_text(json.dumps(details))
+    before = _files(path)
+    actor = load_system(path)
+    identity = artifact_identity(path)
+    assert identity["actor_digest"] == tree_digest(
+        state.carry.history.current_variables
+    )
+    assert identity["input_scale"] == 1.0
     observations, env_state = state.carry.observations, state.carry.state
     memory = init_systems(actor, actor, observations, env_state, jax.random.key(71))
     expected = apply_systems(
@@ -305,15 +531,103 @@ def test_export_load_is_independent_exact_and_immutable(
         actor, actor, memory, observations, env_state, jax.random.key(72)
     )
     _equal(actual, expected)
-    original = _files(destination)
-    assert (
-        export_system(actor.variables, destination, metadata=provenance) == destination
+    assert export_system(actor.variables, path, metadata=provenance) == path
+    assert _files(path) == before
+    details["input_scale"] = 0.0
+    del details["checkpoint_id"]
+    details["checkpoint_id"] = hashlib.sha256(
+        checkpoints._json_bytes(details)  # pyright: ignore[reportPrivateUsage]
+    ).hexdigest()
+    (path / "actor_details.json").write_text(json.dumps(details))
+
+    def forbidden_restore(*args: object, **kwargs: object) -> None:
+        pytest.fail("Invalid saved scale must reject before restoring arrays")
+
+    monkeypatch.setattr(checkpoints, "_restore_arrays", forbidden_restore)
+    before = _files(path)
+    with pytest.raises(ValueError, match="input_scale"):
+        load_system(path)
+    assert _files(path) == before
+
+
+def test_learner_scale_load_and_config_mismatch_before_restore(
+    context: Context, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collection, state = context
+    scaled_ppo = replace(PPO, input_scale=0.01)
+    assert state.carry.tracking.source_configs is not None
+    collection, state = init_learner(
+        schedule=collection.schedule,
+        seed=42,
+        ppo=scaled_ppo,
+        prepared=PreparedTrainingContent(
+            binding=collection.binding,
+            source_configs=state.carry.tracking.source_configs,
+        ),
+        metrics=collection.metrics,
+        recording=collection.recording,
     )
-    assert _files(destination) == original
-    with pytest.raises(ValueError, match="different artifact"):
-        export_system(
-            actor.variables, destination, metadata={**provenance, "env_steps": 4}
+    actor = make_recurrent_mappo_system(
+        state.carry.history.current_variables, input_scale=scaled_ppo.input_scale
+    )
+    metadata = _metadata()
+    cast(dict[str, Any], metadata["config"])["ppo"] = asdict(scaled_ppo)
+    writer = _writer(tmp_path, collection, metadata)
+    try:
+        before = _files(tmp_path)
+        with pytest.raises(ValueError, match="input_scale"):
+            save_checkpoint(
+                tmp_path, collection, state, metadata=metadata, writer=writer, ppo=PPO
+            )
+        assert _files(tmp_path) == before
+        path = save_checkpoint(
+            tmp_path,
+            collection,
+            state,
+            metadata=metadata,
+            writer=writer,
+            ppo=scaled_ppo,
         )
+    finally:
+        if writer is not None:
+            writer.close()
+    loaded = load_system(path)
+    identity = artifact_identity(path)
+    assert identity["input_scale"] == 0.01
+    observations, env_state = state.carry.observations, state.carry.state
+    memory = init_systems(actor, actor, observations, env_state, jax.random.key(71))
+    _equal(
+        apply_systems(
+            actor, actor, memory, observations, env_state, jax.random.key(72)
+        ),
+        apply_systems(
+            loaded, loaded, memory, observations, env_state, jax.random.key(72)
+        ),
+    )
+    exported = export_system(
+        loaded.variables,
+        tmp_path / "scaled-export",
+        metadata={
+            "run_id": "run",
+            "seed": 42,
+            "env_steps": 0,
+            "checkpoint_id": path.name,
+        },
+        input_scale=0.01,
+    )
+    assert artifact_identity(exported)["actor_digest"] == identity["actor_digest"]
+    before = _files(tmp_path)
+
+    def forbidden_restore(*args: object, **kwargs: object) -> None:
+        pytest.fail("Scale mismatch must reject before restoring arrays")
+
+    monkeypatch.setattr(checkpoints, "_restore_arrays", forbidden_restore)
+    with pytest.raises(ValueError, match="input_scale"):
+        restore_checkpoint(
+            path, collection, state, expected_metadata=_expected(metadata), ppo=PPO
+        )
+    assert _files(tmp_path) == before
+    assert not (tmp_path / "checkpoint_recovery.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -424,6 +738,7 @@ def test_missing_execution_cannot_save_but_historical_actor_stays_readable(
             writer.close()
     details = read_checkpoint_details(path)
     del details["metadata"]["execution"]
+    del details["metadata"]["config"]["ppo"]["input_scale"]
     del details["checkpoint_id"]
     details["checkpoint_id"] = hashlib.sha256(
         checkpoints._json_bytes(details)  # pyright: ignore[reportPrivateUsage]

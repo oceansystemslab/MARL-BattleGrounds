@@ -82,12 +82,12 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
         # The current 20-case scenario suite measured 104.322 s on CPU.
         "tests/test_tdm_scenarios.py": 105,
         "tests/test_visual_debugger_replay_service.py": 400,
-        # Packet 3's 38-case collection suite measured 286.39 s on CPU.
-        "tests/test_training_collection.py": 287,
-        # Packet 4 focused CPU suites: 192.54 s, 130.82 s and 218.72 s.
-        "tests/test_training_learner.py": 193,
-        "tests/test_training_checkpoints.py": 131,
-        "tests/test_training_runner.py": 219,
+        # Packet 4's pinned-opponent follow-up re-measured the four training
+        # suites one at a time on CPU: 318.37 s, 197.89 s, 162.33 s, 403.02 s.
+        "tests/test_training_collection.py": 319,
+        "tests/test_training_learner.py": 198,
+        "tests/test_training_checkpoints.py": 163,
+        "tests/test_training_runner.py": 404,
     },
     extracted_family_costs={
         (
@@ -125,9 +125,11 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
         12: (
             ("residual:tests/test_visual_debugger_service.py", 8, 4),
             ("file:tests/test_shared_obs_runtime.py", 8, 3),
-            ("file:tests/test_combat_ultimate_effects.py", 4, 5),
+            ("file:tests/test_combat_ultimate_effects.py", 3, 5),
             ("file:tests/test_tdm_scenarios.py", 12, 8),
-            ("file:tests/test_canonical_tournament.py", 11, 7),
+            ("file:tests/test_evaluation_scenario.py", 4, 8),
+            ("file:tests/test_collection.py", 4, 8),
+            ("file:tests/test_evaluation_replay.py", 7, 5),
         )
     },
     strict=True,

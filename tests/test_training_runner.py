@@ -6,6 +6,11 @@ these are engineering checks, not evidence that a short run learned a policy.
 The test-only panel path also checks real validation, interruption, selection,
 loading and reports while proving validation leaves training results unchanged.
 Changed execution settings reject before array restoration or recording rewind.
+Scaled actor exports survive pending-output recovery; a changed export scale is
+rejected before recording or logs change, even when weight bytes still match.
+The pinned opponent share is validated with the other settings, round-trips
+through the saved config, and reaches the schedule, checkpoint and exposure
+records of a real short run.
 """
 
 # Failure injection inspects the private host coordinator, not a public API.
@@ -25,11 +30,14 @@ from marl_battlegrounds.training.runner import (
 )
 
 
-@pytest.mark.parametrize("recording", [False, True])
+@pytest.mark.parametrize(
+    ("recording", "input_scale"), [(False, 1.0), (True, 1.0), (False, 0.01)]
+)
 def test_public_run_resume_and_final_pending_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     recording: bool,
+    input_scale: float,
 ) -> None:
     from marl_battlegrounds.baselines.ppo import PPOConfig
     from marl_battlegrounds.training import checkpoints, runner
@@ -48,7 +56,7 @@ def test_public_run_resume_and_final_pending_work(
         num_envs=4,
         total_env_steps=12,
         seed=710,
-        ppo=PPOConfig(rollout_length=2, epochs=1),
+        ppo=PPOConfig(rollout_length=2, epochs=1, input_scale=input_scale),
         checkpoint_interval_updates=1,
         metrics="none",
         recording=recording,
@@ -95,6 +103,32 @@ def test_public_run_resume_and_final_pending_work(
         path: path.read_bytes() for path in destination.rglob("*") if path.is_file()
     }
     assert not (destination / "checkpoint_recovery.json").exists()
+    if input_scale != 1.0:
+        import hashlib
+
+        saved = checkpoints.read_checkpoint_details(checkpoint)
+        ancestor_path = Path(
+            next(iter(saved["metadata"]["host_state"]["actors"].values()))
+        )
+        description = ancestor_path / "actor_details.json"
+        original_description = description.read_bytes()
+        changed_actor = json.loads(original_description)
+        changed_actor["input_scale"] = 1.0
+        del changed_actor["checkpoint_id"]
+        changed_actor["checkpoint_id"] = hashlib.sha256(
+            checkpoints._json_bytes(changed_actor)
+        ).hexdigest()
+        description.write_text(json.dumps(changed_actor))
+        before_mismatch = {
+            path: path.read_bytes() for path in destination.rglob("*") if path.is_file()
+        }
+        with pytest.raises(ValueError, match="actor identity"):
+            runner.train(resume_from=checkpoint)
+        assert before_mismatch == {
+            path: path.read_bytes() for path in destination.rglob("*") if path.is_file()
+        }
+        assert not (destination / "checkpoint_recovery.json").exists()
+        description.write_bytes(original_description)
     if recording:
         restore_cursor = runner.restore_log_cursor
 
@@ -130,6 +164,10 @@ def test_public_run_resume_and_final_pending_work(
     assert (
         checkpoints.artifact_identity(restored.final_actor)["actor_digest"]
         == checkpoints.artifact_identity(baseline.final_actor)["actor_digest"]
+    )
+    assert (
+        checkpoints.artifact_identity(restored.final_actor)["input_scale"]
+        == input_scale
     )
     assert json.loads((destination / "status.json").read_text())["status"] == "complete"
     assert not (destination / "checkpoint_recovery.json").exists()
@@ -356,6 +394,9 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
         {"shaping_coefficient": float("nan")},
         {"slot_diagnostic": True},
         {"recording": 1},
+        {"pinned_opponent_share": 0.9},
+        {"pinned_opponent_share": True},
+        {"pinned_opponent_share": float("nan")},
     ],
 )
 def test_invalid_config_rejected(change: dict[str, Any]) -> None:
@@ -363,9 +404,54 @@ def test_invalid_config_rejected(change: dict[str, Any]) -> None:
         replace(TrainConfig(), **change)
 
 
+def test_pinned_share_flows_through_the_public_run_and_its_saved_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.training import checkpoints, runner
+
+    identity = checkpoints.runtime_identity()
+    monkeypatch.setattr(checkpoints, "runtime_identity", lambda: identity)
+    config = TrainConfig(
+        num_envs=4,
+        total_env_steps=16,
+        seed=711,
+        ppo=PPOConfig(rollout_length=2, epochs=1),
+        checkpoint_interval_updates=1,
+        metrics="none",
+        verbose=False,
+        pinned_opponent_share=0.1,
+    )
+    result = runner.train(config, output_dir=tmp_path / "pinned")
+    assert result.completed_updates == 2
+    details = json.loads((result.run_dir / "run_details.json").read_text())
+    assert details["config"]["pinned_opponent_share"] == 0.1
+    assert details["schedule"]["history_thresholds"] == (
+        "first update, then 5% through 95%"
+    )
+    latest = json.loads((result.run_dir / "latest_checkpoint.json").read_text())
+    saved = checkpoints.read_checkpoint_details(
+        result.run_dir / latest["relative_path"]
+    )
+    assert saved["collection"]["pinned_opponent_share"] == 0.1
+    assert saved["metadata"]["config"]["pinned_opponent_share"] == 0.1
+    exposure = json.loads((result.run_dir / "exposure.json").read_text())
+    assert len(exposure["steps_by_opponent"]) == 21
+    assert len(exposure["starts_by_opponent"]) == 21
+
+
 def test_config_roundtrip_and_unknown_keys() -> None:
     config = TrainConfig(seed=19041901, checkpoint_env_steps=(524288, 1048576))
     assert config_from_dict(config_to_dict(config)) == config
+    pinned = TrainConfig(pinned_opponent_share=0.1)
+    assert config_from_dict(config_to_dict(pinned)) == pinned
+    assert config_to_dict(pinned)["pinned_opponent_share"] == 0.1
+    older = {
+        key: value
+        for key, value in config_to_dict(config).items()
+        if key != "pinned_opponent_share"
+    }
+    assert config_from_dict(older) == config
     with pytest.raises(ValueError, match="Unknown"):
         config_from_dict({"typo": 1})
     with pytest.raises(ValueError, match="schema_version"):

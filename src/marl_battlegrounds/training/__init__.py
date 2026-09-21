@@ -21,6 +21,7 @@ if TYPE_CHECKING:
         prepare_training_content as prepare_training_content,
     )
     from marl_battlegrounds.training.analysis import analyze as analyze
+    from marl_battlegrounds.training.analysis import analyze_screen as analyze_screen
     from marl_battlegrounds.training.checkpoints import load_system as load_system
     from marl_battlegrounds.training.collection import TrainingCarry as TrainingCarry
     from marl_battlegrounds.training.collection import (
@@ -87,8 +88,12 @@ if TYPE_CHECKING:
     from marl_battlegrounds.training.runner import TrainConfig as TrainConfig
     from marl_battlegrounds.training.runner import TrainResult as TrainResult
     from marl_battlegrounds.training.runner import train as train
+    from marl_battlegrounds.training.screen import prepare_screen as prepare_screen
     from marl_battlegrounds.training.shaping import (
         team_potential_shaping as team_potential_shaping,
+    )
+    from marl_battlegrounds.training.shaping import (
+        team_score_delta_shaping as team_score_delta_shaping,
     )
     from marl_battlegrounds.training.shaping import validate_shaping as validate_shaping
 
@@ -98,6 +103,8 @@ _OWNERS = {
     "train": "runner",
     "load_system": "checkpoints",
     "analyze": "analysis",
+    "analyze_screen": "analysis",
+    "prepare_screen": "screen",
     "PreparedTrainingContent": "_content",
     "TrainingContentBinding": "_content",
     "prepare_training_content": "_content",
@@ -111,6 +118,7 @@ _OWNERS = {
     "TrainingSchedule": "curriculum",
     "make_training_schedule": "curriculum",
     "team_potential_shaping": "shaping",
+    "team_score_delta_shaping": "shaping",
     "validate_shaping": "shaping",
     "OpponentHistory": "opponents",
     "SnapshotEvent": "opponents",
@@ -147,6 +155,7 @@ __all__ = [
     "TrainingTransition",
     "advance_training_step",
     "analyze",
+    "analyze_screen",
     "assign_opponents",
     "collect_training_rollout",
     "init_opponent_history",
@@ -154,6 +163,7 @@ __all__ = [
     "load_system",
     "make_opponent_system",
     "make_training_schedule",
+    "prepare_screen",
     "prepare_training_content",
     "refresh_opponents",
     "sample_training_configs",
