@@ -1,17 +1,24 @@
 """Deterministically shard pytest by weighted test-work-unit affinity for CI.
 
 Load this module with ``pytest -p scripts.dev.pytest_shard`` and pass an exact
-``--ci-shard=N/M`` selector. Ordinary test files remain on one worker. A small,
-strictly validated cost profile may extract known slow function families or
-split a declared hotspot at function-family boundaries while keeping every
-parameterized family indivisible.
+``--ci-shard=N/M`` selector. Ordinary test files remain on one worker. The
+measured cost table ``scripts/dev/pytest_shard_costs.json`` gives each test
+file's cost in seconds, may pull known slow function families out of their
+file, and keeps every parameterized family indivisible. Files missing from the
+table cost one unit per collected test, and table entries for tests that no
+longer exist are ignored. ``scripts/dev/shard_costs.py`` refreshes the table
+from timings saved by ``scripts/dev/check.sh --timings``;
+docs/dev/quality_gates.md explains the routine.
 """
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import cast
 
 import pytest
 from _pytest.config import Config
@@ -76,66 +83,153 @@ class TestWorkUnit:
     cost: int
 
 
-CI_SHARD_COST_PROFILE = ShardCostProfile(
-    file_cost_overrides={
-        "tests/test_shared_obs_runtime.py": 110,
-        # The current 20-case scenario suite measured 104.322 s on CPU.
-        "tests/test_tdm_scenarios.py": 105,
-        "tests/test_visual_debugger_replay_service.py": 400,
-        # Packet 4's pinned-opponent follow-up re-measured the four training
-        # suites one at a time on CPU: 318.37 s, 197.89 s, 162.33 s, 403.02 s.
-        # The spawn-frame packet re-measured the checkpoints suite alone on
-        # 2026-09-21 after its frame tests: 191.27 s for 62 tests.
-        "tests/test_training_collection.py": 319,
-        "tests/test_training_learner.py": 198,
-        "tests/test_training_checkpoints.py": 192,
-        "tests/test_training_runner.py": 404,
-    },
-    extracted_family_costs={
-        (
-            "tests/test_visual_debugger_scenarios.py::"
-            "test_every_authoritative_visual_mechanic_has_regular_and_stress_evidence"
-        ): 500,
-        (
-            "tests/test_visual_debugger_scenarios.py::"
-            "test_every_registered_scripted_command_matches_authored_acceptance"
-        ): 70,
-        (
-            "tests/test_visual_debugger_scenarios.py::"
-            "test_researcher_scenarios_cover_every_canonical_event_kind"
-        ): 50,
-        (
-            "tests/test_visual_debugger_service.py::"
-            "test_every_scripted_scenario_preflights_each_successor_in_both_views"
-        ): 500,
-        (
-            "tests/test_visual_debugger_sample_replays.py::"
-            "test_checked_samples_match_fresh_cpu_generation_scientific_truth"
-        ): 400,
-    },
-    residual_file_costs={
-        "tests/test_visual_debugger_scenarios.py": 160,
-        "tests/test_visual_debugger_service.py": 200,
-        "tests/test_visual_debugger_sample_replays.py": 500,
-    },
-    reserved_costs_by_shard_count={12: (0,) * 11 + (50,)},
-    # Keep measured twelve-worker destinations while refreshing source owners
-    # from actual collection after test additions (M9-M10 Packet 4, 2026-09-19).
-    # Source IDs are owners after weighted packing, before these intact moves.
-    # Keep the existing split/fixture rules and each unit's collection order.
-    relocations_by_shard_count={
-        12: (
-            ("residual:tests/test_visual_debugger_service.py", 8, 4),
-            ("file:tests/test_shared_obs_runtime.py", 8, 3),
-            ("file:tests/test_combat_ultimate_effects.py", 3, 5),
-            ("file:tests/test_tdm_scenarios.py", 12, 8),
-            ("file:tests/test_evaluation_scenario.py", 4, 8),
-            ("file:tests/test_collection.py", 12, 8),
-            ("file:tests/test_evaluation_replay.py", 9, 5),
-        )
-    },
-    strict=True,
+MEASURED_COSTS_PATH = Path(__file__).with_name("pytest_shard_costs.json")
+MEASURED_COSTS_SCHEMA = "marl-bgs-pytest-shard-costs@1"
+_MEASURED_COST_KEYS = frozenset(
+    {
+        "schema",
+        "measured_on",
+        "measured_commit",
+        "measured_with",
+        "reserved_seconds",
+        "reserved_reason",
+        "files",
+        "split_families",
+        "split_residuals",
+    }
 )
+
+
+def _measured_seconds(value: object, label: str) -> dict[str, int]:
+    """Read one cost-table section as test names mapped to whole seconds.
+
+    Parameters
+    ----------
+    value : object
+        Parsed JSON value of the section, such as the ``files`` object.
+    label : str
+        Section name used in error messages.
+
+    Returns
+    -------
+    dict of str to int
+        A new mapping from each test path or family node ID to its cost.
+
+    Raises
+    ------
+    ValueError
+        The value is not an object, a key is empty or not a string, or a cost is
+        not a positive whole number (booleans are rejected).
+    """
+    if not isinstance(value, dict):
+        raise ValueError(f"measured shard cost {label} must be an object")
+    section: dict[str, int] = {}
+    for key, cost in cast(dict[object, object], value).items():
+        if not isinstance(key, str) or not key:
+            raise ValueError(f"measured shard cost {label} keys must be test paths")
+        if type(cost) is not int or cost < 1:
+            raise ValueError(
+                f"measured shard cost {label} values must be positive whole seconds"
+            )
+        section[key] = cost
+    return section
+
+
+def load_measured_cost_profile(path: Path = MEASURED_COSTS_PATH) -> ShardCostProfile:
+    """Build the CI cost profile from a measured cost table.
+
+    Parameters
+    ----------
+    path : Path
+        JSON table to read. The default is ``scripts/dev/pytest_shard_costs.json``
+        beside this module.
+
+    Returns
+    -------
+    ShardCostProfile
+        ``files`` become whole-file costs; ``split_families`` become their own
+        units; ``split_residuals`` cost the rest of those files;
+        ``reserved_seconds`` add fixed per-shard work such as hosted Pyright.
+        There are no relocations: measured costs replace them. The profile is
+        not strict, so entries for files or functions that no longer exist are
+        ignored instead of stopping collection; a split file whose functions
+        are gone costs one unit per test until the next refresh.
+
+    Raises
+    ------
+    OSError
+        The table cannot be read.
+    ValueError
+        The JSON is invalid, has another schema or unknown keys, holds a cost
+        that is not a positive whole number of seconds, has a reserved list
+        whose length differs from its shard count, or names a split file that
+        is also listed whole or lacks exactly one residual entry.
+
+    Notes
+    -----
+    Reads one file on the host; no pytest state changes. The table is read
+    when this module is imported, so a malformed table stops every shard; restore
+    it with ``git checkout -- scripts/dev/pytest_shard_costs.json``. Costs are
+    seconds measured on one machine, so they are relative weights, not a promise
+    of elapsed time elsewhere. ``scripts/dev/shard_costs.py`` writes this table;
+    people should not edit its numbers by hand.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"measured shard cost table is not JSON: {path}") from error
+    if not isinstance(raw, dict):
+        raise ValueError("measured shard cost table must be a JSON object")
+    table = cast(dict[str, object], raw)
+    if table.get("schema") != MEASURED_COSTS_SCHEMA:
+        raise ValueError(f"measured shard cost table must use {MEASURED_COSTS_SCHEMA}")
+    unknown = set(table) - _MEASURED_COST_KEYS
+    if unknown:
+        raise ValueError(f"unknown measured shard cost keys: {sorted(unknown)}")
+    reserved_raw = table.get("reserved_seconds", {})
+    if not isinstance(reserved_raw, dict):
+        raise ValueError("measured shard cost reserved_seconds must be an object")
+    reserved: dict[int, tuple[int, ...]] = {}
+    for count, values in cast(dict[object, object], reserved_raw).items():
+        entries = cast(list[object], values) if isinstance(values, list) else None
+        if (
+            not isinstance(count, str)
+            or not count.isdigit()
+            or count != str(int(count))
+            or entries is None
+            or len(entries) != int(count)
+            or any(type(entry) is not int or entry < 0 for entry in entries)
+        ):
+            raise ValueError(
+                "reserved_seconds must map a shard count to one whole-second "
+                "value per shard"
+            )
+        reserved[int(count)] = tuple(cast(int, entry) for entry in entries)
+    files = _measured_seconds(table.get("files", {}), "files")
+    split_families = _measured_seconds(
+        table.get("split_families", {}), "split_families"
+    )
+    split_residuals = _measured_seconds(
+        table.get("split_residuals", {}), "split_residuals"
+    )
+    split_paths = {nodeid.split("::", maxsplit=1)[0] for nodeid in split_families}
+    if split_paths != set(split_residuals):
+        raise ValueError(
+            "every split file needs exactly one split_residuals entry and no more"
+        )
+    overlap = sorted(split_paths & set(files))
+    if overlap:
+        raise ValueError(f"split files cannot also be listed whole: {overlap}")
+    return ShardCostProfile(
+        file_cost_overrides=files,
+        extracted_family_costs=split_families,
+        residual_file_costs=split_residuals,
+        reserved_costs_by_shard_count=reserved,
+        strict=False,
+    )
+
+
+CI_SHARD_COST_PROFILE = load_measured_cost_profile()
 
 
 def parse_shard_spec(value: str) -> tuple[int, int]:

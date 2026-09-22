@@ -126,6 +126,8 @@ an actionable CI-only follow-up; ordinary timing variance does not. Rebalance
 intact work units within the current twelve-Python/eight-browser, twenty-job
 ceiling while allowing valid work to finish. Do not cancel and rerun unchanged
 work. Never omit tests or weaken assertions to satisfy the timing target.
+Since 22 September 2026 the scheduler uses measured per-file costs instead of
+those hand-picked moves; see [Rebalancing the test shards](#rebalancing-the-test-shards).
 
 The twelve Python shards and eight browser profiles are continuing ownership
 obligations, not a one-time optimization. Any change that adds, removes,
@@ -158,6 +160,93 @@ no further safe redistribution exists. Never omit tests, duplicate execution,
 weaken assertions, or cancel a valid run merely because it crossed the target.
 Cancel only when a concrete corrective change is ready to apply before rerun.
 
+
+## Rebalancing the test shards
+
+The Python scheduler weighs each test file by its measured cost in seconds. The
+costs live in one table, [pytest_shard_costs.json](../../scripts/dev/pytest_shard_costs.json),
+which [pytest_shard.py](../../scripts/dev/pytest_shard.py) loads. A file that is
+too big for one shard may be split at test-function boundaries: the table
+lists its slow functions under `split_families` and the rest of the file under
+`split_residuals`. A file missing from the table, such as a new one, costs one
+unit per collected test until the next refresh. Entries for files or functions
+that no longer exist are ignored, so renaming or deleting tests never stops a
+shard. `reserved_seconds` keeps 50 seconds free on shard 12 because hosted CI
+runs Pyright there before its tests. The numbers come from the tool below; do
+not edit them by hand.
+
+Refresh the table when shard times drift apart or after adding or moving heavy
+tests. Use timings from a gate where every shard passed; the tool refuses
+missing, failed or partial timings and checks the new table with the scheduler
+before replacing the old one:
+
+```bash
+scripts/dev/check.sh --timings /tmp/shard-timings            # full Python gate, saves per-test times
+uv run --no-sync python scripts/dev/shard_costs.py update /tmp/shard-timings
+uv run --no-sync python scripts/dev/shard_costs.py plan       # predicted seconds per shard
+```
+
+`update` sums each file's measured seconds, splits files larger than half an
+average shard where the scheduler allows it, rewrites the table and prints the
+predicted seconds of every shard. It warns about a file whose test functions
+share module fixtures, which the scheduler cannot split (move some tests into
+a new file), about one test function that alone is too large (split its
+parameter cases into two functions or make it faster), and about collected
+files that have no timing. If a split file later gains a shared module fixture,
+every shard stops at collection; run `update` again with the last good timings
+folder, or delete that file's `split_families` and `split_residuals` entries.
+A malformed table also stops every shard; restore it with
+`git checkout -- scripts/dev/pytest_shard_costs.json`.
+
+Browser profiles are listed by hand in
+[ci-shards.json](../../web/visual_debugger/e2e/ci-shards.json). A profile runs
+its files whole, or only the tests whose titles it lists, across all of its
+files; adding or renaming a test in a title-selected file needs a manifest
+edit. Measure and read the profiles with:
+
+```bash
+scripts/dev/check_frontend.sh --timings /tmp/shard-timings
+uv run --no-sync python scripts/dev/shard_costs.py browser /tmp/shard-timings
+```
+
+The browser report sums per-test time only. It leaves out each file's shared
+`beforeAll` setup and worker start-up, which cost some profiles one to two
+minutes, so also compare the whole-profile seconds the gate prints. Keep tests
+that depend on each other's server or viewer state in one profile. A file whose
+tests reset shared state may be split, but each profile then repeats its setup:
+control-parity is split this way, and profile 7 pays about 65 seconds for the
+replay viewer's setup. Keep the environment-setting profile 3 unchanged. Hosted
+CI runs the frontend static and unit checks with profile 3, the lightest. The
+exact-cover test in `web/visual_debugger/tests/ci-shards.test.js` proves every
+browser test runs exactly once; update its layout checks with the manifest.
+
+Measurement of 22 September 2026 on a 32-CPU workstation, Python and browser
+gates running together. All times are whole-command seconds. "Before" is the
+old hand-kept layout; "after" is the measured layout in the first full gate
+that used it. Three review agents were using the machine during that gate, so
+every shard ran about 8 percent slower than in the measuring run.
+
+| Shard | Python before | Python after | Browser before | Browser after |
+| --- | --- | --- | --- | --- |
+| 1 | 744 | 1,216 | 340 | 423 |
+| 2 | 794 | 1,126 | 295 | 392 |
+| 3 | 741 | 1,212 | 225 | 223 |
+| 4 | 1,425 | 1,203 | 552 | 401 |
+| 5 | 941 | 1,078 | 259 | 264 |
+| 6 | 831 | 1,088 | 581 | 364 |
+| 7 | 1,477 | 1,104 | 221 | 441 |
+| 8 | 742 | 1,102 | 288 | 400 |
+| 9 | 1,029 | 955 | | |
+| 10 | 1,247 | 1,174 | | |
+| 11 | 1,234 | 958 | | |
+| 12 | 1,012 | 992 | | |
+
+The gate waits for its slowest shard: 1,477 seconds before and 1,216 seconds
+after, about 20 minutes instead of about 25. The slowest shard went from 45
+percent above the average to 10 percent above it. The average itself is the
+floor: balancing cannot go below it, only removing work or adding machines can.
+Each Python shard also spends about 60 to 90 seconds collecting and starting
+before its tests.
 
 ## Authoritative Replay and DevClient integration baseline
 

@@ -111,7 +111,7 @@ jobs:
         run: npm ci
 
       - name: Run frontend static gates
-        if: matrix.shard == 7
+        if: matrix.shard == 3
         run: scripts/dev/check_frontend.sh --static-only
 
       - name: Install Chromium

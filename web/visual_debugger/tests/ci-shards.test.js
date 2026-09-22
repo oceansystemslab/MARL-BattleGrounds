@@ -82,7 +82,7 @@ test("CI browser manifest is nonempty, exact, and eight-way", () => {
   assert.ok(manifest.shards.every((shard) => shard.files.length > 0));
   assert.deepEqual(
     manifest.shards.slice(0, 2).map((shard) => shard.test_titles?.length),
-    [5, 4],
+    [8, 16],
   );
   assert.deepEqual(manifest.shards[2], {
     files: ["authorized-presentation-install.spec.js"],
@@ -91,18 +91,15 @@ test("CI browser manifest is nonempty, exact, and eight-way", () => {
     ],
     env: { MARL_CP5_SLICE_5_ONLY: "1" },
   });
-  assert.deepEqual(manifest.shards[3].files, [
-    "control-parity.spec.js",
-    "dev-client-authoring.spec.js",
-  ]);
+  assert.deepEqual(manifest.shards[3].files, ["dev-client-authoring.spec.js"]);
   assert.deepEqual(manifest.shards[4].files, [
     "recording-handoff.spec.js",
     "authorized-presentation-renderer.spec.js",
     "resize.spec.js",
   ]);
   assert.deepEqual(
-    manifest.shards.slice(6).map((shard) => shard.test_titles?.length),
-    [2, 1],
+    manifest.shards.slice(5).map((shard) => shard.test_titles?.length),
+    [12, 4, 10],
   );
 });
 

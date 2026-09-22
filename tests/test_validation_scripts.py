@@ -1,4 +1,7 @@
-"""Check contributor and GPU validation commands from outside their implementation."""
+"""Check contributor and GPU validation commands from outside their implementation,
+including the --timings mode that saves one per-test timing file per Python shard
+and per browser profile.
+"""
 
 import os
 import re
@@ -87,10 +90,10 @@ def _fake_tool_script() -> str:
 
         tool="$(basename -- "$0")"
         arguments="$*"
-        printf 'start\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        printf 'start\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
           "$tool" "$PWD" "${JAX_PLATFORMS-}" \
           "${PLAYWRIGHT_OUTPUT_DIR-${MARL_PLAYWRIGHT_OUTPUT_DIR-}}" \
-          "$arguments" "${CI-}" >> "$FAKE_TOOL_LOG"
+          "$arguments" "${CI-}" "${PLAYWRIGHT_JSON_OUTPUT_FILE-}" >> "$FAKE_TOOL_LOG"
 
         if [[ -n "${FAKE_SLEEP_MATCH-}" && \
               "$arguments" == *"$FAKE_SLEEP_MATCH"* ]]; then
@@ -189,6 +192,7 @@ def test_python_gate_is_root_independent_cpu_only_and_exactly_sharded(
     }
     assert shard_selectors == {f"{index}/12" for index in range(1, 13)}
     assert sum("ruff format --check ." in invocation for invocation in invocations) == 1
+    assert not any("--junitxml" in invocation for invocation in invocations)
     assert sum("ruff check ." in invocation for invocation in invocations) == 1
     assert (
         sum(
@@ -251,6 +255,8 @@ def test_frontend_gate_is_root_independent_and_isolates_browser_outputs(
     assert sum("run lint" in invocation for invocation in npm_invocations) == 1
     assert sum("run typecheck" in invocation for invocation in npm_invocations) == 1
     assert sum("run test:unit" in invocation for invocation in npm_invocations) == 1
+    assert not any("--reporter" in record[5] for record in node_records)
+    assert {record[7] for record in node_records} == {""}
 
     shard_selectors = {
         match.group(1)
@@ -290,6 +296,91 @@ def test_frontend_gate_is_root_independent_and_isolates_browser_outputs(
     ]
     assert len(failure_npm_invocations) == 1
     assert "format:check" in failure_npm_invocations[0]
+
+
+def test_python_gate_timings_save_one_junit_file_per_shard(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    fake_bin = tmp_path / "fake-bin"
+    log_path = tmp_path / "python-timings.log"
+    _initialize_repository(repository)
+    _copy_validation_scripts(repository, "check.sh")
+    _install_fake_tools(fake_bin, "uv")
+    outside = _outside_directory(tmp_path)
+
+    missing = _run(
+        [str(repository / "scripts" / "dev" / "check.sh"), "--timings"],
+        cwd=outside,
+        env=_environment(fake_bin, log_path),
+    )
+    assert missing.returncode == 2
+    assert _log_records(log_path) == []
+
+    result = _run(
+        [str(repository / "scripts" / "dev" / "check.sh"), "--timings", "timings"],
+        cwd=outside,
+        env=_environment(fake_bin, log_path),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    timings = (outside / "timings").resolve()
+    assert timings.is_dir()
+    uv_records = [record for record in _log_records(log_path) if record[1] == "uv"]
+    assert len(uv_records) == 15
+    assert {record[3] for record in uv_records} == {"cpu"}
+    junit_by_shard = {
+        match.group(1): match.group(2)
+        for record in uv_records
+        if (
+            match := re.search(
+                r"--ci-shard=(\d+)/12 .*--junitxml=(\S+)(?:\s|$)", record[5]
+            )
+        )
+        is not None
+    }
+    assert junit_by_shard == {
+        str(index): str(timings / f"python-shard-{index}.xml") for index in range(1, 13)
+    }
+    static = [record[5] for record in uv_records if "--ci-shard" not in record[5]]
+    assert len(static) == 3
+    assert not any("--junitxml" in invocation for invocation in static)
+
+
+def test_frontend_gate_timings_save_one_json_report_per_profile(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    fake_bin = tmp_path / "fake-bin"
+    log_path = tmp_path / "frontend-timings.log"
+    _initialize_repository(repository)
+    _copy_validation_scripts(repository, "check_frontend.sh")
+    _install_fake_tools(fake_bin, "npm", "node")
+    outside = _outside_directory(tmp_path)
+
+    result = _run(
+        [str(repository / "scripts" / "dev" / "check_frontend.sh"), "--timings", "t"],
+        cwd=outside,
+        env=_environment(fake_bin, log_path),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    timings = (outside / "t").resolve()
+    assert timings.is_dir()
+    records = _log_records(log_path)
+    assert len([record for record in records if record[1] == "npm"]) == 4
+    node_records = [record for record in records if record[1] == "node"]
+    assert len(node_records) == 8
+    reports = {
+        match.group(1): record[7]
+        for record in node_records
+        if (match := re.search(r"run-ci-shard\.js\s+(\d+)/8(?:\s|$)", record[5]))
+        is not None
+    }
+    assert reports == {
+        str(index): str(timings / f"browser-profile-{index}.json")
+        for index in range(1, 9)
+    }
+    assert all("--reporter=line,json" in record[5] for record in node_records)
+    assert all("--max-failures=1" in record[5] for record in node_records)
 
 
 def test_python_gate_waits_for_all_workers_before_reporting_failure(

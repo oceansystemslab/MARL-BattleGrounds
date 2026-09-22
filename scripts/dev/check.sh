@@ -4,11 +4,14 @@
 # Usage: scripts/dev/check.sh --help. With no options, run all twelve Python
 # shards, Ruff format/lint and Pyright with at most twelve workers. --tests-only
 # and --static-only select those groups; --shard N/12 accepts extra pytest args.
+# --timings DIR runs the same full gate and also saves each shard's per-test
+# times as DIR/python-shard-N.xml (JUnit) for scripts/dev/shard_costs.py.
 # Run after preparing the locked uv environment; this command never syncs it.
 # The shard plugin owns test assignment. Output includes each task's exit code and
 # elapsed seconds. Failures return nonzero. No commit or GPU speed claim is made.
 set -euo pipefail
 
+CALLER_DIR="${PWD}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
 
@@ -90,16 +93,24 @@ run_python_static() {
 }
 
 # Run all twelve shards and three static checks through the shared twelve-slot
-# pool. No arguments. Print every result, clean logs and return 1 on any failure.
+# pool. Optional $1 is an existing directory; when given, each shard also writes
+# its per-test times to $1/python-shard-N.xml. Print every result, clean logs and
+# return 1 on any failure.
 run_complete_python_gate() {
+  local timings_dir="${1:-}"
   local shard_number=""
   local status=0
+  local -a timing_args=()
 
   marl_validation_init 12 python-validation
   for shard_number in {1..12}; do
+    timing_args=()
+    if [[ -n "${timings_dir}" ]]; then
+      timing_args=("--junitxml=${timings_dir}/python-shard-${shard_number}.xml")
+    fi
     marl_validation_start \
       "Python tests ${shard_number}/12" \
-      run_python_shard "${shard_number}/12"
+      run_python_shard "${shard_number}/12" "${timing_args[@]}"
   done
   marl_validation_start "Ruff format" uv run --no-sync ruff format --check .
   marl_validation_start "Ruff lint" uv run --no-sync ruff check .
@@ -114,7 +125,7 @@ run_complete_python_gate() {
 # Print accepted command forms to stderr. No arguments or state changes.
 usage() {
   cat >&2 <<'EOF'
-usage: scripts/dev/check.sh [--tests-only | --static-only | --shard N/12 [pytest arguments...] | --help]
+usage: scripts/dev/check.sh [--tests-only | --static-only | --timings DIR | --shard N/12 [pytest arguments...] | --help]
 EOF
 }
 
@@ -140,6 +151,24 @@ case "${1:-}" in
       exit 2
     fi
     run_python_static
+    ;;
+  --timings)
+    shift
+    if (( $# != 1 )) || [[ -z "$1" ]]; then
+      echo "error: --timings requires exactly one output directory." >&2
+      exit 2
+    fi
+    timings_dir="$1"
+    if [[ "${timings_dir}" != /* ]]; then
+      timings_dir="${CALLER_DIR}/${timings_dir}"
+    fi
+    mkdir -p -- "${timings_dir}"
+    if ! timings_dir="$(cd -- "${timings_dir}" && pwd -P)"; then
+      echo "error: cannot enter the --timings directory." >&2
+      exit 2
+    fi
+    require_canonical_python_environment
+    run_complete_python_gate "${timings_dir}"
     ;;
   --shard)
     shift

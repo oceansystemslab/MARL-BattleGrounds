@@ -1,10 +1,18 @@
 """Check deterministic assignment of Python tests to CI shards.
 
 The checks cover weighted groups, exact coverage and keeping related test cases
-and fixtures together.
+and fixtures together. They also cover the measured cost table: the scheduler
+uses the checked-in table as is, ignores entries for tests that no longer
+exist, and the loader rejects malformed or inconsistent tables. The rebalancing
+tool maps JUnit timings to test families and refuses missing, failed or partial
+timings, reads Playwright timings as (spec file, title) rows, splits only
+oversized files at function boundaries the scheduler allows, and predicts shard
+costs with the scheduler's own packing.
 """
 
+import json
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -12,18 +20,29 @@ import pytest
 from _pytest.nodes import Item
 from scripts.dev.pytest_shard import (
     CI_SHARD_COST_PROFILE,
+    MEASURED_COSTS_PATH,
+    MEASURED_COSTS_SCHEMA,
     ShardCostProfile,
     TestFamilyKey,
     assign_test_families,
     build_test_work_units,
     dynamic_fixture_request_sites_from_item,
     family_key_from_metadata,
+    load_measured_cost_profile,
     module_fixture_keys_from_item,
     parse_shard_spec,
     shard_costs,
     shard_loads,
     validate_split_dynamic_fixture_requests,
     validate_split_fixture_affinity,
+)
+from scripts.dev.shard_costs import (
+    CollectedTests,
+    build_cost_table,
+    family_nodeid_from_junit,
+    predict_shards,
+    read_browser_seconds,
+    read_junit_seconds,
 )
 
 
@@ -597,58 +616,268 @@ def test_strict_cost_profile_rejects_stale_entries(
         build_test_work_units({present: 1}, profile)
 
 
-def test_production_profile_names_and_weights_exactly_five_extracted_families() -> None:
-    assert CI_SHARD_COST_PROFILE.file_cost_overrides == {
-        "tests/test_shared_obs_runtime.py": 110,
-        "tests/test_tdm_scenarios.py": 105,
-        "tests/test_visual_debugger_replay_service.py": 400,
-        "tests/test_training_collection.py": 319,
-        "tests/test_training_learner.py": 198,
-        "tests/test_training_checkpoints.py": 192,
-        "tests/test_training_runner.py": 404,
-    }
+def test_production_profile_is_the_checked_in_measured_cost_table() -> None:
+    table = json.loads(MEASURED_COSTS_PATH.read_text(encoding="utf-8"))
+    assert table["schema"] == MEASURED_COSTS_SCHEMA
+    assert load_measured_cost_profile() == CI_SHARD_COST_PROFILE
+    assert not CI_SHARD_COST_PROFILE.strict
+    assert CI_SHARD_COST_PROFILE.file_cost_overrides == table["files"]
+    assert CI_SHARD_COST_PROFILE.extracted_family_costs == table["split_families"]
+    assert CI_SHARD_COST_PROFILE.residual_file_costs == table["split_residuals"]
     assert CI_SHARD_COST_PROFILE.split_file_family_cost_floors == {}
-    assert CI_SHARD_COST_PROFILE.extracted_family_costs == {
-        (
-            "tests/test_visual_debugger_scenarios.py::"
-            "test_every_authoritative_visual_mechanic_has_regular_and_stress_evidence"
-        ): 500,
-        (
-            "tests/test_visual_debugger_scenarios.py::"
-            "test_every_registered_scripted_command_matches_authored_acceptance"
-        ): 70,
-        (
-            "tests/test_visual_debugger_scenarios.py::"
-            "test_researcher_scenarios_cover_every_canonical_event_kind"
-        ): 50,
-        (
-            "tests/test_visual_debugger_service.py::"
-            "test_every_scripted_scenario_preflights_each_successor_in_both_views"
-        ): 500,
-        (
-            "tests/test_visual_debugger_sample_replays.py::"
-            "test_checked_samples_match_fresh_cpu_generation_scientific_truth"
-        ): 400,
-    }
-    assert CI_SHARD_COST_PROFILE.residual_file_costs == {
-        "tests/test_visual_debugger_scenarios.py": 160,
-        "tests/test_visual_debugger_service.py": 200,
-        "tests/test_visual_debugger_sample_replays.py": 500,
-    }
+    assert CI_SHARD_COST_PROFILE.relocations_by_shard_count == {}
+    assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset()
     assert CI_SHARD_COST_PROFILE.reserved_costs_by_shard_count[12] == (
         (0,) * 11 + (50,)
     )
-    assert set(CI_SHARD_COST_PROFILE.relocations_by_shard_count) == {12}
-    assert CI_SHARD_COST_PROFILE.relocations_by_shard_count[12] == (
-        ("residual:tests/test_visual_debugger_service.py", 8, 4),
-        ("file:tests/test_shared_obs_runtime.py", 8, 3),
-        ("file:tests/test_combat_ultimate_effects.py", 3, 5),
-        ("file:tests/test_tdm_scenarios.py", 12, 8),
-        ("file:tests/test_evaluation_scenario.py", 4, 8),
-        ("file:tests/test_collection.py", 12, 8),
-        ("file:tests/test_evaluation_replay.py", 9, 5),
+    split_paths = {
+        nodeid.split("::", maxsplit=1)[0]
+        for nodeid in CI_SHARD_COST_PROFILE.extracted_family_costs
+    }
+    assert split_paths == set(CI_SHARD_COST_PROFILE.residual_file_costs)
+    assert not split_paths & set(CI_SHARD_COST_PROFILE.file_cost_overrides)
+    repository = Path(__file__).resolve().parents[1]
+    assert all(
+        (repository / path).is_file()
+        for path in (*CI_SHARD_COST_PROFILE.file_cost_overrides, *split_paths)
     )
-    assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"schema": "other@1"}, "must use"),
+        ({"unexpected": 1}, "unknown measured shard cost keys"),
+        ({"files": {"tests/test_a.py": 0}}, "positive whole seconds"),
+        ({"files": {"tests/test_a.py": 1.5}}, "positive whole seconds"),
+        ({"files": {"tests/test_a.py": True}}, "positive whole seconds"),
+        ({"files": {"tests/test_b.py": 4}}, "cannot also be listed whole"),
+        ({"split_residuals": {}}, "exactly one split_residuals"),
+        ({"reserved_seconds": {"2": [0]}}, "one whole-second value per shard"),
+        ({"reserved_seconds": {"02": [0, 5]}}, "one whole-second value per shard"),
+        ({"files": {"": 3}}, "must be test paths"),
+        ({"split_families": []}, "must be an object"),
+        ({"reserved_seconds": {"2": [-1, 0]}}, "reserved_seconds must map"),
+        ({"reserved_seconds": {"twelve": [0]}}, "reserved_seconds must map"),
+    ],
+)
+def test_measured_cost_table_loader_rejects_malformed_tables(
+    tmp_path: Path, change: dict[str, object], message: str
+) -> None:
+    valid = {
+        "schema": MEASURED_COSTS_SCHEMA,
+        "measured_on": "2026-01-01",
+        "files": {"tests/test_a.py": 3},
+        "split_families": {"tests/test_b.py::test_slow": 9},
+        "split_residuals": {"tests/test_b.py": 2},
+        "reserved_seconds": {"2": [0, 5]},
+    }
+    path = tmp_path / "costs.json"
+    path.write_text(json.dumps(valid), encoding="utf-8")
+    profile = load_measured_cost_profile(path)
+    assert profile.file_cost_overrides == {"tests/test_a.py": 3}
+    assert profile.extracted_family_costs == {"tests/test_b.py::test_slow": 9}
+    assert profile.residual_file_costs == {"tests/test_b.py": 2}
+    assert profile.reserved_costs_by_shard_count == {2: (0, 5)}
+    assert not profile.strict
+    present = {
+        ("tests/test_a.py", "tests/test_a.py::test_x"): 2,
+        ("tests/test_c.py", "tests/test_c.py::test_y"): 5,
+    }
+    # Entries for files and functions that are gone are ignored, not fatal.
+    units = {
+        unit.identifier: unit.cost for unit in build_test_work_units(present, profile)
+    }
+    assert units == {"file:tests/test_a.py": 3, "file:tests/test_c.py": 5}
+
+    path.write_text(json.dumps({**valid, **change}), encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        load_measured_cost_profile(path)
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="not JSON"):
+        load_measured_cost_profile(path)
+
+
+def test_junit_timings_map_to_scheduler_family_ids(tmp_path: Path) -> None:
+    assert family_nodeid_from_junit("tests.test_a", "test_x") == (
+        "tests/test_a.py::test_x"
+    )
+    assert family_nodeid_from_junit("tests.test_a", "test_x[case-1]") == (
+        "tests/test_a.py::test_x"
+    )
+    assert family_nodeid_from_junit("tests.test_a.TestGroup", "test_y[p]") == (
+        "tests/test_a.py::TestGroup::test_y"
+    )
+    with pytest.raises(ValueError, match="not a tests/ module"):
+        family_nodeid_from_junit("scripts.dev", "test_z")
+    (tmp_path / "python-shard-1.xml").write_text(
+        "<testsuites><testsuite>"
+        '<testcase classname="tests.test_a" name="test_x[1]" time="1.25"/>'
+        '<testcase classname="tests.test_a" name="test_x[2]" time="0.75"/>'
+        "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+    (tmp_path / "python-shard-2.xml").write_text(
+        '<testsuites><testsuite><testcase classname="tests.test_b" name="test_y"'
+        ' time="4.0"/></testsuite></testsuites>',
+        encoding="utf-8",
+    )
+    assert read_junit_seconds(tmp_path, shard_count=2) == {
+        "tests/test_a.py::test_x": 2.0,
+        "tests/test_b.py::test_y": 4.0,
+    }
+    with pytest.raises(FileNotFoundError, match="shard 3"):
+        read_junit_seconds(tmp_path, shard_count=3)
+    for content, message in (
+        ('<testsuite tests="0"></testsuite>', "did not pass completely"),
+        (
+            '<testsuite failures="1"><testcase classname="tests.test_b" '
+            'name="test_y" time="1"/></testsuite>',
+            "did not pass completely",
+        ),
+        (
+            '<testsuite><testcase classname="" name="tests.test_b" time="0"/>'
+            "</testsuite>",
+            "collection error",
+        ),
+    ):
+        (tmp_path / "python-shard-2.xml").write_text(content, encoding="utf-8")
+        with pytest.raises(ValueError, match=message):
+            read_junit_seconds(tmp_path, shard_count=2)
+
+
+def _collected(
+    counts: dict[str, int],
+    fixtures: dict[str, frozenset[tuple[str, str]]] | None = None,
+) -> CollectedTests:
+    families = {
+        (nodeid.split("::")[0], nodeid): count for nodeid, count in counts.items()
+    }
+    shared = fixtures or {}
+    return CollectedTests(
+        item_counts=families,
+        module_fixtures_by_family={
+            family: shared.get(family[1], frozenset()) for family in families
+        },
+        request_sites_by_family={family: frozenset() for family in families},
+    )
+
+
+def test_cost_table_splits_only_oversized_files_at_allowed_function_boundaries() -> (
+    None
+):
+    anchor = ("tests/test_shared.py", "anchor")
+    collected = _collected(
+        {
+            "tests/test_small.py::test_a": 1,
+            "tests/test_big.py::test_slow": 3,
+            "tests/test_big.py::test_mid": 1,
+            "tests/test_big.py::test_fast": 1,
+            "tests/test_single.py::test_huge": 1,
+            "tests/test_shared.py::test_one": 1,
+            "tests/test_shared.py::test_two": 1,
+        },
+        {
+            "tests/test_shared.py::test_one": frozenset({anchor}),
+            "tests/test_shared.py::test_two": frozenset({anchor}),
+        },
+    )
+    table, warnings = build_cost_table(
+        {
+            "tests/test_small.py::test_a": 4.2,
+            "tests/test_big.py::test_slow": 60.0,
+            "tests/test_big.py::test_mid": 30.0,
+            "tests/test_big.py::test_fast": 5.0,
+            "tests/test_single.py::test_huge": 80.0,
+            "tests/test_shared.py::test_one": 30.0,
+            "tests/test_shared.py::test_two": 30.0,
+            "tests/test_gone.py::test_old": 99.0,
+        },
+        collected,
+        max_unit_seconds=40,
+        measured_on="2026-01-01",
+        measured_with="Synthetic timings.",
+    )
+    assert table["files"] == {
+        "tests/test_shared.py": 60,
+        "tests/test_single.py": 80,
+        "tests/test_small.py": 5,
+    }
+    assert table["split_families"] == {"tests/test_big.py::test_slow": 60}
+    assert table["split_residuals"] == {"tests/test_big.py": 35}
+    assert any("test_single.py alone" in warning for warning in warnings)
+    assert any(
+        "test_shared.py" in warning and "cannot split" in warning
+        for warning in warnings
+    )
+    assert any("test_slow alone" in warning for warning in warnings)
+
+
+def test_shard_predictions_use_the_scheduler_packing(tmp_path: Path) -> None:
+    collected = _collected(
+        {
+            "tests/test_a.py::test_x": 1,
+            "tests/test_b.py::test_y": 1,
+            "tests/test_c.py::test_z": 1,
+        }
+    )
+    path = tmp_path / "costs.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": MEASURED_COSTS_SCHEMA,
+                "files": {"tests/test_a.py": 10, "tests/test_b.py": 6},
+                "reserved_seconds": {"2": [0, 1]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    profile = load_measured_cost_profile(path)
+    predictions = predict_shards(profile, collected, shard_count=2)
+    assignments = assign_test_families(collected.item_counts, 2, cost_profile=profile)
+    assert [row.seconds for row in predictions] == list(
+        shard_costs(assignments, collected.item_counts, cost_profile=profile)
+    )
+    assert [row.seconds for row in predictions] == [10, 8]
+    assert predictions[0].largest_unit == "file:tests/test_a.py"
+    assert sum(row.units for row in predictions) == 3
+
+
+def test_browser_reports_sum_attempt_durations_per_spec(tmp_path: Path) -> None:
+    report = {
+        "suites": [
+            {
+                "file": "replay.spec.js",
+                "specs": [
+                    {
+                        "title": "opens a replay",
+                        "tests": [{"results": [{"duration": 1500}, {"duration": 500}]}],
+                    }
+                ],
+                "suites": [
+                    {
+                        "specs": [
+                            {
+                                "title": "nested",
+                                "tests": [{"results": [{"duration": 250}]}],
+                            }
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+    (tmp_path / "browser-profile-3.json").write_text(
+        json.dumps(report), encoding="utf-8"
+    )
+    assert read_browser_seconds(tmp_path) == {
+        3: [
+            ("replay.spec.js", "opens a replay", 2.0),
+            ("replay.spec.js", "nested", 0.25),
+        ]
+    }
+    with pytest.raises(FileNotFoundError):
+        read_browser_seconds(tmp_path / "missing")
 
 
 def test_dominant_units_preserve_hotspot_affinity_and_exact_ownership() -> None:

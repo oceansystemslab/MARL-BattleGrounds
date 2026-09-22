@@ -68,7 +68,21 @@ export function validatedEnvironment(value, label) {
   );
 }
 
-/** @returns {CiManifest} */
+/**
+ * Read and check e2e/ci-shards.json: eight profiles that together name every
+ * spec file. A profile without test_titles runs its files whole. A profile with
+ * test_titles runs, across all of its files, only tests whose full title ends
+ * with one entry after a space or at its start, so it must list the titles of
+ * every test it should run; adding or renaming a test in such a file needs a
+ * manifest edit. A spec file shared by several profiles must be title-selected
+ * in each, and no title may repeat among one file's owners. The exact-cover
+ * unit test in tests/ci-shards.test.js proves every browser test runs in
+ * exactly one profile.
+ *
+ * @returns {CiManifest}
+ * @throws {Error} The manifest is malformed, does not name every spec file
+ *   exactly, or breaks one of the title rules above.
+ */
 export function validatedCiManifest() {
   const value = /** @type {unknown} */ (JSON.parse(readFileSync(manifestPath, "utf8")));
   if (
@@ -102,11 +116,6 @@ export function validatedCiManifest() {
       entry.test_titles,
       `CI browser shard ${index + 1} test_titles`,
     );
-    if (files.length !== 1) {
-      throw new Error(
-        `CI browser shard ${index + 1} may select exact titles from only one file`,
-      );
-    }
     return env === undefined
       ? { files, test_titles: testTitles }
       : { files, test_titles: testTitles, env };
