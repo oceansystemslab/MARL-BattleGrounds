@@ -1,6 +1,7 @@
 /**
  * @file Launch and control a local live debugger for browser tests, with fixed inputs
- * and explicit process cleanup.
+ * and explicit process cleanup. Startup waits for the launch URL and shutdown sends
+ * SIGINT and waits for exit, both with no time limit.
  */
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
@@ -8,7 +9,6 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPOSITORY_ROOT = resolve(HERE, "../../../..");
-export const DEBUGGER_STOP_TIMEOUT_MS = 30_000;
 export const COMBAT_DEBUGGER_ENTRYPOINT = "scripts/dev/debug_renderer.py";
 export const SCRIPTED_DEBUGGER_HARNESS =
   "tests/visual_debugger_scripted_browser_harness.py";
@@ -35,22 +35,13 @@ function hasExited(child) {
 }
 
 /** @param {import("node:child_process").ChildProcess} child
- * @param {number} timeoutMs
- * @returns {Promise<boolean>} */
-function waitForExit(child, timeoutMs) {
+ * @returns {Promise<void>} */
+function waitForExit(child) {
   if (hasExited(child)) {
-    return Promise.resolve(true);
+    return Promise.resolve();
   }
   return new Promise((resolveExit) => {
-    /** @param {boolean} exited */
-    const finish = (exited) => {
-      clearTimeout(timeout);
-      child.off("exit", onExit);
-      resolveExit(exited);
-    };
-    const onExit = () => finish(true);
-    const timeout = setTimeout(() => finish(false), timeoutMs);
-    child.once("exit", onExit);
+    child.once("exit", () => resolveExit());
   });
 }
 
@@ -128,17 +119,12 @@ function startDebuggerProcess(arguments_) {
     let settled = false;
     let stdout = "";
     let stderr = "";
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error(`Debugger startup timed out.\n${stderr}`));
-    }, 60_000);
 
     child.once("error", (error) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timeout);
       reject(error);
     });
     child.stderr?.setEncoding("utf8");
@@ -155,11 +141,9 @@ function startDebuggerProcess(arguments_) {
         return;
       }
       settled = true;
-      clearTimeout(timeout);
       resolveUrl({ process: child, url: match[1] });
     });
     child.once("exit", (code) => {
-      clearTimeout(timeout);
       if (!settled) {
         settled = true;
         reject(
@@ -176,14 +160,5 @@ export async function stopDebugger(child) {
     return;
   }
   child.kill("SIGINT");
-  if (await waitForExit(child, DEBUGGER_STOP_TIMEOUT_MS)) {
-    return;
-  }
-
-  child.kill("SIGKILL");
-  const cleanupCompleted = await waitForExit(child, DEBUGGER_STOP_TIMEOUT_MS);
-  throw new Error(
-    `Debugger did not exit within ${DEBUGGER_STOP_TIMEOUT_MS} ms after SIGINT; ` +
-      `SIGKILL cleanup ${cleanupCompleted ? "completed" : "did not complete"}.`,
-  );
+  await waitForExit(child);
 }

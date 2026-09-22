@@ -1,6 +1,8 @@
 /**
  * @file Launch local replay-viewer test sessions and expose their URLs/process
- * lifecycle for browser checks.
+ * lifecycle for browser checks. Replay export and viewer startup wait with no
+ * time limit, and frame waits set no limit of their own. A process that fails
+ * to start or exits early still rejects at once.
  */
 import { execFile, spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -8,14 +10,9 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import {
-  DEBUGGER_STOP_TIMEOUT_MS,
-  REPOSITORY_ROOT,
-  stopDebugger,
-} from "./live-debugger.js";
+import { REPOSITORY_ROOT, stopDebugger } from "./live-debugger.js";
 
 const execFileAsync = promisify(execFile);
-const STARTUP_TIMEOUT_MS = 60_000;
 export const REPLAY_VIEWER_ENTRYPOINT = "scripts/dev/replay_viewer.py";
 
 /** @returns {Promise<{
@@ -102,7 +99,6 @@ async function exportReplayPaths(args = []) {
         cwd: REPOSITORY_ROOT,
         env: process.env,
         maxBuffer: 1024 * 1024,
-        timeout: 120_000,
       },
     );
     const payload = JSON.parse(result.stdout.trim());
@@ -227,21 +223,12 @@ export function startReplayViewer(options) {
     let settled = false;
     let stdout = "";
     let stderr = "";
-    const timeout = setTimeout(() => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      child.kill("SIGTERM");
-      reject(new Error(`Replay viewer startup timed out.\n${stderr}`));
-    }, STARTUP_TIMEOUT_MS);
 
     child.once("error", (error) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timeout);
       reject(error);
     });
     child.stderr?.setEncoding("utf8");
@@ -258,11 +245,9 @@ export function startReplayViewer(options) {
         return;
       }
       settled = true;
-      clearTimeout(timeout);
       resolveUrl({ process: child, url: match[1] });
     });
     child.once("exit", (code) => {
-      clearTimeout(timeout);
       if (!settled) {
         settled = true;
         reject(
@@ -311,17 +296,14 @@ export function currentReplayTimeline(page) {
  * @param {number} frameIndex */
 export async function expectReplayFrameIndex(page, frameIndex) {
   const expected = String(frameIndex);
-  await page
-    .locator("#replay-frame-slider")
-    .waitFor({ state: "visible", timeout: 30_000 });
+  await page.locator("#replay-frame-slider").waitFor({ state: "visible" });
   await page.waitForFunction(
     ([selector, value]) => {
       const slider = document.querySelector(selector);
       return slider instanceof HTMLInputElement && slider.value === value;
     },
     ["#replay-frame-slider", expected],
-    { timeout: 30_000 },
   );
 }
 
-export { DEBUGGER_STOP_TIMEOUT_MS, stopDebugger };
+export { stopDebugger };

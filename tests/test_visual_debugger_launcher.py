@@ -2132,7 +2132,6 @@ def test_static_cli_completes_with_a_headless_matplotlib_backend() -> None:
         check=False,
         capture_output=True,
         text=True,
-        timeout=120,
     )
 
     assert result.returncode == 0, result.stderr

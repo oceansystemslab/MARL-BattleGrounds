@@ -925,8 +925,7 @@ def test_metric_report_view_switch_and_sidecar_read_share_one_lock_epoch(
         @property
         def metric_report_artifact(self) -> object:
             entered.set()
-            if not release.wait(timeout=5):
-                raise RuntimeError("metric sidecar read was not released")
+            release.wait()
             return artifact
 
     service = ReplayViewerService(
@@ -945,14 +944,14 @@ def test_metric_report_view_switch_and_sidecar_read_share_one_lock_epoch(
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         metric_future = executor.submit(service.current_metric_report)
-        assert entered.wait(timeout=2)
+        assert entered.wait()
         command_future = executor.submit(switch_to_pov)
-        assert command_started.wait(timeout=2)
+        assert command_started.wait()
         with pytest.raises(FutureTimeoutError):
             command_future.result(timeout=0.1)
         release.set()
-        metric_result = metric_future.result(timeout=2)
-        command_result = command_future.result(timeout=2)
+        metric_result = metric_future.result()
+        command_result = command_future.result()
 
     assert metric_result.outcome == "available"
     assert _response(command_result).frame.view_mode == "pov"

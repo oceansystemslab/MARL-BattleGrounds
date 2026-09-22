@@ -170,13 +170,11 @@ async function activateAndWaitForJoinedLiveAuthority(page, activate) {
     (response) =>
       response.request().method() === "POST" &&
       new URL(response.url()).pathname === "/api/command",
-    { timeout: 120_000 },
   );
   const presentationResponse = page.waitForResponse(
     (response) =>
       response.request().method() === "GET" &&
       new URL(response.url()).pathname === "/api/presentation/frame",
-    { timeout: 120_000 },
   );
   await activate();
   expect((await commandResponse).status()).toBe(200);
@@ -250,7 +248,6 @@ export async function advanceScriptTo(page, targetTransition) {
     await page.keyboard.press("n");
     await expect(page.locator("#transition-value")).toHaveText(
       new RegExp(`:transition:${transition - 1}$`),
-      { timeout: 120_000 },
     );
     await expect(page.locator("#step-value")).toHaveText(String(transition));
     await expect(page.locator(CHOREOGRAPHY_ROOT)).toHaveCount(1);

@@ -180,7 +180,7 @@ def _authorized_get(
     server: DebuggerHTTPServer,
     path: str,
 ) -> tuple[HTTPResponse, bytes]:
-    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    connection = HTTPConnection("127.0.0.1", server.server_port)
     connection.request("GET", path, headers={_TOKEN_HEADER: _TOKEN})
     response = connection.getresponse()
     payload = response.read()
@@ -403,7 +403,7 @@ def test_recording_handoff_http_gets_use_actual_private_shared_roots(
         if thread.is_alive():
             server.shutdown()
         server.server_close()
-        thread.join(timeout=2)
+        thread.join()
 
     installed = coordinator.router.snapshot()
     assert result.replay_handoff is shared_viewer

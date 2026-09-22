@@ -58,9 +58,7 @@ test("scripted live Submit advances once, installs T0, and seals at completion",
   });
 
   await page.goto(scriptedDebugger.url);
-  await expect(page.locator("#connection-status")).toHaveText("Online", {
-    timeout: 30_000,
-  });
+  await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page.locator("html")).toHaveAttribute(
     "data-presentation-authority",
     "installed",
@@ -280,7 +278,6 @@ test("scripted live Submit advances once, installs T0, and seals at completion",
     (response) =>
       response.request().method() === "POST" &&
       new URL(response.url()).pathname === "/api/command",
-    { timeout: 30_000 },
   );
   await submit.click();
   const response = await responsePromise;

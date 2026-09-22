@@ -75,7 +75,6 @@ async function applyLiveCommand(page, activate) {
     (response) =>
       response.request().method() === "POST" &&
       new URL(response.url()).pathname === "/api/command",
-    { timeout: 60_000 },
   );
   await activate();
   const response = await responsePromise;

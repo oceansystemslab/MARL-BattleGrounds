@@ -35,7 +35,6 @@ const PNG_PROVENANCE_KEYWORD = "MARL-BattleGrounds Replay Provenance";
 const EPISODE_DETAILS_ROUTE = "/api/replay/details";
 const REPLAY_SUFFIX = ".marlbg-replay.json";
 const METRIC_SUFFIX = ".marlbg-metrics.json";
-const METRIC_PREPARATION_TIMEOUT_MS = 60_000;
 const EXPECTED_METRIC_TOPICS = Object.freeze([
   ["priority", "Episode Results"],
   ["abilities", "Ability Activations"],
@@ -207,9 +206,7 @@ function captureBrowserErrors(page) {
 async function openReplay(page, url) {
   captureBrowserErrors(page);
   await page.goto(url);
-  await expect(page.locator("#connection-status")).toHaveText("Online", {
-    timeout: 30_000,
-  });
+  await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page.locator("html")).toHaveAttribute("data-viewer-mode", "replay");
   await expect(page.locator("#replay-timeline")).toBeVisible();
   expect(page.url()).not.toContain("token=");
@@ -237,7 +234,6 @@ function nextReplayResponse(page) {
     (response) =>
       response.request().method() === "POST" &&
       new URL(response.url()).pathname === "/api/replay/command",
-    { timeout: 30_000 },
   );
 }
 
@@ -254,9 +250,7 @@ async function clickReplayCommand(page, selector) {
 /** @param {import("@playwright/test").Page} page
  * @param {string} key */
 async function pressReplayCommand(page, key) {
-  await expect(page.locator("#replay-frame-slider")).toBeEnabled({
-    timeout: 30_000,
-  });
+  await expect(page.locator("#replay-frame-slider")).toBeEnabled();
   const responsePromise = nextReplayResponse(page);
   await page.locator("#battlefield").focus();
   await page.keyboard.press(key);
@@ -611,9 +605,7 @@ async function installReplayView(page, view) {
 
 /** @param {import("@playwright/test").Page} page */
 async function waitForSettledReplayArtifactActions(page) {
-  await expect(page.locator("#replay-transport-status")).toContainText("SETTLED", {
-    timeout: 30_000,
-  });
+  await expect(page.locator("#replay-transport-status")).toContainText("SETTLED");
   await expect(page.locator("#battlefield-shell")).toHaveAttribute(
     "aria-busy",
     "false",
@@ -622,9 +614,7 @@ async function waitForSettledReplayArtifactActions(page) {
     "data-render-policy",
     "replay_static",
   );
-  await expect(page.locator("#replay-export-png-button")).toBeEnabled({
-    timeout: 30_000,
-  });
+  await expect(page.locator("#replay-export-png-button")).toBeEnabled();
 }
 
 /** @param {import("@playwright/test").Page} page */
@@ -969,7 +959,7 @@ async function exportAndInspectReplayPng(page, options) {
   page.on("request", recordRequest);
   let download;
   try {
-    const downloadPromise = page.waitForEvent("download", { timeout: 30_000 });
+    const downloadPromise = page.waitForEvent("download");
     await page.locator("#replay-export-png-button").click();
     download = await downloadPromise;
     await expect(page.locator("#replay-export-png-button")).toHaveAttribute(
@@ -1273,9 +1263,8 @@ async function downloadEpisodeDetails(page, sourceMetricPath) {
       (candidate) =>
         candidate.request().method() === "GET" &&
         new URL(candidate.url()).pathname === EPISODE_DETAILS_ROUTE,
-      { timeout: 30_000 },
     );
-    const downloadPromise = page.waitForEvent("download", { timeout: 30_000 });
+    const downloadPromise = page.waitForEvent("download");
     await page.locator("#replay-episode-details-button").click();
     [response, download] = await Promise.all([responsePromise, downloadPromise]);
     await expect(page.locator("#notice")).toContainText("Downloaded");
@@ -1784,7 +1773,6 @@ test("one replay transport trajectory keeps static seeks, playback, rates, and r
     (request) =>
       request.method() === "POST" &&
       new URL(request.url()).pathname === "/api/replay/command",
-    { timeout: 30_000 },
   );
   const continuedResponsePromise = nextReplayResponse(page);
   await page.locator("#replay-play-pause-button").click();
@@ -1855,7 +1843,6 @@ test("one replay transport trajectory keeps static seeks, playback, rates, and r
   );
   await expect(page.locator("#replay-transport-status")).toContainText(
     "2.00× · SETTLED",
-    { timeout: 30_000 },
   );
   expect(replayPosts).toHaveLength(postsBeforeFinalReplay);
   await expect(page.locator("#replay-play-pause-button")).toBeEnabled();
@@ -1896,21 +1883,19 @@ test("basic_support Agent POV playback visibly dwells for Hunter and Priest", as
       page.locator('#battlefield .combat-choreography[data-state="playing"]'),
     ).toHaveCount(1);
     await expect
-      .poll(
-        () =>
-          page
-            .locator(animatedEffectSelector)
-            .evaluateAll(
-              (nodes) =>
-                nodes.filter(
-                  (node) =>
-                    node.getClientRects().length > 0 &&
-                    node
-                      .getAnimations({ subtree: true })
-                      .some((animation) => animation.playState === "running"),
-                ).length,
-            ),
-        { timeout: 5_000 },
+      .poll(() =>
+        page
+          .locator(animatedEffectSelector)
+          .evaluateAll(
+            (nodes) =>
+              nodes.filter(
+                (node) =>
+                  node.getClientRects().length > 0 &&
+                  node
+                    .getAnimations({ subtree: true })
+                    .some((animation) => animation.playState === "running"),
+              ).length,
+          ),
       )
       .toBeGreaterThan(0);
     const eventIds = await page.locator(animatedEffectSelector).evaluateAll((nodes) => {
@@ -2045,24 +2030,22 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
   // Capture the browser's single catalog request before Chromium may evict its
   // large response body from the inspector cache. No second request is made.
   await page.route("**/api/replay/metrics/catalog.json", async (route) => {
-    const response = await route.fetch({ timeout: METRIC_PREPARATION_TIMEOUT_MS });
+    const response = await route.fetch();
     expect(response.status()).toBe(200);
     recordCatalog(await response.json());
     await route.fulfill({ response });
   });
   try {
     await openReplay(page, viewer.url);
-    // Initial analysis compiles JAX once. Await that specific operation before
-    // applying the ordinary DOM deadline; parallel CPU profiles can share a host.
+    // Initial analysis compiles JAX once. Wait for that response and the
+    // catalog before checking the metric table.
     const analysisResponse = page.waitForResponse(
       (response) =>
         new URL(response.url()).pathname === "/api/replay/metrics/1/cursor.json",
-      { timeout: METRIC_PREPARATION_TIMEOUT_MS },
     );
     const catalogResponse = page.waitForResponse(
       (response) =>
         new URL(response.url()).pathname === "/api/replay/metrics/catalog.json",
-      { timeout: METRIC_PREPARATION_TIMEOUT_MS },
     );
     await page.locator("#evaluation-metrics > summary").click();
     expect((await analysisResponse).status()).toBe(200);
@@ -3114,6 +3097,8 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
         await page.waitForTimeout(1600);
         await expect(destination).toHaveClass(/metric-search-match/u);
       }
+      // The Viewer clears this highlight after 3 seconds. This 4-second limit
+      // checks that timer, so it is part of the assertion, not a wait limit.
       await expect(destination).not.toHaveClass(/metric-search-match/u, {
         timeout: 4000,
       });
@@ -3599,9 +3584,7 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
     await page.route(pattern, async (route) => {
       recordRequest();
       try {
-        // This request may compile the first analysis; it is not an interaction
-        // governed by Playwright's shorter click/hover deadline.
-        const response = await route.fetch({ timeout: METRIC_PREPARATION_TIMEOUT_MS });
+        const response = await route.fetch();
         expect(response.status()).toBe(200);
         await delayed;
         await route.fulfill(malformed ? { json: { invalid: true } } : { response });
@@ -3977,14 +3960,12 @@ test("a stale cross-tab command atomically installs the latest audience without 
     (response) =>
       response.status() === 409 &&
       new URL(response.url()).pathname === "/api/replay/command",
-    { timeout: 30_000 },
   );
   const matchingTimelinePromise = page.waitForResponse(
     (response) =>
       response.status() === 200 &&
       response.request().method() === "GET" &&
       new URL(response.url()).pathname === "/api/replay/timeline",
-    { timeout: 30_000 },
   );
   await page.locator("#replay-next-button").click();
   const staleResponse = await staleResponsePromise;
@@ -4097,9 +4078,7 @@ test("accessible playback pauses on hidden/error/endpoint and keeps one request 
     });
   });
   await page.locator("#replay-next-button").click();
-  await expect(page.locator("#connection-status")).toHaveText("Resync required", {
-    timeout: 10_000,
-  });
+  await expect(page.locator("#connection-status")).toHaveText("Resync required");
   await expect(page.locator("#connection-status")).toHaveAttribute(
     "data-state",
     "offline",
@@ -4690,18 +4669,13 @@ test("Exit flushes its replay response before clean server shutdown", async ({
 }) => {
   const complete = requiredViewer(completeViewer, "complete");
   await openReplay(page, complete.url);
-  const exitPromise = new Promise((resolve, reject) => {
+  const exitPromise = new Promise((resolve) => {
     const process = complete.process;
     if (process.exitCode !== null || process.signalCode !== null) {
       resolve(undefined);
       return;
     }
-    const timeout = setTimeout(
-      () => reject(new Error("Replay viewer did not exit after its exit response.")),
-      5_000,
-    );
     process.once("exit", () => {
-      clearTimeout(timeout);
       resolve(undefined);
     });
   });

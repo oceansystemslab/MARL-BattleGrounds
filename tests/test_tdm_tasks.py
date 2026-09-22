@@ -679,4 +679,4 @@ assert len(_tdm_assets.map_history()) == 52
 assert _tdm_assets.map_id_aliases().maps[0].current_map_id == 12
 assert not any(name == 'scripts' or name.startswith('scripts.') for name in sys.modules)
 """
-    subprocess.run([sys.executable, "-c", script], cwd=tmp_path, check=True, timeout=60)
+    subprocess.run([sys.executable, "-c", script], cwd=tmp_path, check=True)

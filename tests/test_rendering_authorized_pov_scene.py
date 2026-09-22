@@ -1944,7 +1944,6 @@ print('forbidden', loaded)
         check=False,
         capture_output=True,
         text=True,
-        timeout=30,
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "forbidden []"

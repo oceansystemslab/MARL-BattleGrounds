@@ -389,9 +389,7 @@ test("authorized draft edit and rapid Submit install exactly one successor", asy
     heldSubmitPresentation.release();
     await heldSubmitPresentation.dispose();
   }
-  await expect(page.locator("#step-value")).toHaveText(String(successorStep + 1), {
-    timeout: 120_000,
-  });
+  await expect(page.locator("#step-value")).toHaveText(String(successorStep + 1));
   await expect.poll(() => commands.length).toBe(3);
   expect(
     commands.filter(
@@ -497,9 +495,7 @@ test("pointer draft keeps battlefield focus and queues one Enter exactly once", 
   }
 
   await expect(page.locator("#connection-status")).toHaveText("Online");
-  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1), {
-    timeout: 120_000,
-  });
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1));
   await expect.poll(() => requests.length).toBe(2);
   await expect(battlefield).toBeFocused();
 
@@ -600,9 +596,7 @@ test("Enter follows a coherent idempotent draft exactly once", async ({ page }) 
   expect(String(requests[1].command.key).toLowerCase()).toBe("enter");
   expect(requests[1].command_id).not.toBe(requests[0].command_id);
   expect(requests[1].base_revision).toBe(requests[0].base_revision);
-  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1), {
-    timeout: 120_000,
-  });
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1));
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(battlefield).toBeFocused();
   await page.unroute("**/api/command");
@@ -699,9 +693,7 @@ test("target selection preserves pointer Submit and keyboard-native focus", asyn
     role: "target",
   });
   expect(String(requests[1].command.key).toLowerCase()).toBe("enter");
-  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1), {
-    timeout: 120_000,
-  });
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1));
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(battlefield).toBeFocused();
 
@@ -803,9 +795,7 @@ test("Agent pointer roster selection queues movement before one Enter", async ({
   }
 
   await expect(page.locator("#connection-status")).toHaveText("Online");
-  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1), {
-    timeout: 120_000,
-  });
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1));
   await expect.poll(() => requests.length).toBe(3);
   expect(requests[0].command).toMatchObject({
     command_type: "roster_selection",
@@ -1142,7 +1132,6 @@ test("post-Charge Agent history stays installable through a reciprocal Charge", 
       );
       await expect(page.locator("#step-value")).toHaveText(
         String(stepBeforeMovement + 1),
-        { timeout: 120_000 },
       );
       stagedTurns += 1;
     }
@@ -1187,9 +1176,7 @@ test("post-Charge Agent history stays installable through a reciprocal Charge", 
     await activateLiveCommand(page, () => page.locator("#ultimate-button").click());
     const firstChargeStep = await currentStep(page);
     await activateLiveCommand(page, () => page.locator("#submit-turn-button").click());
-    await expect(page.locator("#step-value")).toHaveText(String(firstChargeStep + 1), {
-      timeout: 120_000,
-    });
+    await expect(page.locator("#step-value")).toHaveText(String(firstChargeStep + 1));
     const afterFirstCharge = await currentAuthorizedPresentation(page);
     const firstChargeRow = /** @type {TransitionActionRow[]} */ (
       afterFirstCharge.latest_transition.action_rows
@@ -1210,9 +1197,7 @@ test("post-Charge Agent history stays installable through a reciprocal Charge", 
     await activateLiveCommand(page, () => page.locator("#no-combat-button").click());
     const settlingStep = await currentStep(page);
     await activateLiveCommand(page, () => page.locator("#submit-turn-button").click());
-    await expect(page.locator("#step-value")).toHaveText(String(settlingStep + 1), {
-      timeout: 120_000,
-    });
+    await expect(page.locator("#step-value")).toHaveText(String(settlingStep + 1));
 
     await controlLiveAgent(page, 6);
     const stepBeforeAgentInstall = await currentStep(page);
@@ -1289,10 +1274,7 @@ test("post-Charge Agent history stays installable through a reciprocal Charge", 
       "Enter",
     ]);
     expect(commandRequests[1].base_revision).toBe(commandRequests[0].base_revision + 1);
-    await expect(page.locator("#step-value")).toHaveText(
-      String(reverseChargeStep + 1),
-      { timeout: 120_000 },
-    );
+    await expect(page.locator("#step-value")).toHaveText(String(reverseChargeStep + 1));
     await expectHealthyInstallation();
     await expect.poll(() => commandRequests.length).toBe(2);
 
@@ -1460,9 +1442,7 @@ test("Live Mage Burst retains every authorized Mage and Warrior aura modifier", 
     "true",
   );
   await page.locator("#submit-turn-button").click();
-  await expect(page.locator("#step-value")).toHaveText(String(stepBefore + 1), {
-    timeout: 120_000,
-  });
+  await expect(page.locator("#step-value")).toHaveText(String(stepBefore + 1));
   await expect(page.locator("#connection-status")).toHaveText("Online");
 
   const inventories = await page.evaluate(() => {
@@ -1564,9 +1544,7 @@ test("WASD followed immediately by Enter submits the installed draft once", asyn
   expect(String(requests[1].command.key).toLowerCase()).toBe("enter");
   expect(requests[1].command_id).not.toBe(requests[0].command_id);
   expect(requests[1].base_revision).toBe(requests[0].base_revision + 1);
-  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1), {
-    timeout: 120_000,
-  });
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1));
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(battlefield).toBeFocused();
   await page.unroute("**/api/command");
@@ -1634,7 +1612,7 @@ for (const [viewLabel, viewValue] of [
       await heldDraftPresentation?.dispose();
     }
 
-    await expect.poll(() => requests.length, { timeout: 120_000 }).toBe(3);
+    await expect.poll(() => requests.length).toBe(3);
     expect(
       requests.map((request) => String(request.command.key).toLowerCase()),
     ).toEqual(["enter", "w", "enter"]);
@@ -1642,9 +1620,7 @@ for (const [viewLabel, viewValue] of [
     expect(requests[2].command_id).not.toBe(requests[1].command_id);
     expect(requests[1].base_revision).toBe(requests[0].base_revision + 1);
     expect(requests[2].base_revision).toBe(requests[1].base_revision + 1);
-    await expect(page.locator("#step-value")).toHaveText(String(baseStep + 2), {
-      timeout: 120_000,
-    });
+    await expect(page.locator("#step-value")).toHaveText(String(baseStep + 2));
     await expect(page.locator("#connection-status")).toHaveText("Online");
     await expect(battlefield).not.toBeFocused();
     await page.unroute("**/api/command");
@@ -1690,14 +1666,12 @@ test("queued Escape preserves its direct battlefield focus release", async ({
     await heldSubmitPresentation.dispose();
   }
 
-  await expect.poll(() => requests.length, { timeout: 120_000 }).toBe(2);
+  await expect.poll(() => requests.length).toBe(2);
   expect(requests.map((request) => String(request.command.key).toLowerCase())).toEqual([
     "enter",
     "escape",
   ]);
-  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1), {
-    timeout: 120_000,
-  });
+  await expect(page.locator("#step-value")).toHaveText(String(baseStep + 1));
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(battlefield).not.toBeFocused();
   await page.unroute("**/api/command");
@@ -1765,9 +1739,7 @@ test("battlefield Space submits once and consumes busy repeats without scrolling
     await heldPresentation.dispose();
   }
 
-  await expect(page.locator("#step-value")).toHaveText(String(stepBefore + 1), {
-    timeout: 120_000,
-  });
+  await expect(page.locator("#step-value")).toHaveText(String(stepBefore + 1));
   await expect(page.locator("html")).toHaveAttribute(
     "data-presentation-authority",
     "installed",

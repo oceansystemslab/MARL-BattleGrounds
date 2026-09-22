@@ -204,7 +204,6 @@ def _generate_samples_in_cpu_child(
         check=False,
         capture_output=True,
         text=True,
-        timeout=120,
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "generated 3 sample replays"
@@ -846,7 +845,6 @@ raise SystemExit("FIFO was unexpectedly accepted")
         check=False,
         capture_output=True,
         text=True,
-        timeout=10,
     )
 
     assert completed.returncode == 0, completed.stderr

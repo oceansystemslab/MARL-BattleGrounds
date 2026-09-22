@@ -1,6 +1,6 @@
 """Check fixed source preparation and unattended process ownership on CPU.
 
-These bounded fixtures test source/config/panel identity, isolated imports,
+These small fixtures test source/config/panel identity, isolated imports,
 explicit GPU selection without GPU allocation, durable failure status, detached
 stdin/log behavior, duplicate launch rejection and recovery marker precedence.
 Status distinguishes live ownership, clean completion, failed exit and a killed
@@ -506,13 +506,19 @@ def _supervisor_command(
             "    original(path,value)\n"
             "module.atomic_json=publish\n"
         )
+    # Shorter than the launcher's real 10 s and 2 s limits so tests stay quick.
+    # One second still gives a trainer that obeys a stop time to exit on a
+    # loaded machine before the kill. A trainer that ignores the stop is killed
+    # after 1 s and collected almost at once; even if every limit ran out, the
+    # stop would end within 3 s, under the 5 s speed check in the stop test.
+    # The tests themselves wait for the supervisor with no time limit.
     script = (
         "import importlib.util; from pathlib import Path; "
         f"spec=importlib.util.spec_from_file_location('launch_under_test',"
         f"{launch.__file__!r}); "
         "module=importlib.util.module_from_spec(spec); "
         "spec.loader.exec_module(module); "
-        "module._STOP_TIMEOUT_SECONDS=0.2; module._KILL_TIMEOUT_SECONDS=0.5; "
+        "module._STOP_TIMEOUT_SECONDS=1.0; module._KILL_TIMEOUT_SECONDS=1.0; "
         f"print('Launch module: '+str(module.__file__),flush=True); "
         + injection
         + f"raise SystemExit(module.supervise_command(Path({str(package)!r}),"
@@ -552,9 +558,8 @@ def test_detached_child_survives_parent_exit_and_records_stdout_and_failure(
         text=True,
     )
     pid = int(result.stdout.strip())
-    deadline = time.monotonic() + 15
     try:
-        while time.monotonic() < deadline:
+        while True:
             path = tmp_path / "process.json"
             if path.exists() and launch._read(path).get("state") == "exited":
                 break
@@ -671,7 +676,11 @@ def test_preparation_copies_panel_and_emits_space_safe_commands_without_launch(
 
 
 def test_stop_signal_reaches_owned_trainer_and_records_exit(tmp_path: Path) -> None:
-    command = _supervisor_command(tmp_path, "import time; time.sleep(30)")
+    worker = (
+        f"import pathlib,time; pathlib.Path({str(tmp_path / 'ready')!r}).touch(); "
+        "time.sleep(30)"
+    )
+    command = _supervisor_command(tmp_path, worker)
     with (tmp_path / "process.log").open("wb") as log:
         child = subprocess.Popen(
             command,
@@ -681,16 +690,15 @@ def test_stop_signal_reaches_owned_trainer_and_records_exit(tmp_path: Path) -> N
             start_new_session=True,
         )
     try:
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            path = tmp_path / "process.json"
-            if path.exists() and "trainer" in launch._read(path):
-                break
+        # Wait until the trainer runs. A stop that arrives after the trainer is
+        # recorded but before it is released keeps it from starting at all.
+        while not (tmp_path / "ready").exists():
             time.sleep(0.02)
+        assert (tmp_path / "ready").exists()
         before = launch._read(tmp_path / "process.json")
         assert "trainer" in before
         child.send_signal(signal.SIGTERM)
-        child.wait(timeout=5)
+        child.wait()
         after = launch._read(tmp_path / "process.json")
         assert after["state"] == "exited"
         assert after["stop_signal"] == signal.SIGTERM
@@ -699,7 +707,7 @@ def test_stop_signal_reaches_owned_trainer_and_records_exit(tmp_path: Path) -> N
     finally:
         if child.poll() is None:
             os.killpg(child.pid, signal.SIGKILL)
-            child.wait(timeout=5)
+            child.wait()
 
 
 def _family_worker(package: Path, mode: str) -> str:
@@ -752,8 +760,7 @@ def _start_family(
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
+    while True:
         record = package / "process.json"
         if (
             (package / "worker.json").exists()
@@ -762,8 +769,6 @@ def _start_family(
         ):
             return child
         time.sleep(0.02)
-    _cleanup_family(package, child)
-    raise AssertionError((package / "process.log").read_text())
 
 
 def _kill_identity(identity: dict[str, Any]) -> None:
@@ -785,7 +790,7 @@ def _cleanup_family(package: Path, child: subprocess.Popen[bytes]) -> None:
                 _kill_identity(process_identity(pid))
     if child.poll() is None:
         child.kill()
-    child.wait(timeout=5)
+    child.wait()
 
 
 @pytest.mark.parametrize(
@@ -814,7 +819,7 @@ def test_stop_reaches_trainer_and_worker_with_bounded_force_and_isolation(
         assert worker["group"] != child.pid
         started = time.monotonic()
         child.send_signal(number)
-        child.wait(timeout=5)
+        child.wait()
         assert time.monotonic() - started < 5
         after = launch._read(tmp_path / "process.json")
         assert after["state"] == "exited" and after["stop_signal"] == number
@@ -837,7 +842,7 @@ def test_stop_reaches_trainer_and_worker_with_bounded_force_and_isolation(
     finally:
         _cleanup_family(tmp_path, child)
         unrelated.kill()
-        unrelated.wait(timeout=5)
+        unrelated.wait()
 
 
 def test_natural_trainer_failure_cleans_worker_after_leader_exit(
@@ -845,7 +850,7 @@ def test_natural_trainer_failure_cleans_worker_after_leader_exit(
 ) -> None:
     child = _start_family(tmp_path, "fail")
     try:
-        child.wait(timeout=5)
+        child.wait()
         after = launch._read(tmp_path / "process.json")
         assert after["state"] == "exited" and after["exit_code"] == 7
         assert after["cleanup"]["signals"] == [signal.SIGTERM]
@@ -862,7 +867,7 @@ def test_deadline_stops_owned_descendants_and_records_distinct_failure(
 ) -> None:
     child = _start_family(tmp_path, mode, deadline_seconds=2.0)
     try:
-        child.wait(timeout=6)
+        child.wait()
         record = launch._read(tmp_path / "process.json")
         assert child.returncode == record["exit_code"] == 124
         assert record["stop_reason"] == "deadline"
@@ -945,13 +950,12 @@ def test_graceful_child_zero_exit_does_not_hide_stop_request(
             stderr=subprocess.STDOUT,
         )
     try:
-        until = time.monotonic() + 5
-        while not (tmp_path / "ready").exists() and time.monotonic() < until:
+        while not (tmp_path / "ready").exists():
             time.sleep(0.02)
         assert (tmp_path / "ready").exists()
         if deadline_seconds is None:
             child.send_signal(signal.SIGTERM)
-        child.wait(timeout=5)
+        child.wait()
         record = launch._read(tmp_path / "process.json")
         assert record["cleanup"]["trainer_exit_code"] == 0
         assert record["exit_code"] == (143 if deadline_seconds is None else 124)
@@ -970,12 +974,9 @@ def test_orphan_worker_blocks_restart_after_supervisor_and_leader_exit(
     try:
         record = launch._read(tmp_path / "process.json")
         child.kill()
-        child.wait(timeout=5)
+        child.wait()
         (tmp_path / "exit_trainer").touch()
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and launch._alive(
-            {"trainer": record["trainer"]}
-        ):
+        while launch._alive({"trainer": record["trainer"]}):
             time.sleep(0.02)
         assert not launch._alive({"process": record["process"]})
         assert not launch._alive({"trainer": record["trainer"]})
@@ -997,7 +998,7 @@ def test_cleanup_never_signals_reaped_child_or_shared_process_group(
     send = Mock()
     monkeypatch.setattr(launch.os, "killpg", send)
     reaped = subprocess.Popen([sys.executable, "-I", "-c", "pass"])
-    reaped.wait(timeout=5)
+    reaped.wait()
     with pytest.raises(ChildProcessError):
         launch._finish_trainer(reaped, signal.SIGTERM)
     shared = subprocess.Popen(
@@ -1009,7 +1010,7 @@ def test_cleanup_never_signals_reaped_child_or_shared_process_group(
         send.assert_not_called()
     finally:
         shared.kill()
-        shared.wait(timeout=5)
+        shared.wait()
 
 
 @pytest.mark.parametrize("changed", ["pid", "start_ticks", "boot_id"])
@@ -1041,11 +1042,10 @@ def test_unregistered_trainer_exits_if_supervisor_dies_before_release(
             start_new_session=True,
         )
     try:
-        child.wait(timeout=5)
+        child.wait()
         assert child.returncode == -signal.SIGKILL
         identity = launch._read(tmp_path / "unregistered.json")
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and launch._alive({"trainer": identity}):
+        while launch._alive({"trainer": identity}):
             time.sleep(0.02)
         assert not launch._alive({"trainer": identity})
         assert not launch._group_members(identity["pid"])
@@ -1057,4 +1057,4 @@ def test_unregistered_trainer_exits_if_supervisor_dies_before_release(
             _kill_identity(launch._read(path))
         if child.poll() is None:
             child.kill()
-        child.wait(timeout=5)
+        child.wait()

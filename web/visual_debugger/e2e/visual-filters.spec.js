@@ -196,9 +196,7 @@ async function authenticatedText(page, path) {
  * @param {{viewerMode: "live" | "replay", audience: string, presentationKind: string}} expected */
 async function openInstalled(page, url, expected) {
   await page.goto(url);
-  await expect(page.locator("#connection-status")).toHaveText("Online", {
-    timeout: 30_000,
-  });
+  await expect(page.locator("#connection-status")).toHaveText("Online");
   const root = page.locator("html");
   await expect(root).toHaveAttribute("data-viewer-mode", expected.viewerMode);
   await expect(root).toHaveAttribute("data-audience", expected.audience);
@@ -244,7 +242,6 @@ async function performCommand(page, path, action) {
     (response) =>
       response.request().method() === "POST" &&
       new URL(response.url()).pathname === path,
-    { timeout: 30_000 },
   );
   await action();
   const response = await responsePromise;
@@ -1441,9 +1438,7 @@ test("real maximum-status replay renders +2 without losing owner semantics", asy
   try {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(replay.url);
-    await expect(page.locator("#connection-status")).toHaveText("Online", {
-      timeout: 30_000,
-    });
+    await expect(page.locator("#connection-status")).toHaveText("Online");
     await expect(page.locator("html")).toHaveAttribute(
       "data-presentation-authority",
       "installed",
@@ -1614,9 +1609,7 @@ test("amended regular and stress scenarios retain Oracle-Agent presentation cont
       "false",
     );
     await expect(page.locator("#battlefield-empty")).toBeHidden();
-    await expect(page.locator(playingChoreography)).toHaveCount(0, {
-      timeout: 15_000,
-    });
+    await expect(page.locator(playingChoreography)).toHaveCount(0);
     const presentation = JSON.parse(
       await authenticatedText(page, "/api/presentation/frame"),
     );

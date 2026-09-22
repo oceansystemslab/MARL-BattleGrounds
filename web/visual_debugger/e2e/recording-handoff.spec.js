@@ -79,9 +79,7 @@ function collectBrowserErrors(page) {
 async function openRecording(page, url) {
   collectBrowserErrors(page);
   await page.goto(url);
-  await expect(page.locator("#connection-status")).toHaveText("Online", {
-    timeout: 30_000,
-  });
+  await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page).toHaveTitle("MARL-BattleGrounds DevClient");
   await expect(page.locator("html")).toHaveAttribute(
     "data-product-kind",
@@ -180,7 +178,6 @@ function expectExactWireRecording(frame, count) {
 async function expectRecordingCount(page, count) {
   await expect(page.locator("#recording-progress")).toHaveText(
     new RegExp(`^${count} / [1-9]\\d* transitions$`),
-    { timeout: 120_000 },
   );
   const frame = await currentFrame(page);
   expectExactWireRecording(frame, count);
@@ -195,7 +192,6 @@ async function captureNextTransition(page, expectedCount) {
     (response) =>
       response.request().method() === "POST" &&
       new URL(response.url()).pathname === "/api/command",
-    { timeout: 120_000 },
   );
   await page.locator("#submit-turn-button").click();
   const response = await responsePromise;
@@ -224,9 +220,7 @@ async function expectSettledReplayHandoff(
   audience = "researcher",
   informationMode = "shared_obs",
 ) {
-  await expect(page.locator("html")).toHaveAttribute("data-viewer-mode", "replay", {
-    timeout: 120_000,
-  });
+  await expect(page.locator("html")).toHaveAttribute("data-viewer-mode", "replay");
   await expect(page).toHaveTitle("MARL-BattleGrounds Replay Viewer");
   await expect(page.locator("html")).toHaveAttribute(
     "data-product-kind",
@@ -484,7 +478,6 @@ test("confirmed prefix discard restarts capture and Finish opens settled frame-z
     (response) =>
       response.request().method() === "POST" &&
       new URL(response.url()).pathname === "/api/command",
-    { timeout: 120_000 },
   );
   try {
     await page.locator("#recording-finish-button").click();
@@ -519,7 +512,6 @@ test("Exit persists an interrupted prefix before clean process shutdown", async 
       (response) =>
         response.request().method() === "POST" &&
         new URL(response.url()).pathname === "/api/command",
-      { timeout: 120_000 },
     )
     .then(async (response) => ({
       payload: await response.json(),
@@ -571,7 +563,6 @@ test("a second live tab cannot advance after Finish and Reconnect adopts replay"
     (response) =>
       response.request().method() === "POST" &&
       new URL(response.url()).pathname === "/api/command",
-    { timeout: 120_000 },
   );
   await stalePage.locator("#submit-turn-button").click();
   const rejected = await rejectedPromise;
@@ -620,7 +611,6 @@ test("actor POV handoff retains battlefield fog and artifact-wide facts", async 
     (response) =>
       response.request().method() === "POST" &&
       new URL(response.url()).pathname === "/api/command",
-    { timeout: 120_000 },
   );
   await page.locator("#recording-finish-button").click();
   const response = await responsePromise;
@@ -698,7 +688,6 @@ test("target race remains Online and fenced until Save As recovers cached artifa
   await expect(page.locator("html")).toHaveAttribute(
     "data-recording-lifecycle",
     "persistence_failed",
-    { timeout: 120_000 },
   );
   await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page.locator("#recording-persistence-error")).toHaveText(
@@ -876,9 +865,7 @@ test("target race remains Online and fenced until Save As recovers cached artifa
   );
 
   await page.locator("#exit-button").click();
-  await expect(page.locator("#connection-status")).toHaveText("Online", {
-    timeout: 120_000,
-  });
+  await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page.locator("#connection-status")).not.toHaveText("Shutting down");
   await expect(page.locator("#notice")).toContainText("remains open for recovery");
 
@@ -921,7 +908,7 @@ test("Reconnect completes a lost Finish response without retrying publication", 
       return;
     }
     finishRequests += 1;
-    const response = await route.fetch({ timeout: 120_000 });
+    const response = await route.fetch();
     expect(response.status()).toBe(200);
     await delayed;
     await route.abort("failed");
@@ -933,9 +920,7 @@ test("Reconnect completes a lost Finish response without retrying publication", 
   } finally {
     releaseResponse();
   }
-  await expect(page.locator("#connection-status")).toHaveText("Resync required", {
-    timeout: 120_000,
-  });
+  await expect(page.locator("#connection-status")).toHaveText("Resync required");
   await expect(page.locator("#notice")).toContainText(
     "Command outcome is unknown because the connection failed",
   );

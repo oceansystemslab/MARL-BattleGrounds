@@ -180,10 +180,14 @@ Do not duplicate an exhaustive numerical cross-product in browser tests. Each
 browser case must protect behavior that needs a real browser. The GPU correctness
 gate does not run the complete CPU suite again.
 
-Keep Playwright `timeout: 0` for whole tests. Individual actions, assertions,
-requests and startup/cleanup retain bounded waits so failures identify the stuck
-operation. Canonical gates stop a red shard at its first failure; successful
-runs still execute the complete inventory.
+Tests have no time limits. Playwright uses `timeout: 0` for whole tests,
+actions, navigation and assertions, and Python tests wait without `timeout=`
+or deadlines. A slow step on a busy machine then waits instead of failing. A
+hung test stays hung: find and fix its cause. Only three kinds of limit stay:
+waits that are meant to expire (for example, "nothing happens within 0.1 s"),
+product timing settings under test, and checks of the product's own speed.
+Canonical gates stop a red shard at its first failure; successful runs still
+execute the complete inventory.
 
 ## Development selection
 

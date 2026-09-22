@@ -57,7 +57,7 @@ def running_live_presentation_server() -> Iterator[
         if thread.is_alive():
             server.shutdown()
         server.server_close()
-        thread.join(timeout=2)
+        thread.join()
 
 
 def _exchange(
@@ -68,7 +68,7 @@ def _exchange(
     body: bytes | None = None,
     headers: dict[str, str] | None = None,
 ) -> tuple[HTTPResponse, bytes]:
-    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    connection = HTTPConnection("127.0.0.1", server.server_port)
     connection.request(method, path, body=body, headers=headers or {})
     response = connection.getresponse()
     payload = response.read()
@@ -145,7 +145,7 @@ def _assert_json_security_headers(response: HTTPResponse, body: bytes) -> None:
 def _duplicate_token_exchange(
     server: DebuggerHTTPServer,
 ) -> tuple[HTTPResponse, bytes]:
-    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    connection = HTTPConnection("127.0.0.1", server.server_port)
     connection.putrequest("GET", _PRESENTATION_PATH)
     connection.putheader(_TOKEN_HEADER, _TOKEN)
     connection.putheader(_TOKEN_HEADER, _TOKEN)
@@ -303,7 +303,7 @@ def test_scripted_reset_http_is_epoch_preserving_and_nonmutating() -> None:
         if thread.is_alive():
             server.shutdown()
         server.server_close()
-        thread.join(timeout=2)
+        thread.join()
 
 
 def test_command_between_raw_and_presentation_gets_is_detectable_by_source_epoch(

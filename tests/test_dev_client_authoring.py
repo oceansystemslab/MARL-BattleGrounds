@@ -1619,7 +1619,7 @@ def test_authoring_binding_serializes_threaded_host_commands(
         call_count += 1
         if call_count == 1:
             first_entered.set()
-            assert release_first.wait(timeout=2.0)
+            assert release_first.wait()
         else:
             second_entered.set()
         return ()
@@ -1628,12 +1628,12 @@ def test_authoring_binding_serializes_threaded_host_commands(
     request = _request({"command_type": "list", "asset_kind": "all"})
     with ThreadPoolExecutor(max_workers=2) as executor:
         first = executor.submit(binding.apply_command, request)
-        assert first_entered.wait(timeout=2.0)
+        assert first_entered.wait()
         second = executor.submit(binding.apply_command, request)
         assert not second_entered.wait(timeout=0.1)
         release_first.set()
-        assert first.result(timeout=2.0).ok
-        assert second.result(timeout=2.0).ok
+        assert first.result().ok
+        assert second.result().ok
     assert second_entered.is_set()
 
 

@@ -1458,9 +1458,7 @@ async function captureCp4ENativeState(page, options) {
 async function openProduct(page, url, mode, { allVisualFilters = false } = {}) {
   captureBrowserErrors(page);
   await page.goto(url);
-  await expect(page.locator("#connection-status")).toHaveText("Online", {
-    timeout: 30_000,
-  });
+  await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page.locator("html")).toHaveAttribute(
     "data-presentation-authority",
     "installed",
@@ -1608,13 +1606,11 @@ async function expectSingleReplayUtilityCommand(page, selector, expectedCommand)
       (response) =>
         response.request().method() === "POST" &&
         new URL(response.url()).pathname === "/api/replay/command",
-      { timeout: 30_000 },
     );
     const presentationPromise = page.waitForResponse(
       (response) =>
         response.request().method() === "GET" &&
         new URL(response.url()).pathname === "/api/presentation/frame",
-      { timeout: 30_000 },
     );
     await page.locator(selector).click();
     const response = await responsePromise;
@@ -1654,7 +1650,6 @@ async function expectSingleActivationCommand(page, path, activate, expectedComma
       (response) =>
         response.request().method() === "POST" &&
         new URL(response.url()).pathname === path,
-      { timeout: 30_000 },
     );
     await activate();
     const response = await responsePromise;
@@ -1698,7 +1693,6 @@ async function expectSingleCommandMatching(page, path, activate, verifyCommand) 
       (response) =>
         response.request().method() === "POST" &&
         new URL(response.url()).pathname === path,
-      { timeout: 30_000 },
     );
     await activate();
     expect((await responsePromise).status()).toBe(200);
@@ -2346,7 +2340,6 @@ async function seekReplay(page, frameIndex) {
     (response) =>
       response.request().method() === "POST" &&
       new URL(response.url()).pathname === "/api/replay/command",
-    { timeout: 30_000 },
   );
   await page.locator("#replay-frame-slider").evaluate((element, value) => {
     if (!(element instanceof HTMLInputElement)) {
@@ -4484,7 +4477,6 @@ test(CP5_C_SLICE_TEST_TITLE, async ({ page }) => {
         (response) =>
           response.request().method() === "POST" &&
           new URL(response.url()).pathname === "/api/replay/command",
-        { timeout: 30_000 },
       );
       await next.click();
       const response = await responsePromise;
@@ -5359,7 +5351,6 @@ async function runCp5Slice5Proof(
       (response) =>
         response.request().method() === "POST" &&
         new URL(response.url()).pathname === "/api/replay/command",
-      { timeout: 30_000 },
     );
     await next.click();
     const response = await responsePromise;
@@ -5799,7 +5790,6 @@ async function runCp5Slice5Proof(
           (response) =>
             response.request().method() === "POST" &&
             new URL(response.url()).pathname === "/api/replay/command",
-          { timeout: 30_000 },
         );
         await page.locator("#view-select").selectOption("researcher");
         expect((await researcherResponse).status()).toBe(200);

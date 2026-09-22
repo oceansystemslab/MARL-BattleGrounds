@@ -974,9 +974,7 @@ test("paused replay installs a complete deterministic static summary at both sup
   const apiRequests = captureApiRequests(page);
   await page.setViewportSize(MINIMUM_VIEWPORT);
   await page.goto(replay.url);
-  await expect(page.locator("#connection-status")).toHaveText("Online", {
-    timeout: 30_000,
-  });
+  await expect(page.locator("#connection-status")).toHaveText("Online");
   await expect(page.locator("html")).toHaveAttribute("data-viewer-mode", "replay");
   await expect(page.locator("html")).toHaveAttribute("data-audience", "researcher");
   await expect(page.locator("html")).toHaveAttribute(

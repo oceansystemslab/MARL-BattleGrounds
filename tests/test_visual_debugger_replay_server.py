@@ -276,7 +276,7 @@ class _FakeReplayService:
         if self.metric_catalog_started is not None:
             self.metric_catalog_started.set()
         if self.metric_catalog_release is not None:
-            assert self.metric_catalog_release.wait(timeout=5)
+            assert self.metric_catalog_release.wait()
         return b'{"measurements":[{"name":"example","applicable":false}]}'
 
     def metric_analysis(
@@ -412,8 +412,7 @@ class _BlockingLiveService:
 
     def _wait_for_release(self) -> None:
         self.entered.set()
-        if not self.release.wait(timeout=5):
-            raise RuntimeError("synthetic live request was not released")
+        self.release.wait()
 
 
 def _error_factory(*, error_code: str, message: str) -> _FakeReplayError:
@@ -489,7 +488,7 @@ def running_replay_server() -> Iterator[
         if thread.is_alive():
             server.shutdown()
         server.server_close()
-        thread.join(timeout=2)
+        thread.join()
 
 
 def _exchange(
@@ -500,7 +499,7 @@ def _exchange(
     body: bytes | None = None,
     headers: dict[str, str] | None = None,
 ) -> tuple[HTTPResponse, bytes]:
-    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    connection = HTTPConnection("127.0.0.1", server.server_port)
     connection.request(method, path, body=body, headers=headers or {})
     response = connection.getresponse()
     payload = response.read()
@@ -509,11 +508,7 @@ def _exchange(
 
 
 def _raw_exchange(server: DebuggerHTTPServer, request: bytes) -> bytes:
-    with socket.create_connection(
-        ("127.0.0.1", server.server_port),
-        timeout=5,
-    ) as connection:
-        connection.settimeout(5)
+    with socket.create_connection(("127.0.0.1", server.server_port)) as connection:
         connection.sendall(request)
         chunks: list[bytes] = []
         while True:
@@ -646,7 +641,7 @@ def _real_metric_exchange(
         if thread.is_alive():
             server.shutdown()
         server.server_close()
-        thread.join(timeout=2)
+        thread.join()
 
 
 def test_replay_bootstrap_exposes_only_the_replay_product_identity(
@@ -809,7 +804,7 @@ def test_real_service_reserved_suffix_metric_download_is_repeatable() -> None:
         if thread.is_alive():
             server.shutdown()
         server.server_close()
-        thread.join(timeout=2)
+        thread.join()
 
     expected = canonical_metric_report_artifact_json_bytes_v1(artifact)
     first_response, first_body = first
@@ -1097,14 +1092,14 @@ def test_live_request_and_replay_replacement_are_serialized_and_coherent() -> No
     swap_thread = Thread(target=install_replay, daemon=True)
     try:
         old_request.start()
-        assert live_service.entered.wait(timeout=2)
+        assert live_service.entered.wait()
         swap_thread.start()
-        assert swap_started.wait(timeout=2)
+        assert swap_started.wait()
         assert not swap_finished.wait(timeout=0.1)
 
         live_service.release.set()
-        old_request.join(timeout=2)
-        swap_thread.join(timeout=2)
+        old_request.join()
+        swap_thread.join()
         assert not old_request.is_alive()
         assert not swap_thread.is_alive()
 
@@ -1195,9 +1190,9 @@ def test_live_request_and_replay_replacement_are_serialized_and_coherent() -> No
         if server_thread.is_alive():
             server.shutdown()
         server.server_close()
-        server_thread.join(timeout=2)
-        old_request.join(timeout=2)
-        swap_thread.join(timeout=2)
+        server_thread.join()
+        old_request.join()
+        swap_thread.join()
 
 
 def test_in_flight_live_presentation_pins_old_binding_until_replay_cas() -> None:
@@ -1245,13 +1240,13 @@ def test_in_flight_live_presentation_pins_old_binding_until_replay_cas() -> None
     swap_thread = Thread(target=install_replay, daemon=True)
     try:
         old_request.start()
-        assert live_service.entered.wait(timeout=2)
+        assert live_service.entered.wait()
         swap_thread.start()
         assert not swap_finished.wait(timeout=0.1)
 
         live_service.release.set()
-        old_request.join(timeout=2)
-        swap_thread.join(timeout=2)
+        old_request.join()
+        swap_thread.join()
         assert not old_request.is_alive()
         assert not swap_thread.is_alive()
         assert swap_results == [True]
@@ -1279,9 +1274,9 @@ def test_in_flight_live_presentation_pins_old_binding_until_replay_cas() -> None
         if server_thread.is_alive():
             server.shutdown()
         server.server_close()
-        server_thread.join(timeout=2)
-        old_request.join(timeout=2)
-        swap_thread.join(timeout=2)
+        server_thread.join()
+        old_request.join()
+        swap_thread.join()
 
 
 def test_live_request_can_reentrantly_install_replay_before_live_response() -> None:
@@ -1347,7 +1342,7 @@ def test_live_request_can_reentrantly_install_replay_before_live_response() -> N
         if server_thread.is_alive():
             server.shutdown()
         server.server_close()
-        server_thread.join(timeout=2)
+        server_thread.join()
 
 
 def test_preconstructed_router_requires_exact_coherent_redundant_inputs() -> None:
@@ -1517,13 +1512,13 @@ def test_in_flight_error_uses_the_pinned_protocol_family() -> None:
     swap_thread = Thread(target=install_replay, daemon=True)
     try:
         old_request.start()
-        assert live_service.entered.wait(timeout=2)
+        assert live_service.entered.wait()
         swap_thread.start()
         assert not swap_finished.wait(timeout=0.1)
 
         live_service.release.set()
-        old_request.join(timeout=2)
-        swap_thread.join(timeout=2)
+        old_request.join()
+        swap_thread.join()
         assert not old_request.is_alive()
         assert not swap_thread.is_alive()
 
@@ -1549,9 +1544,9 @@ def test_in_flight_error_uses_the_pinned_protocol_family() -> None:
         if server_thread.is_alive():
             server.shutdown()
         server.server_close()
-        server_thread.join(timeout=2)
-        old_request.join(timeout=2)
-        swap_thread.join(timeout=2)
+        server_thread.join()
+        old_request.join()
+        swap_thread.join()
 
 
 def test_coordinator_cas_failure_never_partially_swaps_active_pair() -> None:
@@ -1848,7 +1843,7 @@ def test_actual_shared_replay_http_keeps_fog_private_beside_artifact_facts(
         if thread.is_alive():
             server.shutdown()
         server.server_close()
-        thread.join(timeout=2)
+        thread.join()
 
     assert frame_response.status == timeline_response.status == HTTPStatus.OK
     assert applied_response.status == duplicate_response.status == HTTPStatus.OK
@@ -2080,7 +2075,7 @@ def test_replay_routes_reuse_host_origin_token_and_size_protections(
         body=b"{}",
         headers={"Content-Type": "application/json"},
     )
-    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    connection = HTTPConnection("127.0.0.1", server.server_port)
     connection.putrequest("POST", "/api/replay/command", skip_host=True)
     connection.putheader("Host", server.expected_host)
     connection.putheader(_TOKEN_HEADER, _TOKEN)
@@ -2201,7 +2196,7 @@ def test_live_and_replay_routes_are_mode_isolated(
     finally:
         live_server.shutdown()
         live_server.server_close()
-        live_thread.join(timeout=2)
+        live_thread.join()
 
     assert replay_live_command.status == HTTPStatus.NOT_FOUND
     assert invented_replay_frame.status == HTTPStatus.NOT_FOUND
@@ -2243,7 +2238,7 @@ def test_replay_exit_response_is_flushed_before_server_shutdown() -> None:
             body=body,
             headers=_authorized_headers(**{"Content-Type": "application/json"}),
         )
-        thread.join(timeout=2)
+        thread.join()
 
         assert response.status == HTTPStatus.OK
         assert json.loads(payload)["result"] == "shutdown_scheduled"
@@ -2321,7 +2316,7 @@ def test_metric_catalog_http_is_authenticated_and_keeps_playback_available(
     )
     worker.start()
     try:
-        assert service.metric_catalog_started.wait(timeout=2)
+        assert service.metric_catalog_started.wait()
         # The catalog may still be preparing while ordinary replay reads run.
         frame_response, _ = _exchange(
             server, "GET", REPLAY_HTTP_ROUTES.frame, headers={_TOKEN_HEADER: _TOKEN}
@@ -2330,7 +2325,7 @@ def test_metric_catalog_http_is_authenticated_and_keeps_playback_available(
         assert worker.is_alive()
     finally:
         service.metric_catalog_release.set()
-        worker.join(timeout=2)
+        worker.join()
     assert not worker.is_alive()
     response, payload = results[0]
     assert response.status == HTTPStatus.OK

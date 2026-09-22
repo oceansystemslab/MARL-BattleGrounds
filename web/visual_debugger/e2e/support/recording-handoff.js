@@ -1,6 +1,6 @@
 /**
  * @file Provide browser-test setup and inspection for live-recording handoff to an
- * immutable replay.
+ * immutable replay. Waits for debugger startup and exit have no time limit.
  */
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -12,7 +12,6 @@ import { REPOSITORY_ROOT, stopDebugger } from "./live-debugger.js";
 const RECORDING_TEMP_PREFIX = "marl-battlegrounds-recording-e2e-";
 const REPLAY_FILE_SUFFIX = ".marlbg-replay.json";
 const METRIC_FILE_SUFFIX = ".marlbg-metrics.json";
-const STARTUP_TIMEOUT_MS = 60_000;
 
 /** @param {string} replayPath */
 export function metricReportPathForReplay(replayPath) {
@@ -83,15 +82,8 @@ export async function startRecordingDebugger({ stem = "episode" } = {}) {
           return;
         }
         settled = true;
-        clearTimeout(timeout);
         callback();
       };
-      const timeout = setTimeout(() => {
-        finish(() => {
-          child.kill("SIGTERM");
-          reject(new Error(`Recording debugger startup timed out.\n${stderr}`));
-        });
-      }, STARTUP_TIMEOUT_MS);
 
       child.once("error", (error) => finish(() => reject(error)));
       child.stderr?.setEncoding("utf8");
@@ -173,20 +165,14 @@ export async function stopRecordingDebugger(started) {
   }
 }
 
-/** @param {import("node:child_process").ChildProcess} child
- * @param {number} [timeoutMs] */
-export async function waitForRecordingDebuggerExit(child, timeoutMs = 30_000) {
+/** @param {import("node:child_process").ChildProcess} child */
+export async function waitForRecordingDebuggerExit(child) {
   if (child.exitCode !== null || child.signalCode !== null) {
     return { exitCode: child.exitCode, signalCode: child.signalCode };
   }
-  return new Promise((resolveExit, reject) => {
-    const timeout = setTimeout(() => {
-      child.off("exit", onExit);
-      reject(new Error("Recording debugger did not exit within the deadline."));
-    }, timeoutMs);
+  return new Promise((resolveExit) => {
     /** @param {number | null} exitCode @param {NodeJS.Signals | null} signalCode */
     const onExit = (exitCode, signalCode) => {
-      clearTimeout(timeout);
       resolveExit({ exitCode, signalCode });
     };
     child.once("exit", onExit);

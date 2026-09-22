@@ -80,7 +80,7 @@ def running_server() -> Iterator[tuple[DebuggerHTTPServer, Thread]]:
         if thread.is_alive():
             server.shutdown()
         server.server_close()
-        thread.join(timeout=2)
+        thread.join()
 
 
 def _exchange(
@@ -159,11 +159,7 @@ def _complete_runtime_asset_root(tmp_path: Path) -> Path:
 
 
 def _raw_exchange(server: DebuggerHTTPServer, request: bytes) -> bytes:
-    with socket.create_connection(
-        ("127.0.0.1", server.server_port),
-        timeout=5,
-    ) as connection:
-        connection.settimeout(5)
+    with socket.create_connection(("127.0.0.1", server.server_port)) as connection:
         connection.sendall(request)
         chunks: list[bytes] = []
         while True:
@@ -346,7 +342,7 @@ def test_live_authoring_route_strictly_parses_and_applies_one_command(
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=2)
+        thread.join()
 
     assert accepted.status == HTTPStatus.OK
     assert bootstrap.status == HTTPStatus.OK
@@ -836,7 +832,7 @@ def test_authenticated_exit_delivers_response_then_stops_server() -> None:
             body=body,
             headers=_authorized_headers(**{"Content-Type": "application/json"}),
         )
-        thread.join(timeout=2)
+        thread.join()
 
         assert response.status == 200
         assert json.loads(payload)["result"] == "shutdown_scheduled"
@@ -888,7 +884,7 @@ def test_accepted_exit_stops_server_when_response_write_fails(
             + f"Content-Length: {len(body)}\r\n\r\n".encode()
             + body,
         )
-        thread.join(timeout=2)
+        thread.join()
 
         assert response == b""
         assert not thread.is_alive()

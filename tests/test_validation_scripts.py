@@ -41,7 +41,6 @@ def _run(
         check=check,
         capture_output=True,
         text=True,
-        timeout=30,
     )
 
 

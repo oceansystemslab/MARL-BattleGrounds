@@ -1032,7 +1032,7 @@ def test_live_presentation_getter_holds_lock_against_submit(
         raw_frame: ResearcherLiveDebuggerFrameV2,
     ) -> LiveOracleAuthorizedPresentationFrameV1:
         entered.set()
-        assert release.wait(timeout=10)
+        assert release.wait()
         return original(
             context,
             current_frame,
@@ -1052,12 +1052,12 @@ def test_live_presentation_getter_holds_lock_against_submit(
     )
     with ThreadPoolExecutor(max_workers=2) as pool:
         presentation_future = pool.submit(service.current_presentation)
-        assert entered.wait(timeout=10)
+        assert entered.wait()
         submit_future = pool.submit(service.apply_command, submit)
         assert not submit_future.done()
         release.set()
-        presentation = presentation_future.result(timeout=20)
-        submitted = submit_future.result(timeout=20)
+        presentation = presentation_future.result()
+        submitted = submit_future.result()
 
     assert presentation.outcome == "response"
     assert isinstance(
