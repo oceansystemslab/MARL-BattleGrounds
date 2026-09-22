@@ -1,4 +1,7 @@
-"""Check DevClient map and scenario authoring with isolated local files."""
+"""Check DevClient map and scenario authoring with isolated local files, including
+that a saved map equal to an approved TDM map previews in the live debugger under
+that map's registered identity and its approved source label.
+"""
 
 from __future__ import annotations
 
@@ -60,9 +63,18 @@ from scripts.dev.visual_debugger.protocol import (
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.service import DebuggerService
-from tests.visual_debugger_fixtures import debugger_test_launch_specification
+from tests.visual_debugger_fixtures import (
+    approved_map_draft,
+    debugger_test_launch_specification,
+)
 
 from marl_battlegrounds.core.types import MAX_OBSTACLE_SLOTS
+from marl_battlegrounds.evaluation.map_identity import RecordedMap, recorded_map
+from marl_battlegrounds.evaluation.models import ContentAddressedIdentityV1
+from marl_battlegrounds.tasks import list_tdm_maps
+from marl_battlegrounds.viewer.presentation_protocol import (
+    LiveOracleAuthorizedPresentationFrameV1,
+)
 
 
 def _store(tmp_path: Path) -> DevAssetStore:
@@ -1458,6 +1470,78 @@ def test_loaded_snapshot_replaces_and_resets_the_exact_debugger_scenario(
     assert configured_result.outcome == "response"
     assert debugger.session.team_b_controller == "reactive_tdm"
     assert int(debugger.session.state.step_count) == 7
+
+
+def test_saved_map_equal_to_an_approved_map_previews_with_its_registered_identity(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    approved = list_tdm_maps()[41]
+    saved = store.save_draft(approved_map_draft(41), expected_revision=0)
+    # The draft is saved at revision 1 while the catalog records revision 2; the
+    # recorded layout must carry the catalog's approved revision.
+    assert saved.revision == 1
+    assert approved.source.revision == 2
+    initial_session = create_session(
+        get_scenario("arena_5v5"),
+        seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
+        controlled_global_slot=None,
+        show_ranges=True,
+        verbose_logging=False,
+    )
+    debugger = DebuggerService(
+        initial_session,
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+    )
+
+    def install_snapshot(snapshot: LoadedDevScenarioSnapshotV1) -> None:
+        debugger.load_scenario(debugger_scenario_from_snapshot(snapshot))
+
+    loader = DevScenarioLoadService(store, install_snapshot=install_snapshot)
+
+    attempt = loader.load(
+        DevSavedDraftSourceV1(
+            asset_kind="map",
+            asset_id=saved.asset_id,
+            revision=saved.revision,
+        )
+    )
+
+    assert attempt.ok, [problem.message for problem in attempt.problems]
+    assert attempt.summary is not None
+    assert attempt.summary.debug_profile == "default_tdm_map_preview"
+    assert debugger.revision == 1
+    context = debugger.session.evaluation_context
+    assert context.identity.layout == ContentAddressedIdentityV1(
+        identifier=approved.source.asset_id,
+        version=approved.source.revision,
+        canonical_digest=approved.source.semantic_digest,
+    )
+    aggregation = {row.name: row.value for row in context.aggregation_keys}
+    assert aggregation["map_origin"] == "registered"
+    assert aggregation["map_id"] == "41"
+    assert aggregation["map_name"] == approved.name
+    assert aggregation["map_split"] == "training"
+    assert aggregation["scenario_source"] == (
+        "map:saved_draft:tdm_map_id_41_sai_training:revision:1"
+        ":profile:default-tdm-map-preview@1"
+    )
+    expected_map = RecordedMap(
+        map_id=41,
+        technical_name=approved.name,
+        display_name="Sai",
+        split="training",
+    )
+    assert recorded_map(context) == expected_map
+    presentation = debugger.current_presentation()
+    assert presentation.outcome == "response"
+    payload = presentation.payload
+    assert type(payload) is LiveOracleAuthorizedPresentationFrameV1
+    assert payload.match_summary is not None
+    assert payload.match_summary.map == expected_map
 
 
 def test_single_authoring_binding_parses_whole_commands_and_shares_loader(

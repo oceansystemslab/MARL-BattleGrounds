@@ -41,10 +41,11 @@ needed to launch the built browser assets.
 
 Create or open a map/scenario in DevClient, save it, then load that revision in
 Combat Debugger. A saved scenario restores its authored state. A saved map opens
-a clearly labeled default 5v5 TDM preview. **Open in Debug** uses the same
-Python build-and-validation path. A rejected load leaves the current session
-unchanged. Reset restores the already loaded snapshot; it does not pick up later
-edits to the saved asset.
+a clearly labeled default 5v5 TDM preview. A map equal to an approved TDM map is
+recorded under that map's registered identity. **Open
+in Debug** uses the same Python build-and-validation path. A rejected load
+leaves the current session unchanged. Reset restores the already loaded
+snapshot; it does not pick up later edits to the saved asset.
 
 Save is explicit, with no autosave. It creates numbered local revisions and
 checks the expected revision before writing. Selectors list every applicable

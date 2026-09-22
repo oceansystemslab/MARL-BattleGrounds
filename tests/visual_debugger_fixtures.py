@@ -1,9 +1,21 @@
-"""Build debugger test scenarios, including deliberately rejected actions."""
+"""Build debugger test scenarios, including deliberately rejected actions, and an
+authoring map draft that reproduces one approved TDM map from packaged catalog
+geometry alone, so its semantic digest equals the catalog's approved source digest.
+"""
 
+import math
 from collections.abc import Sequence
 
 import jax
 import jax.numpy as jnp
+from scripts.dev.visual_debugger.authoring_compiler import map_semantic_digest
+from scripts.dev.visual_debugger.authoring_models import (
+    DevMapDraftV1,
+    DevPillarV1,
+    DevPointV1,
+    DevWallV1,
+    new_map_draft,
+)
 from scripts.dev.visual_debugger.control import (
     build_scripted_joint_action,
     submit_joint_action,
@@ -19,6 +31,7 @@ from scripts.dev.visual_debugger.model import (
     ScenarioFrame,
 )
 
+from marl_battlegrounds._tdm_assets import map_geometry
 from marl_battlegrounds.core.config import resolve_agent_profile
 from marl_battlegrounds.core.env import reset
 from marl_battlegrounds.core.types import (
@@ -31,11 +44,23 @@ from marl_battlegrounds.core.types import (
     MOVE_EAST,
     MOVE_STAY,
     NEUTRAL_CLASS_ID,
+    OBSTACLE_FEATURE_ACTIVE,
+    OBSTACLE_FEATURE_HEIGHT,
+    OBSTACLE_FEATURE_RADIUS,
+    OBSTACLE_FEATURE_THETA,
+    OBSTACLE_FEATURE_TYPE,
+    OBSTACLE_FEATURE_WIDTH,
+    OBSTACLE_FEATURE_X,
+    OBSTACLE_FEATURE_Y,
     OBSTACLE_FEATURES,
+    OBSTACLE_TYPE_PILLAR,
+    OBSTACLE_TYPE_WALL,
     TASK_MODE_NEUTRAL,
     EnvConfig,
 )
 from marl_battlegrounds.evaluation.catalog import build_code_revision_v1
+from marl_battlegrounds.evaluation.map_identity import approved_map_id
+from marl_battlegrounds.tasks import list_tdm_maps
 
 _TEST_DIGEST = "a" * 64
 
@@ -78,6 +103,62 @@ def _spawn_pad_positions(map_width: float, map_height: float) -> jax.Array:
         ),
         axis=0,
     )
+
+
+def approved_map_draft(map_id: int) -> DevMapDraftV1:
+    info = list_tdm_maps()[map_id]
+    geometry = map_geometry(info)
+    obstacles: list[DevWallV1 | DevPillarV1] = []
+    for index, row in enumerate(geometry.obstacles):
+        if row[OBSTACLE_FEATURE_ACTIVE] != 1.0:
+            continue
+        object_id = f"obstacle_{index}"
+        if row[OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_WALL:
+            obstacles.append(
+                DevWallV1(
+                    object_id=object_id,
+                    center_x=row[OBSTACLE_FEATURE_X],
+                    center_y=row[OBSTACLE_FEATURE_Y],
+                    width=row[OBSTACLE_FEATURE_WIDTH],
+                    height=row[OBSTACLE_FEATURE_HEIGHT],
+                    rotation_degrees=math.degrees(row[OBSTACLE_FEATURE_THETA]),
+                )
+            )
+        elif row[OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_PILLAR:
+            obstacles.append(
+                DevPillarV1(
+                    object_id=object_id,
+                    center_x=row[OBSTACLE_FEATURE_X],
+                    center_y=row[OBSTACLE_FEATURE_Y],
+                    radius=row[OBSTACLE_FEATURE_RADIUS],
+                )
+            )
+        else:
+            raise ValueError(f"map {map_id} row {index} has an unknown obstacle type")
+    blank = new_map_draft(info.source.asset_id)
+    packaged_pads = [
+        point for bank in geometry.team_spawn_pad_positions for point in bank
+    ]
+    spawn_pads = tuple(
+        pad.model_copy(update={"position": DevPointV1(x=float(x), y=float(y))})
+        for pad, (x, y) in zip(blank.content.spawn_pads, packaged_pads, strict=True)
+    )
+    draft = blank.model_copy(
+        update={
+            "content": blank.content.model_copy(
+                update={
+                    "name": info.name,
+                    "width": geometry.map_width,
+                    "height": geometry.map_height,
+                    "obstacles": tuple(obstacles),
+                    "spawn_pads": spawn_pads,
+                }
+            )
+        }
+    )
+    # The draft must be the approved map itself, not merely look like it.
+    assert approved_map_id(draft.asset_id, map_semantic_digest(draft.content)) == map_id
+    return draft
 
 
 def rejection_lane_scenario() -> DebuggerScenario:

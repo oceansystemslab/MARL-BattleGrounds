@@ -465,6 +465,13 @@ def build_debugger_evaluation_context_v1(
     EvaluationEpisodeContextV3
         Matching roster, config, task/scenario identity, controller assignments,
         named seed streams, capture choices and custom/nonofficial metadata.
+        When the scenario provenance names an approved map ID, the layout
+        identity is that map's approved source: its catalog asset ID, catalog
+        revision and semantic digest, and the aggregation keys record the map as
+        registered. Other authored provenance gives the layout identity
+        ``authored-map`` version 1 with the map's semantic digest, recorded as a
+        custom map. Without provenance the layout identity is
+        ``resolved-debugger-environment`` version 1 with the resolved config digest.
 
     Raises
     ------
@@ -472,7 +479,9 @@ def build_debugger_evaluation_context_v1(
         If the launch record or config is not the exact supported model type.
     ValueError
         If generation, horizon, controllers, input mode, source classification,
-        configuration or recorded identity is invalid.
+        configuration or recorded identity is invalid, or if the provenance map ID
+        names an approved map whose semantic digest differs from the scenario's
+        map digest.
 
     Notes
     -----
@@ -480,7 +489,10 @@ def build_debugger_evaluation_context_v1(
     Launch-stable named seeds preserve the same initial conditions across repeated
     comparisons; run_generation changes episode identity without hiding new randomness.
     This builds host metadata and may copy arrays for validation/hashing. It does not
-    start an episode or write a replay.
+    start an episode or write a replay. An approved map's source identity is read
+    from the packaged TDM catalog on the host. Only the layout digest enters the
+    evaluation, matchup, match and episode IDs, so those IDs do not depend on the
+    layout label.
     """
     if type(launch_specification) is not DebuggerEvaluationLaunchSpecificationV1:
         raise TypeError(
@@ -540,6 +552,29 @@ def build_debugger_evaluation_context_v1(
         if scenario.provenance is not None
         else resolved_config.canonical_digest_sha256
     )
+    approved_source = None
+    if scenario.provenance is not None and scenario.provenance.map_id is not None:
+        from marl_battlegrounds.tasks import list_tdm_maps
+
+        # The layout label names the approved source whose semantic digest equals
+        # the loaded content: the catalog's asset ID and revision, never the
+        # draft's own file revision, which is 0 for an unsaved buffer and moves
+        # when the same content is saved again.
+        approved_source = list_tdm_maps()[scenario.provenance.map_id].source
+        if approved_source.semantic_digest != layout_identity_digest:
+            raise ValueError(
+                "provenance map_id names an approved map whose semantic digest "
+                "differs from the scenario's map digest"
+            )
+    if approved_source is not None:
+        layout_identifier = approved_source.asset_id
+        layout_version = approved_source.revision
+    elif scenario.provenance is not None:
+        layout_identifier = "authored-map"
+        layout_version = 1
+    else:
+        layout_identifier = "resolved-debugger-environment"
+        layout_version = 1
     actor_projection = (
         SHARED_OBS_ACTOR_PROJECTION_V2
         if execution_information_mode == "shared_obs"
@@ -644,12 +679,8 @@ def build_debugger_evaluation_context_v1(
         },
     )
     layout = ContentAddressedIdentityV1(
-        identifier=(
-            "authored-map"
-            if scenario.provenance is not None
-            else "resolved-debugger-environment"
-        ),
-        version=1,
+        identifier=layout_identifier,
+        version=layout_version,
         canonical_digest=layout_identity_digest,
     )
     scenario_identity = ContentAddressedIdentityV1(

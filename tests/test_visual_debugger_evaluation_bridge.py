@@ -1,4 +1,8 @@
-"""Check the recorded context created when the debugger starts an episode."""
+"""Check the recorded context created when the debugger starts an episode,
+including that a scenario naming an approved map records that map's approved
+source as its layout identity without changing episode IDs, and that a map ID
+whose approved digest differs from the recorded map digest is rejected.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,8 @@ import pytest
 import scripts.dev.visual_debugger.evaluation_bridge as evaluation_bridge
 import scripts.dev.visual_debugger.recording as debugger_recording
 from pydantic import ValidationError
+from scripts.dev.visual_debugger.authoring_compiler import compile_dev_scenario
+from scripts.dev.visual_debugger.authoring_models import new_scenario_draft
 from scripts.dev.visual_debugger.evaluation_bridge import (
     DEBUGGER_PUBLIC_AGENT_IDS_V1,
     DebuggerActionSourceKindV1,
@@ -17,16 +23,19 @@ from scripts.dev.visual_debugger.evaluation_bridge import (
     build_debugger_evaluation_launch_specification_v1,
 )
 from scripts.dev.visual_debugger.model import (
+    DebuggerScenario,
     DebuggerScenarioProvenance,
     TeamBController,
     TeamController,
 )
 from scripts.dev.visual_debugger.scenarios import get_scenario
+from tests.visual_debugger_fixtures import approved_map_draft
 
 from marl_battlegrounds.core.env import initialize_scenario_state
 from marl_battlegrounds.evaluation.capture import (
     capture_initial_evaluation_frame_v2,
 )
+from marl_battlegrounds.evaluation.map_identity import recorded_map
 from marl_battlegrounds.evaluation.models import (
     REQUIRED_SCHEMA_BINDINGS_V3,
     AssignedPolicySlotV2,
@@ -37,6 +46,7 @@ from marl_battlegrounds.evaluation.models import (
     NotApplicablePolicySlotV1,
     canonical_json_bytes,
 )
+from marl_battlegrounds.tasks import list_tdm_maps
 
 
 def _code_revision(*, dirty: bool = False) -> CodeRevisionV1:
@@ -637,6 +647,99 @@ def test_authored_team_deathmatch_uses_independent_task_map_and_scenario_identit
     assert context.identity.scenario is not None
     assert context.identity.scenario.identifier == "authored-team-deathmatch-scenario"
     assert context.identity.scenario.canonical_digest == "b" * 64
+
+
+def test_registered_map_layout_identity_names_the_approved_source() -> None:
+    approved = list_tdm_maps()[41]
+    compiled = compile_dev_scenario(
+        new_scenario_draft("preview", source_map=approved_map_draft(41))
+    )
+    assert compiled.map_semantic_digest == approved.source.semantic_digest
+    source = get_scenario("arena_5v5")
+
+    def scenario_with(map_id: int | None) -> DebuggerScenario:
+        return replace(
+            source,
+            name="approved-map-preview",
+            build_scenario=lambda: (compiled.config, compiled.initial_state),
+            provenance=DebuggerScenarioProvenance(
+                source_kind="saved_draft",
+                source_identity="map:saved_draft:tdm_map_id_41_sai_training:revision:2",
+                scenario_semantic_digest=compiled.semantic_digest,
+                map_semantic_digest=compiled.map_semantic_digest,
+                resolved_configuration_digest=compiled.resolved_configuration_digest,
+                resolved_initial_state_digest=compiled.resolved_initial_state_digest,
+                map_id=map_id,
+            ),
+        )
+
+    def context_with(map_id: int | None) -> EvaluationEpisodeContextV3:
+        return build_debugger_evaluation_context_v1(
+            _launch(),
+            scenario=scenario_with(map_id),
+            config=compiled.config,
+            run_generation=0,
+            action_source_kind="manual",
+            team_a_controller="manual",
+            team_b_controller="manual",
+            execution_information_mode="no_shared_obs",
+        )
+
+    registered = context_with(41)
+    custom = context_with(None)
+
+    assert registered.identity.layout == ContentAddressedIdentityV1(
+        identifier=approved.source.asset_id,
+        version=approved.source.revision,
+        canonical_digest=approved.source.semantic_digest,
+    )
+    assert recorded_map(registered).map_id == 41
+    assert custom.identity.layout == ContentAddressedIdentityV1(
+        identifier="authored-map",
+        version=1,
+        canonical_digest=approved.source.semantic_digest,
+    )
+    assert recorded_map(custom).map_id is None
+    # Only the layout digest is hashed into the IDs, so the label changes nothing.
+    assert registered.identity.evaluation_id == custom.identity.evaluation_id
+    assert registered.identity.matchup_id == custom.identity.matchup_id
+    assert registered.identity.match_id == custom.identity.match_id
+    assert registered.identity.episode_id == custom.identity.episode_id
+
+
+def test_registered_map_with_a_foreign_digest_is_rejected_before_geometry() -> None:
+    source = get_scenario("arena_5v5")
+    neutral_config, state = source.build_scenario()
+    tdm_config = neutral_config._replace(
+        task_mode=1,
+        team_deathmatch_score_threshold=5,
+    )
+    stale = replace(
+        source,
+        name="stale-map-id",
+        build_scenario=lambda: (tdm_config, state),
+        provenance=DebuggerScenarioProvenance(
+            source_kind="saved_draft",
+            source_identity="saved_draft:scenario:arena:r1",
+            scenario_semantic_digest="b" * 64,
+            map_semantic_digest="c" * 64,
+            resolved_configuration_digest="d" * 64,
+            resolved_initial_state_digest="e" * 64,
+            map_id=41,
+        ),
+    )
+    # The arena geometry also differs from map 41; the digest guard must speak first.
+    with pytest.raises(ValueError, match="semantic digest differs"):
+        build_debugger_evaluation_context_v1(
+            _launch(),
+            scenario=stale,
+            config=tdm_config,
+            run_generation=0,
+            action_source_kind="manual",
+            team_a_controller="manual",
+            team_b_controller="manual",
+            execution_information_mode="no_shared_obs",
+        )
 
 
 def test_context_captures_the_authored_initial_frame_through_public_cp2_api() -> None:

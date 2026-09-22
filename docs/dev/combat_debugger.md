@@ -134,6 +134,11 @@ authored starting state. Map rows are explicitly labelled as default 5v5 TDM
 previews: Python copies the map into the default scenario, builds the simulator
 inputs, and validates them. It does not change or save the map. `Open in Debug`
 in either authoring area calls this same loading service for its current buffer.
+When a map's content equals an approved TDM map, its preview is recorded under
+that map's registered identity: the map ID, name and split appear in the
+recording keys, and the layout identity carries the approved source's asset ID,
+catalog revision and semantic digest, so the match summary shows the map's name
+instead of Custom Map. Any other map is recorded as a custom layout.
 Python parses and validates each requested start before replacing the current
 session. A failure leaves the session untouched and reports linked problems.
 Reset restores the immutable loaded snapshot and seed, including its map,
