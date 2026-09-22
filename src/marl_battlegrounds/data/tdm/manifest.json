@@ -555,12 +555,12 @@
       "curriculum": false,
       "source": {
         "asset_id": "tdm_map_id_39_ufo_training",
-        "revision": 6,
-        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_39_ufo_training/r6.json",
-        "source_sha256": "4519944680a3810cb5985bb07f6a8692d23eb454f37d63905aa89fc58b4c5a37",
-        "semantic_digest": "8755f18410e55ab70df5cab8f99ac1de358609868882042b76796c7115dd22db"
+        "revision": 7,
+        "source_path": "artifacts/dev_client/drafts/maps/tdm_map_id_39_ufo_training/r7.json",
+        "source_sha256": "f91633cc6cfdb12043855e414c2d1f23d236acce7bacfd0a5399af84358de032",
+        "semantic_digest": "b2e8789d814fdfdf124d527b5dd924683f846ace38eaac9d4ea7cb6880b0eca3"
       },
-      "resource_sha256": "8acdae3c42235af3b1a60a8442959ff3f511089d8e3aaeba835ba89ce9eaed36"
+      "resource_sha256": "eb1e056aa48df15395c9538b5d9ff2917b91ed4013c3a865be31abf4a3e97697"
     },
     {
       "map_id": 40,

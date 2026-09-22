@@ -923,6 +923,11 @@ collection. This work proves no learning, geometry or theoretical-optimality cla
 
 ### Recording Costs — 2026-09-16
 
+**Workload note, 22 September 2026.** These measurements used games between the old
+scripted controllers ALPHA version 2 and BETA version 4 only as a workload. They remain valid
+measurements of the recording code's cost.
+They say nothing current about either controller.
+
 A matched RTX 5090 check used 32 games, 16 decisions, ALPHA/BETA controllers,
 the same map and keys, and five synchronized warm samples per mode. Every retained
 metric and final trajectory matched the committed `f43c2cb` reference by value.
@@ -1376,6 +1381,12 @@ that answers their question. Reading a subset saves analysis memory without
 changing collection or the original CSV.
 
 ## Performance qualification
+
+**Workload note, 22 September 2026.** The measurements and audits in this section and its
+subsections used games between the old
+scripted controllers ALPHA version 2 and BETA version 4 only as a workload. They remain
+valid measurements of the code's cost and of its metric columns.
+They say nothing current about either controller.
 
 **GPU execution with JAX is the performance target.** Measure compilation and
 reuse, synchronized execution, peak GPU memory, transfers, and the setup and

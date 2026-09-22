@@ -65,7 +65,8 @@ pursues observed living Priests, then Mages, then Hunters, with lowest-health
 and global-slot tie breaks. Its glancing shoulder routes and local wall steering
 do not guarantee navigation. Both prefer passing below nearby vertical walls,
 then above when needed. A three-tick ALPHA allied-congestion stall remains
-known. The shared `scenario_5` BETA behavior serves Scenarios 3 and 5; the old
+known. (Superseded, 22 September 2026: this assessment of ALPHA version 2 and BETA
+version 4 is historical only; later study found longer stalls.) The shared `scenario_5` BETA behavior serves Scenarios 3 and 5; the old
 standalone Scenario 3, Scripted TDM, and separate Reactive MRP interfaces were
 removed. Historical recording identities remain readable.
 

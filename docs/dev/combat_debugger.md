@@ -193,7 +193,9 @@ exists and an end fits, allow a detour that passes its body-contact check. See
 [A35](../design/specification_amendments.md#a35-reactive-tdm-wall-steering) for
 the precise local rules. This improves tested wall pockets but does not
 guarantee navigation: a three-tick ALPHA allied-congestion stall remains known,
-and fixed-side routing may take a longer path. Combat and class goals are
+and fixed-side routing may take a longer path. (Superseded, 22 September 2026: this
+assessment of ALPHA version 2 and BETA version 4 is historical only; later
+study found longer stalls.) Combat and class goals are
 unchanged.
 
 In a body-blocking study, the defending Warrior can screen a vulnerable Hunter

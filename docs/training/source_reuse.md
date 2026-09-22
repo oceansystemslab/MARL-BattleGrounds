@@ -322,6 +322,11 @@ string records what was declared; changing it after JAX starts does not prove
 the compiler changed. Historical descriptions, frozen actor loading and reports
 remain readable; a missing old execution identity is not treated as the new one.
 
+**Workload note, 22 September 2026.** The checks in the next two paragraphs used
+training on the old maps (maps 0 to 41 with revision 6 of Map 39). They remain
+valid measurements of the code's correctness and cost. They are not learning
+results.
+
 The first fresh-process GPU check restored all 332 array leaves exactly but
 later chose different actions under ordinary compiler settings. Setting the
 global autotune flag to zero produced exact continuation in two fresh child

@@ -1,5 +1,11 @@
 # Development Checkpoint Population
 
+**Superseded, 22 September 2026.** Every model and result on this page comes
+from training on the old maps: maps 0 to 41 with revision 6 of Map 39, before
+its update. The checks against ALPHA and BETA used the old scripted controllers,
+ALPHA version 2 and BETA version 4. All of it is historical only. Do not use it
+as current evidence, for comparisons or to choose settings.
+
 **Start here for the saved models and manuscript evidence.** On 20 September
 2026, we adopted every model in the completed checkpoint comparison as
 **Development Population V1**. Keep this page as the entry point as the population

@@ -2402,7 +2402,9 @@ scenario decisions/transitions remain exact. A three-decision ALPHA allied-body
 congestion stall remains known; no complete final-version Foxhole rollout or
 measured speedup is claimed. Fixed-side choices may take longer routes, moving
 defenders can re-block, and other local jams remain possible. The user accepts
-these limits for diagnostic use. Official scenario evidence must still freeze
+these limits for diagnostic use. (Superseded, 22 September 2026: this assessment
+of ALPHA version 2 and BETA version 4 is historical only; later study found
+longer stalls.) Official scenario evidence must still freeze
 and separately qualify its exact controller identity; this change neither
 completes M7 nor qualifies a scientific scenario.
 
@@ -2535,7 +2537,6 @@ An exception does not approve a wider set of gaps.
 | 12 | None | (6, 8), (9, 11), (17, 20), (18, 19) |
 | 13 | 10 and 17: bottom | None |
 | 31 | 4 and 7: bottom | None |
-| 39 | None | (11, 14), (11, 15) |
 | 40 | 22: bottom; 23: top | None |
 | 42 | 15, 16, 17 and 18: top | None |
 | 47 | 26: bottom; 27: top | (1, 31), (3, 30) |
@@ -2560,6 +2561,38 @@ Earlier replays, solver tests and speed measurements remain evidence for their
 recorded map versions. Do not present them as measurements of these revised
 maps. This publication does not change the approved eight scenarios, their
 embedded geometry or their winning-command witnesses.
+
+### UFO map update on 2026-09-22
+
+Map 39, `tdm_map_id_39_ufo_training`, now uses saved revision 7. Revision 7
+removes one obstacle from revision 6: the thin wall that ran from the centre
+circle at (10, 6) up to the circle at (10, 8.45). Every other obstacle keeps
+its shape and position. The obstacles after the removed wall are renumbered,
+so the map has 22 obstacles with IDs 0 through 21. The map keeps its ID, name,
+training split and mirror symmetry. The manifest records revision 7, its
+source hash and its compiled resource hash. The other 51 maps, the aliases,
+the history resource and the eight scenarios are unchanged.
+
+Why: with that wall in place, the pocket between it and the left slanted wall
+closed toward the centre. The scripted controllers (seen with ALPHA version 2,
+BETA version 4 and a candidate revision of them) do not steer around other
+bodies, so the leading agent was pinned in that corner by the teammates behind
+it, and six agents stood still for whole games. With the wall removed, the
+agents go round the centre circle.
+
+The clearance table above no longer lists Map 39. Its two exceptions were the
+gaps between the removed wall and the two slanted walls. Removing an obstacle
+changes no other gap, so the remaining obstacles meet the limits with no
+exception.
+
+This update does not add revision 6 to the history resource, which keeps one
+earlier version per map; for Map 39 that is revision 3. This is an accepted
+exception to the rule above that old replays keep their recorded version.
+Replay files recorded on revision 6 of Map 39 still pass the replay loader,
+but the Replay Viewer cannot present them, and every check of a recorded map's
+identity rejects them. Training checkpoints saved before this update cannot
+resume, because their saved content binding covers every map. Results from
+revision 6 remain evidence for that version only.
 
 ### Final M7 DevClient and Replay Viewer work
 
@@ -2852,7 +2885,9 @@ Reflected game outcomes often differ: 194 of 416 matched outcomes agree when
 controllers choose actions throughout each game. These are spatial-reflection
 diagnostics, not evidence that all mirrored fights agree. The checks support
 the stated comparisons; they do not establish a universal speedup or
-sample-efficiency claim.
+sample-efficiency claim. (Workload note, 22 September 2026: the census and reflection
+games used ALPHA version 2 and BETA version 4 as their workload. They remain
+solver evidence and say nothing current about either controller.)
 
 **Scenario repair — 2026-09-15.** The user supplied revised winning commands
 for Scenarios 1, 3, 5 and 8 and three small physical edits for Scenario 4.

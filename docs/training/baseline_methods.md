@@ -1,5 +1,11 @@
 # Baseline Development Methods
 
+**Status, 22 September 2026:** every learning result in this document comes from
+models trained on the old maps (maps 0 to 41 with revision 6 of Map 39) and,
+where a section says so, from games against ALPHA version 2 and BETA version 4.
+All of those results are superseded and historical only. Methods, rules and
+declarations still describe how the studies were run.
+
 For the current model population, exact checkpoint locations, result tables and
 manuscript evidence links, open the
 [development checkpoint index](checkpoint_population.md). Population V1 keeps
@@ -13,6 +19,11 @@ Passing a software check does not establish useful learning. Baselines need not
 show coordinated tactics to be valid reference methods.
 
 ## Current MAPPO Standard
+
+**Superseded, 22 September 2026.** The study results quoted in this section come
+from models trained on the old maps: maps 0 to 41 with revision 6 of Map 39,
+before its update. They are historical only. The decisions recorded here stay
+as written.
 
 **Decision, 22 September 2026:** the recurrent MAPPO baseline trains with the
 spawn frame on (`PPOConfig.spawn_frame="left"`, the default since this date;
@@ -87,6 +98,10 @@ the follow-up used 983,040. Keep these limits with the manuscript record.
 
 ## Leading B/T Settings Across Three Seeds
 
+**Superseded, 22 September 2026.** This study has run on the old maps (maps 0 to
+41 with revision 6 of Map 39); its results are historical only. Do not use them
+as current evidence, for comparisons or to choose settings.
+
 **Declared, 20 September 2026; awaiting the user's launch:** retain the existing
 seed 19,044,601 and add only seeds 19,044,611 and 19,044,612 for B512/T32,
 B512/T64, B768/T32 and B1024/T32. The user added B1024/T32 and clarified that
@@ -124,6 +139,11 @@ launches it and returns for analysis. No new learning evidence exists at this
 declaration point.
 
 ## Curriculum And Dense Reward Comparison
+
+**Superseded, 22 September 2026.** The results in this section come from models
+trained on the old maps: maps 0 to 41 with revision 6 of Map 39, before its
+update. They are historical only. Do not use them as current evidence, for
+comparisons or to choose settings.
 
 On 20 September 2026, two runs compared the current curriculum with curriculum
 off. Both used B512/T32, training seed 19,044,601, input scale 0.01, dense team
@@ -181,6 +201,10 @@ elapsed time precedes its own evaluation; final run totals include final outputs
 
 ## Separate Runs On One GPU
 
+**Workload note, 22 September 2026.** The measurements in this section used
+training on the old maps (maps 0 to 41 with revision 6 of Map 39). They remain
+valid measurements of the code's cost. They are not learning results.
+
 On 20 September 2026, a bounded check measured one, two and four independent
 B512/T32 MAPPO processes on the internal RTX 5090. Each process had four separate
 physical CPU cores, preallocation off and JAX memory fraction 0.20. After twelve
@@ -212,6 +236,10 @@ small speed advantage. The full record, exact CSV and raw results are under
 `artifacts/m9-m10/packet-4/b512-t32-concurrency/`.
 
 ## Five-Minute MAPPO Configuration Screen
+
+**Superseded, 22 September 2026.** This screen ran on the old maps (maps 0 to 41
+with revision 6 of Map 39). Its learning results are historical only; its speed
+checks remain valid cost measurements of that code.
 
 The first screen asks which complete recurrent MAPPO configuration learns more
 for the time spent. It is a small development experiment, with one training seed.
@@ -324,6 +352,11 @@ be recorded separately; it does not change the five-minute case budgets.
 
 ## Saved Record And Later Decisions
 
+**Superseded, 22 September 2026.** The results in this section come from models
+trained on the old maps: maps 0 to 41 with revision 6 of Map 39, before its
+update. They are historical only. Do not use them as current evidence, for
+comparisons or to choose settings.
+
 The package owns `declaration.json`, `screen_package.json`, `launch_time.json`,
 `budgets.json`, `study.json`, per-case configs, run records and attempt logs.
 The source snapshot includes the actual reviewed public working files and their
@@ -352,6 +385,11 @@ in that history, including weak results. Final baseline claims require more than
 this one-seed screen and must not use protected test results for tuning.
 
 ## Thirty-Minute Curriculum Comparison
+
+**Superseded, 22 September 2026.** The results in this section come from models
+trained on the old maps: maps 0 to 41 with revision 6 of Map 39, before its
+update. They are historical only. Do not use them as current evidence, for
+comparisons or to choose settings.
 
 **Declared, 20 September 2026; not yet run:** compare current curriculum plus
 reward shaping against reward shaping only. Run sequentially on the internal
@@ -384,6 +422,11 @@ commands, logs and table live under
 user launches them and returns for the result review.
 
 ## Twenty-Million-Step MAPPO Tuning Study
+
+**Superseded, 22 September 2026.** The results in this section come from models
+trained on the old maps: maps 0 to 41 with revision 6 of Map 39, before its
+update. They are historical only. Do not use them as current evidence, for
+comparisons or to choose settings.
 
 **Approved on 20 September 2026; all 48 runs completed on 21 September 2026.**
 The completed repeat screen leaves B512/T32 first by the requested three-seed
@@ -480,6 +523,11 @@ deferred.
 
 ## Pinned Near-Start Opponent, Two-Arm Test
 
+**Superseded, 22 September 2026.** The results in this section come from models
+trained on the old maps: maps 0 to 41 with revision 6 of Map 39, before its
+update. They are historical only. Do not use them as current evidence, for
+comparisons or to choose settings.
+
 **Declared and run on 21 September 2026.** The tuning study's
 confirmations show that 46 of 48 selected models won no confirmation game from
 their weaker spawn end, one more won a single game there, and the habit is
@@ -562,6 +610,11 @@ plots: `artifacts/m9-m10/packet-4/pinned-opponent-20m/reports/results.md`.
 
 ## Mirror Check: Post-Hoc Canonicalization Of One-Sided Models
 
+**Superseded, 22 September 2026.** The results in this section come from models
+trained on the old maps: maps 0 to 41 with revision 6 of Map 39, before its
+update. They are historical only. Do not use them as current evidence, for
+comparisons or to choose settings.
+
 **Declared and run on 21 September 2026.**
 Every one of the 52 maps is an exact left-right mirror image of itself (largest
 deviation 7e-7 world units, float rounding), the two spawn banks sit at x=0.5
@@ -614,6 +667,12 @@ the mirror on from the start is a separate question, as are stronger opponents.
 | c03 seed 19,044,702 | left | 45 | 0 | 45 | 41 |
 
 ## Spawn Frame Option For Recurrent MAPPO
+
+**Superseded, 22 September 2026.** The results in this section come from models
+trained on the old maps (maps 0 to 41 with revision 6 of Map 39) and from games
+against the old scripted controllers ALPHA version 2 and BETA version 4. They
+are historical only. Do not use them as current evidence, for comparisons or to
+choose settings.
 
 **Declared on 21 September 2026; approved by the owner. First package run the same day as a pilot; second package declared below.**
 (Status, 22 September 2026: `"left"` is now the default and the value
@@ -711,6 +770,11 @@ impure transform. Its evidence lives in
 head-to-head tables, audit disposition in the private brief).
 
 ### Second Package, Declared
+
+**Superseded, 22 September 2026.** This package has since run on the old maps
+(maps 0 to 41 with revision 6 of Map 39). Its result and its games against ALPHA
+version 2 and BETA version 4 are recorded in its package and are historical
+only, like the rest of this section.
 
 **Declared on 22 September 2026; not yet run.** The same three-seed
 two-arm test on the corrected transform:

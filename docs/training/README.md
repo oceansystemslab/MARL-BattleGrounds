@@ -26,6 +26,9 @@ For the qualified local GPU setup, follow the [GPU guide](../dev/gpu_sanity.md).
 The [baseline development record](baseline_methods.md#current-mappo-standard)
 records **512 parallel environments and rollout length 32** as our current
 MAPPO starting configuration, with the measured results and their limits.
+Those learning results, and every result from models trained on the old maps
+(maps 0 to 41 with revision 6 of Map 39), are superseded as of 22 September
+2026 and are historical only.
 The completed five-minute screen's launcher is described under
 [Configuration Screen](#configuration-screen).
 For the distribution example and its recording benchmark, use
@@ -597,7 +600,8 @@ one update take the same time under `"left"` as under `"world"` within
 measurement noise (about 433 ms and 93 ms), because the only quadratic part,
 the obstacle mirror decision, is made once per game and shared by a team's
 five actors (`team_obstacle_partners`); the update keeps about 2 ms of that
-decision, 0.4 percent of a block. (Measured 2026-09-22.) A policy trained
+decision, 0.4 percent of a block. (Measured 2026-09-22, training on the old
+maps with revision 6 of Map 39; it remains a valid cost measurement.) A policy trained
 this way plays both spawn ends alike by construction; whether it learns faster
 or better is a separate measured question. The runner carries the setting into
 collection, updates, checkpoints, exported actors and their inference identity;
@@ -1257,6 +1261,10 @@ general competence, sample efficiency or learned team tactics.
 
 ### Measured MAPPO Engineering Checks
 
+**Workload note, 22 September 2026.** These checks used training on the old maps
+(maps 0 to 41 with revision 6 of Map 39). They remain valid measurements of the
+code's correctness and cost. They are not learning results.
+
 The final compiler-policy check used the internal RTX 5090, B32/T128, four PPO
 epochs, native K20/H300 and priority metrics, with episode recording disabled.
 The production update and independent reference matched all 354 output leaves
@@ -1320,6 +1328,10 @@ Generated evidence is in `artifacts/m9-m10/packet-4/gpu-final-policy-costs/` and
 `final-fresh-process-resume-results.json` and `pending_eta_host_cost.json`.
 
 ### Measured Integration Results
+
+**Superseded, 22 September 2026.** These runs trained on the old maps (maps 0 to
+41 with revision 6 of Map 39). Their learning results are historical only; the
+costs they report remain valid measurements of that code.
 
 The four declared local development runs used the internal RTX 5090, B32/T128,
 four PPO epochs and native K20/H300. They completed their exact budgets:
@@ -1483,6 +1495,7 @@ use `seed_pairs=20, root_seed=19_044_791` for 200 games. Merely raising
 
 For the complete 48-run tuning recipe, read the
 [baseline methods record](baseline_methods.md#twenty-million-step-mappo-tuning-study).
+The recipe still applies; that study's results are superseded and historical only.
 The study's artifact directory owns its launch/watch/status/resume scripts and
 reports. It checks every 10% boundary, selects a model, confirms it on fresh
 games and writes plots without an active assistant session. It has no automatic
