@@ -260,8 +260,11 @@ The library route uses four calls:
    Supply a native JAX `System` whose lanes are independent and whose memory
    has a leading game axis. Actor-only weights stay dynamic. Policy adapters,
    host methods, custom memory-reset hooks and frozen checkpoint labels are
-   unsupported by this collector; ordinary environment/System loops remain
-   available for those methods.
+   unsupported for this trained actor; ordinary environment/System loops remain
+   available for those methods. The optional `pinned_opponent=` argument is
+   different: it names the opponent that plays the pinned share of games, and
+   it accepts any valid System or Policy, including host methods and methods
+   with custom reset hooks (see "Current And Historical Self-Play").
 3. `collect_training_rollout(collection, carry, length=128, writer=None)`
    returns the next carry and a `TrainingRollout`. Reuse the same collection
    descriptor and block length. The final block stops at the exact total and
@@ -385,6 +388,61 @@ and steps that met slot 0 appears in `exposure.json`, row 1 of the opponent
 lists. A pinned opponent is a development setting for the self-play recipe; it
 is not evidence of learning until a declared comparison shows it.
 
+`TrainConfig(pinned_opponent=...)` makes the pinned share play a named System
+instead of that first-update actor:
+
+```python
+from marl_battlegrounds import training
+
+config = training.TrainConfig(
+    pinned_opponent="tdm-alpha",  # or "/abs/path/run/actors/<id>", or "pkg.agents:make_team"
+    pinned_opponent_share=0.1,
+)
+```
+
+The reference is a built-in name (`"random"`, `"tdm-alpha"`, `"tdm-beta"`), an
+absolute path to one of our exported actor directories, or a `module:function`
+factory that returns a `System` or `Policy`; the library route's
+`init_training_collection(..., pinned_opponent=...)` also takes the object
+itself. Slot 0 still marks the assignment, so row 1 of the opponent lists in
+`exposure.json` counts games against the named System, and `exposure.json`
+labels every row. Learner rows record `opponent_update=-2` for those games. The
+named System is frozen once, registered the way evaluation registers it, and
+follows the same rules as a Team B method in evaluation: only its own games are
+valid, it starts each new game with fresh memory, and it may use its own
+`reset_memory` hook. A Policy acts per actor, so it is computed on its own
+games only: inside the compiled step those games are gathered into a block a
+quarter of the batch in size, and when more games than that are pinned the
+Policy runs on the whole batch and the other games' results are thrown away.
+A generic System is given the whole Team B batch with the other games
+marked invalid, and it must ignore them, as M8 requires of every System. A JAX
+method runs inside the compiled step and is skipped on steps where no game
+uses it; its initializer still runs when one of its games starts. A host
+method, such as an LLM agent, runs once per step on the host through the same
+helper evaluation uses. A step with no pinned game copies nothing to the host;
+otherwise Team B's inputs are copied, about 94 KB per game: only the pinned
+games for a Policy, all games for a generic System. The method's own time comes
+on top. `collect_training_rollout` runs that route;
+`scan_training_rollout` and `advance_training_step` refuse such a collection.
+A host collection serves each training round once, and after a method error it
+refuses reuse, so a stale carry never meets newer opponent memory.
+
+Resume continues a pinned opponent exactly or refuses. JAX methods keep their
+memory in the saved state. A host method's memory is never saved: a host method
+with no initializer, no reset hook and no memory template has none and resumes
+normally, and any other host method can resume only from a checkpoint where
+none of its games is unfinished. Use absolute export paths; a moved export
+fails the resume check. A named pinned System is a training opponent of that
+run and of any run that later pins an export of it. Results against it are
+familiar-opponent results, and a different name is not proof of an unfamiliar
+opponent: Beta's rules include Alpha's. The run's record says what is known
+about the opponent's own training history: `exposure` is `none`, `known` (which
+scripted scenario controllers) or `unknown`. Pinning `tdm-alpha` or `tdm-beta`,
+directly or through an export trained that way, makes all eight protected
+scenarios familiar, so their results from that run are not protected-scenario
+evidence. The validation panel is declared separately and does not change
+because a System was pinned.
+
 Call `refresh_opponents` once after each completed learner update and before
 the next block. Supply already-updated actor-only variables, the exact next
 `update_index`, the carry's completed real rounds and its numerical schedule.
@@ -460,7 +518,7 @@ Core observations stay in world coordinates. The optional helpers
 reflect a team's permitted view and move mask about the vertical centerline
 and map a chosen move back, using only that team's own spawn pads and the map
 width. The recurrent MAPPO baseline calls them before encoding when its spawn
-frame is `"left"` or `"right"`; the environment, evaluator and tournament never
+frame is `"left"`, its default; the environment, evaluator and tournament never
 apply them.
 
 ## Actions And Random Keys
@@ -516,12 +574,18 @@ users must pass the same `input_scale` to `make_recurrent_mappo_system` and
 `critic_values`; pass the original `ppo` config to `build_ppo_batch`.
 The [source ledger](source_reuse.md#optional-input-scale) explains compatibility.
 
-`PPOConfig(spawn_frame="left")` makes the actor always see the game as if its
-team started on the left bank: whenever its own team starts on the right, its
-permitted view is reflected about the map's vertical centerline before the
-network and the chosen move is reflected back before the game receives it.
-`"right"` does the same with the right bank as home. The default `"world"`
-keeps raw coordinates and traces the donor's program bit for bit. Every
+`PPOConfig.spawn_frame` defaults to `"left"`: the actor always sees the game as
+if its team started on the left bank. Whenever its own team starts on the
+right, its permitted view is reflected about the map's vertical centerline
+before the network and the chosen move is reflected back before the game
+receives it. `spawn_frame="world"` keeps raw coordinates and traces the donor's
+program bit for bit. The default changed from `"world"` on 22 September 2026,
+and the value `"right"` was removed. Saved checkpoints, exported actors and run
+records without a frame still mean `"world"`, and resuming such a run keeps
+it. An old training config file, however, names no frame, so starting a new
+run from it now trains in `"left"`; add `"spawn_frame": "world"` to its `ppo`
+block to reproduce the old run. The JSON examples in this guide name no frame
+and therefore mean `"left"`. Every
 built-in Team Deathmatch map is its own mirror image, so the reflected view is
 exact up to float rounding; the game itself reproduces a mirrored match only
 approximately after contact, as the reflection diagnostics in amendment A37
@@ -538,8 +602,11 @@ this way plays both spawn ends alike by construction; whether it learns faster
 or better is a separate measured question. The runner carries the setting into
 collection, updates, checkpoints, exported actors and their inference identity;
 a loaded actor plays in the frame it was trained in, never a guessed one.
-Low-level users pass the same `spawn_frame` to `make_recurrent_mappo_system`
-and the original `ppo` config to `update_recurrent_ppo`. The
+Low-level users pass the same `spawn_frame` to `make_recurrent_mappo_system`,
+whose default follows `PPOConfig` (so old world weights need
+`spawn_frame="world"`), and the original `ppo` config to `update_recurrent_ppo`.
+`export_system` has no default frame: it writes a durable identity, so the
+caller must name the frame the weights were trained in. The
 [source ledger](source_reuse.md#optional-spawn-frame) gives the precedent and
 compatibility rules.
 
@@ -955,7 +1022,9 @@ must stay fixed while the development checkout changes.
 Save the following as `/absolute/path/mappo-demo.json`. Replace the panel path
 with the absolute path of the existing qualified panel. The other values below
 fully state this example's settings. Changing a value creates a different
-experiment and may need new qualification.
+experiment and may need new qualification. The spawn frame is written out
+because its default changed on 22 September 2026; a demonstration declared
+before then used `"world"`.
 
 ```json
 {
@@ -980,7 +1049,8 @@ experiment and may need new qualification.
     "entropy_coefficient": 0.01,
     "value_coefficient": 0.5,
     "max_grad_norm": 0.5,
-    "adam_epsilon": 0.00001
+    "adam_epsilon": 0.00001,
+    "spawn_frame": "left"
   },
   "metrics": "priority",
   "recording": false,

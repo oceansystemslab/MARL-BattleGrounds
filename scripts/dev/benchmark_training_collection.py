@@ -15,6 +15,9 @@ components, and its own row packing. It never calls the training step or scan.
 Private helpers are used for numerical guard/padding contracts and instrumentation.
 No optimizer update, learner checkpoint, competence claim or GPU selection is
 performed by this script. Existing output directories are never overwritten.
+The actor uses the baseline's default spawn frame, "left" since 22 September
+2026. Measurements saved before that date used "world"; a rerun measures
+the left program and is not a like-for-like repeat of them.
 """
 
 from __future__ import annotations

@@ -11,10 +11,11 @@ Shaping mode is saved with collection settings. Missing historical mode means
 potential, and a different mode cannot reach array restore or output recovery.
 The pinned opponent share is saved the same way: a missing historical key
 restores at zero and a different share is rejected before arrays are restored.
-The spawn frame follows the input-scale rules: exports write it only when it is
-not "world", a missing historical key loads as "world", the version-1 identity
-envelope for a scaled world-frame actor is pinned so existing identities cannot
-drift, a "left" or "right" export has its own identity and loads as that frame,
+The spawn frame follows the input-scale rules: an export must name its frame,
+writes it only when it is not "world", a missing historical key loads as
+"world", the version-1 identity envelope for a scaled world-frame actor is
+pinned so existing identities cannot drift, a "left" export has its own
+identity and loads as that frame,
 an invalid saved frame and a learner frame mismatch are rejected before arrays
 are restored, and an older learner config without the nested key resumes.
 saved_training_config fixes a saved config's missing ppo.spawn_frame at "world"
@@ -78,7 +79,7 @@ from marl_battlegrounds.training.learner import (
 
 type Tree = Any
 type Context = tuple[TrainingCollection, LearnerState]
-PPO = PPOConfig(rollout_length=2, epochs=1)
+PPO = PPOConfig(rollout_length=2, epochs=1, spawn_frame="world")
 
 
 def _equal(left: Tree, right: Tree) -> None:
@@ -408,7 +409,7 @@ def test_save_checks_actual_source_bank_without_rebuilding_installed_content(
 
 @pytest.mark.parametrize(
     ("input_scale", "spawn_frame"),
-    [(1.0, "world"), (0.01, "world"), (1.0, "left"), (0.01, "right")],
+    [(1.0, "world"), (0.01, "world"), (1.0, "left"), (0.01, "left")],
 )
 def test_export_load_is_independent_exact_and_immutable(
     context: Context, tmp_path: Path, input_scale: float, spawn_frame: str
@@ -420,6 +421,13 @@ def test_export_load_is_independent_exact_and_immutable(
         "env_steps": 0,
         "checkpoint_id": "a" * 64,
     }
+    with pytest.raises(TypeError, match="spawn_frame"):
+        export_system(  # pyright: ignore[reportCallIssue]
+            state.carry.history.current_variables,
+            tmp_path / "unnamed",
+            metadata=provenance,
+        )
+    assert not (tmp_path / "unnamed").exists()
     destination = tmp_path / "actor"
     export_system(
         state.carry.history.current_variables,
@@ -483,7 +491,7 @@ def test_export_load_is_independent_exact_and_immutable(
             spawn_frame=spawn_frame,
         )
     changed_scale = 0.5 if input_scale == 1.0 else 1.0
-    changed_frame = "left" if spawn_frame != "left" else "right"
+    changed_frame = "left" if spawn_frame == "world" else "world"
     with pytest.raises(ValueError, match="different artifact"):
         export_system(
             actor.variables,
@@ -527,7 +535,11 @@ def test_export_rejects_invalid_input_scale_before_writing(
 ) -> None:
     with pytest.raises(ValueError, match="input_scale"):
         export_system(
-            None, tmp_path / "actor", metadata={}, input_scale=cast(float, input_scale)
+            None,
+            tmp_path / "actor",
+            metadata={},
+            input_scale=cast(float, input_scale),
+            spawn_frame="world",
         )
     assert not list(tmp_path.iterdir())
 
@@ -543,7 +555,10 @@ def test_historical_actor_default_and_invalid_saved_scale(
         "checkpoint_id": "a" * 64,
     }
     path = export_system(
-        state.carry.history.current_variables, tmp_path / "legacy", metadata=provenance
+        state.carry.history.current_variables,
+        tmp_path / "legacy",
+        metadata=provenance,
+        spawn_frame="world",
     )
     details = read_checkpoint_details(path)
     del details["input_scale"]
@@ -574,7 +589,10 @@ def test_historical_actor_default_and_invalid_saved_scale(
         actor, actor, memory, observations, env_state, jax.random.key(72)
     )
     _equal(actual, expected)
-    assert export_system(actor.variables, path, metadata=provenance) == path
+    assert (
+        export_system(actor.variables, path, metadata=provenance, spawn_frame="world")
+        == path
+    )
     assert _files(path) == before
     details["input_scale"] = 0.0
     del details["checkpoint_id"]
@@ -607,10 +625,10 @@ def test_inference_identity_envelope_is_pinned_and_frames_extend_it() -> None:
         frame: checkpoints._inference_digest(  # pyright: ignore[reportPrivateUsage]
             {**world_scaled, "spawn_frame": frame}
         )
-        for frame in ("world", "left", "right")
+        for frame in ("world", "left")
     }
     assert digests["world"] == checkpoints._inference_digest(world_scaled)  # pyright: ignore[reportPrivateUsage]
-    assert len(set(digests.values())) == 3
+    assert len(set(digests.values())) == 2
     unscaled_left = checkpoints._inference_digest(  # pyright: ignore[reportPrivateUsage]
         {**raw, "spawn_frame": "left"}
     )
@@ -655,7 +673,7 @@ def test_historical_actor_default_frame_and_invalid_saved_frame(
     )
     assert (
         load_system(path).apply
-        is make_recurrent_mappo_system({}, input_scale=0.01).apply
+        is make_recurrent_mappo_system({}, input_scale=0.01, spawn_frame="world").apply
     )
     details["spawn_frame"] = "up"
     del details["checkpoint_id"]
@@ -752,7 +770,9 @@ def test_learner_scale_load_and_config_mismatch_before_restore(
         recording=collection.recording,
     )
     actor = make_recurrent_mappo_system(
-        state.carry.history.current_variables, input_scale=scaled_ppo.input_scale
+        state.carry.history.current_variables,
+        input_scale=scaled_ppo.input_scale,
+        spawn_frame=scaled_ppo.spawn_frame,
     )
     metadata = _metadata()
     cast(dict[str, Any], metadata["config"])["ppo"] = asdict(scaled_ppo)
@@ -798,6 +818,7 @@ def test_learner_scale_load_and_config_mismatch_before_restore(
             "checkpoint_id": path.name,
         },
         input_scale=0.01,
+        spawn_frame="world",
     )
     assert artifact_identity(exported)["actor_digest"] == identity["actor_digest"]
     before = _files(tmp_path)

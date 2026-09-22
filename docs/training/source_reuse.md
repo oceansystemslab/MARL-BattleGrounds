@@ -89,12 +89,14 @@ have different policy identities.
 
 ### Optional Spawn Frame
 
-`PPOConfig.spawn_frame` defaults to `"world"`, preserving the donor calculations
-and every existing model bit for bit. `"left"` reflects the actor's permitted
-view about the map's vertical centerline whenever its own team starts on the
-right bank, so every game looks like a start from x = 0.5, and reflects the
-chosen move back before the game receives it; `"right"` does the same with the
-right bank as home. For example, an actor at x = 19.5 that sees an enemy at
+`PPOConfig.spawn_frame` defaults to `"left"` since 22 September 2026. `"left"`
+reflects the actor's permitted view about the map's vertical centerline
+whenever its own team starts on the right bank, so every game looks like a
+start from x = 0.5, and reflects the chosen move back before the game receives
+it. `"world"` preserves the donor calculations and every earlier model bit for
+bit. The value `"right"` existed only to rescue world-trained models that had
+learned the right bank; it was removed with those models' supersession, and
+records that used it stay reproducible only through their frozen packages. For example, an actor at x = 19.5 that sees an enemy at
 x = 3 is shown itself at x = 0.5 and the enemy at x = 17; when it says East the
 game receives West. The reflection changes the x of unit rows, spawn pads and
 obstacle rows that have no mirror partner in their own table (with wall angles
@@ -121,7 +123,7 @@ one was not, so only the left-right flip is used. The design claim, verbatim:
 in a consistent orientation and maps chosen actions back to native
 coordinates. It leaves game rules and information access unchanged."
 
-A policy trained in a left or right frame plays both spawn ends alike by
+A policy trained in the left frame plays both spawn ends alike by
 construction; that alone does not establish better learning. Keep the frame
 fixed for a run and compare against `"world"` with declared seeds and budgets.
 Collection, PPO updates, historical opponents and exported actors must all use
@@ -131,7 +133,7 @@ view, mask and stored index the same way. Old exports without this field use
 `"world"`; loading never applies a new frame and never infers one from a
 model's results; adapting an old model means re-exporting it with an explicit
 frame, which is a new identity. Equal weights with different spawn frames have
-different policy identities. A run in a left or right frame cannot reuse a
+different policy identities. A run in the left frame cannot reuse a
 world-frame run's shared random initialization result, because that identity
 includes the frame.
 
@@ -277,6 +279,10 @@ They contain no numerical bytes. Typed keys use Orbax's native handling.
 This adaptation changes neither an optimizer equation nor a learned parameter.
 
 Validation, recording, deployment loading and analysis reuse MARL-BGs owners.
+A named pinned opponent reuses them too: the M8 evaluator's freezing,
+preparation, registration and one-team execution helpers, including its host
+helper for host methods, which run outside compiled code in a host loop of the
+collector. No donor code is involved.
 The early two-member panel is provisional. Complete-workflow tests and measured
 costs supplement the original numerical comparisons; actual learning quality
 still needs the declared development and demonstration evidence.

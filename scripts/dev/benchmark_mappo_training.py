@@ -25,6 +25,9 @@ The tool writes source identity, cost JSON, real update/status files and capture
 stdout files. It does not save checkpoints, run validation, plot learning curves
 or establish useful learning. The saved mini-run measures those separate costs.
 GPU memory polling is a sampled lower bound, not a guaranteed peak.
+The learner uses the baseline's default spawn frame, "left" since 22 September
+2026. Measurements saved before that date used "world"; a rerun measures
+the left program and is not a like-for-like repeat of them.
 
 Use --diagnose-update for one block only when numerical agreement fails. It
 writes every differing leaf's path and error, then compares separately compiled

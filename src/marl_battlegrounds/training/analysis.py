@@ -577,6 +577,8 @@ def _summary(directory: Path) -> Record:
         "shaping_mode": config.get("shaping_mode", "potential"),
         "input_scale": config.get("ppo", {}).get("input_scale", 1.0),
         "spawn_frame": config.get("ppo", {}).get("spawn_frame", "world"),
+        "pinned_opponent": config.get("pinned_opponent"),
+        "pinned_opponent_share": config.get("pinned_opponent_share", 0.0),
         "seed": config.get("seed"),
         "declared_env_steps": config.get("total_env_steps"),
         "details_path": str(directory / "run_details.json"),
@@ -698,6 +700,15 @@ def _write_summary(summaries: Sequence[Record], destination: Path) -> Path:
                 f"Shaping Mode: {summary['shaping_mode']}. "
                 f"Input Scale: {summary['input_scale']}. "
                 f"Spawn Frame: {summary['spawn_frame']}.",
+                *(
+                    [
+                        f"Pinned Opponent: {summary['pinned_opponent']} in "
+                        f"{summary['pinned_opponent_share']} of new games, a "
+                        "training opponent; its evidence is in exposure.json."
+                    ]
+                    if summary["pinned_opponent"] is not None
+                    else []
+                ),
                 "Declared budget: "
                 f"{summary['declared_env_steps']} environment transitions.",
                 "Exact settings, source identity (`source`), content identity "

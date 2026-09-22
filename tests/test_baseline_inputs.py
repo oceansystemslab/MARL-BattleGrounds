@@ -19,7 +19,8 @@ game for a team's five actors and equals the per-actor result on every map,
 refusing inputs without a team axis; mirrored twin rollouts without combat agree for
 twenty pre-contact steps; and twins with one authored death per team agree
 through the respawn wave for a full and a padded roster, in both teams. Unused
-observer rows are never flagged in either frame. Contact and combat under the
+observer rows are never flagged, and "world", the removed "right" and any other
+name are refused by the flag helper. Contact and combat under the
 mirror are not compared here: Core reproduces a mirrored game only approximately
 after contact, so trained-model checks live in the packet's post-hoc replay.
 """
@@ -661,18 +662,18 @@ def test_spawn_frame_flag_follows_the_own_bank_and_ignores_unused_slots() -> Non
         expected = np.array([[team == 1] * 5, [team == 0] * 5])
         np.testing.assert_array_equal(right, expected)
         np.testing.assert_array_equal(spawn_frame_flag(actors, "left"), expected)
-        np.testing.assert_array_equal(spawn_frame_flag(actors, "right"), ~expected)
-        with pytest.raises(ValueError, match="spawn_frame"):
-            spawn_frame_flag(actors, "world")
-        with pytest.raises(ValueError, match="spawn_frame"):
-            spawn_frame_flag(actors, "up")
+        for rejected in ("world", "right", "up"):
+            with pytest.raises(ValueError, match="spawn_frame"):
+                spawn_frame_flag(actors, rejected)
     _, observations, state = _two_lane_reset(team_sizes=(2, 2))
     actors = system_inputs(observations, state, team=0).actors
     right = np.asarray(team_on_right(actors))
     np.testing.assert_array_equal(right[:, :2], np.array([[False] * 2, [True] * 2]))
     assert not right[:, 2:].any()
-    assert not np.asarray(spawn_frame_flag(actors, "right"))[:, 2:].any()
-    assert np.asarray(spawn_frame_flag(actors, "right"))[0, :2].all()
+    left = np.asarray(spawn_frame_flag(actors, "left"))
+    assert not left[:, 2:].any()
+    assert left[1, :2].all()
+    assert not left[0].any()
 
 
 @pytest.mark.parametrize("team", [0, 1])

@@ -5,13 +5,14 @@ including legal action probabilities, death, respawn, reset and padding. Small
 fixed donor tensors isolate group averaging and complete Adam-state preservation.
 Input-scale checks pair inference and PPO with explicit feature multiplication,
 preserve default parameters, and distinguish recorded inference settings.
-Spawn-frame checks reject bad names, keep parameter bytes, make each frame a
-distinct System identity with a closure-free hook whose numerical keyword
-defaults are recorded for every factory System including the default, and
-prove that a "left" or
-"right" System equals the actor run on explicitly reflected features with its
-world-frame actions and stored indices agreeing while its unflagged lanes stay
-bit-identical to the "world" System. They do not establish GPU speed, learning
+Spawn-frame checks reject bad names including the removed "right", keep
+parameter bytes, make each frame a distinct System identity with a closure-free
+hook whose numerical keyword defaults are recorded for every factory System, show
+that the factory's default is the unscaled "left" hook while an explicit "world"
+System uses the direct actor hook, and prove that a "left" System equals the
+actor run on explicitly reflected features with its world-frame actions and
+stored indices agreeing while its unflagged lanes stay bit-identical to an
+explicit "world" System. They do not establish GPU speed, learning
 quality or full learner recovery.
 """
 
@@ -47,6 +48,7 @@ from marl_battlegrounds.baselines.ppo import (
     PPOMinibatch,
     PPOTrainState,
     RecurrentActor,
+    _apply_actor,  # pyright: ignore[reportPrivateUsage]
     calculate_gae,
     critic_values,
     initialize_ppo,
@@ -751,7 +753,7 @@ def _balanced_setup(
     return env, observations, state
 
 
-@pytest.mark.parametrize("frame", ["World", "up", "", None, 0, True, b"left"])
+@pytest.mark.parametrize("frame", ["World", "right", "up", "", None, 0, True, b"left"])
 def test_spawn_frame_rejects_invalid_static_settings(frame: object) -> None:
     with pytest.raises(ValueError, match="spawn_frame"):
         PPOConfig(spawn_frame=cast(str, frame))
@@ -762,35 +764,46 @@ def test_spawn_frame_rejects_invalid_static_settings(frame: object) -> None:
 def test_spawn_frame_keeps_initial_parameter_bytes() -> None:
     key = jax.random.key(147)
     default = initialize_ppo(key)
-    for frame in ("world", "left", "right"):
+    for frame in ("world", "left"):
         _assert_tree_equal(default, initialize_ppo(key, PPOConfig(spawn_frame=frame)))
 
 
 def test_spawn_frame_is_part_of_system_identity_and_reuses_its_apply_hook() -> None:
-    raw = make_recurrent_mappo_system({})
-    world = make_recurrent_mappo_system({}, spawn_frame="world")
-    left = make_recurrent_mappo_system({}, input_scale=0.01, spawn_frame="left")
-    repeated = make_recurrent_mappo_system({}, input_scale=0.01, spawn_frame="left")
-    right = make_recurrent_mappo_system({}, input_scale=0.01, spawn_frame="right")
-    scaled = make_recurrent_mappo_system({}, input_scale=0.01)
+    default = make_recurrent_mappo_system({})
     unscaled_left = make_recurrent_mappo_system({}, spawn_frame="left")
-    assert raw.apply is world.apply
-    assert left.apply is repeated.apply
+    world = make_recurrent_mappo_system({}, spawn_frame="world")
+    scaled_left = make_recurrent_mappo_system({}, input_scale=0.01)
+    repeated = make_recurrent_mappo_system({}, input_scale=0.01, spawn_frame="left")
+    scaled_world = make_recurrent_mappo_system(
+        {}, input_scale=0.01, spawn_frame="world"
+    )
+    assert default.apply is unscaled_left.apply
+    assert world.apply is _apply_actor
+    assert scaled_left.apply is repeated.apply
     records = [
         normalize_system_registration(value, phase="evaluation", frozen=True)
-        for value in (raw, left, repeated, right, scaled, unscaled_left)
+        for value in (
+            default,
+            unscaled_left,
+            world,
+            scaled_left,
+            repeated,
+            scaled_world,
+        )
     ]
-    assert records[1] == records[2]
-    assert len({records[index][0] for index in (0, 1, 3, 4, 5)}) == 5
+    assert records[0] == records[1]
+    assert records[3] == records[4]
+    assert len({records[index][0] for index in (0, 2, 3, 5)}) == 4
     hooks = [cast(dict[str, Any], record[1]["hooks"])["apply"] for record in records]
     assert all(hook["closure_content"] == "none" for hook in hooks)
     digests = [hook["defaults_digest"] for hook in hooks]
     assert all(digest is not None for digest in digests)
-    assert len({digests[index] for index in (0, 1, 3, 4, 5)}) == 5
-    assert raw.apply.__kwdefaults__ == {"input_scale": 1.0, "spawn_frame_index": 0}
+    assert len({digests[index] for index in (0, 2, 3, 5)}) == 4
+    assert default.apply.__kwdefaults__ == {"input_scale": 1.0, "spawn_frame_index": 1}
+    assert world.apply.__kwdefaults__ == {"input_scale": 1.0, "spawn_frame_index": 0}
 
 
-@pytest.mark.parametrize("frame", ["left", "right"])
+@pytest.mark.parametrize("frame", ["left"])
 def test_reflected_system_matches_explicit_reflected_features_and_world_actions(
     networks: PPOTrainState, frame: str
 ) -> None:
@@ -840,7 +853,9 @@ def test_reflected_system_matches_explicit_reflected_features_and_world_actions(
         )
     )
     plain = _actor_output(
-        make_recurrent_mappo_system(networks.actor_params, input_scale=0.01),
+        make_recurrent_mappo_system(
+            networks.actor_params, input_scale=0.01, spawn_frame="world"
+        ),
         memory,
         inputs,
         keys,

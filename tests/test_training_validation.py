@@ -53,6 +53,7 @@ def actors(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
                     "env_steps": steps,
                     "checkpoint_id": str(index + 1) * 64,
                 },
+                spawn_frame="world",
             )
         )
     return paths[0], paths[1]

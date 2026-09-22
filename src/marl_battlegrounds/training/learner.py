@@ -41,6 +41,7 @@ from marl_battlegrounds.core.types import (
     TASK_MODE_OUTCOME_TEAM_A_WIN,
     TASK_MODE_OUTCOME_TEAM_B_WIN,
 )
+from marl_battlegrounds.evaluation.policy_execution import Policy, System
 from marl_battlegrounds.policies.actor import ActorAction
 from marl_battlegrounds.training._content import PreparedTrainingContent
 
@@ -307,6 +308,7 @@ def init_learner(
     metrics: str = "priority",
     recording: bool = False,
     pinned_opponent_share: float = 0.0,
+    pinned_opponent: System | Policy | str | None = None,
 ) -> tuple[TrainingCollection, LearnerState]:
     """Initialize one untrained MAPPO learner and its verified collection setup.
 
@@ -320,7 +322,8 @@ def init_learner(
         streams. Version-1 model/shuffle tags derive separate learner keys.
     ppo : PPOConfig, default=DEFAULT_PPO_CONFIG
         Static donor update settings, including the actor's input scale and
-        spawn frame, which the actor System and every update then share.
+        spawn frame, which the actor System and every update then share. The
+        default's frame is "left".
         Counters and per-minibatch sample counts must fit int32 for the
         complete scheduled run.
     prepared : PreparedTrainingContent or None, default=None
@@ -342,6 +345,10 @@ def init_learner(
         first-update actor in history slot 0. Zero keeps the existing 80/20
         self-play recipe. A positive share needs a schedule built with
         early_history_capture=True; the collection setup checks that pairing.
+    pinned_opponent : System, Policy, str or None, default=None
+        Named method that plays slot-0 lanes instead of the first-update actor;
+        passed unchanged to init_training_collection, which documents the
+        accepted forms. None keeps the self-play recipe above.
 
     Returns
     -------
@@ -401,6 +408,7 @@ def init_learner(
         metrics=metrics,
         recording=recording,
         pinned_opponent_share=pinned_opponent_share,
+        pinned_opponent=pinned_opponent,
     )
     state = LearnerState(
         carry,

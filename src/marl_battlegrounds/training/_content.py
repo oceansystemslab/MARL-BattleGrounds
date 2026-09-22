@@ -2,8 +2,10 @@
 
 Preparation reads installed TDM resources and their scientific authorities once
 at host setup. The frozen binding records the finite built-in content closure;
-it admits no external opponents, datasets, replays, feedback or seed schedules.
-It cannot certify a researcher's undeclared outside influences. The returned
+it admits no external datasets, replays, feedback or seed schedules.
+pinned_opponent_evidence records what is known about a pinned training
+opponent's own training content and controller exposure; it never refuses a
+method, and it cannot certify a researcher's undeclared outside influences. The returned
 threshold-major numerical bank is separate from this host evidence and shared by
 compiled samplers. This module uses base dependencies only and runs no episode.
 """
@@ -14,6 +16,7 @@ import ast
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.resources import files
+from pathlib import Path
 from typing import Annotated, Literal, Self, cast
 
 import jax
@@ -567,3 +570,228 @@ def prepare_training_content(
             "saved training content is incompatible with installed scientific content"
         )
     return PreparedTrainingContent(binding=binding, source_configs=bank)
+
+
+def _leakage_projection(binding: TrainingContentBinding) -> dict[str, object]:
+    """Keep the part of a binding that decides protected-controller exposure.
+
+    The protected scenario closure: each scenario's ID, root and layout.
+    Ordinary map revisions, threshold banks and controller rule descriptors are
+    left out, so a source run on older maps or another threshold bank still
+    links, while a run made under a different protected closure does not. The
+    source run's own binding was verified by this gate when it trained, which
+    already kept protected content out of its training. No files are read.
+    """
+    return {
+        "protected": [
+            [
+                row.info.scenario_id,
+                row.root.model_dump(mode="json"),
+                row.layout.model_dump(mode="json"),
+            ]
+            for row in binding.protected_scenarios
+        ],
+    }
+
+
+def _export_origin(
+    binding: TrainingContentBinding, export: Path
+) -> tuple[str, dict[str, object] | None]:
+    """Decide whether an actor export is proven to come from its claimed checkpoint.
+
+    Parameters
+    ----------
+    binding : TrainingContentBinding
+        Today's verified training content.
+    export : Path
+        Actor export directory, already loaded and hash-checked by load_system.
+
+    Returns
+    -------
+    tuple[str, dict or None]
+        ("verified", the source learner's saved pinned-opponent record or None)
+        when every linking field agrees and the learner's protected scenario
+        closure matches today's; otherwise ("declared", None). A pinned record
+        of None means the source run played self-play only.
+
+    Notes
+    -----
+    Reads the export's description and its sibling learner description
+    ``<run>/checkpoints/<checkpoint_id>/`` without payloads; each description's
+    own hash is verified. Writes nothing.
+    """
+    from marl_battlegrounds.training import checkpoints
+
+    details = checkpoints.read_checkpoint_description(export)
+    metadata = cast(dict[str, object], details.get("metadata", {}))
+    identifier = metadata.get("checkpoint_id")
+    if not isinstance(identifier, str):
+        return "declared", None
+    source = export.resolve().parent.parent / "checkpoints" / identifier
+    try:
+        learner = checkpoints.read_checkpoint_description(source)
+    except OSError, ValueError:
+        return "declared", None
+    saved = cast(dict[str, object], learner.get("metadata", {}))
+    config = cast(dict[str, object], saved.get("config", {}))
+    counters = cast(dict[str, object], learner.get("counters", {}))
+    collection = cast(dict[str, object], learner.get("collection", {}))
+    linked = (
+        learner.get("checkpoint_id") == identifier
+        and learner.get("actor_digest") == details.get("actor_digest")
+        and saved.get("run_id") == metadata.get("run_id")
+        and config.get("seed") == metadata.get("seed")
+        and counters.get("env_steps") == metadata.get("env_steps")
+        and checkpoints._config_input_scale(config)  # pyright: ignore[reportPrivateUsage]
+        == checkpoints._actor_input_scale(details)  # pyright: ignore[reportPrivateUsage]
+        and checkpoints._config_spawn_frame(config)  # pyright: ignore[reportPrivateUsage]
+        == checkpoints._actor_spawn_frame(details)  # pyright: ignore[reportPrivateUsage]
+        and collection.get("pinned_opponent") == metadata.get("pinned_opponent")
+    )
+    if not linked:
+        return "declared", None
+    try:
+        # The same JSON route prepare_training_content uses for saved bindings.
+        source_binding = TrainingContentBinding.model_validate_json(
+            canonical_json_bytes(
+                cast(Mapping[str, object], collection.get("content_binding"))
+            )
+        )
+    except ValueError:
+        return "declared", None
+    if _leakage_projection(source_binding) != _leakage_projection(binding):
+        return "declared", None
+    return "verified", cast(dict[str, object] | None, collection.get("pinned_opponent"))
+
+
+def pinned_opponent_evidence(
+    binding: TrainingContentBinding, method: object, *, export: Path | None = None
+) -> dict[str, object]:
+    """Record what is known about a pinned training opponent's training history.
+
+    Parameters
+    ----------
+    binding : TrainingContentBinding
+        Today's verified training content.
+    method : Policy or System
+        The frozen pinned method.
+    export : Path or None, default None
+        Its actor export directory when it was loaded from one.
+
+    Returns
+    -------
+    dict
+        JSON-ready. ``source`` is "installed" (a built-in Policy), "verified
+        export", "declared export" or "researcher method". ``exposure`` is
+        "none", "known" or "unknown": whether the method, or anything it was
+        trained against through a verified chain, is one of the protected
+        scenario pressure controllers. ``controllers`` names the known ones by
+        identifier and version. ``familiar_scenarios`` lists the scenarios whose
+        results become familiar-opponent results or cannot count as protected
+        evidence: all eight whenever any pressure controller is known, because
+        Beta's rules include Alpha's, and all eight when exposure is unknown.
+        Unknown history is never reported as "none". A researcher System that
+        declares components also gets ``declared_components``, a copy of them.
+
+    Notes
+    -----
+    Host-only. Never refuses a method: execution is allowed for every valid
+    System; this record limits what its results may claim. Controller identity
+    is descriptor identity, so a controller update must change its descriptor.
+    """
+    from marl_battlegrounds.evaluation.policy_execution import (
+        Policy,
+        System,
+        controller_identity,
+        policy,
+    )
+
+    pressures = {
+        (row.pressure.identifier, row.pressure.version, row.pressure.canonical_digest)
+        for row in binding.protected_scenarios
+    }
+    all_scenarios = sorted(row.info.scenario_id for row in binding.protected_scenarios)
+
+    def known(controllers: list[str]) -> dict[str, object]:
+        """Exposure to named pressure controllers makes every scenario familiar."""
+        return {
+            "exposure": "known",
+            "controllers": sorted(set(controllers)),
+            "familiar_scenarios": all_scenarios,
+        }
+
+    policies: tuple[Policy, ...] = ()
+    if isinstance(method, Policy):
+        policies = (method,)
+    elif isinstance(method, System):
+        policies = method._policies  # pyright: ignore[reportPrivateUsage]
+    controllers: list[str] = []
+    for entry in policies:
+        identity = controller_identity(entry)
+        if (
+            identity is not None
+            and (
+                identity["identifier"],
+                identity["version"],
+                identity["canonical_digest"],
+            )
+            in pressures
+        ):
+            controllers.append(f"{identity['identifier']}@{identity['version']}")
+    random_apply = policy("random").apply
+    if isinstance(method, Policy) and (controllers or method.apply is random_apply):
+        base: dict[str, object] = {"source": "installed"}
+        base.update(
+            known(controllers)
+            if controllers
+            else {"exposure": "none", "controllers": [], "familiar_scenarios": []}
+        )
+        return base
+    if export is not None:
+        status, inherited = _export_origin(binding, export)
+        if status == "verified":
+            record: dict[str, object] = {"source": "verified export"}
+            if inherited is None:
+                record.update(
+                    {"exposure": "none", "controllers": [], "familiar_scenarios": []}
+                )
+            else:
+                parent = cast(dict[str, object], inherited.get("evidence", {}))
+                if parent.get("exposure") == "known":
+                    record.update(known(cast(list[str], parent.get("controllers", []))))
+                elif parent.get("exposure") == "none":
+                    record.update(
+                        {
+                            "exposure": "none",
+                            "controllers": [],
+                            "familiar_scenarios": [],
+                        }
+                    )
+                else:
+                    record.update(
+                        {
+                            "exposure": "unknown",
+                            "controllers": [],
+                            "familiar_scenarios": all_scenarios,
+                        }
+                    )
+            return record
+        return {
+            "source": "declared export",
+            "exposure": "unknown",
+            "controllers": [],
+            "familiar_scenarios": all_scenarios,
+        }
+    record = {"source": "researcher method"}
+    record.update(
+        known(controllers)
+        if controllers
+        else {
+            "exposure": "unknown",
+            "controllers": [],
+            "familiar_scenarios": all_scenarios,
+        }
+    )
+    if isinstance(method, System) and method.components:
+        record["declared_components"] = [dict(entry) for entry in method.components]
+    return record

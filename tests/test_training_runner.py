@@ -10,10 +10,14 @@ Scaled actor exports survive pending-output recovery; a changed export scale is
 rejected before recording or logs change, even when weight bytes still match.
 The pinned opponent share is validated with the other settings, round-trips
 through the saved config, and reaches the schedule, checkpoint and exposure
-records of a real short run.
+records of a real short run. A named pinned_opponent round-trips too, an older
+config without the key reads as None, and a name without a positive share or
+an empty or non-string name is rejected.
 The spawn frame rides the same end-to-end case: a "left" run exports its frame,
 a tampered export is rejected as a different identity, the resumed run reports
-the frame, and the saved config round-trips with and without the nested key.
+the frame, and the saved config round-trips with and without the nested key; a
+config without the key takes the constructor default "left" for a new run, while
+saved_training_config still reads it as "world".
 """
 
 # Failure injection inspects the private host coordinator, not a public API.
@@ -247,6 +251,7 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
                 "env_steps": steps,
                 "checkpoint_id": str(index + 1) * 64,
             },
+            spawn_frame="world",
         )
         for index, steps in enumerate((4, 8))
     )
@@ -259,7 +264,8 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
         num_envs=4,
         total_env_steps=12,
         seed=711,
-        ppo=PPOConfig(rollout_length=2, epochs=1),
+        # World frame: the selected export's identity is then its raw weight digest.
+        ppo=PPOConfig(rollout_length=2, epochs=1, spawn_frame="world"),
         checkpoint_interval_updates=1,
         validation_fractions=(1.0,),
         routine_seed_pairs=1,
@@ -422,6 +428,9 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
         {"pinned_opponent_share": 0.9},
         {"pinned_opponent_share": True},
         {"pinned_opponent_share": float("nan")},
+        {"pinned_opponent": "tdm-alpha"},
+        {"pinned_opponent": "", "pinned_opponent_share": 0.1},
+        {"pinned_opponent": 3, "pinned_opponent_share": 0.1},
     ],
 )
 def test_invalid_config_rejected(change: dict[str, Any]) -> None:
@@ -479,6 +488,16 @@ def test_config_roundtrip_and_unknown_keys() -> None:
     assert config_from_dict(older) == config
     from marl_battlegrounds.baselines.ppo import PPOConfig
 
+    named = TrainConfig(pinned_opponent="tdm-alpha", pinned_opponent_share=0.1)
+    assert config_from_dict(config_to_dict(named)) == named
+    assert config_to_dict(named)["pinned_opponent"] == "tdm-alpha"
+    assert "pinned_opponent" in config_to_dict(config)
+    older_named = {
+        key: value
+        for key, value in config_to_dict(config).items()
+        if key != "pinned_opponent"
+    }
+    assert config_from_dict(older_named) == config
     framed = TrainConfig(ppo=PPOConfig(spawn_frame="left"))
     assert config_from_dict(config_to_dict(framed)) == framed
     assert config_to_dict(framed)["ppo"]["spawn_frame"] == "left"
@@ -489,6 +508,13 @@ def test_config_roundtrip_and_unknown_keys() -> None:
         if key != "spawn_frame"
     }
     assert config_from_dict(without_frame) == config
+    assert config.ppo.spawn_frame == "left"
+    # Two rules side by side: a new run from a config without a frame takes the
+    # constructor default, while a saved record without one still means "world".
+    from marl_battlegrounds.training.checkpoints import saved_training_config
+
+    saved = saved_training_config({"metadata": {"config": without_frame}})
+    assert saved["ppo"]["spawn_frame"] == "world"
     with pytest.raises(ValueError, match="Unknown"):
         config_from_dict({"typo": 1})
     with pytest.raises(ValueError, match="schema_version"):

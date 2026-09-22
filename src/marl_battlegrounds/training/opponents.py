@@ -2,7 +2,10 @@
 
 Initialize a capacity-20 bank on the host, draw assignments only at game resets,
 and publish updated actor variables after learning with refresh_opponents.
-make_opponent_system applies those choices through the actor's existing System.
+make_opponent_system applies those choices through the actor's existing System,
+and can play a named pinned System on the lanes assigned to slot 0 through M8's
+own one-team helpers. A pinned host method runs outside compiled code through
+HostOpponent, and HOST_ACTIONS_SYSTEM hands its actions to the compiled step.
 Recurrent memory belongs to SystemState.team_b, never to this bank. These helpers
 do not train, load checkpoints, call a critic, or change simulator rules.
 """
@@ -17,12 +20,23 @@ from jax import Array
 from jax.core import Tracer
 from jax.typing import DTypeLike
 
+# One owner for per-team execution: the pinned opponent reuses M8's helpers.
+# pyright: reportPrivateUsage=false
 from marl_battlegrounds.evaluation.policy_execution import (
     System,
     SystemInput,
     SystemOutput,
-    _normal_output,  # pyright: ignore[reportPrivateUsage]
+    _default_reset,
+    _execution,
+    _host_apply,
+    _initial_memory,
+    _jax_apply,
+    _normal_output,
+    _SystemExecution,
+    select_policy_carry,
 )
+from marl_battlegrounds.evaluation.system_evaluation import prepare_evaluation_system
+from marl_battlegrounds.policies.actor import ActorAction
 from marl_battlegrounds.training.curriculum import ScheduleArrays
 
 type Tree = Any
@@ -53,7 +67,10 @@ class OpponentHistory(NamedTuple):
         Int32 (20,) slot satisfying each requested history threshold, or -1 if
         unmet. Thresholds are the 5% steps, or round 1 followed by 5% through
         95% when the schedule requests early capture of a pinned first-update
-        actor. Several thresholds can point to one slot after one update.
+        actor. Several thresholds can point to one slot after one update. When
+        a named System is pinned, slot 0 still holds the first-update actor, but
+        lanes assigned to slot 0 play the named System instead and the snapshot
+        is never played.
     last_refresh_rounds : Array
         Int32 scalar last accepted real-round count, initially zero. One round
         means one decision across the fixed environment batch.
@@ -296,7 +313,9 @@ def assign_opponents(
         uniform occupied-slot draw. Other sampling/action streams are untouched.
     pinned_share : float, default=0.0
         Static Python probability, within [0, 0.8], that a reset lane meets
-        history slot 0, the pinned first-update actor. Zero keeps the 80%
+        history slot 0: the pinned first-update actor, or the named pinned System
+        when the collection has one (slot 0 then only marks the assignment). Zero
+        keeps the 80%
         current and 20% uniform-history recipe with exactly today's random
         draws. A positive share requires a schedule whose first history
         threshold is round 1, so slot 0 holds the actor after the first completed
@@ -542,7 +561,78 @@ def _remove_batch(leaf: Array) -> Array:
     return leaf[0]
 
 
-def make_opponent_system(actor: System) -> System:
+def _compact_capacity(size: int) -> int:
+    """Return how many pinned games the compact route holds: a quarter, at least one.
+
+    Parameters
+    ----------
+    size : int
+        Static number of games B, positive.
+
+    Returns
+    -------
+    int
+        ceil(size / 4), at least 1. A pinned share of 0.1 at B=512 puts about
+        51 games on the pinned System, well inside 128; a step with more
+        pinned games than this uses the full batch instead.
+    """
+    return max(1, -(-size // 4))
+
+
+def _gather_rows(tree: Tree, index: Array, size: int) -> Tree:
+    """Take the rows named by index from every leading-B leaf of a tree.
+
+    Parameters
+    ----------
+    tree : Any
+        Pytree whose leaves all have leading axis B; typed key arrays work too.
+    index : Array
+        Int32 (C,) row numbers. Entries equal to size mark unused slots.
+    size : int
+        Static B.
+
+    Returns
+    -------
+    Any
+        The same tree with leading axis C. Unused slots read row B - 1; the
+        caller marks them invalid. Pure; no host transfer.
+    """
+    safe = jnp.minimum(index, size - 1)
+
+    def take(leaf: Array) -> Array:
+        """Read the selected rows of one leaf."""
+        return leaf[safe]
+
+    return jax.tree.map(take, tree)
+
+
+def _scatter_rows(full: Tree, part: Tree, index: Array) -> Tree:
+    """Write rows of part back into full at index; unused slots are dropped.
+
+    Parameters
+    ----------
+    full : Any
+        Pytree with leading-B leaves.
+    part : Any
+        The same tree structure with leading-C leaves of matching dtypes.
+    index : Array
+        Int32 (C,) target rows; entries equal to B are out of range.
+
+    Returns
+    -------
+    Any
+        full with the indexed rows replaced. Out-of-range entries are dropped,
+        so padding never overwrites a real game. Pure.
+    """
+
+    def put(whole: Array, rows: Array) -> Array:
+        """Place one leaf's rows."""
+        return whole.at[index].set(rows, mode="drop")
+
+    return jax.tree.map(put, full, part)
+
+
+def make_opponent_system(actor: System, *, pinned: System | None = None) -> System:
     """Wrap a native JAX actor for current or frozen per-game opponent variables.
 
     Parameters
@@ -553,23 +643,35 @@ def make_opponent_system(actor: System) -> System:
         or initializing a lane alone must equal its row in a batch. The actor's
         architecture, input/action schemas and inference mode stay fixed. Only
         changing numerical inference state belongs in the variables tree.
+    pinned : System or None, default None
+        Keyword-only. None returns exactly today's wrapper. A frozen JAX-execution
+        System, or a Policy adapted with shared_policy, plays the lanes whose
+        assignment is slot 0 instead of the network. Its memory may have any
+        layout M8 allows, with or without its own reset_memory hook. A host
+        method is not passed here: the collection passes HOST_ACTIONS_SYSTEM
+        and runs the host method through HostOpponent.
 
     Returns
     -------
     System
-        Stable apply/init callbacks with variables=(). Supply an OpponentHistory
-        explicitly as variables_b to init_systems and apply_systems. All-current
-        batches call the base actor once on the full batch. Mixed batches map
-        independent length-one calls in lane order. Initialization selects each
-        lane's assigned variables too. Learning outputs are empty and policy IDs
-        are unreported (-1); training records own exact version identities.
+        Stable apply/init callbacks with variables=(). Without a pinned System,
+        supply an OpponentHistory explicitly as variables_b to init_systems and
+        apply_systems; with one, supply (history, pinned variables, pinned memory
+        template), and the memory is (network memory, pinned memory).
+        All-current batches call the base actor once on the full batch. Mixed
+        batches map independent length-one calls in lane order; with a pinned
+        System, slot-0 lanes count as current for the network, whose output
+        there is discarded. Initialization selects each lane's assigned
+        variables too. Learning outputs are empty and policy IDs are unreported
+        (-1); training records own exact version identities.
 
     Raises
     ------
     TypeError, ValueError
         actor is not a native JAX System, uses a Policy adapter/custom reset hook,
-        or has nonnumeric variables. The returned callbacks reject incompatible
-        variable/input/key/memory shapes and concrete invalid snapshot IDs.
+        or has nonnumeric variables; pinned is not a System or uses host
+        execution. The returned callbacks reject incompatible variable/input/
+        key/memory shapes and concrete invalid snapshot IDs.
 
     Notes
     -----
@@ -582,8 +684,19 @@ def make_opponent_system(actor: System) -> System:
     Lane independence and actor-only information ownership are caller contracts,
     not properties that inspecting an arbitrary callback can prove. Traced calls
     require a valid history and the collector's pre-application failure guard.
-    Policy adapters and host methods remain supported through their existing M8
-    routes, outside this wrapper. No critic, checkpoint loader or learner is called.
+    A pinned System follows M8's rules for one team: it sees only its own lanes
+    as valid (other lanes are padding to it), its memory is initialized by M8's
+    outer reset through this wrapper's init for pinned lanes of new games, and
+    its step runs through M8's _jax_apply with the same keys the network gets.
+    A whole-batch lax.cond skips it on steps where no lane uses it. A Policy
+    adapter, which acts per actor, then runs on the pinned games only, gathered
+    into a quarter of the batch (the full batch when more games are pinned);
+    a generic System, which may look across the batch, runs on the full batch
+    with the other games marked invalid. The actions are merged per game across
+    all five actors. A wrapper reset hook exists only when the pinned System has
+    its own; that hook receives M8's reset mask for every new game, and for
+    games it does not play the fresh memory is its idle placeholder.
+    No critic, checkpoint loader or learner is called.
     """
     if not isinstance(cast(object, actor), System):
         raise TypeError("actor must be a System")
@@ -694,4 +807,413 @@ def make_opponent_system(actor: System) -> System:
             jax.lax.cond(jnp.all(history.lane_snapshot == -1), current, mixed, None),
         )
 
-    return System(f"{actor.name} Training Opponent", apply, init=initialize)
+    if pinned is None:
+        return System(f"{actor.name} Training Opponent", apply, init=initialize)
+    if not isinstance(cast(object, pinned), System):
+        raise TypeError("pinned must be a System")
+    if pinned.execution != "jax":
+        raise ValueError(
+            "A pinned System inside this wrapper must use JAX execution; host "
+            "methods run through collect_training_rollout's host route"
+        )
+    pinned_execution = _execution(pinned)
+    pinned_reset = pinned.reset_memory
+    # A Policy acts per actor, so running it on the pinned games alone gives
+    # exactly the actions it gives them inside the full batch. A generic
+    # System may legally look across the batch, so it keeps the full batch.
+    pinned_compact = bool(pinned._policies)  # pyright: ignore[reportPrivateUsage]
+
+    def network_view(history: OpponentHistory) -> OpponentHistory:
+        """Give pinned lanes current weights; their network output is discarded."""
+        snapshot = jnp.where(history.lane_snapshot == 0, -1, history.lane_snapshot)
+        return history._replace(lane_snapshot=snapshot)
+
+    def unpack(variables: Tree) -> tuple[OpponentHistory, Tree, Tree]:
+        """Split (history, pinned variables, pinned memory template)."""
+        if (
+            not isinstance(variables, tuple)
+            or len(cast(tuple[Tree, ...], variables)) != 3
+        ):
+            raise ValueError(
+                "A pinned opponent wrapper needs variables_b=(history, pinned "
+                "variables, pinned memory template)"
+            )
+        history, pinned_variables, template = cast(tuple[Tree, Tree, Tree], variables)
+        return cast(OpponentHistory, history), pinned_variables, template
+
+    def initialize_pinned(variables: Tree, inputs: SystemInput, keys: Array) -> Tree:
+        """Create (network memory, pinned memory), the pinned half for pinned lanes."""
+        history, pinned_variables, template = unpack(variables)
+        check(history, inputs, keys)
+        network = initialize(network_view(history), inputs, keys)
+        use = inputs.valid & (history.lane_snapshot == 0)
+        fresh = _initial_memory(
+            pinned_execution,
+            pinned_variables,
+            template,
+            inputs._replace(valid=use),
+            keys,
+        )
+        return (network, fresh)
+
+    def apply_pinned(
+        variables: Tree, memory: Tree, inputs: SystemInput, keys: Array
+    ) -> SystemOutput:
+        """Apply the network, then the pinned System on its lanes, per game."""
+        history, pinned_variables, template = unpack(variables)
+        size = check(history, inputs, keys)
+        if not isinstance(memory, tuple) or len(cast(tuple[Tree, ...], memory)) != 2:
+            raise ValueError(
+                "A pinned opponent's memory must be (network memory, pinned memory)"
+            )
+        network_memory, pinned_memory = cast(tuple[Tree, Tree], memory)
+        network = apply(network_view(history), network_memory, inputs, keys)
+        next_network = network.next_memory
+        if pinned_reset is not None:
+            # A wrapper reset hook turns off M8's padding protection, so keep
+            # invalid lanes of the network half here.
+            next_network = select_policy_carry(
+                inputs.valid, next_network, network_memory
+            )
+        use = inputs.valid & (history.lane_snapshot == 0)
+
+        def run(_: None) -> tuple[ActorAction, Tree]:
+            """Apply the pinned System to its lanes with M8's one-team rules."""
+            output = _jax_apply(
+                pinned_execution,
+                pinned_variables,
+                template,
+                pinned_memory,
+                inputs._replace(valid=use),
+                keys,
+                keys,
+                jnp.zeros_like(use),
+                keep_learning_outputs=False,
+            )
+            heads = ActorAction(
+                *(jnp.asarray(head, jnp.int32) for head in output.actions)
+            )
+            return heads, output.next_memory
+
+        def skip(_: None) -> tuple[ActorAction, Tree]:
+            """No lane meets the pinned System this step, so it is not called."""
+            zero = jnp.zeros((size, 5), jnp.int32)
+            return ActorAction(zero, zero, zero), pinned_memory
+
+        chosen_run = run
+        if pinned_compact:
+            capacity = _compact_capacity(size)
+
+            def run_compact(_: None) -> tuple[ActorAction, Tree]:
+                """Apply a Policy adapter to the pinned games only, then put back."""
+                index = jnp.nonzero(use, size=capacity, fill_value=size)[0]
+                rows = _gather_rows(inputs, index, size)._replace(
+                    valid=jnp.arange(capacity) < jnp.sum(use)
+                )
+                row_keys = _gather_rows(keys, index, size)
+                output = _jax_apply(
+                    pinned_execution,
+                    pinned_variables,
+                    template,
+                    _gather_rows(pinned_memory, index, size),
+                    rows,
+                    row_keys,
+                    row_keys,
+                    jnp.zeros((capacity,), jnp.bool_),
+                    keep_learning_outputs=False,
+                )
+                heads = ActorAction(
+                    *(
+                        _scatter_rows(
+                            jnp.zeros((size, 5), jnp.int32),
+                            jnp.asarray(head, jnp.int32),
+                            index,
+                        )
+                        for head in output.actions
+                    )
+                )
+                return heads, _scatter_rows(pinned_memory, output.next_memory, index)
+
+            def run_small_or_full(_: None) -> tuple[ActorAction, Tree]:
+                """Compact when the pinned games fit the capacity, else run all."""
+                return cast(
+                    tuple[ActorAction, Tree],
+                    jax.lax.cond(jnp.sum(use) <= capacity, run_compact, run, None),
+                )
+
+            chosen_run = run_small_or_full
+
+        pinned_actions, next_pinned = cast(
+            tuple[ActorAction, Tree],
+            jax.lax.cond(jnp.any(use), chosen_run, skip, None),
+        )
+        actions = ActorAction(
+            *(
+                jnp.where(use[:, None], chosen, own)
+                for chosen, own in zip(pinned_actions, network.actions, strict=True)
+            )
+        )
+        return SystemOutput(actions, (next_network, next_pinned))
+
+    hook = None
+    if pinned_reset is not None:
+        reset_pinned_half = pinned_reset
+
+        def reset_both(old: Tree, fresh: Tree, mask: Array) -> Tree:
+            """Reset the network half by M8's default, the pinned half by its hook."""
+            old_pair = cast(tuple[Tree, Tree], old)
+            fresh_pair = cast(tuple[Tree, Tree], fresh)
+            return (
+                _default_reset(old_pair[0], fresh_pair[0], mask, host=False),
+                reset_pinned_half(old_pair[1], fresh_pair[1], mask),
+            )
+
+        hook = reset_both
+    return System(
+        f"{actor.name} Training Opponent With {pinned.name}",
+        apply_pinned,
+        init=initialize_pinned,
+        reset_memory=hook,
+    )
+
+
+def _replay_host_actions(
+    variables: Tree, memory: Tree, inputs: SystemInput, keys: Array
+) -> tuple[ActorAction, Tree]:
+    """Return actions a host method already chose, supplied as this step's data.
+
+    Parameters
+    ----------
+    variables : ActorAction
+        This step's host actions, three int32 arrays of shape (B, 5).
+    memory : Any
+        Returned unchanged; the stand-in keeps no memory of its own.
+    inputs, keys
+        Unused. The host method saw the same inputs and keys before this step.
+
+    Returns
+    -------
+    tuple[ActorAction, Any]
+        The supplied actions and the unchanged memory.
+    """
+    del inputs, keys
+    return ActorAction(*cast(tuple[Array, Array, Array], variables)), memory
+
+
+HOST_ACTIONS_SYSTEM = System("Host Actions", _replay_host_actions)
+"""JAX stand-in for a pinned host method inside the compiled step.
+
+The host route in ``collect_training_rollout`` asks the host method for its
+actions, puts them in ``TrainingCarry.pinned_opponent``, and this System returns
+them for the pinned lanes. It has no memory; the host method's memory lives on
+its ``HostOpponent`` holder.
+"""
+
+
+class HostOpponent:
+    """Hold one pinned host method, its memory, and the round it may serve next.
+
+    Parameters
+    ----------
+    system : System
+        Frozen host-execution System (a Policy is adapted with shared_policy
+        before it arrives here).
+    num_envs : int
+        Fixed number of games B.
+
+    Attributes
+    ----------
+    execution : _SystemExecution
+        Stable M8 execution descriptor of the method.
+    variables, template : Any
+        Frozen parameters and memory template from prepare_evaluation_system.
+    memory : Any
+        The method's current memory for all B lanes, in M8's host layout.
+        Only pinned lanes ever change it.
+    generations : numpy.ndarray
+        Int64 (B,) reset generation each lane's memory belongs to; -1 means
+        never served, so the lane initializes on its first pinned decision.
+    stateful : bool
+        False only when the method has no init, no reset_memory hook and an
+        empty memory template; M8's reset rule then keeps its memory empty and
+        refuses anything else. Every other host method counts as stateful,
+        because it may build memory while it plays.
+    next_round : int or None
+        The training round this holder serves next; None until the first
+        call, so a holder built for a resumed run accepts the restored round.
+    failure : BaseException or None
+        The first error raised by the method. Once set, the holder refuses
+        every later call.
+    failed_round : int or None
+        The round whose call failed, named in the refusal message; None until
+        a failure.
+
+    Notes
+    -----
+    Host-only and mutable. One holder belongs to one TrainingCollection. It
+    serves each training round once, in order: a stale carry, such as the
+    block's starting carry after a failure, is refused rather than combined
+    with newer memory. The memory is never saved; see restore_checkpoint for
+    the resume rule.
+    """
+
+    def __init__(self, system: System, num_envs: int) -> None:
+        """Split the frozen method once; memory is built by start()."""
+        self.execution: _SystemExecution
+        self.execution, self.variables, self.template = prepare_evaluation_system(
+            system
+        )
+        self.stateful = (
+            self.execution.init is not None
+            or self.execution.reset is not None
+            or bool(jax.tree.leaves(self.template))
+        )
+        self.memory: Tree = ()
+        self.generations = np.full(num_envs, -1, np.int64)
+        self.next_round: int | None = None
+        self.failure: BaseException | None = None
+        self.failed_round: int | None = None
+
+    def start(self, inputs: SystemInput, init_keys: Array) -> None:
+        """Build placeholder memory with every lane invalid, so nothing opens.
+
+        Parameters
+        ----------
+        inputs : SystemInput
+            Team B inputs of the setup reset, already on the host.
+        init_keys : Array
+            Team B initialization keys, as M8 derives them.
+        """
+        idle = inputs._replace(valid=np.zeros_like(np.asarray(inputs.valid)))
+        self.memory = _initial_memory(
+            self.execution, self.variables, self.template, idle, init_keys
+        )
+
+    def act(
+        self,
+        round_index: int,
+        inputs: SystemInput,
+        pinned: np.ndarray,
+        keys: Array,
+        init_keys: Array,
+        generations: np.ndarray,
+    ) -> ActorAction:
+        """Choose the pinned lanes' actions for one round through M8's host helper.
+
+        Parameters
+        ----------
+        round_index : int
+            The carry's completed-round count before this decision.
+        inputs : SystemInput
+            Team B inputs for all B lanes, after finished games were reset, still
+            on the device. Only what the method needs is copied to the host:
+            nothing when no game is pinned, the pinned games' rows for a Policy
+            adapter, all rows for a generic host System.
+        pinned : numpy.ndarray
+            Bool (B,) lanes assigned to the pinned System.
+        keys, init_keys : Array
+            Team B action and initialization keys, as M8 derives them.
+        generations : numpy.ndarray
+            Int (B,) current reset generation of each lane.
+
+        Returns
+        -------
+        ActorAction
+            Three (B, 5) int32 JAX arrays on the default device. Lanes that are
+            not pinned are zero, whatever the method returned for them.
+
+        Raises
+        ------
+        RuntimeError
+            An earlier call failed; the holder is unusable.
+        ValueError
+            round_index is not the next round this holder serves.
+        TypeError
+            A method classified as memory-free returned memory: M8's own reset
+            rule refuses memory that does not keep the structure its init
+            established (no init means empty memory).
+        BaseException
+            Any error of the method itself propagates with its own type, and
+            the holder becomes unusable.
+        """
+        if self.failure is not None:
+            raise RuntimeError(
+                f"This host-pinned collection failed at round {self.failed_round}; "
+                "build a new collection or resume from a checkpoint"
+            ) from self.failure
+        if self.next_round is not None and round_index != self.next_round:
+            raise ValueError(
+                f"The host opponent's memory is at round {self.next_round}, but the "
+                f"carry is at round {round_index}; a host-pinned collection serves "
+                "each round once, so build a new collection or resume from a "
+                "checkpoint"
+            )
+        valid = np.asarray(jax.device_get(inputs.valid)) & np.asarray(pinned)
+        count = len(valid)
+        if not valid.any():
+            # No game meets the method this round: no input transfer, no call.
+            self.next_round = round_index + 1
+            zero = jnp.zeros((count, 5), jnp.int32)
+            return ActorAction(zero, zero, zero)
+        reset = (np.asarray(generations) != self.generations) & valid
+        try:
+            if self.execution.policies:
+                # A Policy acts per actor, so only the pinned games' rows are
+                # sent to the host and computed; the result is exact.
+                rows = np.flatnonzero(valid)
+
+                def pick(leaf: Any) -> Any:  # noqa: ANN401
+                    """Take the pinned games' rows of one leaf."""
+                    return leaf[rows]
+
+                output = _host_apply(
+                    self.execution,
+                    self.variables,
+                    self.template,
+                    jax.tree.map(pick, self.memory),
+                    jax.tree.map(pick, inputs)._replace(
+                        valid=np.ones(len(rows), np.bool_)
+                    ),
+                    keys[rows],
+                    init_keys[rows],
+                    reset[rows],
+                    keep_learning_outputs=False,
+                )
+
+                def put(whole: Any, part: Any) -> np.ndarray:  # noqa: ANN401
+                    """Write the pinned games' rows back into one leaf."""
+                    result = np.array(whole)
+                    result[rows] = np.asarray(part)
+                    return result
+
+                memory = jax.tree.map(put, self.memory, output.next_memory)
+                heads: list[np.ndarray] = []
+                for head in output.actions:
+                    full = np.zeros((count, 5), np.int32)
+                    full[rows] = np.asarray(head, np.int32)
+                    heads.append(full)
+            else:
+                output = _host_apply(
+                    self.execution,
+                    self.variables,
+                    self.template,
+                    self.memory,
+                    inputs._replace(valid=valid),
+                    keys,
+                    init_keys,
+                    reset,
+                    keep_learning_outputs=False,
+                )
+                memory = output.next_memory
+                heads = [
+                    np.where(valid[:, None], np.asarray(head, np.int32), 0)
+                    for head in output.actions
+                ]
+        except BaseException as error:
+            self.failure = error
+            self.failed_round = round_index
+            raise
+        self.memory = memory
+        self.generations = np.where(valid, np.asarray(generations), self.generations)
+        self.next_round = round_index + 1
+        return ActorAction(*(jnp.asarray(head) for head in heads))

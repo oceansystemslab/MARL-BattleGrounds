@@ -24,9 +24,9 @@ critic_values and update_recurrent_ppo separately with privileged training data.
 
 Requires the optional training extra. Inputs stay on device inside jit/scan.
 Reference settings are starting values, not qualified learning settings for BG.
-PPOConfig.spawn_frame is a BG adaptation: "left" or "right" reflects the actor's
-permitted view so every game looks like a start from that bank, and maps the
-chosen move back; "world" keeps the donor's raw coordinates bit for bit.
+PPOConfig.spawn_frame is a BG adaptation: "left", the default, reflects the
+actor's permitted view so every game looks like a start from the left bank, and
+maps the chosen move back; "world" keeps the donor's raw coordinates bit for bit.
 """
 
 import functools
@@ -102,12 +102,12 @@ def _input_scale(value: float) -> float:
 def _spawn_frame(value: object) -> str:
     """Check a static spawn frame name and return it as a Python string.
 
-    This host check accepts exactly the strings "world", "left" and "right".
-    Any other value, including Booleans, None and traced arrays, raises
-    ValueError. It performs no device work.
+    This host check accepts exactly the strings "world" and "left". Any other
+    value, including the removed "right", Booleans, None and traced arrays,
+    raises ValueError. It performs no device work.
     """
     if not isinstance(value, str) or value not in SPAWN_FRAMES:
-        raise ValueError('spawn_frame must be "world", "left" or "right".')
+        raise ValueError('spawn_frame must be "world" or "left".')
     return value
 
 
@@ -150,13 +150,16 @@ class PPOConfig:
         before the first Dense layer. One preserves the donor's raw inputs.
         Use the same setting for collection, learning and loaded inference.
         No feature is removed and no running statistics are collected.
-    spawn_frame : str, default="world"
-        Which spawn bank the actor always seems to start from. "world" keeps
-        raw coordinates and traces the donor's program bit for bit. "left"
-        reflects the permitted view of any actor whose own team starts on the
-        right bank about the map's vertical centerline, so every game looks
-        like a left start, and maps the chosen move back before the game
-        receives it; "right" does the same with the right bank as home. On
+    spawn_frame : str, default="left"
+        Which spawn bank the actor always seems to start from. "left", the
+        default, reflects the permitted view of any actor whose own team
+        starts on the right bank about the map's vertical centerline, so every
+        game looks like a left start, and maps the chosen move back before the
+        game receives it. "world" keeps raw coordinates and traces the donor's
+        program bit for bit; pass it to reproduce runs made before the default
+        changed on 22 September 2026, and in old config files, which name no
+        frame and would otherwise train in "left". Saved checkpoints, exports
+        and run records without a frame still mean "world". On
         the built-in Team Deathmatch maps, which are their own mirror images,
         a reflected right start shows the own pads near x = 0.5; a custom
         layout is reflected the same way with no such guarantee, and
@@ -169,8 +172,7 @@ class PPOConfig:
     ValueError
         A count is not a positive Python int, or a numerical setting is nonfinite
         or outside its stated range. Boolean counts and non-real/Boolean input
-        scales are rejected, as is a spawn frame other than "world", "left" or
-        "right".
+        scales are rejected, as is a spawn frame other than "world" or "left".
 
     Notes
     -----
@@ -193,7 +195,7 @@ class PPOConfig:
     max_grad_norm: float = 0.5
     adam_epsilon: float = 0.00001
     input_scale: float = 1.0
-    spawn_frame: str = "world"
+    spawn_frame: str = "left"
 
     def __post_init__(self) -> None:
         """Reject invalid static update counts and numerical settings on the host."""
@@ -732,10 +734,10 @@ def _apply_actor(
         settings. One keeps raw inputs. The System factory binds this setting.
     spawn_frame_index : int, default=0
         Position of the actor's training spawn frame in SPAWN_FRAMES: 0 is
-        "world", 1 is "left", 2 is "right". A number rather than the name,
-        because M8 records a System hook's numerical keyword defaults in its
-        identity and skips text. "left" or "right" reflects flagged lanes'
-        permitted view and move mask before the network, samples in that
+        "world", 1 is "left". A number rather than the name, because M8
+        records a System hook's numerical keyword defaults in its identity and
+        skips text. "left" reflects flagged lanes' permitted view and move
+        mask before the network, samples in that
         frame, and maps the chosen index back to world directions for both
         the returned actions and the learning outputs. "world" leaves the
         donor's program unchanged. The System factory binds this setting.
@@ -819,7 +821,7 @@ def _scaled_actor_apply(
     returned hook uses the normal actor call and has no captured weights or
     mutable state. M8 digests a hook's numerical keyword defaults into System
     identity, so the frame is recorded as its index in SPAWN_FRAMES (0 world,
-    1 left, 2 right), exactly as _apply_actor records it for the default
+    1 left), the same way _apply_actor records index 0 for the unscaled world
     System; equal weights used with different scales or frames therefore
     describe different Systems. Caching preserves callable identity during
     setup.
@@ -858,7 +860,7 @@ def make_recurrent_mappo_system(
     actor_params: Tree,
     *,
     input_scale: float = 1.0,
-    spawn_frame: str = "world",
+    spawn_frame: str = DEFAULT_PPO_CONFIG.spawn_frame,
     name: str = "Recurrent MAPPO",
     checkpoint: str | None = None,
 ) -> System:
@@ -874,9 +876,12 @@ def make_recurrent_mappo_system(
         preserves historical raw-input behavior. The fixed apply hook records
         this setting in System identity; equal weights with different scales
         describe different inference. No weights or encoder fields are changed.
-    spawn_frame : str, default="world"
-        Spawn frame used to train these weights: "world", "left" or "right"
-        (see PPOConfig). The apply hook records it in System identity; equal
+    spawn_frame : str, default="left"
+        Spawn frame used to train these weights: "world" or "left" (see
+        PPOConfig). The default follows DEFAULT_PPO_CONFIG.spawn_frame. Weights
+        trained before 22 September 2026 without a frame were trained in
+        "world"; pass spawn_frame="world" for them, or they will play
+        mirrored. The apply hook records the frame in System identity; equal
         weights with different frames describe different inference.
     name : str, default="Recurrent MAPPO"
         Nonempty display name. It does not establish a trained model's identity.
@@ -894,7 +899,7 @@ def make_recurrent_mappo_system(
     ------
     ValueError
         The scale is not a positive finite real number, is Boolean, the spawn
-        frame is not one of the three names, or the System rejects an empty or
+        frame is not "world" or "left", or the System rejects an empty or
         invalid display name.
 
     Notes
@@ -1301,8 +1306,8 @@ def _reflected_minibatch(
 
     actor_inputs, mask and actions carry the leading (G,T,E,5) axes of one
     minibatch: the rebuilt permitted view, the stored world-frame Core masks and
-    the stored world-frame categorical indices. spawn_frame is "left" or
-    "right". Return the reflected view, the 198-way categorical mask in that
+    the stored world-frame categorical indices. spawn_frame is "left". Return
+    the reflected view, the 198-way categorical mask in that
     frame and the indices mapped into it, so the recomputed log probability
     matches the action-time value for the same submitted move. The obstacle
     partner mask is computed once per recorded game and step from that row's
@@ -1346,8 +1351,10 @@ def update_recurrent_ppo(
         The caller owns future keys; no next key is returned.
     config : PPOConfig, default=DEFAULT_PPO_CONFIG
         Static grouping, epoch, minibatch, GAE and optimizer settings, and the
-        spawn frame the stored actions were chosen in. Capture one fixed
-        configuration when compiling this function.
+        spawn frame the stored actions were chosen in. The default's frame is
+        "left", which reflects flagged rows before the log probability; pass a
+        config with spawn_frame="world" for actions chosen in the world frame.
+        Capture one fixed configuration when compiling this function.
 
     Returns
     -------
@@ -1369,8 +1376,8 @@ def update_recurrent_ppo(
     the selected minibatch is encoded. Groups share one optimizer per network.
     Death excludes policy samples while preserving value learning; inactive or
     padded rows are absent from both losses. Empty networks skip their update as
-    documented by update_minibatch. When config.spawn_frame is "left" or
-    "right", each minibatch's rebuilt view and mask are reflected and the
+    documented by update_minibatch. When config.spawn_frame is "left", each
+    minibatch's rebuilt view and mask are reflected and the
     stored world-frame indices are mapped into that frame before the log
     probability, exactly as at action time; "world" traces the donor's
     program unchanged.

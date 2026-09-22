@@ -95,6 +95,18 @@ class TrainConfig:
         100% snapshot, so slot 0 holds that near-untrained actor for the whole
         run; the remaining probability is 20% other history when any exists and
         current weights otherwise. Evaluation opponents are unaffected.
+    pinned_opponent : str or None, default=None
+        None keeps the pinned share playing that first-update actor. Otherwise
+        a method reference that plays the pinned share instead: a built-in name
+        ("random", "tdm-alpha", "tdm-beta"), an absolute path to an exported
+        actor directory (a relative path is rejected), or a
+        ``module:function`` factory, resolved by
+        ``load_method`` when the run is set up and again on resume. Requires a
+        positive pinned_opponent_share. JAX methods and host methods (for
+        example LLM agents) are both accepted; a host method with memory cannot
+        be resumed while one of its games is unfinished. The pinned opponent
+        is a training opponent: results against it, and its evidence of
+        protected-controller exposure, are recorded with the run.
     ppo : PPOConfig, default=PPOConfig()
         Immutable donor network update settings, including rollout length,
         input scale and spawn frame. A shared random initialization result can
@@ -153,6 +165,7 @@ class TrainConfig:
     shaping_coefficient: float = 0.01
     shaping_mode: Literal["potential", "score_delta"] = "potential"
     pinned_opponent_share: float = 0.0
+    pinned_opponent: str | None = None
     ppo: PPOConfig = field(default_factory=PPOConfig)
     metrics: Literal["priority", "none"] = "priority"
     recording: bool = False
@@ -224,6 +237,23 @@ class TrainConfig:
             mode=self.shaping_mode,
         )
         _pinned_share(self.pinned_opponent_share)
+        if self.pinned_opponent is not None:
+            if (
+                not isinstance(cast(object, self.pinned_opponent), str)
+                or not self.pinned_opponent.strip()
+            ):
+                raise ValueError("pinned_opponent must be None or a nonempty string")
+            if not self.pinned_opponent_share > 0:
+                raise ValueError(
+                    "pinned_opponent needs a positive pinned_opponent_share"
+                )
+            if (
+                "/" in self.pinned_opponent
+                and not Path(self.pinned_opponent).is_absolute()
+            ):
+                # A saved config is resolved again on resume, possibly from
+                # another working directory, so a path must be absolute.
+                raise ValueError("pinned_opponent paths must be absolute")
         if self.purpose not in ("development", "demonstration"):
             raise ValueError("purpose must be development or demonstration")
         if self.validation_panel is not None and (
@@ -502,6 +532,7 @@ def train(
         metrics=config.metrics,
         recording=config.recording,
         pinned_opponent_share=config.pinned_opponent_share,
+        pinned_opponent=config.pinned_opponent,
     )
     if config.random_initialization_result is not None:
         from marl_battlegrounds.evaluation.recording_identity import tree_digest
@@ -659,8 +690,18 @@ def train(
                         ("team_b", collection.opponent),
                     )
                 }
+                # The pass names the pinned System; the writer and the
+                # checkpoint must hold the same details, which resume compares.
+                recording_details: dict[str, object] = (
+                    {}
+                    if collection.pinned_opponent is None
+                    else {"pinned_opponent": collection.pinned_opponent}
+                )
                 writer = RunWriter(
-                    root / "episodes", phase="training", policies=policies
+                    root / "episodes",
+                    phase="training",
+                    policies=policies,
+                    details=recording_details or None,
                 )
                 stack.callback(writer.close)
                 metadata["recording"] = {
@@ -669,7 +710,7 @@ def train(
                     "pass_id": "1",
                     "policies": policies,
                     "checkpoint_id": None,
-                    "details": {},
+                    "details": recording_details,
                 }
             atomic_json(
                 root / "run_details.json",
@@ -1146,6 +1187,12 @@ class _Run:
                 "seed": self.config.seed,
                 "env_steps": self.host["env_steps"],
                 "checkpoint_id": self.checkpoint.name,
+                # A later run that pins this export inherits its exposure.
+                **(
+                    {}
+                    if self.collection.pinned_opponent is None
+                    else {"pinned_opponent": self.collection.pinned_opponent}
+                ),
             },
         )
         self.host["actors"][self.checkpoint.name] = str(destination)

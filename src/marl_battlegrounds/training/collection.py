@@ -2,19 +2,26 @@
 
 Host setup verifies content and freezes callables. Numerical carry keeps changing
 weights, games, memories and counters. Pure scan and bounded recording share one
-step. No critic, optimizer, learning run or durable learner checkpoint lives here.
+step. A named pinned opponent plays the lanes assigned to history slot 0: a JAX
+method inside the compiled step, a host method through a host loop in
+collect_training_rollout. No critic, optimizer, learning run or durable learner
+checkpoint lives here.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from functools import lru_cache, partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
+
+from marl_battlegrounds._method_loading import load_method
 
 # Shared private helpers retain one owner for execution and stage accounting.
 # pyright: reportPrivateUsage=false
@@ -36,20 +43,35 @@ from marl_battlegrounds.episode_tracking import (
     init_episode_tracking,
 )
 from marl_battlegrounds.evaluation.episode_metrics import MetricValues
+from marl_battlegrounds.evaluation.models import canonical_digest_sha256
 from marl_battlegrounds.evaluation.policy_execution import (
+    Policy,
     PolicyTrace,
     System,
     SystemState,
+    _action_keys,
+    _initialization_keys,
     init_systems,
+    shared_policy,
+    system_inputs,
 )
 from marl_battlegrounds.evaluation.recording_identity import (
+    normalize_system_registration,
     ordered_source_bank_identity,
+    policy_description,
+    tree_digest,
 )
+from marl_battlegrounds.evaluation.system_evaluation import (
+    freeze_evaluation_method,
+    prepare_evaluation_system,
+)
+from marl_battlegrounds.policies.actor import ActorAction
 from marl_battlegrounds.policies.input import Observations
 from marl_battlegrounds.training._compilation import training_compiler_options
 from marl_battlegrounds.training._content import (
     PreparedTrainingContent,
     TrainingContentBinding,
+    pinned_opponent_evidence,
     prepare_training_content,
 )
 from marl_battlegrounds.training._execution import _apply_and_track, _reset_finished
@@ -67,6 +89,8 @@ from marl_battlegrounds.training.distributions import (
     training_keys,
 )
 from marl_battlegrounds.training.opponents import (
+    HOST_ACTIONS_SYSTEM,
+    HostOpponent,
     OpponentHistory,
     _history_invalid,
     _history_shapes,
@@ -96,7 +120,10 @@ class TrainingCarry(NamedTuple):
     root_key is Threefry. memory holds separate teams; tracking owns the only
     source bank. source_indices (B,) and source_class_ids (B,10) describe live
     games. schedule and progress count rounds; history owns all actor variables.
-    discount/coefficient are validated scalar float32 values. No host evidence,
+    discount/coefficient are validated scalar float32 values. pinned_opponent
+    is () unless a named System is pinned: then (variables, memory template)
+    for a JAX method, or (this step's host actions, ()) for a host method,
+    whose own memory stays on the collection's HostOpponent. No host evidence,
     critic, optimizer, writer or expanded actor features enters this tree.
     """
 
@@ -113,6 +140,7 @@ class TrainingCarry(NamedTuple):
     history: OpponentHistory
     discount: Array
     coefficient: Array
+    pinned_opponent: Tree = ()
 
 
 class TrainingTransition(NamedTuple):
@@ -125,6 +153,9 @@ class TrainingTransition(NamedTuple):
     Completion outcome/length (B,) and final_scores (B,2) are zero unless ended.
     priority is existing MetricValues, masked to real endings, or None.
     Int32 identity/version fields are (B,); opponent_snapshot=-1 means current.
+    opponent_update is the learner version the opponent's weights come from;
+    for games against a named pinned System (opponent_snapshot 0 when the
+    collection has one) it is -2, because that System is not a learner version.
     training_state is float32 (B,919) or None and never enters an actor.
     Invalid padding has neutral-only masks, zero payloads and -1 identities.
     """
@@ -191,7 +222,12 @@ class TrainingCollection:
     root_bits, key_schema and reward_settings bind in-memory continuation.
     pinned_opponent_share is the static probability that a reset lane meets the
     pinned first-update actor in history slot 0; zero keeps the 80/20 recipe.
-    Reuse this descriptor across blocks to reuse compiled functions. It is not
+    pinned_opponent is None, or the JSON record of a named System that plays
+    slot-0 lanes instead (reference, name, execution, registration and its ID,
+    variables digest, evidence, memory rule). host_opponent is the mutable
+    HostOpponent of a pinned host method, else None; a collection that has one
+    serves each training round once and must not be replayed. Reuse this
+    descriptor across blocks to reuse compiled functions. It is not
     a PyTree or a durable checkpoint and must stay outside numerical carry.
     """
 
@@ -211,6 +247,8 @@ class TrainingCollection:
     reward_settings: tuple[float, float]
     shaping_mode: str = "potential"
     pinned_opponent_share: float = 0.0
+    pinned_opponent: dict[str, Any] | None = None
+    host_opponent: HostOpponent | None = None
 
 
 def _zeros(tree: Tree) -> Tree:
@@ -259,6 +297,32 @@ def _failed(carry: TrainingCarry) -> Array:
         | _history_invalid(carry.history)
         | (carry.history.last_refresh_rounds > carry.progress.rounds)
     )
+
+
+def _uncommitted(leaf: Tree) -> Tree:
+    """Return a device-committed array as an uncommitted copy; keep other leaves.
+
+    Parameters
+    ----------
+    leaf : Any
+        One leaf of a pinned System's variables or memory template.
+
+    Returns
+    -------
+    Any
+        For a jax.Array committed to a device, an equal array (same dtype,
+        shape and values; typed keys stay typed) on the default device with no
+        commitment, like every other array of a fresh TrainingCarry. Any other
+        leaf, including NumPy arrays and uncommitted arrays, unchanged.
+
+    Notes
+    -----
+    Host-only, called once at setup. Copies the leaf through the host.
+    """
+    if not isinstance(leaf, jax.Array) or not leaf.committed:
+        return leaf
+    host = jax.device_get(leaf)
+    return host if isinstance(host, jax.Array) else jnp.asarray(host)
 
 
 def _check_carry(carry: TrainingCarry) -> None:
@@ -470,6 +534,7 @@ def init_training_collection(
     metrics: str = "priority",
     recording: bool = False,
     pinned_opponent_share: float = 0.0,
+    pinned_opponent: System | Policy | str | None = None,
 ) -> tuple[TrainingCollection, TrainingCarry]:
     """Verify and initialize one fixed-batch experiment without choosing actions.
 
@@ -509,20 +574,43 @@ def init_training_collection(
         and 20% uniform-history recipe and traces today's program. A positive
         share requires schedule.early_history_capture=True, and that flag
         requires a positive share; the pair is checked here before any reset.
+    pinned_opponent : System, Policy, str or None, default None
+        None keeps slot 0 as the network's first-update snapshot, exactly as
+        before. Otherwise the method that plays every lane assigned to slot 0,
+        instead of that snapshot: a System or Policy object, or a reference
+        string resolved by ``load_method`` (a built-in name, an absolute
+        actor-export directory, or ``module:function``). Requires a positive
+        pinned_opponent_share. It is frozen once with M8's
+        ``freeze_evaluation_method`` and registered the way evaluation and
+        validation register it. A JAX method runs inside the compiled step,
+        with its variables and memory template in the carry as uncommitted
+        arrays like the rest of the fresh carry, so the first blocks compile
+        once; a host method runs through the host loop of
+        collect_training_rollout and its memory is never saved. An
+        independent_policies System must match every Team B roster size in the
+        schedule. Its training history is recorded by
+        ``pinned_opponent_evidence``; nothing is refused for missing history.
 
     Returns
     -------
     tuple[TrainingCollection, TrainingCarry]
         Stable host descriptor and complete numerical state. Setup reads files
-        only when preparing content, places arrays, initializes memory and traces
-        output shapes. It creates no writer and executes no actor decision.
+        when preparing content and, for a string pinned_opponent, when loading
+        an actor export and its sibling learner description or importing and
+        calling a factory once. It places arrays, initializes memory (including
+        the pinned method's placeholder memory, with every game marked invalid)
+        and traces output shapes. It creates no writer and executes no actor
+        decision.
 
     Raises
     ------
     TypeError, ValueError
         Unsupported settings, content/bank mismatch, variable structure mismatch,
-        a pinned share outside its contract or disagreeing with the schedule, or
-        failed initialization. Failures precede any real transition.
+        a pinned share outside its contract or disagreeing with the schedule, a
+        pinned opponent without a positive share, an unresolvable reference, an
+        independent roster that the schedule would break, or failed
+        initialization. Errors from a factory propagate with their own type.
+        Failures precede any real transition.
     """
     if not isinstance(cast(object, actor), System):
         raise TypeError("actor must be a native JAX System")
@@ -575,7 +663,6 @@ def init_training_collection(
             raise ValueError(
                 "actor_variables must match the System leaf shapes and dtypes"
             )
-    opponent = make_opponent_system(actor)
     history = init_opponent_history(actor_variables, num_envs=schedule.num_envs)
     if prepared is None:
         prepared = prepare_training_content(score_thresholds=schedule.score_thresholds)
@@ -590,6 +677,80 @@ def init_training_collection(
         )
     if prepared.binding.score_thresholds != schedule.score_thresholds:
         raise ValueError("Prepared score thresholds differ from the training schedule")
+    pinned_record: dict[str, Any] | None = None
+    host: HostOpponent | None = None
+    pinned_values: Tree = ()
+    pinned_system: System | None = None
+    if pinned_opponent is not None:
+        if not pinned_opponent_share > 0:
+            raise ValueError("A pinned opponent needs a positive pinned_opponent_share")
+        reference = pinned_opponent if isinstance(pinned_opponent, str) else None
+        method = (
+            load_method(pinned_opponent)
+            if isinstance(pinned_opponent, str)
+            else pinned_opponent
+        )
+        frozen = freeze_evaluation_method(method)
+        system = shared_policy(frozen) if isinstance(frozen, Policy) else frozen
+        if system._policies and not system._shared:
+            stages = int(schedule.arrays.stage_count)
+            sizes = {
+                int(size) for size in np.asarray(schedule.arrays.team_sizes)[:stages]
+            }
+            if sizes != {len(system._policies)}:
+                raise ValueError(
+                    "An independent_policies pinned opponent needs every Team B "
+                    f"roster size to equal its {len(system._policies)} Policies; "
+                    f"the schedule uses {sorted(sizes)}"
+                )
+        registration = (
+            policy_description(
+                frozen, frozen.variables, frozen.initial_carry, include_digests=True
+            )
+            if isinstance(frozen, Policy)
+            else normalize_system_registration(frozen, phase="validation", frozen=True)[
+                1
+            ]
+        )
+        export = (
+            Path(reference)
+            if reference is not None and Path(reference).is_dir()
+            else None
+        )
+        if system.execution == "host":
+            host = HostOpponent(system, schedule.num_envs)
+            pinned_system = HOST_ACTIONS_SYSTEM
+            zero = jnp.zeros((schedule.num_envs, 5), jnp.int32)
+            pinned_values = (ActorAction(zero, zero, zero), ())
+            memory_rule = "host only, not saved" if host.stateful else "none"
+            variables_digest = None
+        else:
+            _, variables, template = prepare_evaluation_system(frozen)
+            pinned_system = system
+            # A loaded export's weights arrive committed to one device while
+            # the rest of the fresh carry is not; that mix makes the rollout
+            # and the update compile twice. Give them the carry's placement.
+            pinned_values = jax.tree.map(_uncommitted, (variables, template))
+            memory_rule = "saved in the carry"
+            variables_digest = tree_digest(variables)
+        # JSON round trip: checkpoints compare this record with its saved JSON.
+        pinned_record = json.loads(
+            json.dumps(
+                {
+                    "reference": reference,
+                    "name": system.name,
+                    "execution": system.execution,
+                    "registration_id": canonical_digest_sha256(registration),
+                    "registration": registration,
+                    "variables_digest": variables_digest,
+                    "evidence": pinned_opponent_evidence(
+                        prepared.binding, frozen, export=export
+                    ),
+                    "memory_rule": memory_rule,
+                }
+            )
+        )
+    opponent = make_opponent_system(actor, pinned=pinned_system)
     root = jax.random.key(seed, impl="threefry2x32")
     generation = jnp.zeros(schedule.num_envs, jnp.int32)
     sampled = sample_training_configs(
@@ -617,8 +778,13 @@ def init_training_collection(
         state,
         training_keys(root, generation, stream="initialization"),
         variables_a=actor_variables,
-        variables_b=history,
+        variables_b=history if pinned_system is None else (history, *pinned_values),
     )
+    if host is not None:
+        host.start(
+            jax.device_get(system_inputs(observations, state, team=1)),
+            _initialization_keys(memory.init_key, state.episode_id, 1),
+        )
     tracking = init_episode_tracking(
         env,
         state,
@@ -643,6 +809,7 @@ def init_training_collection(
         history,
         jnp.asarray(discount, jnp.float32),
         jnp.asarray(coefficient, jnp.float32),
+        pinned_values,
     )
     _check_carry(carry)
     shape = jax.eval_shape(partial(_apply, actor=actor, opponent=opponent), carry)
@@ -663,6 +830,8 @@ def init_training_collection(
         (float(carry.discount), float(carry.coefficient)),
         shaping_mode=shaping_mode,
         pinned_opponent_share=float(pinned_opponent_share),
+        pinned_opponent=pinned_record,
+        host_opponent=host,
     )
     return collection, carry
 
@@ -680,7 +849,9 @@ def _apply(carry: TrainingCarry, actor: System, opponent: System) -> Tree:
         actor=actor,
         opponent=opponent,
         variables_a=carry.history.current_variables,
-        variables_b=carry.history,
+        variables_b=carry.history
+        if len(carry.pinned_opponent) == 0
+        else (carry.history, *carry.pinned_opponent),
         action_keys=training_keys(
             carry.root_key,
             state.reset_generation,
@@ -850,6 +1021,11 @@ def _real_step(
         carry.history.current_update,
         carry.history.captured_updates[jnp.maximum(carry.history.lane_snapshot, 0)],
     )
+    if collection.pinned_opponent is not None:
+        # Slot 0 marks the named pinned System, not a learner version.
+        opponent_update = jnp.where(
+            carry.history.lane_snapshot == 0, -2, opponent_update
+        )
     if not collection.shaping:
         shaping = jnp.zeros_like(rewards.rewards[:, 0])
     elif collection.shaping_mode == "potential":
@@ -906,6 +1082,19 @@ def _real_step(
     ), (row, info, trace)
 
 
+def _refuse_host(collection: TrainingCollection, name: str) -> None:
+    """Refuse a pure helper for a collection whose pinned opponent runs on the host.
+
+    Raises ValueError naming the helper when collection.host_opponent is set;
+    does nothing otherwise. Called at trace time, so it adds nothing to programs.
+    """
+    if collection.host_opponent is not None:
+        raise ValueError(
+            f"{name} cannot call a pinned host method; use collect_training_rollout, "
+            "which runs the host route"
+        )
+
+
 def advance_training_step(
     collection: TrainingCollection, carry: TrainingCarry
 ) -> tuple[TrainingCarry, tuple[TrainingTransition, EpisodeInfo, PolicyTrace]]:
@@ -918,7 +1107,22 @@ def advance_training_step(
     reads/writes no files. Host callers must check the returned failure state
     before learning; collect_training_rollout does that automatically. Calling
     this single-step helper after exhaustion marks an accounting error without
-    advancing. Use rollout helpers for ordinary safe budget padding.
+    advancing. Use rollout helpers for ordinary safe budget padding. A
+    collection whose pinned opponent is a host method raises ValueError here,
+    because this compiled step cannot call the host; use
+    collect_training_rollout.
+    """
+    _refuse_host(collection, "advance_training_step")
+    return _advance_training_step(collection, carry)
+
+
+def _advance_training_step(
+    collection: TrainingCollection, carry: TrainingCarry
+) -> tuple[TrainingCarry, tuple[TrainingTransition, EpisodeInfo, PolicyTrace]]:
+    """Take one real round; the shared body of every collection route.
+
+    Same contract as advance_training_step, without the host refusal: the host
+    loop calls it after putting the host method's actions in the carry.
     """
 
     def proceed(values: TrainingCarry) -> Tree:
@@ -992,7 +1196,10 @@ def scan_training_rollout(
     length returns unchanged carry and a zero-length tree. A sticky failure
     freezes later work; inspect it on the host before using any returned data.
     There is no writer, actor replay, optimizer, hidden synchronization or I/O.
+    A collection whose pinned opponent is a host method raises ValueError at
+    trace time; collect_training_rollout runs it through the host route.
     """
+    _refuse_host(collection, "scan_training_rollout")
     length = _length(length)
     initial = carry
 
@@ -1003,7 +1210,7 @@ def scan_training_rollout(
 
         def real(x: TrainingCarry) -> tuple[TrainingCarry, TrainingTransition]:
             """Retain only compact learning rows from a real public decision."""
-            after, (row, _, _) = advance_training_step(collection, x)
+            after, (row, _, _) = _advance_training_step(collection, x)
             return after, row
 
         def pad(x: TrainingCarry) -> tuple[TrainingCarry, TrainingTransition]:
@@ -1046,7 +1253,7 @@ def _recorded_step(
 
     def step(carry: TrainingCarry, _unused: None) -> Tree:
         """Match the ordinary collector callback without capturing live arrays."""
-        return advance_training_step(collection, carry)
+        return _advance_training_step(collection, carry)
 
     return step
 
@@ -1068,11 +1275,24 @@ def collect_training_rollout(
     success. Writer exceptions propagate through its existing recovery route.
     Recorded and unrecorded paths use the same training compiler policy.
     This function synchronizes small counters and is not itself jittable.
+
+    When the pinned opponent is a host method, each real round runs as: a
+    compiled reset of finished games, one host call through M8's _host_apply
+    for the pinned lanes (HostOpponent.act, which serves each round once), and
+    the ordinary compiled step with those actions as data; with a writer, each
+    round goes through the same bounded recorder. The rows, padding and
+    failure rules equal the other routes'. A method's error propagates with its
+    own type before the round's step, and the collection then refuses reuse.
+    Each round costs two compiled calls and one host synchronization, plus the
+    Team B inputs copied to the host (about 94 KB per game) and the method's
+    own time.
     """
     length = _length(length)
     if collection.recording != (writer is not None):
         raise ValueError("Supply a writer exactly when collection recording is enabled")
     _check_carry(carry)
+    if collection.host_opponent is not None:
+        return _collect_host_rollout(collection, carry, length=length, writer=writer)
     initial = carry
     if writer is None:
         carry, rollout = _compiled_rollout(collection, length)(carry)
@@ -1120,6 +1340,9 @@ def training_summary(
     score_thresholds_by_episode_stage labels active reset-time stages.
     exposure_by_score_threshold groups starts, env_steps and actor_decisions by
     the K actually used by each game, including games carried across stage ends.
+    With a named pinned opponent the result also holds its record and
+    opponent_rows, the meaning of each of the 21 opponent counts (row 1 is the
+    pinned System); without one those keys are absent, as before.
     """
     _check_carry(carry)
     p = jax.device_get(carry.progress)
@@ -1171,4 +1394,173 @@ def training_summary(
             for x in np.asarray(~carry.state.done.done & ~carry.state.episode_start)
         ),
         "learner_samples": None,
+        **(
+            {}
+            if collection.pinned_opponent is None
+            else {
+                "pinned_opponent": collection.pinned_opponent,
+                "opponent_rows": [
+                    "current weights",
+                    f"pinned: {collection.pinned_opponent['name']}",
+                    *(f"history slot {slot}" for slot in range(1, 20)),
+                ],
+            }
+        ),
     }
+
+
+def _host_decision(collection: TrainingCollection, carry: TrainingCarry) -> Tree:
+    """Reset finished games and gather Team B's decision inputs for the host.
+
+    Returns (carry after resets, Team B SystemInput, pinned lanes (B,) bool,
+    Team B action keys, Team B initialization keys, reset generations (B,),
+    completed rounds, failure flag). Resets happen exactly as
+    _advance_training_step would do them, so the step that follows finds no
+    pending reset. Keys are derived as M8 derives them for Team B. Pure.
+    """
+
+    def reset(values: TrainingCarry) -> TrainingCarry:
+        """Reset lanes whose games finished, as the ordinary step does first."""
+        return cast(
+            TrainingCarry,
+            jax.lax.cond(
+                jnp.any(values.state.done.done),
+                partial(_reset_pending, collection),
+                _retain,
+                values,
+            ),
+        )
+
+    stop = _failed(carry) | (carry.progress.rounds >= carry.schedule.total_rounds)
+    carry = cast(TrainingCarry, jax.lax.cond(stop, _retain, reset, carry))
+    state = carry.state
+    local_step = state.core_state.step_count - state.initial_step_count
+    roots = training_keys(
+        carry.root_key,
+        state.reset_generation,
+        stream="action",
+        decision_step=local_step,
+    )
+    return (
+        carry,
+        system_inputs(carry.observations, state, team=1),
+        carry.history.lane_snapshot == 0,
+        _action_keys(roots, state.episode_id, 1),
+        _initialization_keys(carry.memory.init_key, state.episode_id, 1),
+        state.reset_generation,
+        carry.progress.rounds,
+        _failed(carry),
+    )
+
+
+@lru_cache(maxsize=32)
+def _host_decision_compiled(collection: TrainingCollection) -> Tree:
+    """Cache the compiled host-route reset and input gathering per collection."""
+    return jax.jit(
+        partial(_host_decision, collection),
+        compiler_options=training_compiler_options(),
+    )
+
+
+@lru_cache(maxsize=32)
+def _host_step_compiled(collection: TrainingCollection) -> Tree:
+    """Cache the compiled single step the host route runs after each host call."""
+    return jax.jit(
+        partial(_advance_training_step, collection),
+        compiler_options=training_compiler_options(),
+    )
+
+
+def _first_row(leaf: Array) -> Array:
+    """Take the single row of a one-step recorded collection."""
+    return leaf[0]
+
+
+def _stack_rows(*leaves: Array) -> Array:
+    """Stack per-round rows along a new leading time axis."""
+    return jnp.stack(leaves)
+
+
+def _empty_rows(leaf: Array) -> Array:
+    """Make a zero-length time axis shaped like one padding row."""
+    return jnp.zeros((0, *leaf.shape), leaf.dtype)
+
+
+def _collect_host_rollout(
+    collection: TrainingCollection,
+    carry: TrainingCarry,
+    *,
+    length: int,
+    writer: RunWriter | None,
+) -> tuple[TrainingCarry, TrainingRollout]:
+    """Collect one block when the pinned opponent is a host method.
+
+    Parameters and return value follow collect_training_rollout. Real rounds
+    stop at the exact budget or at a sticky failure; the rest of the block is
+    the recorded route's padding. The host method's errors propagate with
+    their own type. A failure found at the start of a round is reported to the
+    writer before it is raised, as the recorded route does. Team B inputs stay
+    on the device; HostOpponent.act copies only what the method needs.
+    Host-only and not jittable.
+    """
+    holder = cast(HostOpponent, collection.host_opponent)
+    initial = carry
+    real = min(length, int(carry.schedule.total_rounds) - int(carry.progress.rounds))
+    decide = _host_decision_compiled(collection)
+    step = _host_step_compiled(collection)
+    rows: list[TrainingTransition] = []
+    for _ in range(real):
+        carry, inputs, pinned, keys, init_keys, generations, rounds, failed = cast(
+            tuple[TrainingCarry, Any, Array, Array, Array, Array, Array, Array],
+            decide(carry),
+        )
+        if bool(failed):
+            if writer is not None:
+                # The recorded route reports this failure to its writer inside
+                # the recorded step; the host route reports it here.
+                error = ValueError(
+                    "Training collection has a lifecycle, tracking or opponent error"
+                )
+                writer.record_failure(error)
+                raise error
+            break
+        actions = holder.act(
+            int(rounds),
+            inputs,
+            np.asarray(pinned),
+            keys,
+            init_keys,
+            np.asarray(generations),
+        )
+        carry = carry._replace(
+            pinned_opponent=(ActorAction(*(jnp.asarray(head) for head in actions)), ())
+        )
+        if writer is None:
+            carry, (row, _, _) = cast(
+                tuple[TrainingCarry, tuple[TrainingTransition, Any, Any]], step(carry)
+            )
+        else:
+            carry, one = collect_rollout(
+                _recorded_step(collection),
+                carry,
+                num_steps=1,
+                writer=writer,
+                source_configs=carry.tracking.source_configs,
+                output_steps=1,
+                compiler_options=training_compiler_options(),
+            )
+            row = cast(TrainingTransition, jax.tree.map(_first_row, one))
+        rows.append(row)
+    padding = _padding(collection, initial)
+    rows.extend([padding] * (length - len(rows)))
+    stacked = (
+        cast(TrainingTransition, jax.tree.map(_stack_rows, *rows))
+        if rows
+        else cast(
+            TrainingTransition,
+            jax.tree.map(_empty_rows, padding),
+        )
+    )
+    rollout = _package(collection, initial, carry, stacked)
+    _check_carry(carry)
+    return carry, rollout

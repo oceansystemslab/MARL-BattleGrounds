@@ -641,7 +641,8 @@ def test_untrained_mappo_retains_same_call_native_choices_and_probabilities(
     prepared: PreparedTrainingContent,
 ) -> None:
     weights = initialize_ppo(jax.random.key(912)).actor_params
-    actor = make_recurrent_mappo_system(weights)
+    # Pinned to the world frame: the direct forward below applies no reflection.
+    actor = make_recurrent_mappo_system(weights, spawn_frame="world")
     collection, carry = init_training_collection(
         actor,
         weights,

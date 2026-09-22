@@ -297,6 +297,17 @@ checkpoint selection, early stopping, repeated-submission selection, or
 population weighting. A map embedded in an official scenario is consequently
 ineligible for official training and validation populations.
 
+Exception of 22 September 2026: the ordinary built-in `tdm-alpha` and `tdm-beta`
+teams may be training opponents (the pinned opponent of a training run), even
+though their rules drive the scenario pressure controllers. Every other part of
+the scenario closure stays protected. All eight scenario results of a run whose
+training met either team, directly or through a pinned export trained that way,
+are familiar-opponent results and do not count as protected-scenario evidence;
+the run records that exposure. The same rule applies whenever a run's recorded
+exposure is unknown, as for a researcher method or an export whose training
+history cannot be linked: its eight scenario results do not count as
+protected-scenario evidence.
+
 ## Common policy and evaluation lifecycle
 
 [Amendment A12](../design/specification_amendments.md#a12-common-milestone-1012-policy-pipeline-spine)
@@ -589,7 +600,9 @@ feedback—must not influence gradients, online or offline learning, imitation,
 behavioral cloning, distillation, curricula, opponent adaptation, architecture,
 hyperparameters, reward or heuristic design, prompts, decoding, checkpoint
 selection, early stopping, repeated-submission selection, population weights,
-or any other adaptive decision.
+or any other adaptive decision. The one exception, for the ordinary built-in
+`tdm-alpha` and `tdm-beta` teams as training opponents, and its reporting rule
+are stated in the scenario section above.
 
 Training, validation, and evaluation manifests identify content by immutable
 digest and fail closed when their declared content closures intersect where

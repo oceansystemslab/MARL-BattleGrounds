@@ -22,6 +22,12 @@ actor shared across teammates, with separate actor memory. The untrained actor
 is not the built-in Random policy. Its original export comes from the B512/T64
 screen; its verified initial inference identity is shared with the later pair.
 
+**Superseded for baseline use (decision, 22 September 2026):** every member above was trained in the world frame and selected
+against Random. The baseline now trains with the spawn frame on and selects
+against strong opponents, so this population is historical evidence, not the
+pool the Big 12 or future comparisons draw from; a new population follows the
+spawn-frame sweep. Nothing is deleted.
+
 Membership keeps early, weak and final checkpoints. It was not filtered by wins
 or test-map outcomes. Earlier B/T trials and mini checks remain in the wider
 archive; V1 names the 41 actors in the latest comparison table.
@@ -123,7 +129,9 @@ retain their weights for the game and keep recurrent memory separate.
 
 Once models become training opponents, games against them measure performance
 against familiar opponents. Keep a separately declared evaluation set for claims
-about unfamiliar opponents. Existing checks remain development evidence; they
+about unfamiliar opponents. A System named as a run's pinned opponent is such a
+training opponent, and the run's records carry its identity and its recorded
+controller exposure, so a later evaluation can tell which results are familiar. Existing checks remain development evidence; they
 do not establish that the proposed 80/20 change improves MAPPO.
 
 ## Manuscript Use

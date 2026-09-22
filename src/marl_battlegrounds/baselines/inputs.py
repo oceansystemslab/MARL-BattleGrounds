@@ -2,7 +2,7 @@
 
 The two encoders provide fixed float32 feature layouts for baseline networks.
 spawn_frame_flag names the rows a baseline reflects before encoding when its
-spawn frame is "left" or "right"; "world" encodes raw coordinates.
+spawn frame is "left"; "world" encodes raw coordinates.
 team_obstacle_partners makes the obstacle mirror decision once per game for a
 team's five actors, who share one map table, so the reflection stays cheap.
 Actor features retain each recipient's own information rights. Training-state
@@ -53,8 +53,10 @@ from marl_battlegrounds.policies.input import (
 ACTOR_INPUT_SCHEMA_VERSION = 1
 TRAINING_STATE_SCHEMA_VERSION = 1
 # A baseline's spawn frame: "world" keeps raw coordinates; "left" reflects the
-# view of any actor whose team starts on the right bank; "right" the reverse.
-SPAWN_FRAMES = ("world", "left", "right")
+# view of any actor whose team starts on the right bank. The position is the
+# frame's saved index, so "world" stays 0 and "left" stays 1. "right" was
+# removed on 22 September 2026; nothing saved outside frozen packages used it.
+SPAWN_FRAMES = ("world", "left")
 
 
 def spawn_frame_flag(actors: ActorInput, spawn_frame: str) -> Array:
@@ -65,28 +67,28 @@ def spawn_frame_flag(actors: ActorInput, spawn_frame: str) -> Array:
     actors : ActorInput
         Permitted inputs with any leading shape L, for example (B, 5).
     spawn_frame : str
-        "left" flags actors whose own team starts on the right bank, so every
-        game looks like a left start; "right" flags the others.
+        Must be "left": flag actors whose own team starts on the right bank,
+        so every game looks like a left start.
 
     Returns
     -------
     Array
-        Boolean array of shape L: team_on_right for "left", its complement for
-        "right". Unused observer rows, whose permitted view is all zero (map
-        width 0), are never flagged in either frame, so padded lanes stay
-        bit-identical to the world frame. Dead actors keep their flag.
+        Boolean array of shape L: team_on_right, except that unused observer
+        rows, whose permitted view is all zero (map width 0), are never
+        flagged, so padded lanes stay bit-identical to the world frame. Dead
+        actors keep their flag.
 
     Raises
     ------
     ValueError
         spawn_frame is "world", which reflects nothing and must not reach this
-        helper, or any other value.
+        helper, or any other value, including the removed "right".
     """
-    if spawn_frame not in ("left", "right"):
-        raise ValueError('spawn_frame must be "left" or "right" to compute a flag.')
+    if spawn_frame != "left":
+        raise ValueError('spawn_frame must be "left" to compute a flag.')
     on_right = team_on_right(actors)
     used = actors.observation.context_features[..., CONTEXT_FEATURE_MAP_WIDTH] > 0
-    return (on_right if spawn_frame == "left" else ~on_right) & used
+    return on_right & used
 
 
 def team_obstacle_partners(actors: ActorInput) -> Array:

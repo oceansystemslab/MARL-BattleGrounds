@@ -1795,6 +1795,17 @@ therefore ineligible for an official training or validation manifest even if a
 separate saved-map revision contains identical content. Identity aliases and
 different filenames do not defeat content-digest disjointness.
 
+Exception of 22 September 2026: the ordinary built-in `tdm-alpha` and `tdm-beta`
+teams may be training opponents (the pinned opponent of a training run), even
+though their rules drive the scenario pressure controllers. Every other part of
+the scenario closure stays protected. All eight scenario results of a run whose
+training met either team, directly or through a pinned export trained that way,
+are familiar-opponent results and do not count as protected-scenario evidence;
+the run records that exposure. The same rule applies whenever a run's recorded
+exposure is unknown, as for a researcher method or an export whose training
+history cannot be linked: its eight scenario results do not count as
+protected-scenario evidence.
+
 Milestones 11 and 12 enforce this boundary proportionately through
 content-addressed and mutually disjoint training, validation, and evaluation
 manifests; complete training, checkpoint-selection, and controller provenance;
@@ -2732,6 +2743,14 @@ the same encoded view there; it does not claim that reflected games reproduce
 outcomes bit for bit, which the reflection diagnostics recorded elsewhere in
 this document show they do not.
 
+Clarification of 22 September 2026: "left" is now the default and "right" is
+removed. A saved checkpoint, exported actor or run record without a frame still
+means "world", and resuming such a run keeps it; an old training config file
+started as a new run takes the new default unless it names "world". Exporting
+raw weights must name the frame. A default-built recurrent MAPPO System now
+registers the left hook, so an evaluation interrupted before this change and
+started with a default-built System is refused on resume as a different System.
+
 ## A38. Neutral Collision Handling
 
 **Accepted change — 2026-09-14.** This supersedes A37's collision-ordering
@@ -2943,9 +2962,17 @@ pinned share, zero by default, makes the first capture follow the first
 completed update and keeps that actor in slot 0 for the run; each reset then
 picks slot 0 with the declared share, another occupied slot with total
 probability 0.2 when any exists, and current weights otherwise. The default
-preserves this rule exactly. Current weights refresh only after a completed
-learner update, before the next block, while game memory continues. Teams own
-separate memory and retain existing actor information limits.
+preserves this rule exactly. Addition of 22 September 2026: the pinned share
+may instead play a named System (a built-in team, an exported actor, or a
+researcher's JAX or host method), which plays every lane assigned to slot 0
+under the same one-team rules as a Team B method in evaluation. Its identity,
+registration and recorded controller exposure are saved with the run, a JAX
+method's memory is saved with each checkpoint, and a host method's memory is
+not, so a resume that would cut one of its unfinished games is refused. Results
+against a pinned System are familiar-opponent results (see A26). Current
+weights refresh only after a completed learner update, before the next block,
+while game memory continues. Teams own separate memory and retain existing
+actor information limits.
 
 The bank holds at most 20 immutable snapshots without eviction. Requested
 thresholds are 5%, 10%, ..., 100% of the exact real budget, rounded upward to

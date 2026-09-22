@@ -12,6 +12,9 @@ The tool saves JSON measurements and small output arrays. It stores one input
 snapshot, never T expanded actor-input copies. Fixed inputs may let the compiler
 reuse encoding across decisions. This measures actor calls, not simulator steps,
 varying-observation rollouts, learner updates or learned behavior.
+The actor uses the baseline's default spawn frame, "left" since 22 September
+2026. Measurements saved before that date used "world"; a rerun measures
+the left program and is not a like-for-like repeat of them.
 """
 
 from __future__ import annotations

@@ -4,12 +4,15 @@ CPU proofs compare the adapter with direct existing numerical calls, including
 reset/cutoff/ending boundaries, final padding, same-call actor data, exact update
 and history counts, masked samples, finite failure guards and compilation reuse.
 Synthetic short horizons are test inputs after content admission, not proposed
-training settings. The default and an explicit zero pinned opponent share give
-identical learner states after real updates. With a "left" or "right" spawn
-frame the direct composition reflects the rebuilt view, mask and stored index
-the way the actor did, the stored log probabilities match that recomputation
-before any optimizer update, the update is accepted, and a stored index left in
-the reflected frame is rejected by the admission guard. No test claims useful
+training settings. The default and an explicit zero pinned opponent share with
+no named pinned opponent give identical learner states after real updates. The
+shared context pins the
+"world" frame so its direct recomputation needs no reflection. With the "left"
+spawn frame, at two input scales, the direct composition reflects the rebuilt
+view, mask and stored index the way the actor did, the stored log probabilities
+match that recomputation before any optimizer update, the update is accepted,
+and a stored index left in the reflected frame is rejected by the admission
+guard. No test claims useful
 learning or GPU performance.
 """
 
@@ -92,7 +95,7 @@ def prepared() -> PreparedTrainingContent:
 
 @pytest.fixture(scope="module")
 def context(prepared: PreparedTrainingContent) -> Context:
-    ppo = PPOConfig(rollout_length=4, epochs=1)
+    ppo = PPOConfig(rollout_length=4, epochs=1, spawn_frame="world")
     collection, state = init_learner(
         schedule=make_training_schedule(total_env_steps=64, num_envs=4),
         seed=71,
@@ -187,6 +190,7 @@ def test_default_and_explicit_zero_pinned_share_give_identical_learners(
         prepared=prepared,
         metrics="none",
         pinned_opponent_share=0.0,
+        pinned_opponent=None,
     )
     states: list[LearnerState] = []
     for collection, state in (default, explicit):
@@ -220,7 +224,7 @@ def test_initial_state_owns_one_actor_and_separate_deterministic_keys(
 
 @pytest.mark.parametrize(
     ("input_scale", "spawn_frame"),
-    ((1.0, "world"), (0.01, "world"), (0.01, "left"), (1.0, "right")),
+    ((1.0, "world"), (0.01, "world"), (0.01, "left"), (1.0, "left")),
 )
 def test_collected_values_behavior_and_update_match_direct_composition(
     context: Context,

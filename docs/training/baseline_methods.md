@@ -14,6 +14,24 @@ show coordinated tactics to be valid reference methods.
 
 ## Current MAPPO Standard
 
+**Decision, 22 September 2026:** the recurrent MAPPO baseline trains with the
+spawn frame on (`PPOConfig.spawn_frame="left"`, the default since this date;
+the value `"right"` is removed), and selection and validation move to strong
+opponents.
+Every world-frame model trained and selected against Random before this date,
+including the twenty-million-step tuning study's 48 runs and 480 saved
+checkpoints and the pinned-opponent runs, is superseded as a baseline: not
+carried into the Big 12, the checkpoint population or future comparisons, and
+its Random-proxy ranking is not used to choose settings. The evidence stays in
+its packages, each marked with a `SUPERSEDED.md`. A new sweep on the
+spawn-frame recipe with strong-opponent selection decides the settings; the
+512/32 shape below is kept as the starting configuration. The sweep may pin a
+strong training opponent with `TrainConfig(pinned_opponent=...)`. Such an
+opponent is a familiar opponent for that run: results against it, and all
+eight protected-scenario results when it is `tdm-alpha` or `tdm-beta`, are
+reported as familiar-opponent results, and pinning does not change the
+declared validation panel.
+
 **Decision, 20 September 2026:** use **512 parallel environments and rollout
 length 32** as the standard starting configuration for future recurrent MAPPO
 development runs. Set `num_envs=512` and `PPOConfig(rollout_length=32)` explicitly.
@@ -598,6 +616,8 @@ the mirror on from the start is a separate question, as are stronger opponents.
 ## Spawn Frame Option For Recurrent MAPPO
 
 **Declared on 21 September 2026; approved by the owner. First package run the same day as a pilot; second package declared below.**
+(Status, 22 September 2026: `"left"` is now the default and the value
+`"right"` has been removed; the text below records the setting as declared.)
 The mirror check above showed the one-sided spawn habit is a frame effect. The
 recurrent MAPPO baseline now carries one setting, `PPOConfig.spawn_frame`, with
 values `"world"` (today's raw coordinates, bit for bit), `"left"` (the actor's

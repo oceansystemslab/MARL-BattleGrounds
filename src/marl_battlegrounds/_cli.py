@@ -298,19 +298,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _load_method(reference: str) -> System | Policy | str:
-    """Return a bare name or call one trusted factory without choosing an action."""
+    """Return a bare name, or call one trusted factory without choosing an action.
+
+    Text without a colon is returned unchanged for the evaluator to resolve.
+    Text with a colon is a ``module:function`` factory, run through
+    ``load_factory``, the one owner of that rule; any error it raises,
+    including a factory's own error or a wrong return type, becomes a
+    _FactoryError whose cause is the original exception.
+    """
     if ":" not in reference:
         return reference
-    from marl_battlegrounds._method_loading import installed_callable
-    from marl_battlegrounds.evaluation.policy_execution import Policy, System
+    from marl_battlegrounds._method_loading import load_factory
 
     try:
-        value = installed_callable(reference)()
+        return load_factory(reference)
+    except TypeError as error:
+        raise _FactoryError(str(error)) from error
     except Exception as error:
         raise _FactoryError(f"Factory {reference!r} failed: {error}") from error
-    if not isinstance(value, (Policy, System)):
-        raise _FactoryError(f"Factory {reference!r} must return a System or Policy")
-    return value
 
 
 def _cell(value: object) -> str:

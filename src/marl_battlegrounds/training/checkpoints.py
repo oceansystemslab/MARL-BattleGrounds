@@ -136,7 +136,7 @@ def _input_scale(value: object) -> float:
 
 
 def _spawn_frame(value: object) -> str:
-    """Validate one spawn frame name ("world", "left", "right") via the PPO owner."""
+    """Validate one spawn frame name ("world" or "left") via the PPO owner."""
     return PPOConfig(spawn_frame=cast(str, value)).spawn_frame
 
 
@@ -209,9 +209,9 @@ def _inference_digest(details: dict[str, Any]) -> str:
 
     At scale 1.0 in the world frame the identity is the raw weight digest. A
     non-default scale alone uses the version-1 envelope exactly as before, so
-    every existing scaled identity is unchanged. A "left" or "right" frame adds
-    the frame to a version-2 envelope, so equal weights played in different
-    frames are different Systems.
+    every existing scaled identity is unchanged. A "left" frame adds the frame
+    to a version-2 envelope, so equal weights played in different frames are
+    different Systems.
     """
     scale = _actor_input_scale(details)
     frame = _actor_spawn_frame(details)
@@ -432,8 +432,12 @@ def _check_context(
 
 
 def _collection_details(collection: TrainingCollection) -> dict[str, Any]:
-    """Record reconstructible static settings and verified content identities."""
-    return _object(
+    """Record reconstructible static settings and verified content identities.
+
+    A named pinned opponent's JSON record is added under "pinned_opponent" only
+    when one is pinned, so descriptions of unpinned runs keep their bytes.
+    """
+    details = _object(
         {
             "content_binding": collection.binding.model_dump(mode="json"),
             "schedule": dict(collection.schedule.rounding_report),
@@ -452,6 +456,9 @@ def _collection_details(collection: TrainingCollection) -> dict[str, Any]:
         },
         "Collection details",
     )
+    if collection.pinned_opponent is not None:
+        details["pinned_opponent"] = collection.pinned_opponent
+    return details
 
 
 def _check_recording(value: object, root: Path) -> dict[str, Any]:
@@ -529,7 +536,7 @@ def save_checkpoint(
     ppo : PPOConfig, default DEFAULT_PPO_CONFIG
         Existing numerical learner settings used by boundary validation. Its
         input scale and spawn frame must equal the saved config's, else the
-        save is refused before any file changes.
+        save is refused before any file changes. The default's frame is "left".
 
     Returns
     -------
@@ -714,6 +721,14 @@ def restore_checkpoint(
         equal to today's default; a positive share must be saved explicitly.
         Missing historical ppo.spawn_frame means "world" on both sides; a
         checkpoint saved in another frame must be resumed in that frame.
+        Missing historical pinned_opponent means None in both configs and the
+        saved collection settings. A pinned opponent must match its saved record
+        exactly (reference, registration, variables digest, evidence, memory
+        rule), else restore is refused before arrays are read. After arrays are
+        read, and before the slower learner validation, a JAX pinned System's
+        weights must match their recorded digest, and a pinned host method with
+        memory refuses the resume when any of its games is unfinished, because
+        that memory is never saved.
     expected_metadata : mapping
         Required config, source, dependencies and execution discovered for
         this execution. Each must equal its saved value. Additional supplied
@@ -721,7 +736,8 @@ def restore_checkpoint(
     ppo : PPOConfig, default DEFAULT_PPO_CONFIG
         Matched numerical update settings for restored-boundary validation. Its
         input scale and spawn frame must equal the checkpoint's, else restore
-        is refused before arrays are read.
+        is refused before arrays are read. The default's frame is "left", so a
+        checkpoint trained in "world" needs the matching config passed here.
     device : jax.Device or None, default None
         Explicit target device; None uses this process's first selected device.
         Every restored array, including empty IDs, is committed to this device.
@@ -760,6 +776,7 @@ def restore_checkpoint(
         if isinstance(config_record, dict):
             normalized = dict(cast(dict[str, Any], config_record))
             normalized.setdefault("pinned_opponent_share", 0.0)
+            normalized.setdefault("pinned_opponent", None)
             ppo_record = normalized.get("ppo")
             if isinstance(ppo_record, dict):
                 # Configs saved before spawn_frame existed compare at "world".
@@ -777,7 +794,11 @@ def restore_checkpoint(
     saved_collection.setdefault("shaping_mode", "potential")
     saved_collection.setdefault("score_threshold_curriculum", False)
     saved_collection.setdefault("pinned_opponent_share", 0.0)
-    if saved_collection != _collection_details(collection):
+    if saved_collection.pop("pinned_opponent", None) != collection.pinned_opponent:
+        raise ValueError("Checkpoint pinned opponent differs")
+    current_collection = _collection_details(collection)
+    current_collection.pop("pinned_opponent", None)
+    if saved_collection != current_collection:
         raise ValueError("Checkpoint content or collection settings differ")
     recorded = details["metadata"].get("recording")
     if collection.recording != (recorded is not None):
@@ -823,6 +844,9 @@ def restore_checkpoint(
     )
     if _layout(state) != details["layout"]:
         raise ValueError("Restored array schema differs")
+    # The pinned checks read a few restored arrays; they run before the full
+    # learner validation, which re-checks the installed content and is slow.
+    _check_restored_pinned_opponent(collection, state)
     validate_learner(collection, state, ppo=ppo)
     counters = {
         "updates": int(state.completed_updates),
@@ -831,6 +855,41 @@ def restore_checkpoint(
     if counters != details["counters"]:
         raise ValueError("Checkpoint counters disagree with numerical state")
     return RestoredCheckpoint(state, details, root)
+
+
+def _check_restored_pinned_opponent(
+    collection: TrainingCollection, state: LearnerState
+) -> None:
+    """Apply the pinned opponent's resume rules to already restored arrays.
+
+    A JAX pinned System's restored weights must match the digest recorded when
+    the run started. A pinned host method whose memory is not saved can only
+    continue when none of its games is unfinished: every lane assigned to it
+    must have finished its game at this checkpoint. Raises ValueError otherwise.
+    Called inside restore_checkpoint before it returns, so a refusal happens
+    before any recording or log file changes. Reads small arrays; writes nothing.
+    """
+    record = collection.pinned_opponent
+    if record is None:
+        return
+    digest = record.get("variables_digest")
+    pinned = cast(tuple[Any, ...], state.carry.pinned_opponent)
+    if digest is not None and tree_digest(pinned[0]) != digest:
+        raise ValueError("Restored pinned opponent weights differ from its record")
+    host = collection.host_opponent
+    if host is not None and host.stateful:
+        carry = state.carry
+        unfinished = np.asarray(
+            (carry.history.lane_snapshot == 0) & ~carry.state.done.done
+        )
+        if bool(unfinished.any()):
+            raise ValueError(
+                "The pinned host method's memory is not saved, and "
+                f"{int(unfinished.sum())} of its games are unfinished at this "
+                "checkpoint; ordinary resume "
+                "cannot continue them without that memory. Resume from a checkpoint "
+                "where none of its games is unfinished, or start a new run."
+            )
 
 
 def resume_recording(
@@ -912,7 +971,7 @@ def export_system(
     *,
     metadata: dict[str, object],
     input_scale: float = 1.0,
-    spawn_frame: str = "world",
+    spawn_frame: str,
 ) -> Path:
     """Publish a standalone immutable sampled-MAPPO actor artifact.
 
@@ -930,11 +989,13 @@ def export_system(
         Finite positive factor applied before the actor's first Dense layer.
         Use the originating PPO config's value. It is part of inference identity;
         changing it does not rewrite weights or the raw input schema.
-    spawn_frame : str, default="world"
-        Spawn frame the weights were trained in: "world", "left" or "right".
-        Use the originating PPO config's value. A non-world frame is written
-        into the description and the inference identity; "world" writes no key,
-        so default exports keep their historical description bytes.
+    spawn_frame : str
+        Required. Spawn frame the weights were trained in: "world" or "left".
+        Use the originating PPO config's value. There is no default, because
+        an export writes a durable identity: a guessed frame would silently
+        label world weights as left, or the reverse. "left" is written into
+        the description and the inference identity; "world" writes no key, so
+        world exports keep their historical description bytes.
 
     Returns
     -------
