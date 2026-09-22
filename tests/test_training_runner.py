@@ -11,6 +11,9 @@ rejected before recording or logs change, even when weight bytes still match.
 The pinned opponent share is validated with the other settings, round-trips
 through the saved config, and reaches the schedule, checkpoint and exposure
 records of a real short run.
+The spawn frame rides the same end-to-end case: a "left" run exports its frame,
+a tampered export is rejected as a different identity, the resumed run reports
+the frame, and the saved config round-trips with and without the nested key.
 """
 
 # Failure injection inspects the private host coordinator, not a public API.
@@ -31,13 +34,15 @@ from marl_battlegrounds.training.runner import (
 
 
 @pytest.mark.parametrize(
-    ("recording", "input_scale"), [(False, 1.0), (True, 1.0), (False, 0.01)]
+    ("recording", "input_scale", "spawn_frame"),
+    [(False, 1.0, "world"), (True, 1.0, "world"), (False, 0.01, "left")],
 )
 def test_public_run_resume_and_final_pending_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     recording: bool,
     input_scale: float,
+    spawn_frame: str,
 ) -> None:
     from marl_battlegrounds.baselines.ppo import PPOConfig
     from marl_battlegrounds.training import checkpoints, runner
@@ -56,7 +61,9 @@ def test_public_run_resume_and_final_pending_work(
         num_envs=4,
         total_env_steps=12,
         seed=710,
-        ppo=PPOConfig(rollout_length=2, epochs=1, input_scale=input_scale),
+        ppo=PPOConfig(
+            rollout_length=2, epochs=1, input_scale=input_scale, spawn_frame=spawn_frame
+        ),
         checkpoint_interval_updates=1,
         metrics="none",
         recording=recording,
@@ -112,22 +119,36 @@ def test_public_run_resume_and_final_pending_work(
         )
         description = ancestor_path / "actor_details.json"
         original_description = description.read_bytes()
-        changed_actor = json.loads(original_description)
-        changed_actor["input_scale"] = 1.0
-        del changed_actor["checkpoint_id"]
-        changed_actor["checkpoint_id"] = hashlib.sha256(
-            checkpoints._json_bytes(changed_actor)
-        ).hexdigest()
-        description.write_text(json.dumps(changed_actor))
-        before_mismatch = {
-            path: path.read_bytes() for path in destination.rglob("*") if path.is_file()
-        }
-        with pytest.raises(ValueError, match="actor identity"):
-            runner.train(resume_from=checkpoint)
-        assert before_mismatch == {
-            path: path.read_bytes() for path in destination.rglob("*") if path.is_file()
-        }
-        assert not (destination / "checkpoint_recovery.json").exists()
+        saved_actor = json.loads(original_description)
+        assert ("spawn_frame" in saved_actor) == (spawn_frame != "world")
+        tampered = [{**saved_actor, "input_scale": 1.0}]
+        if spawn_frame != "world":
+            tampered.append(
+                {
+                    key: value
+                    for key, value in saved_actor.items()
+                    if key != "spawn_frame"
+                }
+            )
+        for changed_actor in tampered:
+            del changed_actor["checkpoint_id"]
+            changed_actor["checkpoint_id"] = hashlib.sha256(
+                checkpoints._json_bytes(changed_actor)
+            ).hexdigest()
+            description.write_text(json.dumps(changed_actor))
+            before_mismatch = {
+                path: path.read_bytes()
+                for path in destination.rglob("*")
+                if path.is_file()
+            }
+            with pytest.raises(ValueError, match="actor identity"):
+                runner.train(resume_from=checkpoint)
+            assert before_mismatch == {
+                path: path.read_bytes()
+                for path in destination.rglob("*")
+                if path.is_file()
+            }
+            assert not (destination / "checkpoint_recovery.json").exists()
         description.write_bytes(original_description)
     if recording:
         restore_cursor = runner.restore_log_cursor
@@ -168,6 +189,10 @@ def test_public_run_resume_and_final_pending_work(
     assert (
         checkpoints.artifact_identity(restored.final_actor)["input_scale"]
         == input_scale
+    )
+    assert (
+        checkpoints.artifact_identity(restored.final_actor)["spawn_frame"]
+        == spawn_frame
     )
     assert json.loads((destination / "status.json").read_text())["status"] == "complete"
     assert not (destination / "checkpoint_recovery.json").exists()
@@ -452,6 +477,18 @@ def test_config_roundtrip_and_unknown_keys() -> None:
         if key != "pinned_opponent_share"
     }
     assert config_from_dict(older) == config
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+
+    framed = TrainConfig(ppo=PPOConfig(spawn_frame="left"))
+    assert config_from_dict(config_to_dict(framed)) == framed
+    assert config_to_dict(framed)["ppo"]["spawn_frame"] == "left"
+    without_frame = config_to_dict(config)
+    without_frame["ppo"] = {
+        key: value
+        for key, value in without_frame["ppo"].items()
+        if key != "spawn_frame"
+    }
+    assert config_from_dict(without_frame) == config
     with pytest.raises(ValueError, match="Unknown"):
         config_from_dict({"typo": 1})
     with pytest.raises(ValueError, match="schema_version"):

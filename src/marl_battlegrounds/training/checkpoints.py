@@ -135,6 +135,62 @@ def _input_scale(value: object) -> float:
     return float(PPOConfig(input_scale=cast(float, value)).input_scale)
 
 
+def _spawn_frame(value: object) -> str:
+    """Validate one spawn frame name ("world", "left", "right") via the PPO owner."""
+    return PPOConfig(spawn_frame=cast(str, value)).spawn_frame
+
+
+def _config_spawn_frame(config: object) -> str:
+    """Read a learner's spawn frame; historical configs without it use "world"."""
+    ppo = _object(_object(config, "Learner config").get("ppo", {}), "PPO config")
+    return _spawn_frame(ppo.get("spawn_frame", "world"))
+
+
+def saved_training_config(details: dict[str, Any]) -> dict[str, Any]:
+    """Return a learner checkpoint's saved config with its historical meaning fixed.
+
+    Parameters
+    ----------
+    details : dict
+        A checkpoint description from read_checkpoint_details with
+        metadata.config, the JSON training config saved with the run.
+
+    Returns
+    -------
+    dict
+        A new top-level and ppo dictionary. ppo.spawn_frame is filled with
+        "world" when the saved config has no ppo block or no such key, because
+        a checkpoint saved before the setting existed trained in raw world
+        coordinates whatever the current PPOConfig default is. Every other
+        saved value is returned as saved; absent keys keep taking the current
+        TrainConfig and PPOConfig defaults through config_from_dict.
+
+    Raises
+    ------
+    ValueError, TypeError
+        metadata.config or its ppo block is not a JSON object.
+
+    Notes
+    -----
+    Host-only; reads no file and changes neither details nor the saved config.
+    The runner decodes a resumed run's settings through this function, so an
+    explicit resume config that names a different frame is rejected by the
+    runner's exact-settings comparison rather than silently adopted.
+    """
+    config = _object(details["metadata"]["config"], "Saved training config")
+    ppo = dict(_object(config.get("ppo", {}), "Saved ppo settings"))
+    ppo.setdefault("spawn_frame", "world")
+    config["ppo"] = ppo
+    return config
+
+
+def _actor_spawn_frame(details: dict[str, Any]) -> str:
+    """Read the saved spawn frame; historical descriptions without it use "world"."""
+    if details["kind"] == "actor":
+        return _spawn_frame(details.get("spawn_frame", "world"))
+    return _config_spawn_frame(details["metadata"]["config"])
+
+
 def _config_input_scale(config: object) -> float:
     """Read a learner's scale; historical configs without it use 1.0."""
     ppo = _object(_object(config, "Learner config").get("ppo", {}), "PPO config")
@@ -149,20 +205,28 @@ def _actor_input_scale(details: dict[str, Any]) -> float:
 
 
 def _inference_digest(details: dict[str, Any]) -> str:
-    """Bind weights and scale while preserving the old identity at scale 1.0."""
+    """Bind weights, scale and spawn frame; keep old identities where unchanged.
+
+    At scale 1.0 in the world frame the identity is the raw weight digest. A
+    non-default scale alone uses the version-1 envelope exactly as before, so
+    every existing scaled identity is unchanged. A "left" or "right" frame adds
+    the frame to a version-2 envelope, so equal weights played in different
+    frames are different Systems.
+    """
     scale = _actor_input_scale(details)
-    if scale == 1.0:
+    frame = _actor_spawn_frame(details)
+    if scale == 1.0 and frame == "world":
         return details["actor_digest"]
-    return sha256(
-        _json_bytes(
-            {
-                "kind": "recurrent_mappo_inference",
-                "version": 1,
-                "actor_digest": details["actor_digest"],
-                "input_scale": scale,
-            }
-        )
-    ).hexdigest()
+    envelope: dict[str, Any] = {
+        "kind": "recurrent_mappo_inference",
+        "version": 1,
+        "actor_digest": details["actor_digest"],
+        "input_scale": scale,
+    }
+    if frame != "world":
+        envelope["version"] = 2
+        envelope["spawn_frame"] = frame
+    return sha256(_json_bytes(envelope)).hexdigest()
 
 
 def _directory(path: Path) -> Path:
@@ -463,7 +527,9 @@ def save_checkpoint(
         with the learner. Recording metadata contains relative_path, phase,
         pass_id, policies, checkpoint_id and details from original registration.
     ppo : PPOConfig, default DEFAULT_PPO_CONFIG
-        Existing numerical learner settings used by boundary validation.
+        Existing numerical learner settings used by boundary validation. Its
+        input scale and spawn frame must equal the saved config's, else the
+        save is refused before any file changes.
 
     Returns
     -------
@@ -485,6 +551,8 @@ def save_checkpoint(
     context = _check_context(metadata, require_execution=True)
     if _config_input_scale(context["config"]) != ppo.input_scale:
         raise ValueError("Checkpoint config input_scale differs from PPO settings")
+    if _config_spawn_frame(context["config"]) != ppo.spawn_frame:
+        raise ValueError("Checkpoint config spawn_frame differs from PPO settings")
     validate_learner(collection, state, ppo=ppo, recheck_installed_content=False)
     if collection.recording != (writer is not None):
         raise ValueError("Checkpoint writer must match collection recording")
@@ -582,8 +650,9 @@ def read_checkpoint_description(path: str | Path) -> dict[str, Any]:
     }
     if details["kind"] == "learner":
         required |= {"collection", "layout", "recording_token", "counters"}
-    elif "input_scale" in details:
-        required.add("input_scale")
+    else:
+        # Actor exports carry these optional inference settings only when set.
+        required |= {key for key in ("input_scale", "spawn_frame") if key in details}
     if set(details) != required:
         raise ValueError("Checkpoint description fields differ from its schema")
     _object(details["metadata"], "Checkpoint provenance")
@@ -596,6 +665,7 @@ def read_checkpoint_description(path: str | Path) -> dict[str, Any]:
     if details["kind"] == "learner":
         _check_context(details.get("metadata"))
     _actor_input_scale(details)
+    _actor_spawn_frame(details)
     return details
 
 
@@ -642,12 +712,16 @@ def restore_checkpoint(
         pinned_opponent_share means zero in the saved config, in the expected
         config and in the saved collection settings, so an older run compares
         equal to today's default; a positive share must be saved explicitly.
+        Missing historical ppo.spawn_frame means "world" on both sides; a
+        checkpoint saved in another frame must be resumed in that frame.
     expected_metadata : mapping
         Required config, source, dependencies and execution discovered for
         this execution. Each must equal its saved value. Additional supplied
         keys are equality assertions; attempt/parent IDs usually are omitted.
     ppo : PPOConfig, default DEFAULT_PPO_CONFIG
-        Matched numerical update settings for restored-boundary validation.
+        Matched numerical update settings for restored-boundary validation. Its
+        input scale and spawn frame must equal the checkpoint's, else restore
+        is refused before arrays are read.
     device : jax.Device or None, default None
         Explicit target device; None uses this process's first selected device.
         Every restored array, including empty IDs, is committed to this device.
@@ -686,11 +760,19 @@ def restore_checkpoint(
         if isinstance(config_record, dict):
             normalized = dict(cast(dict[str, Any], config_record))
             normalized.setdefault("pinned_opponent_share", 0.0)
+            ppo_record = normalized.get("ppo")
+            if isinstance(ppo_record, dict):
+                # Configs saved before spawn_frame existed compare at "world".
+                nested = dict(cast(dict[str, Any], ppo_record))
+                nested.setdefault("spawn_frame", "world")
+                normalized["ppo"] = nested
             record["config"] = normalized
     if any(saved_metadata.get(key) != value for key, value in expected.items()):
         raise ValueError("Checkpoint execution metadata differs")
     if _actor_input_scale(details) != ppo.input_scale:
         raise ValueError("Checkpoint input_scale differs from PPO settings")
+    if _actor_spawn_frame(details) != ppo.spawn_frame:
+        raise ValueError("Checkpoint spawn_frame differs from PPO settings")
     saved_collection = _object(details["collection"], "Saved collection settings")
     saved_collection.setdefault("shaping_mode", "potential")
     saved_collection.setdefault("score_threshold_curriculum", False)
@@ -830,6 +912,7 @@ def export_system(
     *,
     metadata: dict[str, object],
     input_scale: float = 1.0,
+    spawn_frame: str = "world",
 ) -> Path:
     """Publish a standalone immutable sampled-MAPPO actor artifact.
 
@@ -847,6 +930,11 @@ def export_system(
         Finite positive factor applied before the actor's first Dense layer.
         Use the originating PPO config's value. It is part of inference identity;
         changing it does not rewrite weights or the raw input schema.
+    spawn_frame : str, default="world"
+        Spawn frame the weights were trained in: "world", "left" or "right".
+        Use the originating PPO config's value. A non-world frame is written
+        into the description and the inference identity; "world" writes no key,
+        so default exports keep their historical description bytes.
 
     Returns
     -------
@@ -856,7 +944,8 @@ def export_system(
     Raises
     ------
     ValueError
-        Variables, scale or provenance are invalid, or the destination conflicts.
+        Variables, scale, frame or provenance are invalid, or the destination
+        conflicts.
     OSError
         A required directory or payload cannot be read or written.
 
@@ -865,6 +954,7 @@ def export_system(
     Host-only. No map preparation, critic, optimizer or game state is required.
     """
     input_scale = _input_scale(input_scale)
+    spawn_frame = _spawn_frame(spawn_frame)
     context = _object(metadata, "Actor provenance")
     if not {"run_id", "seed", "env_steps", "checkpoint_id"} <= context.keys():
         raise ValueError(
@@ -891,6 +981,7 @@ def export_system(
             saved["kind"] == "actor"
             and saved["actor_digest"] == digest
             and _actor_input_scale(saved) == input_scale
+            and _actor_spawn_frame(saved) == spawn_frame
             and saved["metadata"] == context
         ):
             return target
@@ -908,6 +999,8 @@ def export_system(
         "input_scale": input_scale,
         "files": _inventory(temporary),
     }
+    if spawn_frame != "world":
+        details["spawn_frame"] = spawn_frame
     details["checkpoint_id"] = sha256(_json_bytes(details)).hexdigest()
     _atomic_json(temporary / _ACTOR_DESCRIPTION, details)
     _sync_tree(temporary)
@@ -920,12 +1013,14 @@ def artifact_identity(path: str | Path) -> dict[str, Any]:
     """Read verified actor identity/provenance without restoring numerical state.
 
     Accept a standalone export or complete learner checkpoint. Return direct
-    actor_digest, weight_digest, input_scale, checkpoint_id, schemas, run_id,
-    seed and env_steps fields plus original metadata. actor_digest binds weights
-    and inference scale; at scale 1.0 it keeps the historical weight digest.
-    weight_digest always identifies only the saved variables. Neither identity
-    proves competence. All file hashes are checked; this operation may read a
-    full learner payload from disk. Missing historical scale means 1.0.
+    actor_digest, weight_digest, input_scale, spawn_frame, checkpoint_id,
+    schemas, run_id, seed and env_steps fields plus original metadata.
+    actor_digest binds weights, inference scale and spawn frame; at scale 1.0
+    in the world frame it keeps the historical weight digest. weight_digest
+    always identifies only the saved variables. Neither identity proves
+    competence. All file hashes are checked; this operation may read a full
+    learner payload from disk. Missing historical scale means 1.0 and a missing
+    frame means "world".
     """
     details = read_checkpoint_details(path)
     metadata = details["metadata"]
@@ -934,6 +1029,7 @@ def artifact_identity(path: str | Path) -> dict[str, Any]:
         "actor_digest": _inference_digest(details),
         "weight_digest": details["actor_digest"],
         "input_scale": _actor_input_scale(details),
+        "spawn_frame": _actor_spawn_frame(details),
         "checkpoint_id": details["checkpoint_id"],
         "schemas": details["schemas"],
         "metadata": metadata,
@@ -976,7 +1072,9 @@ def load_system(checkpoint: str | Path) -> System:
     A frozen actor identity makes no claim about learned competence.
     Historical artifacts without an input scale keep their original scale 1.0
     and weight-digest identity. Learner checkpoints use config.ppo.input_scale;
-    actor exports use their explicit saved scale. Neither route rewrites weights.
+    actor exports use their explicit saved scale. The saved spawn frame is
+    restored the same way and is never inferred from a model's results; a
+    missing frame means "world". Neither route rewrites weights.
     """
     root = _directory(Path(checkpoint))
     details = read_checkpoint_details(root)
@@ -992,6 +1090,7 @@ def load_system(checkpoint: str | Path) -> System:
         actor,
         checkpoint=_inference_digest(details),
         input_scale=_actor_input_scale(details),
+        spawn_frame=_actor_spawn_frame(details),
     )
 
 

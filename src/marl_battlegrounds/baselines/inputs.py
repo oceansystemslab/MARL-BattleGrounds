@@ -1,6 +1,10 @@
 """Encode permitted actor inputs and separate physical training state.
 
 The two encoders provide fixed float32 feature layouts for baseline networks.
+spawn_frame_flag names the rows a baseline reflects before encoding when its
+spawn frame is "left" or "right"; "world" encodes raw coordinates.
+team_obstacle_partners makes the obstacle mirror decision once per game for a
+team's five actors, who share one map table, so the reflection stays cheap.
 Actor features retain each recipient's own information rights. Training-state
 features are privileged and must never enter an actor's network or memory.
 The ordered layouts below own the versioned offsets; Core still owns field and
@@ -25,6 +29,7 @@ from jax.typing import ArrayLike
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_CLASS_ID,
+    CONTEXT_FEATURE_MAP_WIDTH,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
     NUM_CLASSES,
@@ -39,10 +44,92 @@ from marl_battlegrounds.core.types import (
     EnvConfig,
     EnvState,
 )
-from marl_battlegrounds.policies.input import ActorInput
+from marl_battlegrounds.policies.input import (
+    ActorInput,
+    obstacle_mirror_partners,
+    team_on_right,
+)
 
 ACTOR_INPUT_SCHEMA_VERSION = 1
 TRAINING_STATE_SCHEMA_VERSION = 1
+# A baseline's spawn frame: "world" keeps raw coordinates; "left" reflects the
+# view of any actor whose team starts on the right bank; "right" the reverse.
+SPAWN_FRAMES = ("world", "left", "right")
+
+
+def spawn_frame_flag(actors: ActorInput, spawn_frame: str) -> Array:
+    """Return the Boolean rows whose permitted view a spawn frame reflects.
+
+    Parameters
+    ----------
+    actors : ActorInput
+        Permitted inputs with any leading shape L, for example (B, 5).
+    spawn_frame : str
+        "left" flags actors whose own team starts on the right bank, so every
+        game looks like a left start; "right" flags the others.
+
+    Returns
+    -------
+    Array
+        Boolean array of shape L: team_on_right for "left", its complement for
+        "right". Unused observer rows, whose permitted view is all zero (map
+        width 0), are never flagged in either frame, so padded lanes stay
+        bit-identical to the world frame. Dead actors keep their flag.
+
+    Raises
+    ------
+    ValueError
+        spawn_frame is "world", which reflects nothing and must not reach this
+        helper, or any other value.
+    """
+    if spawn_frame not in ("left", "right"):
+        raise ValueError('spawn_frame must be "left" or "right" to compute a flag.')
+    on_right = team_on_right(actors)
+    used = actors.observation.context_features[..., CONTEXT_FEATURE_MAP_WIDTH] > 0
+    return (on_right if spawn_frame == "left" else ~on_right) & used
+
+
+def team_obstacle_partners(actors: ActorInput) -> Array:
+    """Compute the obstacle mirror partners once per game for a team's five actors.
+
+    Parameters
+    ----------
+    actors : ActorInput
+        One team's permitted inputs whose last leading axis is the five roster
+        slots of one game, for example (B, 5) or (G, T, E, 5). Core builds one
+        obstacle table per map and every actor of a game receives that same
+        table, so the decision is made on slot 0 and shared.
+
+    Returns
+    -------
+    Array
+        Boolean array of the actors' leading shape plus (32,): the result of
+        obstacle_mirror_partners for slot 0's table and map width, repeated over
+        the five slots. Pass it to mirror_team_view as obstacle_partners; the
+        output equals the per-row computation and the 32 x 32 row comparison
+        runs once per game instead of once per actor.
+
+    Raises
+    ------
+    ValueError
+        The last leading axis is not the five roster slots. A batch of single
+        actors from different games must use mirror_team_view's default path.
+
+    Notes
+    -----
+    Pure JAX; works under jit and vmap. This is the baseline's own grouping
+    knowledge; the public helper never assumes it.
+    """
+    table = actors.observation.map_obstacle_features
+    if table.ndim < 4 or table.shape[-3] != MAX_AGENTS_PER_TEAM:
+        raise ValueError(
+            "team_obstacle_partners needs a team axis of five actors before the "
+            "obstacle table."
+        )
+    width = actors.observation.context_features[..., CONTEXT_FEATURE_MAP_WIDTH]
+    per_game = obstacle_mirror_partners(table[..., 0, :, :], width[..., 0])
+    return jnp.broadcast_to(per_game[..., None, :], table.shape[:-1])
+
 
 # Each entry names a source field, its per-record shape and its encoded width.
 type _Layout = tuple[tuple[str, tuple[int, ...], int], ...]

@@ -604,7 +604,7 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
         "tests/test_visual_debugger_replay_service.py": 400,
         "tests/test_training_collection.py": 319,
         "tests/test_training_learner.py": 198,
-        "tests/test_training_checkpoints.py": 163,
+        "tests/test_training_checkpoints.py": 192,
         "tests/test_training_runner.py": 404,
     }
     assert CI_SHARD_COST_PROFILE.split_file_family_cost_floors == {}
@@ -645,8 +645,8 @@ def test_production_profile_names_and_weights_exactly_five_extracted_families() 
         ("file:tests/test_combat_ultimate_effects.py", 3, 5),
         ("file:tests/test_tdm_scenarios.py", 12, 8),
         ("file:tests/test_evaluation_scenario.py", 4, 8),
-        ("file:tests/test_collection.py", 4, 8),
-        ("file:tests/test_evaluation_replay.py", 7, 5),
+        ("file:tests/test_collection.py", 12, 8),
+        ("file:tests/test_evaluation_replay.py", 9, 5),
     )
     assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset()
 

@@ -319,8 +319,10 @@ def init_learner(
         Python run seed, excluding bool. Collection retains its own unchanged
         streams. Version-1 model/shuffle tags derive separate learner keys.
     ppo : PPOConfig, default=DEFAULT_PPO_CONFIG
-        Static donor update settings. Counters and per-minibatch sample counts
-        must fit int32 for the complete scheduled run.
+        Static donor update settings, including the actor's input scale and
+        spawn frame, which the actor System and every update then share.
+        Counters and per-minibatch sample counts must fit int32 for the
+        complete scheduled run.
     prepared : PreparedTrainingContent or None, default=None
         Existing verified content, or None to perform the collection preflight.
     shaping : bool, default=False
@@ -381,7 +383,9 @@ def init_learner(
         jax.random.fold_in(root, MODEL_INITIALIZATION_TAG), ppo
     )
     actor = make_recurrent_mappo_system(
-        initialized.actor_params, input_scale=ppo.input_scale
+        initialized.actor_params,
+        input_scale=ppo.input_scale,
+        spawn_frame=ppo.spawn_frame,
     )
     collection, carry = init_training_collection(
         actor,

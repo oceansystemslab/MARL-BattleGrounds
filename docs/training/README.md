@@ -454,6 +454,15 @@ Keep compact `Observations` in rollout storage. Expand actor features only when
 applying a model. Store the critic view once per game. Its temporary broadcast
 across actors belongs inside the critic application or current minibatch.
 
+Core observations stay in world coordinates. The optional helpers
+`team_on_right`, `mirror_team_view` and `mirror_move` in
+[input.py](../../src/marl_battlegrounds/policies/input.py) let any method
+reflect a team's permitted view and move mask about the vertical centerline
+and map a chosen move back, using only that team's own spawn pads and the map
+width. The recurrent MAPPO baseline calls them before encoding when its spawn
+frame is `"left"` or `"right"`; the environment, evaluator and tournament never
+apply them.
+
 ## Actions And Random Keys
 
 [actions.py](../../src/marl_battlegrounds/baselines/actions.py) defines 198 choices
@@ -507,13 +516,41 @@ users must pass the same `input_scale` to `make_recurrent_mappo_system` and
 `critic_values`; pass the original `ppo` config to `build_ppo_batch`.
 The [source ledger](source_reuse.md#optional-input-scale) explains compatibility.
 
+`PPOConfig(spawn_frame="left")` makes the actor always see the game as if its
+team started on the left bank: whenever its own team starts on the right, its
+permitted view is reflected about the map's vertical centerline before the
+network and the chosen move is reflected back before the game receives it.
+`"right"` does the same with the right bank as home. The default `"world"`
+keeps raw coordinates and traces the donor's program bit for bit. Every
+built-in Team Deathmatch map is its own mirror image, so the reflected view is
+exact up to float rounding; the game itself reproduces a mirrored match only
+approximately after contact, as the reflection diagnostics in amendment A37
+record. The setting changes no rule and reads nothing beyond the actor's own
+view. It is a Team Deathmatch adapter: objective positions for later game
+modes are not reflected. Measured cost on an RTX 5090 at 512 games and
+32-step rollouts, same session, alternating frames: one collection block and
+one update take the same time under `"left"` as under `"world"` within
+measurement noise (about 433 ms and 93 ms), because the only quadratic part,
+the obstacle mirror decision, is made once per game and shared by a team's
+five actors (`team_obstacle_partners`); the update keeps about 2 ms of that
+decision, 0.4 percent of a block. (Measured 2026-09-22.) A policy trained
+this way plays both spawn ends alike by construction; whether it learns faster
+or better is a separate measured question. The runner carries the setting into
+collection, updates, checkpoints, exported actors and their inference identity;
+a loaded actor plays in the frame it was trained in, never a guessed one.
+Low-level users pass the same `spawn_frame` to `make_recurrent_mappo_system`
+and the original `ppo` config to `update_recurrent_ppo`. The
+[source ledger](source_reuse.md#optional-spawn-frame) gives the precedent and
+compatibility rules.
+
 When investigating weak learning, inspect actual task outcomes and fixed-opponent
 validation before increasing the budget. Under native K20/H300, a game without
 a winner at the horizon is a draw even when its kill scores differ. Potential
 shaping preserves that objective; it does not turn such draws into wins. Low
 value loss and a negative actor loss do not prove progress: the actor loss also
-includes its entropy bonus. Compare input scales and update settings on declared
-development seeds, and keep test-map outcomes out of those choices.
+includes its entropy bonus. Compare input scales, spawn frames and update
+settings on declared development seeds, and keep test-map outcomes out of
+those choices.
 
 `PPOBatch` uses time first: `(T, B, ...)`. Actions, values, rewards and sample
 masks use five Team A slots. `ended[t]` describes the transition produced by

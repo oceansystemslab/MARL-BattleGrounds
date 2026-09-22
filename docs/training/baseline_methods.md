@@ -594,3 +594,109 @@ the mirror on from the start is a separate question, as are stronger opponents.
 | c07 seed 19,044,701 | right | 0 | 66 | 62 | 66 |
 | t03 seed 19,044,703 | right | 0 | 74 | 73 | 74 |
 | c03 seed 19,044,702 | left | 45 | 0 | 45 | 41 |
+
+## Spawn Frame Option For Recurrent MAPPO
+
+**Declared on 21 September 2026; approved by the owner. First package run the same day as a pilot; second package declared below.**
+The mirror check above showed the one-sided spawn habit is a frame effect. The
+recurrent MAPPO baseline now carries one setting, `PPOConfig.spawn_frame`, with
+values `"world"` (today's raw coordinates, bit for bit), `"left"` (the actor's
+permitted view is reflected whenever its own team starts on the right bank, so
+every game looks like a left start, and the chosen move is reflected back) and
+`"right"`. The transform lives in the baseline's input adapter and in three
+small public helpers and the `MOVE_MIRROR` table beside the team-view builder;
+the environment, evaluator and
+tournament never apply it, and a researcher's own System may use the helpers or
+not. The precedent and the design claim are recorded in the source-reuse ledger:
+Google Research Football flips the live observation and translates the action
+back for right-side players, RLGym inverts physics for the orange team to avoid
+re-learning the same strategy on both sides, and AlphaZero orients the board to
+the current player. The setting is saved in the actor export and its inference
+identity; old exports mean `"world"`; a loaded actor plays in the frame it was
+trained in.
+
+The experiment: the c03 settings with `ppo.spawn_frame` `"left"` and a fresh
+random initialization result, seeds 19,044,701, 19,044,702 and 19,044,703,
+19,999,744 real transitions, the study's checkpoints, 40-game routine checks and
+200-game confirmations at root 19,044,791, split by spawn end. Control: the
+study's finished c03 runs, reused under an equivalence job that must reproduce
+seed 19,044,701 to its first checkpoint under `"world"`; that reuse is bounded
+by one recorded limit, the mirror check's plain replays of these same
+confirmations matched 599 of 600 recorded games, so GPU replay is exact up to
+contact and not beyond. Frozen rule: TWO-SIDED
+when every seed's weaker confirmation end wins at least 10 of 100 and at least
+half of its stronger end; WITHIN THE DECLARED PERFORMANCE ALLOWANCE when every
+seed's task score over 200 games (win 1, draw 0.5, loss 0) is at least the
+control seed's minus 0.05, losses are at most 5 and wins are not zero; the
+default becomes `"left"` for recurrent MAPPO only when both hold and every case
+completed; PARTIAL keeps `"world"` and the option when TWO-SIDED holds in
+exactly two seeds with the allowance met everywhere, or TWO-SIDED holds
+everywhere and the allowance fails in exactly one seed; NULL otherwise, which
+for an exact
+transform points first at the transform. Three seeds, reported per seed, no
+significance claim; c03 was chosen on the same confirmation numbers, so a tie is
+confounded. A policy trained in a canonical frame is two-sided by construction;
+the run measures whether it is as good as, or better than, the world-frame
+control, not whether it is symmetric.
+
+### First Package: Pilot Result, Audit And Correction
+
+**Run and read on 21 September 2026.** The three treatment seeds
+trained and confirmed. Against Random (200 games, 100 per end): seed 701
+selected its 10.0M checkpoint and won 1 game with no losses, about 6.3 kills
+and 4.6 deaths per game on both ends, task score 0.5025 against the control's
+0.6425; seed 702 selected 4.0M and won 79 (43 and 36 by end) with no losses,
+16.5 kills and 2.7 deaths per game on both ends, task score 0.6975 against
+0.6125; seed 703 selected 12.0M and won 44 (27 and 17), 14 kills and 1.5
+deaths, task score 0.6100 against 0.6175. By the frozen rule the verdict is
+NULL, carried by seed 701 alone: seeds 702 and 703 are two-sided and within
+the allowance. Seed 701's routine checks show why: it played both ends alike
+at every checkpoint but never rose above a brawl (up to 8.9 kills against 5.6
+deaths per game), where the world-frame control's strong end climbed to 18.5
+kills against 1.6 deaths while its weak end stayed passive at about 1 kill and
+0 deaths. The working explanation is self-play: a world-frame policy fights a
+passive copy of itself in half its games and sharpens a safe attack that also
+beats Random; a frame-trained policy meets a two-sided copy of itself in every
+game. This is one seed's trajectory, not a property of the frame.
+
+**Head-to-head, same day.** Each seed's treatment (final 20M actor)
+against the study's control final actor wrapped two-sided with its learned
+bank, 100 paired games in each team order on maps 42 to 46 at root
+19,045,101: seed 701 even (4 wins 3 losses and 3 wins 2 losses, 93 and 95
+draws) despite 1 against 57 wins on the Random proxy; seed 702 even to
+slightly treatment (20 wins 15 losses and 16 wins 16 losses); seed 703 the
+control (0 wins 22 losses and 28 wins 0 losses). Against the scripted teams
+every one of the six models lost 95 to 100 of 100 to tdm-alpha and to
+tdm-beta, which reached 20 kills in nearly every game; our models scored 2 to
+11 kills per game against them. Reading: the Random proxy ranks farming a
+passive opponent, not fighting; the scripted teams are the strongest opponents
+available today by a wide margin; selection and validation should move to
+strong opponents, which is a separate packet.
+
+**Audit and correction, same day.** Four independent auditors ran
+fresh code on the trained weights. The learner's update recomputes every
+stored log probability on real fights to float rounding; both teams' self-play
+actions go through the frame from their own pads; masks and legality hold on
+every row. One material defect: reflecting obstacle rows in place made the
+reflected table a row permutation of the authored one on every map with
+obstacles, and the encoder reads rows in slot order, so the two ends did not
+see the same input vector (logit differences of 0.02 to 0.17 at the first
+step, a few percent by first contact). The helper now leaves any obstacle row
+whose mirror image is already in its table as authored and reflects only rows
+without a partner; on all 52 maps the table is unchanged and the encoded
+vectors of the two ends are identical (difference 0.0), and asymmetric layouts
+keep correct geometry. The first package therefore stands as a pilot under an
+impure transform. Its evidence lives in
+`artifacts/m9-m10/packet-4/spawn-frame-20m/` (qualification record,
+head-to-head tables, audit disposition in the private brief).
+
+### Second Package, Declared
+
+**Declared on 22 September 2026; not yet run.** The same three-seed
+two-arm test on the corrected transform:
+`artifacts/m9-m10/packet-4/spawn-frame-v2-20m/`, same settings, seeds, budget,
+control reuse under the equivalence job, and the same frozen rule. Its post-hoc
+check must reproduce the mirror check's numbers exactly (62/66, 73/74, 45/41),
+because the shipped helper now makes the choice the mirror check's wrapper
+made. Alpha and beta games and the head-to-head follow the run as descriptive
+evidence.

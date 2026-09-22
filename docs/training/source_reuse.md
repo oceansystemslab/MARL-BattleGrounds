@@ -87,6 +87,54 @@ must all use the saved scale. Old exports without this field use `1.0`; loading
 them never applies a new scale. Equal weights with different inference scales
 have different policy identities.
 
+### Optional Spawn Frame
+
+`PPOConfig.spawn_frame` defaults to `"world"`, preserving the donor calculations
+and every existing model bit for bit. `"left"` reflects the actor's permitted
+view about the map's vertical centerline whenever its own team starts on the
+right bank, so every game looks like a start from x = 0.5, and reflects the
+chosen move back before the game receives it; `"right"` does the same with the
+right bank as home. For example, an actor at x = 19.5 that sees an enemy at
+x = 3 is shown itself at x = 0.5 and the enemy at x = 17; when it says East the
+game receives West. The reflection changes the x of unit rows, spawn pads and
+obstacle rows that have no mirror partner in their own table (with wall angles
+negated; a row whose mirror image is already present stays as authored, so the
+built-in maps encode identically from both ends), and swaps East with West,
+Northeast
+with Northwest and Southeast with Southwest in the previous-move one-hots and
+the move mask. Targets, Ultimates, memory and every other field are frame-free.
+The raw encoder, information limits and network size stay the same.
+
+This is a representation choice, not a donor setting. Google Research Football
+flips the live observation and translates the action back for right-side
+players (`observation_rotation.flip_observation` and `flip_single_action` in
+its environment); its documentation says "even if you control players on the
+right team, observations are mirrored". RLGym inverts physics for the orange
+team "to avoid re-learning the same strategy on both sides of the pitch".
+AlphaZero orients the board to the perspective of the current player, and
+warns that chess and shogi permit no reflection augmentation because their
+rules are asymmetric; here the left-right symmetry of all 52 maps was checked
+by the mirror check's test over every map's obstacle table and spawn pads,
+recorded in the baseline methods record (mirror-check section), the up-down
+one was not, so only the left-right flip is used. The design claim, verbatim:
+"An optional team-relative coordinate adapter presents permitted observations
+in a consistent orientation and maps chosen actions back to native
+coordinates. It leaves game rules and information access unchanged."
+
+A policy trained in a left or right frame plays both spawn ends alike by
+construction; that alone does not establish better learning. Keep the frame
+fixed for a run and compare against `"world"` with declared seeds and budgets.
+Collection, PPO updates, historical opponents and exported actors must all use
+the saved frame: the actor samples in its frame and stores world-frame indices
+and probabilities computed in its frame, and the update reflects the rebuilt
+view, mask and stored index the same way. Old exports without this field use
+`"world"`; loading never applies a new frame and never infers one from a
+model's results; adapting an old model means re-exporting it with an explicit
+frame, which is a new identity. Equal weights with different spawn frames have
+different policy identities. A run in a left or right frame cannot reuse a
+world-frame run's shared random initialization result, because that identity
+includes the frame.
+
 ### Optional Dense Training Reward
 
 The default `shaping_mode="potential"` keeps the original score-potential

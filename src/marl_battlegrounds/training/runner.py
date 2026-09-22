@@ -96,7 +96,9 @@ class TrainConfig:
         run; the remaining probability is 20% other history when any exists and
         current weights otherwise. Evaluation opponents are unaffected.
     ppo : PPOConfig, default=PPOConfig()
-        Immutable donor network update settings, including rollout length.
+        Immutable donor network update settings, including rollout length,
+        input scale and spawn frame. A shared random initialization result can
+        be reused only by a run with the same scale and frame.
     metrics : {"priority", "none"}, default="priority"
         Existing episode metric level. No replay recording is implied.
     recording : bool, default=False
@@ -416,7 +418,9 @@ def train(
         numerical state before writer rewind. The saved compiler policy,
         backend, device kind, runtime and numerical settings must match.
         Older checkpoints without that identity remain readable but cannot
-        resume. Failed recovery retains its explicit retry marker.
+        resume. A saved config without ppo.spawn_frame means "world" whatever
+        the current default is; a supplied config that disagrees is rejected.
+        Failed recovery retains its explicit retry marker.
 
     Returns
     -------
@@ -456,7 +460,7 @@ def train(
         saved = checkpoints.read_checkpoint_details(checkpoint)
         if saved["kind"] != "learner":
             raise ValueError("Resume requires a complete learner checkpoint")
-        inherited = config_from_dict(saved["metadata"]["config"])
+        inherited = config_from_dict(checkpoints.saved_training_config(saved))
         if config is not None and config_to_dict(config) != config_to_dict(inherited):
             raise ValueError("Resume config differs from the saved experiment")
         config = inherited
@@ -507,6 +511,7 @@ def train(
                 "kind": "actor",
                 "actor_digest": tree_digest(state.carry.history.current_variables),
                 "input_scale": config.ppo.input_scale,
+                "spawn_frame": config.ppo.spawn_frame,
             }
         )
         validation.read_random_initialization(
@@ -1135,6 +1140,7 @@ class _Run:
             self.state.carry.history.current_variables,
             destination,
             input_scale=self.config.ppo.input_scale,
+            spawn_frame=self.config.ppo.spawn_frame,
             metadata={
                 "run_id": self.metadata["run_id"],
                 "seed": self.config.seed,

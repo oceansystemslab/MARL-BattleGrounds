@@ -11,6 +11,16 @@ Shaping mode is saved with collection settings. Missing historical mode means
 potential, and a different mode cannot reach array restore or output recovery.
 The pinned opponent share is saved the same way: a missing historical key
 restores at zero and a different share is rejected before arrays are restored.
+The spawn frame follows the input-scale rules: exports write it only when it is
+not "world", a missing historical key loads as "world", the version-1 identity
+envelope for a scaled world-frame actor is pinned so existing identities cannot
+drift, a "left" or "right" export has its own identity and loads as that frame,
+an invalid saved frame and a learner frame mismatch are rejected before arrays
+are restored, and an older learner config without the nested key resumes.
+saved_training_config fixes a saved config's missing ppo.spawn_frame at "world"
+without changing the checkpoint description, so the runner's resume keeps that
+meaning whatever the current default is, and the runner rejects an explicit
+resume config that names another frame before any file changes.
 """
 
 from __future__ import annotations
@@ -396,9 +406,12 @@ def test_save_checks_actual_source_bank_without_rebuilding_installed_content(
             writer.close()
 
 
-@pytest.mark.parametrize("input_scale", [1.0, 0.01])
+@pytest.mark.parametrize(
+    ("input_scale", "spawn_frame"),
+    [(1.0, "world"), (0.01, "world"), (1.0, "left"), (0.01, "right")],
+)
 def test_export_load_is_independent_exact_and_immutable(
-    context: Context, tmp_path: Path, input_scale: float
+    context: Context, tmp_path: Path, input_scale: float, spawn_frame: str
 ) -> None:
     _, state = context
     provenance: dict[str, object] = {
@@ -413,6 +426,7 @@ def test_export_load_is_independent_exact_and_immutable(
         destination,
         metadata=provenance,
         input_scale=input_scale,
+        spawn_frame=spawn_frame,
     )
     actor = load_system(destination)
     identity = artifact_identity(destination)
@@ -420,14 +434,22 @@ def test_export_load_is_independent_exact_and_immutable(
     assert actor.checkpoint == identity["actor_digest"]
     assert identity["weight_digest"] == weight_digest
     assert identity["input_scale"] == input_scale
-    assert (actor.checkpoint == weight_digest) == (input_scale == 1.0)
+    assert identity["spawn_frame"] == spawn_frame
+    assert ("spawn_frame" in read_checkpoint_details(destination)) == (
+        spawn_frame != "world"
+    )
+    assert (actor.checkpoint == weight_digest) == (
+        input_scale == 1.0 and spawn_frame == "world"
+    )
     _equal(actor.variables, state.carry.history.current_variables)
     assert identity["seed"] == 42
     observations, env_state = state.carry.observations, state.carry.state
     memory = init_systems(actor, actor, observations, env_state, jax.random.key(71))
     expected = apply_systems(
         make_recurrent_mappo_system(
-            state.carry.history.current_variables, input_scale=input_scale
+            state.carry.history.current_variables,
+            input_scale=input_scale,
+            spawn_frame=spawn_frame,
         ),
         actor,
         memory,
@@ -443,7 +465,11 @@ def test_export_load_is_independent_exact_and_immutable(
     original = _files(destination)
     assert (
         export_system(
-            actor.variables, destination, metadata=provenance, input_scale=input_scale
+            actor.variables,
+            destination,
+            metadata=provenance,
+            input_scale=input_scale,
+            spawn_frame=spawn_frame,
         )
         == destination
     )
@@ -454,26 +480,43 @@ def test_export_load_is_independent_exact_and_immutable(
             destination,
             metadata={**provenance, "env_steps": 4},
             input_scale=input_scale,
+            spawn_frame=spawn_frame,
         )
     changed_scale = 0.5 if input_scale == 1.0 else 1.0
+    changed_frame = "left" if spawn_frame != "left" else "right"
     with pytest.raises(ValueError, match="different artifact"):
         export_system(
             actor.variables,
             destination,
             metadata=provenance,
             input_scale=changed_scale,
+            spawn_frame=spawn_frame,
         )
-    other = export_system(
-        actor.variables,
-        tmp_path / "other-scale",
-        metadata=provenance,
-        input_scale=changed_scale,
-    )
-    other_identity = artifact_identity(other)
-    assert other_identity["actor_digest"] != identity["actor_digest"]
-    assert other_identity["checkpoint_id"] != identity["checkpoint_id"]
-    assert other_identity["weight_digest"] == identity["weight_digest"]
-    assert load_system(other).checkpoint == other_identity["actor_digest"]
+    with pytest.raises(ValueError, match="different artifact"):
+        export_system(
+            actor.variables,
+            destination,
+            metadata=provenance,
+            input_scale=input_scale,
+            spawn_frame=changed_frame,
+        )
+    for name, scale, frame in (
+        ("other-scale", changed_scale, spawn_frame),
+        ("other-frame", input_scale, changed_frame),
+    ):
+        other = export_system(
+            actor.variables,
+            tmp_path / name,
+            metadata=provenance,
+            input_scale=scale,
+            spawn_frame=frame,
+        )
+        other_identity = artifact_identity(other)
+        assert other_identity["actor_digest"] != identity["actor_digest"]
+        assert other_identity["checkpoint_id"] != identity["checkpoint_id"]
+        assert other_identity["weight_digest"] == identity["weight_digest"]
+        assert other_identity["spawn_frame"] == frame
+        assert load_system(other).checkpoint == other_identity["actor_digest"]
 
 
 @pytest.mark.parametrize(
@@ -548,6 +591,147 @@ def test_historical_actor_default_and_invalid_saved_scale(
     with pytest.raises(ValueError, match="input_scale"):
         load_system(path)
     assert _files(path) == before
+
+
+def test_inference_identity_envelope_is_pinned_and_frames_extend_it() -> None:
+    world_scaled = {"kind": "actor", "actor_digest": "a" * 64, "input_scale": 0.01}
+    # Version-1 envelope digest computed from the committed formula; existing
+    # scaled identities must never drift.
+    assert (
+        checkpoints._inference_digest(world_scaled)  # pyright: ignore[reportPrivateUsage]
+        == "627796419b405ec0d11b648b9d3403c14234d7d50e693b1be0144198b873afef"
+    )
+    raw = {"kind": "actor", "actor_digest": "a" * 64}
+    assert checkpoints._inference_digest(raw) == "a" * 64  # pyright: ignore[reportPrivateUsage]
+    digests = {
+        frame: checkpoints._inference_digest(  # pyright: ignore[reportPrivateUsage]
+            {**world_scaled, "spawn_frame": frame}
+        )
+        for frame in ("world", "left", "right")
+    }
+    assert digests["world"] == checkpoints._inference_digest(world_scaled)  # pyright: ignore[reportPrivateUsage]
+    assert len(set(digests.values())) == 3
+    unscaled_left = checkpoints._inference_digest(  # pyright: ignore[reportPrivateUsage]
+        {**raw, "spawn_frame": "left"}
+    )
+    assert unscaled_left not in {"a" * 64, *digests.values()}
+
+
+def test_historical_actor_default_frame_and_invalid_saved_frame(
+    context: Context, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, state = context
+    provenance: dict[str, object] = {
+        "run_id": "run",
+        "seed": 42,
+        "env_steps": 0,
+        "checkpoint_id": "a" * 64,
+    }
+    path = export_system(
+        state.carry.history.current_variables,
+        tmp_path / "framed",
+        metadata=provenance,
+        input_scale=0.01,
+        spawn_frame="left",
+    )
+    framed_identity = artifact_identity(path)
+    details = read_checkpoint_details(path)
+    assert details["spawn_frame"] == "left"
+    del details["spawn_frame"]
+    del details["checkpoint_id"]
+    details["checkpoint_id"] = hashlib.sha256(
+        checkpoints._json_bytes(details)  # pyright: ignore[reportPrivateUsage]
+    ).hexdigest()
+    (path / "actor_details.json").write_text(json.dumps(details))
+    identity = artifact_identity(path)
+    assert identity["spawn_frame"] == "world"
+    assert identity["actor_digest"] != framed_identity["actor_digest"]
+    assert identity["actor_digest"] == checkpoints._inference_digest(  # pyright: ignore[reportPrivateUsage]
+        {
+            "kind": "actor",
+            "actor_digest": identity["weight_digest"],
+            "input_scale": 0.01,
+        }
+    )
+    assert (
+        load_system(path).apply
+        is make_recurrent_mappo_system({}, input_scale=0.01).apply
+    )
+    details["spawn_frame"] = "up"
+    del details["checkpoint_id"]
+    details["checkpoint_id"] = hashlib.sha256(
+        checkpoints._json_bytes(details)  # pyright: ignore[reportPrivateUsage]
+    ).hexdigest()
+    (path / "actor_details.json").write_text(json.dumps(details))
+
+    def forbidden_restore(*args: object, **kwargs: object) -> None:
+        pytest.fail("Invalid saved frame must reject before restoring arrays")
+
+    monkeypatch.setattr(checkpoints, "_restore_arrays", forbidden_restore)
+    before = _files(path)
+    with pytest.raises(ValueError, match="spawn_frame"):
+        load_system(path)
+    assert _files(path) == before
+
+
+def test_learner_frame_mismatch_rejects_before_files_and_old_config_resumes(
+    context: Context, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collection, state = context
+    metadata = _metadata()
+    writer = _writer(tmp_path, collection, metadata)
+    try:
+        before = _files(tmp_path)
+        with pytest.raises(ValueError, match="spawn_frame"):
+            save_checkpoint(
+                tmp_path,
+                collection,
+                state,
+                metadata=metadata,
+                writer=writer,
+                ppo=replace(PPO, spawn_frame="left"),
+            )
+        assert _files(tmp_path) == before
+        path = save_checkpoint(
+            tmp_path, collection, state, metadata=metadata, writer=writer, ppo=PPO
+        )
+    finally:
+        if writer is not None:
+            writer.close()
+
+    def forbidden_restore(*args: object, **kwargs: object) -> None:
+        pytest.fail("A different frame must reject before restoring arrays")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(checkpoints, "_restore_arrays", forbidden_restore)
+        with pytest.raises(ValueError, match="spawn_frame"):
+            restore_checkpoint(
+                path,
+                collection,
+                state,
+                expected_metadata=_expected(metadata),
+                ppo=replace(PPO, spawn_frame="left"),
+            )
+    # A learner config saved before spawn_frame existed compares at "world".
+    details = read_checkpoint_details(path)
+    del details["metadata"]["config"]["ppo"]["spawn_frame"]
+    del details["checkpoint_id"]
+    details["checkpoint_id"] = hashlib.sha256(
+        checkpoints._json_bytes(details)  # pyright: ignore[reportPrivateUsage]
+    ).hexdigest()
+    (path / "checkpoint_details.json").write_text(json.dumps(details))
+    historical = path.with_name(details["checkpoint_id"])
+    path.rename(historical)
+    assert artifact_identity(historical)["spawn_frame"] == "world"
+    restored = restore_checkpoint(
+        historical,
+        collection,
+        state,
+        expected_metadata=_expected(metadata),
+        ppo=PPO,
+        device=cast(Any, jax.devices()[0]),
+    )
+    _equal(state, restored.state)
 
 
 def test_learner_scale_load_and_config_mismatch_before_restore(
@@ -908,3 +1092,53 @@ def test_complete_update_and_next_partial_block_reproduce_after_disk_restore(
     finally:
         if writer is not None:
             writer.close()
+
+
+def test_saved_training_config_fixes_a_missing_frame_at_world_without_mutation() -> (
+    None
+):
+    saved: dict[str, Any] = {
+        "metadata": {"config": {"seed": 3, "ppo": {"input_scale": 0.01}}}
+    }
+    fixed = checkpoints.saved_training_config(saved)
+    assert fixed["ppo"] == {"input_scale": 0.01, "spawn_frame": "world"}
+    assert fixed["seed"] == 3
+    assert saved["metadata"]["config"] == {"seed": 3, "ppo": {"input_scale": 0.01}}
+    without_block = checkpoints.saved_training_config(
+        {"metadata": {"config": {"seed": 3}}}
+    )
+    assert without_block["ppo"] == {"spawn_frame": "world"}
+    explicit = checkpoints.saved_training_config(
+        {"metadata": {"config": {"ppo": {"spawn_frame": "left"}}}}
+    )
+    assert explicit["ppo"]["spawn_frame"] == "left"
+    with pytest.raises(ValueError, match="JSON object"):
+        checkpoints.saved_training_config({"metadata": {"config": {"ppo": []}}})
+
+
+def test_resume_reads_a_missing_saved_frame_as_world_and_rejects_another(
+    context: Context, tmp_path: Path
+) -> None:
+    from marl_battlegrounds.training import runner
+
+    collection, state = context
+    metadata = _metadata()
+    saved_config = cast(dict[str, Any], metadata["config"])
+    saved_ppo = dict(cast(dict[str, Any], saved_config["ppo"]))
+    del saved_ppo["spawn_frame"]
+    saved_config["ppo"] = saved_ppo
+    writer = _writer(tmp_path, collection, metadata)
+    try:
+        path = save_checkpoint(
+            tmp_path, collection, state, metadata=metadata, writer=writer, ppo=PPO
+        )
+    finally:
+        if writer is not None:
+            writer.close()
+    details = checkpoints.read_checkpoint_details(path)
+    assert "spawn_frame" not in details["metadata"]["config"]["ppo"]
+    inherited = runner.config_from_dict(checkpoints.saved_training_config(details))
+    assert inherited.ppo.spawn_frame == "world"
+    explicit = replace(inherited, ppo=replace(inherited.ppo, spawn_frame="left"))
+    with pytest.raises(ValueError, match="Resume config differs"):
+        runner.train(explicit, resume_from=path)

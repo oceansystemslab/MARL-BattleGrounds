@@ -3,9 +3,28 @@
 These tests cover every input field, named offsets, categorical absence, source
 permissions, public lifecycle facts, accepted-action history and float32 limits.
 They compare scalar, batched and compiled calls without broadening actor rights
-or treating encoding checks as learning or GPU-speed evidence.
+or treating encoding checks as learning or GPU-speed evidence. The spawn-frame
+mirror is checked on real resets: the flag follows each team's own spawn bank
+and reads unused slots as not-on-the-right; reflecting a far-end view equals the
+near-end view for Team A and Team B leaf by leaf, obstacle rows and the encoded
+feature vector included, on map 42 and at reset on all 52 maps; reflecting
+twice returns the input within float rounding; an obstacle row whose mirror
+image is already in its table stays as authored while a row without a partner
+is reflected with its angle negated, and hidden rows, unavailable sources and
+unused obstacles stay zero; obstacle_mirror_partners is the per-table decision
+and mirror_team_view accepts it precomputed only in the actors' shape and dtype;
+a batch of single actors from different games equals separate per-actor calls,
+so no grouping is guessed; team_obstacle_partners makes the decision once per
+game for a team's five actors and equals the per-actor result on every map,
+refusing inputs without a team axis; mirrored twin rollouts without combat agree for
+twenty pre-contact steps; and twins with one authored death per team agree
+through the respawn wave for a full and a padded roster, in both teams. Unused
+observer rows are never flagged in either frame. Contact and combat under the
+mirror are not compared here: Core reproduces a mirrored game only approximately
+after contact, so trained-model checks live in the packet's post-hoc replay.
 """
 
+import itertools
 from collections.abc import Iterator
 from typing import cast
 
@@ -26,24 +45,41 @@ from marl_battlegrounds.baselines.inputs import (
     TRAINING_STATE_SCHEMA_VERSION,
     encode_actor_inputs,
     encode_training_state,
+    spawn_frame_flag,
+    team_obstacle_partners,
 )
 from marl_battlegrounds.core import env as core
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_CLASS_ID,
     AGENT_FEATURE_X,
+    CONTEXT_FEATURE_MAP_WIDTH,
     OBSTACLE_FEATURE_ACTIVE,
+    OBSTACLE_FEATURE_THETA,
     OBSTACLE_FEATURE_TYPE,
+    OBSTACLE_FEATURE_X,
+    OBSTACLE_TYPE_PILLAR,
+    OBSTACLE_TYPE_WALL,
+    Action,
+    ActionMask,
     EnvConfig,
     EnvState,
     Observation,
 )
+from marl_battlegrounds.environment import Environment, EnvironmentState, make
+from marl_battlegrounds.evaluation.policy_execution import SystemInput, system_inputs
 from marl_battlegrounds.policies.input import (
+    MOVE_MIRROR,
     ActorInput,
+    Observations,
     build_actor_input,
     build_observations,
     build_team_actor_input,
+    mirror_team_view,
+    obstacle_mirror_partners,
+    team_on_right,
 )
+from marl_battlegrounds.tasks import balanced_spawn_configs
 
 
 def _row[T](value: T, index: int) -> T:
@@ -581,3 +617,459 @@ def test_training_shapes_require_fixed_suffixes_and_broadcastable_config(
         config = _batch(config, 2)
     with pytest.raises(ValueError, match="must have shape"):
         jax.jit(encode_training_state)(state, config)
+
+
+def _two_lane_reset(
+    team_sizes: tuple[int, int] = (5, 5),
+) -> tuple[Environment, Observations, EnvironmentState]:
+    if team_sizes == (5, 5):
+        env = make("tdm", map_id=42, num_envs=2, balance_spawn_locations=True)
+    else:
+        config = balanced_spawn_configs(
+            evaluation_env_config(team_sizes=team_sizes), num_envs=2
+        )
+        env = make("tdm", env_config=config, num_envs=2)
+    observations, state = env.reset(jax.random.key(11))
+    return env, observations, state
+
+
+def _assert_mirror_maps_far_onto_near(
+    mirrored: SystemInput, inputs: SystemInput, near: int
+) -> None:
+    far = 1 - near
+    for name, leaf in _leaves(mirrored):
+        expected = np.asarray(dict(_leaves(inputs))[name][near])
+        actual = np.asarray(leaf[far])
+        if name.endswith("map_obstacle_features"):
+            np.testing.assert_array_equal(actual, expected, err_msg=name)
+        else:
+            np.testing.assert_allclose(
+                actual, expected, atol=1e-5, rtol=0, err_msg=name
+            )
+        np.testing.assert_array_equal(np.asarray(leaf[near]), expected, err_msg=name)
+    # The network consumes the flattened vector; both ends must produce it alike.
+    encoded = np.asarray(encode_actor_inputs(mirrored.actors))
+    reference = np.asarray(encode_actor_inputs(inputs.actors))
+    np.testing.assert_allclose(encoded[far], reference[near], atol=1e-5, rtol=0)
+
+
+def test_spawn_frame_flag_follows_the_own_bank_and_ignores_unused_slots() -> None:
+    _, observations, state = _two_lane_reset()
+    for team in (0, 1):
+        actors = system_inputs(observations, state, team=team).actors
+        right = np.asarray(team_on_right(actors))
+        expected = np.array([[team == 1] * 5, [team == 0] * 5])
+        np.testing.assert_array_equal(right, expected)
+        np.testing.assert_array_equal(spawn_frame_flag(actors, "left"), expected)
+        np.testing.assert_array_equal(spawn_frame_flag(actors, "right"), ~expected)
+        with pytest.raises(ValueError, match="spawn_frame"):
+            spawn_frame_flag(actors, "world")
+        with pytest.raises(ValueError, match="spawn_frame"):
+            spawn_frame_flag(actors, "up")
+    _, observations, state = _two_lane_reset(team_sizes=(2, 2))
+    actors = system_inputs(observations, state, team=0).actors
+    right = np.asarray(team_on_right(actors))
+    np.testing.assert_array_equal(right[:, :2], np.array([[False] * 2, [True] * 2]))
+    assert not right[:, 2:].any()
+    assert not np.asarray(spawn_frame_flag(actors, "right"))[:, 2:].any()
+    assert np.asarray(spawn_frame_flag(actors, "right"))[0, :2].all()
+
+
+@pytest.mark.parametrize("team", [0, 1])
+def test_mirror_team_view_maps_the_far_end_onto_the_near_end(team: int) -> None:
+    _, observations, state = _two_lane_reset()
+    inputs = system_inputs(observations, state, team=team)
+    flag = spawn_frame_flag(inputs.actors, "left")
+    actors, mask = mirror_team_view(inputs.actors, inputs.action_mask, flag)
+    mirrored = inputs._replace(actors=actors, action_mask=mask)
+    _assert_mirror_maps_far_onto_near(mirrored, inputs, near=team)
+    again, again_mask = mirror_team_view(actors, mask, flag)
+    for name, leaf in _leaves(again):
+        np.testing.assert_allclose(
+            np.asarray(leaf),
+            np.asarray(dict(_leaves(inputs.actors))[name]),
+            atol=2e-6,
+            rtol=0,
+            err_msg=name,
+        )
+    for name, leaf in _leaves(again_mask):
+        np.testing.assert_array_equal(
+            np.asarray(leaf),
+            np.asarray(dict(_leaves(inputs.action_mask))[name]),
+            err_msg=name,
+        )
+    compiled = cast(
+        tuple[ActorInput, ActionMask],
+        jax.jit(mirror_team_view)(inputs.actors, inputs.action_mask, flag),
+    )
+    eager = dict(itertools.chain(_leaves(actors, "actors"), _leaves(mask, "mask")))
+    for name, leaf in itertools.chain(
+        _leaves(compiled[0], "actors"), _leaves(compiled[1], "mask")
+    ):
+        np.testing.assert_array_equal(
+            np.asarray(leaf), np.asarray(eager[name]), err_msg=name
+        )
+
+
+def test_mirror_team_view_reflects_an_asymmetric_wall_and_keeps_missing_rows_zero() -> (
+    None
+):
+    _, observations, state = _two_lane_reset()
+    inputs = system_inputs(observations, state, team=0)
+    observation = inputs.actors.observation
+    width = float(observation.context_features[0, 0, CONTEXT_FEATURE_MAP_WIDTH])
+    wall = jnp.asarray(
+        [OBSTACLE_TYPE_WALL, 4.0, 5.0, 0.0, 3.0, 1.0, 0.3, 1.0], jnp.float32
+    )
+    obstacles = (
+        observation.map_obstacle_features.at[:, :, 0].set(wall).at[:, :, 1].set(0.0)
+    )
+    east = jnp.zeros((2, 5, 5, 9), jnp.float32).at[:, :, 0, 3].set(1.0)
+    previous = observation.previous_timestep_actions._replace(
+        ally_previous_timestep_move_actions_one_hot=east
+    )
+    zero_enemy = observation.enemy_unit_features.at[:, :, 2].set(0.0)
+    observation = observation._replace(
+        map_obstacle_features=obstacles,
+        previous_timestep_actions=previous,
+        enemy_unit_features=zero_enemy,
+    )
+    bank = inputs.actors.source_bank
+    bank = bank._replace(
+        unit_features_by_source_and_candidate=bank.unit_features_by_source_and_candidate.at[
+            :, :, 1
+        ].set(0.0)
+    )
+    actors = ActorInput(observation, bank, inputs.actors.source_availability)
+    flag = jnp.ones((2, 5), jnp.bool_)
+    reflected, mask = mirror_team_view(actors, inputs.action_mask, flag)
+    table = np.asarray(reflected.observation.map_obstacle_features)
+    assert np.allclose(table[..., 0, OBSTACLE_FEATURE_X], width - 4.0)
+    assert np.allclose(table[..., 0, OBSTACLE_FEATURE_THETA], -0.3)
+    assert np.allclose(table[..., 0, OBSTACLE_FEATURE_ACTIVE], 1.0)
+    assert not table[..., 1, :].any()
+    assert not np.asarray(reflected.observation.enemy_unit_features)[:, :, 2].any()
+    assert not np.asarray(reflected.source_bank.unit_features_by_source_and_candidate)[
+        :, :, 1
+    ].any()
+    self_x = np.asarray(observation.self_features[..., AGENT_FEATURE_X])
+    np.testing.assert_allclose(
+        np.asarray(reflected.observation.self_features[..., AGENT_FEATURE_X]),
+        width - self_x,
+        atol=1e-5,
+    )
+    moved = np.asarray(
+        reflected.observation.previous_timestep_actions.ally_previous_timestep_move_actions_one_hot
+    )
+    assert moved[:, :, 0, 4].all() and not moved[:, :, 0, 3].any()
+    pads = np.asarray(
+        reflected.observation.spawn_lifecycle.spawn_pad_positions_by_agent_by_team
+    )
+    np.testing.assert_allclose(
+        pads[..., 0],
+        width
+        - np.asarray(
+            observation.spawn_lifecycle.spawn_pad_positions_by_agent_by_team[..., 0]
+        ),
+    )
+    for name in (
+        "context_features",
+        "objective_features",
+        "ally_visibility_mask",
+        "self_ally_index",
+    ):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(reflected.observation, name)),
+            np.asarray(getattr(observation, name)),
+        )
+    np.testing.assert_array_equal(
+        np.asarray(reflected.source_availability),
+        np.asarray(inputs.actors.source_availability),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(mask.move_mask),
+        np.asarray(jnp.take(inputs.action_mask.move_mask, MOVE_MIRROR, axis=-1)),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(mask.select_target_use_ultimate_joint_mask),
+        np.asarray(inputs.action_mask.select_target_use_ultimate_joint_mask),
+    )
+    with pytest.raises(ValueError, match="leading shape"):
+        mirror_team_view(actors, inputs.action_mask, jnp.ones((2,), jnp.bool_))
+    with pytest.raises(TypeError, match="Boolean"):
+        mirror_team_view(actors, inputs.action_mask, jnp.ones((2, 5), jnp.int32))
+
+
+def test_mirror_team_view_keeps_partnered_obstacle_rows_and_reflects_the_rest() -> None:
+    _, observations, state = _two_lane_reset()
+    inputs = system_inputs(observations, state, team=0)
+    observation = inputs.actors.observation
+    width = float(observation.context_features[0, 0, CONTEXT_FEATURE_MAP_WIDTH])
+    half = width / 2
+    rows = np.zeros((32, 8), np.float32)
+    rows[0] = (OBSTACLE_TYPE_WALL, 4.0, 5.0, 0.0, 3.0, 1.0, 0.3, 1.0)
+    rows[1] = (OBSTACLE_TYPE_WALL, width - 4.0, 5.0, 0.0, 3.0, 1.0, -0.3, 1.0)
+    rows[2] = (OBSTACLE_TYPE_WALL, half, 8.0, 0.0, 2.0, 2.0, np.pi / 4, 1.0)
+    rows[3] = (OBSTACLE_TYPE_PILLAR, 3.0, 2.0, 0.5, 0.0, 0.0, 0.0, 1.0)
+    rows[4] = (OBSTACLE_TYPE_WALL, 7.0, 2.0, 0.0, 1.0, 3.0, 1.0, 1.0)
+    rows[5] = (
+        OBSTACLE_TYPE_WALL,
+        width - 7.0,
+        2.0,
+        0.0,
+        3.0,
+        1.0,
+        np.pi / 2 - 1.0,
+        1.0,
+    )
+    rows[6] = (OBSTACLE_TYPE_WALL, 6.0, 9.0, 0.0, 4.0, 1.0, 0.0, 1.0)
+    table = jnp.broadcast_to(jnp.asarray(rows), (2, 5, 32, 8))
+    actors = ActorInput(
+        observation._replace(map_obstacle_features=table),
+        inputs.actors.source_bank,
+        inputs.actors.source_availability,
+    )
+    flag = jnp.ones((2, 5), jnp.bool_)
+    reflected, _ = mirror_team_view(actors, inputs.action_mask, flag)
+    result = np.asarray(reflected.observation.map_obstacle_features)[0, 0]
+    # Rows 0 and 1 mirror each other, row 2 is a centerline square, rows 4 and 5
+    # mirror each other with width and height swapped: all stay as authored.
+    np.testing.assert_array_equal(result[[0, 1, 2, 4, 5]], rows[[0, 1, 2, 4, 5]])
+    # The pillar and the lone wall have no partner: reflected in place.
+    assert result[3, OBSTACLE_FEATURE_X] == pytest.approx(width - 3.0)
+    assert result[3, OBSTACLE_FEATURE_ACTIVE] == 1.0
+    assert result[6, OBSTACLE_FEATURE_X] == pytest.approx(width - 6.0)
+    assert result[6, OBSTACLE_FEATURE_THETA] == pytest.approx(-0.0)
+    assert not result[7:].any()
+    unflagged, _ = mirror_team_view(actors, inputs.action_mask, ~flag)
+    np.testing.assert_array_equal(
+        np.asarray(unflagged.observation.map_obstacle_features)[0, 0], rows
+    )
+
+
+@pytest.mark.parametrize("team", [0, 1])
+def test_every_map_encodes_identically_from_both_ends_at_reset(team: int) -> None:
+    for map_id in range(52):
+        env = make("tdm", map_id=map_id, num_envs=2, balance_spawn_locations=True)
+        observations, state = env.reset(jax.random.key(map_id + 3))
+        inputs = system_inputs(observations, state, team=team)
+        flag = spawn_frame_flag(inputs.actors, "left")
+        actors, _ = mirror_team_view(inputs.actors, inputs.action_mask, flag)
+        far, near = 1 - team, team
+        obstacles = np.asarray(actors.observation.map_obstacle_features)
+        np.testing.assert_array_equal(
+            obstacles[far],
+            np.asarray(inputs.actors.observation.map_obstacle_features)[near],
+            err_msg=f"map {map_id}",
+        )
+        encoded = np.asarray(encode_actor_inputs(actors))
+        reference = np.asarray(encode_actor_inputs(inputs.actors))
+        np.testing.assert_allclose(
+            encoded[far], reference[near], atol=1e-5, rtol=0, err_msg=f"map {map_id}"
+        )
+
+
+def test_mirrored_twin_rollouts_without_combat_agree_for_twenty_steps() -> None:
+    env, observations, state = _two_lane_reset()
+    key = jax.random.key(23)
+    for step in range(20):
+        for team in (0, 1):
+            inputs = system_inputs(observations, state, team=team)
+            flag = spawn_frame_flag(inputs.actors, "left")
+            actors, mask = mirror_team_view(inputs.actors, inputs.action_mask, flag)
+            far = 1 - team
+            reference = dict(
+                itertools.chain(
+                    _leaves(inputs.actors, "actors"),
+                    _leaves(inputs.action_mask, "mask"),
+                )
+            )
+            for name, leaf in itertools.chain(
+                _leaves(actors, "actors"), _leaves(mask, "mask")
+            ):
+                expected = np.asarray(reference[name][team])
+                actual = np.asarray(leaf[far])
+                np.testing.assert_allclose(
+                    actual, expected, atol=1e-4, rtol=0, err_msg=f"step {step} {name}"
+                )
+        key, move_key, step_key = jax.random.split(key, 3)
+        move = jax.random.randint(move_key, (10,), 0, 9, dtype=jnp.int32)
+        moves = jnp.stack((move, MOVE_MIRROR[move]))
+        zeros = jnp.zeros((2, 10), jnp.int32)
+        observations, state, _, _, _ = env.step(
+            jax.random.split(step_key, 2), state, Action(moves, zeros, zeros)
+        )
+
+
+@pytest.mark.parametrize("team_sizes", [(5, 5), (3, 2)])
+def test_mirrored_twins_agree_through_an_authored_death_and_respawn(
+    team_sizes: tuple[int, int],
+) -> None:
+    env, _, state = _two_lane_reset(team_sizes)
+    # Slot 0 belongs to Team A and slot 5 to Team B in every roster shape.
+    dead = jnp.zeros((2, 10), jnp.bool_).at[:, jnp.asarray((0, 5))].set(True)
+    core_state = state.core_state
+    state = state._replace(
+        core_state=core_state._replace(
+            alive_mask=core_state.alive_mask & ~dead,
+            current_health=jnp.where(dead, 0.0, core_state.current_health),
+        )
+    )
+    key = jax.random.key(29)
+    stay = jnp.zeros((2, 10), jnp.int32)
+    alive_history: list[np.ndarray[tuple[int, ...], np.dtype[np.bool_]]] = []
+    for _ in range(10):
+        key, step_key = jax.random.split(key)
+        # One shared key per step keeps the two lanes exact mirror twins.
+        observations, state, _, _, _ = env.step(
+            jnp.stack((step_key, step_key)), state, Action(stay, stay, stay)
+        )
+        alive_history.append(np.asarray(state.core_state.alive_mask)[:, (0, 5)])
+        for team in (0, 1):
+            inputs = system_inputs(observations, state, team=team)
+            flag = spawn_frame_flag(inputs.actors, "left")
+            actors, mask = mirror_team_view(inputs.actors, inputs.action_mask, flag)
+            mirrored = inputs._replace(actors=actors, action_mask=mask)
+            _assert_mirror_maps_far_onto_near(mirrored, inputs, near=team)
+    assert not alive_history[0].any()
+    assert alive_history[-1].all()
+    revived = next(i for i, alive in enumerate(alive_history) if alive.all())
+    assert 0 < revived < 9
+
+
+def _asymmetric_table(
+    width: float,
+) -> np.ndarray[tuple[int, ...], np.dtype[np.float32]]:
+    rows = np.zeros((32, 8), np.float32)
+    rows[0] = (OBSTACLE_TYPE_WALL, 4.0, 5.0, 0.0, 3.0, 1.0, 0.3, 1.0)
+    rows[1] = (OBSTACLE_TYPE_WALL, width - 4.0, 5.0, 0.0, 3.0, 1.0, -0.3, 1.0)
+    rows[2] = (OBSTACLE_TYPE_PILLAR, 3.0, 2.0, 0.5, 0.0, 0.0, 0.0, 1.0)
+    return rows
+
+
+def _single_actor(
+    inputs: SystemInput, lane: int, actor: int
+) -> tuple[ActorInput, ActionMask]:
+    def pick(leaf: Array) -> Array:
+        return leaf[lane, actor]
+
+    return jax.tree.map(pick, inputs.actors), jax.tree.map(pick, inputs.action_mask)
+
+
+def test_single_actor_batches_from_different_maps_equal_per_actor_calls() -> None:
+    _, observations, state = _two_lane_reset()
+    inputs = system_inputs(observations, state, team=0)
+    width = float(
+        inputs.actors.observation.context_features[0, 0, CONTEXT_FEATURE_MAP_WIDTH]
+    )
+    # Game 1 keeps map 42's symmetric table; game 2 gets an asymmetric one whose
+    # pillar has no mirror partner, so the two games must decide differently.
+    table = inputs.actors.observation.map_obstacle_features.at[1].set(
+        jnp.asarray(_asymmetric_table(width))
+    )
+    actors = ActorInput(
+        inputs.actors.observation._replace(map_obstacle_features=table),
+        inputs.actors.source_bank,
+        inputs.actors.source_availability,
+    )
+    inputs = inputs._replace(actors=actors)
+    singles = [_single_actor(inputs, lane, 0) for lane in (0, 1)]
+
+    def stack(*leaves: Array) -> Array:
+        return jnp.stack(leaves)
+
+    batch_actors = jax.tree.map(stack, singles[0][0], singles[1][0])
+    batch_mask = jax.tree.map(stack, singles[0][1], singles[1][1])
+    flag = jnp.ones((2,), jnp.bool_)
+    batched_actors, batched_mask = mirror_team_view(batch_actors, batch_mask, flag)
+    for lane, (single_actors, single_mask) in enumerate(singles):
+        actors_one, mask_one = mirror_team_view(
+            single_actors, single_mask, jnp.asarray(True)
+        )
+        for name, leaf in _leaves(actors_one, "actors"):
+            np.testing.assert_array_equal(
+                np.asarray(leaf),
+                np.asarray(dict(_leaves(batched_actors, "actors"))[name][lane]),
+                err_msg=name,
+            )
+        for name, leaf in _leaves(mask_one, "mask"):
+            np.testing.assert_array_equal(
+                np.asarray(leaf),
+                np.asarray(dict(_leaves(batched_mask, "mask"))[name][lane]),
+                err_msg=name,
+            )
+    result = np.asarray(batched_actors.observation.map_obstacle_features)
+    np.testing.assert_array_equal(result[0], np.asarray(table[0, 0]))
+    assert result[1, 2, OBSTACLE_FEATURE_X] == pytest.approx(width - 3.0)
+    np.testing.assert_array_equal(result[1, :2], _asymmetric_table(width)[:2])
+
+
+def test_precomputed_partner_mask_matches_default_and_is_checked() -> None:
+    _, observations, state = _two_lane_reset()
+    inputs = system_inputs(observations, state, team=1)
+    flag = spawn_frame_flag(inputs.actors, "left")
+    width = inputs.actors.observation.context_features[..., CONTEXT_FEATURE_MAP_WIDTH]
+    per_row = obstacle_mirror_partners(
+        inputs.actors.observation.map_obstacle_features, width
+    )
+    assert per_row.shape == (2, 5, 32) and per_row.dtype == jnp.bool_
+    default_actors, default_mask = mirror_team_view(
+        inputs.actors, inputs.action_mask, flag
+    )
+    given_actors, given_mask = mirror_team_view(
+        inputs.actors, inputs.action_mask, flag, obstacle_partners=per_row
+    )
+    for name, leaf in _leaves(given_actors, "actors"):
+        np.testing.assert_array_equal(
+            np.asarray(leaf),
+            np.asarray(dict(_leaves(default_actors, "actors"))[name]),
+            err_msg=name,
+        )
+    np.testing.assert_array_equal(
+        np.asarray(given_mask.move_mask), np.asarray(default_mask.move_mask)
+    )
+    with pytest.raises(ValueError, match="leading shape plus"):
+        mirror_team_view(
+            inputs.actors, inputs.action_mask, flag, obstacle_partners=per_row[:, :1]
+        )
+    with pytest.raises(TypeError, match="Boolean"):
+        mirror_team_view(
+            inputs.actors,
+            inputs.action_mask,
+            flag,
+            obstacle_partners=per_row.astype(jnp.int32),
+        )
+
+
+@pytest.mark.parametrize("team_sizes", [(5, 5), (2, 2)])
+def test_team_obstacle_partners_equals_per_actor_partners(
+    team_sizes: tuple[int, int],
+) -> None:
+    for map_id in (0, 7, 42):
+        if team_sizes == (5, 5):
+            env = make("tdm", map_id=map_id, num_envs=2, balance_spawn_locations=True)
+            observations, state = env.reset(jax.random.key(map_id + 5))
+        else:
+            _, observations, state = _two_lane_reset(team_sizes)
+        for team in (0, 1):
+            inputs = system_inputs(observations, state, team=team)
+            table = inputs.actors.observation.map_obstacle_features
+            width = inputs.actors.observation.context_features[
+                ..., CONTEXT_FEATURE_MAP_WIDTH
+            ]
+            # Core hands every actor of a game the same map table.
+            for actor in range(1, 5):
+                np.testing.assert_array_equal(
+                    np.asarray(table[:, actor]), np.asarray(table[:, 0])
+                )
+            np.testing.assert_array_equal(
+                np.asarray(team_obstacle_partners(inputs.actors)),
+                np.asarray(obstacle_mirror_partners(table, width)),
+            )
+    single_actors, _ = _single_actor(inputs, 0, 0)
+
+    def pair(leaf: Array) -> Array:
+        return jnp.stack((leaf, leaf))
+
+    with pytest.raises(ValueError, match="team axis"):
+        team_obstacle_partners(jax.tree.map(pair, single_actors))

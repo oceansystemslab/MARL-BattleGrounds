@@ -541,7 +541,8 @@ def validate_host_state(
         an actor or completed validation artifact is missing or changed; or a
         candidate belongs to an abandoned continuation. A pending current export
         need not exist. Ancestor descriptions remain usable after payload pruning.
-        Exported weights and input scale must match their learner boundary.
+        Exported weights, input scale and spawn frame must match their
+        learner boundary.
 
     Notes
     -----
@@ -738,6 +739,7 @@ def validate_host_state(
             or actor["env_steps"] != ancestor["counters"]["env_steps"]
             or actor["weight_digest"] != ancestor["actor_digest"]
             or actor["input_scale"] != config["ppo"].get("input_scale", 1.0)
+            or actor["spawn_frame"] != config["ppo"].get("spawn_frame", "world")
             or actor["schemas"] != ancestor["schemas"]
         ):
             raise ValueError("Saved actor identity differs from its learner boundary")

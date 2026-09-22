@@ -24,6 +24,9 @@ critic_values and update_recurrent_ppo separately with privileged training data.
 
 Requires the optional training extra. Inputs stay on device inside jit/scan.
 Reference settings are starting values, not qualified learning settings for BG.
+PPOConfig.spawn_frame is a BG adaptation: "left" or "right" reflects the actor's
+permitted view so every game looks like a start from that bank, and maps the
+chosen move back; "world" keeps the donor's raw coordinates bit for bit.
 """
 
 import functools
@@ -51,12 +54,16 @@ from marl_battlegrounds.baselines.actions import (
     action_log_prob,
     categorical_action_mask,
     decode_actions,
+    mirror_action_indices,
     sample_actions,
 )
 from marl_battlegrounds.baselines.inputs import (
     ACTOR_FEATURE_SIZE,
+    SPAWN_FRAMES,
     TRAINING_STATE_FEATURE_SIZE,
     encode_actor_inputs,
+    spawn_frame_flag,
+    team_obstacle_partners,
 )
 from marl_battlegrounds.core.types import ActionMask
 from marl_battlegrounds.evaluation.policy_execution import (
@@ -64,7 +71,12 @@ from marl_battlegrounds.evaluation.policy_execution import (
     SystemInput,
     SystemOutput,
 )
-from marl_battlegrounds.policies.input import Observations, build_team_actor_input
+from marl_battlegrounds.policies.input import (
+    ActorInput,
+    Observations,
+    build_team_actor_input,
+    mirror_team_view,
+)
 
 type Tree = Any
 HIDDEN_SIZE = 128
@@ -85,6 +97,18 @@ def _input_scale(value: float) -> float:
     ):
         raise ValueError("input_scale must be a finite positive real number.")
     return float(value)
+
+
+def _spawn_frame(value: object) -> str:
+    """Check a static spawn frame name and return it as a Python string.
+
+    This host check accepts exactly the strings "world", "left" and "right".
+    Any other value, including Booleans, None and traced arrays, raises
+    ValueError. It performs no device work.
+    """
+    if not isinstance(value, str) or value not in SPAWN_FRAMES:
+        raise ValueError('spawn_frame must be "world", "left" or "right".')
+    return value
 
 
 @dataclass(frozen=True)
@@ -126,13 +150,27 @@ class PPOConfig:
         before the first Dense layer. One preserves the donor's raw inputs.
         Use the same setting for collection, learning and loaded inference.
         No feature is removed and no running statistics are collected.
+    spawn_frame : str, default="world"
+        Which spawn bank the actor always seems to start from. "world" keeps
+        raw coordinates and traces the donor's program bit for bit. "left"
+        reflects the permitted view of any actor whose own team starts on the
+        right bank about the map's vertical centerline, so every game looks
+        like a left start, and maps the chosen move back before the game
+        receives it; "right" does the same with the right bank as home. On
+        the built-in Team Deathmatch maps, which are their own mirror images,
+        a reflected right start shows the own pads near x = 0.5; a custom
+        layout is reflected the same way with no such guarantee, and
+        coordinates keep float32 rounding. Use the same setting for
+        collection, learning and loaded inference; it is saved with exported
+        actors and is part of their inference identity.
 
     Raises
     ------
     ValueError
         A count is not a positive Python int, or a numerical setting is nonfinite
         or outside its stated range. Boolean counts and non-real/Boolean input
-        scales are rejected.
+        scales are rejected, as is a spawn frame other than "world", "left" or
+        "right".
 
     Notes
     -----
@@ -155,10 +193,12 @@ class PPOConfig:
     max_grad_norm: float = 0.5
     adam_epsilon: float = 0.00001
     input_scale: float = 1.0
+    spawn_frame: str = "world"
 
     def __post_init__(self) -> None:
         """Reject invalid static update counts and numerical settings on the host."""
         _input_scale(self.input_scale)
+        _spawn_frame(self.spawn_frame)
         for name in ("rollout_length", "epochs", "minibatches", "groups"):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
@@ -215,10 +255,11 @@ class PPOLearningOutputs(NamedTuple):
     Attributes
     ----------
     action_indices : Array
-        Int32 (B,5) submitted choices in the versioned 198-choice action space.
+        Int32 (B,5) submitted choices in the versioned 198-choice action space,
+        always in world directions, whatever spawn frame the actor used.
     log_prob : Array
         Float32 (B,5) natural-log probability of each submitted choice under its
-        action-time mask and actor weights.
+        action-time mask and actor weights, computed in the actor's frame.
 
     Notes
     -----
@@ -304,9 +345,11 @@ class PPOMinibatch(NamedTuple):
         Separate float32 (G,T,E,5,F) inputs with their respective feature widths.
         G is gradient groups, T is time and E is selected games per group.
     action_mask : Array
-        Boolean (G,T,E,5,198) exact combined action legality.
+        Boolean (G,T,E,5,198) exact combined action legality, in the actor's
+        spawn frame.
     actions : Array
-        Int32 (G,T,E,5) submitted categorical choices.
+        Int32 (G,T,E,5) submitted categorical choices, in the actor's spawn
+        frame (world directions unless the frame reflected them).
     old_log_prob, old_values : Array
         Float32 (G,T,E,5) action-time log probabilities and value predictions.
     advantages, targets : Array
@@ -668,6 +711,7 @@ def _apply_actor(
     keys: Array,
     *,
     input_scale: float = 1.0,
+    spawn_frame_index: int = 0,
 ) -> SystemOutput:
     """Apply the actor once using M8's paired current inputs and lane keys.
 
@@ -686,6 +730,15 @@ def _apply_actor(
     input_scale : float, default=1.0
         Fixed positive finite feature multiplier from the actor's training
         settings. One keeps raw inputs. The System factory binds this setting.
+    spawn_frame_index : int, default=0
+        Position of the actor's training spawn frame in SPAWN_FRAMES: 0 is
+        "world", 1 is "left", 2 is "right". A number rather than the name,
+        because M8 records a System hook's numerical keyword defaults in its
+        identity and skips text. "left" or "right" reflects flagged lanes'
+        permitted view and move mask before the network, samples in that
+        frame, and maps the chosen index back to world directions for both
+        the returned actions and the learning outputs. "world" leaves the
+        donor's program unchanged. The System factory binds this setting.
 
     Returns
     -------
@@ -705,9 +758,25 @@ def _apply_actor(
     -----
     Pure device work supports jit/scan. Source rows and encoded features are
     temporary. M8 owns episode binding and selected memory resets. No input is
-    changed, no extra actor call is made and no data is saved.
+    changed, no extra actor call is made and no data is saved. In a reflected
+    frame the obstacle partner decision is made once per lane from slot 0's
+    table (team_obstacle_partners) and shared by the five actors; it is
+    recomputed on every call, never cached.
     """
-    features = encode_actor_inputs(inputs.actors)
+    actors, frame_mask = inputs.actors, inputs.action_mask
+    flag: Array | None = None
+    spawn_frame = SPAWN_FRAMES[spawn_frame_index]
+    if spawn_frame != "world":
+        flag = spawn_frame_flag(actors, spawn_frame)
+        # The five actors of a lane share one map table: match obstacles once
+        # per game rather than once per actor.
+        actors, frame_mask = mirror_team_view(
+            actors,
+            frame_mask,
+            flag,
+            obstacle_partners=team_obstacle_partners(actors),
+        )
+    features = encode_actor_inputs(actors)
     valid = jnp.broadcast_to(inputs.valid[:, None], inputs.active_mask.shape)
     starts = jnp.broadcast_to(inputs.episode_start[:, None], inputs.active_mask.shape)
     memory, logits = cast(
@@ -717,29 +786,45 @@ def _apply_actor(
         ),
     )
     logits = logits[0]
-    mask = categorical_action_mask(inputs.action_mask)
+    mask = categorical_action_mask(frame_mask)
     actor_keys = jax.vmap(functools.partial(jax.random.split, num=5))(keys)
     indices = sample_actions(logits, mask, actor_keys)
+    if flag is None:
+        return SystemOutput(
+            decode_actions(indices),
+            memory,
+            learning_outputs=PPOLearningOutputs(
+                indices, action_log_prob(logits, mask, indices)
+            ),
+        )
+    # The probability belongs to the reflected frame the actor sampled in; the
+    # index is mapped back so the game and the stored rows see world directions.
+    log_prob = action_log_prob(logits, mask, indices)
+    world = mirror_action_indices(indices, flag)
     return SystemOutput(
-        decode_actions(indices),
+        decode_actions(world),
         memory,
-        learning_outputs=PPOLearningOutputs(
-            indices, action_log_prob(logits, mask, indices)
-        ),
+        learning_outputs=PPOLearningOutputs(world, log_prob),
     )
 
 
 @functools.lru_cache(maxsize=16)
 def _scaled_actor_apply(
-    scale: float,
+    scale: float, spawn_frame: str
 ) -> Callable[[Tree, Array, SystemInput, Array], SystemOutput]:
-    """Reuse an apply hook whose recorded keyword default identifies its scale.
+    """Reuse an apply hook whose keyword defaults identify its scale and frame.
 
-    scale is an already checked Python float. The returned hook uses the normal
-    actor call and has no captured weights or mutable state. M8 includes its
-    numerical defaults in System identity, distinguishing equal weights used
-    with different scales. Caching preserves callable identity during setup.
+    scale is an already checked Python float and spawn_frame an already checked
+    frame name; both are required so one setting has one cache key. The
+    returned hook uses the normal actor call and has no captured weights or
+    mutable state. M8 digests a hook's numerical keyword defaults into System
+    identity, so the frame is recorded as its index in SPAWN_FRAMES (0 world,
+    1 left, 2 right), exactly as _apply_actor records it for the default
+    System; equal weights used with different scales or frames therefore
+    describe different Systems. Caching preserves callable identity during
+    setup.
     """
+    frame_index = SPAWN_FRAMES.index(spawn_frame)
 
     def apply(
         variables: Tree,
@@ -748,14 +833,23 @@ def _scaled_actor_apply(
         keys: Array,
         *,
         input_scale: float = scale,
+        spawn_frame_index: int = frame_index,
     ) -> SystemOutput:
-        """Apply the actor using the factory-bound scale in the keyword default.
+        """Apply the actor using the factory-bound settings in the keyword defaults.
 
         Arguments, outputs and side effects follow _apply_actor. The optional
-        input_scale default records this hook's fixed inference setting; normal
-        System execution supplies only variables, memory, inputs and keys.
+        input_scale and spawn_frame_index defaults record this hook's fixed
+        inference settings; normal System execution supplies only variables,
+        memory, inputs and keys.
         """
-        return _apply_actor(variables, memory, inputs, keys, input_scale=input_scale)
+        return _apply_actor(
+            variables,
+            memory,
+            inputs,
+            keys,
+            input_scale=input_scale,
+            spawn_frame_index=spawn_frame_index,
+        )
 
     return apply
 
@@ -764,6 +858,7 @@ def make_recurrent_mappo_system(
     actor_params: Tree,
     *,
     input_scale: float = 1.0,
+    spawn_frame: str = "world",
     name: str = "Recurrent MAPPO",
     checkpoint: str | None = None,
 ) -> System:
@@ -779,6 +874,10 @@ def make_recurrent_mappo_system(
         preserves historical raw-input behavior. The fixed apply hook records
         this setting in System identity; equal weights with different scales
         describe different inference. No weights or encoder fields are changed.
+    spawn_frame : str, default="world"
+        Spawn frame used to train these weights: "world", "left" or "right"
+        (see PPOConfig). The apply hook records it in System identity; equal
+        weights with different frames describe different inference.
     name : str, default="Recurrent MAPPO"
         Nonempty display name. It does not establish a trained model's identity.
     checkpoint : str or None, default=None
@@ -794,8 +893,9 @@ def make_recurrent_mappo_system(
     Raises
     ------
     ValueError
-        The scale is not a positive finite real number, is Boolean, or the
-        System rejects an empty or invalid display name.
+        The scale is not a positive finite real number, is Boolean, the spawn
+        frame is not one of the three names, or the System rejects an empty or
+        invalid display name.
 
     Notes
     -----
@@ -806,9 +906,15 @@ def make_recurrent_mappo_system(
     claim. Execution accepts Threefry action keys only.
     """
     scale = _input_scale(input_scale)
+    frame = _spawn_frame(spawn_frame)
+    apply = (
+        _apply_actor
+        if scale == 1.0 and frame == "world"
+        else _scaled_actor_apply(scale, frame)
+    )
     return System(
         name,
-        _apply_actor if scale == 1.0 else _scaled_actor_apply(scale),
+        apply,
         variables=actor_params,
         init=_initial_actor_memory,
         checkpoint=checkpoint,
@@ -1188,6 +1294,35 @@ def update_minibatch(
     return PPOTrainState(actor, critic, actor_state, critic_state), metrics
 
 
+def _reflected_minibatch(
+    actor_inputs: ActorInput, mask: ActionMask, actions: Array, spawn_frame: str
+) -> tuple[ActorInput, Array, Array]:
+    """Rebuild one minibatch's actor frame the way the actor saw it when acting.
+
+    actor_inputs, mask and actions carry the leading (G,T,E,5) axes of one
+    minibatch: the rebuilt permitted view, the stored world-frame Core masks and
+    the stored world-frame categorical indices. spawn_frame is "left" or
+    "right". Return the reflected view, the 198-way categorical mask in that
+    frame and the indices mapped into it, so the recomputed log probability
+    matches the action-time value for the same submitted move. The obstacle
+    partner mask is computed once per recorded game and step from that row's
+    own rebuilt table (team_obstacle_partners) and shared by its five actors;
+    nothing is cached across rows or calls. Pure JAX.
+    """
+    flag = spawn_frame_flag(actor_inputs, spawn_frame)
+    reflected, frame_mask = mirror_team_view(
+        actor_inputs,
+        mask,
+        flag,
+        obstacle_partners=team_obstacle_partners(actor_inputs),
+    )
+    return (
+        reflected,
+        categorical_action_mask(frame_mask),
+        mirror_action_indices(actions, flag),
+    )
+
+
 def update_recurrent_ppo(
     state: PPOTrainState,
     batch: PPOBatch,
@@ -1210,8 +1345,9 @@ def update_recurrent_ppo(
         shuffles. Legacy keys require the Threefry default implementation.
         The caller owns future keys; no next key is returned.
     config : PPOConfig, default=DEFAULT_PPO_CONFIG
-        Static grouping, epoch, minibatch, GAE and optimizer settings. Capture
-        one fixed configuration when compiling this function.
+        Static grouping, epoch, minibatch, GAE and optimizer settings, and the
+        spawn frame the stored actions were chosen in. Capture one fixed
+        configuration when compiling this function.
 
     Returns
     -------
@@ -1233,7 +1369,11 @@ def update_recurrent_ppo(
     the selected minibatch is encoded. Groups share one optimizer per network.
     Death excludes policy samples while preserving value learning; inactive or
     padded rows are absent from both losses. Empty networks skip their update as
-    documented by update_minibatch.
+    documented by update_minibatch. When config.spawn_frame is "left" or
+    "right", each minibatch's rebuilt view and mask are reflected and the
+    stored world-frame indices are mapped into that frame before the log
+    probability, exactly as at action time; "world" traces the donor's
+    program unchanged.
 
     Use jit around this numerical call. Paired fields, finite values and legal
     recorded actions remain caller preconditions. Inputs are immutable. No
@@ -1299,7 +1439,17 @@ def update_recurrent_ppo(
                 ),
                 in_axes=(0, None),
             )(compact, 0)
-            features = encode_actor_inputs(actor_inputs)
+            if config.spawn_frame == "world":
+                canonical = None
+                features = encode_actor_inputs(actor_inputs)
+            else:
+                canonical = _reflected_minibatch(
+                    actor_inputs,
+                    jax.tree.map(take, batch.action_mask),
+                    take(batch.actions),
+                    config.spawn_frame,
+                )
+                features = encode_actor_inputs(canonical[0])
             physical = take(batch.training_state)
             critic = jnp.broadcast_to(
                 physical[..., None, :], (*features.shape[:-1], physical.shape[-1])
@@ -1308,11 +1458,16 @@ def update_recurrent_ppo(
             valid = jnp.broadcast_to(take(batch.valid)[..., None], lane_shape)
             starts = jnp.broadcast_to(take(batch.episode_start)[..., None], lane_shape)
             member = take(batch.active)
+            if canonical is None:
+                mask = categorical_action_mask(jax.tree.map(take, batch.action_mask))
+                actions = take(batch.actions)
+            else:
+                _, mask, actions = canonical
             encoded = PPOMinibatch(
                 features,
                 critic,
-                categorical_action_mask(jax.tree.map(take, batch.action_mask)),
-                take(batch.actions),
+                mask,
+                actions,
                 take(batch.old_log_prob),
                 take(batch.old_values),
                 take(advantages),

@@ -5,8 +5,12 @@ reset/cutoff/ending boundaries, final padding, same-call actor data, exact updat
 and history counts, masked samples, finite failure guards and compilation reuse.
 Synthetic short horizons are test inputs after content admission, not proposed
 training settings. The default and an explicit zero pinned opponent share give
-identical learner states after real updates. No test claims useful learning or
-GPU performance.
+identical learner states after real updates. With a "left" or "right" spawn
+frame the direct composition reflects the rebuilt view, mask and stored index
+the way the actor did, the stored log probabilities match that recomputation
+before any optimizer update, the update is accepted, and a stored index left in
+the reflected frame is rejected by the admission guard. No test claims useful
+learning or GPU performance.
 """
 
 from dataclasses import replace
@@ -32,8 +36,9 @@ import marl_battlegrounds as marl_bgs
 from marl_battlegrounds.baselines.actions import (
     action_log_prob,
     categorical_action_mask,
+    mirror_action_indices,
 )
-from marl_battlegrounds.baselines.inputs import encode_actor_inputs
+from marl_battlegrounds.baselines.inputs import encode_actor_inputs, spawn_frame_flag
 from marl_battlegrounds.baselines.ppo import (
     PPOBatch,
     PPOConfig,
@@ -48,7 +53,7 @@ from marl_battlegrounds.baselines.ppo import (
 from marl_battlegrounds.core import env as core
 from marl_battlegrounds.episode_tracking import init_episode_tracking
 from marl_battlegrounds.evaluation.policy_execution import init_systems
-from marl_battlegrounds.policies.input import build_team_actor_input
+from marl_battlegrounds.policies.input import build_team_actor_input, mirror_team_view
 from marl_battlegrounds.training import (
     PreparedTrainingContent,
     TrainingCarry,
@@ -213,17 +218,21 @@ def test_initial_state_owns_one_actor_and_separate_deterministic_keys(
     validate_learner(collection, state, ppo=ppo)
 
 
-@pytest.mark.parametrize("input_scale", (1.0, 0.01))
+@pytest.mark.parametrize(
+    ("input_scale", "spawn_frame"),
+    ((1.0, "world"), (0.01, "world"), (0.01, "left"), (1.0, "right")),
+)
 def test_collected_values_behavior_and_update_match_direct_composition(
     context: Context,
     collected: tuple[TrainingCarry, TrainingRollout],
     prepared: PreparedTrainingContent,
     input_scale: float,
+    spawn_frame: str,
 ) -> None:
     collection, state, ppo = context
     after, rollout = collected
-    if input_scale != 1.0:
-        ppo = replace(ppo, input_scale=input_scale)
+    if input_scale != 1.0 or spawn_frame != "world":
+        ppo = replace(ppo, input_scale=input_scale, spawn_frame=spawn_frame)
         collection, state = init_learner(
             schedule=collection.schedule,
             seed=71,
@@ -249,6 +258,15 @@ def test_collected_values_behavior_and_update_match_direct_composition(
     inputs = jax.vmap(
         jax.vmap(build_team_actor_input, in_axes=(0, None)), in_axes=(0, None)
     )(batch.observations, 0)
+    native_mask = batch.action_mask
+    actions = batch.actions
+    if spawn_frame != "world":
+        # Recompute in the frame the actor sampled in: reflect the rebuilt view
+        # and mask and map the stored world index into that frame.
+        flag = spawn_frame_flag(inputs, spawn_frame)
+        assert bool(flag.any()) and not bool(flag.all())
+        inputs, native_mask = mirror_team_view(inputs, native_mask, flag)
+        actions = mirror_action_indices(actions, flag)
     shape = batch.actions.shape
     _, logits = cast(
         tuple[Array, Array],
@@ -261,9 +279,7 @@ def test_collected_values_behavior_and_update_match_direct_composition(
         ),
     )
     np.testing.assert_allclose(
-        action_log_prob(
-            logits, categorical_action_mask(batch.action_mask), batch.actions
-        ),
+        action_log_prob(logits, categorical_action_mask(native_mask), actions),
         batch.old_log_prob,
         atol=2e-6,
         rtol=2e-6,
@@ -447,7 +463,8 @@ def test_interior_horizon_ending_cuts_gae_and_final_value(context: Context) -> N
 
 
 @pytest.mark.parametrize(
-    "kind", ["boundary", "collection", "probability", "action", "optimizer"]
+    "kind",
+    ["boundary", "collection", "probability", "action", "reflected_index", "optimizer"],
 )
 def test_bad_candidates_never_publish_or_advance_prior_boundary(
     context: Context,
@@ -482,6 +499,25 @@ def test_bad_candidates_never_publish_or_advance_prior_boundary(
             transitions=rollout.transitions._replace(
                 learning_outputs=outputs._replace(
                     action_indices=outputs.action_indices.at[0, 0, 0].set(198)
+                )
+            )
+        )
+        expected_reason = LEARNER_ERROR_ACTION
+    elif kind == "reflected_index":
+        # A stored index left in the reflected frame for a sideways move must
+        # fail the guard that compares it with the submitted world action.
+        outputs = rollout.transitions.learning_outputs
+        indices = np.asarray(outputs.action_indices)
+        moving = np.argwhere((indices // 22) >= 3)
+        assert moving.size, "the collected rollout holds no sideways move"
+        t, b, a = (int(value) for value in moving[0])
+        reflected = mirror_action_indices(
+            jnp.asarray(indices[t, b, a], jnp.int32), jnp.bool_(True)
+        )
+        rollout = rollout._replace(
+            transitions=rollout.transitions._replace(
+                learning_outputs=outputs._replace(
+                    action_indices=outputs.action_indices.at[t, b, a].set(reflected)
                 )
             )
         )

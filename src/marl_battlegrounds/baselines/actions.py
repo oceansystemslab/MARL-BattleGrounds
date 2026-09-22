@@ -4,6 +4,8 @@ PPO and local Q-networks use 198 categories in movement, target, Ultimate order,
 with Ultimate changing fastest. Core owns legality and physical effects. These
 pure JAX helpers preserve arbitrary leading sample axes and never repair actions.
 They require base dependencies only and do not retain random state.
+mirror_action_indices applies the public move reflection to whole categorical
+indices, so a method that reflects its view can store world-frame choices.
 """
 
 import math
@@ -19,6 +21,7 @@ from marl_battlegrounds.core.types import (
     ActionMask,
 )
 from marl_battlegrounds.policies.actor import ActorAction
+from marl_battlegrounds.policies.input import MOVE_MIRROR
 
 ACTION_SCHEMA_VERSION = 1
 NUM_ACTIONS = NUM_MOVE_ACTIONS * NUM_TARGET_ACTIONS * NUM_ULTIMATE_ACTIONS
@@ -122,6 +125,42 @@ def categorical_action_mask(mask: ActionMask) -> Array:
     return (move[..., :, None, None] & joint[..., None, :, :]).reshape(
         *move.shape[:-1], NUM_ACTIONS
     )
+
+
+def mirror_action_indices(indices: Array, flag: Array) -> Array:
+    """Swap the East and West move families of categorical indices in flagged rows.
+
+    Parameters
+    ----------
+    indices : Array
+        Int32 categorical indices 0..197 with any shape L.
+    flag : Array
+        Boolean array of shape L, or broadcastable to it. True rows are mapped;
+        False rows are returned unchanged.
+
+    Returns
+    -------
+    Array
+        Int32 indices of the same shape. In flagged rows index i becomes
+        MOVE_MIRROR[i // 22] * 22 + i % 22: the 22-wide move blocks 3 and 4,
+        5 and 6, 7 and 8 change places and the target and Ultimate parts stay.
+        Applying the map twice returns the input. It is the index form of the
+        move-mask permutation in mirror_team_view, so a log probability under
+        a reflected mask and reflected logits at the reflected index equals the
+        log probability at the world index under the world mask and logits.
+
+    Raises
+    ------
+    TypeError
+        indices is not int32 or flag is not Boolean.
+    """
+    if indices.dtype != jnp.int32:
+        raise TypeError("Action indices must be int32 arrays.")
+    if flag.dtype != jnp.bool_:
+        raise TypeError("The mirror flag must be a Boolean array.")
+    combat = NUM_TARGET_ACTIONS * NUM_ULTIMATE_ACTIONS
+    mirrored = MOVE_MIRROR[indices // combat] * combat + indices % combat
+    return jnp.where(flag, mirrored, indices)
 
 
 def _masked_logits(logits: Array, mask: Array) -> Array:

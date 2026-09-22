@@ -5,7 +5,14 @@ including legal action probabilities, death, respawn, reset and padding. Small
 fixed donor tensors isolate group averaging and complete Adam-state preservation.
 Input-scale checks pair inference and PPO with explicit feature multiplication,
 preserve default parameters, and distinguish recorded inference settings.
-They do not establish GPU speed, learning quality or full learner recovery.
+Spawn-frame checks reject bad names, keep parameter bytes, make each frame a
+distinct System identity with a closure-free hook whose numerical keyword
+defaults are recorded for every factory System including the default, and
+prove that a "left" or
+"right" System equals the actor run on explicitly reflected features with its
+world-frame actions and stored indices agreeing while its unflagged lanes stay
+bit-identical to the "world" System. They do not establish GPU speed, learning
+quality or full learner recovery.
 """
 
 from dataclasses import replace
@@ -25,10 +32,12 @@ from marl_battlegrounds.baselines.actions import (
     action_log_prob,
     categorical_action_mask,
     encode_actions,
+    mirror_action_indices,
 )
 from marl_battlegrounds.baselines.inputs import (
     encode_actor_inputs,
     encode_training_state,
+    spawn_frame_flag,
 )
 from marl_battlegrounds.baselines.ppo import (
     HIDDEN_SIZE,
@@ -59,7 +68,8 @@ from marl_battlegrounds.evaluation.recording_identity import (
     normalize_system_registration,
 )
 from marl_battlegrounds.policies.actor import ActorAction
-from marl_battlegrounds.policies.input import Observations
+from marl_battlegrounds.policies.input import Observations, mirror_team_view
+from marl_battlegrounds.tasks import balanced_spawn_configs
 
 type Tree = Any
 
@@ -728,3 +738,124 @@ def test_scaled_ppo_losses_and_gradients_match_explicit_scaled_features(
     )
     _assert_tree_close(actual, expected)
     assert _tree_changed(actual, _update(state, batch, config))
+
+
+def _balanced_setup(
+    max_steps: int = 8,
+) -> tuple[Environment, Observations, EnvironmentState]:
+    config = balanced_spawn_configs(
+        evaluation_env_config(team_sizes=(2, 2), max_steps=max_steps), num_envs=2
+    )
+    env = make("tdm", env_config=config, num_envs=2, metrics="none")
+    observations, state = env.reset(jax.random.key(12))
+    return env, observations, state
+
+
+@pytest.mark.parametrize("frame", ["World", "up", "", None, 0, True, b"left"])
+def test_spawn_frame_rejects_invalid_static_settings(frame: object) -> None:
+    with pytest.raises(ValueError, match="spawn_frame"):
+        PPOConfig(spawn_frame=cast(str, frame))
+    with pytest.raises(ValueError, match="spawn_frame"):
+        make_recurrent_mappo_system({}, spawn_frame=cast(str, frame))
+
+
+def test_spawn_frame_keeps_initial_parameter_bytes() -> None:
+    key = jax.random.key(147)
+    default = initialize_ppo(key)
+    for frame in ("world", "left", "right"):
+        _assert_tree_equal(default, initialize_ppo(key, PPOConfig(spawn_frame=frame)))
+
+
+def test_spawn_frame_is_part_of_system_identity_and_reuses_its_apply_hook() -> None:
+    raw = make_recurrent_mappo_system({})
+    world = make_recurrent_mappo_system({}, spawn_frame="world")
+    left = make_recurrent_mappo_system({}, input_scale=0.01, spawn_frame="left")
+    repeated = make_recurrent_mappo_system({}, input_scale=0.01, spawn_frame="left")
+    right = make_recurrent_mappo_system({}, input_scale=0.01, spawn_frame="right")
+    scaled = make_recurrent_mappo_system({}, input_scale=0.01)
+    unscaled_left = make_recurrent_mappo_system({}, spawn_frame="left")
+    assert raw.apply is world.apply
+    assert left.apply is repeated.apply
+    records = [
+        normalize_system_registration(value, phase="evaluation", frozen=True)
+        for value in (raw, left, repeated, right, scaled, unscaled_left)
+    ]
+    assert records[1] == records[2]
+    assert len({records[index][0] for index in (0, 1, 3, 4, 5)}) == 5
+    hooks = [cast(dict[str, Any], record[1]["hooks"])["apply"] for record in records]
+    assert all(hook["closure_content"] == "none" for hook in hooks)
+    digests = [hook["defaults_digest"] for hook in hooks]
+    assert all(digest is not None for digest in digests)
+    assert len({digests[index] for index in (0, 1, 3, 4, 5)}) == 5
+    assert raw.apply.__kwdefaults__ == {"input_scale": 1.0, "spawn_frame_index": 0}
+
+
+@pytest.mark.parametrize("frame", ["left", "right"])
+def test_reflected_system_matches_explicit_reflected_features_and_world_actions(
+    networks: PPOTrainState, frame: str
+) -> None:
+    env, observations, state = _balanced_setup()
+    inputs = env.policy_inputs(observations, state)
+    flag = spawn_frame_flag(inputs.actors, frame)
+    assert bool(flag.any()) and not bool(flag.all())
+    actors, native_mask = mirror_team_view(inputs.actors, inputs.action_mask, flag)
+    memory = jnp.full((2, 5, HIDDEN_SIZE), 0.1, jnp.float32)
+    keys = jax.random.split(jax.random.key(148), 2)
+    system = make_recurrent_mappo_system(
+        networks.actor_params, input_scale=0.01, spawn_frame=frame
+    )
+    output = _actor_output(system, memory, inputs, keys)
+    starts = jnp.broadcast_to(inputs.episode_start[:, None], inputs.active_mask.shape)
+    valid = jnp.broadcast_to(inputs.valid[:, None], inputs.active_mask.shape)
+    expected_memory, logits = cast(
+        tuple[Array, Array],
+        RecurrentActor(input_scale=0.01).apply(
+            networks.actor_params,
+            memory,
+            encode_actor_inputs(actors)[None],
+            starts[None],
+            valid[None],
+        ),
+    )
+    _assert_tree_close(output.next_memory, expected_memory)
+    mask = categorical_action_mask(native_mask)
+    reflected_indices = mirror_action_indices(
+        output.learning_outputs.action_indices, flag
+    )
+    np.testing.assert_allclose(
+        output.learning_outputs.log_prob,
+        action_log_prob(logits[0], mask, reflected_indices),
+        atol=2e-6,
+        rtol=2e-6,
+    )
+    np.testing.assert_array_equal(
+        output.learning_outputs.action_indices, encode_actions(output.actions)
+    )
+    legal = categorical_action_mask(inputs.action_mask)
+    assert bool(
+        jnp.all(
+            jnp.take_along_axis(
+                legal, output.learning_outputs.action_indices[..., None], axis=-1
+            )
+        )
+    )
+    plain = _actor_output(
+        make_recurrent_mappo_system(networks.actor_params, input_scale=0.01),
+        memory,
+        inputs,
+        keys,
+    )
+    unflagged = ~flag
+    for name in ("move", "select_target", "use_ultimate"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(output.actions, name))[np.asarray(unflagged)],
+            np.asarray(getattr(plain.actions, name))[np.asarray(unflagged)],
+        )
+    np.testing.assert_array_equal(
+        np.asarray(output.learning_outputs.log_prob)[np.asarray(unflagged)],
+        np.asarray(plain.learning_outputs.log_prob)[np.asarray(unflagged)],
+    )
+    np.testing.assert_array_equal(
+        np.asarray(output.next_memory)[np.asarray(unflagged)],
+        np.asarray(plain.next_memory)[np.asarray(unflagged)],
+    )

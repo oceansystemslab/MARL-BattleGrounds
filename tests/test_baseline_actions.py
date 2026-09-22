@@ -2,7 +2,12 @@
 
 CPU cases cover every category, coupled legality, lifecycle neutral choices,
 independent keyed batches, probability/entropy gradients and public action
-acceptance. Scalar/odd batches are correctness checks, not GPU benchmarks.
+acceptance. The spawn-frame mirror is checked exactly: MOVE_MIRROR negates the
+x of Core's unit directions and is an involution, mirror_action_indices is the
+index form of the move-mask permutation over all 198 categories, and log
+probabilities and entropy are invariant under a simultaneous permutation of
+logits, mask and index. Scalar/odd batches are correctness checks, not GPU
+benchmarks.
 """
 
 import itertools
@@ -22,12 +27,17 @@ from marl_battlegrounds.baselines.actions import (
     categorical_action_mask,
     decode_actions,
     encode_actions,
+    mirror_action_indices,
     sample_actions,
 )
 from marl_battlegrounds.core import env as core
+from marl_battlegrounds.core.axis_mappings import (
+    UNIT_DIRECTION_VECTOR_BY_MOVEMENT_ACTION_ARRAY,
+)
 from marl_battlegrounds.core.types import ActionMask
 from marl_battlegrounds.environment import make
 from marl_battlegrounds.policies.actor import ActorAction
+from marl_battlegrounds.policies.input import MOVE_MIRROR, mirror_move
 
 
 def test_all_native_categories_round_trip_in_declared_order() -> None:
@@ -224,3 +234,81 @@ def test_same_shape_values_reuse_compilation() -> None:
             cast(Array, act(logits, mask, jax.random.split(jax.random.key(seed), 3)))
         )
     assert traces == 1
+
+
+def test_move_mirror_negates_x_of_core_directions_and_is_an_involution() -> None:
+    table = np.asarray(UNIT_DIRECTION_VECTOR_BY_MOVEMENT_ACTION_ARRAY)
+    permutation = np.asarray(MOVE_MIRROR)
+    np.testing.assert_array_equal(table[permutation], table * np.asarray([-1.0, 1.0]))
+    np.testing.assert_array_equal(permutation[permutation], np.arange(9))
+    moves = jnp.arange(9, dtype=jnp.int32)
+    np.testing.assert_array_equal(
+        mirror_move(moves, jnp.ones(9, jnp.bool_)), permutation
+    )
+    np.testing.assert_array_equal(mirror_move(moves, jnp.zeros(9, jnp.bool_)), moves)
+    assert mirror_move(moves, jnp.ones(9, jnp.bool_)).dtype == jnp.int32
+    with pytest.raises(TypeError):
+        mirror_move(moves.astype(jnp.float32), jnp.ones(9, jnp.bool_))
+    with pytest.raises(TypeError):
+        mirror_move(moves, jnp.ones(9, jnp.int32))
+
+
+def test_mirror_action_indices_is_the_index_form_of_the_move_mask_permutation() -> None:
+    indices = jnp.arange(NUM_ACTIONS, dtype=jnp.int32)
+    on = jnp.ones(NUM_ACTIONS, jnp.bool_)
+    mirrored = mirror_action_indices(indices, on)
+    native = decode_actions(indices)
+    expected = encode_actions(native._replace(move=mirror_move(native.move, on)))
+    np.testing.assert_array_equal(mirrored, expected)
+    np.testing.assert_array_equal(mirror_action_indices(mirrored, on), indices)
+    np.testing.assert_array_equal(mirror_action_indices(indices, ~on), indices)
+    assert mirrored.dtype == jnp.int32
+    # Only the three East/West block pairs move; targets and Ultimates stay.
+    moved = np.asarray(mirrored) != np.arange(NUM_ACTIONS)
+    assert moved.sum() == 132 and not moved[:66].any()
+    key = jax.random.key(3)
+    move_mask = jax.random.bernoulli(key, 0.6, (4, 9)).at[:, 0].set(True)
+    joint = jax.random.bernoulli(jax.random.fold_in(key, 1), 0.5, (4, 11, 2))
+    joint = joint.at[:, 0, 0].set(True)
+    mask = ActionMask(
+        move_mask, jnp.ones((4, 11), jnp.bool_), jnp.ones((4, 2), jnp.bool_), joint
+    )
+    flat = categorical_action_mask(mask)
+    permuted = mask._replace(move_mask=jnp.take(move_mask, MOVE_MIRROR, axis=-1))
+    np.testing.assert_array_equal(
+        categorical_action_mask(permuted), flat[:, np.asarray(mirrored)]
+    )
+    flags = jnp.asarray([[True, False, True], [False, False, False]])
+    shaped = jnp.broadcast_to(indices[:3], (2, 3))
+    out = cast(Array, jax.jit(mirror_action_indices)(shaped, flags))
+    np.testing.assert_array_equal(out, jnp.where(flags, mirrored[:3], shaped))
+    with pytest.raises(TypeError):
+        mirror_action_indices(indices.astype(jnp.float32), on)
+    with pytest.raises(TypeError):
+        mirror_action_indices(indices, on.astype(jnp.int32))
+
+
+def test_log_prob_and_entropy_are_invariant_under_a_joint_permutation() -> None:
+    key = jax.random.key(7)
+    logits = jax.random.normal(key, (5, NUM_ACTIONS))
+    mask = jax.random.bernoulli(jax.random.fold_in(key, 1), 0.7, (5, NUM_ACTIONS))
+    mask = mask.at[:, 0].set(True)
+    permutation = mirror_action_indices(
+        jnp.arange(NUM_ACTIONS, dtype=jnp.int32), jnp.ones(NUM_ACTIONS, jnp.bool_)
+    )
+    chosen = jnp.asarray([0, 5, 66, 133, 197], jnp.int32)
+    chosen = jnp.where(mask[jnp.arange(5), chosen], chosen, 0)
+    permuted_logits = logits[:, permutation]
+    permuted_mask = mask[:, permutation]
+    np.testing.assert_allclose(
+        action_log_prob(permuted_logits, permuted_mask, permutation[chosen]),
+        action_log_prob(logits, mask, chosen),
+        atol=1e-6,
+        rtol=1e-6,
+    )
+    np.testing.assert_allclose(
+        action_entropy(permuted_logits, permuted_mask),
+        action_entropy(logits, mask),
+        atol=1e-6,
+        rtol=1e-6,
+    )

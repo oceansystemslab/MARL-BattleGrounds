@@ -84,9 +84,11 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
         "tests/test_visual_debugger_replay_service.py": 400,
         # Packet 4's pinned-opponent follow-up re-measured the four training
         # suites one at a time on CPU: 318.37 s, 197.89 s, 162.33 s, 403.02 s.
+        # The spawn-frame packet re-measured the checkpoints suite alone on
+        # 2026-09-21 after its frame tests: 191.27 s for 62 tests.
         "tests/test_training_collection.py": 319,
         "tests/test_training_learner.py": 198,
-        "tests/test_training_checkpoints.py": 163,
+        "tests/test_training_checkpoints.py": 192,
         "tests/test_training_runner.py": 404,
     },
     extracted_family_costs={
@@ -128,8 +130,8 @@ CI_SHARD_COST_PROFILE = ShardCostProfile(
             ("file:tests/test_combat_ultimate_effects.py", 3, 5),
             ("file:tests/test_tdm_scenarios.py", 12, 8),
             ("file:tests/test_evaluation_scenario.py", 4, 8),
-            ("file:tests/test_collection.py", 4, 8),
-            ("file:tests/test_evaluation_replay.py", 7, 5),
+            ("file:tests/test_collection.py", 12, 8),
+            ("file:tests/test_evaluation_replay.py", 9, 5),
         )
     },
     strict=True,

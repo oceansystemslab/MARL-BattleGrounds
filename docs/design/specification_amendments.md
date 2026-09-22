@@ -2715,6 +2715,23 @@ schedules, separate matched-shape action/state/input comparisons, historical and
 current recording tests, and measured computation/storage costs. Source review
 alone cannot establish speed, sample efficiency, learned behavior or fairness.
 
+Addition of 2026-09-21: the recurrent MAPPO baseline gains an optional
+spawn frame, `PPOConfig.spawn_frame` with values "world" (default), "left" and
+"right". In a left or right frame the baseline reflects its own team's permitted
+view about the vertical map centerline whenever that team starts on the other
+bank and reflects the chosen move back before submitting it. This is an input
+convention inside the researcher's System, offered through optional public
+helpers beside the team-view builder; Core observations keep the world frame
+exactly as this amendment states, and the environment, evaluator and tournament
+apply nothing. The frame is saved with exported actors and is part of their
+inference identity, so equal weights played in different frames are different
+policies; a saved frame is restored, never inferred. The reflection is exact
+geometry on the left-right symmetric maps, and because an obstacle row whose
+mirror image is already in the table stays as authored, both spawn ends produce
+the same encoded view there; it does not claim that reflected games reproduce
+outcomes bit for bit, which the reflection diagnostics recorded elsewhere in
+this document show they do not.
+
 ## A38. Neutral Collision Handling
 
 **Accepted change — 2026-09-14.** This supersedes A37's collision-ordering
