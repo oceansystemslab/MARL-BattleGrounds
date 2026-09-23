@@ -386,15 +386,16 @@ def test_live_host_validation_keeps_32_lanes_and_reuses_completed_rows(
     assert len(client.calls) == before
 
 
+@pytest.mark.parametrize("method", ("mappo", "ff_ippo"))
 def test_independent_mixture_export_and_fake_language_client_complete_validation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str
 ) -> None:
     from marl_battlegrounds.evaluation.recording_context import (
         capture_recording_provenance,
     )
 
     actor = checkpoints.export_system(
-        initialize_ppo(jax.random.key(89)).actor_params,
+        initialize_ppo(jax.random.key(89), method=method).actor_params,
         tmp_path / "actor",
         metadata={
             "run_id": "system-validation",
@@ -403,6 +404,7 @@ def test_independent_mixture_export_and_fake_language_client_complete_validation
             "checkpoint_id": "c" * 64,
         },
         spawn_frame="left",
+        method=method,
     )
     client = FakeLanguageClient()
     language = LanguageMethod(client)

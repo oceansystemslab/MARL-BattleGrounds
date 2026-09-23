@@ -1,4 +1,4 @@
-"""Run and resume one declared recurrent MAPPO experiment.
+"""Run and resume one declared recurrent or feedforward PPO experiment.
 
 TrainConfig owns validated host settings. train joins existing collection,
 learner, checkpoint and evaluation authorities; numerical work stays outside
@@ -22,7 +22,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from marl_battlegrounds._method_loading import validate_saved_method_reference
-from marl_battlegrounds.baselines.ppo import PPOConfig
+from marl_battlegrounds.baselines.ppo import (
+    PPOConfig,
+    PPOMethod,
+    validate_ppo_batch_size,
+    validate_ppo_method,
+)
 from marl_battlegrounds.training._run_io import (
     ProgressReporter,
     TrainingSpeedEstimate,
@@ -66,10 +71,14 @@ class TrainConfig:
     ----------
     seed : int, default=42
         Root seed for model and independent collection/shuffle streams.
-    method : {"mappo"}, default="mappo"
-        Recurrent MAPPO is the only implemented learner.
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+        Actor/critic choice saved with the run. MAPPO uses physical critic
+        inputs; IPPO uses each actor's permitted inputs. The ff_ methods use
+        two 128-wide layers without recurrent memory.
     num_envs : int, default=32
-        Fixed even environment batch, divisible by PPO groups times minibatches.
+        Fixed even environment batch. Recurrent methods require divisibility by
+        PPO groups times minibatches. Feedforward methods require divisibility
+        by groups, and rollout_length*num_envs by groups times minibatches.
     total_env_steps : int, default=10000000
         Exact real environment transitions, divisible by num_envs. Resets and
         padding do not count. Per-lane rounds must fit a signed 32-bit integer.
@@ -125,7 +134,7 @@ class TrainConfig:
         Freeze these once before training. Live methods instead belong in
         train's validation_opponents keyword. Conflicting declarations fail.
     slot_diagnostic_actor : str or None, default=None
-        Explicit absolute MAPPO export for the optional slot comparison with a
+        Explicit absolute PPO export for the optional slot comparison with a
         new System panel. Historical panels keep their final actor by default.
         Enabled diagnostics verify this artifact before learner setup.
     validation_fractions : tuple[float, ...], default=(0.1, ..., 1.0)
@@ -165,7 +174,7 @@ class TrainConfig:
     """
 
     seed: int = 42
-    method: Literal["mappo"] = "mappo"
+    method: PPOMethod = "mappo"
     num_envs: int = 32
     total_env_steps: int = 10_000_000
     curriculum: bool = False
@@ -218,18 +227,14 @@ class TrainConfig:
         ):
             if type(getattr(self, name)) is not bool:
                 raise TypeError(f"{name} must be bool")
-        if self.method != "mappo":
-            raise ValueError("Only recurrent mappo is implemented")
+        validate_ppo_method(self.method)
         if self.curriculum and self.score_threshold_curriculum:
             raise ValueError("Choose team/map curriculum or score-threshold curriculum")
         if not isinstance(cast(object, self.ppo), PPOConfig):
             raise TypeError("ppo must be PPOConfig")
-        if self.num_envs % 2 or self.num_envs % (
-            self.ppo.groups * self.ppo.minibatches
-        ):
-            raise ValueError(
-                "num_envs must be even and divide by PPO groups * minibatches"
-            )
+        if self.num_envs % 2:
+            raise ValueError("num_envs must be even for paired spawn ends")
+        validate_ppo_batch_size(self.num_envs, self.ppo, method=self.method)
         if self.total_env_steps % self.num_envs:
             raise ValueError("total_env_steps must be divisible by num_envs")
         if self.total_env_steps // self.num_envs > 2**31 - 1:
@@ -461,7 +466,7 @@ def train(
     resume_from: str | Path | None = None,
     validation_opponents: Sequence[Any] | None = None,
 ) -> TrainResult:
-    """Run or resume one complete declared MAPPO experiment on the current device.
+    """Run or resume one complete declared PPO experiment on the current device.
 
     Parameters
     ----------
@@ -596,6 +601,7 @@ def train(
         schedule=schedule,
         seed=config.seed,
         ppo=config.ppo,
+        method=config.method,
         shaping=config.shaping,
         shaping_coefficient=config.shaping_coefficient,
         shaping_mode=config.shaping_mode,
@@ -613,6 +619,7 @@ def train(
                 "actor_digest": tree_digest(state.carry.history.current_variables),
                 "input_scale": config.ppo.input_scale,
                 "spawn_frame": config.ppo.spawn_frame,
+                "schemas": checkpoints.checkpoint_schemas(config.method),
             }
         )
         validation.read_random_initialization(
@@ -642,6 +649,7 @@ def train(
                     "execution": execution_identity_now,
                 },
                 ppo=config.ppo,
+                method=config.method,
             )
             metadata = dict(restored.details["metadata"])
             cursors = metadata.get("log_cursors", {})
@@ -792,7 +800,7 @@ def train(
                     "config": metadata["config"],
                     "source": source,
                     "dependencies": dependencies,
-                    "schemas": checkpoints.checkpoint_schemas(),
+                    "schemas": checkpoints.checkpoint_schemas(config.method),
                     "execution": execution_identity_now,
                     "runtime": runtime,
                     "content_binding": collection.binding.model_dump(mode="json"),
@@ -1026,7 +1034,7 @@ class _Run:
         self.updater = cast(
             "_Updater",
             jax.jit(
-                partial(update_learner, ppo=config.ppo),
+                partial(update_learner, ppo=config.ppo, method=config.method),
                 compiler_options=training_compiler_options(),
             ),
         )
@@ -1195,6 +1203,7 @@ class _Run:
             metadata=self.metadata,
             writer=self.writer,
             ppo=self.config.ppo,
+            method=self.config.method,
         )
         self.metadata["parent_checkpoint"] = self.checkpoint.name
         seconds = time.monotonic() - started
@@ -1252,6 +1261,7 @@ class _Run:
             destination,
             input_scale=self.config.ppo.input_scale,
             spawn_frame=self.config.ppo.spawn_frame,
+            method=self.config.method,
             metadata={
                 "run_id": self.metadata["run_id"],
                 "seed": self.config.seed,

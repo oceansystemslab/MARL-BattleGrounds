@@ -1,4 +1,4 @@
-"""Supply compact CPU helpers for MAPPO integration and continuation proofs.
+"""Supply compact CPU helpers for PPO integration and continuation proofs.
 
 Synthetic banks change only declared test horizons after real content admission;
 they are never represented as approved training content or passed to restore
@@ -67,6 +67,7 @@ def scanner(
 @lru_cache
 def updater(
     ppo: PPOConfig,
+    method: str = "mappo",
 ) -> Callable[
     [LearnerState, TrainingCarry, TrainingRollout], tuple[LearnerState, UpdateResult]
 ]:
@@ -75,7 +76,7 @@ def updater(
             [LearnerState, TrainingCarry, TrainingRollout],
             tuple[LearnerState, UpdateResult],
         ],
-        jax.jit(partial(update_learner, ppo=ppo)),
+        jax.jit(partial(update_learner, ppo=ppo, method=method)),
     )
 
 

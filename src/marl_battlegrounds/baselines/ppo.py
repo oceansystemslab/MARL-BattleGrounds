@@ -37,13 +37,15 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-"""Provide recurrent MAPPO numerical components and an actor-only M8 System.
+"""Provide recurrent and feedforward PPO calculations and actor-only M8 Systems.
 
 This module adapts Mava's networks, GAE and grouped PPO updates. It owns no
 environment loop, checkpoint writer, curriculum or training run. initialize_ppo
 creates untrained actor/critic parameters and separate optimizer states.
-make_recurrent_mappo_system exposes only actor parameters to M8. Learners call
-critic_values and update_recurrent_ppo separately with privileged training data.
+make_ppo_system exposes only actor parameters to M8; make_recurrent_mappo_system
+keeps its existing MAPPO interface. IPPO critics use each actor's permitted
+view. MAPPO critics use separate physical training data. Learners retain the
+compact rollout and construct only the selected minibatch's expanded features.
 
 Requires the optional training extra. Inputs stay on device inside jit/scan.
 Reference settings are starting values, not qualified learning settings for BG.
@@ -57,7 +59,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from numbers import Real
-from typing import Any, NamedTuple, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -102,10 +104,46 @@ from marl_battlegrounds.policies.input import (
 )
 
 type Tree = Any
+type PPOMethod = Literal["mappo", "ippo", "ff_mappo", "ff_ippo"]
 HIDDEN_SIZE = 128
+_METHODS = {
+    "mappo": (True, False, "Recurrent MAPPO"),
+    "ippo": (True, True, "Recurrent IPPO"),
+    "ff_mappo": (False, False, "Feedforward MAPPO"),
+    "ff_ippo": (False, True, "Feedforward IPPO"),
+}
 _VALUE_NORM_DECAY = 0.99999
 _VALUE_NORM_EPSILON = 1e-5
 _VALUE_NORM_VARIANCE_FLOOR = 1e-2
+
+
+def validate_ppo_method(method: str) -> PPOMethod:
+    """Return a supported static PPO method name or raise ValueError.
+
+    Accept mappo, ippo, ff_mappo and ff_ippo. This host-only check allocates no
+    arrays and owns the method choices shared by models, training and storage.
+    """
+    if not isinstance(cast(object, method), str) or method not in _METHODS:
+        raise ValueError("PPO method must be mappo, ippo, ff_mappo or ff_ippo")
+    return cast(PPOMethod, method)
+
+
+def is_recurrent_method(method: str) -> bool:
+    """Return whether a checked PPO method uses recurrent actor/critic memory.
+
+    method is a static name accepted by validate_ppo_method. Invalid names raise
+    ValueError. No network, arrays or mutable state are created.
+    """
+    return _METHODS[validate_ppo_method(method)][0]
+
+
+def uses_local_critic(method: str) -> bool:
+    """Return whether a checked PPO critic reads its own actor's permitted view.
+
+    IPPO methods use that local view; MAPPO methods use physical training state.
+    Invalid static method names raise ValueError before any device work.
+    """
+    return _METHODS[validate_ppo_method(method)][1]
 
 
 class ValueNormState(NamedTuple):
@@ -184,7 +222,8 @@ def _update_value_norm(
 ) -> ValueNormState:
     """Refresh shared statistics once from eligible raw float32 critic targets.
 
-    targets and Boolean mask have the same grouped minibatch shape (G,T,E,5).
+    targets and Boolean mask have the same grouped minibatch shape:
+    (G,T,E,5) for recurrent methods or (G,Q,5) for feedforward methods.
     Pool all eligible rows, including dead active agents. Empty input preserves
     every leaf exactly. The caller stops gradients before and after this pure
     JAX update; no Python mutation or per-group independent normalizer exists.
@@ -248,15 +287,18 @@ class PPOConfig:
     actor_lr, critic_lr : float, default=0.00025
         Positive constant learning rates for the separate Adam optimizers.
     rollout_length : int, default=128
-        Decisions in a complete recurrent sequence. Shorter chunks are unsupported.
+        Decisions collected per game before an update. Recurrent methods keep
+        this complete sequence; shorter recurrent chunks are unsupported.
     epochs : int, default=4
         How many times each update uses the supplied rollout.
     minibatches : int, default=2
-        Number of game-sequence subsets in each group and epoch.
+        Number of subsets in each group and epoch: whole game sequences for
+        recurrent methods, or time/game rows for feedforward methods.
     groups : int, default=2
         Number of groups whose gradients are averaged for one learner. These
-        are not independent runs. Game count must be divisible by
-        groups*minibatches.
+        are not independent runs. Game count must be divisible by groups.
+        Recurrent game count, or feedforward rollout_length times game count,
+        must also be divisible by groups*minibatches.
     gamma : float, default=0.99
         Reward discount per transition, from zero through one.
     gae_lambda : float, default=0.95
@@ -415,16 +457,16 @@ class PPOLearningOutputs(NamedTuple):
 
 
 class PPOBatch(NamedTuple):
-    """Describe one compact Team A rollout for a recurrent PPO update.
+    """Describe one compact Team A rollout for a PPO update.
 
     Attributes
     ----------
     observations : Observations
         Compact observations with leading (T,B), ten base rows and permissions.
         T is time and B is the number of games. Actor expansion stays temporary.
-    training_state : Array
+    training_state : Array or None
         Float32 (T,B,919) versioned physical-state features, stored once per game.
-        This input is available to the critic only.
+        This input is available to MAPPO critics only. IPPO uses None.
     action_mask : ActionMask
         Team A's action-time native masks, with leading (T,B,5).
     actions : Array
@@ -450,8 +492,9 @@ class PPOBatch(NamedTuple):
     final_values : Array
         Float32 (B,5) values at the true last successor, before any automatic
         reset. GAE ignores these values when that transition ended the task.
-    actor_memory, critic_memory : Array
+    actor_memory, critic_memory : Array or tuple
         Separate float32 (B,5,128) carries just before the first decision.
+        Feedforward methods use empty tuples for both memories.
     old_normalized_values : Array or None
         Exact float32 (T,B,5) pre-update network predictions when normalization
         is enabled. These fixed clipping anchors are required in that mode;
@@ -466,7 +509,7 @@ class PPOBatch(NamedTuple):
     """
 
     observations: Observations
-    training_state: Array
+    training_state: Array | None
     action_mask: ActionMask
     actions: Array
     old_log_prob: Array
@@ -478,8 +521,8 @@ class PPOBatch(NamedTuple):
     active: Array
     alive: Array
     final_values: Array
-    actor_memory: Array
-    critic_memory: Array
+    actor_memory: Tree
+    critic_memory: Tree
     old_normalized_values: Array | None = None
 
 
@@ -491,6 +534,10 @@ class PPOMinibatch(NamedTuple):
     actor_features, critic_features : Array
         Separate float32 (G,T,E,5,F) inputs with their respective feature widths.
         G is gradient groups, T is time and E is selected games per group.
+        Feedforward inputs instead have (G,Q,5,F), with Q selected time/game rows.
+        FF-MAPPO also accepts compact critic features (G,Q,F): its network runs
+        once per game row, then shares the prediction across five actor losses.
+        All following feedforward sample fields use the prefix (G,Q,5).
     action_mask : Array
         Boolean (G,T,E,5,198) exact combined action legality, in the actor's
         spawn frame.
@@ -508,8 +555,9 @@ class PPOMinibatch(NamedTuple):
         Boolean (G,T,E,5) decision-epoch reset and real-transition masks.
     actor_samples, critic_samples : Array
         Boolean (G,T,E,5) loss eligibility. Each True entry must also be valid.
-    actor_memory, critic_memory : Array
+    actor_memory, critic_memory : Array or tuple
         Separate float32 (G,E,5,128) carries immediately before each sequence.
+        Feedforward methods use empty tuples, with no dummy array or time axis.
 
     Notes
     -----
@@ -531,8 +579,8 @@ class PPOMinibatch(NamedTuple):
     valid: Array
     actor_samples: Array
     critic_samples: Array
-    actor_memory: Array
-    critic_memory: Array
+    actor_memory: Tree
+    critic_memory: Tree
 
 
 class PPOMetrics(NamedTuple):
@@ -593,12 +641,15 @@ class PPOMetrics(NamedTuple):
 
 
 class MLPTorso(nn.Module):
-    """Apply the donor's 128-wide orthogonal Dense layer and ReLU.
+    """Apply the donor's orthogonal Dense layers and ReLU.
 
-    Input float32 (...,F) becomes (...,128). The torso gain is sqrt(2), biases
+    Input float32 (...,F) becomes (...,layer_sizes[-1]). layer_sizes defaults
+    to one 128-wide layer; feedforward PPO uses two. Gain is sqrt(2), biases
     start at zero and no layer normalization is added. Parameters are separate
     for each owning actor/critic torso.
     """
+
+    layer_sizes: tuple[int, ...] = (HIDDEN_SIZE,)
 
     @nn.compact
     def __call__(self, features: Array) -> Array:
@@ -612,13 +663,13 @@ class MLPTorso(nn.Module):
         Returns
         -------
         Array
-            Float32 (...,128) output after the dense layer and ReLU.
+            Float32 (...,layer_sizes[-1]) output after the dense layers and ReLU.
         """
-        return nn.relu(
-            nn.Dense(HIDDEN_SIZE, kernel_init=nn.initializers.orthogonal(2**0.5))(
-                features
+        for size in self.layer_sizes:
+            features = nn.relu(
+                nn.Dense(size, kernel_init=nn.initializers.orthogonal(2**0.5))(features)
             )
-        )
+        return features
 
 
 class ScannedRNN(nn.Module):
@@ -751,10 +802,11 @@ class RecurrentActor(nn.Module):
 
 
 class RecurrentValueNet(nn.Module):
-    """Apply the separate donor critic to training-only features.
+    """Apply the separate donor critic to physical or permitted local features.
 
     Carry and masks follow RecurrentActor. Features use (T,E,5,F), normally a
-    temporary broadcast of one 919-value physical view per game. Output values
+    temporary broadcast of one 919-value physical view per game for MAPPO, or
+    each actor's 5164-value permitted view for IPPO. Output values
     have shape (T,E,5). This module is never part of the actor-producing System.
     input_scale is a fixed positive finite real multiplier, default 1.0, applied
     before the first Dense layer. Use the same setting as the paired actor.
@@ -773,8 +825,9 @@ class RecurrentValueNet(nn.Module):
         carry : Array
             Float32 (E,5,128) critic memory before the sequence.
         features : Array
-            Float32 (T,E,5,F) physical-state features, normally F=919. The width
-            must match the initialized critic. Actor code may not read this data.
+            Float32 (T,E,5,F) critic features, F=919 for MAPPO or 5164 for IPPO.
+            The width must match the initialized critic. Actor code may not
+            read this data.
         resets, valid : Array
             Boolean (T,E,5) episode-start and valid-decision flags. Resets occur
             before the GRU. Invalid rows retain their prior memory.
@@ -783,7 +836,8 @@ class RecurrentValueNet(nn.Module):
         -------
         tuple[Array, Array]
             Final float32 (E,5,128) critic memory and float32 (T,E,5) predicted
-            returns in the training reward's units. Ignore invalid-row values.
+            values in network units (normalized when ValueNorm is used).
+            Ignore invalid-row values.
 
         Notes
         -----
@@ -799,6 +853,58 @@ class RecurrentValueNet(nn.Module):
         embedding = MLPTorso(name="post_torso")(embedding)
         values = nn.Dense(1, kernel_init=nn.initializers.orthogonal(1.0))(embedding)
         return carry, values[..., 0]
+
+
+class FeedForwardActor(nn.Module):
+    """Map permitted feature rows to logits using two 128-wide ReLU layers.
+
+    Parameters are shared across actor rows, without pooling inputs or memory.
+    input_scale defaults to 1.0 and is applied once before the first Dense layer.
+    The donor torso and action-head parameter names and initialization are kept.
+    """
+
+    input_scale: float = 1.0
+
+    @nn.compact
+    def __call__(self, features: Array) -> Array:
+        """Return float32 (...,198) logits for float32 (...,F) permitted inputs.
+
+        F must match the initialized width. No time or memory axis is required.
+        No actions are sampled and inputs stay unchanged. Invalid input_scale
+        raises ValueError; the pure Flax application supports jit and vmap.
+        """
+        scale = _input_scale(self.input_scale)
+        if scale != 1.0:
+            features = features * scale
+        embedding = MLPTorso((HIDDEN_SIZE, HIDDEN_SIZE), name="torso")(features)
+        return DiscreteActionHead(name="action_head")(embedding)
+
+
+class FeedForwardValueNet(nn.Module):
+    """Value independent rows using two 128-wide ReLU layers and no memory.
+
+    MAPPO supplies its physical view; IPPO supplies each actor's permitted view.
+    input_scale defaults to 1.0 and is applied once before the first Dense layer.
+    This training-only network never forms part of an actor System.
+    """
+
+    input_scale: float = 1.0
+
+    @nn.compact
+    def __call__(self, features: Array) -> Array:
+        """Return float32 (...) values for float32 (...,F) critic feature rows.
+
+        F must match the initialized width. Values use network units, which may
+        be normalized by the learner. This pure application changes no memory,
+        input or parameter. Invalid input_scale raises ValueError before use.
+        """
+        scale = _input_scale(self.input_scale)
+        if scale != 1.0:
+            features = features * scale
+        embedding = MLPTorso((HIDDEN_SIZE, HIDDEN_SIZE), name="torso")(features)
+        return nn.Dense(1, kernel_init=nn.initializers.orthogonal(1.0))(embedding)[
+            ..., 0
+        ]
 
 
 def _optimizers(
@@ -821,7 +927,9 @@ def _optimizers(
     return make(config.actor_lr), make(config.critic_lr)
 
 
-def initialize_ppo(key: Array, config: PPOConfig = DEFAULT_PPO_CONFIG) -> PPOTrainState:
+def initialize_ppo(
+    key: Array, config: PPOConfig = DEFAULT_PPO_CONFIG, *, method: str = "mappo"
+) -> PPOTrainState:
     """Initialize untrained BG-width actor/critic parameters and optimizers.
 
     Parameters
@@ -832,17 +940,20 @@ def initialize_ppo(key: Array, config: PPOConfig = DEFAULT_PPO_CONFIG) -> PPOTra
     config : PPOConfig, default=DEFAULT_PPO_CONFIG
         Static optimizer and input-scale settings. The default uses the pinned
         donor settings. Scaling preserves the initialized parameter tree/bytes.
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+        Static network choice. IPPO uses local critic inputs; feedforward methods
+        initialize two-layer models without recurrent parameters or memory.
 
     Returns
     -------
     PPOTrainState
         Independent actor/critic variable trees and separate initialized Adam
-        states. Widths match the versioned actor and physical-state encoders.
+        states. Widths match the actor encoder and selected critic input view.
 
     Raises
     ------
     ValueError
-        The key does not use Threefry.
+        The key does not use Threefry or the method is unsupported.
 
     Notes
     -----
@@ -851,22 +962,30 @@ def initialize_ppo(key: Array, config: PPOConfig = DEFAULT_PPO_CONFIG) -> PPOTra
     future random keys. Actor episode memory is initialized by the System; critic
     episode memory remains the learner's responsibility. Weights are untrained.
     """
+    method = validate_ppo_method(method)
     if str(jax.random.key_impl(key)) != "threefry2x32":
         raise ValueError("PPO initialization requires Threefry random keys.")
     actor_key, critic_key = jax.random.split(key)
-    memory = jnp.zeros((1, 5, HIDDEN_SIZE), jnp.float32)
-    starts = jnp.zeros((1, 1, 5), jnp.bool_)
-    valid = jnp.ones_like(starts)
-    actor = RecurrentActor(input_scale=config.input_scale).init(
-        actor_key, memory, jnp.zeros((1, 1, 5, ACTOR_FEATURE_SIZE)), starts, valid
+    critic_width = (
+        ACTOR_FEATURE_SIZE if uses_local_critic(method) else TRAINING_STATE_FEATURE_SIZE
     )
-    critic = RecurrentValueNet(input_scale=config.input_scale).init(
-        critic_key,
-        memory,
-        jnp.zeros((1, 1, 5, TRAINING_STATE_FEATURE_SIZE)),
-        starts,
-        valid,
-    )
+    if is_recurrent_method(method):
+        memory = jnp.zeros((1, 5, HIDDEN_SIZE), jnp.float32)
+        starts = jnp.zeros((1, 1, 5), jnp.bool_)
+        valid = jnp.ones_like(starts)
+        actor = RecurrentActor(input_scale=config.input_scale).init(
+            actor_key, memory, jnp.zeros((1, 1, 5, ACTOR_FEATURE_SIZE)), starts, valid
+        )
+        critic = RecurrentValueNet(input_scale=config.input_scale).init(
+            critic_key, memory, jnp.zeros((1, 1, 5, critic_width)), starts, valid
+        )
+    else:
+        actor = FeedForwardActor(input_scale=config.input_scale).init(
+            actor_key, jnp.zeros((1, 5, ACTOR_FEATURE_SIZE))
+        )
+        critic = FeedForwardValueNet(input_scale=config.input_scale).init(
+            critic_key, jnp.zeros((1, 5, critic_width))
+        )
     actor_opt, critic_opt = _optimizers(config)
     return PPOTrainState(
         actor,
@@ -1108,6 +1227,153 @@ def make_recurrent_mappo_system(
     )
 
 
+def _apply_feedforward_actor(
+    variables: Tree,
+    memory: tuple[()],
+    inputs: SystemInput,
+    keys: Array,
+    *,
+    input_scale: float = 1.0,
+    spawn_frame_index: int = 0,
+) -> SystemOutput:
+    """Sample one feedforward decision from permitted M8 inputs and lane keys.
+
+    variables holds actor parameters; memory is the empty tuple. inputs carries
+    paired (B,5) actor views/masks and lifecycle flags. keys supplies one Threefry
+    key per game. input_scale is a positive finite training multiplier;
+    spawn_frame_index is 0 for world or 1 for left, bound by the factory.
+    Return native actions, empty memory and same-call world-frame learning
+    outputs. Invalid lanes are ignored by collection. Input helpers reject bad
+    shapes, dtypes or keys. This pure device path changes no inputs or files and
+    performs no critic call, memory initialization or recurrent work.
+    """
+    del memory
+    actors, frame_mask = inputs.actors, inputs.action_mask
+    flag: Array | None = None
+    frame = SPAWN_FRAMES[spawn_frame_index]
+    if frame != "world":
+        flag = spawn_frame_flag(actors, frame)
+        actors, frame_mask = mirror_team_view(
+            actors,
+            frame_mask,
+            flag,
+            obstacle_partners=team_obstacle_partners(actors),
+        )
+    logits = cast(
+        Array,
+        FeedForwardActor(input_scale=input_scale).apply(
+            variables, encode_actor_inputs(actors)
+        ),
+    )
+    mask = categorical_action_mask(frame_mask)
+    actor_keys = jax.vmap(functools.partial(jax.random.split, num=5))(keys)
+    indices = sample_actions(logits, mask, actor_keys)
+    log_prob = action_log_prob(logits, mask, indices)
+    world = indices if flag is None else mirror_action_indices(indices, flag)
+    return SystemOutput(
+        decode_actions(world), (), learning_outputs=PPOLearningOutputs(world, log_prob)
+    )
+
+
+@functools.lru_cache(maxsize=16)
+def _feedforward_actor_apply(
+    scale: float, frame: str
+) -> Callable[[Tree, tuple[()], SystemInput, Array], SystemOutput]:
+    """Cache a feedforward hook with numerical scale/frame defaults for identity.
+
+    scale and frame are checked host values. Return an actor apply callable;
+    never capture weights or live inputs. Numerical defaults make distinct
+    inference settings visible to the existing M8 registration owner.
+    """
+    frame_index = SPAWN_FRAMES.index(frame)
+
+    def apply(
+        variables: Tree,
+        memory: tuple[()],
+        inputs: SystemInput,
+        keys: Array,
+        *,
+        input_scale: float = scale,
+        spawn_frame_index: int = frame_index,
+    ) -> SystemOutput:
+        """Apply the feedforward actor with the recorded scale/frame defaults.
+
+        Inputs and outputs follow _apply_feedforward_actor. M8 supplies the first
+        four arguments; fixed numerical defaults identify the inference settings.
+        """
+        return _apply_feedforward_actor(
+            variables,
+            memory,
+            inputs,
+            keys,
+            input_scale=input_scale,
+            spawn_frame_index=spawn_frame_index,
+        )
+
+    return apply
+
+
+def make_ppo_system(
+    actor_params: Tree,
+    *,
+    method: str = "mappo",
+    input_scale: float = 1.0,
+    spawn_frame: str = DEFAULT_PPO_CONFIG.spawn_frame,
+    name: str | None = None,
+    checkpoint: str | None = None,
+) -> System:
+    """Wrap one PPO actor as the existing sampled-action M8 System.
+
+    Parameters
+    ----------
+    actor_params : PyTree
+        Actor-only variables matching method. No critic or optimizer is used.
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+        Static architecture choice. Recurrent methods retain separate actor
+        memory; feedforward methods have init=None and use empty memory tuples.
+    input_scale : float, default=1.0
+        Positive finite feature multiplier used during training.
+    spawn_frame : {"world", "left"}, default="left"
+        Saved actor frame. Historical frame-free actors require world.
+    name : str or None, default=None
+        Display name. None uses the method's name; empty names are rejected.
+    checkpoint : str or None, default=None
+        Optional identity label. This function opens no checkpoint files.
+
+    Returns
+    -------
+    System
+        Actor-only descriptor retaining the supplied variables and stable hooks.
+
+    Raises
+    ------
+    ValueError
+        Method, scale, frame or display name is invalid.
+
+    Notes
+    -----
+    No device work or actions are performed here. M8 owns episode resets and
+    lane randomness. The MAPPO route preserves its existing callable identities.
+    Parameter shapes are checked by the network when called, not by this factory.
+    """
+    method = validate_ppo_method(method)
+    label = _METHODS[method][2] if name is None else name
+    if is_recurrent_method(method):
+        return make_recurrent_mappo_system(
+            actor_params,
+            input_scale=input_scale,
+            spawn_frame=spawn_frame,
+            name=label,
+            checkpoint=checkpoint,
+        )
+    return System(
+        label,
+        _feedforward_actor_apply(_input_scale(input_scale), _spawn_frame(spawn_frame)),
+        variables=actor_params,
+        checkpoint=checkpoint,
+    )
+
+
 def critic_values(
     params: Tree,
     memory: Array,
@@ -1295,41 +1561,51 @@ def _mean(values: Array, mask: Array) -> Array:
 
 
 def _actor_loss(  # pyright: ignore[reportUnusedFunction]
-    params: Tree, batch: PPOMinibatch, config: PPOConfig
+    params: Tree, batch: PPOMinibatch, config: PPOConfig, *, method: str = "mappo"
 ) -> tuple[Array, Array]:
     """Return the masked actor objective and entropy for numerical reference use.
 
     params is one actor tree; batch is one group without G. config supplies the
     PPO clip and entropy weight. Return float32 scalar loss and entropy. This
     delegates to the same single forward pass used by the optimizer diagnostics.
+    method is a static supported PPO name, default mappo, choosing the network.
     """
-    loss, diagnostics = _actor_loss_with_metrics(params, batch, config)
+    loss, diagnostics = _actor_loss_with_metrics(params, batch, config, method=method)
     return loss, diagnostics[0]
 
 
 def _actor_loss_with_metrics(
-    params: Tree, batch: PPOMinibatch, config: PPOConfig
+    params: Tree, batch: PPOMinibatch, config: PPOConfig, *, method: str = "mappo"
 ) -> tuple[Array, tuple[Array, Array, Array]]:
     """Return one group's masked actor loss and unscaled policy entropy.
 
     params is the shared actor variable tree. batch is one PPOMinibatch group,
-    with time-first arrays and no leading G axis. config fixes clipping and the
+    with no leading G axis. config fixes clipping and the
     entropy weight. Standardize only that group's eligible advantages with the
     donor epsilon. Return two float32 scalars; the loss includes entropy's
     coefficient. Return loss plus (entropy, sampled KL, ratio clip fraction),
-    all scalar float32. Entropy and KL use natural-log units. This performs a recurrent
-    actor call but samples no actions and changes no parameters or input arrays.
+    all scalar float32. Entropy and KL use natural-log units. method defaults to
+    mappo and selects a recurrent (T,E,5) or feedforward (Q,5) sample layout.
+    The actor call samples no actions and changes no parameters or input arrays.
     """
-    _, logits = cast(
-        tuple[Array, Array],
-        RecurrentActor(input_scale=config.input_scale).apply(
-            params,
-            batch.actor_memory,
-            batch.actor_features,
-            batch.episode_start,
-            batch.valid,
-        ),
-    )
+    if is_recurrent_method(method):
+        _, logits = cast(
+            tuple[Array, Array],
+            RecurrentActor(input_scale=config.input_scale).apply(
+                params,
+                batch.actor_memory,
+                batch.actor_features,
+                batch.episode_start,
+                batch.valid,
+            ),
+        )
+    else:
+        logits = cast(
+            Array,
+            FeedForwardActor(input_scale=config.input_scale).apply(
+                params, batch.actor_features
+            ),
+        )
     logp = action_log_prob(logits, batch.action_mask, batch.actions)
     mean = _mean(batch.advantages, batch.actor_samples)
     variance = _mean(jnp.square(batch.advantages - mean), batch.actor_samples)
@@ -1353,19 +1629,20 @@ def _actor_loss_with_metrics(
 
 
 def _critic_loss(  # pyright: ignore[reportUnusedFunction]
-    params: Tree, batch: PPOMinibatch, config: PPOConfig
+    params: Tree, batch: PPOMinibatch, config: PPOConfig, *, method: str = "mappo"
 ) -> Array:
     """Return the critic objective from its shared single-forward calculation.
 
     params is one critic tree; batch is one group. Predictions, old anchors and
     targets must share network units here. Return scalar half-squared clipped
     loss, before value_coefficient. The optimizer prepares normalized targets.
+    method is a static supported PPO name, default mappo, choosing the network.
     """
-    return _critic_loss_with_metrics(params, batch, config)[0]
+    return _critic_loss_with_metrics(params, batch, config, method=method)[0]
 
 
 def _critic_loss_with_metrics(
-    params: Tree, batch: PPOMinibatch, config: PPOConfig
+    params: Tree, batch: PPOMinibatch, config: PPOConfig, *, method: str = "mappo"
 ) -> tuple[Array, tuple[Array, Array, Array]]:
     """Return one group's masked donor half-squared-error value loss.
 
@@ -1374,17 +1651,31 @@ def _critic_loss_with_metrics(
     float32 scalar loss and (clip fraction, prediction mean, squared error).
     All value quantities use network units: targets have already been normalized
     when enabled. Only critic_samples contribute. No optimizer or writer runs.
+    method defaults to mappo and selects the recurrent or feedforward network;
+    the caller supplies physical MAPPO or actor-local IPPO features accordingly.
+    Compact FF-MAPPO critic features have no actor axis. Broadcast predictions
+    after the network, preserving each actor's own target, anchor and mask.
     """
-    _, values = cast(
-        tuple[Array, Array],
-        RecurrentValueNet(input_scale=config.input_scale).apply(
-            params,
-            batch.critic_memory,
-            batch.critic_features,
-            batch.episode_start,
-            batch.valid,
-        ),
-    )
+    if is_recurrent_method(method):
+        _, values = cast(
+            tuple[Array, Array],
+            RecurrentValueNet(input_scale=config.input_scale).apply(
+                params,
+                batch.critic_memory,
+                batch.critic_features,
+                batch.episode_start,
+                batch.valid,
+            ),
+        )
+    else:
+        values = cast(
+            Array,
+            FeedForwardValueNet(input_scale=config.input_scale).apply(
+                params, batch.critic_features
+            ),
+        )
+        if method == "ff_mappo" and values.ndim == batch.old_values.ndim - 1:
+            values = jnp.broadcast_to(values[..., None], batch.old_values.shape)
     clipped = batch.old_values + jnp.clip(
         values - batch.old_values, -config.clip_epsilon, config.clip_epsilon
     )
@@ -1406,7 +1697,11 @@ def _critic_loss_with_metrics(
 
 
 def update_minibatch(
-    state: PPOTrainState, batch: PPOMinibatch, config: PPOConfig = DEFAULT_PPO_CONFIG
+    state: PPOTrainState,
+    batch: PPOMinibatch,
+    config: PPOConfig = DEFAULT_PPO_CONFIG,
+    *,
+    method: str = "mappo",
 ) -> tuple[PPOTrainState, PPOMetrics]:
     """Average eligible groups and apply one separate actor/critic optimizer step.
 
@@ -1420,6 +1715,9 @@ def update_minibatch(
     config : PPOConfig, default=DEFAULT_PPO_CONFIG
         Static clipping, optimizer and loss settings. Use the same optimizer
         structure that created state's actor and critic optimizer trees.
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+        Static model choice. Recurrent samples use (G,T,E,5); feedforward samples
+        use (G,Q,5). Empty groups contribute no gradient weight in either case.
 
     Returns
     -------
@@ -1447,6 +1745,7 @@ def update_minibatch(
     config and makes no random draws, host callbacks, file writes or environment
     steps. An optimizer update is learner work, not newly collected experience.
     """
+    method = validate_ppo_method(method)
     if batch.actions.shape[0] != config.groups:
         raise ValueError("Minibatch group count must match PPOConfig.groups.")
     _check_value_norm(state.value_norm, config.value_normalization)
@@ -1465,8 +1764,9 @@ def update_minibatch(
         scale_mean, variance = _value_norm_moments(value_norm)
         scale_std = jnp.sqrt(variance)
         batch = batch._replace(targets=_normalize_values(batch.targets, value_norm))
-    actor_count = jnp.sum(batch.actor_samples, axis=(1, 2, 3))
-    critic_count = jnp.sum(batch.critic_samples, axis=(1, 2, 3))
+    sample_axes = tuple(range(1, batch.actions.ndim))
+    actor_count = jnp.sum(batch.actor_samples, axis=sample_axes)
+    critic_count = jnp.sum(batch.critic_samples, axis=sample_axes)
 
     def zero_group_gradients(params: Tree) -> Tree:
         """Create shape-matched zeros without running an empty network."""
@@ -1480,7 +1780,10 @@ def update_minibatch(
     def actor_gradients(_: None) -> Tree:
         """Run the actor only when at least one group has policy samples."""
         return jax.vmap(
-            jax.value_and_grad(_actor_loss_with_metrics, has_aux=True),
+            jax.value_and_grad(
+                functools.partial(_actor_loss_with_metrics, method=method),
+                has_aux=True,
+            ),
             in_axes=(None, 0, None),
         )(state.actor_params, batch, config)
 
@@ -1498,7 +1801,9 @@ def update_minibatch(
         params: Tree, group: PPOMinibatch
     ) -> tuple[Array, tuple[Array, Array, Array, Array]]:
         """Keep the donor coefficient outside its already halved value loss."""
-        value_loss, diagnostics = _critic_loss_with_metrics(params, group, config)
+        value_loss, diagnostics = _critic_loss_with_metrics(
+            params, group, config, method=method
+        )
         return config.value_coefficient * value_loss, (value_loss, *diagnostics)
 
     def critic_gradients(_: None) -> Tree:
@@ -1599,7 +1904,8 @@ def _reflected_minibatch(
 ) -> tuple[ActorInput, Array, Array]:
     """Rebuild one minibatch's actor frame the way the actor saw it when acting.
 
-    actor_inputs, mask and actions carry the leading (G,T,E,5) axes of one
+    actor_inputs, mask and actions carry the leading (G,T,E,5) recurrent axes
+    or (G,Q,5) feedforward axes of one
     minibatch: the rebuilt permitted view, the stored world-frame Core masks and
     the stored world-frame categorical indices. spawn_frame is "left". Return
     the reflected view, the 198-way categorical mask in that
@@ -1680,19 +1986,95 @@ def update_recurrent_ppo(
     recorded actions remain caller preconditions. Inputs are immutable. No
     environment advances, checkpoint saves, file writes or new experience occur.
     """
+    return update_ppo(state, batch, key, config)
+
+
+def validate_ppo_batch_size(
+    games: int, config: PPOConfig, *, method: str = "mappo"
+) -> None:
+    """Check one static PPO game's batch against its grouping and minibatches.
+
+    games is a positive Python count; config supplies positive rollout length,
+    groups and minibatches. Recurrent game count must be divisible by
+    groups*minibatches. Feedforward game count must be divisible by groups,
+    and rollout_length*games must be divisible by groups*minibatches.
+    Invalid method or divisibility raises ValueError. This host/static helper
+    performs no device work; training separately requires an even game count.
+    """
+    recurrent = is_recurrent_method(method)
+    if type(games) is not int or games < 1 or games % config.groups:
+        raise ValueError("PPO needs positive B divisible by groups")
+    rows = games if recurrent else config.rollout_length * games
+    if rows % (config.groups * config.minibatches):
+        kind = "B" if recurrent else "T*B"
+        raise ValueError(f"PPO needs {kind} divisible by groups*minibatches")
+
+
+def update_ppo(
+    state: PPOTrainState,
+    batch: PPOBatch,
+    key: Array,
+    config: PPOConfig = DEFAULT_PPO_CONFIG,
+    *,
+    method: str = "mappo",
+) -> tuple[PPOTrainState, PPOMetrics]:
+    """Update one PPO method from compact observations and fixed behavior data.
+
+    Parameters
+    ----------
+    state : PPOTrainState
+        Shared actor/critic parameters and separate optimizer/ValueNorm states.
+    batch : PPOBatch
+        Paired compact data with actions (T,B,5). T equals rollout_length.
+        MAPPO requires physical training features; IPPO requires None instead.
+        Recurrent memory belongs to the input sequence, not the returned state.
+    key : Array
+        Fresh typed scalar or legacy (2,) Threefry key. The caller owns future
+        keys. Group/epoch splitting follows the pinned donor.
+    config : PPOConfig, default=DEFAULT_PPO_CONFIG
+        Static loss, input-frame, normalization and update settings.
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+        Static actor/critic and minibatch choice. IPPO shares each selected
+        actor's encoded features with its separate local critic.
+
+    Returns
+    -------
+    tuple[PPOTrainState, PPOMetrics]
+        Updated numerical state and (epochs,minibatches) metric leaves. Sample
+        counts include repeated learner use, not new environment transitions.
+
+    Raises
+    ------
+    ValueError
+        Method, Threefry key, shapes, minibatch divisibility or clipping-anchor
+        presence is incompatible with the static settings.
+
+    Notes
+    -----
+    Compute GAE before shuffling. Recurrent updates keep whole game sequences
+    and actor order. Feedforward updates shuffle time/game rows within each
+    fixed group, retaining all five actors together. They require B divisible
+    by groups and T*B divisible by groups*minibatches; recurrent updates require
+    B divisible by groups*minibatches. Expand only each selected minibatch.
+    Inputs remain unchanged; this pure JAX function performs no environment,
+    reset or I/O work.
+    Finite arrays, permitted inputs and legal recorded actions are preconditions.
+    """
+    method = validate_ppo_method(method)
+    recurrent = is_recurrent_method(method)
     if str(jax.random.key_impl(key)) != "threefry2x32":
         raise ValueError("PPO sequence shuffling requires Threefry random keys.")
     length, games, actors = batch.actions.shape
-    if (
-        length != config.rollout_length
-        or actors != 5
-        or games < config.groups * config.minibatches
-        or games % (config.groups * config.minibatches)
+    if length != config.rollout_length or actors != 5:
+        raise ValueError("PPO needs T=rollout_length and five actor slots")
+    validate_ppo_batch_size(games, config, method=method)
+    if (batch.training_state is None) != uses_local_critic(method):
+        raise ValueError("PPO method and critic training-state payload disagree")
+    if not recurrent and any(
+        not isinstance(memory, tuple) or len(cast(tuple[Tree, ...], memory)) != 0
+        for memory in (batch.actor_memory, batch.critic_memory)
     ):
-        raise ValueError(
-            "PPO needs T=rollout_length, five actor slots and B divisible "
-            "by groups*minibatches."
-        )
+        raise ValueError("Feedforward PPO batches require empty memory tuples")
     samples = batch.valid[..., None] & batch.active
     _check_value_norm(state.value_norm, config.value_normalization)
     if config.value_normalization:
@@ -1717,23 +2099,26 @@ def update_recurrent_ppo(
         gae_lambda=config.gae_lambda,
     )
     group_games = games // config.groups
-    minibatch_games = group_games // config.minibatches
+    group_rows = group_games if recurrent else length * group_games
+    minibatch_rows = group_rows // config.minibatches
     keys = jax.random.split(key, config.groups)
 
     def epoch(
         carry: tuple[PPOTrainState, Array], unused: None
     ) -> tuple[tuple[PPOTrainState, Array], PPOMetrics]:
-        """Shuffle game indices without changing their time/actor order."""
+        """Shuffle whole recurrent sequences or feedforward time/game rows."""
         del unused
         current, epoch_keys = carry
         split = jax.vmap(functools.partial(jax.random.split, num=3))(epoch_keys)
         next_keys, shuffle_keys = split[:, 0], split[:, 1]
         permutations = jax.vmap(
-            functools.partial(jax.random.permutation, x=group_games)
+            functools.partial(jax.random.permutation, x=group_rows)
         )(shuffle_keys)
-        indices = permutations + jnp.arange(config.groups)[:, None] * group_games
+        indices = permutations
+        if recurrent:
+            indices = indices + jnp.arange(config.groups)[:, None] * group_games
         indices = indices.reshape(
-            config.groups, config.minibatches, minibatch_games
+            config.groups, config.minibatches, minibatch_rows
         ).swapaxes(0, 1)
 
         def minibatch(
@@ -1742,17 +2127,21 @@ def update_recurrent_ppo(
             """Expand only selected compact observations for this optimizer step."""
 
             def take(value: Array) -> Array:
-                """Select (G,E) games from (T,B,...) and move G before time."""
-                return jnp.swapaxes(jnp.take(value, selected, axis=1), 0, 1)
+                """Gather selected sequences or time/game rows from compact data."""
+                if recurrent:
+                    return jnp.swapaxes(jnp.take(value, selected, axis=1), 0, 1)
+                time = selected // group_games
+                lane = (
+                    selected % group_games
+                    + jnp.arange(config.groups)[:, None] * group_games
+                )
+                return value[time, lane]
 
             compact = jax.tree.map(take, batch.observations)
-            actor_inputs = jax.vmap(
-                jax.vmap(
-                    jax.vmap(build_team_actor_input, in_axes=(0, None)),
-                    in_axes=(0, None),
-                ),
-                in_axes=(0, None),
-            )(compact, 0)
+            expand = build_team_actor_input
+            for _ in range(3 if recurrent else 2):
+                expand = jax.vmap(expand, in_axes=(0, None))
+            actor_inputs = expand(compact, 0)
             if config.spawn_frame == "world":
                 canonical = None
                 features = encode_actor_inputs(actor_inputs)
@@ -1764,10 +2153,17 @@ def update_recurrent_ppo(
                     config.spawn_frame,
                 )
                 features = encode_actor_inputs(canonical[0])
-            physical = take(batch.training_state)
-            critic = jnp.broadcast_to(
-                physical[..., None, :], (*features.shape[:-1], physical.shape[-1])
-            )
+            critic = features
+            if batch.training_state is not None:
+                physical = take(batch.training_state)
+                critic = (
+                    jnp.broadcast_to(
+                        physical[..., None, :],
+                        (*features.shape[:-1], physical.shape[-1]),
+                    )
+                    if recurrent
+                    else physical
+                )
             lane_shape = features.shape[:-1]
             valid = jnp.broadcast_to(take(batch.valid)[..., None], lane_shape)
             starts = jnp.broadcast_to(take(batch.episode_start)[..., None], lane_shape)
@@ -1794,10 +2190,10 @@ def update_recurrent_ppo(
                 valid,
                 valid & member & take(batch.alive),
                 valid & member,
-                batch.actor_memory[selected],
-                batch.critic_memory[selected],
+                batch.actor_memory[selected] if recurrent else (),
+                batch.critic_memory[selected] if recurrent else (),
             )
-            return update_minibatch(current, encoded, config)
+            return update_minibatch(current, encoded, config, method=method)
 
         current, metrics = jax.lax.scan(minibatch, current, indices)
         return (current, next_keys), metrics

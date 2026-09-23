@@ -15,6 +15,7 @@ from copy import deepcopy
 from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import jax
@@ -50,6 +51,48 @@ def _files(root: Path) -> dict[str, bytes]:
         for path in root.rglob("*")
         if path.is_file()
     }
+
+
+def test_initialization_reuse_binds_the_selected_method_before_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from marl_battlegrounds.training import learner
+
+    variables = {"weights": jnp.arange(4, dtype=jnp.float32)}
+    state = SimpleNamespace(
+        carry=SimpleNamespace(history=SimpleNamespace(current_variables=variables))
+    )
+
+    def initialize(**kwargs: object) -> tuple[None, SimpleNamespace]:
+        return None, state
+
+    monkeypatch.setattr(learner, "init_learner", initialize)
+    digests: list[str] = []
+
+    def read_initialization(
+        path: object, *, actor_digest: str, seed_pairs: int
+    ) -> None:
+        assert path == str(tmp_path / "initialization.json") and seed_pairs == 1
+        digests.append(actor_digest)
+        raise ValueError("Stop at the initialization identity check")
+
+    monkeypatch.setattr(validation, "read_random_initialization", read_initialization)
+    for method in ("mappo", "ippo", "ff_mappo", "ff_ippo"):
+        config = config_from_dict(
+            {
+                "method": method,
+                "num_envs": 4,
+                "total_env_steps": 8,
+                "ppo": {"rollout_length": 2, "spawn_frame": "world"},
+                "random_diagnostic_seed_pairs": 1,
+                "random_initialization_result": str(tmp_path / "initialization.json"),
+            }
+        )
+        with pytest.raises(ValueError, match="initialization identity check"):
+            runner.train(config, output_dir=tmp_path / method)
+        assert not (tmp_path / method).exists()
+    assert digests[0] == tree_digest(variables)
+    assert len(set(digests)) == 4
 
 
 @pytest.fixture(scope="module")

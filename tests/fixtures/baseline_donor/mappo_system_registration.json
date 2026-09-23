@@ -1,0 +1,163 @@
+{
+  "dependencies": {
+    "flax": "0.12.7",
+    "jax": "0.10.1",
+    "jaxlib": "0.10.1",
+    "numpy": "2.4.6",
+    "optax": "0.2.8",
+    "orbax-checkpoint": "0.11.40"
+  },
+  "python": "3.14.5",
+  "registrations": [
+    {
+      "identity": "9c16625b2896152887acea422f00f2a636ea3775e208b10a59a459f755e7e262",
+      "input_scale": 1.0,
+      "registration": {
+        "adapter_kind": null,
+        "adapter_policies": [],
+        "checkpoint": "packet-5-reference",
+        "components": [],
+        "execution": "jax",
+        "hooks": {
+          "apply": {
+            "callable_name": "marl_battlegrounds.baselines.ppo._apply_actor",
+            "closure_content": "none",
+            "code_digest": "a22377d72844e50fd7310cc6cf5d5d121617ff9d9e5c8404dbac30329f7814cd",
+            "code_scope": "python_function_bytecode",
+            "defaults_digest": "fac323a35ba92239665ea29e68c36e48bf8c2ec0d952452673975471eb8c7051",
+            "external_state": "unknown"
+          },
+          "init": {
+            "callable_name": "marl_battlegrounds.baselines.ppo._initial_actor_memory",
+            "closure_content": "none",
+            "code_digest": "760d45f1e7f78a60c806035553f38c596fbbefa8ac1ce36d741bdc66b7730ba2",
+            "code_scope": "python_function_bytecode",
+            "defaults_digest": "4dbd94257a409786a8b0f5a10c8e3e0fc8453c7c81f70c61a81a0bf3bdf9f746",
+            "external_state": "unknown"
+          },
+          "reset_memory": null
+        },
+        "kind": "system",
+        "name": "MAPPO Compatibility Reference",
+        "parameter_evidence": "registration_snapshot",
+        "parameter_status": "frozen",
+        "variables_digest": "cf630ac87cb555f8d68d6794591e64aaba5786dde4dedba166a9eee465c9e4c6",
+        "variables_frozen": true
+      },
+      "spawn_frame": "world"
+    },
+    {
+      "identity": "7d466d09de0de0e810066db073cebee147e0e24374714fc1776caf311e69ac8e",
+      "input_scale": 1.0,
+      "registration": {
+        "adapter_kind": null,
+        "adapter_policies": [],
+        "checkpoint": "packet-5-reference",
+        "components": [],
+        "execution": "jax",
+        "hooks": {
+          "apply": {
+            "callable_name": "marl_battlegrounds.baselines.ppo._scaled_actor_apply.<locals>.apply",
+            "closure_content": "none",
+            "code_digest": "949a2b8f04e0280eedab8fe6a45f15dbaefa226f6a59cec07bca32494a285094",
+            "code_scope": "python_function_bytecode",
+            "defaults_digest": "d51f0b7b36ee3e60a1be47a12f4801cf9e553091001f2a1f51077b75e405e8ff",
+            "external_state": "unknown"
+          },
+          "init": {
+            "callable_name": "marl_battlegrounds.baselines.ppo._initial_actor_memory",
+            "closure_content": "none",
+            "code_digest": "760d45f1e7f78a60c806035553f38c596fbbefa8ac1ce36d741bdc66b7730ba2",
+            "code_scope": "python_function_bytecode",
+            "defaults_digest": "4dbd94257a409786a8b0f5a10c8e3e0fc8453c7c81f70c61a81a0bf3bdf9f746",
+            "external_state": "unknown"
+          },
+          "reset_memory": null
+        },
+        "kind": "system",
+        "name": "MAPPO Compatibility Reference",
+        "parameter_evidence": "registration_snapshot",
+        "parameter_status": "frozen",
+        "variables_digest": "cf630ac87cb555f8d68d6794591e64aaba5786dde4dedba166a9eee465c9e4c6",
+        "variables_frozen": true
+      },
+      "spawn_frame": "left"
+    },
+    {
+      "identity": "ce36a482302e80dbe987a22dc6831d9518c07069a79a2203ad92bc0b80e52497",
+      "input_scale": 0.01,
+      "registration": {
+        "adapter_kind": null,
+        "adapter_policies": [],
+        "checkpoint": "packet-5-reference",
+        "components": [],
+        "execution": "jax",
+        "hooks": {
+          "apply": {
+            "callable_name": "marl_battlegrounds.baselines.ppo._scaled_actor_apply.<locals>.apply",
+            "closure_content": "none",
+            "code_digest": "949a2b8f04e0280eedab8fe6a45f15dbaefa226f6a59cec07bca32494a285094",
+            "code_scope": "python_function_bytecode",
+            "defaults_digest": "ffe2a8d6a711fbdca4cf2a0626be08dd019053475ef05e0ce579f3efd96ccd49",
+            "external_state": "unknown"
+          },
+          "init": {
+            "callable_name": "marl_battlegrounds.baselines.ppo._initial_actor_memory",
+            "closure_content": "none",
+            "code_digest": "760d45f1e7f78a60c806035553f38c596fbbefa8ac1ce36d741bdc66b7730ba2",
+            "code_scope": "python_function_bytecode",
+            "defaults_digest": "4dbd94257a409786a8b0f5a10c8e3e0fc8453c7c81f70c61a81a0bf3bdf9f746",
+            "external_state": "unknown"
+          },
+          "reset_memory": null
+        },
+        "kind": "system",
+        "name": "MAPPO Compatibility Reference",
+        "parameter_evidence": "registration_snapshot",
+        "parameter_status": "frozen",
+        "variables_digest": "cf630ac87cb555f8d68d6794591e64aaba5786dde4dedba166a9eee465c9e4c6",
+        "variables_frozen": true
+      },
+      "spawn_frame": "world"
+    },
+    {
+      "identity": "70236e7cf3625dfb572c2d4af9390b74c09e4219d2624a029203c53c0dd1eca3",
+      "input_scale": 0.01,
+      "registration": {
+        "adapter_kind": null,
+        "adapter_policies": [],
+        "checkpoint": "packet-5-reference",
+        "components": [],
+        "execution": "jax",
+        "hooks": {
+          "apply": {
+            "callable_name": "marl_battlegrounds.baselines.ppo._scaled_actor_apply.<locals>.apply",
+            "closure_content": "none",
+            "code_digest": "949a2b8f04e0280eedab8fe6a45f15dbaefa226f6a59cec07bca32494a285094",
+            "code_scope": "python_function_bytecode",
+            "defaults_digest": "3141538c2b495faef54417e4e5258545183cb8576b54b413ab56f31a70e6805f",
+            "external_state": "unknown"
+          },
+          "init": {
+            "callable_name": "marl_battlegrounds.baselines.ppo._initial_actor_memory",
+            "closure_content": "none",
+            "code_digest": "760d45f1e7f78a60c806035553f38c596fbbefa8ac1ce36d741bdc66b7730ba2",
+            "code_scope": "python_function_bytecode",
+            "defaults_digest": "4dbd94257a409786a8b0f5a10c8e3e0fc8453c7c81f70c61a81a0bf3bdf9f746",
+            "external_state": "unknown"
+          },
+          "reset_memory": null
+        },
+        "kind": "system",
+        "name": "MAPPO Compatibility Reference",
+        "parameter_evidence": "registration_snapshot",
+        "parameter_status": "frozen",
+        "variables_digest": "cf630ac87cb555f8d68d6794591e64aaba5786dde4dedba166a9eee465c9e4c6",
+        "variables_frozen": true
+      },
+      "spawn_frame": "left"
+    }
+  ],
+  "seed": 19047001,
+  "source": "95a947565ad70fd90790fd25553dc417e239f50c"
+}

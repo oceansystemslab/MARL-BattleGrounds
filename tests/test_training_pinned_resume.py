@@ -15,6 +15,8 @@ unchanged. A pinned host method whose
 memory is not saved refuses the resume, before any file changes, when one of
 its games is unfinished; a memory-free host method, and a stateful one with no
 pinned game in progress, resume normally.
+Mixed recurrent/feedforward learners and pinned actors keep their distinct
+memory trees through a saved in-progress game and its next partial rollout.
 """
 
 # pyright: reportPrivateUsage=false
@@ -29,9 +31,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax import Array
-from tests.training_learner_helpers import updater
+from tests.training_learner_helpers import equal, updater
 
-from marl_battlegrounds.baselines.ppo import PPOConfig
+from marl_battlegrounds.baselines.ppo import (
+    PPOConfig,
+    initialize_ppo,
+    make_ppo_system,
+)
 from marl_battlegrounds.evaluation.policy_execution import (
     System,
     SystemInput,
@@ -61,7 +67,7 @@ def prepared() -> PreparedTrainingContent:
 
 
 def _learner(
-    prepared: PreparedTrainingContent, pinned: object | None
+    prepared: PreparedTrainingContent, pinned: object | None, *, method: str = "mappo"
 ) -> tuple[TrainingCollection, LearnerState]:
     return init_learner(
         schedule=make_training_schedule(
@@ -69,6 +75,7 @@ def _learner(
         ),
         seed=42,
         ppo=PPO,
+        method=method,
         prepared=prepared,
         metrics="none",
         pinned_opponent_share=0.5 if pinned is not None else 0.0,
@@ -83,7 +90,9 @@ def _assigned(state: LearnerState, snapshot: tuple[int, ...]) -> LearnerState:
     return state._replace(carry=state.carry._replace(history=history))
 
 
-def _metadata(pinned: str | None, *, with_key: bool = True) -> dict[str, object]:
+def _metadata(
+    pinned: str | None, *, with_key: bool = True, method: str | None = None
+) -> dict[str, object]:
     config: dict[str, object] = {
         "seed": 42,
         "num_envs": 4,
@@ -93,6 +102,8 @@ def _metadata(pinned: str | None, *, with_key: bool = True) -> dict[str, object]
     }
     if with_key:
         config["pinned_opponent"] = pinned
+    if method is not None:
+        config["method"] = method
     return {
         "run_id": "pinned-resume",
         "attempt_id": "first",
@@ -296,4 +307,65 @@ def test_a_memory_free_host_method_resumes_with_games_in_progress(
     assert not collection.host_opponent.stateful
     checkpoints._check_restored_pinned_opponent(
         collection, _assigned(state, (-1, 0, -1, 0))
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "opponent_method"), [("ff_ippo", "ippo"), ("ippo", "ff_ippo")]
+)
+def test_mixed_actor_memories_resume_a_pinned_game_and_partial_update(
+    prepared: PreparedTrainingContent,
+    tmp_path: Path,
+    method: str,
+    opponent_method: str,
+) -> None:
+    opponent = make_ppo_system(
+        initialize_ppo(jax.random.key(71), PPO, method=opponent_method).actor_params,
+        method=opponent_method,
+        spawn_frame=PPO.spawn_frame,
+    )
+    collection, initial = _learner(prepared, opponent, method=method)
+    update = updater(PPO, method)
+    carry, rollout = collect_training_rollout(collection, initial.carry, length=2)
+    state, result = update(initial, carry, rollout)
+    assert bool(result.performed) and not bool(result.failed)
+    state = _assigned(state, (-1, 0, -1, 0))
+    carry, rollout = collect_training_rollout(collection, state.carry, length=2)
+    state, result = update(state, carry, rollout)
+    assert bool(result.performed) and not bool(result.failed)
+    own, pinned = state.carry.memory.team_b
+    if method.startswith("ff_"):
+        assert own == state.carry.memory.team_a == state.critic_memory == ()
+        assert pinned.shape == (4, 5, 128)
+        assert np.any(np.asarray(pinned)[[1, 3]] != 0)
+    else:
+        assert own.shape == (4, 5, 128)
+        assert pinned == ()
+    metadata = _metadata(None, method=method)
+    cast(dict[str, object], metadata["config"])["pinned_opponent_share"] = 0.5
+    path = save_checkpoint(
+        tmp_path, collection, state, metadata=metadata, ppo=PPO, method=method
+    )
+    restored = restore_checkpoint(
+        path,
+        collection,
+        initial,
+        expected_metadata=_expected(metadata),
+        ppo=PPO,
+        method=method,
+    )
+    uninterrupted_carry, uninterrupted_rollout = collect_training_rollout(
+        collection, state.carry, length=2
+    )
+    resumed_carry, resumed_rollout = collect_training_rollout(
+        collection, restored.state.carry, length=2
+    )
+    uninterrupted, result = update(state, uninterrupted_carry, uninterrupted_rollout)
+    resumed, resumed_result = update(restored.state, resumed_carry, resumed_rollout)
+    assert int(resumed_rollout.real_steps) == 1
+    assert bool(result.performed) and bool(resumed_result.performed)
+    assert not bool(result.failed) and not bool(resumed_result.failed)
+    equal(
+        (state, uninterrupted_rollout, uninterrupted),
+        (restored.state, resumed_rollout, resumed),
     )

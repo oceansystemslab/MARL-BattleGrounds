@@ -2,8 +2,9 @@
 
 Progress, locks and logs use the standard library only. Saved host recovery
 also reads checkpoint and validation identities through their existing owners.
-No helper restores model arrays, starts a backend or synchronizes a GPU.
-Progress uses summaries already needed by the runner.
+Saved System-panel checks may load an actor to verify its recorded identity;
+they run no games. Progress uses summaries already needed by the runner and
+does not restore arrays or synchronize a GPU.
 """
 
 from __future__ import annotations
@@ -541,14 +542,15 @@ def validate_host_state(
         an actor or completed validation artifact is missing or changed; or a
         candidate belongs to an abandoned continuation. A pending current export
         need not exist. Ancestor descriptions remain usable after payload pruning.
-        Exported weights, input scale and spawn frame must match their
-        learner boundary.
+        Exported weights, input scale, spawn frame and complete model schema
+        must match their learner boundary and the saved training method.
 
     Notes
     -----
     Read-only and host-only. Existing checkpoint and selection owners verify
-    artifact identities and selection rules. Numerical arrays are never restored
-    or transferred, and no evaluator, writer or training backend is started.
+    artifact identities and selection rules. System-panel records may require
+    loading an actor to verify its registration; learner arrays are not restored
+    here. No games run and no writer or log is changed.
     Call this after complete learner restore and before resume_recording.
     """
     from marl_battlegrounds.training import analysis, checkpoints, validation
@@ -556,6 +558,9 @@ def validate_host_state(
     root = run_dir.resolve()
     metadata = checkpoint_details["metadata"]
     config = metadata["config"]
+    schemas = checkpoints.checkpoint_schemas(config.get("method", "mappo"))
+    if checkpoint_details["schemas"] != schemas:
+        raise ValueError("Saved model schema differs from the training method")
     value: object = metadata.get("host_state")
     if not isinstance(value, dict):
         raise ValueError("Saved host state must be a JSON object")
@@ -706,6 +711,8 @@ def validate_host_state(
             raise ValueError("Completed games exceed real transitions")
 
     ancestry = checkpoint_ancestry(root, checkpoint_details)
+    if any(ancestor["schemas"] != schemas for ancestor in ancestry.values()):
+        raise ValueError("Saved ancestor model differs from the training method")
 
     recent = host["recovery_checkpoints"]
     if not isinstance(recent, list):
@@ -741,6 +748,7 @@ def validate_host_state(
             or actor["input_scale"] != config["ppo"].get("input_scale", 1.0)
             or actor["spawn_frame"] != config["ppo"].get("spawn_frame", "world")
             or actor["schemas"] != ancestor["schemas"]
+            or actor["schemas"] != schemas
         ):
             raise ValueError("Saved actor identity differs from its learner boundary")
         actor_records[key] = actor

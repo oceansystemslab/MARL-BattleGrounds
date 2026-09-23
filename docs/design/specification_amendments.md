@@ -3045,8 +3045,17 @@ The public owners are `training.train`, `training.load_system` and
 `training.analyze`. CLI commands call those same functions. A run owns its
 settings, source/content identities, complete learner checkpoints, optional
 episode recording, validation tasks and reports. Default training uses plain
-recurrent MAPPO, B32/T128 and the recorded donor settings. Other learners remain
-separate implementation work.
+recurrent MAPPO, B32/T128 and the recorded donor settings.
+
+**PPO method extension, 23 September 2026:** the same saved `TrainConfig.method`
+also selects recurrent IPPO, feedforward MAPPO or feedforward IPPO. Recurrent
+IPPO's critic uses only its actor's permitted inputs and its own memory. The
+feedforward networks use two 128-wide ReLU layers and empty memory. IPPO
+collects no privileged critic features. All four share the established action,
+ValueNorm, input-scale, spawn-frame, checkpoint and evaluation owners. New model
+tags distinguish their artifacts; historical MAPPO meanings remain unchanged.
+The initial feedforward experiment matrix is plain. Short software checks do
+not establish learning or sample efficiency. QMIX and PQN remain separate work.
 
 Keep action-time actor outputs. Real endings receive zero bootstrap; ordinary
 collection cutoffs retain it. Critic bootstrap reads the true successor without

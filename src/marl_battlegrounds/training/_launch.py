@@ -1,4 +1,4 @@
-"""Prepare and run a fixed local MAPPO package without an active Codex session.
+"""Prepare and run a fixed local PPO package without an active Codex session.
 
 Preparation reads a committed Git tree or freezes current working files, builds
 a separate pinned environment and copies the frozen panel when needed.
@@ -1098,7 +1098,7 @@ def main(argv: list[str] | None = None) -> int:
     action; status only prints records. Errors propagate with nonzero process
     status and logs. The internal supervisor executes the same public train CLI.
     """
-    parser = argparse.ArgumentParser(description="Run one fixed MAPPO package")
+    parser = argparse.ArgumentParser(description="Run one fixed PPO package")
     parser.add_argument("action", choices=("start", "resume", "status", "supervise"))
     parser.add_argument("package", type=Path)
     parser.add_argument("--checkpoint")

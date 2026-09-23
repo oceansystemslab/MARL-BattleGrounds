@@ -1,7 +1,7 @@
 """Check the one reference loader and the pinned-opponent evidence classes.
 
 load_method turns the three built-in names into their Policies, an exported
-actor directory into its recurrent MAPPO System, and a module:function factory
+actor directory into its method's PPO System, and a module:function factory
 into the Policy or System it returns; it refuses a learner checkpoint
 directory, an empty or unknown reference and a factory that returns anything
 else, and a factory's own error keeps its type. The command line's factory
@@ -46,12 +46,15 @@ def prepared() -> PreparedTrainingContent:
     return prepare_training_content()
 
 
-@pytest.fixture(scope="module")
-def exported(tmp_path_factory: pytest.TempPathFactory) -> Path:
+@pytest.fixture(scope="module", params=("mappo", "ippo", "ff_mappo", "ff_ippo"))
+def exported(
+    tmp_path_factory: pytest.TempPathFactory, request: pytest.FixtureRequest
+) -> Path:
+    method = str(request.param)
     root = tmp_path_factory.mktemp("loading") / "actors"
     root.mkdir()
     return export_system(
-        initialize_ppo(jax.random.key(3)).actor_params,
+        initialize_ppo(jax.random.key(3), method=method).actor_params,
         root / "actor",
         metadata={
             "run_id": "loading",
@@ -60,6 +63,7 @@ def exported(tmp_path_factory: pytest.TempPathFactory) -> Path:
             "checkpoint_id": "b" * 64,
         },
         spawn_frame="left",
+        method=method,
     )
 
 

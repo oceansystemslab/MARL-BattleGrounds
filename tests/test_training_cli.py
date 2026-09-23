@@ -14,12 +14,17 @@ from marl_battlegrounds import _cli
 from marl_battlegrounds.training import runner
 
 
+@pytest.mark.parametrize("method", (None, "mappo", "ippo", "ff_mappo", "ff_ippo"))
 def test_train_cli_calls_shared_function(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    method: str | None,
 ) -> None:
     config = tmp_path / "config.json"
-    config.write_text(json.dumps({"num_envs": 4, "total_env_steps": 8}))
+    settings: dict[str, object] = {"num_envs": 4, "total_env_steps": 8}
+    if method is not None:
+        settings["method"] = method
+    config.write_text(json.dumps(settings))
     calls: list[tuple[runner.TrainConfig, dict[str, Any]]] = []
 
     def fake_train(
@@ -36,6 +41,7 @@ def test_train_cli_calls_shared_function(
         == 0
     )
     assert calls[0][0].num_envs == 4
+    assert calls[0][0].method == (method or "mappo")
     assert calls[0][1] == {"output_dir": str(tmp_path), "resume_from": None}
 
 

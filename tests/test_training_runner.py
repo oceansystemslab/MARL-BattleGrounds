@@ -18,6 +18,10 @@ a tampered export is rejected as a different identity, the resumed run reports
 the frame, and the saved config round-trips with and without the nested key; a
 config without the key takes the constructor default "left" for a new run, while
 saved_training_config still reads it as "world".
+All four PPO methods use the same recording recovery checks. Method settings
+round-trip through JSON and keep their recurrent or feedforward batch rules.
+Changing an exported model tag while preserving its actor weights is rejected
+before recording or log recovery changes the saved files.
 """
 
 # Failure injection inspects the private host coordinator, not a public API.
@@ -26,7 +30,7 @@ saved_training_config still reads it as "world".
 import json
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -38,12 +42,20 @@ from marl_battlegrounds.training.runner import (
 
 
 @pytest.mark.parametrize(
-    ("recording", "input_scale", "spawn_frame"),
-    [(False, 1.0, "world"), (True, 1.0, "world"), (False, 0.01, "left")],
+    ("method", "recording", "input_scale", "spawn_frame"),
+    [
+        ("mappo", False, 1.0, "world"),
+        ("mappo", True, 1.0, "world"),
+        ("mappo", False, 0.01, "left"),
+        ("ippo", True, 1.0, "world"),
+        ("ff_mappo", True, 1.0, "world"),
+        ("ff_ippo", True, 1.0, "world"),
+    ],
 )
 def test_public_run_resume_and_final_pending_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    method: Literal["mappo", "ippo", "ff_mappo", "ff_ippo"],
     recording: bool,
     input_scale: float,
     spawn_frame: str,
@@ -62,6 +74,7 @@ def test_public_run_resume_and_final_pending_work(
     monkeypatch.setattr(runner, "TrainingSpeedEstimate", forbidden_estimate)
     monkeypatch.setattr(runner._Run, "pending_seconds", forbidden_estimate)
     config = TrainConfig(
+        method=method,
         num_envs=4,
         total_env_steps=12,
         seed=710,
@@ -78,6 +91,7 @@ def test_public_run_resume_and_final_pending_work(
 
     details = json.loads((baseline.run_dir / "run_details.json").read_text())
     assert details["execution"] == execution_identity()
+    assert details["config"]["method"] == method
     assert baseline.completed_env_steps == 12
     assert baseline.completed_updates == 2
     assert baseline.selected_actor is None
@@ -114,7 +128,7 @@ def test_public_run_resume_and_final_pending_work(
         path: path.read_bytes() for path in destination.rglob("*") if path.is_file()
     }
     assert not (destination / "checkpoint_recovery.json").exists()
-    if input_scale != 1.0:
+    if input_scale != 1.0 or method != "mappo":
         import hashlib
 
         saved = checkpoints.read_checkpoint_details(checkpoint)
@@ -125,7 +139,7 @@ def test_public_run_resume_and_final_pending_work(
         original_description = description.read_bytes()
         saved_actor = json.loads(original_description)
         assert ("spawn_frame" in saved_actor) == (spawn_frame != "world")
-        tampered = [{**saved_actor, "input_scale": 1.0}]
+        tampered = [{**saved_actor, "input_scale": 1.0}] if input_scale != 1.0 else []
         if spawn_frame != "world":
             tampered.append(
                 {
@@ -133,6 +147,15 @@ def test_public_run_resume_and_final_pending_work(
                     for key, value in saved_actor.items()
                     if key != "spawn_frame"
                 }
+            )
+        if method != "mappo":
+            other_method = {
+                "ippo": "mappo",
+                "ff_mappo": "ff_ippo",
+                "ff_ippo": "ff_mappo",
+            }[method]
+            tampered.append(
+                {**saved_actor, "schemas": checkpoints.checkpoint_schemas(other_method)}
             )
         for changed_actor in tampered:
             del changed_actor["checkpoint_id"]
@@ -536,6 +559,29 @@ def test_config_roundtrip_and_unknown_keys() -> None:
         config_from_dict({"typo": 1})
     with pytest.raises(ValueError, match="schema_version"):
         config_from_dict({"schema_version": 2})
+
+
+@pytest.mark.parametrize("method", ("mappo", "ippo", "ff_mappo", "ff_ippo"))
+def test_ppo_method_config_roundtrip_and_method_specific_batch_rules(
+    method: Literal["mappo", "ippo", "ff_mappo", "ff_ippo"],
+) -> None:
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+
+    config = TrainConfig(
+        method=method,
+        num_envs=4,
+        total_env_steps=32,
+        ppo=PPOConfig(rollout_length=4, epochs=1),
+    )
+    assert config_from_dict(config_to_dict(config)) == config
+    assert config_from_dict({}).method == "mappo"
+    threshold = replace(config, score_threshold_curriculum=True)
+    assert config_from_dict(config_to_dict(threshold)) == threshold
+    if method.startswith("ff_"):
+        assert replace(config, num_envs=6, total_env_steps=24).num_envs == 6
+    else:
+        with pytest.raises(ValueError, match=r"divis|batch|games|B"):
+            replace(config, num_envs=6, total_env_steps=24)
 
 
 def test_retention_preserves_candidates_and_small_ancestry(tmp_path: Path) -> None:

@@ -1,9 +1,74 @@
 # Baseline Source Reuse
 
-The recurrent MAPPO components start from Mava's reviewed learning code. BG
+The four PPO baselines start from Mava's reviewed learning code. BG
 keeps its own environment, permitted actor inputs, action rules, evaluation,
 recording and checkpoint ownership. This page records the source and the
 independent numerical reference. A source match is not evidence of learning.
+
+## PPO Model Choices
+
+One shared PPO implementation serves four method settings:
+
+| Method | Actor | Critic Input | Memory |
+| --- | --- | --- | --- |
+| `mappo` | 128-wide recurrent network | Physical training state | Separate actor and critic carries |
+| `ippo` | Same recurrent network | Each actor's own permitted view | Separate actor and critic carries |
+| `ff_mappo` | Two 128-wide ReLU layers | Physical training state | None |
+| `ff_ippo` | Two 128-wide ReLU layers | Each actor's own permitted view | None |
+
+Feedforward networks keep the donor's orthogonal gains: square root of two
+for torso layers, 0.01 for the action head and 1.0 for the value head. They use
+zero biases, no layer normalization and no recurrent cell. Their System memory
+is the empty tuple, not an unused recurrent array. Recurrent and feedforward
+models differ in both architecture and sample ordering; comparing them is not
+a pure test of memory.
+
+All four use the shared optimizer, masking and optional ValueNorm rules below.
+The public defaults remain input scale 1.0, left spawn frame and ValueNorm on.
+These BG adaptations are checked separately from raw donor comparisons, which
+use scale 1.0, world frame and ValueNorm off. Search recipes do not silently
+change constructor defaults or historical saved settings.
+
+With the current 5,164 actor features, 919 physical-state features and 198
+actions, the parameter counts are:
+
+| Method | Actor Parameters | Critic Parameters |
+| --- | ---: | ---: |
+| `mappo` | 801,990 | 233,217 |
+| `ippo` | 801,990 | 776,577 |
+| `ff_mappo` | 703,174 | 134,401 |
+| `ff_ippo` | 703,174 | 677,761 |
+
+Each parameter is float32, so weights alone use four bytes per parameter.
+Optimizer state, gradients, temporary arrays and opponent history add storage.
+Each recurrent actor or critic carry adds 640 float32 values per game;
+feedforward methods allocate neither carry. These exact layout counts are not
+measurements of peak process or GPU memory.
+
+An IPPO critic uses the same permitted view, input scale and spawn frame as its
+actor. It has separate weights and, for recurrent IPPO, separate memory. It
+cannot use another actor's private row, the actor's carry or physical training
+state. Collection stores compact observations and action-time outputs. Preparing
+the learner batch computes fixed old values and cutoff values. The local critic
+expands one time row at a time, and selected update minibatches share the
+already encoded local features with the actor. This avoids retaining a full
+expanded local-feature rollout.
+
+Returns and advantages are calculated in time order for every method. Recurrent
+updates then shuffle whole game sequences within each data group. Feedforward
+updates shuffle complete time/game rows within each group; the five actors stay
+together. Only the chosen minibatch is expanded into network inputs. Feedforward
+MAPPO computes one physical critic prediction per game row when preparing
+rollout values and during learning, then shares it across the actor slots. Each
+actor retains its own loss mask, old prediction and target. Neither feedforward
+method runs a GRU or resets a hidden carry. Feedforward IPPO collects no
+physical-state feature payload.
+
+The recurrent batch must be divisible by groups times minibatches. For
+feedforward methods, the batch must be divisible by groups, and rollout length
+times batch must be divisible by groups times minibatches. Training also needs
+an even batch for paired spawn ends. These rules change sample ordering; they do not change
+the experience budget, loss masks or optimizer settings.
 
 ## Source Identity And License
 
@@ -17,6 +82,14 @@ original notices. The [source manifest](../../tests/fixtures/baseline_donor/sour
 records each retained file's SHA256 and Git blob identity. Files ending in
 `.txt` under that fixture are unchanged source evidence, not BG modules.
 Do not reformat them or replace their expected results to hide a failed port.
+
+The [PPO variants manifest](../../tests/fixtures/baseline_donor/variants_source_manifest.json)
+adds the pinned recurrent IPPO and feedforward MAPPO/IPPO update files, their
+system/default settings and the feedforward network settings. Shared source
+files keep their original bytes. The [variant reference record](../../tests/fixtures/baseline_donor/variants_reference.json)
+binds the additional fixed arrays to those exact sources and the isolated donor
+runtime. The reference helper retains MAPPO as its default; explicit variant
+generation writes separate outputs and does not replace the old MAPPO record.
 
 | Original File | Reused Calculation Or Checked Contract |
 | --- | --- |
@@ -335,7 +408,7 @@ still needs the declared development and demonstration evidence.
 
 ## Training Compiler Policy
 
-Built-in MAPPO passes `xla_gpu_autotune_level=0` to its outer collection and update
+Built-in PPO passes `xla_gpu_autotune_level=0` to its outer collection and update
 compilations, including collection with recording. The shared owner is
 [`training._compilation`](../../src/marl_battlegrounds/training/_compilation.py).
 It changes no process-wide environment or JAX setting. The raw scan and learner

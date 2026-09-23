@@ -1,4 +1,4 @@
-"""Save complete learner boundaries and load independent frozen MAPPO actors.
+"""Save complete PPO learner boundaries and load independent frozen actors.
 
 The runner owns its run lock, immutable settings and training logs. This module
 owns synchronous Orbax payloads, file integrity, publication and checked numerical
@@ -14,6 +14,7 @@ import re
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache, partial
 from hashlib import sha256
 from importlib.metadata import version
 from pathlib import Path
@@ -34,7 +35,8 @@ from marl_battlegrounds.baselines.ppo import (
     DEFAULT_PPO_CONFIG,
     PPOConfig,
     initialize_ppo,
-    make_recurrent_mappo_system,
+    make_ppo_system,
+    validate_ppo_method,
 )
 from marl_battlegrounds.evaluation.recording_identity import tree_digest
 from marl_battlegrounds.training._compilation import execution_identity
@@ -58,6 +60,12 @@ _SCHEMAS = {
     "action": ACTION_SCHEMA_VERSION,
     "collection_keys": TRAINING_KEY_SCHEMA_VERSION,
     "learner_keys": 1,
+}
+_MODELS = {
+    "mappo": "recurrent_mappo_128",
+    "ippo": "recurrent_ippo_128",
+    "ff_mappo": "feedforward_mappo_128x128",
+    "ff_ippo": "feedforward_ippo_128x128",
 }
 _CONTEXT = {
     "run_id",
@@ -158,6 +166,38 @@ def _config_value_normalization(config: object) -> bool:
     ).value_normalization
 
 
+def _config_method(config: object) -> str:
+    """Read a saved learner method; only historical absence means MAPPO.
+
+    config must be a JSON object. Reject unknown method values through the
+    numerical owner's validation. No saved object is changed and no device work
+    runs. Array shapes never decide which method produced a checkpoint.
+    """
+    value = _object(config, "Learner config")
+    return validate_ppo_method(value.get("method", "mappo"))
+
+
+def _schema_method(schemas: object) -> str:
+    """Return the method named by one complete supported schema dictionary.
+
+    schemas must exactly match checkpoint_schemas for a known model. Reject
+    unknown models, altered versions/types, missing fields and extra fields with
+    ValueError. Boolean or float versions do not stand in for integers. This
+    host-only check reads no arrays and changes no input.
+    """
+    value = _object(schemas, "Checkpoint schemas")
+    for method, model in _MODELS.items():
+        if (
+            value.get("model") == model
+            and value == checkpoint_schemas(method)
+            and all(
+                type(value[key]) is type(expected) for key, expected in _SCHEMAS.items()
+            )
+        ):
+            return method
+    raise ValueError("Checkpoint model or schema differs from this implementation")
+
+
 def saved_training_config(details: dict[str, Any]) -> dict[str, Any]:
     """Return a learner checkpoint's saved config with its historical meaning fixed.
 
@@ -170,7 +210,8 @@ def saved_training_config(details: dict[str, Any]) -> dict[str, Any]:
     Returns
     -------
     dict
-        A new top-level and ppo dictionary. ppo.spawn_frame is filled with
+        A new top-level and ppo dictionary. Missing method becomes "mappo";
+        missing ppo.input_scale becomes 1.0. ppo.spawn_frame is filled with
         "world" when the saved config has no ppo block or no such key, because
         a checkpoint saved before the setting existed trained in raw world
         coordinates whatever the current PPOConfig default is. Missing
@@ -195,9 +236,11 @@ def saved_training_config(details: dict[str, Any]) -> dict[str, Any]:
     """
     config = _object(details["metadata"]["config"], "Saved training config")
     ppo = dict(_object(config.get("ppo", {}), "Saved ppo settings"))
+    ppo.setdefault("input_scale", 1.0)
     ppo.setdefault("spawn_frame", "world")
     ppo.setdefault("value_normalization", False)
     config["ppo"] = ppo
+    config.setdefault("method", "mappo")
     config.setdefault("validation_opponents", None)
     config.setdefault("slot_diagnostic_actor", None)
     return config
@@ -226,14 +269,30 @@ def _actor_input_scale(details: dict[str, Any]) -> float:
 def _inference_digest(details: dict[str, Any]) -> str:
     """Bind weights, scale and spawn frame; keep old identities where unchanged.
 
-    At scale 1.0 in the world frame the identity is the raw weight digest. A
+    For MAPPO at scale 1.0 in the world frame the identity is the raw weight digest. A
     non-default scale alone uses the version-1 envelope exactly as before, so
     every existing scaled identity is unchanged. A "left" frame adds the frame
     to a version-2 envelope, so equal weights played in different frames are
-    different Systems.
+    different Systems. Other methods always use the version-1 ppo_inference
+    envelope with model, actor_digest, input_scale and spawn_frame. A synthetic
+    historical MAPPO identity may omit schemas; saved artifacts cannot omit it.
     """
     scale = _actor_input_scale(details)
     frame = _actor_spawn_frame(details)
+    method = _schema_method(details.get("schemas", _SCHEMAS))
+    if method != "mappo":
+        return sha256(
+            _json_bytes(
+                {
+                    "kind": "ppo_inference",
+                    "version": 1,
+                    "model": _MODELS[method],
+                    "actor_digest": details["actor_digest"],
+                    "input_scale": scale,
+                    "spawn_frame": frame,
+                }
+            )
+        ).hexdigest()
     if scale == 1.0 and frame == "world":
         return details["actor_digest"]
     envelope: dict[str, Any] = {
@@ -530,6 +589,7 @@ def save_checkpoint(
     metadata: dict[str, object],
     writer: RunWriter | None = None,
     ppo: PPOConfig = DEFAULT_PPO_CONFIG,
+    method: str = "mappo",
 ) -> Path:
     """Publish a complete update boundary, then replace its latest pointer.
 
@@ -557,6 +617,10 @@ def save_checkpoint(
         input scale, spawn frame and value-normalization setting must equal the
         saved config's, and the state must carry matching statistics, else the
         save is refused before any file changes. The default's frame is "left".
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+        Static learner method, matching metadata.config.method and the complete
+        numerical state. Missing historical config method means MAPPO. Conflicts
+        fail before obtaining a writer token or writing any payload.
 
     Returns
     -------
@@ -574,8 +638,11 @@ def save_checkpoint(
     """
     from marl_battlegrounds.training.learner import validate_learner
 
+    method = validate_ppo_method(method)
     root = _directory(Path(run_dir))
     context = _check_context(metadata, require_execution=True)
+    if _config_method(context["config"]) != method:
+        raise ValueError("Checkpoint config method differs from the selected method")
     if _config_input_scale(context["config"]) != ppo.input_scale:
         raise ValueError("Checkpoint config input_scale differs from PPO settings")
     if _config_spawn_frame(context["config"]) != ppo.spawn_frame:
@@ -584,7 +651,9 @@ def save_checkpoint(
         raise ValueError(
             "Checkpoint config value_normalization differs from PPO settings"
         )
-    validate_learner(collection, state, ppo=ppo, recheck_installed_content=False)
+    validate_learner(
+        collection, state, ppo=ppo, method=method, recheck_installed_content=False
+    )
     if collection.recording != (writer is not None):
         raise ValueError("Checkpoint writer must match collection recording")
     token = None
@@ -610,7 +679,7 @@ def save_checkpoint(
     details: dict[str, Any] = {
         "schema_version": 1,
         "kind": "learner",
-        "schemas": _SCHEMAS,
+        "schemas": checkpoint_schemas(method),
         "metadata": context,
         "collection": _collection_details(collection),
         "layout": _layout(state),
@@ -665,8 +734,9 @@ def read_checkpoint_description(path: str | Path) -> dict[str, Any]:
     unsigned = {k: v for k, v in details.items() if k != "checkpoint_id"}
     if sha256(_json_bytes(unsigned)).hexdigest() != identifier:
         raise ValueError("Checkpoint description digest differs")
-    if details.get("schema_version") != 1 or details.get("schemas") != _SCHEMAS:
+    if type(details.get("schema_version")) is not int or details["schema_version"] != 1:
         raise ValueError("Checkpoint model or schema differs from this implementation")
+    method = _schema_method(details.get("schemas"))
     if details.get("kind") not in ("learner", "actor"):
         raise ValueError("Unsupported checkpoint kind")
     required = {
@@ -695,6 +765,8 @@ def read_checkpoint_description(path: str | Path) -> dict[str, Any]:
         _relative(root, relative)
     if details["kind"] == "learner":
         _check_context(details.get("metadata"))
+        if _config_method(details["metadata"]["config"]) != method:
+            raise ValueError("Checkpoint config method differs from its model schema")
     _actor_input_scale(details)
     _actor_spawn_frame(details)
     return details
@@ -723,6 +795,7 @@ def restore_checkpoint(
     *,
     expected_metadata: Mapping[str, object],
     ppo: PPOConfig = DEFAULT_PPO_CONFIG,
+    method: str = "mappo",
     device: object | None = None,
 ) -> RestoredCheckpoint:
     """Fully validate and restore numerical state without changing any files.
@@ -767,6 +840,10 @@ def restore_checkpoint(
         checkpoint's, else restore
         is refused before arrays are read. The default's frame is "left", so a
         checkpoint trained in "world" needs the matching config passed here.
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+        Static requested method. It must agree with saved/expected config and
+        the model schema before any numerical arrays are restored. Missing
+        historical config method means MAPPO, never a guess from array shapes.
     device : jax.Device or None, default None
         Explicit target device; None uses this process's first selected device.
         Every restored array, including empty IDs, is committed to this device.
@@ -787,15 +864,20 @@ def restore_checkpoint(
     """
     from marl_battlegrounds.training.learner import validate_learner
 
+    method = validate_ppo_method(method)
     root = _directory(Path(path))
     details = read_checkpoint_details(root)
     if details["kind"] != "learner":
         raise ValueError("Actor exports cannot resume a learner")
+    if _schema_method(details["schemas"]) != method:
+        raise ValueError("Checkpoint model differs from the requested method")
     expected = _object(dict(expected_metadata), "Expected execution metadata")
     if not {"config", "source", "dependencies", "execution"} <= expected.keys():
         raise ValueError(
             "Restore requires current config, source, dependencies and execution"
         )
+    if _config_method(expected["config"]) != method:
+        raise ValueError("Expected config method differs from the requested method")
     if expected["execution"] != execution_identity():
         raise ValueError("Expected execution identity differs from the current runtime")
     saved_metadata = dict(details["metadata"])
@@ -804,6 +886,7 @@ def restore_checkpoint(
         config_record = record.get("config")
         if isinstance(config_record, dict):
             normalized = dict(cast(dict[str, Any], config_record))
+            normalized.setdefault("method", "mappo")
             normalized.setdefault("pinned_opponent_share", 0.0)
             normalized.setdefault("pinned_opponent", None)
             normalized.setdefault("validation_opponents", None)
@@ -812,6 +895,7 @@ def restore_checkpoint(
             if isinstance(ppo_record, dict):
                 # Configs saved before spawn_frame existed compare at "world".
                 nested = dict(cast(dict[str, Any], ppo_record))
+                nested.setdefault("input_scale", 1.0)
                 nested.setdefault("spawn_frame", "world")
                 nested.setdefault("value_normalization", False)
                 normalized["ppo"] = nested
@@ -884,7 +968,7 @@ def restore_checkpoint(
     # The pinned checks read a few restored arrays; they run before the full
     # learner validation, which re-checks the installed content and is slow.
     _check_restored_pinned_opponent(collection, state)
-    validate_learner(collection, state, ppo=ppo)
+    validate_learner(collection, state, ppo=ppo, method=method)
     counters = {
         "updates": int(state.completed_updates),
         "env_steps": int(state.carry.progress.rounds) * collection.schedule.num_envs,
@@ -997,9 +1081,19 @@ def finish_checkpoint_recovery(
     _sync_dir(root)
 
 
-def _actor_template() -> Tree:
-    """Derive the installed fixed actor schema without allocating model weights."""
-    return jax.eval_shape(initialize_ppo, jax.random.key(0)).actor_params
+@lru_cache(maxsize=4)
+def _actor_template(method: str = "mappo") -> Tree:
+    """Cache actor shapes/dtypes for one checked static method, default MAPPO.
+
+    Trace the method-aware initializer with eval_shape. The returned tree holds
+    only abstract actor leaves; no actor/critic weights or optimizer arrays are
+    allocated. Invalid methods raise ValueError before tracing. Callers must not
+    change this shared template; restore creates its own placement targets.
+    """
+    method = validate_ppo_method(method)
+    return jax.eval_shape(
+        partial(initialize_ppo, method=method), jax.random.key(0)
+    ).actor_params
 
 
 def export_system(
@@ -1009,13 +1103,14 @@ def export_system(
     metadata: dict[str, object],
     input_scale: float = 1.0,
     spawn_frame: str,
+    method: str = "mappo",
 ) -> Path:
-    """Publish a standalone immutable sampled-MAPPO actor artifact.
+    """Publish a standalone immutable sampled-PPO actor artifact.
 
     Parameters
     ----------
     actor_variables : PyTree
-        Finite variables matching the installed 128-wide actor schema.
+        Finite variables matching the selected method's actor schema.
     destination : str or Path
         Exact output directory with an existing parent. Matching exports are
         reused; different weights, scale or provenance at this path are rejected.
@@ -1033,6 +1128,10 @@ def export_system(
         label world weights as left, or the reverse. "left" is written into
         the description and the inference identity; "world" writes no key, so
         world exports keep their historical description bytes.
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+        Method that trained these weights. Its model schema is the export's
+        sole method authority. Equal actor shapes/bytes do not make different
+        methods interchangeable; an existing different-method path is rejected.
 
     Returns
     -------
@@ -1051,6 +1150,7 @@ def export_system(
     -----
     Host-only. No map preparation, critic, optimizer or game state is required.
     """
+    method = validate_ppo_method(method)
     input_scale = _input_scale(input_scale)
     spawn_frame = _spawn_frame(spawn_frame)
     context = _object(metadata, "Actor provenance")
@@ -1064,8 +1164,8 @@ def export_system(
         if type(context[name]) is not int or context[name] < 0:
             raise ValueError(f"Actor {name} must be a nonnegative integer")
     _digest(context["checkpoint_id"], "Origin checkpoint")
-    if _layout(actor_variables) != _layout(_actor_template()):
-        raise ValueError("Actor variables differ from the installed MAPPO schema")
+    if _layout(actor_variables) != _layout(_actor_template(method)):
+        raise ValueError("Actor variables differ from the selected PPO model schema")
     if not all(
         bool(jnp.all(jnp.isfinite(value))) for value in jax.tree.leaves(actor_variables)
     ):
@@ -1077,6 +1177,7 @@ def export_system(
         saved = read_checkpoint_details(target)
         if (
             saved["kind"] == "actor"
+            and saved["schemas"] == checkpoint_schemas(method)
             and saved["actor_digest"] == digest
             and _actor_input_scale(saved) == input_scale
             and _actor_spawn_frame(saved) == spawn_frame
@@ -1090,7 +1191,7 @@ def export_system(
     details: dict[str, Any] = {
         "schema_version": 1,
         "kind": "actor",
-        "schemas": _SCHEMAS,
+        "schemas": checkpoint_schemas(method),
         "metadata": context,
         "actor_layout": _layout(actor_variables),
         "actor_digest": digest,
@@ -1113,12 +1214,13 @@ def artifact_identity(path: str | Path) -> dict[str, Any]:
     Accept a standalone export or complete learner checkpoint. Return direct
     actor_digest, weight_digest, input_scale, spawn_frame, checkpoint_id,
     schemas, run_id, seed and env_steps fields plus original metadata.
-    actor_digest binds weights, inference scale and spawn frame; at scale 1.0
-    in the world frame it keeps the historical weight digest. weight_digest
+    actor_digest binds model, weights, inference scale and spawn frame. MAPPO at
+    scale 1.0 in the world frame keeps its historical weight digest. weight_digest
     always identifies only the saved variables. Neither identity proves
     competence. All file hashes are checked; this operation may read a full
     learner payload from disk. Missing historical scale means 1.0 and a missing
-    frame means "world".
+    frame means "world". schemas identifies the method; no separate method field
+    is added to this result or to actor exports.
     """
     details = read_checkpoint_details(path)
     metadata = details["metadata"]
@@ -1140,7 +1242,7 @@ def artifact_identity(path: str | Path) -> dict[str, Any]:
 
 
 def load_system(checkpoint: str | Path) -> System:
-    """Load an exact saved actor as the existing sampled recurrent MAPPO System.
+    """Load an exact saved PPO actor through the existing sampled-action System.
 
     Parameters
     ----------
@@ -1151,8 +1253,9 @@ def load_system(checkpoint: str | Path) -> System:
     -------
     System
         Frozen numerical actor variables with their saved input scale and verified
-        inference digest as the checkpoint label. Each evaluator creates fresh
-        recurrent memory. The
+        inference digest as the checkpoint label. The validated model schema
+        chooses the actor architecture. Each evaluator creates fresh recurrent
+        memory or empty feedforward memory. The
         actor samples legal masked actions; no critic or training-only input is
         loaded, and no map preparation or full run directory is needed.
 
@@ -1176,7 +1279,8 @@ def load_system(checkpoint: str | Path) -> System:
     """
     root = _directory(Path(checkpoint))
     details = read_checkpoint_details(root)
-    template = _actor_template()
+    method = _schema_method(details["schemas"])
+    template = _actor_template(method)
     if details["actor_layout"] != _layout(template):
         raise ValueError("Actor artifact schema differs from the installed model")
     actor = _restore_arrays(root / "actor", template, None)
@@ -1184,16 +1288,23 @@ def load_system(checkpoint: str | Path) -> System:
         bool(jnp.all(jnp.isfinite(value))) for value in jax.tree.leaves(actor)
     ):
         raise ValueError("Restored actor is nonfinite or its digest differs")
-    return make_recurrent_mappo_system(
+    return make_ppo_system(
         actor,
+        method=method,
         checkpoint=_inference_digest(details),
         input_scale=_actor_input_scale(details),
         spawn_frame=_actor_spawn_frame(details),
     )
 
 
-def checkpoint_schemas() -> dict[str, int | str]:
-    """Return the installed checkpoint and model format identifiers.
+def checkpoint_schemas(method: str = "mappo") -> dict[str, int | str]:
+    """Return the installed checkpoint and selected model format identifiers.
+
+    Parameters
+    ----------
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+        Static method. Unknown values raise ValueError through the PPO owner.
+        MAPPO retains its exact historical schema dictionary.
 
     Returns
     -------
@@ -1207,7 +1318,7 @@ def checkpoint_schemas() -> dict[str, int | str]:
     -----
     Reads only fixed metadata; no file access or device initialization occurs.
     """
-    return dict(_SCHEMAS)
+    return {**_SCHEMAS, "model": _MODELS[validate_ppo_method(method)]}
 
 
 def checkpoint_dependencies() -> dict[str, str]:

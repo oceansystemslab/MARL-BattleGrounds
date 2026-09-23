@@ -4,6 +4,8 @@ These CPU integration checks execute public environment/System/tracker calls.
 They compare changing curriculum stages with one compiled shape and independent
 seed execution with batched execution. Updates are illustrative counters, not
 an optimizer or a learning claim. Existing restart tests own writer rollback.
+The PPO example passes each method through the shared public workflow and
+rejects attempts to override the method owned by a config or saved checkpoint.
 """
 
 import sys
@@ -19,6 +21,7 @@ import numpy as np
 import pytest
 from examples import episode_tracking as curriculum
 from examples import evaluation as evaluation_example
+from examples import mappo_training as training_example
 from examples import recorded_rollout as recorded
 from examples import research_methods
 
@@ -238,4 +241,72 @@ def test_evaluation_example_resolves_valid_workflow_budgets(
     name = "episodes_per_pair" if workflow == "tournament" else "num_episodes"
     assert all(call[name] == expected for call in calls)
     assert all(call["num_envs"] == 32 for call in calls)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("method", (None, "mappo", "ippo", "ff_mappo", "ff_ippo"))
+def test_training_example_passes_method_to_the_shared_public_workflow(
+    method: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from marl_battlegrounds import training
+
+    calls: list[tuple[training.TrainConfig | None, dict[str, object]]] = []
+    loaded: list[Path] = []
+    reviews: list[list[Path]] = []
+    actor = tmp_path / "selected-actor"
+
+    def train(
+        config: training.TrainConfig | None, **kwargs: object
+    ) -> training.TrainResult:
+        calls.append((config, kwargs))
+        return training.TrainResult(
+            tmp_path, tmp_path / "final-actor", actor, 32, 2, "complete", ()
+        )
+
+    def load(path: Path) -> object:
+        loaded.append(path)
+        return object()
+
+    def analyze(paths: list[Path], **_kwargs: object) -> dict[str, object]:
+        reviews.append(paths)
+        return {"artifacts": {"summary": str(tmp_path / "summary.md")}}
+
+    args = ["mappo_training.py", "--output-dir", str(tmp_path)]
+    if method is not None:
+        args.extend(("--method", method))
+    monkeypatch.setattr(sys, "argv", args)
+    monkeypatch.setattr(training, "train", train)
+    monkeypatch.setattr(training, "load_system", load)
+    monkeypatch.setattr(training, "analyze", analyze)
+    training_example.main()
+    assert len(calls) == 1
+    config, kwargs = calls[0]
+    assert config is not None and config.method == (method or "mappo")
+    assert (config.num_envs, config.ppo.rollout_length, config.total_env_steps) == (
+        4,
+        4,
+        32,
+    )
+    assert kwargs == {"output_dir": tmp_path, "resume_from": None}
+    assert loaded == [actor] and reviews == [[tmp_path]]
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("route", ("config", "resume"))
+def test_training_example_rejects_method_override_of_saved_configuration(
+    route: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = ["mappo_training.py", "--method", "ippo"]
+    if route == "config":
+        args.extend(("--output-dir", str(tmp_path), "--config", "saved.json"))
+    else:
+        args.extend(("--resume-from", str(tmp_path)))
+    monkeypatch.setattr(sys, "argv", args)
+    with pytest.raises(SystemExit) as error:
+        training_example.main()
+    assert error.value.code == 2
     assert not list(tmp_path.iterdir())

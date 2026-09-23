@@ -18,6 +18,25 @@ Report native task scores separately from training rewards and combat measures.
 Passing a software check does not establish useful learning. Baselines need not
 show coordinated tactics to be valid reference methods.
 
+## PPO Software And Experiment Scope
+
+The shared PPO workflow supports `mappo`, `ippo`, `ff_mappo` and `ff_ippo`.
+Choose the method in `TrainConfig`; training, save/resume, validation, selection,
+export, loading and evaluation keep the same public routes. Recurrent IPPO
+includes the existing curriculum and shaping options. The first feedforward
+recipes are plain. See the [training guide](README.md#ppo-method-choices) for
+model inputs, memory and complete examples, and the
+[source ledger](source_reuse.md#ppo-model-choices) for parameter counts and
+deliberate donor changes.
+
+The new methods retain today's ValueNorm, input-scale and spawn-frame defaults.
+The running MAPPO search does not choose their settings. Fixed-input donor
+comparisons and tiny integration runs check software; they do not establish
+sample efficiency, useful tactics or a ranking between methods. Feedforward
+and recurrent models have different parameter counts, so this comparison is
+not a pure memory ablation. Earlier MAPPO learning results below retain their
+original historical scope.
+
 ## Current MAPPO Standard
 
 **Superseded, 22 September 2026.** The study results quoted in this section come

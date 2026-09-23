@@ -1,4 +1,4 @@
-"""Load and rebuild the independent recurrent MAPPO numerical reference.
+"""Load and rebuild independent pinned-source PPO numerical references.
 
 Ordinary tests call ``load_reference`` and ``reference_tree``. They need NumPy,
 but do not import Mava, TensorFlow Probability or historical training packages.
@@ -16,6 +16,12 @@ namespace owns ``config``, ``actor_apply_fn``, ``critic_apply_fn`` and the two
 optimizer update functions required by the extracted losses/epoch. Callers set
 those names before evaluating their fixed tensors. This route imports current
 Flax and Optax only when requested and never imports production baseline code.
+
+Pass ``method="ippo"``, ``"ff_mappo"`` or ``"ff_ippo"`` to build the matching
+current-stack reference. ``load_variants_reference(method)`` reads that method's
+historical arrays. ``--methods ippo ff_mappo ff_ippo --generate DIRECTORY``
+generates a separate combined archive from the additional pinned source files.
+The old default generator and historical MAPPO files retain their own meaning.
 """
 
 from __future__ import annotations
@@ -42,6 +48,12 @@ from numpy.typing import NDArray
 
 _FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "baseline_donor"
 _DATA_FILE = "recurrent_mappo.npz"
+_DONOR_METHODS = {
+    "mappo": "rec_mappo",
+    "ippo": "rec_ippo",
+    "ff_mappo": "ff_mappo",
+    "ff_ippo": "ff_ippo",
+}
 
 
 def load_reference() -> tuple[dict[str, Any], dict[str, NDArray[Any]]]:
@@ -59,6 +71,53 @@ def load_reference() -> tuple[dict[str, Any], dict[str, NDArray[Any]]]:
     with np.load(data_path, allow_pickle=False) as archive:
         arrays = {key: archive[key].copy() for key in archive.files}
     return metadata, arrays
+
+
+def load_variants_reference(
+    method: str,
+) -> tuple[dict[str, Any], dict[str, NDArray[Any]]]:
+    if method not in _DONOR_METHODS or method == "mappo":
+        raise ValueError("A variants reference requires ippo, ff_mappo or ff_ippo.")
+    manifest = _manifest(method)
+    for path in manifest["files"]:
+        _source_text(path, manifest)
+    metadata = json.loads((_FIXTURE_ROOT / "variants_reference.json").read_text())
+    if (
+        hashlib.sha256(
+            (_FIXTURE_ROOT / "variants_source_manifest.json").read_bytes()
+        ).hexdigest()
+        != metadata["source_manifest_sha256"]
+    ):
+        raise ValueError("The variants source manifest does not match the reference.")
+    data_path = _FIXTURE_ROOT / "ppo_variants.npz"
+    if hashlib.sha256(data_path.read_bytes()).hexdigest() != metadata["archive_sha256"]:
+        raise ValueError("The variants archive does not match its recorded hash.")
+    marker = method + "/"
+    with np.load(data_path, allow_pickle=False) as archive:
+        arrays = {
+            key.removeprefix(marker): archive[key].copy()
+            for key in archive.files
+            if key.startswith(marker)
+        }
+    return metadata["methods"][method], arrays
+
+
+def _manifest(method: str) -> dict[str, Any]:
+    if method not in _DONOR_METHODS:
+        raise ValueError(f"Unknown donor method: {method}")
+    name = (
+        "source_manifest.json" if method == "mappo" else "variants_source_manifest.json"
+    )
+    manifest = json.loads((_FIXTURE_ROOT / name).read_text())
+    if (
+        method != "mappo"
+        and hashlib.sha256(
+            (_FIXTURE_ROOT / "source_manifest.json").read_bytes()
+        ).hexdigest()
+        != manifest["base_manifest_sha256"]
+    ):
+        raise ValueError("The historical source manifest changed.")
+    return manifest
 
 
 def reference_tree(arrays: dict[str, NDArray[Any]], prefix: str) -> dict[str, Any]:
@@ -163,13 +222,45 @@ def _categorical_shim(jax: Any, jnp: Any) -> tuple[SimpleNamespace, SimpleNamesp
     )
 
 
-def build_same_stack_reference() -> dict[str, Any]:
-    manifest = json.loads((_FIXTURE_ROOT / "source_manifest.json").read_text())
-    return _reference_namespace(manifest, same_stack=True)
+def build_same_stack_reference(method: str = "mappo") -> dict[str, Any]:
+    return _reference_namespace(_manifest(method), same_stack=True, method=method)
+
+
+def reference_optimizers(
+    namespace: dict[str, Any], method: str = "mappo"
+) -> tuple[Any, Any]:
+    path = f"mava/systems/ppo/anakin/{_DONOR_METHODS[method]}.py"
+    setup = _source_node(_source_text(path, _manifest(method)), ("learner_setup",))
+    statements: list[ast.stmt] = [
+        child
+        for child in getattr(setup, "body", [])
+        if isinstance(child, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id in ("actor_optim", "critic_optim")
+            for target in child.targets
+        )
+    ]
+    namespace["actor_lr"] = namespace["config"].system.actor_lr
+    namespace["critic_lr"] = namespace["config"].system.critic_lr
+    exec(
+        compile(
+            ast.fix_missing_locations(ast.Module(body=statements, type_ignores=[])),
+            path,
+            "exec",
+        ),
+        namespace,
+    )
+    actor, critic = namespace["actor_optim"], namespace["critic_optim"]
+    namespace["actor_update_fn"], namespace["critic_update_fn"] = (
+        actor.update,
+        critic.update,
+    )
+    return actor, critic
 
 
 def _reference_namespace(
-    manifest: dict[str, Any], *, same_stack: bool = False
+    manifest: dict[str, Any], *, same_stack: bool = False, method: str = "mappo"
 ) -> dict[str, Any]:
     jax = importlib.import_module("jax")
     jnp = importlib.import_module("jax.numpy")
@@ -182,7 +273,9 @@ def _reference_namespace(
             "tensorflow_probability.substrates.jax.distributions"
         )
         tfb = importlib.import_module("tensorflow_probability.substrates.jax.bijectors")
-    module = ModuleType("mava_pinned_reference" + ("_same_stack" if same_stack else ""))
+    module = ModuleType(
+        "mava_pinned_reference_" + method + ("_same_stack" if same_stack else "")
+    )
     sys.modules[module.__name__] = module
     namespace = module.__dict__
     namespace.update(
@@ -206,18 +299,30 @@ def _reference_namespace(
         ("mava/types.py", (("Observation",), ("ObservationGlobalState",))),
         (
             "mava/systems/ppo/types.py",
-            (("Params",), ("OptStates",), ("HiddenStates",), ("RNNPPOTransition",)),
+            (
+                ("Params",),
+                ("OptStates",),
+                ("HiddenStates",),
+                ("RNNPPOTransition",),
+                ("PPOTransition",),
+            ),
         ),
         ("mava/networks/torsos.py", (("_parse_activation_fn",), ("MLPTorso",))),
         ("mava/networks/distributions.py", (("IdentityTransformation",),)),
         ("mava/networks/heads.py", (("DiscreteActionHead",),)),
         (
             "mava/networks/base.py",
-            (("ScannedRNN",), ("RecurrentActor",), ("RecurrentValueNet",)),
+            (
+                ("ScannedRNN",),
+                ("RecurrentActor",),
+                ("RecurrentValueNet",),
+                ("FeedForwardActor",),
+                ("FeedForwardValueNet",),
+            ),
         ),
         ("mava/utils/multistep.py", (("calculate_gae",),)),
         (
-            "mava/systems/ppo/anakin/rec_mappo.py",
+            f"mava/systems/ppo/anakin/{_DONOR_METHODS[method]}.py",
             (
                 ("get_learner_fn", "_update_step", "_update_epoch"),
                 (
@@ -239,6 +344,13 @@ def _reference_namespace(
     )
     for path, symbols in sources:
         _exec_source(namespace, manifest, path, symbols)
+    if method.startswith("ff_"):
+        _exec_source(
+            namespace,
+            manifest,
+            "mava/utils/jax_utils.py",
+            (("ndim_at_least",), ("merge_leading_dims",)),
+        )
     return namespace
 
 
@@ -257,28 +369,36 @@ def _store_tree(
         arrays["/".join((prefix, *parts))] = np.asarray(leaf)
 
 
-def generate_reference(output_dir: Path) -> None:
+def generate_reference(output_dir: Path, method: str = "mappo") -> None:
     packages = _check_environment()
-    manifest = json.loads((_FIXTURE_ROOT / "source_manifest.json").read_text())
+    manifest = _manifest(method)
+    recurrent = not method.startswith("ff_")
+    centralized = method in ("mappo", "ff_mappo")
+    donor_method = _DONOR_METHODS[method]
     for path in manifest["files"]:
         _source_text(path, manifest)
-    ns = _reference_namespace(manifest)
+    ns = _reference_namespace(manifest, method=method)
     jax, jnp, optax = (ns[name] for name in ("jax", "jnp", "optax"))
     if jax.default_backend() != "cpu":
         raise ValueError("Reference generation requires JAX_PLATFORMS=cpu.")
     omega = importlib.import_module("omegaconf").OmegaConf
     system = omega.create(
-        _source_text("mava/configs/system/ppo/rec_mappo.yaml", manifest)
+        _source_text(f"mava/configs/system/ppo/{donor_method}.yaml", manifest)
     )
     architecture = omega.create(_source_text("mava/configs/arch/anakin.yaml", manifest))
     # Small CPU tensors preserve both group and minibatch axes and all five actors.
     groups, time, environments, actors = 2, 4, 4, 5
     system.rollout_length = time
-    system.recurrent_chunk_size = time
+    if recurrent:
+        system.recurrent_chunk_size = time
     architecture.num_envs = environments
     config = omega.create({"system": system, "arch": architecture})
     ns["config"] = config
-    network = omega.create(_source_text("mava/configs/network/rnn.yaml", manifest))
+    network = omega.create(
+        _source_text(
+            f"mava/configs/network/{'rnn' if recurrent else 'mlp'}.yaml", manifest
+        )
+    )
 
     def torso(settings: Any) -> Any:
         return ns["MLPTorso"](
@@ -287,54 +407,37 @@ def generate_reference(output_dir: Path) -> None:
             use_layer_norm=settings.use_layer_norm,
         )
 
-    actor = ns["RecurrentActor"](
-        torso(network.actor_network.pre_torso),
-        torso(network.actor_network.post_torso),
-        ns["DiscreteActionHead"](198),
-        hidden_state_dim=network.hidden_state_dim,
-    )
-    critic = ns["RecurrentValueNet"](
-        torso(network.critic_network.pre_torso),
-        torso(network.critic_network.post_torso),
-        centralised_critic=True,
-        hidden_state_dim=network.hidden_state_dim,
-    )
+    if recurrent:
+        actor = ns["RecurrentActor"](
+            torso(network.actor_network.pre_torso),
+            torso(network.actor_network.post_torso),
+            ns["DiscreteActionHead"](198),
+            hidden_state_dim=network.hidden_state_dim,
+        )
+        critic = ns["RecurrentValueNet"](
+            torso(network.critic_network.pre_torso),
+            torso(network.critic_network.post_torso),
+            centralised_critic=centralized,
+            hidden_state_dim=network.hidden_state_dim,
+        )
+    else:
+        actor = ns["FeedForwardActor"](
+            torso(network.actor_network.pre_torso), ns["DiscreteActionHead"](198)
+        )
+        critic = ns["FeedForwardValueNet"](
+            torso(network.critic_network.pre_torso), centralised_critic=centralized
+        )
     ns["actor_apply_fn"], ns["critic_apply_fn"] = actor.apply, critic.apply
 
-    # Execute the exact donor optimizer construction, with its original config.
-    learner_source = _source_text("mava/systems/ppo/anakin/rec_mappo.py", manifest)
-    setup_node = _source_node(learner_source, ("learner_setup",))
-    optimizer_nodes: list[ast.stmt] = [
-        child
-        for child in getattr(setup_node, "body", [])
-        if isinstance(child, ast.Assign)
-        and any(
-            isinstance(target, ast.Name)
-            and target.id in ("actor_optim", "critic_optim")
-            for target in child.targets
-        )
-    ]
-    ns["actor_lr"], ns["critic_lr"] = system.actor_lr, system.critic_lr
-    exec(
-        compile(
-            ast.fix_missing_locations(
-                ast.Module(body=optimizer_nodes, type_ignores=[])
-            ),
-            "mava/systems/ppo/anakin/rec_mappo.py",
-            "exec",
-        ),
-        ns,
-    )
-    actor_optim, critic_optim = ns["actor_optim"], ns["critic_optim"]
-    ns["actor_update_fn"], ns["critic_update_fn"] = (
-        actor_optim.update,
-        critic_optim.update,
-    )
+    # Execute the original optimizer statements, not a BG optimizer helper.
+    actor_optim, critic_optim = reference_optimizers(ns, method)
 
     rng = np.random.default_rng(190919)
     shape = (groups, time, environments, actors)
     actor_features = jnp.asarray(rng.normal(size=(*shape, 13)).astype(np.float32))
     critic_features = jnp.asarray(rng.normal(size=(*shape, 17)).astype(np.float32))
+    if not centralized:
+        critic_features = actor_features
     masks_np = rng.random((*shape, 198)) > 0.22
     masks_np[..., 0] = True
     masks = jnp.asarray(masks_np)
@@ -349,20 +452,29 @@ def generate_reference(output_dir: Path) -> None:
     )
     observation = ns["ObservationGlobalState"](actor_features, masks, critic_features)
     example_observation = jax.tree.map(lambda value: value[0], observation)
-    actor_params = actor.init(
-        jax.random.PRNGKey(19), actor_carry[0], (example_observation, starts[0])
-    )
-    critic_params = critic.init(
-        jax.random.PRNGKey(23), critic_carry[0], (example_observation, starts[0])
-    )
+    if recurrent:
+        actor_params = actor.init(
+            jax.random.PRNGKey(19), actor_carry[0], (example_observation, starts[0])
+        )
+        critic_params = critic.init(
+            jax.random.PRNGKey(23), critic_carry[0], (example_observation, starts[0])
+        )
+    else:
+        actor_params = actor.init(jax.random.PRNGKey(19), example_observation)
+        critic_params = critic.init(jax.random.PRNGKey(23), example_observation)
     params = ns["Params"](actor_params, critic_params)
     opt_states = ns["OptStates"](
         actor_optim.init(actor_params), critic_optim.init(critic_params)
     )
 
     def forward(carry_a: Any, carry_c: Any, obs: Any, reset: Any) -> tuple[Any, ...]:
-        next_a, distribution = actor.apply(actor_params, carry_a, (obs, reset))
-        next_c, value = critic.apply(critic_params, carry_c, (obs, reset))
+        if recurrent:
+            next_a, distribution = actor.apply(actor_params, carry_a, (obs, reset))
+            next_c, value = critic.apply(critic_params, carry_c, (obs, reset))
+        else:
+            distribution = actor.apply(actor_params, obs)
+            value = critic.apply(critic_params, obs)
+            next_a, next_c = (), ()
         return (
             next_a,
             next_c,
@@ -403,8 +515,14 @@ def generate_reference(output_dir: Path) -> None:
             critic_carry[:, None], (groups, time, environments, actors, 128)
         ),
     )
-    trajectory = ns["RNNPPOTransition"](
-        starts, actions, old_values, rewards, old_logs, observation, carries
+    trajectory = (
+        ns["RNNPPOTransition"](
+            starts, actions, old_values, rewards, old_logs, observation, carries
+        )
+        if recurrent
+        else ns["PPOTransition"](
+            starts, actions, old_values, rewards, old_logs, observation
+        )
     )
     gae = jax.vmap(ns["calculate_gae"], in_axes=(0, 0, 0, None, None))
     advantages, targets = gae(
@@ -413,14 +531,25 @@ def generate_reference(output_dir: Path) -> None:
     keys = jax.random.split(jax.random.PRNGKey(29), groups)
 
     # These first-half minibatches have fixed membership, independent of shuffling.
-    first_batch = jax.tree.map(lambda value: value[:, :, :2], trajectory)
+    if recurrent:
+        first_batch = jax.tree.map(lambda value: value[:, :, :2], trajectory)
+        first_advantages, first_targets = advantages[:, :, :2], targets[:, :, :2]
+    else:
+
+        def first_rows(value: Any) -> Any:
+            return value.reshape(groups, time * environments, *value.shape[3:])[
+                :, : time * environments // 2
+            ]
+
+        first_batch = jax.tree.map(first_rows, trajectory)
+        first_advantages, first_targets = first_rows(advantages), first_rows(targets)
     actor_grad_fn = jax.value_and_grad(ns["_actor_loss_fn"], has_aux=True)
     critic_grad_fn = jax.value_and_grad(ns["_critic_loss_fn"], has_aux=True)
     actor_loss, actor_grads = jax.vmap(actor_grad_fn, in_axes=(None, 0, 0, 0))(
-        actor_params, first_batch, advantages[:, :, :2], keys
+        actor_params, first_batch, first_advantages, keys
     )
     critic_loss, critic_grads = jax.vmap(critic_grad_fn, in_axes=(None, 0, 0))(
-        critic_params, first_batch, targets[:, :, :2]
+        critic_params, first_batch, first_targets
     )
     mean_actor_grads = jax.tree.map(lambda value: value.mean(0), actor_grads)
     mean_critic_grads = jax.tree.map(lambda value: value.mean(0), critic_grads)
@@ -455,8 +584,11 @@ def generate_reference(output_dir: Path) -> None:
         "critic_features": critic_features,
         "action_mask": masks,
         "episode_start": starts,
-        "actor_carry": actor_carry,
-        "critic_carry": critic_carry,
+        **(
+            {"actor_carry": actor_carry, "critic_carry": critic_carry}
+            if recurrent
+            else {}
+        ),
         "actions": actions,
         "old_log_probabilities": old_logs,
         "old_values": old_values,
@@ -467,8 +599,7 @@ def generate_reference(output_dir: Path) -> None:
     }.items():
         arrays[f"input/{name}"] = np.asarray(value)
     for name, value in {
-        "actor_carry": next_a,
-        "critic_carry": next_c,
+        **({"actor_carry": next_a, "critic_carry": next_c} if recurrent else {}),
         "masked_logits": logits,
         "raw_logits": raw_logits,
         "log_probabilities": log_probabilities,
@@ -511,9 +642,11 @@ def generate_reference(output_dir: Path) -> None:
     for _ in range(system.ppo_epochs):
         split_keys = jax.vmap(lambda key: jax.random.split(key, 3))(current_keys)
         permutations.append(
-            jax.vmap(lambda key: jax.random.permutation(key, environments))(
-                split_keys[:, 1]
-            )
+            jax.vmap(
+                lambda key: jax.random.permutation(
+                    key, environments if recurrent else time * environments
+                )
+            )(split_keys[:, 1])
         )
         current_keys = split_keys[:, 0]
     arrays["input/epoch_permutations"] = np.asarray(jnp.stack(permutations))
@@ -530,7 +663,14 @@ def generate_reference(output_dir: Path) -> None:
         "packages": packages,
         "backend": jax.default_backend(),
         "source_manifest_sha256": hashlib.sha256(
-            (_FIXTURE_ROOT / "source_manifest.json").read_bytes()
+            (
+                _FIXTURE_ROOT
+                / (
+                    "source_manifest.json"
+                    if method == "mappo"
+                    else "variants_source_manifest.json"
+                )
+            ).read_bytes()
         ).hexdigest(),
         "archive_sha256": hashlib.sha256(data_path.read_bytes()).hexdigest(),
         "generator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -544,7 +684,7 @@ def generate_reference(output_dir: Path) -> None:
             "environments_per_group": environments,
             "actors": actors,
             "actor_features": 13,
-            "critic_features": 17,
+            "critic_features": 17 if centralized else 13,
             "hidden_width": 128,
             "actions": 198,
         },
@@ -562,6 +702,37 @@ def generate_reference(output_dir: Path) -> None:
     print(f"Wrote {len(arrays)} arrays to {data_path}")
 
 
+def generate_variants_reference(output_dir: Path, methods: list[str]) -> None:
+    if len(set(methods)) != len(methods) or any(
+        method not in _DONOR_METHODS or method == "mappo" for method in methods
+    ):
+        raise ValueError("Choose each of ippo, ff_mappo and ff_ippo at most once.")
+    arrays: dict[str, NDArray[Any]] = {}
+    details: dict[str, Any] = {}
+    for method in methods:
+        destination = output_dir / method
+        generate_reference(destination, method)
+        details[method] = json.loads((destination / "reference.json").read_text())
+        with np.load(destination / _DATA_FILE, allow_pickle=False) as archive:
+            for key in archive.files:
+                arrays[f"{method}/{key}"] = archive[key].copy()
+    data_path = output_dir / "ppo_variants.npz"
+    cast(Callable[..., None], np.savez_compressed)(data_path, **arrays)
+    metadata = {
+        "schema_version": 1,
+        "source_manifest_sha256": hashlib.sha256(
+            (_FIXTURE_ROOT / "variants_source_manifest.json").read_bytes()
+        ).hexdigest(),
+        "archive_sha256": hashlib.sha256(data_path.read_bytes()).hexdigest(),
+        "generator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "methods": details,
+        "array_count": len(arrays),
+    }
+    (output_dir / "variants_reference.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n"
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Reproduce the pinned CPU MAPPO reference."
@@ -569,4 +740,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--generate", required=True, type=Path, metavar="OUTPUT_DIRECTORY"
     )
-    generate_reference(parser.parse_args().generate)
+    parser.add_argument("--methods", nargs="+", choices=("ippo", "ff_mappo", "ff_ippo"))
+    options = parser.parse_args()
+    if options.methods:
+        generate_variants_reference(options.generate, options.methods)
+    else:
+        generate_reference(options.generate)

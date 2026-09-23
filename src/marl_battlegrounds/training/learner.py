@@ -1,4 +1,4 @@
-"""Join compact training collection to the existing recurrent MAPPO update.
+"""Join compact training collection to the shared PPO updates.
 
 init_learner owns host setup. build_ppo_batch applies the separate collection-time
 critic, and update_learner accepts a completed collection block or returns a
@@ -22,30 +22,47 @@ from marl_battlegrounds.baselines.actions import (
     categorical_action_mask,
     encode_actions,
 )
-from marl_battlegrounds.baselines.inputs import TRAINING_STATE_FEATURE_SIZE
+from marl_battlegrounds.baselines.inputs import (
+    TRAINING_STATE_FEATURE_SIZE,
+    encode_actor_inputs,
+    spawn_frame_flag,
+    team_obstacle_partners,
+)
 from marl_battlegrounds.baselines.ppo import (
     DEFAULT_PPO_CONFIG,
     HIDDEN_SIZE,
+    FeedForwardValueNet,
     PPOBatch,
     PPOConfig,
     PPOLearningOutputs,
     PPOMetrics,
     PPOTrainState,
+    RecurrentValueNet,
     ValueNormState,
     _check_value_norm,
     _critic_network_values,
     _denormalize_values,
     initialize_ppo,
-    make_recurrent_mappo_system,
-    update_recurrent_ppo,
+    is_recurrent_method,
+    make_ppo_system,
+    update_ppo,
+    uses_local_critic,
+    validate_ppo_batch_size,
+    validate_ppo_method,
 )
 from marl_battlegrounds.core.types import (
     TASK_MODE_OUTCOME_DRAW,
     TASK_MODE_OUTCOME_TEAM_A_WIN,
     TASK_MODE_OUTCOME_TEAM_B_WIN,
+    ActionMask,
 )
 from marl_battlegrounds.evaluation.policy_execution import Policy, System
 from marl_battlegrounds.policies.actor import ActorAction
+from marl_battlegrounds.policies.input import (
+    Observations,
+    build_team_actor_input,
+    mirror_team_view,
+)
 from marl_battlegrounds.training._content import PreparedTrainingContent
 
 # These package-private guards keep collection's lifecycle and restore rules
@@ -79,7 +96,7 @@ _MAX_COUNT = int(np.iinfo(np.int32).max)
 
 
 class LearnerState(NamedTuple):
-    """Keep one complete numerical MAPPO boundary with one current actor tree.
+    """Keep one complete numerical PPO boundary with one current actor tree.
 
     Attributes
     ----------
@@ -89,9 +106,9 @@ class LearnerState(NamedTuple):
     critic_params, actor_opt_state, critic_opt_state : PyTree
         Separate critic Flax variables and actor/critic Optax states. Their
         shapes and dtypes match initialize_ppo for the configured update.
-    critic_memory : Array
+    critic_memory : Array or tuple
         Float32 (B,5,128) carry before the next real decision. A bootstrap-only
-        critic call never advances this stored memory.
+        critic call never advances this stored memory. Feedforward uses ().
     shuffle_root : Array
         Scalar typed Threefry key derived from the collection root with
         SHUFFLE_ROOT_TAG. Each real update folds in its next update index.
@@ -117,7 +134,7 @@ class LearnerState(NamedTuple):
     critic_params: Tree
     actor_opt_state: Tree
     critic_opt_state: Tree
-    critic_memory: Array
+    critic_memory: Tree
     shuffle_root: Array
     completed_updates: Array
     failed: Array
@@ -187,18 +204,33 @@ def _array(value: Array, shape: tuple[int, ...], dtype: object, name: str) -> No
         raise ValueError(f"{name} must have shape {shape} and dtype {dtype}")
 
 
-def _state_shapes(state: LearnerState) -> int:
+def _memory_shape(memory: Tree, games: int, method: str, name: str) -> None:
+    """Check a method's recurrent float32 (B,5,128) carry or empty tuple.
+
+    games is B and name labels shape errors. All inputs are static metadata or
+    shape-bearing leaves. Raise ValueError for mismatches without device reads.
+    """
+    if is_recurrent_method(method):
+        if not hasattr(memory, "shape"):
+            raise ValueError(f"{name} must be a recurrent array")
+        _array(memory, (games, 5, HIDDEN_SIZE), jnp.float32, name)
+    elif not isinstance(memory, tuple) or len(cast(tuple[Tree, ...], memory)) != 0:
+        raise ValueError(f"{name} must be an empty tuple for feedforward PPO")
+
+
+def _state_shapes(state: LearnerState, *, method: str = "mappo") -> int:
     """Check fixed learner memory/key/count shapes and return its game count.
 
     This uses only static metadata and supports jit. Numerical values and the
     network/optimizer trees are checked at their separate setup/update boundaries.
+    method is the static PPO choice and defaults to recurrent MAPPO.
     """
     games = state.carry.state.episode_id.shape[0]
     for name, memory in (
         ("Actor memory", state.carry.memory.team_a),
         ("Critic memory", state.critic_memory),
     ):
-        _array(memory, (games, 5, HIDDEN_SIZE), jnp.float32, name)
+        _memory_shape(memory, games, method, name)
     for name in ("completed_updates", "failure_reason"):
         _array(getattr(state, name), (), jnp.int32, name)
     _array(state.failed, (), jnp.bool_, "failed")
@@ -210,37 +242,41 @@ def _state_shapes(state: LearnerState) -> int:
     return games
 
 
-def _rollout_shapes(state: LearnerState, rollout: TrainingRollout) -> tuple[int, int]:
-    """Check static MAPPO rollout leaves before tracing critic or update work.
+def _rollout_shapes(
+    state: LearnerState, rollout: TrainingRollout, *, method: str = "mappo"
+) -> tuple[int, int]:
+    """Check static PPO rollout leaves before tracing critic or update work.
 
-    Require positive output capacity, compact physical features and the existing
+    Require positive output capacity, the method's critic features and the existing
     PPOLearningOutputs record. Real-prefix length remains a numerical guard.
     Return (capacity, games); these are structural Python integers.
     """
-    games = _state_shapes(state)
+    games = _state_shapes(state, method=method)
     rows = rollout.transitions
     if rows.valid.ndim != 2 or rows.valid.shape[1] != games or rows.valid.shape[0] < 1:
-        raise ValueError("MAPPO rollout needs positive (T,B) capacity")
+        raise ValueError("PPO rollout needs positive (T,B) capacity")
     length = rows.valid.shape[0]
     if not isinstance(rows.learning_outputs, PPOLearningOutputs):
-        raise TypeError("MAPPO collection must return PPOLearningOutputs")
-    if rows.training_state is None or rollout.final_training_state is None:
-        raise ValueError("MAPPO collection must enable collect_training_state")
-    _array(
-        rows.training_state,
-        (length, games, TRAINING_STATE_FEATURE_SIZE),
-        jnp.float32,
-        "training_state",
-    )
-    _array(
-        rollout.final_training_state,
-        (games, TRAINING_STATE_FEATURE_SIZE),
-        jnp.float32,
-        "final_training_state",
-    )
-    _array(
-        rollout.initial_memory, (games, 5, HIDDEN_SIZE), jnp.float32, "initial_memory"
-    )
+        raise TypeError("PPO collection must return PPOLearningOutputs")
+    if uses_local_critic(method):
+        if rows.training_state is not None or rollout.final_training_state is not None:
+            raise ValueError("IPPO collection must omit physical training state")
+    else:
+        if rows.training_state is None or rollout.final_training_state is None:
+            raise ValueError("MAPPO collection must enable collect_training_state")
+        _array(
+            rows.training_state,
+            (length, games, TRAINING_STATE_FEATURE_SIZE),
+            jnp.float32,
+            "training_state",
+        )
+        _array(
+            rollout.final_training_state,
+            (games, TRAINING_STATE_FEATURE_SIZE),
+            jnp.float32,
+            "final_training_state",
+        )
+    _memory_shape(rollout.initial_memory, games, method, "initial_memory")
     _array(rollout.real_steps, (), jnp.int32, "real_steps")
     for name in ("valid", "episode_start", "ended"):
         _array(getattr(rows, name), (length, games), jnp.bool_, name)
@@ -314,15 +350,18 @@ def _ppo_state(state: LearnerState) -> PPOTrainState:
 
 
 @lru_cache(maxsize=16)
-def _ppo_spec(ppo: PPOConfig) -> PPOTrainState:
+def _ppo_spec(ppo: PPOConfig, method: str = "mappo") -> PPOTrainState:
     """Trace the known initializer once per static config to obtain safe leaf specs.
 
     This host helper executes no network initialization or optimizer step. The
     cached tree contains only shapes/dtypes, not weights or experiment arrays.
+    The cache includes method, which defaults to recurrent MAPPO.
     """
     return cast(
         PPOTrainState,
-        jax.eval_shape(partial(initialize_ppo, config=ppo), jax.random.key(0)),
+        jax.eval_shape(
+            partial(initialize_ppo, config=ppo, method=method), jax.random.key(0)
+        ),
     )
 
 
@@ -331,6 +370,7 @@ def init_learner(
     schedule: TrainingSchedule,
     seed: int = 42,
     ppo: PPOConfig = DEFAULT_PPO_CONFIG,
+    method: str = "mappo",
     prepared: PreparedTrainingContent | None = None,
     shaping: bool = False,
     shaping_coefficient: float = 0.01,
@@ -340,13 +380,14 @@ def init_learner(
     pinned_opponent_share: float = 0.0,
     pinned_opponent: System | Policy | str | None = None,
 ) -> tuple[TrainingCollection, LearnerState]:
-    """Initialize one untrained MAPPO learner and its verified collection setup.
+    """Initialize one untrained PPO learner and its verified collection setup.
 
     Parameters
     ----------
     schedule : TrainingSchedule
         Checked exact budget and positive even batch from make_training_schedule.
-        B must be divisible by ppo.groups*ppo.minibatches.
+        Recurrent B must be divisible by groups*minibatches. Feedforward B must
+        be divisible by groups, and rollout_length*B by groups*minibatches.
     seed : int, default=42
         Python run seed, excluding bool. Collection retains its own unchanged
         streams. Version-1 model/shuffle tags derive separate learner keys.
@@ -356,6 +397,10 @@ def init_learner(
         default's frame is "left".
         Counters and per-minibatch sample counts must fit int32 for the
         complete scheduled run.
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+        Static actor/critic choice. IPPO uses only local critic inputs and omits
+        physical-state collection. Feedforward methods keep empty actor/critic
+        memory and require T*B, rather than B, divisible by groups*minibatches.
     prepared : PreparedTrainingContent or None, default=None
         Existing verified content, or None to perform the collection preflight.
     shaping : bool, default=False
@@ -405,8 +450,8 @@ def init_learner(
     if type(seed) is not int:
         raise TypeError("Learner seed must be a Python integer")
     games = schedule.num_envs
-    if games % (ppo.groups * ppo.minibatches):
-        raise ValueError("Learner B must be divisible by groups*minibatches")
+    method = validate_ppo_method(method)
+    validate_ppo_batch_size(games, ppo, method=method)
     updates = (
         int(schedule.arrays.total_rounds) + ppo.rollout_length - 1
     ) // ppo.rollout_length
@@ -417,10 +462,11 @@ def init_learner(
         raise ValueError("Learner optimizer or block sample counts exceed int32")
     root = jax.random.key(seed, impl="threefry2x32")
     initialized = initialize_ppo(
-        jax.random.fold_in(root, MODEL_INITIALIZATION_TAG), ppo
+        jax.random.fold_in(root, MODEL_INITIALIZATION_TAG), ppo, method=method
     )
-    actor = make_recurrent_mappo_system(
+    actor = make_ppo_system(
         initialized.actor_params,
+        method=method,
         input_scale=ppo.input_scale,
         spawn_frame=ppo.spawn_frame,
     )
@@ -434,7 +480,7 @@ def init_learner(
         discount=ppo.gamma,
         coefficient=shaping_coefficient,
         shaping_mode=shaping_mode,
-        collect_training_state=True,
+        collect_training_state=not uses_local_critic(method),
         metrics=metrics,
         recording=recording,
         pinned_opponent_share=pinned_opponent_share,
@@ -445,15 +491,105 @@ def init_learner(
         initialized.critic_params,
         initialized.actor_opt_state,
         initialized.critic_opt_state,
-        jnp.zeros((games, 5, HIDDEN_SIZE), jnp.float32),
+        jnp.zeros((games, 5, HIDDEN_SIZE), jnp.float32)
+        if is_recurrent_method(method)
+        else (),
         jax.random.fold_in(root, SHUFFLE_ROOT_TAG),
         jnp.int32(0),
         jnp.bool_(False),
         jnp.int32(LEARNER_ERROR_NONE),
         initialized.value_norm,
     )
-    _state_shapes(state)
+    _state_shapes(state, method=method)
     return collection, state
+
+
+def _local_critic_network_values(
+    params: Tree,
+    memory: Tree,
+    observations: Observations,
+    action_mask: ActionMask,
+    episode_start: Array,
+    valid: Array,
+    *,
+    ppo: PPOConfig,
+    method: str,
+) -> tuple[Tree, Array]:
+    """Stream local critic values without expanding a complete actor rollout.
+
+    observations and action_mask contain compact (T,B) Team A decision rows;
+    episode_start/valid are bool (T,B). params holds only local critic weights
+    and memory is its independent float32 (B,5,128) carry, or () for ff_ippo.
+    method selects ippo or ff_ippo. ppo fixes the actor's
+    scale and world/left frame, also used by this local critic. Return final
+    carry and raw float32 (T,B,5) network predictions. Expand at most one time
+    row's (B,5,F) permitted inputs; skip all-invalid rows and preserve their
+    carry. No privileged physical features, actor carry or extra actor call
+    enters this pure scan. Array shape/information contracts are preconditions.
+    """
+    games = valid.shape[1]
+
+    def row(
+        carry: Tree, data: tuple[Observations, ActionMask, Array, Array]
+    ) -> tuple[Tree, Array]:
+        """Read a real decision row with independent local critic memory."""
+        compact, mask, starts, present = data
+
+        def apply(_: None) -> tuple[Tree, Array]:
+            """Expand only this row's permitted inputs and apply its saved frame."""
+            actors = jax.vmap(build_team_actor_input, in_axes=(0, None))(compact, 0)
+            if ppo.spawn_frame != "world":
+                actors, _frame_mask = mirror_team_view(
+                    actors,
+                    mask,
+                    spawn_frame_flag(actors, ppo.spawn_frame),
+                    obstacle_partners=team_obstacle_partners(actors),
+                )
+            features = encode_actor_inputs(actors)
+            live = jnp.broadcast_to(present[:, None], (games, 5))
+            if is_recurrent_method(method):
+                resets = jnp.broadcast_to(starts[:, None], (games, 5))
+                after, values = cast(
+                    tuple[Array, Array],
+                    RecurrentValueNet(input_scale=ppo.input_scale).apply(
+                        params, carry, features[None], resets[None], live[None]
+                    ),
+                )
+                return after, jnp.where(live, values[0], 0.0)
+            values = cast(
+                Array,
+                FeedForwardValueNet(input_scale=ppo.input_scale).apply(
+                    params, features
+                ),
+            )
+            return (), jnp.where(live, values, 0.0)
+
+        return _cond(
+            jnp.any(present),
+            apply,
+            lambda _: (carry, jnp.zeros((games, 5), jnp.float32)),
+        )
+
+    return jax.lax.scan(row, memory, (observations, action_mask, episode_start, valid))
+
+
+def _feedforward_physical_values(
+    params: Tree, features: Array, valid: Array, *, input_scale: float
+) -> tuple[tuple[()], Array]:
+    """Value each physical game row once and share its value across five actors.
+
+    params is a feedforward MAPPO critic tree; features is float32 (T,B,919),
+    valid is bool (T,B) and input_scale is the saved positive multiplier.
+    Return empty memory and float32 (T,B,5) raw network predictions, zero on
+    invalid rows. This has no recurrent calculation or hidden state. Sharing
+    the result avoids five identical network applications to the same game.
+    Shapes and finite inputs are preconditions; this pure call supports jit.
+    """
+    values = cast(
+        Array, FeedForwardValueNet(input_scale=input_scale).apply(params, features)
+    )
+    values = jnp.where(valid, values, 0.0)
+    return (), jnp.broadcast_to(values[..., None], (*values.shape, 5))
 
 
 def build_ppo_batch(
@@ -461,7 +597,8 @@ def build_ppo_batch(
     rollout: TrainingRollout,
     *,
     ppo: PPOConfig = DEFAULT_PPO_CONFIG,
-) -> tuple[PPOBatch, Array]:
+    method: str = "mappo",
+) -> tuple[PPOBatch, Tree]:
     """Pair same-call behavior with fixed pre-update critic values and memory.
 
     Parameters
@@ -470,18 +607,22 @@ def build_ppo_batch(
         Accepted learner state immediately before collecting this block. Only
         its critic parameters and pre-sequence critic memory enter value work.
     rollout : TrainingRollout
-        Compact MAPPO rollout with positive T capacity, optional suffix padding,
-        PPOLearningOutputs and physical-state collection enabled. Its prefix and
+        Compact PPO rollout with positive T capacity, optional suffix padding,
+        PPOLearningOutputs and method-matching critic inputs. Its prefix and
         same-epoch fields must obey the existing collector contract.
     ppo : PPOConfig, default=DEFAULT_PPO_CONFIG
         Original learner settings. The critic uses its fixed input scale for
         both sequence values and the final bootstrap value.
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+        Static initialized method. IPPO reconstructs only permitted local inputs,
+        using the actor's saved frame and the critic's independent memory.
 
     Returns
     -------
-    tuple[PPOBatch, Array]
+    tuple[PPOBatch, PyTree]
         Complete fixed-length PPO batch and float32 (B,5,128) critic carry after
-        real pre-action rows. The bootstrap-only call's memory is discarded.
+        real pre-action rows, or () for a feedforward method.
+        The bootstrap-only call's memory is discarded.
         First-row start lanes have zero temporary initial actor/critic memory;
         continuing/dead lanes preserve it. Old values and final values use the
         same supplied critic. Padding values and terminal bootstraps are zero.
@@ -489,7 +630,7 @@ def build_ppo_batch(
     Raises
     ------
     TypeError, ValueError
-        Static MAPPO output, memory, feature or decision-field shapes/dtypes fail.
+        Static PPO output, memory, feature or decision-field shapes/dtypes fail.
 
     Notes
     -----
@@ -497,37 +638,87 @@ def build_ppo_batch(
     skips both critic calls and retains memory; update_learner skips this whole
     helper for empty updates. No actor call, sampling, GAE, update or reset occurs.
     """
-    length, games = _rollout_shapes(state, rollout)
+    length, games = _rollout_shapes(state, rollout, method=method)
     _check_value_norm(state.value_norm, ppo.value_normalization)
     rows = rollout.transitions
-    physical = cast(Array, rows.training_state)
-    final_physical = cast(Array, rollout.final_training_state)
+    physical = rows.training_state
     reset = (rows.valid[0] & rows.episode_start[0])[:, None, None]
-    actor_memory = jnp.where(reset, 0.0, rollout.initial_memory)
-    critic_memory = jnp.where(reset, 0.0, state.critic_memory)
+    actor_memory = (
+        jnp.where(reset, 0.0, rollout.initial_memory)
+        if is_recurrent_method(method)
+        else ()
+    )
+    critic_memory = (
+        jnp.where(reset, 0.0, state.critic_memory)
+        if is_recurrent_method(method)
+        else ()
+    )
 
-    def values(_: None) -> tuple[Array, Array, Array]:
+    def values(_: None) -> tuple[Tree, Array, Array]:
         """Read the sequence and value its successor without retaining that carry."""
-        memory, old = _critic_network_values(
-            state.critic_params,
-            critic_memory,
-            physical,
-            rows.episode_start,
-            rows.valid,
-            input_scale=ppo.input_scale,
-        )
+        if uses_local_critic(method):
+            memory, old = _local_critic_network_values(
+                state.critic_params,
+                critic_memory,
+                rows.observations,
+                rows.action_mask,
+                rows.episode_start,
+                rows.valid,
+                ppo=ppo,
+                method=method,
+            )
+        elif is_recurrent_method(method):
+            memory, old = _critic_network_values(
+                state.critic_params,
+                cast(Array, critic_memory),
+                cast(Array, physical),
+                rows.episode_start,
+                rows.valid,
+                input_scale=ppo.input_scale,
+            )
+        else:
+            memory, old = _feedforward_physical_values(
+                state.critic_params,
+                cast(Array, physical),
+                rows.valid,
+                input_scale=ppo.input_scale,
+            )
         continues = ~rollout.final_ended
 
         def bootstrap(_: None) -> Array:
             """Value continuing final lanes without retaining bootstrap memory."""
-            _unused_memory, final = _critic_network_values(
-                state.critic_params,
-                memory,
-                final_physical[None],
-                jnp.zeros((1, games), jnp.bool_),
-                continues[None],
-                input_scale=ppo.input_scale,
-            )
+
+            def time_axis(value: Array) -> Array:
+                """Wrap the true successor as one compact time row."""
+                return value[None]
+
+            if uses_local_critic(method):
+                _unused_memory, final = _local_critic_network_values(
+                    state.critic_params,
+                    memory,
+                    jax.tree.map(time_axis, rollout.final_observations),
+                    jax.tree.map(time_axis, rollout.final_action_mask),
+                    jnp.zeros((1, games), jnp.bool_),
+                    continues[None],
+                    ppo=ppo,
+                    method=method,
+                )
+            elif is_recurrent_method(method):
+                _unused_memory, final = _critic_network_values(
+                    state.critic_params,
+                    cast(Array, memory),
+                    cast(Array, rollout.final_training_state)[None],
+                    jnp.zeros((1, games), jnp.bool_),
+                    continues[None],
+                    input_scale=ppo.input_scale,
+                )
+            else:
+                _unused_memory, final = _feedforward_physical_values(
+                    state.critic_params,
+                    cast(Array, rollout.final_training_state)[None],
+                    continues[None],
+                    input_scale=ppo.input_scale,
+                )
             return jnp.where(continues[:, None] & rollout.final_active, final[0], 0.0)
 
         final = _cond(
@@ -537,7 +728,7 @@ def build_ppo_batch(
         )
         return memory, jnp.where(rows.valid[..., None], old, 0.0), final
 
-    def empty(_: None) -> tuple[Array, Array, Array]:
+    def empty(_: None) -> tuple[Tree, Array, Array]:
         """Keep the input critic carry and emit finite values without a network call."""
         return (
             state.critic_memory,
@@ -728,6 +919,7 @@ def update_learner(
     rollout: TrainingRollout,
     *,
     ppo: PPOConfig = DEFAULT_PPO_CONFIG,
+    method: str = "mappo",
 ) -> tuple[LearnerState, UpdateResult]:
     """Accept one real collection block, update PPO and publish its actor once.
 
@@ -741,10 +933,14 @@ def update_learner(
         current actor/history version. No intervening update is permitted.
     rollout : TrainingRollout
         Matching compact rollout with T=ppo.rollout_length, including any final
-        invalid suffix. B must divide into the configured groups/minibatches.
+        invalid suffix. B and T must satisfy the selected method's grouping
+        rules checked by validate_ppo_batch_size.
     ppo : PPOConfig, default=DEFAULT_PPO_CONFIG
         Same static settings used at initialization. Capture these in the jit
         wrapper; changing ordinary state/data values does not make them static.
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+        Same static method used at initialization. Keep it in the compiled
+        wrapper; it is not stored as a dynamic learner-state leaf.
 
     Returns
     -------
@@ -768,11 +964,10 @@ def update_learner(
     collect from a returned failed state. Host code must check result.failed
     before logging an accepted update, saving it or scheduling another action.
     """
-    length, games = _rollout_shapes(state, rollout)
-    if length != ppo.rollout_length or games % (ppo.groups * ppo.minibatches):
-        raise ValueError(
-            "MAPPO needs T=rollout_length and B divisible by groups*minibatches"
-        )
+    length, games = _rollout_shapes(state, rollout, method=method)
+    if length != ppo.rollout_length:
+        raise ValueError("PPO needs T=rollout_length")
+    validate_ppo_batch_size(games, ppo, method=method)
     if collected.state.episode_id.shape != (games,):
         raise ValueError("Collected boundary must retain the learner batch")
     entry_reason = jnp.where(
@@ -787,7 +982,7 @@ def update_learner(
 
     def nonempty(_: None) -> tuple[LearnerState, UpdateResult]:
         """Build fixed old-value data and conditionally accept the update."""
-        batch, memory = build_ppo_batch(state, rollout, ppo=ppo)
+        batch, memory = build_ppo_batch(state, rollout, ppo=ppo, method=method)
         batch_reason = jnp.where(
             ~_finite((batch, memory)),
             LEARNER_ERROR_NONFINITE_BATCH,
@@ -799,11 +994,12 @@ def update_learner(
         def learn(_: None) -> tuple[LearnerState, UpdateResult]:
             """Apply the existing PPO once; publish only a finite complete candidate."""
             index = state.completed_updates + jnp.int32(1)
-            updated, metrics = update_recurrent_ppo(
+            updated, metrics = update_ppo(
                 _ppo_state(state),
                 batch,
                 jax.random.fold_in(state.shuffle_root, index),
                 ppo,
+                method=method,
             )
 
             def publish(_: None) -> tuple[LearnerState, UpdateResult]:
@@ -875,6 +1071,7 @@ def validate_learner(
     state: LearnerState,
     *,
     ppo: PPOConfig = DEFAULT_PPO_CONFIG,
+    method: str = "mappo",
     recheck_installed_content: bool = True,
 ) -> None:
     """Validate a complete accepted learner before any mutable recording recovery.
@@ -887,6 +1084,9 @@ def validate_learner(
         Fully restored numerical boundary, including initialization at update 0.
     ppo : PPOConfig, default=DEFAULT_PPO_CONFIG
         Original static learner settings; optimizer/network shapes must agree.
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+        Original static method; memory, critic payload and model shapes must
+        match. Never infer it from actor shapes, which MAPPO and IPPO share.
     recheck_installed_content : bool, default=True
         Python bool. True reruns installed-content preflight, as restore requires.
         Checkpoint saves use False to reuse the immutable descriptor verified
@@ -911,9 +1111,10 @@ def validate_learner(
     """
     if type(recheck_installed_content) is not bool:
         raise TypeError("recheck_installed_content must be a Python bool")
-    games = _state_shapes(state)
+    games = _state_shapes(state, method=method)
     _check_value_norm(state.value_norm, ppo.value_normalization)
-    if games % (ppo.groups * ppo.minibatches) or not collection.collect_training_state:
+    validate_ppo_batch_size(games, ppo, method=method)
+    if collection.collect_training_state == uses_local_critic(method):
         raise ValueError("Learner descriptor or PPO batch is incompatible")
     if bool(state.failed) or int(state.failure_reason) != LEARNER_ERROR_NONE:
         raise ValueError("A failed learner boundary cannot be restored")
@@ -936,7 +1137,7 @@ def validate_learner(
     ):
         raise ValueError("Learner shuffle key does not match the run root")
     numerical = _ppo_state(state)
-    spec = _ppo_spec(ppo)
+    spec = _ppo_spec(ppo, method)
     if jax.tree.structure(numerical) != jax.tree.structure(spec):
         raise ValueError("Learner network or optimizer structure is incompatible")
     for actual, expected in zip(

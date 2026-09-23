@@ -1174,9 +1174,11 @@ def test_unregistered_trainer_exits_if_supervisor_dies_before_release(
         child.wait()
 
 
+@pytest.mark.parametrize("method", ("mappo", "ippo", "ff_mappo", "ff_ippo"))
 def test_preparation_keeps_builtin_panel_references_and_checks_isolated_reload(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str
 ) -> None:
+    from marl_battlegrounds.baselines.ppo import validate_ppo_method
     from marl_battlegrounds.training.runner import TrainConfig, config_to_dict
     from marl_battlegrounds.training.validation import create_panel, load_panel
 
@@ -1187,7 +1189,11 @@ def test_preparation_keeps_builtin_panel_references_and_checks_isolated_reload(
     atomic_json(
         config_path,
         config_to_dict(
-            TrainConfig(purpose="demonstration", validation_panel=str(panel.path))
+            TrainConfig(
+                method=validate_ppo_method(method),
+                purpose="demonstration",
+                validation_panel=str(panel.path),
+            )
         ),
     )
 
@@ -1220,6 +1226,7 @@ def test_preparation_keeps_builtin_panel_references_and_checks_isolated_reload(
         tmp_path, target, config_path, commit="approved", gpu_uuid="GPU-internal"
     )
     copied = load_panel(target / "panel")
+    assert launch._read(target / "config.json")["method"] == method
     assert copied.digest == panel.digest
     assert [member.reference for member in copied.members] == ["tdm-alpha", "tdm-beta"]
     assert len(reload_commands) == 1

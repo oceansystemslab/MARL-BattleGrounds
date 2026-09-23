@@ -7,11 +7,12 @@ decisions and their limits, use the [baseline methods record](baseline_methods.m
 The `marl_battlegrounds.training` package prepares verified maps, samples
 configurations and collects exact experience budgets with optional curriculum,
 score shaping and self-play history. The `marl_battlegrounds.baselines` package
-provides input encoders, exact action helpers and recurrent MAPPO calculations.
-The optional trainer joins these components into complete recurrent MAPPO runs,
+provides input encoders, exact action helpers and shared PPO calculations.
+The optional trainer joins these components into recurrent and feedforward
+MAPPO and IPPO runs,
 with learner checkpoints, frozen actor loading, validation and analysis.
 Collection alone still performs no optimizer update. Ordinary environment and
-collection helpers need only base dependencies; MAPPO needs `training` and its
+collection helpers need only base dependencies; PPO needs `training` and its
 automatic plots need `viz`. A working trainer is not a claim of learned skill.
 
 Install the existing `training` extra to use PPO. In a prepared contributor
@@ -522,7 +523,7 @@ Core observations stay in world coordinates. The optional helpers
 [input.py](../../src/marl_battlegrounds/policies/input.py) let any method
 reflect a team's permitted view and move mask about the vertical centerline
 and map a chosen move back, using only that team's own spawn pads and the map
-width. The recurrent MAPPO baseline calls them before encoding when its spawn
+width. The four PPO baselines call them before encoding when their spawn
 frame is `"left"`, its default; the environment, evaluator and tournament never
 apply them.
 
@@ -552,6 +553,9 @@ neutral-only masks. The helpers do not repair sampled actions.
 
 ## Recurrent MAPPO Boundary
 
+These existing MAPPO calls retain their defaults and saved identities. For all
+four methods, use the method-aware calls described below.
+
 [ppo.py](../../src/marl_battlegrounds/baselines/ppo.py) provides these entry points:
 
 - `initialize_ppo` creates separate untrained actor and critic parameters and
@@ -570,6 +574,49 @@ own output head. There is no running input normalization or added agent-ID
 wrapper. New learners normalize critic targets as described below.
 The [source ledger](source_reuse.md) gives the exact donor, initialization,
 settings, masks and independent offline reference.
+
+### PPO Method Choices
+
+Use `TrainConfig(method=...)` to choose the full workflow. The default is
+`"mappo"`.
+
+| Method | Actor | Critic |
+| --- | --- | --- |
+| `mappo` | 128-wide recurrent network | Physical training state, separate memory |
+| `ippo` | Same recurrent network | Each actor's permitted inputs, separate memory |
+| `ff_mappo` | Two 128-wide ReLU layers | Physical training state, no memory |
+| `ff_ippo` | Two 128-wide ReLU layers | Each actor's permitted inputs, no memory |
+
+The actor and critic always have separate parameters and optimizers. IPPO
+collects no physical-state features. Its critic expands compact permitted
+observations one time row at a time and reuses encoded actor inputs inside
+each learning minibatch. It cannot read another actor's private row or memory.
+Feedforward System and critic memory are empty tuples; there are no unused
+recurrent arrays or GRU calls.
+
+Low-level users pass the same static `method` to `initialize_ppo`,
+`make_ppo_system`, `init_learner`, `build_ppo_batch`, `update_learner`,
+`validate_learner` and
+checkpoint save/export/restore calls. `update_ppo` selects the complete numerical
+update. Existing `make_recurrent_mappo_system` and `update_recurrent_ppo` calls
+keep their MAPPO meaning. Ordinary researchers need only the saved method in
+`TrainConfig`; the runner passes it to these owners.
+
+Returns and advantages always use time order. Recurrent minibatches keep whole
+game sequences. Feedforward minibatches shuffle time/game rows within each
+group, keeping five actor slots together. With G groups and M minibatches,
+recurrent B must be divisible by G times M. Feedforward B must be divisible by
+G, and T times B must be divisible by G times M. Here B is the environment
+batch and T is the rollout length. Training needs an even B for paired spawn
+ends. For example,
+B6/T4/G2/M2 works for feedforward training but cannot form recurrent minibatches.
+
+All four methods share ValueNorm, input-scale and spawn-frame settings below.
+Recurrent IPPO uses the existing curriculum and shaping options. The initial
+feedforward experiment recipes are plain; reusable flags remain available but
+do not establish feedforward treatment results. Parameter counts are listed in
+the [source ledger](source_reuse.md#ppo-model-choices). These architectures have
+different parameter counts, so their comparison is not a pure test of memory.
 
 `PPOConfig(input_scale=0.01)` explicitly scales actor and critic inputs before
 their first layer. The default `1.0` preserves the donor and old models. Use a
@@ -820,7 +867,43 @@ select a GPU or launch either experiment.
 `TrainConfig` defaults to plain recurrent MAPPO, 32 environments, rollout length
 128 and 10,000,000 real transitions. `curriculum` and `shaping` are independent
 Boolean choices. `recording=False` skips episode-table drains; update records,
-learner checkpoints and final reports still save. Other learners are rejected.
+learner checkpoints and final reports still save. Set `method="ippo"`,
+`method="ff_mappo"` or `method="ff_ippo"` to use another PPO method with the same
+workflow. Unknown method values fail before output or recovery work.
+
+For a small complete example with saved selection and evaluation, use:
+
+```python
+import marl_battlegrounds as marl_bgs
+from marl_battlegrounds import training
+from marl_battlegrounds.baselines.ppo import PPOConfig
+
+result = training.train(
+    training.TrainConfig(
+        method="ippo", seed=19047101, num_envs=4, total_env_steps=32,
+        ppo=PPOConfig(rollout_length=4, epochs=1),
+        validation_opponents=("tdm-alpha",), purpose="development",
+        validation_fractions=(0.5, 1.0),
+        routine_seed_pairs=1, confirmation_seed_pairs=1,
+    ),
+    output_dir="artifacts/ippo-workflow",
+)
+actor = training.load_system(result.selected_actor or result.final_actor)
+games = marl_bgs.evaluate(
+    actor, "tdm-alpha", num_episodes=2, maps=[42], seed=19047103,
+    num_envs=2, phase="validation", output_dir="artifacts/ippo-evaluation",
+)
+reports = training.analyze(
+    [result.run_dir], output_dir="artifacts/ippo-analysis",
+)
+```
+
+Run this on CPU. Change only `method` to choose any of the four implementations;
+use a fresh output directory for each run. These tiny budgets check the workflow,
+not useful play. For recurrent IPPO curriculum/shaping wiring, use 256 transitions
+and `curriculum=True`, `shaping=True`, or both in the same config. Set
+`validation_opponents=None` for those small wiring checks. A short check
+does not prove that every curriculum stage received useful experience.
 
 A new run requires a new or empty exact output directory. Resume requires the
 path of a complete learner checkpoint, not an actor export or run directory:
@@ -861,10 +944,21 @@ JAX_PLATFORMS=cpu uv run --no-sync python -m marl_battlegrounds train \
 uv run --no-sync python -m marl_battlegrounds analyze-training RUN --output-dir REPORT
 ```
 
-The [complete example](../../examples/mappo_training.py) also accepts `--config`
+The [complete example](../../examples/mappo_training.py) also accepts
+`--method ippo`, `--method ff_mappo` or `--method ff_ippo` for its tiny new run. Omitting
+`--method` keeps MAPPO; `--method mappo` makes it explicit. For example:
+
+```bash
+JAX_PLATFORMS=cpu uv run --no-sync python examples/mappo_training.py \
+  --method ff_ippo --output-dir artifacts/ff-ippo-example --evaluate
+```
+
+The example also accepts `--config`
 or `--resume-from`. Adding `--evaluate` loads the saved actor, plays two CPU
 diagnostic games against Random and saves ordinary M8 results. These are wiring
-checks, not useful-learning evidence or checkpoint-selection results.
+checks, not useful-learning evidence or checkpoint-selection results. An explicit
+`--method` cannot accompany `--config` or `--resume-from`; those settings already
+name the saved method. The package CLI reads method from the JSON config.
 
 ### Progress And Costs
 
@@ -948,7 +1042,7 @@ Every save still checks the actual source bank carried by the learner, its
 numerical state and its counters. Restore places every array on the selected
 device, including empty recording and metric IDs.
 
-Built-in MAPPO fixes GPU kernel selection with `xla_gpu_autotune_level=0` on its
+Built-in PPO fixes GPU kernel selection with `xla_gpu_autotune_level=0` on its
 outer collection and update compilations, including recorded collection. This
 avoids choosing different kernels from fresh timing trials after a restart.
 It changes no process-wide JAX setting. Raw numerical helpers remain usable in
@@ -963,6 +1057,17 @@ Frozen actor exports contain only deployment data and provenance. They load as
 sampled M8 Systems without critic state, optimizer state or training maps. Death
 and respawn preserve actor memory; episode resets clear it. The training-only
 critic view never enters actor decisions or exported actor memory.
+
+Saved model tags distinguish `recurrent_mappo_128`, `recurrent_ippo_128`,
+`feedforward_mappo_128x128` and `feedforward_ippo_128x128`. The loader reads the
+validated schema; it never guesses the method from array shapes or filenames.
+Equal actor weights from different methods have different inference identities.
+New variant identities include the model, weights, scale and frame. Historical
+MAPPO schema and inference identities remain unchanged. Missing fields in an
+old saved config mean MAPPO, input scale 1.0, world frame and ValueNorm off.
+These meanings apply to loading saved work; new configs use today's defaults.
+Exact learner resume still requires the original source, dependencies and
+execution settings. Actor-only loading supports independent deployment.
 
 Automatic reports include `run_summary.md`, `learning_curve.csv`,
 `learning_curves.png`, `learning_curves.svg` and validation cell results. Analysis

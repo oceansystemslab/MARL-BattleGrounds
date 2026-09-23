@@ -84,8 +84,10 @@ Use `reset_done` for ordinary terminal resets, or explicit `reset` arguments
 for custom episode starts. A mask describes current legal actions; a structural
 action space alone cannot express every coupled action constraint.
 
-The optional [training package](docs/training/README.md) adds recurrent MAPPO
-training, complete save/resume, frozen actor loading and learning reports. The
+The optional [training package](docs/training/README.md) adds recurrent and
+feedforward MAPPO and IPPO, complete save/resume, frozen actor loading and
+learning reports. Choose the method in one `TrainConfig`; the workflow stays
+the same. The
 [baseline System example](examples/baseline_system.py) uses initialized,
 **untrained** weights through the same public workflow. The
 [complete training example](examples/mappo_training.py) exercises the public

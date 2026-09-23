@@ -25,6 +25,10 @@ resume config that names another frame before any file changes.
 Missing historical value normalization is False in both config readers. Enabled
 statistics are saved with the learner; disabled state keeps its old array paths.
 Conflicting settings fail before payload restore or writer recovery.
+All four PPO methods retain exact continuation with both normalization modes,
+including a final partial row. Their exports load actor arrays only. Explicit
+model schemas distinguish equal actor bytes and reject conflicts before writer
+tokens, numerical restore or file changes. Feedforward memory stays empty.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ from contextlib import ExitStack
 from dataclasses import asdict, replace
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import jax
@@ -48,6 +53,7 @@ import marl_battlegrounds.training.collection as collection_module
 from marl_battlegrounds.baselines.ppo import (
     PPOConfig,
     ValueNormState,
+    make_ppo_system,
     make_recurrent_mappo_system,
 )
 from marl_battlegrounds.evaluation.policy_execution import apply_systems, init_systems
@@ -1136,11 +1142,13 @@ def test_saved_training_config_fixes_a_missing_frame_at_world_without_mutation()
         "value_normalization": False,
     }
     assert fixed["seed"] == 3
+    assert fixed["method"] == "mappo"
     assert saved["metadata"]["config"] == {"seed": 3, "ppo": {"input_scale": 0.01}}
     without_block = checkpoints.saved_training_config(
         {"metadata": {"config": {"seed": 3}}}
     )
     assert without_block["ppo"] == {
+        "input_scale": 1.0,
         "spawn_frame": "world",
         "value_normalization": False,
     }
@@ -1291,3 +1299,305 @@ def test_resume_reads_a_missing_saved_frame_as_world_and_rejects_another(
     explicit = replace(inherited, ppo=replace(inherited.ppo, spawn_frame="left"))
     with pytest.raises(ValueError, match="Resume config differs"):
         runner.train(explicit, resume_from=path)
+
+
+@pytest.fixture(scope="module")
+def variant_content() -> PreparedTrainingContent:
+    return prepare_training_content()
+
+
+@pytest.mark.parametrize("method", ["mappo", "ippo", "ff_mappo", "ff_ippo"])
+@pytest.mark.parametrize("value_normalization", [False, True])
+def test_variants_resume_partial_updates_and_load_only_actor_arrays(
+    variant_content: PreparedTrainingContent,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    value_normalization: bool,
+) -> None:
+    ppo = replace(PPO, value_normalization=value_normalization)
+    collection, initial = init_learner(
+        schedule=make_training_schedule(total_env_steps=12, num_envs=4),
+        seed=42,
+        ppo=ppo,
+        method=method,
+        prepared=variant_content,
+        metrics="none",
+        recording=value_normalization,
+    )
+    assert collection.collect_training_state == (method in ("mappo", "ff_mappo"))
+    metadata = _metadata()
+    config = cast(dict[str, Any], metadata["config"])
+    config.update(method=method, total_env_steps=12, ppo=asdict(ppo))
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("A method mismatch must fail before writer tokens or array restore")
+
+    untouched = _files(tmp_path)
+    with pytest.raises(ValueError, match="method"):
+        save_checkpoint(
+            tmp_path,
+            collection,
+            initial,
+            metadata=metadata,
+            writer=cast(RunWriter, SimpleNamespace(checkpoint_recording=forbidden)),
+            ppo=ppo,
+            method="ippo" if method != "ippo" else "mappo",
+        )
+    assert _files(tmp_path) == untouched
+    update = cast(
+        Any,
+        jax.jit(
+            partial(update_learner, ppo=ppo, method=method),
+            compiler_options=training_compiler_options(),
+        ),
+    )
+    writer = _writer(tmp_path, collection, metadata)
+    try:
+        carry, rollout = collect_training_rollout(
+            collection, initial.carry, length=2, writer=writer
+        )
+        state, result = update(initial, carry, rollout)
+        assert bool(result.performed) and not bool(result.failed)
+        path = save_checkpoint(
+            tmp_path,
+            collection,
+            state,
+            metadata=metadata,
+            writer=writer,
+            ppo=ppo,
+            method=method,
+        )
+        carry, final_rollout = collect_training_rollout(
+            collection, state.carry, length=2, writer=writer
+        )
+        final, result = update(state, carry, final_rollout)
+        assert bool(result.performed) and not bool(result.failed)
+        assert int(final_rollout.real_steps) == 1
+    finally:
+        if writer is not None:
+            writer.close()
+    restored = restore_checkpoint(
+        path,
+        collection,
+        initial,
+        expected_metadata=_expected(metadata),
+        ppo=ppo,
+        method=method,
+    )
+    _equal(restored.state, state)
+    assert restored.details["schemas"] == checkpoints.checkpoint_schemas(method)
+    assert (restored.state.value_norm is not None) == value_normalization
+    if method.startswith("ff_"):
+        assert (
+            restored.state.critic_memory
+            == restored.state.carry.memory.team_a
+            == restored.state.carry.memory.team_b
+            == ()
+        )
+        assert not any(
+            row["path"][0] == {"field": "critic_memory"}
+            for row in restored.details["layout"]
+        )
+    writer = resume_recording(restored, tmp_path)
+    try:
+        finish_checkpoint_recovery(restored, tmp_path)
+        carry, resumed_rollout = collect_training_rollout(
+            collection, restored.state.carry, length=2, writer=writer
+        )
+        resumed, _ = update(restored.state, carry, resumed_rollout)
+        _equal(resumed_rollout, final_rollout)
+        _equal(resumed, final)
+    finally:
+        if writer is not None:
+            writer.close()
+
+    provenance = {
+        "run_id": metadata["run_id"],
+        "seed": 42,
+        "env_steps": 8,
+        "checkpoint_id": path.name,
+    }
+    export = export_system(
+        state.carry.history.current_variables,
+        tmp_path / "actor",
+        metadata=provenance,
+        input_scale=ppo.input_scale,
+        spawn_frame=ppo.spawn_frame,
+        method=method,
+    )
+    restore_arrays = checkpoints._restore_arrays  # pyright: ignore[reportPrivateUsage]
+    restored_paths: list[str] = []
+
+    def actor_only(array_path: Path, template: Tree, device: object) -> Tree:
+        restored_paths.append(array_path.name)
+        return restore_arrays(array_path, template, device)
+
+    monkeypatch.setattr(checkpoints, "_restore_arrays", actor_only)
+    original = make_ppo_system(
+        state.carry.history.current_variables,
+        method=method,
+        input_scale=ppo.input_scale,
+        spawn_frame=ppo.spawn_frame,
+    )
+    observations, env_state = state.carry.observations, state.carry.state
+    memory = init_systems(
+        original, original, observations, env_state, jax.random.key(71)
+    )
+    expected = apply_systems(
+        original, original, memory, observations, env_state, jax.random.key(72)
+    )
+    identities = []
+    for saved in (path, export):
+        actor = load_system(saved)
+        actual = apply_systems(
+            actor, original, memory, observations, env_state, jax.random.key(72)
+        )
+        _equal(actual, expected)
+        identity = artifact_identity(saved)
+        assert actor.checkpoint == identity["actor_digest"]
+        assert identity["schemas"] == checkpoints.checkpoint_schemas(method)
+        identities.append(identity["actor_digest"])
+    assert identities[0] == identities[1]
+    assert restored_paths == ["actor", "actor"]
+
+    monkeypatch.setattr(checkpoints, "_restore_arrays", forbidden)
+    before = _files(tmp_path)
+    with pytest.raises(ValueError, match="method"):
+        restore_checkpoint(
+            path,
+            collection,
+            initial,
+            expected_metadata=_expected(metadata),
+            ppo=ppo,
+            method="mappo" if method != "mappo" else "ippo",
+        )
+    assert _files(tmp_path) == before
+    assert not (tmp_path / "checkpoint_recovery.json").exists()
+
+
+@pytest.mark.parametrize("method", ["mappo", "ff_mappo"])
+def test_equal_actor_bytes_keep_distinct_methods_and_immutable_exports(
+    variant_content: PreparedTrainingContent, tmp_path: Path, method: str
+) -> None:
+    collection, state = init_learner(
+        schedule=make_training_schedule(total_env_steps=8, num_envs=4),
+        ppo=PPO,
+        method=method,
+        prepared=variant_content,
+        metrics="none",
+    )
+    del collection
+    counterpart = "ippo" if method == "mappo" else "ff_ippo"
+    variables = state.carry.history.current_variables
+    metadata: dict[str, object] = {
+        "run_id": "equal-weights",
+        "seed": 42,
+        "env_steps": 0,
+        "checkpoint_id": "b" * 64,
+    }
+    exports: list[Path] = []
+    for selected in (method, counterpart):
+        destination = tmp_path / selected
+        exports.append(
+            export_system(
+                variables,
+                destination,
+                metadata=metadata,
+                spawn_frame="world",
+                method=selected,
+            )
+        )
+        before = _files(destination)
+        assert (
+            export_system(
+                variables,
+                destination,
+                metadata=metadata,
+                spawn_frame="world",
+                method=selected,
+            )
+            == destination
+        )
+        assert _files(destination) == before
+    left, right = (artifact_identity(path) for path in exports)
+    assert left["weight_digest"] == right["weight_digest"]
+    assert left["actor_digest"] != right["actor_digest"]
+    assert left["schemas"] != right["schemas"]
+    before = _files(exports[0])
+    with pytest.raises(ValueError, match="different artifact"):
+        export_system(
+            variables,
+            exports[0],
+            metadata=metadata,
+            spawn_frame="world",
+            method=counterpart,
+        )
+    assert _files(exports[0]) == before
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "unknown-model",
+        "schema-version",
+        "schema-boolean",
+        "schema-float",
+        "outer-boolean",
+        "extra-key",
+        "method",
+    ],
+)
+def test_signed_method_or_full_schema_conflicts_fail_before_payloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    details: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "learner",
+        "schemas": checkpoints.checkpoint_schemas("ippo"),
+        "metadata": _metadata(),
+        "actor_layout": [],
+        "actor_digest": "a" * 64,
+        "files": {},
+        "collection": {},
+        "layout": [],
+        "recording_token": None,
+        "counters": {"updates": 0, "env_steps": 0},
+    }
+    details["metadata"]["config"]["method"] = "ippo"
+    if mutation == "unknown-model":
+        details["schemas"]["model"] = "unknown"
+    elif mutation == "schema-version":
+        details["schemas"]["actor_input"] = "wrong"
+    elif mutation == "schema-boolean":
+        details["schemas"]["checkpoint"] = True
+    elif mutation == "schema-float":
+        details["schemas"]["learner_keys"] = 1.0
+    elif mutation == "outer-boolean":
+        details["schema_version"] = True
+    elif mutation == "extra-key":
+        details["schemas"]["extra"] = 1
+    else:
+        del details["metadata"]["config"]["method"]
+    details["checkpoint_id"] = hashlib.sha256(
+        checkpoints._json_bytes(details)  # pyright: ignore[reportPrivateUsage]
+    ).hexdigest()
+    (tmp_path / "checkpoint_details.json").write_bytes(checkpoints._json_bytes(details))  # pyright: ignore[reportPrivateUsage]
+    before = _files(tmp_path)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("Conflicting description must fail before reading payload files")
+
+    monkeypatch.setattr(checkpoints, "_inventory", forbidden)
+    with pytest.raises(ValueError, match=r"model|schema|method"):
+        read_checkpoint_details(tmp_path)
+    assert _files(tmp_path) == before
+
+
+def test_actor_templates_cache_only_abstract_selected_method_leaves() -> None:
+    for method in ("mappo", "ippo", "ff_mappo", "ff_ippo"):
+        template = checkpoints._actor_template(method)  # pyright: ignore[reportPrivateUsage]
+        assert checkpoints._actor_template(method) is template  # pyright: ignore[reportPrivateUsage]
+        assert all(
+            isinstance(leaf, jax.ShapeDtypeStruct) for leaf in jax.tree.leaves(template)
+        )

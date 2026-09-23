@@ -2,7 +2,7 @@
 
 The inputs and actions modules use base JAX dependencies. The ppo module needs
 the training extra. Importing this package alone loads neither JAX nor Flax.
-Use ppo.make_recurrent_mappo_system for an initialized, untrained M8 System;
+Use ppo.make_ppo_system for an initialized, untrained PPO M8 System;
 these components do not start training or load a deployment checkpoint.
 """
 
