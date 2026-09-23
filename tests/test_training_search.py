@@ -91,8 +91,8 @@ def test_declaration_keeps_all_main_levers_and_three_fresh_seed_blocks(
     ]
     assert declared["tiers"] == [8]
     assert declared["fixed_discovery_steps"] == 20_054_016
-    assert declared["target_seconds"] == declared["hard_stop_seconds"] == 46_800
-    assert declared["numerical_stop_seconds"] == 46_500
+    assert declared["target_seconds"] == declared["hard_stop_seconds"] == 50_400
+    assert declared["numerical_stop_seconds"] == 50_100
     assert len(declared["discovery_seeds"]) == len(declared["finalist_seeds"]) == 3
     assert not set(declared["discovery_seeds"]) & set(declared["finalist_seeds"])
     base = declared["base_config"]
@@ -113,7 +113,7 @@ def test_fixed_eight_budget_does_not_expand_into_spare_time(cost: float) -> None
     assert budgets["finalist_steps"] == 40_108_032
     assert len(budgets["discovery_order"]) == 24
     assert budgets["training_transitions"] == 721_944_576
-    assert budgets["reserved_seconds"] <= 46_800
+    assert budgets["reserved_seconds"] <= 50_400
     assert {row["recipe_id"] for row in budgets["discovery_order"]} == {
         f"c{i:02}" for i in range(8)
     }

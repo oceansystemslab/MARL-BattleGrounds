@@ -55,7 +55,7 @@ run with a changed opponent-history schedule.
 The six fresh finalist runs each receive exactly 40,108,032 transitions. This
 is 30 training runs and 721,944,576 transitions in total. The forecast includes
 setup, training, saving, validation, assessment and reporting, with a 10% timing
-margin and five-minute reporting reserve. It must fit thirteen hours. Spare
+margin and five-minute reporting reserve. It must fit fourteen hours. Spare
 time does not increase experience, and slow timing does not reduce it. The
 fixed_discovery_steps declaration field makes this explicit; declarations
 without it retain the historical adaptive rule. Rewards cannot change timing
@@ -108,7 +108,7 @@ bash artifacts/m9-m10/packet-4/mappo-optimization-20260923/package-eight/launch.
 
 Preparation and calibration do not start the scientific study. Inspect the
 qualified source, measurements and resolved `budgets.json` before launch.
-Calibration runs in the foreground and has its own one-hour limit. The thirteen-
+Calibration runs in the foreground and has its own one-hour limit. The fourteen-
 hour study clock begins only at scientific launch. Launch returns immediately;
 the detached supervisor continues without an assistant or open terminal.
 An interrupted calibration needs a new package. Resuming a half-finished
@@ -124,8 +124,8 @@ the verified owned processes to shut down. Resume keeps the original source,
 recipes, seeds, experience budgets and clock. It recovers through the trainer
 and evaluator rather than repeating complete work or replacing failed seeds.
 
-Numerical work stops by twelve hours fifty-five minutes; the remaining five
-minutes are for cleanup and reporting. Thirteen hours is the admission and outer limit;
+Numerical work stops by thirteen hours fifty-five minutes; the remaining five
+minutes are for cleanup and reporting. Fourteen hours is the admission and outer limit;
 experience budgets remain fixed. Shutdown starts early enough to include its
 bounded waits. The outer supervisor gives each inner supervisor time to stop
 its own worker group before forcing the controller group to exit. A stopped

@@ -116,7 +116,7 @@ def declaration() -> Record:
     restore the caller's device default. JAX may still discover other backends
     in direct Python calls. Returned JSON fixes eight recipes, three discovery
     seeds each, 20,054,016 transitions per discovery run and twice that per fresh
-    finalist. Timing must fit thirteen hours including margin and reporting.
+    finalist. Timing must fit fourteen hours including margin and reporting.
     """
     import jax
 
@@ -160,9 +160,9 @@ def declaration() -> Record:
         "quantum": _QUANTUM,
         "minimum_steps": _MINIMUM_STEPS,
         "fixed_discovery_steps": _MINIMUM_STEPS,
-        "target_seconds": 46_800,
-        "numerical_stop_seconds": 46_500,
-        "hard_stop_seconds": 46_800,
+        "target_seconds": 50_400,
+        "numerical_stop_seconds": 50_100,
+        "hard_stop_seconds": 50_400,
         "timing_margin": 1.10,
         "report_reserve_seconds": 300,
         "calibration_limit_seconds": 3_600,
