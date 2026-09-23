@@ -385,6 +385,9 @@ both scenarios adopted behavior v2 through the single former
 the existing general controller is displayed as **Reactive TDM ALPHA** and
 the shared variant as **Reactive TDM BETA**. BETA behavior v3 pursues Priest,
 then Mage, then Hunter; other classes and no-prey Rogue movement remain ALPHA.
+Later versions keep that order: BETA v4 added wall steering
+([A35](../design/specification_amendments.md#a35-reactive-tdm-wall-steering))
+and BETA v5 the blocked-wall fixes ([A42](../design/specification_amendments.md#a42-reactive-tdm-fixes-at-blocked-walls)).
 Rogue combat remains independent of pursuit and bounded by its own Basic radius
 and exact masks. The internal `scenario_5` identity and
 V5 payload remain unchanged; the old Scenario 3 executable is removed while

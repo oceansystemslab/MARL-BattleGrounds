@@ -7,6 +7,8 @@
 # and frontend gates, then recheck HEAD, the index tree and worktree cleanliness.
 # The script reports success only for that unchanged candidate. It never stages
 # or commits. git write-tree may write Git tree objects while fingerprinting.
+# A caller's GIT_INDEX_FILE selects this gate's candidate only. Child validation
+# uses its own Git indexes so tests can safely create separate repositories.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -72,8 +74,10 @@ fi
 
 status=0
 marl_validation_init 2 before-commit
-marl_validation_start "Complete Python validation" "${SCRIPT_DIR}/check.sh"
-marl_validation_start "Complete frontend validation" "${SCRIPT_DIR}/check_frontend.sh"
+marl_validation_start "Complete Python validation" \
+  env -u GIT_INDEX_FILE "${SCRIPT_DIR}/check.sh"
+marl_validation_start "Complete frontend validation" \
+  env -u GIT_INDEX_FILE "${SCRIPT_DIR}/check_frontend.sh"
 if ! marl_validation_finish; then
   status=1
 fi

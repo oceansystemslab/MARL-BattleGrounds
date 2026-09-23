@@ -1138,60 +1138,9 @@ class RunWriter:
         identity evidence, never method memory or a call to the method itself.
         Existing stable facts must match; execution placement may differ.
         """
-        from marl_battlegrounds.evaluation.recording_identity import (
-            normalize_system_registration,
+        return _prepare_pass_identity(
+            self._details, phase, pass_id, policies, checkpoint_id, details
         )
-
-        if (
-            not isinstance(cast(object, phase), str)
-            or not phase
-            or not isinstance(cast(object, pass_id), str)
-            or not pass_id
-        ):
-            raise ValueError("phase and pass_id must be nonempty strings")
-        descriptions: dict[str, object] = {}
-        systems: dict[str, Any] = {}
-        system_ids: dict[str, str] = {}
-        for team, value in (policies or {}).items():
-            identifier, registration = normalize_system_registration(value, phase=phase)
-            systems[identifier] = registration
-            system_ids[team] = identifier
-            # Legacy serialized Policy descriptions retain their exact public fields.
-            descriptions[team] = (
-                _json_value(cast(object, value))
-                if isinstance(value, (str, dict))
-                else registration
-            )
-        identity: dict[str, Any] = {
-            "phase": phase,
-            "pass_id": pass_id,
-            "policies": descriptions,
-            "system_ids": system_ids,
-            "checkpoint_id": checkpoint_id,
-            "details": {} if details is None else _json_value(details),
-            "policy_state": "frozen"
-            if systems
-            and all(v["parameter_status"] == "frozen" for v in systems.values())
-            else "evolving",
-        }
-        key = json.dumps((phase, pass_id), separators=(",", ":"))
-        previous = self._details["passes"].get(key)
-        execution_fields = {"runtime_provenance", "num_envs", "chunk_size"}
-        if previous is not None:
-            for name, value in identity.items():
-                old = previous.get(name)
-                if name == "details":
-                    value = {
-                        k: v for k, v in value.items() if k not in execution_fields
-                    }
-                    old = {
-                        k: v
-                        for k, v in cast(dict[str, Any], old or {}).items()
-                        if k not in execution_fields
-                    }
-                if old != value:
-                    raise ValueError("pass identity differs from the recorded run")
-        return key, identity, systems
 
     def register_episodes(
         self,
@@ -3671,3 +3620,73 @@ class RunWriter:
                 "Could not close run writer: "
                 f"{type(cleanup_error).__name__}: {cleanup_error}"
             )
+
+
+def _prepare_pass_identity(
+    manifest: Mapping[str, Any],
+    phase: str,
+    pass_id: str,
+    policies: dict[str, object] | None,
+    checkpoint_id: str | None,
+    details: dict[str, object] | None,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """Check proposed pass identity against a saved manifest without changing it.
+
+    manifest is the already-read run description. Remaining arguments are the
+    same facts accepted by RunWriter.start_pass. Return its pass key, normalized
+    identity and System registrations. Changed stable facts raise ValueError;
+    runtime placement, batch size and chunk size may differ. This does no I/O,
+    method initialization or action call. Writer and read-only verification use
+    this single identity rule.
+    """
+    from marl_battlegrounds.evaluation.recording_identity import (
+        normalize_system_registration,
+    )
+
+    if (
+        not isinstance(cast(object, phase), str)
+        or not phase
+        or not isinstance(cast(object, pass_id), str)
+        or not pass_id
+    ):
+        raise ValueError("phase and pass_id must be nonempty strings")
+    descriptions: dict[str, object] = {}
+    systems: dict[str, Any] = {}
+    system_ids: dict[str, str] = {}
+    for team, value in (policies or {}).items():
+        identifier, registration = normalize_system_registration(value, phase=phase)
+        systems[identifier] = registration
+        system_ids[team] = identifier
+        # Legacy serialized Policy descriptions retain their exact public fields.
+        descriptions[team] = (
+            _json_value(cast(object, value))
+            if isinstance(value, (str, dict))
+            else registration
+        )
+    identity: dict[str, Any] = {
+        "phase": phase,
+        "pass_id": pass_id,
+        "policies": descriptions,
+        "system_ids": system_ids,
+        "checkpoint_id": checkpoint_id,
+        "details": {} if details is None else _json_value(details),
+        "policy_state": "frozen"
+        if systems and all(v["parameter_status"] == "frozen" for v in systems.values())
+        else "evolving",
+    }
+    key = json.dumps((phase, pass_id), separators=(",", ":"))
+    previous = manifest["passes"].get(key)
+    execution_fields = {"runtime_provenance", "num_envs", "chunk_size"}
+    if previous is not None:
+        for name, value in identity.items():
+            old = previous.get(name)
+            if name == "details":
+                value = {k: v for k, v in value.items() if k not in execution_fields}
+                old = {
+                    k: v
+                    for k, v in cast(dict[str, Any], old or {}).items()
+                    if k not in execution_fields
+                }
+            if old != value:
+                raise ValueError("pass identity differs from the recorded run")
+    return key, identity, systems

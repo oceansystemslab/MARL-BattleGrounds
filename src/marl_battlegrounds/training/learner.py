@@ -31,7 +31,10 @@ from marl_battlegrounds.baselines.ppo import (
     PPOLearningOutputs,
     PPOMetrics,
     PPOTrainState,
-    critic_values,
+    ValueNormState,
+    _check_value_norm,
+    _critic_network_values,
+    _denormalize_values,
     initialize_ppo,
     make_recurrent_mappo_system,
     update_recurrent_ppo,
@@ -100,6 +103,9 @@ class LearnerState(NamedTuple):
         2 boundary/count mismatch, 3 nonfinite batch, 4 invalid behavior action,
         5 nonfinite update, and 6 rejected history publication. Failed states
         must not be used for further collection or saved as usable checkpoints.
+    value_norm : ValueNormState or None
+        Three shared critic statistics when enabled, otherwise None. They belong
+        to the accepted update boundary and roll back with all other learner state.
 
     Notes
     -----
@@ -116,6 +122,7 @@ class LearnerState(NamedTuple):
     completed_updates: Array
     failed: Array
     failure_reason: Array
+    value_norm: ValueNormState | None = None
 
 
 class UpdateSummary(NamedTuple):
@@ -270,7 +277,29 @@ def _finite(tree: Tree) -> Array:
     return jnp.all(jnp.stack(checks)) if checks else jnp.bool_(True)
 
 
-_boundary_finite = cast(Callable[[LearnerState], Array], jax.jit(_finite))
+def _valid_boundary(state: LearnerState) -> Array:
+    """Check finite leaves and possible averaging weights in one device result.
+
+    Saved normalization statistics must have nonnegative mean-square and a
+    weight between zero and one. Zero weight means no samples, so both sums
+    must also be zero. Shapes are checked separately before this compiled call.
+    """
+    valid = _finite(state)
+    norm = state.value_norm
+    if norm is not None:
+        valid &= (
+            (norm.running_mean_sq >= 0)
+            & (norm.debiasing_term >= 0)
+            & (norm.debiasing_term <= 1)
+            & (
+                (norm.debiasing_term > 0)
+                | ((norm.running_mean == 0) & (norm.running_mean_sq == 0))
+            )
+        )
+    return valid
+
+
+_saved_boundary_valid = cast(Callable[[LearnerState], Array], jax.jit(_valid_boundary))
 
 
 def _ppo_state(state: LearnerState) -> PPOTrainState:
@@ -280,6 +309,7 @@ def _ppo_state(state: LearnerState) -> PPOTrainState:
         state.critic_params,
         state.actor_opt_state,
         state.critic_opt_state,
+        state.value_norm,
     )
 
 
@@ -420,6 +450,7 @@ def init_learner(
         jnp.int32(0),
         jnp.bool_(False),
         jnp.int32(LEARNER_ERROR_NONE),
+        initialized.value_norm,
     )
     _state_shapes(state)
     return collection, state
@@ -467,6 +498,7 @@ def build_ppo_batch(
     helper for empty updates. No actor call, sampling, GAE, update or reset occurs.
     """
     length, games = _rollout_shapes(state, rollout)
+    _check_value_norm(state.value_norm, ppo.value_normalization)
     rows = rollout.transitions
     physical = cast(Array, rows.training_state)
     final_physical = cast(Array, rollout.final_training_state)
@@ -476,7 +508,7 @@ def build_ppo_batch(
 
     def values(_: None) -> tuple[Array, Array, Array]:
         """Read the sequence and value its successor without retaining that carry."""
-        memory, old = critic_values(
+        memory, old = _critic_network_values(
             state.critic_params,
             critic_memory,
             physical,
@@ -488,7 +520,7 @@ def build_ppo_batch(
 
         def bootstrap(_: None) -> Array:
             """Value continuing final lanes without retaining bootstrap memory."""
-            _unused_memory, final = critic_values(
+            _unused_memory, final = _critic_network_values(
                 state.critic_params,
                 memory,
                 final_physical[None],
@@ -514,6 +546,21 @@ def build_ppo_batch(
         )
 
     memory, old_values, final_values = _cond(rollout.real_steps > 0, values, empty)
+    old_normalized_values = None
+    if state.value_norm is not None:
+        old_normalized_values = old_values
+        old_values = jnp.where(
+            rows.valid[..., None],
+            _denormalize_values(old_values, state.value_norm),
+            0.0,
+        )
+        final_values = jnp.where(
+            (rollout.real_steps > 0)
+            & ~rollout.final_ended[:, None]
+            & rollout.final_active,
+            _denormalize_values(final_values, state.value_norm),
+            0.0,
+        )
     return PPOBatch(
         rows.observations,
         physical,
@@ -530,6 +577,7 @@ def build_ppo_batch(
         final_values,
         actor_memory,
         critic_memory,
+        old_normalized_values,
     ), memory
 
 
@@ -539,7 +587,24 @@ def _absent_result(state: LearnerState, ppo: PPOConfig) -> UpdateResult:
     counts = jnp.zeros((ppo.epochs, ppo.minibatches), jnp.int32)
     return UpdateResult(
         jnp.bool_(False),
-        PPOMetrics(floats, floats, floats, counts, counts),
+        PPOMetrics(
+            floats,
+            floats,
+            floats,
+            counts,
+            counts,
+            floats,
+            floats,
+            floats,
+            floats,
+            floats,
+            floats,
+            floats,
+            floats,
+            floats,
+            floats,
+            floats,
+        ),
         state.failed,
         state.failure_reason,
         SnapshotEvent(
@@ -760,6 +825,7 @@ def update_learner(
                     index,
                     jnp.bool_(False),
                     jnp.int32(LEARNER_ERROR_NONE),
+                    updated.value_norm,
                 )
                 result = UpdateResult(
                     jnp.bool_(True),
@@ -846,6 +912,7 @@ def validate_learner(
     if type(recheck_installed_content) is not bool:
         raise TypeError("recheck_installed_content must be a Python bool")
     games = _state_shapes(state)
+    _check_value_norm(state.value_norm, ppo.value_normalization)
     if games % (ppo.groups * ppo.minibatches) or not collection.collect_training_state:
         raise ValueError("Learner descriptor or PPO batch is incompatible")
     if bool(state.failed) or int(state.failure_reason) != LEARNER_ERROR_NONE:
@@ -878,9 +945,9 @@ def validate_learner(
         _array(actual, expected.shape, expected.dtype, "Learner network/optimizer leaf")
     # Save/restore admission checks the whole numerical boundary, including
     # frozen opponents and game/observation state, in one device reduction.
-    if not bool(_boundary_finite(state)):
+    if not bool(_saved_boundary_valid(state)):
         raise ValueError(
-            "Learner contains nonfinite network, optimizer, memory or collection values"
+            "Learner contains nonfinite values or invalid normalization statistics"
         )
     for optimizer in (state.actor_opt_state, state.critic_opt_state):
         for leaf in jax.tree.leaves(optimizer):

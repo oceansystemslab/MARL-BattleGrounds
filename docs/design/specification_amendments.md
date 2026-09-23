@@ -2097,6 +2097,10 @@ Reactive TDM's class rules use center distances and existing float32 conventions
 | Hunter | Nearest enemy: retreat at/below 3, Stay in (3, 3.5], approach above 3.5 | Nearest legal Trap enemy within distance ≤2; otherwise lowest-health legal Basic enemy |
 | Warrior | Approach nearest enemy center, including at body contact | Lowest-health legal Charge enemy with HP strictly <40; otherwise lowest-health legal Basic enemy |
 
+(Revised by [A42](#a42-reactive-tdm-fixes-at-blocked-walls): since ALPHA
+version 3 the Hunter stays in (3, 3.5] only while the nearest enemy is a legal
+Basic target; otherwise it approaches that enemy.)
+
 Without observed enemies, Mage/Rogue/Hunter/Warrior move toward map center.
 Priest instead follows the nearest observed living ally excluding self:
 retreat at/below 1.5, Stay in (1.5, 2], and approach above 2. A Priest without
@@ -2407,6 +2411,10 @@ of ALPHA version 2 and BETA version 4 is historical only; later study found
 longer stalls.) Official scenario evidence must still freeze
 and separately qualify its exact controller identity; this change neither
 completes M7 nor qualifies a scientific scenario.
+
+(Revised by [A42](#a42-reactive-tdm-fixes-at-blocked-walls): ALPHA version 3
+and BETA version 5 extend a capped wall end once and allow one useful stride of
+end-clearance drift at a wall corner.)
 
 ## A36. Submission roadmap, approved TDM content and M7 closeout
 
@@ -3079,3 +3087,78 @@ records; added terminal output is retained only with no measurable slowdown.
 Working execution, efficient computation, sample efficiency and learned team
 behavior need separate evidence. See the complete
 [training workflow](../training/README.md#train-resume-load-and-analyze).
+
+## A42. Reactive TDM Fixes At Blocked Walls
+
+**Classification:** diagnostic controller correction. **Revises:** A30's Hunter
+movement row and A35's wall steering and controller versions only. Historical
+amendments, recordings and scenario notes remain intact.
+
+ALPHA advances to behavior version 3 and BETA to version 5. BETA changes only
+because its non-Rogues, and its Rogues with no priority prey, use ALPHA's
+rules; BETA's own Rogue pursuit, screening and combat do not change. A study of
+104 ALPHA-against-BETA games on all 52 maps found three ways the controllers
+froze. Three rules change:
+
+1. **Capped wall ends.** Wall steering could pick a short wall where neither
+   end fits: one end meets the map edge or is capped by a pillar or another
+   small wall, and the other end is capped too. It then chose Stay on every
+   tick. Now, when neither end fits and an end's exit
+   is blocked by an obstacle sitting at that end, that end is extended once, to
+   one body radius past the far side of the cap, and the exit is tested there.
+   The capped wall then steers like one longer wall. The extension happens only
+   once: a second cap, a wall across the whole map, or ends that are not capped
+   still mean Stay. Only ALPHA's static branch changes.
+2. **End clearance margin.** Near a wall corner, a move that made full progress
+   could be pushed slightly back from the wall end the agent was rounding
+   (0.024 units in the unit test). The strict clearance check then vetoed every
+   direction, and the agent stood still. Now a move may drift back from the
+   selected end, or finish short of clearing the end line, by up to the minimum
+   useful stride: the existing 10% of its movement speed. BETA's body-aware
+   Rogue keeps the strict check.
+3. **Hunter holds only with a target.** A Hunter more than 3 and at most 3.5
+   units from the nearest enemy held still even when it could not shoot that
+   enemy, for example behind a wall. Now it holds only while that enemy is a
+   legal Basic target in its exact action mask; otherwise it approaches that
+   enemy. Retreat at or below 3 units and approach above 3.5 units are
+   unchanged.
+
+Nothing else changes: class goals, combat choices, masks, SharedObs inputs,
+Core, maps, body radii, speeds and recording structures stay as they were.
+There is still no route memory, lookahead or body prediction.
+
+**Evidence.** Every scenario witness loop (ten loops, 48 turns) replays bit for
+bit as before, and every scenario witness test passes; each witness fixture
+keeps its recorded ticks, and only its recorded opponent version moves to the
+new number. In 104 games (each controller as Team A on maps 0 to 51, seed 0,
+at most 300 ticks) no agent chose Stay through a stall. On the 51 maps other
+than Map 39, where only the controllers changed, stuck runs of five ticks or
+more fell from 141 (2,208 ticks) with ALPHA version 2 and BETA version 4 to 53
+(509 ticks), and runs of 20 ticks or more from 22 to 5. The remaining stuck
+runs are agents pressed against other agents. Map 39's gain comes from its
+revision 7 update, not from these rules: on the earlier Map 39 the fixed
+controllers still left its six Warriors, Hunters and Rogues stuck for almost
+the whole game, while on revision 7 every one of them crossed the map centre.
+
+**Cost.** Timed on the RTX 5090 with 128 and 1,024 games at once (maps 47 to
+51, ALPHA against BETA with 10% exploration), compile time stays about 16 to 20
+seconds. Peak GPU memory rises by 18 MiB at 128 games (371 to 389 MiB) and by
+174 MiB at 1,024 games (2,257 to 2,431 MiB), because the capped-end rule tests
+every obstacle at each exit. No slowdown larger than this machine's own
+run-to-run noise was seen: two timings of identical games differed by up to 13%,
+and one timing with the fixes matched or beat both timings without them. A
+slowdown smaller than about 10% is not ruled out.
+
+**Limits.** The controllers still do not steer around other bodies, so traffic
+jams remain; they are accepted for these scripted baselines. One jam of five
+agents lasting 31 to 35 ticks on Map 36 was seen. Moving defenders can still block a
+path. These are diagnostic controllers, not trained policies or baselines for
+the Big 12.
+
+**Effects on saved work.** Resuming a saved evaluation, tournament or training
+run recorded with ALPHA version 2 or BETA version 4 fails its identity check,
+as intended. Saved scenario-qualification replays that carry the old pressure
+identity are rejected by the scenario checker. The eight packaged scenario
+notes keep their dated "ALPHA v2" and "BETA v4" wording, because changing them
+would change scenario assets. Results recorded with the old versions remain
+evidence for those versions only.

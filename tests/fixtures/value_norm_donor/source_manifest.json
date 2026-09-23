@@ -1,0 +1,19 @@
+{
+  "files": {
+    "LICENSE": {
+      "sha256": "0335be1babd64ea33302d4d365cdecc5985aaf5c4481236e0c5da07eb37a4580",
+      "source": "LICENSE"
+    },
+    "r_mappo.py.txt": {
+      "sha256": "8a889d010cb5e327eeffa9d8ab1d910cab384e295d0690dd05e268dc56e047be",
+      "source": "onpolicy/algorithms/r_mappo/r_mappo.py"
+    },
+    "valuenorm.py.txt": {
+      "sha256": "df19f747f5845c337d1933ee1a092fa3c758f9ada38bfa3e32aa7d277ac845a2",
+      "source": "onpolicy/utils/valuenorm.py"
+    }
+  },
+  "license": "MIT",
+  "repository": "https://github.com/marlbenchmark/on-policy",
+  "revision": "de66d7a4b23fac2513f56f96f73b3f5cb96695ac"
+}

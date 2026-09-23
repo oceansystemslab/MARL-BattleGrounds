@@ -461,7 +461,7 @@ def test_only_scenario_5_adds_v5_execution_and_keeps_distinct_controller_identit
     assert debugger_recording.recording_policy_execution_included(context)  # pyright: ignore[reportPrivateUsage]
     assert {row.name: row.value for row in context.aggregation_keys}[
         "pressure_protocol"
-    ] == "scenario-5-pressure-controller@4"
+    ] == "scenario-5-pressure-controller@5"
 
 
 def test_reactive_team_identity_changes_the_action_contract_identity() -> None:

@@ -9,6 +9,8 @@
 # Run after preparing the locked uv environment; this command never syncs it.
 # The shard plugin owns test assignment. Output includes each task's exit code and
 # elapsed seconds. Failures return nonzero. No commit or GPU speed claim is made.
+# MARL_PYTHON_GATE_JOBS may limit concurrent workers to 1-12 (default 12).
+# This changes resource use only; every shard and static check still runs.
 set -euo pipefail
 
 CALLER_DIR="${PWD}"
@@ -25,6 +27,10 @@ export UV_NO_SYNC=1
 # Reject environment variables that could disable JIT, alter collection or
 # select a deprecated JAX backend. No arguments; print the first error and return 2.
 require_canonical_python_environment() {
+  if [[ ! "${MARL_PYTHON_GATE_JOBS-12}" =~ ^([1-9]|1[0-2])$ ]]; then
+    echo "error: MARL_PYTHON_GATE_JOBS must be an integer from 1 to 12." >&2
+    return 2
+  fi
   if [[ -n "${JAX_PLATFORM_NAME+x}" ]]; then
     echo "error: unset deprecated JAX_PLATFORM_NAME before the canonical Python gate." >&2
     return 2
@@ -63,7 +69,7 @@ run_all_python_tests() {
   local shard_number=""
   local status=0
 
-  marl_validation_init 12 python-validation
+  marl_validation_init "${MARL_PYTHON_GATE_JOBS:-12}" python-validation
   for shard_number in {1..12}; do
     marl_validation_start \
       "Python tests ${shard_number}/12" \
@@ -92,7 +98,7 @@ run_python_static() {
   return "${status}"
 }
 
-# Run all twelve shards and three static checks through the shared twelve-slot
+# Run all twelve shards and three static checks through the shared configured worker
 # pool. Optional $1 is an existing directory; when given, each shard also writes
 # its per-test times to $1/python-shard-N.xml. Print every result, clean logs and
 # return 1 on any failure.
@@ -102,7 +108,7 @@ run_complete_python_gate() {
   local status=0
   local -a timing_args=()
 
-  marl_validation_init 12 python-validation
+  marl_validation_init "${MARL_PYTHON_GATE_JOBS:-12}" python-validation
   for shard_number in {1..12}; do
     timing_args=()
     if [[ -n "${timings_dir}" ]]; then
@@ -126,6 +132,7 @@ run_complete_python_gate() {
 usage() {
   cat >&2 <<'EOF'
 usage: scripts/dev/check.sh [--tests-only | --static-only | --timings DIR | --shard N/12 [pytest arguments...] | --help]
+MARL_PYTHON_GATE_JOBS=1..12 limits concurrent full-gate workers; default 12.
 EOF
 }
 

@@ -147,3 +147,35 @@ def load_method(reference: str) -> Policy | System:
             "actor directory or a module:function factory"
         )
     return load_factory(reference)
+
+
+def validate_saved_method_reference(reference: str) -> None:
+    """Check a durable method reference without opening files or calling factories.
+
+    reference is a nonempty built-in Policy name, an absolute export path, or
+    module:function. Relative paths, including bare directory names, are refused
+    because their meaning changes with the working directory. Built-in names use
+    the existing Policy authority. Missing imports and export files are checked
+    later by load_method. Invalid types or grammar raise TypeError or ValueError.
+    """
+    if not isinstance(cast(object, reference), str):
+        raise TypeError("A saved method reference must be a string")
+    if not reference.strip():
+        raise ValueError("A saved method reference must not be empty")
+    from marl_battlegrounds.evaluation.policy_execution import policy
+
+    try:
+        policy(reference)
+        return
+    except ValueError:
+        pass
+    if Path(reference).is_absolute():
+        return
+    if reference.count(":") == 1:
+        module, attribute = reference.split(":")
+        if module and attribute and "." not in attribute and "/" not in reference:
+            return
+    raise ValueError(
+        "Method paths must be absolute; otherwise use a built-in name "
+        "or module:function"
+    )

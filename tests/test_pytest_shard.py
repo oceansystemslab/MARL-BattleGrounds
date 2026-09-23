@@ -18,6 +18,7 @@ from typing import cast
 
 import pytest
 from _pytest.nodes import Item
+from scripts.dev import shard_costs as shard_costs_module
 from scripts.dev.pytest_shard import (
     CI_SHARD_COST_PROFILE,
     MEASURED_COSTS_PATH,
@@ -760,7 +761,67 @@ def _collected(
             family: shared.get(family[1], frozenset()) for family in families
         },
         request_sites_by_family={family: frozenset() for family in families},
+        item_nodeids=frozenset(counts),
     )
+
+
+@pytest.mark.parametrize(
+    ("names", "expected", "message"),
+    (
+        (("test_x[1]", "test_x[1]"), ("test_x[1]",), "duplicate JUnit case"),
+        (("test_x[1]",), ("test_x[1]", "test_x[2]"), "1 missing, 0 unexpected"),
+        (("test_x[2]",), ("test_x[1]",), "1 missing, 1 unexpected"),
+        (("test_x[1]", "test_y"), ("test_x[1]",), "0 missing, 1 unexpected"),
+    ),
+)
+def test_junit_rejects_duplicate_missing_and_stale_exact_cases(
+    tmp_path: Path, names: tuple[str, ...], expected: tuple[str, ...], message: str
+) -> None:
+    for index, name in enumerate(names, 1):
+        (tmp_path / f"python-shard-{index}.xml").write_text(
+            f'<testsuite><testcase classname="tests.test_a" name="{name}" '
+            'time="1"/></testsuite>',
+            encoding="utf-8",
+        )
+    with pytest.raises(ValueError, match=message):
+        read_junit_seconds(
+            tmp_path,
+            shard_count=len(names),
+            expected_cases={f"tests/test_a.py::{name}" for name in expected},
+        )
+
+
+@pytest.mark.parametrize("duration", ("nan", "inf", "-1"))
+def test_junit_rejects_invalid_durations(tmp_path: Path, duration: str) -> None:
+    (tmp_path / "python-shard-1.xml").write_text(
+        '<testsuite><testcase classname="tests.test_a" name="test_x" '
+        f'time="{duration}"/></testsuite>',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="invalid JUnit duration"):
+        read_junit_seconds(tmp_path, shard_count=1)
+
+
+def test_cost_update_refuses_partial_reports_before_touching_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = {f"tests/test_a.py::test_x[{i}]": 1 for i in range(13)}
+    monkeypatch.setattr(
+        shard_costs_module, "collect_tests", lambda: _collected(expected)
+    )
+    table = tmp_path / "costs.json"
+    table.write_text("preserve this table\n", encoding="utf-8")
+    monkeypatch.setattr(shard_costs_module, "MEASURED_COSTS_PATH", table)
+    for index in range(1, 13):
+        (tmp_path / f"python-shard-{index}.xml").write_text(
+            '<testsuite><testcase classname="tests.test_a" '
+            f'name="test_x[{index}]" time="1"/></testsuite>',
+            encoding="utf-8",
+        )
+    with pytest.raises(ValueError, match="1 missing, 0 unexpected"):
+        shard_costs_module.main(("update", str(tmp_path)))
+    assert table.read_text(encoding="utf-8") == "preserve this table\n"
+    assert not table.with_suffix(".json.new").exists()
 
 
 def test_cost_table_splits_only_oversized_files_at_allowed_function_boundaries() -> (

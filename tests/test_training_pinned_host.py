@@ -381,3 +381,48 @@ def test_pure_helpers_refuse_a_host_pinned_collection(
         scan_training_rollout(collection, carry, length=2)
     with pytest.raises(ValueError, match="cannot call a pinned host method"):
         advance_training_step(collection, carry)
+
+
+@pytest.mark.parametrize("state", ("closed", "failed", "busy", "pending"))
+def test_bad_writer_is_refused_before_a_provider_call(
+    prepared: PreparedTrainingContent, weights: Tree, tmp_path: Path, state: str
+) -> None:
+    host = _Counter()
+    collection, carry = _collection(prepared, weights, host.system(), recording=True)
+    writer = _writer(tmp_path, collection)
+    if state == "closed":
+        writer.close()
+    elif state == "failed":
+        writer.record_failure(RuntimeError("Earlier failure"))
+    elif state == "pending":
+        writer._pending_numerical_starts.add(1)  # pyright: ignore[reportPrivateUsage]
+    else:
+        writer._collection_active = True  # pyright: ignore[reportPrivateUsage]
+    try:
+        with pytest.raises(RuntimeError):
+            collect_training_rollout(collection, carry, length=2, writer=writer)
+        assert host.opened == host.calls == 0
+    finally:
+        writer._collection_active = False  # pyright: ignore[reportPrivateUsage]
+        writer.close()
+
+
+@pytest.mark.parametrize("error_type", (RuntimeError, KeyboardInterrupt))
+def test_provider_failure_marks_the_writer_failed_with_the_original_error(
+    prepared: PreparedTrainingContent,
+    weights: Tree,
+    tmp_path: Path,
+    error_type: type[BaseException],
+) -> None:
+    host = _Counter(fail_at=1, error=error_type)
+    collection, carry = _collection(prepared, weights, host.system(), recording=True)
+    writer = _writer(tmp_path, collection)
+    try:
+        with pytest.raises(error_type, match="provider unavailable") as caught:
+            collect_training_rollout(collection, carry, length=2, writer=writer)
+        assert writer._failed is caught.value  # pyright: ignore[reportPrivateUsage]
+        assert any("Run directory:" in note for note in caught.value.__notes__)
+        with pytest.raises(RuntimeError, match="writer failed"):
+            writer.flush()
+    finally:
+        writer.close()

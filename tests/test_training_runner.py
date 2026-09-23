@@ -206,9 +206,11 @@ def test_public_run_resume_and_final_pending_work(
     assert any(path.read_text() == '{"abandoned": true}' for path in archived)
 
 
+@pytest.mark.parametrize("system_panel", (False, True))
 def test_panel_backed_public_run_resume_selection_and_validation_isolation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    system_panel: bool,
 ) -> None:
     from importlib import import_module
 
@@ -233,6 +235,7 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
 
     monkeypatch.setattr(evaluator, "capture_recording_provenance", fixed_provenance)
     original_evaluate = evaluator.evaluate
+    original_verify = evaluator._verify_evaluation
 
     def short_horizon(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         return original_evaluate(*args, **kwargs, max_steps=1)
@@ -240,6 +243,11 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
     # Only the fixture's game horizon changes. M8 still owns actual games,
     # saved outcomes and their scores; production selection stays untouched.
     monkeypatch.setattr(evaluator, "evaluate", short_horizon)
+
+    def short_verify(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        return original_verify(*args, **kwargs, max_steps=1)
+
+    monkeypatch.setattr(evaluator, "_verify_evaluation", short_verify)
     weights = initialize_ppo(jax.random.key(88)).actor_params
     actors = tuple(
         checkpoints.export_system(
@@ -255,10 +263,16 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
         )
         for index, steps in enumerate((4, 8))
     )
-    panel = validation.create_panel(
-        *actors, output_dir=tmp_path / "panel", test_only=True
+    panel = (
+        validation.create_panel(
+            opponents=("tdm-alpha", "tdm-beta"), output_dir=tmp_path / "panel"
+        )
+        if system_panel
+        else validation.create_panel(
+            *actors, output_dir=tmp_path / "panel", test_only=True
+        )
     )
-    assert not panel.qualified
+    assert panel.qualified == system_panel
     frozen_identities = [checkpoints.artifact_identity(actor) for actor in actors]
     config = TrainConfig(
         num_envs=4,
@@ -419,7 +433,6 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
         {"seed": False},
         {"method": "qmix"},
         {"metrics": "full"},
-        {"purpose": "demonstration"},
         {"validation_fractions": (0.5, 0.4, 1.0)},
         {"checkpoint_env_steps": (32,)},
         {"shaping_coefficient": float("nan")},
@@ -430,6 +443,10 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
         {"pinned_opponent_share": float("nan")},
         {"pinned_opponent": "tdm-alpha"},
         {"pinned_opponent": "", "pinned_opponent_share": 0.1},
+        *(
+            {"pinned_opponent": value, "pinned_opponent_share": 0.1}
+            for value in ("actor", ".", "..", "relative/actor")
+        ),
         {"pinned_opponent": 3, "pinned_opponent_share": 0.1},
     ],
 )
@@ -556,6 +573,7 @@ def test_slot_task_keeps_separate_continuation_evidence(
         "Final", tmp_path / "development-final", "digest", "checkpoint", "run", 1, 8
     )
     execution = object.__new__(runner._Run)
+    execution.config = TrainConfig()
     execution.root = tmp_path
     execution.panel = validation.FrozenPanel(
         tmp_path / "panel.json", "panel", (member,), True

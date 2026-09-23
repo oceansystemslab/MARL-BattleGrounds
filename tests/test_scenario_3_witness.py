@@ -166,7 +166,7 @@ def test_scenario_3_binds_the_approved_setup(scenario: TDMScenario) -> None:
     assert scenario.info.resolved_initial_state_digest == (
         "43bf4bbe5b6f70ff14d85533b9aaec4d626580a55ac6b1cf665e70ded33fea8a"
     )
-    assert reactive_tdm_beta_controller_descriptor()["version"] == 4
+    assert reactive_tdm_beta_controller_descriptor()["version"] == 5
     np.testing.assert_array_equal(
         scenario.initial_state.team_deathmatch_scores, [19, 19]
     )

@@ -29,7 +29,7 @@ from marl_battlegrounds.baselines.inputs import (
     TRAINING_STATE_FEATURE_SIZE,
     encode_training_state,
 )
-from marl_battlegrounds.collection import collect_rollout
+from marl_battlegrounds.collection import _check_collection_writer, collect_rollout
 from marl_battlegrounds.core.types import Action, ActionMask
 from marl_battlegrounds.environment import (
     Environment,
@@ -1292,7 +1292,20 @@ def collect_training_rollout(
         raise ValueError("Supply a writer exactly when collection recording is enabled")
     _check_carry(carry)
     if collection.host_opponent is not None:
-        return _collect_host_rollout(collection, carry, length=length, writer=writer)
+        if writer is not None:
+            _check_collection_writer(
+                writer,
+                has_steps=length > 0
+                and int(carry.progress.rounds) < int(carry.schedule.total_rounds),
+            )
+        try:
+            return _collect_host_rollout(
+                collection, carry, length=length, writer=writer
+            )
+        except BaseException as error:
+            if writer is not None:
+                writer.record_failure(error)
+            raise
     initial = carry
     if writer is None:
         carry, rollout = _compiled_rollout(collection, length)(carry)

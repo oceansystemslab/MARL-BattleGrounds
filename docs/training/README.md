@@ -414,15 +414,15 @@ named System is frozen once, registered the way evaluation registers it, and
 follows the same rules as a Team B method in evaluation: only its own games are
 valid, it starts each new game with fresh memory, and it may use its own
 `reset_memory` hook. A Policy acts per actor, so it is computed on its own
-games only: inside the compiled step those games are gathered into a block a
-quarter of the batch in size, and when more games than that are pinned the
-Policy runs on the whole batch and the other games' results are thrown away.
+games only: inside the compiled step those games use the smallest fitting
+quarter, half or full batch, rounded up. Unused rows are padding, and their
+results are ignored.
 A generic System is given the whole Team B batch with the other games
 marked invalid, and it must ignore them, as M8 requires of every System. A JAX
 method runs inside the compiled step and is skipped on steps where no game
 uses it; its initializer still runs when one of its games starts. A host
 method, such as an LLM agent, runs once per step on the host through the same
-helper evaluation uses. A step with no pinned game copies nothing to the host;
+helper evaluation uses. A step with no pinned game copies no policy inputs to the host;
 otherwise Team B's inputs are copied, about 94 KB per game: only the pinned
 games for a Policy, all games for a generic System. The method's own time comes
 on top. `collect_training_rollout` runs that route;
@@ -430,7 +430,9 @@ on top. `collect_training_rollout` runs that route;
 A host collection serves each training round once, and after a method error it
 refuses reuse, so a stale carry never meets newer opponent memory.
 
-Resume continues a pinned opponent exactly or refuses. JAX methods keep their
+Resume checks the pinned opponent identity and supported saved memory.
+Opaque provider state and remote behavior are not guaranteed to repeat.
+JAX methods keep their
 memory in the saved state. A host method's memory is never saved: a host method
 with no initializer, no reset hook and no memory template has none and resumes
 normally, and any other host method can resume only from a checkpoint where
@@ -564,7 +566,8 @@ neutral-only masks. The helpers do not repair sampled actions.
   `update_minibatch` is its lower-level grouped numerical boundary.
 
 Actor and critic each use Dense(128)/ReLU, GRU(128), Dense(128)/ReLU, then their
-own output head. There is no running normalization or added agent-ID wrapper.
+own output head. There is no running input normalization or added agent-ID
+wrapper. New learners normalize critic targets as described below.
 The [source ledger](source_reuse.md) gives the exact donor, initialization,
 settings, masks and independent offline reference.
 
@@ -581,8 +584,9 @@ The [source ledger](source_reuse.md#optional-input-scale) explains compatibility
 if its team started on the left bank. Whenever its own team starts on the
 right, its permitted view is reflected about the map's vertical centerline
 before the network and the chosen move is reflected back before the game
-receives it. `spawn_frame="world"` keeps raw coordinates and traces the donor's
-program bit for bit. The default changed from `"world"` on 22 September 2026,
+receives it. `spawn_frame="world"` keeps raw coordinates. Historical runs also
+need their saved numerical settings and source. The default changed from
+`"world"` on 22 September 2026,
 and the value `"right"` was removed. Saved checkpoints, exported actors and run
 records without a frame still mean `"world"`, and resuming such a run keeps
 it. An old training config file, however, names no frame, so starting a new
@@ -601,9 +605,10 @@ measurement noise (about 433 ms and 93 ms), because the only quadratic part,
 the obstacle mirror decision, is made once per game and shared by a team's
 five actors (`team_obstacle_partners`); the update keeps about 2 ms of that
 decision, 0.4 percent of a block. (Measured 2026-09-22, training on the old
-maps with revision 6 of Map 39; it remains a valid cost measurement.) A policy trained
-this way plays both spawn ends alike by construction; whether it learns faster
-or better is a separate measured question. The runner carries the setting into
+maps with revision 6 of Map 39; these costs describe that original workload.)
+The adapter gives both spawn ends a consistent horizontal orientation. It
+does not guarantee equal actions or outcomes. Whether it learns faster or
+better is a separate measured question. The runner carries the setting into
 collection, updates, checkpoints, exported actors and their inference identity;
 a loaded actor plays in the frame it was trained in, never a guessed one.
 Low-level users pass the same `spawn_frame` to `make_recurrent_mappo_system`,
@@ -613,6 +618,34 @@ whose default follows `PPOConfig` (so old world weights need
 caller must name the frame the weights were trained in. The
 [source ledger](source_reuse.md#optional-spawn-frame) gives the precedent and
 compatibility rules.
+
+`PPOConfig.value_normalization=True` is the default for new runs. It scales
+critic targets with one learner-owned running mean and variance. Rewards and
+GAE keep their original units. Dead active agents contribute to critic targets;
+inactive slots and padding do not. Statistics update once per nonempty
+optimizer minibatch and roll back if the complete update is rejected.
+
+`PPOBatch.old_values` and `final_values` remain in reward units. Enabled
+normalization also requires `old_normalized_values`: the exact network outputs
+from collection-time critic evaluation, before statistics change. This keeps
+value clipping anchored to the predictions that generated the batch.
+`build_ppo_batch` supplies both forms from the same forward pass. Low-level
+`critic_values` callers pass the learner's `value_norm` to obtain reward units.
+
+Checkpoints carry the three scalar statistics; actor exports do not. Restored
+historical settings that omit the flag mean `False`, preserving the old array
+layout. To start a fresh run with the former numerical recipe, set
+`value_normalization=False` explicitly. See the
+[source ledger](source_reuse.md#critic-target-normalization) for the fixed
+constants, donor source and deliberate adaptations.
+
+PPO metrics report approximate policy KL (change in action probabilities),
+policy and value clipping fractions, entropy, actor and critic gradient norms
+before clipping, raw target mean and standard deviation, raw predicted mean
+and root-mean-square value error, and the normalization mean and scale.
+Value loss uses normalized network units when normalization is enabled.
+Diagnostics reuse the loss forward passes. These values help diagnose a run;
+there is no universal threshold that proves or disproves useful learning.
 
 When investigating weak learning, inspect actual task outcomes and fixed-opponent
 validation before increasing the budget. Under native K20/H300, a game without
@@ -942,65 +975,98 @@ separates task reward per active-agent sample from shaping per real environment
 transition. Missing validation stays missing, and plots identify their frozen
 panel. Failure updates the Markdown status without rerunning games or plots.
 
-### Provisional Validation And Selection
+### Validation And Checkpoint Selection
 
-A development run may omit a panel and returns no selected actor. A demonstration
-requires the qualified frozen two-member panel. Its members are the declared
-halfway/final actors from a separate Plain development seed; their Random checks
-may reject the whole panel but cannot select replacement checkpoints afterward.
-This provisional panel is separate from the later four-family comparison panel.
+Validation accepts any valid `System` or `Policy`: scripted, learned, compiled,
+Python, external, or a mixture. Each method receives only its permitted inputs.
+A panel fixes the opponents before training; it does not require MAPPO opponents.
+A development run may omit validation and then returns no selected actor. A
+`purpose="demonstration"` run requires a panel and completes checkpoint selection.
 
-`training.validation.validate_random` runs each member's declared 100-game
-usefulness check. `create_panel` accepts the two saved actor paths and those
-complete results. It checks ten spawn pairs on each of maps 42–46, the fixed
-Random seed root, exact actor and learner-checkpoint identities, finite scores,
-and complete per-map counts. Both members must score above 0.5 overall and have
-a positive mean Team A score on at least two maps. The panel file retains both
-checked summaries and their task identities, so copying the panel does not lose
-its qualification evidence. These modest gates do not prove general competence.
-
-For a separate check of an existing saved actor and an existing qualified panel,
-use the same validation owner as the trainer. Replace the two input paths below
-with those artifacts, and use a new output directory for this exact task:
+For ordinary Alpha validation, declare its existing built-in name:
 
 ```python
-from marl_battlegrounds.training.validation import validate_checkpoint
+from marl_battlegrounds import training
 
-validation = validate_checkpoint(
-    "RUN/actors/CHECKPOINT_ID",
-    "PANEL/panel.json",
-    output_dir="artifacts/standalone-validation",
+config = training.TrainConfig(
+    validation_opponents=("tdm-alpha",),
+    routine_seed_pairs=4,
+    confirmation_seed_pairs=10,
 )
-print(validation["score"], validation["ci_low"], validation["ci_high"])
+result = training.train(config, output_dir="artifacts/alpha-validation")
+print(result.selected_actor)
 ```
 
-Repeating this call with the same artifacts and output directory resumes its
-saved task. Changing its actor, panel or purpose requires a different task
-directory. This check does not update the actor or resume training. The trainer
-owns the fresh confirmation schedule and final checkpoint selection.
+A reference may also be an absolute exported-actor path or an installed
+`module:function` factory returning a `System` or `Policy`. The factory runs once
+when the panel is loaded. Python callers may instead pass their live methods to
+`train(config, ..., validation_opponents=(my_system,))`. Live clients stay in the
+current process. No client object is written to JSON. On resume, supply the same
+live bindings again; the saved M8 identities must match before recovery changes.
+External services may have state that MARL-BGs cannot freeze or reproduce. Their
+registration keeps that evidence unknown rather than claiming exact behavior.
 
-Validation uses maps 42–46, canonical 5v5, K20/H300 and both spawn ends. Each
-routine check has 200 games; each confirmation has 1,000. Initialization is
-diagnostic only. Ten progress thresholds round up to real completed updates,
-with exact final included. The best two eligible routine checkpoints plus final
-when distinct receive fresh confirmation. Highest confirmation score wins;
-exact ties use the earlier training step. Missing cells block selection.
+For shared fixed panels or explicitly declared validation seeds:
 
-Scores give each map/opponent cell equal weight, with win 1, draw 0.5 and loss 0.
-Uncertainty resamples each shared-seed block's two opponents and two spawn ends
-together. These intervals describe fixed-system game sampling, not variation
-across independent training seeds. Validation uses separate frozen state and
-randomness; the learner remains paused.
+```python
+from marl_battlegrounds.training.validation import create_panel, validate_checkpoint
 
-GPU evaluation uses B32. A resumed pass with fewer than 32 pending games finishes
-in a separate CPU process through the same evaluator and pinned environment.
-All backend segments remain recorded. No extra games are added to pad a batch.
+panel = create_panel(
+    opponents=("tdm-alpha",),
+    roots={"routine": 19046300, "confirmation": 19046400},
+    output_dir="artifacts/alpha-panel",
+)
+validation = validate_checkpoint(
+    "RUN/actors/CHECKPOINT_ID", panel,
+    output_dir="artifacts/standalone-validation", seed_pairs=4,
+)
+print(validation["score"], validation["mean_kill_difference"])
+```
 
-The trained-model slot diagnostic runs after the full training budget, using the
-fixed development-final and full-run-final actors. Its machinery is tested before
-launch. The declared 3,200 games compare global team-slot assignments while
-controlling physical side. This diagnostic and useful-learning conclusions remain
-separate from a formal competence or one-GPU/one-day claim.
+`TrainConfig(validation_panel=".../panel.json")` reuses this saved panel. Declare
+opponents once, either in config or in `train`; explicit bindings alongside a
+saved panel may only restore its existing members. `load_panel(path, bindings=...)`
+also restores live-only methods. Changing frozen membership, roots or identities
+requires a new panel. Repeating `validate_checkpoint` with the same task directory
+resumes only its unfinished games. It never updates an actor or resumes training.
+
+Validation uses maps 42–46, mirrored canonical 5v5, K20/H300, and both spawn ends.
+Each seed pair means ten games per opponent across those five maps. Defaults are
+10 routine pairs and 50 confirmation pairs. Initialization cannot be selected.
+Requested progress fractions round up to completed updates; final is included.
+The best two routine checkpoints plus final, when distinct, receive fresh
+confirmation. The highest native score wins: win 1, draw 0.5, loss 0. Exact ties
+use mean kill difference, then earlier training step, then checkpoint ID.
+Incomplete cells cannot select a checkpoint. Maps and opponents have equal weight.
+
+New panels give each opponent its own deterministic root derived from the declared
+purpose root and saved method identity. Routine games stay matched across
+checkpoints. Confirmation uses a separate root. Intervals keep the two spawn ends
+of each game seed together and resample opponents independently. They describe
+game sampling for these fixed actors, not variation across training seeds.
+For a separate fixed-actor assessment, use `purpose="assessment"`, an explicit
+fresh `root_seed`, and the desired `seed_pairs`. Assessment does not select again.
+
+New panels use fixed 32-lane GPU evaluation, including short initial and resumed
+tails. Unused lanes are inactive; they produce no games, records or provider calls.
+Opaque host clients stay in process. The learner is paused during validation;
+validation has its own state and random keys.
+
+An existing development tournament may select a panel with
+`create_panel(opponents=candidate_methods, ranking=result, size=2, output_dir=...)`.
+`ranking` may be a complete `TournamentResult` or its saved run directory. It must
+cover the whole declared pool on current canonical maps 42–46, 5v5, K20/H300 and
+paired spawn ends. The existing M8 owner verifies actual configurations, method
+identities and completed pairs. Highest saved Elo wins; registration IDs break
+ties. This uses an existing ranking and does not start another tournament.
+
+The old positional `create_panel(halfway, final, ...)` route remains readable and
+keeps its original hashes, Random qualification, shared opponent seeds, earlier
+step tie rule and CPU tail recovery. Those historical rules do not silently
+change when an old run resumes. The optional slot diagnostic still compares two
+MAPPO actor exports. New panels require `slot_diagnostic_actor` to name that
+comparison explicitly; ordinary validation works without it.
+
 
 ## A Panel-Backed MAPPO Demonstration
 
@@ -1010,7 +1076,9 @@ transitions. It uses seed 19042001, the default PPO settings, priority metrics
 and no episode-table recording. Curriculum and shaping are off. The declared
 slot diagnostic runs after training finishes.
 
-You need an existing qualified two-member `panel.json`. Its fixed members must
+This example uses the historical two-actor panel and slot diagnostic. New
+experiments can use the generic System panels shown above. For this example,
+you need an existing qualified two-member `panel.json`. Its fixed members must
 have passed their declared Random checks. A test-only panel is not accepted for
 a demonstration. Qualification does not mean the panel proves broad competence.
 If the declared panel fails its checks, the scientific launch is not qualified.

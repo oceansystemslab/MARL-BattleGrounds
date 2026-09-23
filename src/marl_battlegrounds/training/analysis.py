@@ -74,6 +74,7 @@ def summarize_validation(
     seed_pairs: int,
     bootstrap_draws: int = 2000,
     bootstrap_seed: int = 19_044_001,
+    independent_opponents: bool = False,
 ) -> Record:
     """Reduce complete frozen-panel games with their shared random seeds intact.
 
@@ -92,6 +93,11 @@ def summarize_validation(
     bootstrap_draws, bootstrap_seed : int
         Positive replicate count and independent NumPy seed, default 2000/19044001.
 
+    independent_opponents : bool, default=False
+        True uses new-panel independent opponent roots. Spawn ends remain paired;
+        native Team A/B scores are required for mean kill difference. False keeps
+        the historical shared-seed uncertainty and result fields unchanged.
+
     Returns
     -------
     dict
@@ -108,6 +114,15 @@ def summarize_validation(
         Host-only. All opponents and both ends stay together in a bootstrap block.
         No original metrics are recomputed and no file or global RNG is changed.
     """
+    if independent_opponents:
+        return _independent_validation_summary(
+            rows,
+            maps=maps,
+            opponents=opponents,
+            seed_pairs=seed_pairs,
+            bootstrap_draws=bootstrap_draws,
+            bootstrap_seed=bootstrap_seed,
+        )
     _integer(seed_pairs, "seed_pairs", minimum=1)
     map_ids, names = tuple(maps), tuple(opponents)
     if not map_ids or not names or len(set(map_ids)) != len(map_ids):
@@ -193,6 +208,119 @@ def summarize_validation(
     }
 
 
+def _independent_validation_summary(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    maps: Sequence[int],
+    opponents: Sequence[str],
+    seed_pairs: int,
+    bootstrap_draws: int,
+    bootstrap_seed: int,
+) -> Record:
+    """Keep spawn pairs together while resampling independent opponents separately.
+
+    Native Team A minus Team B scores are kill differences in the fixed TDM
+    validation task. Every game must supply finite values. Maps and opponents
+    have equal weights. The interval concerns these fixed actors only.
+    """
+    if not opponents or len(set(opponents)) != len(opponents):
+        raise ValueError("Validation needs distinct nonempty opponents")
+    if any(row.get("opponent") not in opponents for row in rows):
+        raise ValueError("Validation contains an undeclared opponent")
+    cells: list[Record] = []
+    opponent_summaries: list[Record] = []
+    blocks: list[np.ndarray[Any, np.dtype[np.float64]]] = []
+    for opponent in opponents:
+        selected = [row for row in rows if row.get("opponent") == opponent]
+        checked = summarize_validation(
+            selected,
+            maps=maps,
+            opponents=(opponent,),
+            seed_pairs=seed_pairs,
+            bootstrap_draws=bootstrap_draws,
+            bootstrap_seed=bootstrap_seed,
+        )
+        for cell in checked["cells"]:
+            map_rows = [row for row in selected if row["map_id"] == cell["map_id"]]
+            differences: list[float] = []
+            pairs: dict[int, list[float]] = {}
+            for row in map_rows:
+                values = [row.get("team_a_score"), row.get("team_b_score")]
+                if any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    for value in values
+                ):
+                    raise ValueError(
+                        "New validation needs finite native Team A and Team B scores"
+                    )
+                differences.append(
+                    float(cast(float, values[0])) - float(cast(float, values[1]))
+                )
+                pairs.setdefault(row["seed_id"], []).append(
+                    _score(row["system_game_score"])
+                )
+            cell["mean_kill_difference"] = float(np.mean(differences))
+            cells.append(cell)
+            blocks.append(
+                np.asarray([np.mean(pairs[seed]) for seed in sorted(pairs)], np.float64)
+            )
+        opponent_cells = [cell for cell in cells if cell["opponent"] == opponent]
+        opponent_summaries.append(
+            {
+                "opponent": opponent,
+                "score": checked["score"],
+                "mean_kill_difference": float(
+                    np.mean([cell["mean_kill_difference"] for cell in opponent_cells])
+                ),
+                "games": checked["games"],
+            }
+        )
+    low, high = _bootstrap(blocks, draws=bootstrap_draws, seed=bootstrap_seed)
+    return {
+        "complete": True,
+        "score": sum(_score(row["system_game_score"]) for row in rows) / len(rows),
+        "mean_kill_difference": float(
+            np.mean([cell["mean_kill_difference"] for cell in cells])
+        ),
+        "ci_low": low,
+        "ci_high": high,
+        "games": len(rows),
+        "independent_blocks": len(maps) * len(opponents) * seed_pairs,
+        "cells": cells,
+        "opponents": opponent_summaries,
+        "uncertainty": (
+            "Conditional game-sampling interval; spawn ends stay paired "
+            "and opponents are sampled independently"
+        ),
+        "bootstrap_draws": bootstrap_draws,
+        "bootstrap_seed": bootstrap_seed,
+    }
+
+
+def _selection_key(row: Mapping[str, Any]) -> tuple[float, float, int, str]:
+    """Apply the saved task's exact native-score rule, retaining legacy ties."""
+    difference = 0.0
+    if row.get("selection_schema_version", 1) == 2:
+        value = row.get("mean_kill_difference")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError(
+                "New checkpoint selection needs a finite mean kill difference"
+            )
+        difference = float(value)
+    return (
+        -float(row["score"]),
+        -difference,
+        int(row["env_steps"]),
+        str(row["checkpoint_id"]),
+    )
+
+
 def _candidates(results: Sequence[Mapping[str, Any]]) -> dict[str, Record]:
     """Validate complete unique noninitial checkpoint summaries for selection."""
     selected: dict[str, Record] = {}
@@ -215,6 +343,10 @@ def _candidates(results: Sequence[Mapping[str, Any]]) -> dict[str, Record]:
     panels = {row.get("panel_digest") for row in selected.values()}
     if len(panels) != 1:
         raise ValueError("Selection cannot mix frozen panels")
+    if len({row.get("selection_schema_version", 1) for row in selected.values()}) != 1:
+        raise ValueError("Selection cannot mix scoring protocols")
+    for row in selected.values():
+        _selection_key(row)
     return selected
 
 
@@ -225,7 +357,8 @@ def confirmation_candidates(
 
     routine_results must be complete unique fixed-panel summaries containing
     checkpoint_id, env_steps, score and complete. Initialization is ignored. Ties
-    prefer earlier experience, then identity for stable output. The final checkpoint
+    use new-panel kill difference when declared, then earlier experience and
+    identity. Historical panels skip kill difference. The final checkpoint
     must be present. Incomplete/mismatched evidence raises ValueError. No file changes.
     """
     candidates = _candidates(routine_results)
@@ -233,7 +366,7 @@ def confirmation_candidates(
         raise ValueError("The final checkpoint lacks complete routine validation")
     ordered = sorted(
         candidates,
-        key=lambda key: (-candidates[key]["score"], candidates[key]["env_steps"], key),
+        key=lambda key: _selection_key(candidates[key]),
     )[:2]
     if final_checkpoint_id not in ordered:
         ordered.append(final_checkpoint_id)
@@ -241,12 +374,14 @@ def confirmation_candidates(
 
 
 def select_checkpoint(confirmation_results: Sequence[Mapping[str, Any]]) -> Record:
-    """Choose a complete fresh-confirmation winner, with earlier steps breaking ties.
+    """Choose a fresh-confirmation winner using its saved panel's scoring rule.
 
     Each input uses the same summary contract as confirmation_candidates and must
-    have purpose='confirmation'. Return a new copy of the winning summary. The
-    caller owns checking that every scheduled candidate was confirmed. Empty,
-    incomplete, mixed-panel or wrong-purpose records raise ValueError. No I/O occurs.
+    have purpose='confirmation'. New panels break score ties by kill difference,
+    then earlier experience and identity; historical panels skip kill difference.
+    Return a new copy of the winning summary. The caller checks that every
+    scheduled candidate was confirmed. Empty, incomplete, mixed-panel or
+    wrong-purpose records raise ValueError. No I/O occurs.
     """
     if any(row.get("purpose") != "confirmation" for row in confirmation_results):
         raise ValueError("Selection requires fresh confirmation results")
@@ -254,7 +389,7 @@ def select_checkpoint(confirmation_results: Sequence[Mapping[str, Any]]) -> Reco
     return dict(
         min(
             candidates.values(),
-            key=lambda row: (-row["score"], row["env_steps"], row["checkpoint_id"]),
+            key=_selection_key,
         )
     )
 

@@ -75,9 +75,10 @@ def screen_declaration() -> Record:
     Case names are stable B/T identifiers; their order is shuffled once with a
     private Python Random instance, so the shuffle does not consume a global
     random stream. Optional-library imports may initialize their own state.
-    The recipe keeps the world spawn frame it was declared with, even though
-    PPOConfig now defaults to "left", so the screen reproduces its original
-    experiment. This function writes no files.
+    The recipe keeps its original world spawn frame and disabled value
+    normalization even though new PPO runs use left framing and normalization.
+    This preserves the screen's original numerical settings. This function
+    writes no files.
     """
     from marl_battlegrounds.baselines.ppo import PPOConfig
     from marl_battlegrounds.training.runner import TrainConfig, config_to_dict
@@ -95,7 +96,9 @@ def screen_declaration() -> Record:
             shaping=True,
             shaping_mode="score_delta",
             shaping_coefficient=0.01,
-            ppo=PPOConfig(input_scale=0.01, spawn_frame="world"),
+            ppo=PPOConfig(
+                input_scale=0.01, spawn_frame="world", value_normalization=False
+            ),
             metrics="none",
             recording=False,
             verbose=True,

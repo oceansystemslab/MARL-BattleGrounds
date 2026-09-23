@@ -59,7 +59,9 @@ def _result() -> UpdateResult:
     true = cast(Tree, np.asarray(True))
     false = cast(Tree, np.asarray(False))
     scalar = cast(Tree, np.asarray(1.0, np.float32))
-    metrics = PPOMetrics(*(cast(Tree, np.ones((1, 2), np.float32)) for _ in range(5)))
+    metrics = PPOMetrics(
+        *(cast(Tree, np.ones((1, 2), np.float32)) for _ in PPOMetrics._fields)
+    )
     summary = UpdateSummary(
         scalar,
         scalar,

@@ -58,7 +58,7 @@ def reactive_tdm_beta_controller_descriptor() -> dict[str, object]:
     """
     return {
         "policy_id": "scenario-5-pressure-controller",
-        "version": 4,
+        "version": 5,
         "information": "same-epoch SharedObs and recipient exact masks",
         "execution": "deterministic; actor key ignored",
         "inherited_controller": reactive_tdm_alpha_controller_descriptor(),

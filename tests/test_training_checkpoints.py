@@ -22,12 +22,16 @@ saved_training_config fixes a saved config's missing ppo.spawn_frame at "world"
 without changing the checkpoint description, so the runner's resume keeps that
 meaning whatever the current default is, and the runner rejects an explicit
 resume config that names another frame before any file changes.
+Missing historical value normalization is False in both config readers. Enabled
+statistics are saved with the learner; disabled state keeps its old array paths.
+Conflicting settings fail before payload restore or writer recovery.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections import namedtuple
 from contextlib import ExitStack
 from dataclasses import asdict, replace
 from functools import partial
@@ -41,7 +45,11 @@ import pytest
 
 import marl_battlegrounds.training.checkpoints as checkpoints
 import marl_battlegrounds.training.collection as collection_module
-from marl_battlegrounds.baselines.ppo import PPOConfig, make_recurrent_mappo_system
+from marl_battlegrounds.baselines.ppo import (
+    PPOConfig,
+    ValueNormState,
+    make_recurrent_mappo_system,
+)
 from marl_battlegrounds.evaluation.policy_execution import apply_systems, init_systems
 from marl_battlegrounds.evaluation.recording_identity import (
     normalize_system_registration,
@@ -1122,19 +1130,139 @@ def test_saved_training_config_fixes_a_missing_frame_at_world_without_mutation()
         "metadata": {"config": {"seed": 3, "ppo": {"input_scale": 0.01}}}
     }
     fixed = checkpoints.saved_training_config(saved)
-    assert fixed["ppo"] == {"input_scale": 0.01, "spawn_frame": "world"}
+    assert fixed["ppo"] == {
+        "input_scale": 0.01,
+        "spawn_frame": "world",
+        "value_normalization": False,
+    }
     assert fixed["seed"] == 3
     assert saved["metadata"]["config"] == {"seed": 3, "ppo": {"input_scale": 0.01}}
     without_block = checkpoints.saved_training_config(
         {"metadata": {"config": {"seed": 3}}}
     )
-    assert without_block["ppo"] == {"spawn_frame": "world"}
+    assert without_block["ppo"] == {
+        "spawn_frame": "world",
+        "value_normalization": False,
+    }
     explicit = checkpoints.saved_training_config(
         {"metadata": {"config": {"ppo": {"spawn_frame": "left"}}}}
     )
     assert explicit["ppo"]["spawn_frame"] == "left"
+    assert explicit["ppo"]["value_normalization"] is False
+    enabled = checkpoints.saved_training_config(
+        {"metadata": {"config": {"ppo": {"value_normalization": True}}}}
+    )
+    assert enabled["ppo"]["value_normalization"] is True
     with pytest.raises(ValueError, match="JSON object"):
         checkpoints.saved_training_config({"metadata": {"config": {"ppo": []}}})
+
+
+def test_disabled_value_norm_keeps_historical_paths_and_missing_flag_meaning(
+    context: Context, tmp_path: Path
+) -> None:
+    collection, initial = context
+    ppo = replace(PPO, value_normalization=False)
+    state = initial._replace(value_norm=None)
+    historical_type = namedtuple("HistoricalLearnerState", LearnerState._fields[:-1])  # pyright: ignore[reportUntypedNamedTuple] - Recreate the exact old field layout.
+    historical_state = historical_type(*state[:-1])
+    assert checkpoints._layout(state) == checkpoints._layout(historical_state)  # pyright: ignore[reportPrivateUsage]
+    _equal(
+        checkpoints._state_payload(state),  # pyright: ignore[reportPrivateUsage]
+        checkpoints._state_payload(cast(LearnerState, historical_state)),  # pyright: ignore[reportPrivateUsage]
+    )
+    metadata = _metadata()
+    config = cast(dict[str, Any], metadata["config"])
+    config["ppo"] = asdict(ppo)
+    del config["ppo"]["value_normalization"]
+    writer = _writer(tmp_path, collection, metadata)
+    try:
+        path = save_checkpoint(
+            tmp_path, collection, state, metadata=metadata, writer=writer, ppo=ppo
+        )
+    finally:
+        if writer is not None:
+            writer.close()
+    original = _files(tmp_path)
+    expected = _expected(metadata)
+    expected["config"] = {**config, "ppo": asdict(ppo)}
+    restored = restore_checkpoint(
+        path, collection, state, expected_metadata=expected, ppo=ppo
+    )
+    _equal(state, restored.state)
+    assert restored.state.value_norm is None
+    assert _files(tmp_path) == original
+    assert (
+        "value_normalization"
+        not in read_checkpoint_details(path)["metadata"]["config"]["ppo"]
+    )
+
+
+def test_value_norm_roundtrip_and_conflicts_precede_writer_or_array_changes(
+    context: Context, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collection, initial = context
+    state = initial._replace(
+        value_norm=ValueNormState(jnp.float32(0.2), jnp.float32(0.5), jnp.float32(0.1))
+    )
+    metadata = _metadata()
+    writer = _writer(tmp_path, collection, metadata)
+    try:
+        before = _files(tmp_path)
+        with pytest.raises(ValueError, match="value_normalization"):
+            save_checkpoint(
+                tmp_path,
+                collection,
+                state,
+                metadata=metadata,
+                writer=writer,
+                ppo=replace(PPO, value_normalization=False),
+            )
+        assert _files(tmp_path) == before
+        with pytest.raises(ValueError, match="normalization"):
+            save_checkpoint(
+                tmp_path,
+                collection,
+                state._replace(value_norm=None),
+                metadata=metadata,
+                writer=writer,
+                ppo=PPO,
+            )
+        assert _files(tmp_path) == before
+        path = save_checkpoint(
+            tmp_path, collection, state, metadata=metadata, writer=writer, ppo=PPO
+        )
+    finally:
+        if writer is not None:
+            writer.close()
+    restored = restore_checkpoint(
+        path, collection, initial, expected_metadata=_expected(metadata), ppo=PPO
+    )
+    _equal(state, restored.state)
+    normalizer_rows = [
+        row
+        for row in restored.details["layout"]
+        if row["path"][0] == {"field": "value_norm"}
+    ]
+    assert len(normalizer_rows) == 3
+    assert all(
+        row["shape"] == [] and row["dtype"] == "float32" for row in normalizer_rows
+    )
+    before = _files(tmp_path)
+
+    def forbidden_restore(*args: object, **kwargs: object) -> None:
+        pytest.fail("Normalization mismatch must reject before arrays are read")
+
+    monkeypatch.setattr(checkpoints, "_restore_arrays", forbidden_restore)
+    with pytest.raises(ValueError, match="value_normalization"):
+        restore_checkpoint(
+            path,
+            collection,
+            initial,
+            expected_metadata=_expected(metadata),
+            ppo=replace(PPO, value_normalization=False),
+        )
+    assert _files(tmp_path) == before
+    assert not (tmp_path / "checkpoint_recovery.json").exists()
 
 
 def test_resume_reads_a_missing_saved_frame_as_world_and_rejects_another(

@@ -48,6 +48,7 @@ from marl_battlegrounds.baselines.ppo import (
     PPOMetrics,
     PPOTrainState,
     RecurrentActor,
+    ValueNormState,
     calculate_gae,
     critic_values,
     initialize_ppo,
@@ -118,6 +119,7 @@ def _numerical(state: LearnerState) -> PPOTrainState:
         state.critic_params,
         state.actor_opt_state,
         state.critic_opt_state,
+        state.value_norm,
     )
 
 
@@ -153,6 +155,14 @@ def _direct_batch(
         jnp.zeros_like(rollout.final_ended)[None],
         (~rollout.final_ended)[None],
     )
+    anchors = None
+    if state.value_norm is not None:
+        anchors = jnp.where(rows.valid[..., None], values, 0.0)
+        mean_sum, square_sum, weight = state.value_norm
+        denominator = jnp.maximum(weight, 1e-5)
+        mean = mean_sum / denominator
+        scale = jnp.sqrt(jnp.maximum(square_sum / denominator - mean**2, 1e-2))
+        values, final = values * scale + mean, final * scale + mean
     batch = PPOBatch(
         rows.observations,
         rows.training_state,
@@ -171,6 +181,7 @@ def _direct_batch(
         ),
         rollout.initial_memory,
         state.critic_memory,
+        anchors,
     )
     return batch, memory
 
@@ -451,6 +462,9 @@ def test_pending_reset_and_bootstrap_preserve_correct_two_block_critic_carry(
 def test_interior_horizon_ending_cuts_gae_and_final_value(context: Context) -> None:
     collection, state, _ = context
     state = synthetic_horizons(collection, state, horizon=2)
+    state = state._replace(
+        value_norm=ValueNormState(jnp.float32(4), jnp.float32(20), jnp.float32(0.5))
+    )
     _, rollout = scanner(collection, 4)(state.carry)
     batch, _ = build_ppo_batch(state, rollout)
     np.testing.assert_array_equal(batch.episode_start[:, 0], (True, False, True, False))
@@ -618,6 +632,16 @@ def test_restore_guard_rejects_counter_key_and_optimizer_incoherence(
     )
     with pytest.raises(ValueError, match="optimizer counter"):
         validate_learner(collection, corrupted, ppo=ppo)
+
+
+@pytest.mark.parametrize("values", [(0, -1, 0.5), (0, 1, -0.1), (0, 1, 1.1), (1, 1, 0)])
+def test_restore_rejects_impossible_value_statistics(
+    context: Context, values: tuple[float, float, float]
+) -> None:
+    collection, state, ppo = context
+    invalid = ValueNormState(*(jnp.float32(value) for value in values))
+    with pytest.raises(ValueError, match="normalization statistics"):
+        validate_learner(collection, state._replace(value_norm=invalid), ppo=ppo)
 
 
 @pytest.mark.parametrize("value", (None, 0, 1, "False", np.bool_(True)))

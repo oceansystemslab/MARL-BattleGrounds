@@ -34,11 +34,13 @@ from marl_battlegrounds.core.types import (
     MOVE_STAY,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_HEIGHT,
+    OBSTACLE_FEATURE_RADIUS,
     OBSTACLE_FEATURE_THETA,
     OBSTACLE_FEATURE_TYPE,
     OBSTACLE_FEATURE_WIDTH,
     OBSTACLE_FEATURE_X,
     OBSTACLE_FEATURE_Y,
+    OBSTACLE_TYPE_PILLAR,
     OBSTACLE_TYPE_WALL,
     ActionMask,
     Observation,
@@ -200,9 +202,17 @@ def refine_movement(
     Core's static obstacle and map-bound projection evaluates eight possible moves
     without body-pair contacts. A move needs at least MINIMUM_MOVEMENT_FRACTION of
     the actor's movement speed as displacement, with additional progress checks
-    during wall steering. This is a one-decision preference, not a route planner
-    or a prediction of simultaneous body movement. The helper is JAX-compatible
-    and changes no state.
+    during wall steering. During wall steering a move must also keep its
+    clearance from the selected wall end: it may not move back from that end,
+    unless its endpoint has cleared the end line. Both checks allow a margin of
+    one useful stride, MINIMUM_MOVEMENT_FRACTION times the movement speed: a
+    move may drift back from the end by up to that much, or finish up to that
+    much short of clearing the end line. The margin stops a few millimetres of
+    projection drift at a wall corner from vetoing every direction. The
+    body-aware BETA path keeps the strict geometry-tolerance clearance test.
+    This is a one-decision preference, not a route planner or a prediction of
+    simultaneous body movement. The helper is JAX-compatible and changes no
+    state.
     """
     origin = centers(observation.self_features)
     speed = observation.self_features[AGENT_FEATURE_EFFECTIVE_MOVEMENT_SPEED]
@@ -247,8 +257,12 @@ def refine_movement(
     phase_progress = (projected - origin) @ intended_direction
     away_from_end = (projected[:, 1] - origin[1]) * end_direction
     clears_end = (projected[:, 1] - end_height) * end_direction
-    preserves_clearance = (away_from_end >= -GEOMETRY_TOLERANCE) | (
-        clears_end >= -GEOMETRY_TOLERANCE
+    # A projection can drift a few millimetres toward the wall end while making
+    # full phase progress. Allow up to one useful stride of lost clearance so
+    # that drift cannot veto every direction at the corner.
+    clearance_margin = MINIMUM_MOVEMENT_FRACTION * speed
+    preserves_clearance = (away_from_end >= -clearance_margin) | (
+        clears_end >= -clearance_margin
     )
     preferred = admissible & (
         ~steering
@@ -301,17 +315,27 @@ def _wall_steering(
         Scalar Boolean saying a nearby wall steering rule applies.
     end_direction : Array
         Scalar direction toward the selected wall end: -1 south, 1 north,
-        or 0 for no selected end. Active steering with 0 means neither end fits.
+        or 0 for no selected end. Active steering with 0 means neither end fits,
+        after the static branch's one-step extension past a capping obstacle.
     end_height : Array
-        Selected wall-end y coordinate in world units. Use it only when the
-        steering and end-selection flags make it relevant.
+        Selected wall-end y coordinate in world units. In the static branch,
+        when neither original end fitted, it may be an extended end one body
+        radius past a capping obstacle. Use it only when the steering and
+        end-selection flags make it relevant.
 
     Notes
     -----
     This rule handles axis-aligned walls taller than they are wide, including
     quarter-turn obstacle encodings. It prefers a fitting south end, with a north
-    alternative. The body-aware branch considers directly overlapping expanded
-    wall groups, not an unbounded route search. It carries no route memory and
+    alternative. In the static branch, when neither end fits and an end's exit
+    disc is blocked by an obstacle sitting at that end (a pillar or a short
+    wall), that end is extended once, to one body radius past the far side of
+    the cap, and the exit is tested there, so the composite shape steers like
+    one longer wall. The extension happens only once: a second cap beyond the
+    first, a wall that spans the map, or ends that are not capped still leave
+    no fitting end, and the caller then chooses Stay. The body-aware branch
+    considers directly overlapping expanded wall groups, not an unbounded
+    route search. It carries no route memory and
     changes neither physical geometry nor observations. Possible moves still
     need the caller's legality and progress checks.
     """
@@ -367,6 +391,60 @@ def _wall_steering(
         clear = vmap(vmap(exit_clear))(exit_centers)
         south_fits &= clear[:, 0]
         north_fits &= clear[:, 1]
+        # A capped end: the exit disc overlaps an obstacle sitting at the wall
+        # end, such as a pillar or a short wall. When neither end fits, extend
+        # each blocked end past its cap and test the exit there, so the
+        # composite shape steers like one longer wall instead of vetoing every
+        # move. Every other case keeps the original ends and flags.
+        no_fit = ~(south_fits | north_fits)
+        pillar = obstacles[:, OBSTACLE_FEATURE_TYPE] == OBSTACLE_TYPE_PILLAR
+        extent = jnp.where(
+            pillar,
+            obstacles[:, OBSTACLE_FEATURE_RADIUS],
+            jnp.abs(obstacles[:, OBSTACLE_FEATURE_WIDTH] * jnp.sin(theta)) / 2
+            + jnp.abs(obstacles[:, OBSTACLE_FEATURE_HEIGHT] * jnp.cos(theta)) / 2,
+        )
+
+        def caps(center: Array) -> Array:
+            """Flag the obstacle rows that overlap an actor-sized disc at one exit.
+
+            ``center`` is the exit disc's float (2,) world centre. The result is
+            Boolean (O,), one entry per observed obstacle row; inactive rows are
+            False. The enclosing call supplies the body radius and obstacles.
+            """
+            return vmap(disc_overlaps_obstacle, in_axes=(None, None, 0))(
+                center, radius, obstacles
+            )
+
+        cap_south = vmap(caps)(exit_centers[:, 0])
+        cap_north = vmap(caps)(exit_centers[:, 1])
+        south_past = jnp.min(
+            jnp.where(cap_south, (y - extent)[None, :] - radius, jnp.inf), axis=1
+        )
+        north_past = jnp.max(
+            jnp.where(cap_north, (y + extent)[None, :] + radius, -jnp.inf), axis=1
+        )
+        south_past = jnp.where(clear[:, 0], south, jnp.minimum(south, south_past))
+        north_past = jnp.where(clear[:, 1], north, jnp.maximum(north, north_past))
+        past_centers = jnp.stack(
+            (
+                jnp.stack((exit_x, south_past), axis=-1),
+                jnp.stack((exit_x, north_past), axis=-1),
+            ),
+            axis=1,
+        )
+        clear_past = vmap(vmap(exit_clear))(past_centers)
+        south_fits_past = (south_past >= radius - tolerance) & clear_past[:, 0]
+        north_fits_past = (
+            north_past
+            <= observation.context_features[CONTEXT_FEATURE_MAP_HEIGHT]
+            - radius
+            + tolerance
+        ) & clear_past[:, 1]
+        south = jnp.where(no_fit, south_past, south)
+        north = jnp.where(no_fit, north_past, north)
+        south_fits = jnp.where(no_fit, south_fits_past, south_fits)
+        north_fits = jnp.where(no_fit, north_fits_past, north_fits)
     end_direction = jnp.where(south_fits, -1.0, jnp.where(north_fits, 1.0, 0.0))
     end = jnp.where(south_fits, south, north)
     end_progress = (origin[1] - end) * end_direction

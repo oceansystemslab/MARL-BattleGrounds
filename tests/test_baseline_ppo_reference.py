@@ -43,7 +43,7 @@ type Tree = Any
 type RecordProperty = Callable[[str, object], None]
 _ATOL = 2e-6
 _RTOL = 2e-6
-_CONFIG = ppo.PPOConfig(rollout_length=4)
+_CONFIG = ppo.PPOConfig(rollout_length=4, value_normalization=False)
 
 
 def _asarray(value: NDArray[Any]) -> Array:

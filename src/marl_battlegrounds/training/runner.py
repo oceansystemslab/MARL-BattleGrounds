@@ -13,7 +13,7 @@ import os
 import shutil
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
@@ -21,6 +21,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from marl_battlegrounds._method_loading import validate_saved_method_reference
 from marl_battlegrounds.baselines.ppo import PPOConfig
 from marl_battlegrounds.training._run_io import (
     ProgressReporter,
@@ -117,8 +118,16 @@ class TrainConfig:
         Save episode tables through a separate training RunWriter. False skips
         recording drains; learner checkpoints and update summaries still save.
     validation_panel : str or None, default=None
-        Frozen panel.json path. A demonstration requires it. Development may
-        omit it, in which case no selected actor is claimed.
+        Existing frozen panel.json path. Use this or validation_opponents.
+        Demonstration needs a panel by train setup; development may omit it.
+    validation_opponents : tuple[str, ...] or None, default=None
+        Built-in names, absolute actor exports or module:function factories.
+        Freeze these once before training. Live methods instead belong in
+        train's validation_opponents keyword. Conflicting declarations fail.
+    slot_diagnostic_actor : str or None, default=None
+        Explicit absolute MAPPO export for the optional slot comparison with a
+        new System panel. Historical panels keep their final actor by default.
+        Enabled diagnostics verify this artifact before learner setup.
     validation_fractions : tuple[float, ...], default=(0.1, ..., 1.0)
         Increasing experience fractions, rounded up to completed updates.
         Initialization is diagnostic only. The final fraction must be one.
@@ -170,6 +179,8 @@ class TrainConfig:
     metrics: Literal["priority", "none"] = "priority"
     recording: bool = False
     validation_panel: str | None = None
+    validation_opponents: tuple[str, ...] | None = None
+    slot_diagnostic_actor: str | None = None
     validation_fractions: tuple[float, ...] = tuple(i / 10 for i in range(1, 11))
     routine_seed_pairs: int = 10
     confirmation_seed_pairs: int = 50
@@ -247,13 +258,7 @@ class TrainConfig:
                 raise ValueError(
                     "pinned_opponent needs a positive pinned_opponent_share"
                 )
-            if (
-                "/" in self.pinned_opponent
-                and not Path(self.pinned_opponent).is_absolute()
-            ):
-                # A saved config is resolved again on resume, possibly from
-                # another working directory, so a path must be absolute.
-                raise ValueError("pinned_opponent paths must be absolute")
+            validate_saved_method_reference(self.pinned_opponent)
         if self.purpose not in ("development", "demonstration"):
             raise ValueError("purpose must be development or demonstration")
         if self.validation_panel is not None and (
@@ -277,12 +282,31 @@ class TrainConfig:
                 "random_initialization_result needs a path and enabled "
                 "Random diagnostics"
             )
-        if (
-            self.purpose == "demonstration" or self.slot_diagnostic
-        ) and not self.validation_panel:
-            raise ValueError(
-                "demonstration and slot_diagnostic require validation_panel"
-            )
+        if self.validation_opponents is not None:
+            if (
+                not isinstance(cast(object, self.validation_opponents), tuple)
+                or not self.validation_opponents
+            ):
+                raise ValueError(
+                    "validation_opponents must be a nonempty tuple of references"
+                )
+            for reference in self.validation_opponents:
+                validate_saved_method_reference(reference)
+            if self.validation_panel is not None:
+                raise ValueError(
+                    "Declare validation_panel or validation_opponents, not both"
+                )
+        if self.slot_diagnostic_actor is not None and (
+            not isinstance(cast(object, self.slot_diagnostic_actor), str)
+            or not Path(self.slot_diagnostic_actor).is_absolute()
+        ):
+            raise ValueError("slot_diagnostic_actor must be an absolute actor path")
+        if self.slot_diagnostic and not (
+            self.validation_panel
+            or self.validation_opponents
+            or self.slot_diagnostic_actor
+        ):
+            raise ValueError("slot_diagnostic requires a frozen validation panel")
         fractions = self.validation_fractions
         if (
             not isinstance(cast(object, fractions), tuple)
@@ -361,8 +385,12 @@ def config_from_dict(value: dict[str, Any]) -> TrainConfig:
         if not isinstance(data["ppo"], dict):
             raise TypeError("ppo must be a JSON object")
         data["ppo"] = PPOConfig(**cast(dict[str, Any], data["ppo"]))
-    for name in ("validation_fractions", "checkpoint_env_steps"):
-        if name in data:
+    for name in (
+        "validation_fractions",
+        "checkpoint_env_steps",
+        "validation_opponents",
+    ):
+        if name in data and data[name] is not None:
             if not isinstance(data[name], (list, tuple)):
                 raise TypeError(f"{name} must be a JSON array")
             data[name] = tuple(data[name])
@@ -431,6 +459,7 @@ def train(
     *,
     output_dir: str | Path | None = None,
     resume_from: str | Path | None = None,
+    validation_opponents: Sequence[Any] | None = None,
 ) -> TrainResult:
     """Run or resume one complete declared MAPPO experiment on the current device.
 
@@ -451,6 +480,12 @@ def train(
         resume. A saved config without ppo.spawn_frame means "world" whatever
         the current default is; a supplied config that disagrees is rejected.
         Failed recovery retains its explicit retry marker.
+
+    validation_opponents : sequence of System, Policy or str, optional
+        Live methods or reload references for a new frozen panel. A new run cannot
+        also declare config.validation_opponents. With config.validation_panel or
+        resume, these bindings must match every saved member in order; they never
+        replace membership. A live-only client must be supplied again on resume.
 
     Returns
     -------
@@ -507,11 +542,46 @@ def train(
         if root.exists() and (not root.is_dir() or any(root.iterdir())):
             raise ValueError("output_dir must be new or empty")
     assert config is not None
-    panel = (
-        validation.load_panel(config.validation_panel)
-        if config.validation_panel
-        else None
+    if (
+        saved is None
+        and validation_opponents is not None
+        and config.validation_opponents is not None
+    ):
+        raise ValueError("Declare validation_opponents once, in config or train")
+    declared = (
+        validation_opponents
+        if validation_opponents is not None
+        else config.validation_opponents
     )
+    panel_path = (
+        Path(config.validation_panel)
+        if config.validation_panel
+        else root / "validation_panel" / "panel.json"
+    )
+    if config.validation_panel or (saved is not None and panel_path.exists()):
+        panel = validation.load_panel(panel_path, bindings=declared)
+    elif declared is not None:
+        if saved is not None:
+            raise ValueError("Resume cannot introduce a new validation panel")
+        panel = validation.create_panel(
+            opponents=declared, output_dir=panel_path.parent
+        )
+    else:
+        panel = None
+    if config.slot_diagnostic and panel is None:
+        raise ValueError("slot_diagnostic requires a frozen validation panel")
+    if (
+        config.slot_diagnostic
+        and panel is not None
+        and panel.schema_version == 2
+        and not config.slot_diagnostic_actor
+    ):
+        raise ValueError(
+            "A System panel needs an explicit slot_diagnostic_actor "
+            "for this optional comparison"
+        )
+    if config.slot_diagnostic and config.slot_diagnostic_actor:
+        checkpoints.artifact_identity(config.slot_diagnostic_actor)
     if config.purpose == "demonstration" and (panel is None or not panel.qualified):
         raise ValueError("Demonstration requires a qualified frozen validation panel")
     schedule = make_training_schedule(
@@ -1486,6 +1556,42 @@ class _Run:
                     if np.any(metrics.actor_samples)
                     else None,
                     "learning_rate": self.config.ppo.actor_lr,
+                    "value_loss_units": "normalized_squared"
+                    if self.config.ppo.value_normalization
+                    else "reward_squared",
+                    **{
+                        name: float(
+                            np.asarray(getattr(metrics, name))[
+                                np.asarray(samples) > 0
+                            ].mean()
+                        )
+                        if np.any(samples)
+                        else None
+                        for samples, names in (
+                            (
+                                metrics.actor_samples,
+                                (
+                                    "approx_kl",
+                                    "policy_clip_fraction",
+                                    "actor_grad_norm",
+                                ),
+                            ),
+                            (
+                                metrics.critic_samples,
+                                (
+                                    "value_clip_fraction",
+                                    "critic_grad_norm",
+                                    "target_mean",
+                                    "target_std",
+                                    "value_mean",
+                                    "value_rmse",
+                                    "normalization_mean",
+                                    "normalization_std",
+                                ),
+                            ),
+                        )
+                        for name in names
+                    },
                 }
                 append_jsonl(self.root / "training_updates.jsonl", row)
                 del rollout, collected, result, next_state
@@ -1622,9 +1728,11 @@ class _Run:
         assert self.panel is not None
         self.set_status("slot_diagnostic")
         started = time.monotonic()
+        opponent = self.config.slot_diagnostic_actor or self.panel.members[-1].path
+        assert opponent is not None
         result = run_slot_diagnostic(
             Path(self.host["final_actor"]),
-            self.panel.members[-1].path,
+            opponent,
             output_dir=self.root
             / "slot_diagnostic"
             / Path(self.host["final_actor"]).name,

@@ -6,8 +6,9 @@ saved config without the pinned_opponent key restores against today's config,
 which carries it as None. A different pinned record is refused before any
 array is read and leaves every file unchanged. A JAX pinned System with
 memory whose weights start committed to a device enters the carry with
-uncommitted weights like the rest of the carry, so the first blocks compile
-once; saved while its games are in progress, it restores from the files alone
+uncommitted weights like the rest of the carry. This test checks placement,
+not compilation counts. Saved while its games are in progress, it restores
+from the files alone
 and continues exactly as the uninterrupted collection; saved pinned weights
 that differ from the digest recorded at setup are refused and leave every file
 unchanged. A pinned host method whose

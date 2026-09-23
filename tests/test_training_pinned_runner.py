@@ -1,4 +1,4 @@
-"""Check a public training run that pins tdm-alpha, including its resume.
+"""Check a public training run that pins tdm-alpha and exports its evidence.
 
 A recorded run with pinned_opponent="tdm-alpha" saves the reference in its run
 details, the pinned record in every checkpoint's collection block and in the

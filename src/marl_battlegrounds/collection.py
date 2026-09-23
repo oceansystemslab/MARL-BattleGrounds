@@ -783,6 +783,28 @@ def _collect(
     return carry, output
 
 
+def _check_collection_writer(writer: RunWriter, *, has_steps: bool) -> None:
+    """Reject unusable recording ownership before any policy or provider call.
+
+    writer must be an open, healthy RunWriter outside another collection.
+    has_steps says whether work will advance; only advancing work refuses an
+    unfinished manual start handoff. No state is changed. TypeError and
+    RuntimeError retain the existing collector's meanings. Both numerical and
+    host-method collectors use this preflight.
+    """
+    from marl_battlegrounds.evaluation.run_writer import RunWriter
+
+    if not isinstance(cast(object, writer), RunWriter):
+        raise TypeError("writer must be RunWriter")
+    writer._check_open()  # pyright: ignore[reportPrivateUsage]
+    if getattr(writer, "_collection_active", False):
+        raise RuntimeError("writer is already collecting")
+    if has_steps and writer.has_pending_numerical_starts:
+        raise RuntimeError(
+            "finish the pending manual register/write handoff before collection"
+        )
+
+
 def collect_rollout(
     step_fn: StepFunction,
     carry: object,
@@ -856,22 +878,12 @@ def collect_rollout(
     recording prefixes cross the host boundary. The writer owns publication;
     flush/close establishes durability. This does not save a learner checkpoint.
     """
-    from marl_battlegrounds.evaluation.run_writer import RunWriter
-
     options = _compiler_options(compiler_options)
     total = _integer(num_steps, "num_steps")
     capacity = (
         total if output_steps is None else _integer(output_steps, "output_steps", total)
     )
-    if not isinstance(cast(object, writer), RunWriter):
-        raise TypeError("writer must be RunWriter")
-    writer._check_open()  # pyright: ignore[reportPrivateUsage]
-    if getattr(writer, "_collection_active", False):
-        raise RuntimeError("writer is already collecting")
-    if total and writer.has_pending_numerical_starts:
-        raise RuntimeError(
-            "finish the pending manual register/write handoff before collection"
-        )
+    _check_collection_writer(writer, has_steps=bool(total))
     if not total:
         prepared = _prepare(step_fn, carry, record_capacity)
         return carry, _zeros_from_shape(prepared.transition, capacity, 0)

@@ -837,16 +837,13 @@ def validate_host_state(
                 raise ValueError("Saved validation refers to an unknown actor")
             actor = actor_records[key]
             pairs = config[f"{purpose}_seed_pairs"]
-            expected_task = validation.validation_task_description(
+            expected_task = validation.panel_task_description(
                 checkpoint_id=key,
                 actor_digest=actor["actor_digest"],
                 env_steps=actor["env_steps"],
-                panel_digest=panel.digest,
+                panel=panel,
                 purpose=purpose,
                 seed_pairs=pairs,
-                members=tuple(
-                    (member.name, member.actor_digest) for member in panel.members
-                ),
             )
             directory = root / "validation" / f"{purpose}-{key}"
             task_file = read(directory / "task.json")
@@ -889,6 +886,11 @@ def validate_host_state(
                 panel.members
             ):
                 raise ValueError("Saved validation pass paths are incomplete")
+            loaded_actor = (
+                checkpoints.load_system(cast(dict[str, str], actors)[key])
+                if panel.schema_version == 2
+                else None
+            )
             for index, (path, member) in enumerate(
                 zip(cast(list[Any], paths), panel.members, strict=True)
             ):
@@ -912,6 +914,15 @@ def validate_host_state(
                     != 0
                 ):
                     raise ValueError("Saved validation pass is missing or incomplete")
+                if panel.schema_version == 2:
+                    validation._verify_panel_pass(  # pyright: ignore[reportPrivateUsage]
+                        actual_path,
+                        loaded_actor,
+                        panel.methods[index],
+                        task=expected_task,
+                        member_index=index,
+                        num_envs=min(32, batch),
+                    )
             validation_games += games
             if purpose == "routine":
                 if (

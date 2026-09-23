@@ -100,6 +100,7 @@ from marl_battlegrounds.evaluation.run_writer import (
     RunWriter,
     _json_bytes,  # pyright: ignore[reportPrivateUsage]
     _json_value,  # pyright: ignore[reportPrivateUsage]
+    _prepare_pass_identity,
     configuration_identity,
 )
 from marl_battlegrounds.evaluation.system_evaluation import (
@@ -879,6 +880,7 @@ def _run_evaluation(
     *,
     seed: int = 0,
     num_envs: int = 128,
+    keep_batch_size: bool = False,
     metrics: MetricMode = "priority",
     full_metrics_episodes: Iterable[int] = (),
     replay_episodes: Iterable[int] = (),
@@ -893,6 +895,7 @@ def _run_evaluation(
     saved: tuple[dict[str, object], dict[str, object]] | None = None,
     source_choices: Sequence[EpisodeSpec] | None = None,
     registered_maps: Mapping[int, Mapping[str, Any]] | None = None,
+    _verify_only: bool = False,
 ) -> EvaluationResult:
     """Execute already resolved frozen methods through the chunk/refill authority.
 
@@ -915,7 +918,12 @@ def _run_evaluation(
         counts determine streams independently of scheduling order.
     num_envs : int
         Positive maximum batch size, default 128. The actual batch is
-        capped by the number of pending episodes. One lane runs one game.
+        capped by pending episodes unless keep_batch_size is True.
+    keep_batch_size : bool, default=False
+        Keep num_envs lanes even when fewer games remain, including on resume.
+        Unused lanes are inactive before method initialization and produce no
+        actions, transitions or records. Their inputs have valid=False. This
+        preserves compiled batch shapes across short validation schedules.
     metrics : MetricMode
         "priority" by default; "full" adds all full metrics for every
         episode, and "none" skips default collection. Explicit full metric
@@ -970,6 +978,10 @@ def _run_evaluation(
         Private exact source map identities from an immutable tournament snapshot.
         None uses the current catalog. Supplied entries still require an approved
         current or historical identity and exact source geometry.
+    _verify_only : bool, default=False
+        Private read-only check of an existing saved pass. True returns empty
+        result rows after the writer's shared identity/start checks, before any
+        writer creation, method initialization or environment execution.
 
     Returns
     -------
@@ -1011,7 +1023,14 @@ def _run_evaluation(
     specs = tuple(episodes)
     if not specs:
         raise ValueError("episodes must contain at least one specification")
-    batch_size = min(positive_int(num_envs, "num_envs"), len(specs))
+    if type(keep_batch_size) is not bool:
+        raise ValueError("keep_batch_size must be a bool")
+    requested_batch_size = positive_int(num_envs, "num_envs")
+    batch_size = (
+        requested_batch_size
+        if keep_batch_size
+        else min(requested_batch_size, len(specs))
+    )
     chunk_size = positive_int(chunk_size, "chunk_size")
     if (
         isinstance(seed, bool)
@@ -1215,6 +1234,16 @@ def _run_evaluation(
     }
     metadata["systems"] = {key: value for key, value in registrations.values()}
     metadata["system_ids"] = {name: value[0] for name, value in registrations.items()}
+    if _verify_only:
+        if saved is None:
+            raise ValueError("Read-only verification requires a saved pass")
+        pass_key, _, _ = _prepare_pass_identity(
+            saved[0], phase, pass_id, policies, None, pass_details
+        )
+        RunWriter._validate_saved_starts(
+            saved[0], allow_pending=True, pass_key=pass_key
+        )
+        return EvaluationResult({}, {}, (), metadata, (), None)
     with ExitStack() as cleanup:
         if writer is None and (output_dir is not None or resume_from is not None):
             writer = cleanup.enter_context(
@@ -1286,7 +1315,9 @@ def _run_evaluation(
                 tuple(sorted(previous)),
                 writer.paths if writer is not None else None,
             )
-        effective_batch_size = min(batch_size, len(pending))
+        effective_batch_size = (
+            batch_size if keep_batch_size else min(batch_size, len(pending))
+        )
         if effective_batch_size != batch_size:
             metadata["num_envs"] = effective_batch_size
             runtime = cast(dict[str, object], metadata["runtime_provenance"])
@@ -1346,6 +1377,16 @@ def _run_evaluation(
         initial_b = initial_policy_carry(base_carry_b, batch_size) if legacy else ()
         root = jax.random.key(int(seed))
         lanes = list(pending[:batch_size])
+        real_lane_count = len(lanes)
+        # Padding IDs cannot alias any real game, including completed resume rows.
+        padding_count = batch_size - real_lane_count
+        if padding_count > np.iinfo(np.int32).max - len(spec_by_id):
+            raise ValueError("not enough unused positive int32 IDs for padding")
+        candidate = 1
+        while len(lanes) < batch_size:
+            if candidate not in spec_by_id:
+                lanes.append(EpisodeSpec(candidate, lanes[0].env_config))
+            candidate += 1
 
         def seeds() -> Array:
             """Read the current lane schedule's independent uint32 random-stream IDs."""
@@ -1368,6 +1409,16 @@ def _run_evaluation(
                 initial=_initial_snapshots(lanes, reset_keys),
             ),
         )
+        if padding_count:
+            padding = jnp.arange(batch_size) >= real_lane_count
+            # Finished-lane handling already skips actions, transitions and records.
+            # Set this before init so custom memory sees the correct valid mask.
+            state = state._replace(
+                done=state.done._replace(truncated=state.done.truncated | padding),
+                collect_metrics=state.collect_metrics & ~padding,
+                collect_full_metrics=state.collect_full_metrics & ~padding,
+                collect_replay=state.collect_replay & ~padding,
+            )
         carry: _Carry | _SystemCarry
         if legacy:
             carry = _Carry(
@@ -1571,6 +1622,7 @@ def evaluate_episodes(
     *,
     seed: int | Omitted = OMITTED,
     num_envs: int = 128,
+    keep_batch_size: bool = False,
     metrics: MetricMode | Omitted = OMITTED,
     full_metrics_episodes: Iterable[int] | Omitted = OMITTED,
     replay_episodes: Iterable[int] | Omitted = OMITTED,
@@ -1601,6 +1653,11 @@ def evaluate_episodes(
     num_envs : int, default=128
         Positive maximum worker count, reduced to the number of pending games.
         It does not change schedule identities or random coordinates.
+    keep_batch_size : bool, default=False
+        Keep num_envs lanes on initial and resumed short schedules. Extra lanes
+        have valid=False before System initialization; they produce no games,
+        transitions or records. Host methods must respect that valid mask.
+        This avoids compiling a new batch shape for a short validation pass.
     metrics : {'priority', 'full', 'none'}, default='priority'
         Default scalar collection. none still retains required game outcomes.
     full_metrics_episodes, replay_episodes : iterable of int, default=()
@@ -1664,6 +1721,7 @@ def evaluate_episodes(
         episodes,
         seed=seed,
         num_envs=num_envs,
+        keep_batch_size=keep_batch_size,
         metrics=metrics,
         full_metrics_episodes=full_metrics_episodes,
         replay_episodes=replay_episodes,
@@ -1685,6 +1743,7 @@ def _evaluate_tournament_episodes(
     *,
     seed: int | Omitted = OMITTED,
     num_envs: int = 128,
+    keep_batch_size: bool = False,
     metrics: MetricMode | Omitted = OMITTED,
     full_metrics_episodes: Iterable[int] | Omitted = OMITTED,
     replay_episodes: Iterable[int] | Omitted = OMITTED,
@@ -1759,6 +1818,7 @@ def _evaluate_tournament_episodes(
         specs,
         seed=options["seed"],
         num_envs=num_envs,
+        keep_batch_size=keep_batch_size,
         metrics=options["metrics"],
         full_metrics_episodes=options["full_metrics_episodes"],
         replay_episodes=selected,
@@ -1786,6 +1846,7 @@ def evaluate(
     opponent_roster: Sequence[AgentClassName] | None | Omitted = OMITTED,
     seed: int | Omitted = OMITTED,
     num_envs: int = 128,
+    keep_batch_size: bool = False,
     metrics: MetricMode | Omitted = OMITTED,
     full_metrics_episodes: Iterable[int] | Omitted = OMITTED,
     replay_episodes: Iterable[int] | Omitted = OMITTED,
@@ -1831,6 +1892,11 @@ def evaluate(
     num_envs : int, default=128
         Positive maximum execution batch, bounded by pending games. Placement
         and chunk size do not change schedule identity or episode random streams.
+    keep_batch_size : bool, default=False
+        Keep num_envs lanes when fewer games remain, including on resume. Extra
+        lanes have valid=False before System initialization and produce no
+        games, transitions or records. Host methods must respect that mask.
+        Useful for reusing a compiled batch shape across validation checkpoints.
     metrics : {'priority', 'full', 'none'}, default='priority'
         Default measurement level. Required lengths, scores and outcomes remain
         available under none without implying that priority measurements exist.
@@ -1881,6 +1947,69 @@ def evaluate(
     cross their documented input boundary. This host helper never trains or edits
     the caller's training state, RNG or memory. Use evaluate_episodes for exact
     authored starts, including a single condition without any comparison claim.
+    """
+    request = _generated_evaluation_request(
+        system=system,
+        opponent=opponent,
+        num_episodes=num_episodes,
+        maps=maps,
+        spawn_mode=spawn_mode,
+        system_roster=system_roster,
+        opponent_roster=opponent_roster,
+        seed=seed,
+        num_envs=num_envs,
+        keep_batch_size=keep_batch_size,
+        metrics=metrics,
+        full_metrics_episodes=full_metrics_episodes,
+        replay_episodes=replay_episodes,
+        save_replays=save_replays,
+        output_dir=output_dir,
+        resume_from=resume_from,
+        writer=writer,
+        score_threshold=score_threshold,
+        max_steps=max_steps,
+        phase=phase,
+        pass_id=pass_id,
+        chunk_size=chunk_size,
+    )
+    return _run_evaluation(
+        request.pop("team_a"),
+        request.pop("team_b"),
+        request.pop("episodes"),
+        **request,
+    )
+
+
+def _generated_evaluation_request(
+    system: System | Policy | str,
+    opponent: System | Policy | str,
+    *,
+    num_episodes: int,
+    maps: Iterable[MapInput] | None = None,
+    spawn_mode: str | Omitted = OMITTED,
+    system_roster: Sequence[AgentClassName] | None | Omitted = OMITTED,
+    opponent_roster: Sequence[AgentClassName] | None | Omitted = OMITTED,
+    seed: int | Omitted = OMITTED,
+    num_envs: int = 128,
+    keep_batch_size: bool = False,
+    metrics: MetricMode | Omitted = OMITTED,
+    full_metrics_episodes: Iterable[int] | Omitted = OMITTED,
+    replay_episodes: Iterable[int] | Omitted = OMITTED,
+    save_replays: int | Omitted = OMITTED,
+    output_dir: str | Path | None = None,
+    resume_from: str | Path | None = None,
+    writer: RunWriter | None = None,
+    score_threshold: int | Omitted = OMITTED,
+    max_steps: int | Omitted = OMITTED,
+    phase: str = "evaluation",
+    pass_id: str = "1",
+    chunk_size: int = 16,
+) -> dict[str, Any]:
+    """Resolve evaluate's arguments without starting games or changing files.
+
+    Arguments, defaults and validation errors match evaluate. Return keyword
+    arguments for the shared executor, including the exact saved pass when
+    resuming. The same resolver serves normal execution and read-only checks.
     """
     count = positive_int(num_episodes, "num_episodes")
     if count > np.iinfo(np.int32).max:
@@ -2008,12 +2137,13 @@ def evaluate(
             ),
         }
     )
-    return _run_evaluation(
-        system,
-        opponent,
-        specs,
+    return dict(
+        team_a=system,
+        team_b=opponent,
+        episodes=specs,
         seed=options["seed"],
         num_envs=num_envs,
+        keep_batch_size=keep_batch_size,
         metrics=options["metrics"],
         full_metrics_episodes=options["full_metrics_episodes"],
         replay_episodes=selected,
@@ -2027,6 +2157,27 @@ def evaluate(
         saved=saved,
         source_choices=None if legacy else sources,
     )
+
+
+def _verify_evaluation(  # pyright: ignore[reportUnusedFunction] - Shared private training preflight.
+    system: System | Policy | str,
+    opponent: System | Policy | str,
+    **options: Any,  # noqa: ANN401 - Reuse evaluate's complete keyword contract.
+) -> None:
+    """Check an existing generated evaluation pass without recovering its files.
+
+    system, opponent and options follow evaluate, including required num_episodes.
+    Supply resume_from and the exact phase/pass ID, plus scientific settings to
+    assert. Missing passes or changed methods, roots, conditions or output choices
+    raise ValueError. This reads saved files and freezes numerical method values,
+    but creates no writer, calls no initializer/action and changes no file.
+    """
+    request = _generated_evaluation_request(system, opponent, **options)
+    if request["saved"] is None or request["resume_from"] is None:
+        raise ValueError(
+            "Read-only evaluation verification needs an existing saved pass"
+        )
+    _run_evaluation(**request, _verify_only=True)
 
 
 def _check_source_overrides(config: EnvConfig, options: Mapping[str, object]) -> None:

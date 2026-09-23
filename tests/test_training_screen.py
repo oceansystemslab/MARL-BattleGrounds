@@ -68,6 +68,7 @@ def test_declaration_covers_twelve_fixed_shapes_without_global_random_changes() 
     assert first["base_config"]["shaping_mode"] == "score_delta"
     assert first["base_config"]["shaping_coefficient"] == 0.01
     assert first["base_config"]["ppo"]["input_scale"] == 0.01
+    assert first["base_config"]["ppo"]["value_normalization"] is False
 
 
 @pytest.mark.parametrize("batch", [32, 512, 1024])

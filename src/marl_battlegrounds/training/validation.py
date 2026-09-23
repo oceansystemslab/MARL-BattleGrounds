@@ -1,9 +1,9 @@
 """Run fixed training-validation tasks through the existing M8 evaluator.
 
-Panels bind two immutable actor artifacts. Tasks preserve exact weights, game
-schedules and durable M8 pass identities across interruption. The learner never
-enters this module. A small resumed GPU tail uses the same evaluator in a pinned
-CPU subprocess, leaving original game identities unchanged.
+New panels retain any valid System or Policy and its normal M8 registration.
+Tasks preserve frozen method identities, paired schedules and durable M8 passes.
+The learner never enters this module. New tasks keep fixed batches and live
+clients in process; historical two-actor panels keep their original protocol.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fractions import Fraction
 from hashlib import sha256
 from pathlib import Path
@@ -151,30 +151,44 @@ def resolve_validation_schedule(
 
 @dataclass(frozen=True)
 class PanelMember:
-    """One frozen Halfway/Final artifact with verified numerical and run identity."""
+    """One ordered opponent with its ordinary evaluation identity.
+
+    New members use name, registration_id, registration and optional reference.
+    The remaining fields describe historical MAPPO artifacts only and remain
+    empty for new methods. path=None means no historical artifact path exists.
+    """
 
     name: str
-    path: Path
-    actor_digest: str
-    checkpoint_id: str
-    run_id: str
-    seed: int
-    env_steps: int
+    path: Path | None = None
+    actor_digest: str = ""
+    checkpoint_id: str = ""
+    run_id: str = ""
+    seed: int = 0
+    env_steps: int = 0
+    registration_id: str = ""
+    registration: Record = field(default_factory=lambda: {})
+    reference: str | None = None
 
 
 @dataclass(frozen=True)
 class FrozenPanel:
-    """Verified immutable panel manifest and ordered actor paths.
+    """Verified panel manifest, identity and retained execution methods.
 
-    path identifies panel.json; digest excludes storage paths so identical relocated
-    actors keep their scientific identity. members are Halfway then Final. qualified
-    means the declared Random diagnostics passed; it is not a competence claim.
+    path locates panel.json. digest excludes reload paths. members preserve the
+    declared order. New schema_version=2 panels retain purpose roots and live
+    methods; qualified=True means their method contract was checked, not that
+    they meet a learning threshold. Historical version 1 keeps Halfway/Final
+    artifacts and its original Random qualification meaning. Live methods may
+    contain opaque client state that is neither serialized nor reproducible.
     """
 
     path: Path
     digest: str
     members: tuple[PanelMember, ...]
     qualified: bool
+    schema_version: int = 1
+    roots: Record = field(default_factory=lambda: {})
+    methods: tuple[Any, ...] = field(default=(), repr=False, compare=False)
 
 
 def _artifact(path: str | Path) -> Record:
@@ -196,24 +210,74 @@ def _artifact(path: str | Path) -> Record:
 
 
 def create_panel(
-    halfway: str | Path,
-    final: str | Path,
+    halfway: str | Path | None = None,
+    final: str | Path | None = None,
     *,
     output_dir: str | Path,
     diagnostics: Sequence[Mapping[str, Any]] = (),
     test_only: bool = False,
+    opponents: Sequence[Any] | None = None,
+    roots: Mapping[str, int] | None = None,
+    ranking: object = None,
+    size: int | None = None,
 ) -> FrozenPanel:
-    """Freeze the two predeclared development actors and their usefulness evidence.
+    """Freeze a validation panel before training or checkpoint comparison.
 
-    halfway/final are complete artifact paths from the same run/seed, with increasing
-    positive env_steps. output_dir owns an immutable panel.json. diagnostics contains
-    their two complete fixed 100-game Random summaries, with exact task/checkpoint
-    identities, ten pairs per map, finite scores above 0.5 and positive mean Team A
-    scores on at least two maps. Verified summaries are embedded in panel.json;
-    original storage paths are excluded from its scientific digest. test_only bypasses
-    that learning gate for fixtures and marks the panel unqualified. Return the
-    verified panel. Conflicting files or identities raise ValueError. No game runs.
+    Parameters
+    ----------
+    opponents : sequence of System, Policy or str, optional
+        Ordered methods with distinct names. Strings are built-in names,
+        absolute actor-export paths or installed module:function factories.
+        Factories run once; live methods are retained without serialization.
+    output_dir : str or Path
+        Folder for immutable panel.json. Conflicting contents are refused.
+    roots : mapping or None, default=None
+        New-panel uint32 purpose roots. Defaults: routine/initialization
+        19043002 and confirmation 19043003. Initialization inherits a supplied
+        routine root unless given separately. Confirmation must differ.
+    ranking : TournamentResult, str, Path or None, default=None
+        Optional complete existing development tournament, or its saved run.
+        opponents then supplies its entire current candidate pool. Canonical
+        current maps 42-46, 5v5, K20/H300 and paired ends are required.
+    size : int or None, default=None
+        Positive selected count, required with ranking and forbidden otherwise.
+        Highest saved Elo wins; registration IDs break exact ties.
+    halfway, final : str, Path or None, default=None
+        Historical positional route only: same-run MAPPO artifacts with
+        positive increasing experience. Cannot be mixed with opponents.
+    diagnostics : sequence of mappings, default=()
+        Historical route's two complete 100-game Random qualification summaries.
+    test_only : bool, default=False
+        Historical route only. Skip qualification and mark a fixture unqualified.
+
+    Returns
+    -------
+    FrozenPanel
+        Checked manifest and retained methods. No game or learning update runs.
+
+    Raises
+    ------
+    ValueError, TypeError
+        Methods, declarations, evidence or an existing manifest conflict.
+    OSError, ImportError
+        A reference cannot be read or imported. Factory errors retain their type.
     """
+    if opponents is not None:
+        if halfway is not None or final is not None or diagnostics or test_only:
+            raise ValueError(
+                "Use opponents or the historical halfway/final panel, not both"
+            )
+        return _create_system_panel(
+            opponents, output_dir=output_dir, roots=roots, ranking=ranking, size=size
+        )
+    if (
+        halfway is None
+        or final is None
+        or roots is not None
+        or ranking is not None
+        or size is not None
+    ):
+        raise ValueError("Supply opponents, or both historical halfway/final artifacts")
     identities = [_artifact(path) for path in (halfway, final)]
     if any(
         identity.get("run_id") != identities[0].get("run_id")
@@ -266,6 +330,563 @@ def create_panel(
     if not target.exists():
         _publish(target, content)
     return load_panel(target)
+
+
+def _method_snapshot(value: object) -> tuple[Any, str, Record, str | None]:
+    """Freeze one valid method and record exactly M8's normal registration.
+
+    Strings use the shared built-in/export/factory loader. A factory is called
+    once. Numerical values are frozen; opaque provider state stays declared as
+    unknown. Return the live method, registration ID, description and reload
+    reference. This performs no policy decision and serializes no client object.
+    """
+    from marl_battlegrounds._method_loading import (
+        load_method,
+        validate_saved_method_reference,
+    )
+    from marl_battlegrounds.evaluation.policy_execution import Policy
+    from marl_battlegrounds.evaluation.recording_identity import (
+        normalize_system_registration,
+        policy_description,
+    )
+    from marl_battlegrounds.evaluation.system_evaluation import freeze_evaluation_method
+
+    reference = value if isinstance(value, str) else None
+    if reference is not None:
+        validate_saved_method_reference(reference)
+        value = load_method(reference)
+    method = freeze_evaluation_method(cast(Any, value))
+    description = (
+        policy_description(
+            method, method.variables, method.initial_carry, include_digests=True
+        )
+        if isinstance(method, Policy)
+        else normalize_system_registration(method, phase="validation", frozen=True)[1]
+    )
+    identifier, registration = normalize_system_registration(
+        description, phase="validation"
+    )
+    return method, identifier, cast(Record, registration), reference
+
+
+def _panel_roots(roots: Mapping[str, int] | None) -> Record:
+    """Return checked purpose roots, with initialization sharing routine by default."""
+    values = {key: _ROOTS[key] for key in ("routine", "initialization", "confirmation")}
+    if roots is not None:
+        if not isinstance(cast(object, roots), Mapping):
+            raise ValueError(
+                "Panel roots must be a mapping of purpose names to integers"
+            )
+        if set(roots) - set(values):
+            raise ValueError(
+                "Panel roots support routine, initialization and confirmation"
+            )
+        values.update({key: _root_seed(value) for key, value in roots.items()})
+        if "initialization" not in roots:
+            values["initialization"] = values["routine"]
+    if values["confirmation"] in (values["routine"], values["initialization"]):
+        raise ValueError("Confirmation needs a fresh root, separate from routine games")
+    return values
+
+
+def _rank_panel(
+    records: Sequence[Record], ranking: object, size: int | None
+) -> tuple[list[int], Record]:
+    """Select a declared number from a complete, current development tournament.
+
+    ranking is a TournamentResult or its exact saved run directory. The shared
+    tournament evidence owner checks real spawn pairs, coverage and identities.
+    Canonical current configurations bind maps 42-46, mirrored 5v5, K20 and H300.
+    Elo is read from existing results, never refitted. Ties use registration IDs.
+    """
+    from marl_battlegrounds.evaluation.evaluate import normalize_episode_specs
+    from marl_battlegrounds.evaluation.evaluation_conditions import config_record
+    from marl_battlegrounds.evaluation.results import TournamentResult, load_results
+    from marl_battlegrounds.evaluation.tournament import (
+        _prepare_pair_evidence,  # pyright: ignore[reportPrivateUsage]
+    )
+    from marl_battlegrounds.evaluation.tournament_schedule import TournamentMatch
+    from marl_battlegrounds.tasks import canonical_tournament_rosters
+
+    count = _integer(size, "size", minimum=1)
+    if count > len(records):
+        raise ValueError("Ranked panel size exceeds its declared candidate pool")
+    result = (
+        load_results(ranking, phase="tournament")
+        if isinstance(ranking, (str, Path))
+        else ranking
+    )
+    if (
+        not isinstance(ranking, (str, Path, TournamentResult))
+        or cast(Any, result).status != "complete"
+    ):
+        raise ValueError("Ranking must be a complete existing tournament result")
+    result = cast(Any, result)
+    metadata = result.metadata
+    details = metadata
+    if "schedule" not in details:
+        candidates = [
+            entry.get("details", {})
+            for entry in metadata.get("passes", {}).values()
+            if "participants" in entry.get("details", {})
+            and "num_matches" in entry.get("details", {})
+        ]
+        if len(candidates) != 1:
+            raise ValueError("Ranking needs one complete tournament schedule")
+        details = candidates[0]
+    names = {row["name"] for row in records}
+    if (
+        details.get("pairing_protocol") != "fixed-team-spawn-v1"
+        or details.get("map_ids") != list(VALIDATION_MAPS)
+        or details.get("score_threshold") != 20
+        or details.get("max_steps") != 300
+        or set(details.get("participants", {})) != names
+    ):
+        raise ValueError(
+            "Ranking needs the entire declared pool on paired "
+            "canonical development maps"
+        )
+    expected_ids = {row["name"]: row["registration_id"] for row in records}
+    if details["participants"] != expected_ids:
+        raise ValueError("Ranking methods differ from the current candidate pool")
+    for row in records:
+        if (
+            metadata.get("systems", {}).get(row["registration_id"])
+            != row["registration"]
+        ):
+            raise ValueError(
+                "Ranking method descriptions differ from the current candidate pool"
+            )
+    roster_a, roster_b = canonical_tournament_rosters()
+    specs = normalize_episode_specs(
+        VALIDATION_MAPS, len(VALIDATION_MAPS), roster_a, roster_b, 20, 300
+    )
+    current_ids = {
+        str(spec.map_id): config_record(spec.env_config)[0] for spec in specs
+    }
+    if details.get("configuration_ids_by_map") != current_ids:
+        raise ValueError(
+            "Ranking configurations differ from the current canonical content"
+        )
+
+    def table(name: str) -> list[Record]:
+        """Read shared result columns as plain host records without refitting them."""
+        rows: list[Record] = []
+        for batch in result.iter_table(name):
+            columns = {key: values.tolist() for key, values in batch.items()}
+            rows.extend(
+                dict(zip(columns, values, strict=True))
+                for values in zip(*columns.values(), strict=True)
+            )
+        return rows
+
+    matches = table("matches")
+    schedule = tuple(TournamentMatch(**row) for row in details["schedule"])
+    evidence = _prepare_pair_evidence(
+        schedule,
+        matches,
+        configurations=metadata["configurations"],
+        systems=metadata["systems"],
+        passes=metadata["passes"],
+    )
+    covered = {frozenset((match.team_a, match.team_b)) for match in schedule}
+    expected_pairs = {
+        frozenset((first, second))
+        for first in names
+        for second in names
+        if first != second
+    }
+    if covered != expected_pairs:
+        raise ValueError("Ranking is missing candidate matchups")
+    ratings = table("tournament_results")
+    if len(ratings) != len(records) or {row.get("policy") for row in ratings} != names:
+        raise ValueError("Ranking is missing candidate ratings")
+    scores: dict[str, float] = {}
+    for row in ratings:
+        value = row.get("elo")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError("Ranking Elo must be finite")
+        scores[row["policy"]] = float(value)
+    selected = sorted(
+        range(len(records)),
+        key=lambda index: (
+            -scores[records[index]["name"]],
+            records[index]["registration_id"],
+        ),
+    )[:count]
+    return selected, {
+        "schedule_digest": details["schedule_digest"],
+        "evidence_digest": _digest(evidence),
+        "ratings": [
+            {"registration_id": row["registration_id"], "elo": scores[row["name"]]}
+            for row in records
+        ],
+        "size": count,
+    }
+
+
+def _create_system_panel(
+    opponents: Sequence[Any],
+    *,
+    output_dir: str | Path,
+    roots: Mapping[str, int] | None,
+    ranking: object,
+    size: int | None,
+) -> FrozenPanel:
+    """Freeze ordered methods and optional existing ranking before any game runs."""
+    if isinstance(opponents, (str, bytes)) or not opponents:
+        raise ValueError(
+            "opponents must be a nonempty sequence of methods or references"
+        )
+    snapshots = [_method_snapshot(value) for value in opponents]
+    if len({item[0].name for item in snapshots}) != len(snapshots):
+        raise ValueError("Panel opponents need distinct names")
+    records = [
+        {
+            "name": method.name,
+            "registration_id": identifier,
+            "registration": registration,
+            "reference": reference,
+        }
+        for method, identifier, registration, reference in snapshots
+    ]
+    evidence = None
+    if ranking is not None:
+        indices, evidence = _rank_panel(records, ranking, size)
+        records = [records[index] for index in indices]
+        snapshots = [snapshots[index] for index in indices]
+    elif size is not None:
+        raise ValueError("size is used only with an existing ranking")
+    content: Record = {
+        "schema_version": 2,
+        "members": records,
+        "roots": _panel_roots(roots),
+        "selection_schema_version": 2,
+        "ranking_evidence": evidence,
+    }
+    content["panel_digest"] = _panel_digest(content)
+    target = Path(output_dir).resolve() / "panel.json"
+    if target.exists() and _json(target) != content:
+        raise ValueError("A different immutable panel already occupies output_dir")
+    if not target.exists():
+        _publish(target, content)
+    return _load_system_panel(target, content, tuple(item[0] for item in snapshots))
+
+
+def _load_system_panel(
+    target: Path, content: Record, bindings: Sequence[Any] | None
+) -> FrozenPanel:
+    """Verify a new panel and retain its methods instead of reopening them per pass.
+
+    Supplied bindings replace reload references only when their normal M8 identity
+    matches. Missing live-only methods fail before any writer is opened. Factories
+    are called once on load; later validation rechecks these live snapshots.
+    """
+    entries = content.get("members")
+    if (
+        content.get("panel_digest") != _panel_digest(content)
+        or content.get("selection_schema_version") != 2
+        or not isinstance(entries, list)
+        or not entries
+        or any(not isinstance(row, dict) for row in cast(list[object], entries))
+    ):
+        raise ValueError("Invalid System panel schema or digest")
+    entries = cast(list[Record], entries)
+    roots = _panel_roots(content.get("roots"))
+    if roots != content.get("roots"):
+        raise ValueError("System panel needs all frozen purpose roots")
+    if bindings is not None and len(bindings) != len(entries):
+        raise ValueError("Bindings must cover every frozen panel member in order")
+    methods: list[Any] = []
+    members: list[PanelMember] = []
+    for index, row in enumerate(entries):
+        value = bindings[index] if bindings is not None else row.get("reference")
+        if value is None:
+            raise ValueError(
+                "This panel contains a live-only method; supply its original bindings"
+            )
+        if bindings is None and isinstance(value, str) and row.get("export_relative"):
+            value = str((target.parent / value).resolve())
+        method, identifier, registration, _ = _method_snapshot(value)
+        if (
+            identifier != row.get("registration_id")
+            or registration != row.get("registration")
+            or method.name != row.get("name")
+        ):
+            raise ValueError("Panel method no longer matches its frozen M8 identity")
+        methods.append(method)
+        members.append(
+            PanelMember(
+                name=method.name,
+                registration_id=identifier,
+                registration=registration,
+                reference=row.get("reference"),
+            )
+        )
+    if len({member.name for member in members}) != len(members):
+        raise ValueError("Panel opponents need distinct names")
+    return FrozenPanel(
+        target,
+        content["panel_digest"],
+        tuple(members),
+        True,
+        schema_version=2,
+        roots=roots,
+        methods=tuple(methods),
+    )
+
+
+def panel_task_description(
+    *,
+    checkpoint_id: str,
+    actor_digest: str,
+    env_steps: int,
+    panel: FrozenPanel,
+    purpose: str,
+    seed_pairs: int,
+    root_seed: int | None = None,
+) -> Record:
+    """Describe the saved panel's protocol without changing historical task hashes.
+
+    New panels use independently derived opponent roots and exact native scores.
+    Their root_seed override supports predeclared fresh assessment games. Legacy
+    panels keep their original purpose, roots, members and version-1 task bytes.
+    """
+    if panel.schema_version == 1:
+        return validation_task_description(
+            checkpoint_id=checkpoint_id,
+            actor_digest=actor_digest,
+            env_steps=env_steps,
+            panel_digest=panel.digest,
+            purpose=purpose,
+            seed_pairs=seed_pairs,
+            members=tuple(
+                (member.name, member.actor_digest) for member in panel.members
+            ),
+            root_seed=root_seed,
+        )
+    _integer(env_steps, "env_steps")
+    _integer(seed_pairs, "seed_pairs", minimum=1)
+    if purpose not in (*panel.roots, "assessment"):
+        raise ValueError("Unknown System panel validation purpose")
+    if root_seed is None and purpose == "assessment":
+        raise ValueError("Assessment requires its own explicit fresh root_seed")
+    root = panel.roots[purpose] if root_seed is None else _root_seed(root_seed)
+    if purpose == "confirmation" and root in (
+        panel.roots["routine"],
+        panel.roots["initialization"],
+    ):
+        raise ValueError(
+            "Confirmation requires a fresh root separate from routine games"
+        )
+    if purpose == "assessment" and root in panel.roots.values():
+        raise ValueError(
+            "Assessment requires a fresh root separate from selection games"
+        )
+    if not checkpoint_id or not actor_digest:
+        raise ValueError("Validation needs checkpoint and actor identities")
+    members = [
+        {
+            "name": member.name,
+            "registration_id": member.registration_id,
+            "root": int(
+                _digest({"root": root, "opponent": member.registration_id})[:8], 16
+            ),
+        }
+        for member in panel.members
+    ]
+    if len({member["root"] for member in members}) != len(members):
+        raise ValueError("Opponent roots collided; choose a different panel root")
+    result: Record = {
+        "schema_version": 2,
+        "selection_schema_version": 2,
+        "checkpoint_id": checkpoint_id,
+        "actor_digest": actor_digest,
+        "env_steps": env_steps,
+        "panel_digest": panel.digest,
+        "purpose": purpose,
+        "seed_pairs": seed_pairs,
+        "maps": list(VALIDATION_MAPS),
+        "root": root,
+        "members": members,
+    }
+    return {**result, "task_id": _digest(result)}
+
+
+def _verify_panel_pass(
+    run_dir: Path,
+    actor: object,
+    opponent: object,
+    *,
+    task: Mapping[str, Any],
+    member_index: int,
+    num_envs: int,
+    chunk_size: int = 128,
+) -> None:
+    """Bind an existing pass to its exact task before reuse or writer recovery.
+
+    actor and opponent are the already loaded frozen methods. task is the checked
+    version-2 task; member_index chooses its ordered opponent/root. num_envs and
+    chunk_size are the intended execution settings. The M8 owner verifies its
+    generated conditions, actual registrations and saved declarations without
+    opening a writer or calling either method. A mismatch raises ValueError.
+    """
+    from marl_battlegrounds.evaluation.evaluate import (
+        _verify_evaluation,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    member = task["members"][member_index]
+    _verify_evaluation(
+        cast(Any, actor),
+        cast(Any, opponent),
+        num_episodes=len(VALIDATION_MAPS) * task["seed_pairs"] * 2,
+        maps=VALIDATION_MAPS,
+        spawn_mode="paired",
+        seed=member["root"],
+        num_envs=num_envs,
+        keep_batch_size=True,
+        metrics="priority",
+        phase="validation",
+        pass_id=validation_pass_id(task["task_id"], member["name"]),
+        chunk_size=chunk_size,
+        resume_from=run_dir,
+    )
+
+
+def _validate_system_panel(
+    checkpoint: str | Path,
+    panel: FrozenPanel,
+    *,
+    output_dir: str | Path,
+    purpose: str,
+    seed_pairs: int,
+    num_envs: int,
+    chunk_size: int,
+    event_callback: EventCallback | None,
+    root_seed: int | None,
+) -> Record:
+    """Run retained methods in stable batches using the ordinary M8 evaluator.
+
+    Each opponent keeps independent paired game keys. Interrupted tails remain in
+    this process with inactive padding, so opaque clients are never serialized.
+    Only complete durable rows feed the shared summary and selection owner.
+    """
+    import jax
+
+    from marl_battlegrounds.evaluation.evaluate import evaluate
+    from marl_battlegrounds.training.checkpoints import load_system
+
+    _integer(num_envs, "num_envs", minimum=1)
+    _integer(chunk_size, "chunk_size", minimum=1)
+    if jax.default_backend() != "cpu" and num_envs != 32:
+        raise ValueError("Training validation on GPU requires num_envs=32")
+    identity = _artifact(checkpoint)
+    directory = Path(output_dir).resolve()
+    task = _task(
+        directory,
+        panel_task_description(
+            checkpoint_id=identity["checkpoint_id"],
+            actor_digest=identity["actor_digest"],
+            env_steps=identity["env_steps"],
+            panel=panel,
+            purpose=purpose,
+            seed_pairs=seed_pairs,
+            root_seed=root_seed,
+        ),
+        event_callback,
+    )
+    actor = load_system(checkpoint)
+    rows: list[Record] = []
+    paths: list[str] = []
+    for index, (member, opponent) in enumerate(
+        zip(panel.members, panel.methods, strict=True)
+    ):
+        pass_id = validation_pass_id(task["task_id"], member.name)
+        parent = directory / f"opponent-{index}"
+        run_dir = _saved_run(parent, pass_id)
+        if run_dir is not None:
+            _verify_panel_pass(
+                run_dir,
+                actor,
+                opponent,
+                task=task,
+                member_index=index,
+                num_envs=num_envs,
+                chunk_size=chunk_size,
+            )
+        pending = _pending(
+            run_dir, pass_id=pass_id, total=len(VALIDATION_MAPS) * seed_pairs * 2
+        )
+        if pending:
+            if event_callback is not None:
+                event_callback(
+                    {
+                        "event": "evaluation_segment",
+                        "task_id": task["task_id"],
+                        "pass_id": pass_id,
+                        "backend": jax.default_backend(),
+                        "pending_games": pending,
+                        "num_envs": num_envs,
+                    }
+                )
+            started = time.monotonic()
+            options: Record = (
+                {"output_dir": parent} if run_dir is None else {"resume_from": run_dir}
+            )
+            result = evaluate(
+                actor,
+                opponent,
+                num_episodes=len(VALIDATION_MAPS) * seed_pairs * 2,
+                maps=VALIDATION_MAPS,
+                spawn_mode="paired",
+                seed=task["members"][index]["root"],
+                num_envs=num_envs,
+                keep_batch_size=True,
+                metrics="priority",
+                phase="validation",
+                pass_id=pass_id,
+                chunk_size=chunk_size,
+                **options,
+            )
+            run_dir = result.run_dir
+            if event_callback is not None:
+                event_callback(
+                    {
+                        "event": "evaluation_segment_complete",
+                        "task_id": task["task_id"],
+                        "pass_id": pass_id,
+                        "backend": jax.default_backend(),
+                        "seconds": time.monotonic() - started,
+                    }
+                )
+        assert run_dir is not None
+        paths.append(str(run_dir))
+        rows.extend(_rows(run_dir, pass_id=pass_id, opponent=member.name))
+    result = {
+        **task,
+        **summarize_validation(
+            rows,
+            maps=VALIDATION_MAPS,
+            opponents=[member.name for member in panel.members],
+            seed_pairs=seed_pairs,
+            independent_opponents=True,
+        ),
+        "pass_paths": paths,
+    }
+    _publish(directory / "validation_summary.json", result)
+    if event_callback is not None:
+        event_callback(
+            {
+                "event": "validation_complete",
+                "task_id": task["task_id"],
+                "result": result,
+            }
+        )
+    return result
 
 
 def validation_task_description(
@@ -432,7 +1053,11 @@ def _panel_digest(content: Mapping[str, Any]) -> str:
     return _digest(
         {
             key: [
-                {field: value for field, value in member.items() if field != "path"}
+                {
+                    field: value
+                    for field, value in member.items()
+                    if field not in ("path", "reference", "export_relative")
+                }
                 for member in cast(Sequence[Mapping[str, Any]], value)
             ]
             if key == "members"
@@ -443,19 +1068,28 @@ def _panel_digest(content: Mapping[str, Any]) -> str:
     )
 
 
-def load_panel(path: str | Path) -> FrozenPanel:
-    """Verify panel.json and every member artifact without applying an actor.
+def load_panel(
+    path: str | Path, *, bindings: Sequence[Any] | None = None
+) -> FrozenPanel:
+    """Load and verify a frozen panel without applying a method.
 
-    path may name the manifest or its containing directory. Member paths may be
-    absolute or relative to that directory. Scientific digests are path-independent;
-    moving files without changing content is permitted. Return frozen host records.
-    Malformed schemas, changed artifacts or changed identities raise ValueError.
-    This host read may verify numerical payload files but never runs a game.
+    path names panel.json or its directory. bindings optionally supplies the
+    existing new-panel methods in saved order; each normal M8 identity must
+    match. Otherwise built-in/export/factory references reload each method once.
+    Live-only members require bindings. Export paths in packaged manifests may
+    be relative to the panel directory; historical paths keep their old rule.
+    Return a FrozenPanel retaining the checked methods for repeated validation.
+    Changed identities, malformed content or missing bindings raise ValueError;
+    import, factory and file errors keep their cause. No client is serialized.
     """
     target = Path(path).resolve()
     if target.is_dir():
         target /= "panel.json"
     content = _json(target)
+    if content.get("schema_version") == 2:
+        return _load_system_panel(target, content, bindings)
+    if bindings is not None:
+        raise ValueError("Historical panels use their saved actor paths")
     raw_entries: object = content.get("members", [])
     if not isinstance(raw_entries, list) or any(
         not isinstance(row, dict) for row in cast(list[object], raw_entries)
@@ -838,25 +1472,56 @@ def validate_checkpoint(
     num_envs: int = 32,
     chunk_size: int = 128,
     event_callback: EventCallback | None = None,
+    root_seed: int | None = None,
 ) -> Record:
-    """Evaluate one exact saved actor against the immutable two-member panel.
+    """Evaluate one exact saved actor through the shared M8 evaluator.
 
-    checkpoint identifies an actor export or complete learner checkpoint. panel is
-    verified again even when supplied as FrozenPanel. output_dir is one task-owned
-    directory, reused only for identical scientific conditions. purpose is routine,
-    initialization or confirmation; seed_pairs defaults to 10/10/50 respectively.
-    num_envs is positive and must be 32 on GPU; chunk_size defaults to 128. Optional
-    event_callback receives task and execution-segment records before mutation and
-    verified completion afterward. Return a JSON-ready complete result with score,
-    cells, actor/checkpoint/panel identity and original M8 pass paths. Failures raise
-    without treating partial games as completed validation. No learner is accepted.
+    checkpoint names an actor export or complete learner checkpoint. panel is
+    its frozen manifest path or loaded FrozenPanel; the latter retains live
+    clients and avoids reopening factories. Identities are rechecked before
+    work. output_dir belongs to one immutable task; repeat the same call to
+    resume it. purpose is routine, initialization, confirmation, or assessment
+    for new panels. seed_pairs defaults to 10, or 50 for confirmation. Each pair
+    means ten games per opponent across the five development maps.
+
+    num_envs is positive, default 32; GPU requires 32. New panels keep that batch
+    on all tails with inactive padding. Historical small GPU tails retain CPU
+    recovery. chunk_size is a positive recording chunk, default 128. Optional
+    event_callback receives task, execution and completion records. root_seed
+    overrides a new panel's purpose root and changes task identity; assessment
+    requires this explicit fresh uint32 root. Historical roots cannot change.
+
+    Return complete native score, paired uncertainty, per-cell results and saved
+    M8 paths. New panels also report mean_kill_difference for declared selection.
+    Incomplete games never select a checkpoint. Invalid settings or conflicting
+    identities raise ValueError; file and method failures keep their cause.
+    The call waits for evaluation to finish on the active backend. It never
+    updates a learner or actor.
     """
-    if purpose not in ("routine", "initialization", "confirmation"):
-        raise ValueError("Unknown checkpoint-validation purpose")
-    frozen = load_panel(panel.path if isinstance(panel, FrozenPanel) else panel)
+    frozen = (
+        load_panel(
+            panel.path, bindings=panel.methods if panel.schema_version == 2 else None
+        )
+        if isinstance(panel, FrozenPanel)
+        else load_panel(panel)
+    )
     pairs = (
         (50 if purpose == "confirmation" else 10) if seed_pairs is None else seed_pairs
     )
+    if frozen.schema_version == 2:
+        return _validate_system_panel(
+            checkpoint,
+            frozen,
+            output_dir=output_dir,
+            purpose=purpose,
+            seed_pairs=pairs,
+            num_envs=num_envs,
+            chunk_size=chunk_size,
+            event_callback=event_callback,
+            root_seed=root_seed,
+        )
+    if root_seed is not None:
+        raise ValueError("Historical panels retain their original roots")
     return _validate(
         checkpoint,
         [

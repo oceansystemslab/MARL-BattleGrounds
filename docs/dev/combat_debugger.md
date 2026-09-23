@@ -134,11 +134,12 @@ authored starting state. Map rows are explicitly labelled as default 5v5 TDM
 previews: Python copies the map into the default scenario, builds the simulator
 inputs, and validates them. It does not change or save the map. `Open in Debug`
 in either authoring area calls this same loading service for its current buffer.
-When a map's content equals an approved TDM map, its preview is recorded under
-that map's registered identity: the map ID, name and split appear in the
-recording keys, and the layout identity carries the approved source's asset ID,
-catalog revision and semantic digest, so the match summary shows the map's name
-instead of Custom Map. Any other map is recorded as a custom layout.
+When a map retains an approved TDM map's source name and content digest, its
+preview is recorded under that map's registered identity: the map ID, name and
+split appear in the recording keys, and the layout identity carries the approved
+source's asset ID, catalog revision and semantic digest, so the match summary
+shows the map's name instead of Custom Map. Any other map is recorded as a custom
+layout.
 Python parses and validates each requested start before replacing the current
 session. A failure leaves the session untouched and reports linked problems.
 Reset restores the immutable loaded snapshot and seed, including its map,
@@ -173,7 +174,7 @@ chooses a useful legal endpoint nearest the prey, then uses action order to
 break ties. A clear route gets no extra bonus over allowed contact. Temporary
 retreat is allowed; if no move qualifies, it chooses Stay. Ordinary simulator
 collision response resolves the attempted contact. Scenarios 3 and 5 use
-`scenario_5` behavior v4, displayed as BETA. The old standalone Scenario 3
+`scenario_5` behavior v5, displayed as BETA. The old standalone Scenario 3
 controller was removed; it is not a BETA alias. Historical recordings retain
 their original identities.
 
@@ -197,6 +198,13 @@ and fixed-side routing may take a longer path. (Superseded, 22 September 2026: t
 assessment of ALPHA version 2 and BETA version 4 is historical only; later
 study found longer stalls.) Combat and class goals are
 unchanged.
+
+ALPHA v3 and BETA v5 fix three ways the controllers froze ([A42](../design/specification_amendments.md#a42-reactive-tdm-fixes-at-blocked-walls)).
+A wall end capped by a pillar or a short wall is extended once past the cap, so
+the agent steers around the whole shape. Near a wall corner, a move may drift
+back by up to one useful stride and still count as progress. A Hunter holds its
+distance only while it can shoot the nearest enemy; otherwise it approaches.
+Agents still do not steer around other bodies, so traffic jams remain.
 
 In a body-blocking study, the defending Warrior can screen a vulnerable Hunter
 and provide a moving body around which the Hunter kites, while both maintain
@@ -230,10 +238,10 @@ further changes until the session is recovered or restarted.
 
 The old Scripted TDM scorer, separate Reactive MRP/`scenario_1` executable
 interface and standalone Scenario 3 controller are removed. Current recorded
-controller identities are `reactive-team-deathmatch-controller@2` and
-`scenario-5-pressure-controller@4`. Older
-`reactive-team-deathmatch-controller@1` and `scenario-5-pressure-controller@2`
-identities remain historical evidence. Scenario 5 combinations retain private
+controller identities are `reactive-team-deathmatch-controller@3` and
+`scenario-5-pressure-controller@5`. Older identities, such as
+`reactive-team-deathmatch-controller@2` and `scenario-5-pressure-controller@4`,
+remain historical evidence. Scenario 5 combinations retain private
 action-source V5; other interactive combinations retain V4. Both record
 installed controllers separately from scenario/map identity. Historical
 recordings retain their old identities and remain readable; fixed-frame scripted

@@ -1,8 +1,10 @@
 """Choose deterministic TDM actions from current permitted SharedObs inputs.
 
 ALPHA supports all five classes. Priests follow and heal allies; the other
-classes approach or keep a class-specific distance from enemies. Exact action
-masks limit combat choices, and shared movement helpers handle static walls.
+classes approach or keep a class-specific distance from enemies. A Hunter keeps
+its distance only while it can shoot the nearest enemy; otherwise it approaches.
+Exact action masks limit combat choices, and shared movement helpers handle
+static walls.
 The controller uses no recurrent memory or random draws.
 
 reactive_tdm_alpha_policy chooses actions. The descriptor function returns the
@@ -68,7 +70,7 @@ def reactive_tdm_alpha_controller_descriptor() -> dict[str, object]:
     """
     return {
         "policy_id": "reactive-team-deathmatch-controller",
-        "version": 2,
+        "version": 3,
         "information": "same-epoch-shared-obs; recipient exact masks",
         "execution": "deterministic; actor key ignored",
         "candidates": "observed living active positive-health rows",
@@ -112,7 +114,9 @@ def reactive_tdm_alpha_controller_descriptor() -> dict[str, object]:
             "distance_band": [HUNTER_CLOSE_DISTANCE, HUNTER_FAR_DISTANCE],
             "band_endpoints": "lower exclusive; upper inclusive",
             "movement": (
-                "nearest enemy: retreat at/below lower, approach above upper, else Stay"
+                "nearest enemy: retreat at/below lower, approach above upper, "
+                "else Stay only while that enemy is a legal Basic target, "
+                "otherwise approach"
             ),
             "trap_distance_inclusive": HUNTER_TRAP_DISTANCE,
             "combat": (
@@ -133,12 +137,21 @@ def reactive_tdm_alpha_controller_descriptor() -> dict[str, object]:
                 "approach-only axis-aligned vertical-wall strips, including quarter "
                 "turns; nearest eligible wall center then slot; geometry-sized band "
                 "is wall thickness plus body diameter; SOUTH if body fits and the "
-                "static exit is clear, else NORTH if available; release when actor "
-                "and goal are beyond the same expanded end or the far face; turn "
-                "toward goal-side face after end clearance or admissible projected "
-                "corner progress; preserve end clearance; prefer useful aligned "
-                "phase progress, else positive partial phase progress; neither end "
-                "fits or no admissible progress: Stay; no body prediction"
+                "static exit is clear, else NORTH if available; when neither end "
+                "fits, extend each end whose exit is blocked by a capping obstacle "
+                "once, to one body radius past that cap, and test again; release "
+                "when actor and goal are beyond the same expanded end or the far "
+                "face; turn toward goal-side face after end clearance or "
+                "admissible projected corner progress; preserve end clearance "
+                "within the end clearance margin; prefer useful aligned phase "
+                "progress, else positive partial phase progress; neither end fits "
+                "after the extension or no admissible progress: Stay; no body "
+                "prediction"
+            ),
+            "end_clearance_margin": (
+                "one useful stride (minimum stride fraction times speed): a move "
+                "may drift back from the selected end, or finish short of clearing "
+                "the end line, by up to this much"
             ),
             "projection": "existing static obstacle/bounds geometry; no body pairs",
             "minimum_stride_fraction_inclusive": MINIMUM_MOVEMENT_FRACTION,
@@ -266,8 +279,11 @@ def reactive_tdm_alpha_policy(
     The controller uses permitted shared unit sightings and its own exact masks.
     It has no history, global actor-ID input or access to hidden state. Class
     thresholds are defined by this module's constants; the descriptor records
-    their current values. Core still decides the physical result of the submitted
-    action. Use the shared executor or vmap for teams and games.
+    their current values. A Hunter between its close and far distances holds
+    still only while the nearest enemy is a legal Basic target in the exact
+    mask; otherwise it approaches that enemy. Core still decides the physical
+    result of the submitted action. Use the shared executor or vmap for teams
+    and games.
     """
     del actor_key
     allies, enemies, ally_visible, enemy_visible = compose_shared_obs_unit_features(
@@ -290,10 +306,19 @@ def reactive_tdm_alpha_policy(
     enemy_delta = centers(enemies[nearest_enemy]) - origin
     enemy_distance = enemy_distances[nearest_enemy]
     mage_direction = jnp.sign(enemy_distance - MAGE_DISTANCE) * enemy_delta
+    # The Hunter holds its distance band only while it can actually shoot the
+    # nearest enemy now; otherwise it approaches instead of standing still.
+    joint = recipient_action_mask.select_target_use_ultimate_joint_mask
+    enemies_basic = enemy_living & joint[6:11, 0]
+    hunter_holds = (
+        (enemy_distance > HUNTER_CLOSE_DISTANCE)
+        & (enemy_distance <= HUNTER_FAR_DISTANCE)
+        & enemies_basic[nearest_enemy]
+    )
     hunter_direction = jnp.where(
         enemy_distance <= HUNTER_CLOSE_DISTANCE,
         -enemy_delta,
-        jnp.where(enemy_distance > HUNTER_FAR_DISTANCE, enemy_delta, 0.0),
+        jnp.where(hunter_holds, 0.0, enemy_delta),
     )
     attack_direction = jnp.where(
         is_mage, mage_direction, jnp.where(is_hunter, hunter_direction, enemy_delta)
@@ -321,7 +346,9 @@ def reactive_tdm_alpha_policy(
     attack_approach = ~jnp.any(enemy_living) | jnp.where(
         is_mage,
         enemy_distance > MAGE_DISTANCE,
-        jnp.where(is_hunter, enemy_distance > HUNTER_FAR_DISTANCE, True),
+        jnp.where(
+            is_hunter, (enemy_distance > HUNTER_CLOSE_DISTANCE) & ~hunter_holds, True
+        ),
     )
     move = refine_movement(
         recipient_observation,
@@ -330,10 +357,8 @@ def reactive_tdm_alpha_policy(
         approach=jnp.where(is_priest, priest_approach, attack_approach),
     )
 
-    joint = recipient_action_mask.select_target_use_ultimate_joint_mask
     allies_basic = ally_living & joint[1:6, 0]
     allies_ultimate = ally_living & joint[1:6, 1]
-    enemies_basic = enemy_living & joint[6:11, 0]
     enemies_ultimate = enemy_living & joint[6:11, 1]
     enemies_ultimate &= ~is_warrior | (
         enemies[:, AGENT_FEATURE_CURRENT_HEALTH] < WARRIOR_CHARGE_HEALTH

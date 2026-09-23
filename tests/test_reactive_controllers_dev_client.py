@@ -204,11 +204,11 @@ def test_scenario_controller_uses_one_epoch_bank_assembler_and_step(
     aggregation = {row.name: row.value for row in context.aggregation_keys}
     assert aggregation["action_source"] == ("mixed" if team_a == "manual" else "policy")
     algorithm = f"{scenario_controller.replace('_', '-')}-pressure-controller"
-    assert aggregation["pressure_protocol"] == f"{algorithm}@4"
+    assert aggregation["pressure_protocol"] == f"{algorithm}@5"
     if team_a == "reactive_tdm":
         assert (
             aggregation["reactive_tdm_controller"]
-            == "reactive-team-deathmatch-controller@2"
+            == "reactive-team-deathmatch-controller@3"
         )
         assert (
             aggregation["reactive_tdm_controller_digest"]
@@ -564,7 +564,7 @@ def test_pressure_identity_binds_descriptor_version_and_launch_revision(
     )
     descriptor_name = "reactive_tdm_beta_controller_descriptor"
     descriptor = getattr(evaluation_bridge, descriptor_name)()
-    original_version = 4
+    original_version = 5
     assert descriptor["version"] == original_version
     original_descriptor = descriptor.copy()
     algorithm = f"{scenario_controller.replace('_', '-')}-pressure-controller"
@@ -684,7 +684,7 @@ def test_reactive_controller_recording_reopens_without_replay_changes(
         if team_b == "scenario_5"
         else evaluation_bridge.reactive_tdm_alpha_controller_descriptor()
     )
-    expected_version = 4 if team_b == "scenario_5" else 2
+    expected_version = 5 if team_b == "scenario_5" else 3
     assert descriptor["version"] == expected_version
     expected_digest = canonical_digest_sha256(
         {"behavior": descriptor, "code_revision": context.code_revision}

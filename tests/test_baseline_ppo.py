@@ -473,7 +473,7 @@ def numerical_batch() -> tuple[PPOTrainState, PPOMinibatch, PPOConfig]:
     _, arrays = load_reference()
     actor = jax.tree.map(_asarray, reference_tree(arrays, "parameters/actor"))
     critic = jax.tree.map(_asarray, reference_tree(arrays, "parameters/critic"))
-    config = PPOConfig(rollout_length=4)
+    config = PPOConfig(rollout_length=4, value_normalization=False)
     optimizer = optax.chain(
         optax.clip_by_global_norm(config.max_grad_norm),
         optax.adam(config.actor_lr, eps=config.adam_epsilon),

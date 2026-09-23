@@ -607,7 +607,7 @@ def test_determinism_eager_jit_team_parity_and_descriptor_freshness(
             assert leaf.shape == ()
             assert leaf.dtype == jnp.int32
     descriptor = reactive_tdm_beta_controller_descriptor()
-    assert descriptor["version"] == 4
+    assert descriptor["version"] == 5
     assert descriptor["policy_id"] == "scenario-5-pressure-controller"
     assert (
         descriptor["inherited_controller"] == reactive_tdm_alpha_controller_descriptor()
@@ -615,5 +615,5 @@ def test_determinism_eager_jit_team_parity_and_descriptor_freshness(
     descriptor["version"] = 999
     cast(dict[str, object], descriptor["inherited_controller"])["version"] = 999
     fresh = reactive_tdm_beta_controller_descriptor()
-    assert fresh["version"] == 4
+    assert fresh["version"] == 5
     assert fresh["inherited_controller"] == reactive_tdm_alpha_controller_descriptor()

@@ -196,7 +196,7 @@ def trajectory(scenario: TDMScenario) -> list[WitnessTransition]:
     return _run_witness(scenario)
 
 
-def test_scenario_8_fixture_binds_approved_revision_14_and_beta_v4() -> None:
+def test_scenario_8_fixture_binds_approved_revision_14_and_current_beta() -> None:
     # Keep the old immutable fixture separate from the current packaged route.
     scenario = load_scenario_8()
     draft = load_scenario_8_draft()
@@ -205,7 +205,7 @@ def test_scenario_8_fixture_binds_approved_revision_14_and_beta_v4() -> None:
     assert draft.content.description == draft.content.notes == ""
     assert len(draft.content.embedded_map.obstacles) == 4
     assert scenario.semantic_digest == SCENARIO_8_SEMANTIC_DIGEST
-    assert reactive_tdm_beta_controller_descriptor()["version"] == 4
+    assert reactive_tdm_beta_controller_descriptor()["version"] == 5
     np.testing.assert_array_equal(
         scenario.initial_state.team_deathmatch_scores, [18, 19]
     )

@@ -1,4 +1,9 @@
-"""Check Reactive TDM decisions and the reviewed Scenario 1 and 2 solutions."""
+"""Check Reactive TDM decisions and the reviewed Scenario 1 and 2 solutions.
+
+The Hunter distance band holds still only while the nearest enemy is a legal
+Basic target in the exact mask; with no legal shot at that enemy the Hunter
+approaches it, even when a farther enemy is a legal target.
+"""
 
 from collections.abc import Callable
 from operator import itemgetter
@@ -324,22 +329,37 @@ def test_no_enemy_rendezvous_and_exact_center_stay(
 
 
 @pytest.mark.parametrize(
-    ("distance", "expected"),
+    ("distance", "legal_target", "expected"),
     [
-        (2.999, MOVE_WEST),
-        (3.0, MOVE_WEST),
-        (3.001, MOVE_STAY),
-        (3.5, MOVE_STAY),
-        (3.501, MOVE_EAST),
+        (2.999, False, MOVE_WEST),
+        (3.0, False, MOVE_WEST),
+        (3.001, False, MOVE_EAST),
+        (3.5, False, MOVE_EAST),
+        (3.001, True, MOVE_STAY),
+        (3.5, True, MOVE_STAY),
+        (3.501, False, MOVE_EAST),
     ],
 )
 def test_hunter_spacing_boundaries(
-    scenario: CompiledDevScenarioV1, distance: float, expected: int
+    scenario: CompiledDevScenarioV1,
+    distance: float,
+    legal_target: bool,
+    expected: int,
 ) -> None:
     obs = _visible(
         _observation(scenario, HUNTER_CLASS_ID), "enemy", 0, (10 + distance, 5)
     )
-    assert int(_act(scenario, obs).move) == expected
+    mask = _mask((6, 0)) if legal_target else _mask()
+    assert int(_act(scenario, obs, mask).move) == expected
+
+
+def test_hunter_holds_only_for_the_nearest_enemy_as_target(
+    scenario: CompiledDevScenarioV1,
+) -> None:
+    obs = _visible(_observation(scenario, HUNTER_CLASS_ID), "enemy", 0, (13.25, 5))
+    obs = _visible(obs, "enemy", 1, (10, 8.9))
+    assert int(_act(scenario, obs, _mask((7, 0))).move) == MOVE_EAST
+    assert int(_act(scenario, obs, _mask((6, 0), (7, 0))).move) == MOVE_STAY
 
 
 @pytest.mark.parametrize("distance", [1.999, 2.0, 2.001])
@@ -737,7 +757,7 @@ def test_reactive_controller_reproduces_both_accepted_witnesses(
 def test_descriptor_is_fresh_and_contains_frozen_constants() -> None:
     first = reactive_tdm_alpha_controller_descriptor()
     assert first["policy_id"] == "reactive-team-deathmatch-controller"
-    assert first["version"] == 2
+    assert first["version"] == 3
     cast(dict[str, object], first["movement"])["minimum_stride_fraction_inclusive"] = 99
     assert (
         cast(dict[str, object], reactive_tdm_alpha_controller_descriptor()["movement"])[

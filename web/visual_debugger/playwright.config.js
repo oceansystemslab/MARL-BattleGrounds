@@ -1,7 +1,7 @@
 /**
  * @file Configure serial Chromium browser tests for the two native clients.
  * Each shard has one worker. Nothing has a time limit: a whole test, each
- * action, each navigation and each web-first assertion waits until it
+ * browser launch, action, navigation and web-first assertion waits until it
  * finishes. A test that hangs stays hung so the cause can be found and fixed.
  * CI rejects focused tests; failed runs retain traces and screenshots. Run
  * through check_frontend.sh for the complete inventory or Playwright for a
@@ -39,6 +39,8 @@ export default defineConfig({
     deviceScaleFactor: 1,
     headless: true,
     locale: "en-GB",
+    // Browser startup has a separate default limit; disable that too.
+    launchOptions: { timeout: 0 },
     // No limit: page.goto and reload wait until the page loads.
     navigationTimeout: 0,
     reducedMotion: "no-preference",

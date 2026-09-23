@@ -146,6 +146,18 @@ def _config_spawn_frame(config: object) -> str:
     return _spawn_frame(ppo.get("spawn_frame", "world"))
 
 
+def _config_value_normalization(config: object) -> bool:
+    """Read the saved critic setting; absence means historical raw-value training.
+
+    config must be a JSON learner-config object. A present setting must be a
+    Python bool; PPOConfig owns its validation. No saved input is changed.
+    """
+    ppo = _object(_object(config, "Learner config").get("ppo", {}), "PPO config")
+    return PPOConfig(
+        value_normalization=cast(bool, ppo.get("value_normalization", False))
+    ).value_normalization
+
+
 def saved_training_config(details: dict[str, Any]) -> dict[str, Any]:
     """Return a learner checkpoint's saved config with its historical meaning fixed.
 
@@ -161,7 +173,11 @@ def saved_training_config(details: dict[str, Any]) -> dict[str, Any]:
         A new top-level and ppo dictionary. ppo.spawn_frame is filled with
         "world" when the saved config has no ppo block or no such key, because
         a checkpoint saved before the setting existed trained in raw world
-        coordinates whatever the current PPOConfig default is. Every other
+        coordinates whatever the current PPOConfig default is. Missing
+        ppo.value_normalization is filled with False because historical critics
+        predicted raw reward units. Missing validation_opponents and
+        slot_diagnostic_actor become None, keeping the historical panel route.
+        Every other
         saved value is returned as saved; absent keys keep taking the current
         TrainConfig and PPOConfig defaults through config_from_dict.
 
@@ -180,7 +196,10 @@ def saved_training_config(details: dict[str, Any]) -> dict[str, Any]:
     config = _object(details["metadata"]["config"], "Saved training config")
     ppo = dict(_object(config.get("ppo", {}), "Saved ppo settings"))
     ppo.setdefault("spawn_frame", "world")
+    ppo.setdefault("value_normalization", False)
     config["ppo"] = ppo
+    config.setdefault("validation_opponents", None)
+    config.setdefault("slot_diagnostic_actor", None)
     return config
 
 
@@ -535,7 +554,8 @@ def save_checkpoint(
         pass_id, policies, checkpoint_id and details from original registration.
     ppo : PPOConfig, default DEFAULT_PPO_CONFIG
         Existing numerical learner settings used by boundary validation. Its
-        input scale and spawn frame must equal the saved config's, else the
+        input scale, spawn frame and value-normalization setting must equal the
+        saved config's, and the state must carry matching statistics, else the
         save is refused before any file changes. The default's frame is "left".
 
     Returns
@@ -560,6 +580,10 @@ def save_checkpoint(
         raise ValueError("Checkpoint config input_scale differs from PPO settings")
     if _config_spawn_frame(context["config"]) != ppo.spawn_frame:
         raise ValueError("Checkpoint config spawn_frame differs from PPO settings")
+    if _config_value_normalization(context["config"]) != ppo.value_normalization:
+        raise ValueError(
+            "Checkpoint config value_normalization differs from PPO settings"
+        )
     validate_learner(collection, state, ppo=ppo, recheck_installed_content=False)
     if collection.recording != (writer is not None):
         raise ValueError("Checkpoint writer must match collection recording")
@@ -721,6 +745,10 @@ def restore_checkpoint(
         equal to today's default; a positive share must be saved explicitly.
         Missing historical ppo.spawn_frame means "world" on both sides; a
         checkpoint saved in another frame must be resumed in that frame.
+        Missing historical ppo.value_normalization means False on both sides.
+        Enabled checkpoints carry three scalar statistics; disabled checkpoints
+        retain their historical array paths and payload keys.
+        Missing validation_opponents and slot_diagnostic_actor mean None.
         Missing historical pinned_opponent means None in both configs and the
         saved collection settings. A pinned opponent must match its saved record
         exactly (reference, registration, variables digest, evidence, memory
@@ -735,7 +763,8 @@ def restore_checkpoint(
         keys are equality assertions; attempt/parent IDs usually are omitted.
     ppo : PPOConfig, default DEFAULT_PPO_CONFIG
         Matched numerical update settings for restored-boundary validation. Its
-        input scale and spawn frame must equal the checkpoint's, else restore
+        input scale, spawn frame and value-normalization setting must equal the
+        checkpoint's, else restore
         is refused before arrays are read. The default's frame is "left", so a
         checkpoint trained in "world" needs the matching config passed here.
     device : jax.Device or None, default None
@@ -777,11 +806,14 @@ def restore_checkpoint(
             normalized = dict(cast(dict[str, Any], config_record))
             normalized.setdefault("pinned_opponent_share", 0.0)
             normalized.setdefault("pinned_opponent", None)
-            ppo_record = normalized.get("ppo")
+            normalized.setdefault("validation_opponents", None)
+            normalized.setdefault("slot_diagnostic_actor", None)
+            ppo_record = normalized.get("ppo", {})
             if isinstance(ppo_record, dict):
                 # Configs saved before spawn_frame existed compare at "world".
                 nested = dict(cast(dict[str, Any], ppo_record))
                 nested.setdefault("spawn_frame", "world")
+                nested.setdefault("value_normalization", False)
                 normalized["ppo"] = nested
             record["config"] = normalized
     if any(saved_metadata.get(key) != value for key, value in expected.items()):
@@ -790,6 +822,11 @@ def restore_checkpoint(
         raise ValueError("Checkpoint input_scale differs from PPO settings")
     if _actor_spawn_frame(details) != ppo.spawn_frame:
         raise ValueError("Checkpoint spawn_frame differs from PPO settings")
+    if (
+        _config_value_normalization(details["metadata"]["config"])
+        != ppo.value_normalization
+    ):
+        raise ValueError("Checkpoint value_normalization differs from PPO settings")
     saved_collection = _object(details["collection"], "Saved collection settings")
     saved_collection.setdefault("shaping_mode", "potential")
     saved_collection.setdefault("score_threshold_curriculum", False)

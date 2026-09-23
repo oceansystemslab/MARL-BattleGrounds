@@ -41,11 +41,11 @@ needed to launch the built browser assets.
 
 Create or open a map/scenario in DevClient, save it, then load that revision in
 Combat Debugger. A saved scenario restores its authored state. A saved map opens
-a clearly labeled default 5v5 TDM preview. A map equal to an approved TDM map is
-recorded under that map's registered identity. **Open
-in Debug** uses the same Python build-and-validation path. A rejected load
-leaves the current session unchanged. Reset restores the already loaded
-snapshot; it does not pick up later edits to the saved asset.
+a clearly labeled default 5v5 TDM preview. A map that retains an approved TDM
+map's source name and content digest is recorded under that map's registered
+identity. **Open in Debug** uses the same Python build-and-validation path. A
+rejected load leaves the current session unchanged. Reset restores the already
+loaded snapshot; it does not pick up later edits to the saved asset.
 
 Save is explicit, with no autosave. It creates numbered local revisions and
 checks the expected revision before writing. Selectors list every applicable
@@ -60,11 +60,13 @@ and Manual also support NoSharedObs. Policy-controlled agents stay inspectable,
 but their actions cannot be edited manually. Submit can run both automatic
 teams. A controller or information-mode change resets the loaded snapshot.
 
-ALPHA v2 handles all five classes. BETA v4 uses the same rules except that Rogue
+ALPHA v3 handles all five classes. BETA v5 uses the same rules except that Rogue
 pursues observed living Priests, then Mages, then Hunters, with lowest-health
 and global-slot tie breaks. Its glancing shoulder routes and local wall steering
 do not guarantee navigation. Both prefer passing below nearby vertical walls,
-then above when needed. A three-tick ALPHA allied-congestion stall remains
+then above when needed, and steer past a wall end capped by a pillar or short
+wall. A Hunter holds its distance only while it can shoot the nearest enemy
+([A42](../design/specification_amendments.md#a42-reactive-tdm-fixes-at-blocked-walls)). A three-tick ALPHA allied-congestion stall remains
 known. (Superseded, 22 September 2026: this assessment of ALPHA version 2 and BETA
 version 4 is historical only; later study found longer stalls.) The shared `scenario_5` BETA behavior serves Scenarios 3 and 5; the old
 standalone Scenario 3, Scripted TDM, and separate Reactive MRP interfaces were

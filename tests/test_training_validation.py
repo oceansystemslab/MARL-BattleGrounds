@@ -254,7 +254,10 @@ def test_relocated_member_paths_keep_panel_scientific_identity(
     (relocated / "panel.json").write_text(json.dumps(data))
     copied = load_panel(relocated)
     assert copied.digest == panel.digest and copied.qualified
-    assert all(member.path.parent == relocated for member in copied.members)
+    assert all(
+        member.path is not None and member.path.parent == relocated
+        for member in copied.members
+    )
 
 
 @pytest.mark.parametrize("kind", ("panel", "slot"))

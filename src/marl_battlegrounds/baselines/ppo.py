@@ -14,6 +14,29 @@
 #
 # Adapted from Mava for MARL-BGs.
 # See docs/training/source_reuse.md for source identities and deliberate changes.
+#
+# Value normalization follows on-policy under the following MIT terms.
+# MIT License
+#
+# Copyright (c) 2021 MAPPO contributors
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 """Provide recurrent MAPPO numerical components and an actor-only M8 System.
 
 This module adapts Mava's networks, GAE and grouped PPO updates. It owns no
@@ -26,7 +49,7 @@ Requires the optional training extra. Inputs stay on device inside jit/scan.
 Reference settings are starting values, not qualified learning settings for BG.
 PPOConfig.spawn_frame is a BG adaptation: "left", the default, reflects the
 actor's permitted view so every game looks like a start from the left bank, and
-maps the chosen move back; "world" keeps the donor's raw coordinates bit for bit.
+maps the chosen move back; "world" keeps the donor's raw coordinate convention.
 """
 
 import functools
@@ -80,6 +103,111 @@ from marl_battlegrounds.policies.input import (
 
 type Tree = Any
 HIDDEN_SIZE = 128
+_VALUE_NORM_DECAY = 0.99999
+_VALUE_NORM_EPSILON = 1e-5
+_VALUE_NORM_VARIANCE_FLOOR = 1e-2
+
+
+class ValueNormState(NamedTuple):
+    """Carry one learner's corrected moving averages in three float32 scalars.
+
+    running_mean and running_mean_sq average raw critic targets and their squares.
+    debiasing_term records the accumulated averaging weight. All start at zero.
+    These dynamic JAX leaves belong to training, never actor inference. Statistics
+    update once per nonempty optimizer minibatch, including repeated epochs.
+    """
+
+    running_mean: Array
+    running_mean_sq: Array
+    debiasing_term: Array
+
+
+def _initial_value_norm() -> ValueNormState:
+    """Return zero float32 scalar statistics without samples or host mutation."""
+    zero = jnp.zeros((), jnp.float32)
+    return ValueNormState(zero, zero, zero)
+
+
+def _check_value_norm(state: ValueNormState | None, enabled: bool) -> None:
+    """Check static config/state agreement and scalar shapes before numerical work.
+
+    enabled is a static Python bool. Disabled learners require None; enabled
+    learners require three float32 scalar leaves. Bad structure raises ValueError.
+    Values are checked by the learner's existing finite boundary, not copied here.
+    """
+    if (state is not None) != enabled:
+        raise ValueError("Value normalization setting and learner state disagree")
+    if state is not None and (
+        not isinstance(cast(object, state), ValueNormState)
+        or any(x.shape != () or x.dtype != jnp.float32 for x in state)
+    ):
+        raise ValueError("Value normalization needs three float32 scalar statistics")
+
+
+def _value_norm_moments(state: ValueNormState) -> tuple[Array, Array]:
+    """Return corrected raw-target mean and variance as float32 scalars.
+
+    The averaging weight has floor 1e-5 and variance has floor 1e-2, including
+    startup and constant targets. This pure JAX calculation changes no statistics.
+    """
+    weight = jnp.maximum(state.debiasing_term, _VALUE_NORM_EPSILON)
+    mean = state.running_mean / weight
+    variance = jnp.maximum(
+        state.running_mean_sq / weight - jnp.square(mean),
+        _VALUE_NORM_VARIANCE_FLOOR,
+    )
+    return mean, variance
+
+
+def _normalize_values(values: Array, state: ValueNormState) -> Array:
+    """Convert raw reward-unit float32 values of any shape to critic network units.
+
+    Use the caller's matching statistics. Return the same shape without updating
+    state. The learner treats this result and its statistics as fixed target data.
+    """
+    mean, variance = _value_norm_moments(state)
+    return (values - mean) / jnp.sqrt(variance)
+
+
+def _denormalize_values(values: Array, state: ValueNormState) -> Array:
+    """Convert float32 network predictions of any shape back to reward units.
+
+    Use the statistics belonging to the predictions. Return the same shape;
+    this pure JAX operation does not update statistics or recurrent memory.
+    """
+    mean, variance = _value_norm_moments(state)
+    return values * jnp.sqrt(variance) + mean
+
+
+def _update_value_norm(
+    state: ValueNormState, targets: Array, mask: Array
+) -> ValueNormState:
+    """Refresh shared statistics once from eligible raw float32 critic targets.
+
+    targets and Boolean mask have the same grouped minibatch shape (G,T,E,5).
+    Pool all eligible rows, including dead active agents. Empty input preserves
+    every leaf exactly. The caller stops gradients before and after this pure
+    JAX update; no Python mutation or per-group independent normalizer exists.
+    """
+    count = jnp.sum(mask)
+
+    def update(_: None) -> ValueNormState:
+        """Combine one pooled minibatch with the previous moving averages."""
+        present = jnp.where(mask, targets, 0.0)
+        mean = jnp.sum(present) / count
+        mean_sq = jnp.sum(jnp.square(present)) / count
+        weight = 1.0 - _VALUE_NORM_DECAY
+        return ValueNormState(
+            _VALUE_NORM_DECAY * state.running_mean + weight * mean,
+            _VALUE_NORM_DECAY * state.running_mean_sq + weight * mean_sq,
+            _VALUE_NORM_DECAY * state.debiasing_term + weight,
+        )
+
+    def keep(_: None) -> ValueNormState:
+        """Preserve all three statistics when no eligible critic row exists."""
+        return state
+
+    return cast(ValueNormState, jax.lax.cond(count > 0, update, keep, None))
 
 
 def _input_scale(value: float) -> float:
@@ -150,13 +278,18 @@ class PPOConfig:
         before the first Dense layer. One preserves the donor's raw inputs.
         Use the same setting for collection, learning and loaded inference.
         No feature is removed and no running statistics are collected.
+    value_normalization : bool, default=True
+        Train the critic on normalized reward targets using one learner-owned
+        moving average. GAE still uses reward units; actor inputs and exports
+        do not use these statistics. False preserves the historical raw loss.
+        Saved configurations from before this field existed mean False.
     spawn_frame : str, default="left"
         Which spawn bank the actor always seems to start from. "left", the
         default, reflects the permitted view of any actor whose own team
         starts on the right bank about the map's vertical centerline, so every
         game looks like a left start, and maps the chosen move back before the
-        game receives it. "world" keeps raw coordinates and traces the donor's
-        program bit for bit; pass it to reproduce runs made before the default
+        game receives it. "world" keeps raw coordinates; use it for runs made
+        before the default
         changed on 22 September 2026, and in old config files, which name no
         frame and would otherwise train in "left". Saved checkpoints, exports
         and run records without a frame still mean "world". On
@@ -196,11 +329,14 @@ class PPOConfig:
     adam_epsilon: float = 0.00001
     input_scale: float = 1.0
     spawn_frame: str = "left"
+    value_normalization: bool = True
 
     def __post_init__(self) -> None:
         """Reject invalid static update counts and numerical settings on the host."""
         _input_scale(self.input_scale)
         _spawn_frame(self.spawn_frame)
+        if type(self.value_normalization) is not bool:
+            raise ValueError("value_normalization must be a Python bool")
         for name in ("rollout_length", "epochs", "minibatches", "groups"):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
@@ -237,6 +373,9 @@ class PPOTrainState(NamedTuple):
         Separate Flax variable trees, including their params collection.
     actor_opt_state, critic_opt_state : PyTree
         Separate Optax states for their matching network parameters.
+    value_norm : ValueNormState or None
+        Shared critic statistics when enabled. None is the disabled historical
+        layout and contributes no serialized array leaves.
 
     Notes
     -----
@@ -249,6 +388,7 @@ class PPOTrainState(NamedTuple):
     critic_params: Tree
     actor_opt_state: Tree
     critic_opt_state: Tree
+    value_norm: ValueNormState | None = None
 
 
 class PPOLearningOutputs(NamedTuple):
@@ -292,7 +432,7 @@ class PPOBatch(NamedTuple):
     old_log_prob : Array
         Float32 (T,B,5) natural-log action probabilities from collection.
     old_values : Array
-        Float32 (T,B,5) critic predictions made before the corresponding actions.
+        Float32 (T,B,5) reward-unit predictions before the corresponding actions.
     rewards : Array
         Float32 (T,B,5) training rewards for the produced transitions.
     ended : Array
@@ -312,6 +452,10 @@ class PPOBatch(NamedTuple):
         reset. GAE ignores these values when that transition ended the task.
     actor_memory, critic_memory : Array
         Separate float32 (B,5,128) carries just before the first decision.
+    old_normalized_values : Array or None
+        Exact float32 (T,B,5) pre-update network predictions when normalization
+        is enabled. These fixed clipping anchors are required in that mode;
+        disabled batches use None. Do not reconstruct them using new statistics.
 
     Notes
     -----
@@ -336,6 +480,7 @@ class PPOBatch(NamedTuple):
     final_values: Array
     actor_memory: Array
     critic_memory: Array
+    old_normalized_values: Array | None = None
 
 
 class PPOMinibatch(NamedTuple):
@@ -353,9 +498,12 @@ class PPOMinibatch(NamedTuple):
         Int32 (G,T,E,5) submitted categorical choices, in the actor's spawn
         frame (world directions unless the frame reflected them).
     old_log_prob, old_values : Array
-        Float32 (G,T,E,5) action-time log probabilities and value predictions.
+        Float32 (G,T,E,5) action-time log probabilities and old network predictions.
+        old_values is in normalized units when ValueNorm is enabled, reward
+        units otherwise. It is the exact fixed value-clipping anchor.
     advantages, targets : Array
-        Float32 (G,T,E,5) fixed advantage and value targets for this update.
+        Float32 (G,T,E,5) fixed reward-unit advantages and targets. The update
+        normalizes targets after refreshing statistics; callers supply raw targets.
     episode_start, valid : Array
         Boolean (G,T,E,5) decision-epoch reset and real-transition masks.
     actor_samples, critic_samples : Array
@@ -397,9 +545,26 @@ class PPOMetrics(NamedTuple):
     entropy : Array
         Float32 masked policy entropy in natural-log units, before its weight.
     value_loss : Array
-        Float32 donor half-squared-error loss, before value_coefficient.
+        Float32 donor half-squared-error loss, before value_coefficient. It uses
+        normalized network units when enabled, reward units otherwise.
     actor_samples, critic_samples : Array
         Integer counts of eligible samples across all groups.
+    approx_kl, policy_clip_fraction, value_clip_fraction : Array
+        Float32 sampled policy change in natural-log units and fractions whose
+        policy ratio or value change exceeds its clip. These describe the
+        existing loss forward pass before that minibatch's optimizer step.
+    actor_grad_norm, critic_grad_norm : Array
+        Float32 lengths after group averaging and before optimizer clipping.
+    target_mean, target_std : Array
+        Float32 pooled eligible target moments in reward units. These are
+        minibatch observations, not the running normalization statistics.
+    value_mean, value_rmse : Array
+        Float32 prediction mean and unclipped root mean squared error in reward
+        units, using the refreshed statistics in enabled mode. Nonempty groups
+        have equal weight, as in the critic objective.
+    normalization_mean, normalization_std : Array
+        Float32 corrected running scale used by this minibatch. Disabled mode
+        reports zero and one. An empty critic minibatch reports zero for both.
 
     Notes
     -----
@@ -414,6 +579,17 @@ class PPOMetrics(NamedTuple):
     value_loss: Array
     actor_samples: Array
     critic_samples: Array
+    approx_kl: Array
+    policy_clip_fraction: Array
+    value_clip_fraction: Array
+    actor_grad_norm: Array
+    critic_grad_norm: Array
+    target_mean: Array
+    target_std: Array
+    value_mean: Array
+    value_rmse: Array
+    normalization_mean: Array
+    normalization_std: Array
 
 
 class MLPTorso(nn.Module):
@@ -692,7 +868,13 @@ def initialize_ppo(key: Array, config: PPOConfig = DEFAULT_PPO_CONFIG) -> PPOTra
         valid,
     )
     actor_opt, critic_opt = _optimizers(config)
-    return PPOTrainState(actor, critic, actor_opt.init(actor), critic_opt.init(critic))
+    return PPOTrainState(
+        actor,
+        critic,
+        actor_opt.init(actor),
+        critic_opt.init(critic),
+        _initial_value_norm() if config.value_normalization else None,
+    )
 
 
 def _initial_actor_memory(variables: Tree, inputs: SystemInput, keys: Array) -> Array:
@@ -934,6 +1116,7 @@ def critic_values(
     valid: Array,
     *,
     input_scale: float = 1.0,
+    value_norm: ValueNormState | None = None,
 ) -> tuple[Array, Array]:
     """Apply the critic separately using one physical-state view per game.
 
@@ -954,6 +1137,9 @@ def critic_values(
         Fixed positive finite feature multiplier matching the learner's PPO
         config. One preserves historical raw-input values; this call applies
         the scale once inside the network and keeps stored features unchanged.
+    value_norm : ValueNormState or None, default=None
+        Statistics matching this critic's predictions. Supply them for a critic
+        trained with normalization. None means a historical raw-value critic.
 
     Returns
     -------
@@ -971,6 +1157,33 @@ def critic_values(
     Matching epochs, shapes and dtypes are caller preconditions. This pure
     calculation supports jit/scan and changes no inputs. Privileged features
     and critic memory must never be routed into the actor-producing System.
+    """
+    memory, predictions = _critic_network_values(
+        params, memory, features, episode_start, valid, input_scale=input_scale
+    )
+    return memory, (
+        predictions
+        if value_norm is None
+        else _denormalize_values(predictions, value_norm)
+    )
+
+
+def _critic_network_values(
+    params: Tree,
+    memory: Array,
+    features: Array,
+    episode_start: Array,
+    valid: Array,
+    *,
+    input_scale: float = 1.0,
+) -> tuple[Array, Array]:
+    """Read exact network outputs once for raw values and frozen clipping anchors.
+
+    Arguments follow critic_values: physical features (T,B,919), memory
+    (B,5,128), and decision flags (T,B). Return final memory and float32
+    (T,B,5) network outputs. Enabled critics produce normalized outputs;
+    the caller rescales with their matching statistics. No extra forward pass,
+    persistent feature expansion, host work or statistics update occurs.
     """
     shape = (*features.shape[:-1], 5)
     expanded = jnp.broadcast_to(features[..., None, :], (*shape, features.shape[-1]))
@@ -1081,16 +1294,30 @@ def _mean(values: Array, mask: Array) -> Array:
     return jnp.sum(jnp.where(mask, values, 0.0)) / jnp.maximum(jnp.sum(mask), 1)
 
 
-def _actor_loss(
+def _actor_loss(  # pyright: ignore[reportUnusedFunction]
     params: Tree, batch: PPOMinibatch, config: PPOConfig
 ) -> tuple[Array, Array]:
+    """Return the masked actor objective and entropy for numerical reference use.
+
+    params is one actor tree; batch is one group without G. config supplies the
+    PPO clip and entropy weight. Return float32 scalar loss and entropy. This
+    delegates to the same single forward pass used by the optimizer diagnostics.
+    """
+    loss, diagnostics = _actor_loss_with_metrics(params, batch, config)
+    return loss, diagnostics[0]
+
+
+def _actor_loss_with_metrics(
+    params: Tree, batch: PPOMinibatch, config: PPOConfig
+) -> tuple[Array, tuple[Array, Array, Array]]:
     """Return one group's masked actor loss and unscaled policy entropy.
 
     params is the shared actor variable tree. batch is one PPOMinibatch group,
     with time-first arrays and no leading G axis. config fixes clipping and the
     entropy weight. Standardize only that group's eligible advantages with the
     donor epsilon. Return two float32 scalars; the loss includes entropy's
-    coefficient and entropy uses natural-log units. This performs a recurrent
+    coefficient. Return loss plus (entropy, sampled KL, ratio clip fraction),
+    all scalar float32. Entropy and KL use natural-log units. This performs a recurrent
     actor call but samples no actions and changes no parameters or input arrays.
     """
     _, logits = cast(
@@ -1107,22 +1334,46 @@ def _actor_loss(
     mean = _mean(batch.advantages, batch.actor_samples)
     variance = _mean(jnp.square(batch.advantages - mean), batch.actor_samples)
     advantages = (batch.advantages - mean) / (jnp.sqrt(variance) + 1e-8)
-    ratio = jnp.exp(logp - batch.old_log_prob)
+    log_ratio = logp - batch.old_log_prob
+    ratio = jnp.exp(log_ratio)
     clipped = jnp.clip(ratio, 1 - config.clip_epsilon, 1 + config.clip_epsilon)
     policy = -_mean(
         jnp.minimum(ratio * advantages, clipped * advantages), batch.actor_samples
     )
     entropy = _mean(action_entropy(logits, batch.action_mask), batch.actor_samples)
-    return policy - config.entropy_coefficient * entropy, entropy
+    diagnostics = (
+        entropy,
+        _mean((ratio - 1) - log_ratio, batch.actor_samples),
+        _mean(
+            (jnp.abs(ratio - 1) > config.clip_epsilon).astype(jnp.float32),
+            batch.actor_samples,
+        ),
+    )
+    return policy - config.entropy_coefficient * entropy, diagnostics
 
 
-def _critic_loss(params: Tree, batch: PPOMinibatch, config: PPOConfig) -> Array:
+def _critic_loss(  # pyright: ignore[reportUnusedFunction]
+    params: Tree, batch: PPOMinibatch, config: PPOConfig
+) -> Array:
+    """Return the critic objective from its shared single-forward calculation.
+
+    params is one critic tree; batch is one group. Predictions, old anchors and
+    targets must share network units here. Return scalar half-squared clipped
+    loss, before value_coefficient. The optimizer prepares normalized targets.
+    """
+    return _critic_loss_with_metrics(params, batch, config)[0]
+
+
+def _critic_loss_with_metrics(
+    params: Tree, batch: PPOMinibatch, config: PPOConfig
+) -> tuple[Array, tuple[Array, Array, Array]]:
     """Return one group's masked donor half-squared-error value loss.
 
     params is the shared critic variable tree. batch is one PPOMinibatch group
     without its leading G axis; config sets value-change clipping. Return one
-    float32 scalar in squared reward units, before value_coefficient. Only
-    critic_samples contribute. No actor inputs, optimizer updates or writes occur.
+    float32 scalar loss and (clip fraction, prediction mean, squared error).
+    All value quantities use network units: targets have already been normalized
+    when enabled. Only critic_samples contribute. No optimizer or writer runs.
     """
     _, values = cast(
         tuple[Array, Array],
@@ -1137,11 +1388,20 @@ def _critic_loss(params: Tree, batch: PPOMinibatch, config: PPOConfig) -> Array:
     clipped = batch.old_values + jnp.clip(
         values - batch.old_values, -config.clip_epsilon, config.clip_epsilon
     )
-    return 0.5 * _mean(
-        jnp.maximum(
-            jnp.square(values - batch.targets), jnp.square(clipped - batch.targets)
-        ),
+    error_squared = jnp.square(values - batch.targets)
+    loss = 0.5 * _mean(
+        jnp.maximum(error_squared, jnp.square(clipped - batch.targets)),
         batch.critic_samples,
+    )
+    return loss, (
+        _mean(
+            (jnp.abs(values - batch.old_values) > config.clip_epsilon).astype(
+                jnp.float32
+            ),
+            batch.critic_samples,
+        ),
+        _mean(values, batch.critic_samples),
+        _mean(error_squared, batch.critic_samples),
     )
 
 
@@ -1189,7 +1449,22 @@ def update_minibatch(
     """
     if batch.actions.shape[0] != config.groups:
         raise ValueError("Minibatch group count must match PPOConfig.groups.")
+    _check_value_norm(state.value_norm, config.value_normalization)
     batch = jax.tree.map(jax.lax.stop_gradient, batch)
+    target_mean = _mean(batch.targets, batch.critic_samples)
+    target_std = jnp.sqrt(
+        _mean(jnp.square(batch.targets - target_mean), batch.critic_samples)
+    )
+    value_norm = state.value_norm
+    scale_mean, scale_std = jnp.float32(0), jnp.float32(1)
+    if value_norm is not None:
+        value_norm = jax.tree.map(
+            jax.lax.stop_gradient,
+            _update_value_norm(value_norm, batch.targets, batch.critic_samples),
+        )
+        scale_mean, variance = _value_norm_moments(value_norm)
+        scale_std = jnp.sqrt(variance)
+        batch = batch._replace(targets=_normalize_values(batch.targets, value_norm))
     actor_count = jnp.sum(batch.actor_samples, axis=(1, 2, 3))
     critic_count = jnp.sum(batch.critic_samples, axis=(1, 2, 3))
 
@@ -1205,23 +1480,26 @@ def update_minibatch(
     def actor_gradients(_: None) -> Tree:
         """Run the actor only when at least one group has policy samples."""
         return jax.vmap(
-            jax.value_and_grad(_actor_loss, has_aux=True), in_axes=(None, 0, None)
+            jax.value_and_grad(_actor_loss_with_metrics, has_aux=True),
+            in_axes=(None, 0, None),
         )(state.actor_params, batch, config)
 
     def empty_actor(_: None) -> Tree:
         """Supply zero metrics and gradients for an entirely absent actor loss."""
         zero = jnp.zeros(config.groups, jnp.float32)
-        return (zero, zero), zero_group_gradients(state.actor_params)
+        return (zero, (zero, zero, zero)), zero_group_gradients(state.actor_params)
 
-    (actor_loss, entropy), actor_grads = cast(
-        tuple[tuple[Array, Array], Tree],
+    (actor_loss, (entropy, kl, policy_clip)), actor_grads = cast(
+        tuple[tuple[Array, tuple[Array, Array, Array]], Tree],
         jax.lax.cond(jnp.any(actor_count > 0), actor_gradients, empty_actor, None),
     )
 
-    def critic_loss(params: Tree, group: PPOMinibatch) -> tuple[Array, Array]:
+    def critic_loss(
+        params: Tree, group: PPOMinibatch
+    ) -> tuple[Array, tuple[Array, Array, Array, Array]]:
         """Keep the donor coefficient outside its already halved value loss."""
-        value_loss = _critic_loss(params, group, config)
-        return config.value_coefficient * value_loss, value_loss
+        value_loss, diagnostics = _critic_loss_with_metrics(params, group, config)
+        return config.value_coefficient * value_loss, (value_loss, *diagnostics)
 
     def critic_gradients(_: None) -> Tree:
         """Run the critic only when at least one group has value samples."""
@@ -1232,10 +1510,12 @@ def update_minibatch(
     def empty_critic(_: None) -> Tree:
         """Supply zero metrics and gradients for an entirely absent value loss."""
         zero = jnp.zeros(config.groups, jnp.float32)
-        return (zero, zero), zero_group_gradients(state.critic_params)
+        return (zero, (zero, zero, zero, zero)), zero_group_gradients(
+            state.critic_params
+        )
 
-    (_, value_loss), critic_grads = cast(
-        tuple[tuple[Array, Array], Tree],
+    (_, (value_loss, value_clip, value_mean, value_mse)), critic_grads = cast(
+        tuple[tuple[Array, tuple[Array, Array, Array, Array]], Tree],
         jax.lax.cond(jnp.any(critic_count > 0), critic_gradients, empty_critic, None),
     )
 
@@ -1295,8 +1575,23 @@ def update_minibatch(
         average(value_loss, critic_count),
         jnp.sum(actor_count),
         jnp.sum(critic_count),
+        average(kl, actor_count),
+        average(policy_clip, actor_count),
+        average(value_clip, critic_count),
+        optax.global_norm(actor_grads),
+        optax.global_norm(critic_grads),
+        target_mean,
+        target_std,
+        jnp.where(
+            jnp.any(critic_count),
+            average(value_mean, critic_count) * scale_std + scale_mean,
+            0.0,
+        ),
+        jnp.sqrt(average(value_mse, critic_count)) * scale_std,
+        jnp.where(jnp.any(critic_count), scale_mean, 0.0),
+        jnp.where(jnp.any(critic_count), scale_std, 0.0),
     )
-    return PPOTrainState(actor, critic, actor_state, critic_state), metrics
+    return PPOTrainState(actor, critic, actor_state, critic_state, value_norm), metrics
 
 
 def _reflected_minibatch(
@@ -1379,8 +1674,7 @@ def update_recurrent_ppo(
     documented by update_minibatch. When config.spawn_frame is "left", each
     minibatch's rebuilt view and mask are reflected and the
     stored world-frame indices are mapped into that frame before the log
-    probability, exactly as at action time; "world" traces the donor's
-    program unchanged.
+    probability, exactly as at action time; "world" uses raw coordinates.
 
     Use jit around this numerical call. Paired fields, finite values and legal
     recorded actions remain caller preconditions. Inputs are immutable. No
@@ -1400,6 +1694,19 @@ def update_recurrent_ppo(
             "by groups*minibatches."
         )
     samples = batch.valid[..., None] & batch.active
+    _check_value_norm(state.value_norm, config.value_normalization)
+    if config.value_normalization:
+        if batch.old_normalized_values is None:
+            raise ValueError("Normalized PPO needs exact old network predictions")
+        if (
+            batch.old_normalized_values.shape != batch.old_values.shape
+            or batch.old_normalized_values.dtype != jnp.float32
+        ):
+            raise ValueError("Old normalized predictions must match float32 value rows")
+    elif batch.old_normalized_values is not None:
+        raise ValueError(
+            "Disabled normalization requires no normalized clipping anchors"
+        )
     advantages, targets = calculate_gae(
         batch.rewards,
         batch.old_values,
@@ -1476,7 +1783,11 @@ def update_recurrent_ppo(
                 mask,
                 actions,
                 take(batch.old_log_prob),
-                take(batch.old_values),
+                take(
+                    batch.old_values
+                    if batch.old_normalized_values is None
+                    else batch.old_normalized_values
+                ),
                 take(advantages),
                 take(targets),
                 starts,

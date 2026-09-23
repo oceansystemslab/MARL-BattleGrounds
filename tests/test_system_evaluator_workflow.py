@@ -4,6 +4,8 @@ CPU cases compare actual replay trajectories, fresh recurrent memory and action
 randomness. They cover scalar/odd worker counts, mixed host/JAX execution, one
 provider call per decision, provider failure before advancement, and compilation
 reuse for same-shaped changed parameters. No learner or Core rule changes here.
+Fixed batches also keep padding inactive before custom initialization, preserve
+real game keys through refill and resume, and never publish padded games.
 """
 
 # Public workflow proofs also inspect their shared compiled execution boundary.
@@ -235,7 +237,14 @@ def test_same_shape_checkpoint_values_reuse_system_chunk_program() -> None:
 
 def test_saved_system_pair_routes_and_replays_join_actual_episodes(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    provenance = runner.capture_recording_provenance()
+
+    def same_source(**_: object) -> dict[str, object]:
+        return provenance
+
+    monkeypatch.setattr(runner, "capture_recording_provenance", same_source)
     method = System("counter", _act, variables=jnp.int32(0), init=_init)
     result = evaluate(
         method,
@@ -255,3 +264,203 @@ def test_saved_system_pair_routes_and_replays_join_actual_episodes(
     assert len(result.table("episodes")["episode_id"]) == 2
     assert list(result.table("full_metrics")["episode_id"]) == [1]
     assert result.metadata["spawn_balance"]["paired_complete"] is True
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail(
+            "Read-only verification must not open a writer or initialize a method"
+        )
+
+    monkeypatch.setattr(runner.RunWriter, "__init__", forbidden)
+    monkeypatch.setattr(runner, "_init_system_pair", forbidden)
+    options: dict[str, Any] = dict(
+        num_episodes=2,
+        maps=[12],
+        max_steps=2,
+        metrics="none",
+        full_metrics_episodes=[1],
+        save_replays=2,
+        resume_from=result.run_dir,
+    )
+    runner._verify_evaluation(method, method, **options)
+    with pytest.raises(ValueError, match="identity"):
+        runner._verify_evaluation(
+            replace(method, variables=jnp.int32(1)), method, **options
+        )
+    with pytest.raises(ValueError, match="saved"):
+        runner._verify_evaluation(method, method, seed=123, **options)
+    assert {
+        path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+    } == before
+
+
+def test_fixed_batch_tails_keep_exact_games_and_reuse_compilation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    method = System("count", _act, variables=jnp.int32(1), init=_init)
+    config = _specs()[0].env_config
+    original_init = runner._init_system_pair
+    original_chunk = runner._jax_system_chunk
+    starts: list[tuple[np.ndarray, np.ndarray]] = []
+    transitions: list[tuple[np.ndarray, np.ndarray]] = []
+
+    def initialize(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 - Observe the shared runner without changing its call contract.
+        state = args[6]
+        starts.append((np.asarray(state.episode_id), np.asarray(~state.done.done)))
+        return original_init(*args, **kwargs)
+
+    def chunk(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 - Observe the shared runner without changing its call contract.
+        result = original_chunk(*args, **kwargs)
+        state = result[0].state
+        transitions.append(
+            (
+                np.asarray(state.episode_id),
+                np.asarray(state.cumulative_transition_count),
+            )
+        )
+        return result
+
+    monkeypatch.setattr(runner, "_init_system_pair", initialize)
+    monkeypatch.setattr(runner, "_jax_system_chunk", chunk)
+    compiled = None
+    for count in (1, 31, 32, 33):
+        ids = (np.iinfo(np.int32).max, *range(1, count))
+        specs = tuple(EpisodeSpec(i, config, seed_id=i) for i in ids)
+        result = evaluate_episodes(
+            method,
+            method,
+            specs,
+            num_envs=32,
+            keep_batch_size=True,
+            chunk_size=1,
+            metrics="none",
+        )
+        assert result.metadata["num_envs"] == 32
+        assert set(result.completed_episode_ids) == set(ids)
+        assert set(result.metadata["schedule"]) == set(ids)
+        start_ids, valid = starts[-1]
+        assert start_ids.shape == (32,)
+        assert valid.sum() == min(count, 32)
+        assert set(start_ids[~valid]).isdisjoint(ids)
+        assert len(set(start_ids)) == 32
+        assert np.all(start_ids > 0)
+        for lane_ids, steps in transitions:
+            assert np.all(steps[~np.isin(lane_ids, ids)] == 0)
+        transitions.clear()
+        if compiled is None:
+            compiled = original_chunk._cache_size()
+        assert original_chunk._cache_size() == compiled
+
+
+def test_fixed_batch_setting_rejects_non_boolean_before_output(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="keep_batch_size must be a bool"):
+        evaluate(
+            "random",
+            "random",
+            num_episodes=2,
+            maps=[12],
+            keep_batch_size=cast(bool, 1),
+            output_dir=tmp_path,
+        )
+    assert not list(tmp_path.iterdir())
+
+
+def test_fixed_batch_matches_real_replays_and_default_stays_small() -> None:
+    method = System("count", _act, variables=jnp.int32(1), init=_init)
+    specs = _specs()[:1]
+    options: dict[str, Any] = dict(
+        num_envs=32,
+        chunk_size=1,
+        metrics="none",
+        replay_episodes=(1,),
+        run_id="fixed-batch-parity",
+    )
+    small = evaluate_episodes(method, method, specs, **options)
+    padded = evaluate_episodes(method, method, specs, keep_batch_size=True, **options)
+    assert small.metadata["num_envs"] == 1
+    assert padded.metadata["num_envs"] == 32
+    assert small.episodes == padded.episodes
+    assert len(padded.replays) == 1
+    assert small.replays[0].frames == padded.replays[0].frames
+    assert small.replays[0].transitions == padded.replays[0].transitions
+
+
+def test_fixed_batch_host_resume_initializes_only_real_pending_games(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provenance = runner.capture_recording_provenance()
+
+    def same_source(**_: object) -> dict[str, object]:
+        return provenance
+
+    monkeypatch.setattr(runner, "capture_recording_provenance", same_source)
+    opaque = object()
+    initial_valid: list[np.ndarray] = []
+    chosen_keys: list[tuple[int, ...]] = []
+    should_fail = True
+    calls = 0
+
+    def initialize(
+        variables: PolicyTree, inputs: SystemInput, keys: Array
+    ) -> dict[str, list[object | None]]:
+        del variables, keys
+        initial_valid.append(np.asarray(inputs.valid).copy())
+        return {"lanes": [opaque if valid else None for valid in inputs.valid]}
+
+    def reset_memory(
+        memory: dict[str, list[object | None]],
+        fresh: dict[str, list[object | None]],
+        mask: Array,
+    ) -> dict[str, list[object | None]]:
+        return {
+            "lanes": [
+                new if selected else old
+                for old, new, selected in zip(
+                    memory["lanes"], fresh["lanes"], mask, strict=True
+                )
+            ]
+        }
+
+    def host(
+        variables: PolicyTree,
+        memory: dict[str, list[object | None]],
+        inputs: SystemInput,
+        keys: Array,
+    ) -> SystemOutput:
+        nonlocal calls
+        del variables
+        calls += 1
+        if should_fail and calls == 2:
+            raise RuntimeError("stop after saved first batch")
+        assert inputs.valid.shape == (32,)
+        for lane in np.flatnonzero(inputs.valid):
+            assert memory["lanes"][lane] is opaque
+            chosen_keys.append(tuple(int(x) for x in jax.random.key_data(keys[lane])))
+        zero = cast(Array, np.zeros(inputs.active_mask.shape, np.int32))
+        return SystemOutput(ActorAction(zero, zero, zero), memory)
+
+    provider = System(
+        "opaque", host, init=initialize, reset_memory=reset_memory, execution="host"
+    )
+    config = _specs()[0].env_config
+    specs = tuple(EpisodeSpec(i, config) for i in range(1, 34))
+    options: dict[str, Any] = dict(
+        num_envs=32, keep_batch_size=True, chunk_size=1, metrics="none"
+    )
+    with pytest.raises(RuntimeError, match="stop after saved first batch"):
+        evaluate_episodes(provider, "random", specs, output_dir=tmp_path, **options)
+    run_dir = next(tmp_path.iterdir())
+    should_fail = False
+    initial_valid.clear()
+    resumed = evaluate_episodes(
+        provider, "random", specs, resume_from=run_dir, **options
+    )
+    assert resumed.completed_episode_ids == tuple(range(1, 34))
+    assert [episode.episode_id for episode in resumed.episodes] == [33]
+    assert resumed.metadata["num_envs"] == 32
+    assert len(resumed.table("episodes")["episode_id"]) == 33
+    assert initial_valid[0].shape == (32,)
+    assert np.array_equal(initial_valid[0], np.arange(32) == 0)
+    assert len(chosen_keys) == 33
+    assert len(set(chosen_keys)) == 33
+    assert calls == 3

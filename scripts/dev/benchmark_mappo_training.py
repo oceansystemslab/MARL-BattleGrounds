@@ -62,6 +62,7 @@ from marl_battlegrounds.baselines.ppo import (
     PPOBatch,
     PPOConfig,
     PPOTrainState,
+    _denormalize_values,
     critic_values,
     update_recurrent_ppo,
 )
@@ -127,11 +128,13 @@ def _reference_batch(
     state: LearnerState,
     rollout: TrainingRollout,
     *,
+    ppo: PPOConfig,
     bootstrap_branch: bool = True,
 ) -> tuple[PPOBatch, jax.Array]:
     """Build valid full-block PPO inputs independently of the learner adapter.
 
-    state precedes rollout. Both follow the admitted collector contract. Return
+    state precedes rollout. ppo supplies its input scale and critic setting.
+    Both follow the admitted collector contract. Return
     the batch and critic memory after the sequence, discarding bootstrap memory.
     This pure reference assumes a nonempty block and retains initial memories;
     the recurrent networks reset them on episode-start rows themselves.
@@ -150,6 +153,7 @@ def _reference_batch(
         rows.training_state,
         rows.episode_start,
         rows.valid,
+        input_scale=ppo.input_scale,
     )
 
     def bootstrap(_: None) -> jax.Array:
@@ -160,6 +164,7 @@ def _reference_batch(
             final_features[None],
             jnp.zeros_like(rollout.final_ended)[None],
             (~rollout.final_ended)[None],
+            input_scale=ppo.input_scale,
         )
         return jnp.where(
             (~rollout.final_ended)[:, None] & rollout.final_active, final[0], 0.0
@@ -177,13 +182,28 @@ def _reference_batch(
         if bootstrap_branch
         else bootstrap(None)
     )
+    old_values = jnp.where(rows.valid[..., None], values, 0.0)
+    old_normalized_values = None
+    if state.value_norm is not None:
+        # Preserve exact network outputs for clipping; GAE consumes raw units.
+        old_normalized_values = old_values
+        old_values = jnp.where(
+            rows.valid[..., None],
+            _denormalize_values(old_values, state.value_norm),
+            0.0,
+        )
+        final = jnp.where(
+            (~rollout.final_ended)[:, None] & rollout.final_active,
+            _denormalize_values(final, state.value_norm),
+            0.0,
+        )
     batch = PPOBatch(
         rows.observations,
         rows.training_state,
         rows.action_mask,
         rows.learning_outputs.action_indices,
         rows.learning_outputs.log_prob,
-        jnp.where(rows.valid[..., None], values, 0.0),
+        old_values,
         rows.task_rewards + jnp.where(rows.active, rows.shaping_reward[..., None], 0.0),
         rows.ended,
         rows.episode_start,
@@ -193,6 +213,7 @@ def _reference_batch(
         final,
         rollout.initial_memory,
         state.critic_memory,
+        old_normalized_values,
     )
     return batch, memory
 
@@ -216,7 +237,9 @@ def _reference_update(
     no equations, array values, donor settings or host/device placement.
     """
     state, collected, rollout = value
-    batch, memory = _reference_batch(state, rollout, bootstrap_branch=bootstrap_branch)
+    batch, memory = _reference_batch(
+        state, rollout, ppo=ppo, bootstrap_branch=bootstrap_branch
+    )
     if batch_barrier:
         batch = jax.lax.optimization_barrier(batch)
     index = state.completed_updates + jnp.int32(1)
@@ -226,6 +249,7 @@ def _reference_update(
             state.critic_params,
             state.actor_opt_state,
             state.critic_opt_state,
+            state.value_norm,
         ),
         batch,
         jax.random.fold_in(state.shuffle_root, index),
@@ -248,6 +272,7 @@ def _reference_update(
         index,
         jnp.bool_(False),
         jnp.int32(0),
+        network.value_norm,
     )
     return successor, UpdateResult(
         jnp.bool_(True),
@@ -375,11 +400,11 @@ def _diagnose_update(
 
     def production_batch(value: tuple[LearnerState, TrainingRollout]) -> Tree:
         """Build the adapter's PPO batch at the supplied pre-collection state."""
-        return build_ppo_batch(*value)
+        return build_ppo_batch(*value, ppo=ppo)
 
     def reference_batch(value: tuple[LearnerState, TrainingRollout]) -> Tree:
         """Build the independent batch using the same state and compact rows."""
-        return _reference_batch(*value)
+        return _reference_batch(*value, ppo=ppo)
 
     batch_input = (state, rollout)
     production_fn, _, production_cost = _compile(production_batch, batch_input)
@@ -395,6 +420,7 @@ def _diagnose_update(
             value.critic_params,
             value.actor_opt_state,
             value.critic_opt_state,
+            value.value_norm,
         )
 
     key = jax.random.fold_in(state.shuffle_root, state.completed_updates + jnp.int32(1))
@@ -427,7 +453,7 @@ def _diagnose_update(
 
     def unconditional_batch(value: tuple[LearnerState, TrainingRollout]) -> Tree:
         """Build the earlier reference without a successor branch for diagnosis."""
-        return _reference_batch(*value, bootstrap_branch=False)
+        return _reference_batch(*value, ppo=ppo, bootstrap_branch=False)
 
     def unconditional_update(value: UpdateInput) -> Tree:
         """Run the earlier unconditional reference to isolate compiler rounding."""

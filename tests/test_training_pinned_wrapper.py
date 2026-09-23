@@ -5,12 +5,14 @@ Team B of M8's own apply_systems with that System, for rosters of three and
 five actors, and the other lanes act exactly as the unpinned wrapper; a step
 with no pinned lane never calls the pinned System and leaves its memory
 unchanged; Systems that return a 2-tuple, a 3-tuple or a SystemOutput route
-alike; a Policy adapter runs only on the pinned games, gathered into a quarter
-of the batch, when they fit there and on the full batch when they do not, and
-its actions and memory equal M8's either way, random draws included; when a
+alike; a Policy adapter uses the smallest fitting quarter, half or full batch,
+with no repeated capacities for tiny batches. Exact actor call counts cover
+zero pins and both capacity boundaries; actions, memory and the full random
+key words equal M8's in every route; when a
 game ends, the new game's pinned lane starts from fresh memory and a lane
 moved off the pinned System stops using it, exactly as M8 resets memory, for a
-generic System and a Policy adapter; a Policy whose NumPy memory template is
+generic System and a Policy adapter, including switches between all three
+capacities; a Policy whose NumPy memory template is
 changed after setup still starts pinned games from the snapshot; a pinned
 System with its own reset_memory hook and a lane-second memory layout runs
 through the wrapper's combined hook and matches M8's direct route; and a
@@ -268,11 +270,14 @@ def _steps_apply(
     jax.debug.callback(_seen, carry)
     move = (carry.astype(jnp.int32)[0] + jax.random.randint(key, (), 0, 9)) % 9
     zero = jnp.int32(0)
-    return ActorAction(move, zero, zero), carry + 1.0
+    following = jnp.concatenate(
+        (carry[:1] + jnp.int32(1), jax.random.key_data(key).astype(jnp.int32))
+    )
+    return ActorAction(move, zero, zero), following
 
 
 def _steps_policy() -> System:
-    source = Policy("Steps", _steps_apply, initial_carry=np.zeros(1, np.float32))
+    source = Policy("Steps", _steps_apply, initial_carry=np.zeros(3, np.int32))
     return shared_policy(cast(Policy, freeze_evaluation_method(source)))
 
 
@@ -282,7 +287,25 @@ def _steps_policy() -> System:
         ((-1,) * 8, 0),
         ((0, -1, -1, -1, -1, -1, -1, -1), 10),
         ((-1, 0, -1, -1, -1, 0, -1, -1), 10),
-        ((0, 0, 0, -1, -1, -1, -1, -1), 40),
+        ((0, 0, 0, -1, -1, -1, -1, -1), 20),
+        ((0, 0, 0, 0, -1, -1, -1, -1), 20),
+        ((0, 0, 0, 0, 0, -1, -1, -1), 40),
+        ((0,) * 8, 40),
+        ((0,), 5),
+        ((0, -1), 5),
+        ((0, 0), 10),
+    ],
+    ids=[
+        "pins-0",
+        "pins-1",
+        "pins-2",
+        "pins-3",
+        "pins-4",
+        "pins-5",
+        "pins-8",
+        "batch-1",
+        "batch-2-one-pin",
+        "batch-2-all-pins",
     ],
 )
 def test_a_policy_runs_on_its_games_only_when_they_fit_and_matches_m8(
@@ -292,10 +315,10 @@ def test_a_policy_runs_on_its_games_only_when_they_fit_and_matches_m8(
     SEEN.clear()
     actions, memory = _wrapper_step(weights, steps, snapshot)
     jax.effects_barrier()
-    # Eight games give a capacity of two: 2 x 5 actor rows when the pinned games
-    # fit, all 8 x 5 rows when they do not, and no call when none is pinned.
+    # B8 uses 2, 4 or 8 games times five actor rows; zero pins skip work.
+    # B1 and B2 reuse the distinct capacities that exist at those sizes.
     assert len(SEEN) == rows
-    direct, direct_memory = _direct_step(weights, steps, num_envs=8)
+    direct, direct_memory = _direct_step(weights, steps, num_envs=len(snapshot))
     lanes = np.asarray(snapshot) == 0
     wrapped, reference = _team_b(actions), _team_b(direct)
     for name in HEADS:
@@ -313,12 +336,16 @@ AFTER = (-1, 0, 0, -1, -1, -1, -1, -1)
 
 
 def _across_a_new_game(
-    weights: Tree, team_b: System, first: Tree, second: Tree
+    weights: Tree,
+    team_b: System,
+    first: Tree,
+    second: Tree,
+    ends: tuple[int, ...] = ENDS,
 ) -> tuple[Action, Tree]:
     env, _, state = _setup(3, 8)
     observations, state = env.reset(
         jax.random.key(41),
-        state.config._replace(max_steps=jnp.asarray(ENDS, jnp.int32)),
+        state.config._replace(max_steps=jnp.asarray(ends, jnp.int32)),
     )
     actor = make_recurrent_mappo_system(weights, spawn_frame="world")
     memory = init_systems(
@@ -341,7 +368,7 @@ def _across_a_new_game(
         variables_b=first,
     )
     observations, state, *_ = env.step(jax.random.key(9), state, actions)
-    np.testing.assert_array_equal(state.done.done, np.asarray(ENDS) == 1)
+    np.testing.assert_array_equal(state.done.done, np.asarray(ends) == 1)
     observations, state = env.reset_done(jax.random.key(10), state)
     actions, memory, _ = apply_systems(
         actor,
@@ -357,8 +384,25 @@ def _across_a_new_game(
 
 
 @pytest.mark.parametrize("form", ["system", "policy"])
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (BEFORE, AFTER),
+        (BEFORE, (-1, 0, 0, 0, -1, -1, -1, -1)),
+        ((0, 0, 0, -1, -1, -1, -1, -1), AFTER),
+        (BEFORE, (-1, 0, 0, 0, 0, 0, -1, -1)),
+        ((0, 0, 0, 0, 0, -1, -1, -1), AFTER),
+    ],
+    ids=[
+        "quarter",
+        "quarter-to-half",
+        "half-to-quarter",
+        "quarter-to-full",
+        "full-to-quarter",
+    ],
+)
 def test_a_new_game_resets_and_reassigns_the_pinned_lanes_like_m8(
-    weights: Tree, form: str
+    weights: Tree, form: str, before: tuple[int, ...], after: tuple[int, ...]
 ) -> None:
     pinned = (
         System("Counter", _counter_two, init=_counter_init)
@@ -369,16 +413,17 @@ def test_a_new_game_resets_and_reassigns_the_pinned_lanes_like_m8(
     wrapper = make_opponent_system(
         make_recurrent_mappo_system(weights, spawn_frame="world"), pinned=pinned
     )
+    ends = tuple(1 if old != new else 3 for old, new in zip(before, after, strict=True))
     actions, memory = _across_a_new_game(
         weights,
         wrapper,
-        (_history(weights, BEFORE), variables, template),
-        (_history(weights, AFTER), variables, template),
+        (_history(weights, before), variables, template),
+        (_history(weights, after), variables, template),
+        ends,
     )
-    direct, direct_memory = _across_a_new_game(weights, pinned, None, None)
-    # Lane 1 left the network for the pinned System at its new game; lane 2
-    # kept the pinned System through the first game.
-    lanes = [1, 2]
+    direct, direct_memory = _across_a_new_game(weights, pinned, None, None, ends)
+    # Newly pinned games restart; continuing pinned games retain memory.
+    lanes = np.flatnonzero(np.asarray(after) == 0)
     wrapped, reference = _team_b(actions), _team_b(direct)
     for name in HEADS:
         np.testing.assert_array_equal(wrapped[name][lanes], reference[name][lanes])
@@ -386,7 +431,10 @@ def test_a_new_game_resets_and_reassigns_the_pinned_lanes_like_m8(
         np.asarray(memory[1])[lanes], np.asarray(direct_memory)[lanes]
     )
     if form == "system":
-        np.testing.assert_array_equal(np.asarray(memory[1])[lanes], [1.0, 2.0])
+        np.testing.assert_array_equal(
+            np.asarray(memory[1])[lanes],
+            np.where(np.asarray(before)[lanes] == 0, 2.0, 1.0),
+        )
 
 
 def _template_apply(

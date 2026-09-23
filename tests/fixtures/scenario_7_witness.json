@@ -7,7 +7,7 @@
   "configuration_digest": "f567e834d3d1a6b18523a05e43d0dfbb092a0979dfcb7748f04acfc2dbba88d5",
   "initial_state_digest": "3dfd751f1a95dcd003b6f804872bdda53cc6fec864dfaeb955c94c9854e9ee48",
   "opponent": "tdm-alpha",
-  "opponent_version": 2,
+  "opponent_version": 3,
   "key_schedule": "turn_index",
   "reference_trace_sha256": "423c196950dd372aa087567042b46484fae548bb110ea621a25bc689a2659aa3",
   "ticks": [

@@ -784,3 +784,93 @@ check must reproduce the mirror check's numbers exactly (62/66, 73/74, 45/41),
 because the shipped helper now makes the choice the mirror check's wrapper
 made. Alpha and beta games and the head-to-head follow the run as descriptive
 evidence.
+
+
+## Current Recurrent MAPPO Search: Declared 23 September 2026
+
+The [search protocol](mappo_search.md) defines a new, replicated comparison
+under the current maps, left spawn frame and fixed Alpha validation. It uses
+value normalization for every recipe. Earlier world-frame, Random-validation
+and older-controller runs retain their original identities and are historical
+evidence. They are not reused as fresh seeds in this study.
+
+The protocol searches update reuse, clipping, batch/window length, actor
+learning rate, entropy and Alpha pin share. These are important controls in
+the [original MAPPO study](https://arxiv.org/html/2103.01955v4). The recipe
+comparison is not a factorial estimate of every interaction. Critic learning
+rate, architecture, rewards and normalization constants remain fixed.
+
+Value normalization follows the official implementation, with the source and
+explicit JAX adaptations in the [reuse record](source_reuse.md). An independent
+reference checks moving statistics and normalized losses; the existing Mava
+reference remains in place with normalization disabled. The same critic pass
+supplies raw values for GAE and exact normalized predictions for value clipping.
+Actor exports retain only their original actor information.
+
+A bounded internal RTX 5090 check at B512/T32, four epochs and actual Alpha
+share 0.1 measured 18,797 real transitions per second with normalization and
+19,001 without. Both arms used gamma 0.99; the declared study uses 0.999 and
+requires its own full timing calibration. The observed difference is about 1.1%,
+but the learned trajectories also diverge, so this is not a pure isolated
+normalizer cost. Median learner updates were 0.219 and 0.218 seconds. Both arms
+had the same collection-program hash and sampled process GPU memory near
+5.50 GB. Each arm used five warm samples after actual episode resets.
+
+A separate B32 composition check matched the numerical reference on two
+successive changes of weights and normalization statistics. Integer fields
+and keys matched exactly; floating values used the existing declared tolerance.
+Collection and update each reused one compiled program in those checks.
+The added clipping-anchor array uses 327,680 bytes at B512/T32 and the running
+statistics use 12 bytes; these counts are distinct from measured peak memory.
+
+These are engineering checks, not evidence of better sample efficiency or
+learned tactics. Raw qualification records, source identities, the timing-only
+tier choice, all attempted runs and generated results belong under
+`artifacts/m9-m10/packet-4/mappo-optimization-20260923/`. No study outcome is
+claimed here before the detached study completes. The driver must refuse to
+start if its smallest approved replicated comparison cannot fit the budget.
+
+
+A separate controller audit kept identical permitted B512 inputs and swapped
+only the three controller files. The approved blocked-wall correction cost
+about 1.2–1.6 milliseconds per full all-actor call, an observed 6.6–8.7% increase.
+The played-state inputs exercised changed decisions. Both copies reused their
+compiled call and had sampled process GPU peaks near 1.74 GB. This resolves the
+earlier failed range criterion as a measured correctness/performance tradeoff;
+it does not establish equal speed or a whole-training slowdown of that size.
+The raw comparison and limits are in `qualification/controller-cost-report.md`
+under the study artifact root above.
+
+Pinned Policy adapters now use the smallest fitting quarter, half or full
+batch, rounded up. Zero pinned games skip their call. Generic Systems still
+receive the full batch with other games marked invalid. The wrapper reuses the
+same input, key, memory and action handling for both compact sizes; there is no
+new public setting.
+
+A matched B512/T32 check motivated the middle size. Ordinary c05 training at
+pin share 0.3 reached 161 Alpha games. From two saved states and identical
+random keys, a temporary half-size reference reduced whole-collection time from
+0.60044 to 0.54963 seconds during the reset wave, and from 0.66718 to 0.58389
+seconds immediately afterward. All 332 output arrays and scalar values matched
+exactly in each case. Both collectors reused one compiled program and had 5.488
+GB sampled peak GPU memory. This measures an avoidable cost at those reached
+states, not a full-training gain. The actual quarter/half/full route was then
+checked separately. The raw reference, failed first harness attempt, correction
+and limits are in `qualification/pin03-capacity-report.md` under that same
+study artifact root.
+
+The actual three-size route also matched every output in those two 0.3 cases.
+Collection time fell by 8.25% and 11.67%. A separate natural 0.1 run reached 49
+pins; old and new collection times differed by +0.18% and -0.03% in its two
+matched cases, within the variation of three timing samples. No material warmed
+regression was observed in that check. All four cases matched 332 output arrays
+and scalar values exactly and reused one collector program per process.
+
+The extra branch took about 5.7 more seconds to compile and 0.5 more seconds to
+prepare compiler input. It added 41,728 temporary GPU bytes and 0.27–0.28 GB of
+peak host RAM. Sampled peak GPU memory stayed at 5.488 GB. This cold cost
+applies to every pinned-Policy recipe, including those that keep using the
+quarter route. These collection measurements do not establish a net whole-study
+speedup; final calibration must price the actual source. Raw results, source
+identities, the explicit paired engineering state transfer and limits are in
+`qualification/adaptive-capacity-report.md` under the study artifact root.

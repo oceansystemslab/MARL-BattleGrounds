@@ -1,4 +1,12 @@
-"""Check movement around wall ends and clearance in real paired-agent steps."""
+"""Check movement around wall ends and clearance in real paired-agent steps.
+
+A short wall with no fitting end, because one end meets the map edge or a cap
+and the other end is capped by a pillar or short wall (or both ends are capped),
+is steered past by extending a capped end once, to one body radius beyond the
+cap; a second cap or a wall across the map still gives Stay. Near a wall
+corner a move may drift back from the end by up to the minimum useful stride
+(10% of movement speed) and still make progress; more drift is still vetoed.
+"""
 
 from collections.abc import Callable
 from typing import cast
@@ -150,6 +158,94 @@ def test_bounds_choose_north_only_when_south_cannot_fit(
         int(_REFINE(observation, _mask(), goal - jnp.asarray(position), approach=True))
         == expected
     )
+
+
+_CAP_WALL = (OBSTACLE_TYPE_WALL, 6, 1, 0, 0.01, 2, 0, 1)
+_CAP_PILLAR = (OBSTACLE_TYPE_PILLAR, 6, 2.5, 0.5, 0, 0, 0, 1)
+_BOTH_ENDS_CAPPED = (
+    (OBSTACLE_TYPE_WALL, 6, 4, 0, 0.01, 2, 0, 1),
+    (OBSTACLE_TYPE_PILLAR, 6, 2.5, 0.5, 0, 0, 0, 1),
+    (OBSTACLE_TYPE_PILLAR, 6, 5.5, 0.5, 0, 0, 0, 1),
+)
+
+
+@pytest.mark.parametrize(
+    ("rows", "position", "goal", "expected", "end", "end_height"),
+    [
+        ((_CAP_WALL, _CAP_PILLAR), (5.0, 1.0), (10.0, 1.0), MOVE_NORTH, 1, 3.5),
+        ((_CAP_WALL, _CAP_PILLAR), (7.0, 1.0), (2.0, 1.0), MOVE_NORTH, 1, 3.5),
+        (
+            (
+                (OBSTACLE_TYPE_WALL, 2.5, 0.5, 0, 0.01, 1, 0, 1),
+                (OBSTACLE_TYPE_WALL, 2.5, 1.5, 0, 1, 1, np.pi / 4, 1),
+            ),
+            (1.0, 0.6),
+            (10.0, 0.6),
+            MOVE_NORTH,
+            1,
+            2.0 + np.sqrt(0.5),
+        ),
+        (_BOTH_ENDS_CAPPED, (5.0, 4.0), (10.0, 4.0), MOVE_SOUTH, -1, 1.5),
+        (_BOTH_ENDS_CAPPED, (7.0, 4.0), (2.0, 4.0), MOVE_SOUTH, -1, 1.5),
+        (
+            (_CAP_WALL, _CAP_PILLAR, (OBSTACLE_TYPE_PILLAR, 6, 3.8, 0.5, 0, 0, 0, 1)),
+            (5.0, 1.0),
+            (10.0, 1.0),
+            MOVE_STAY,
+            0,
+            None,
+        ),
+    ],
+    ids=[
+        "pillar_cap_east",
+        "pillar_cap_west",
+        "rotated_cap",
+        "both_ends_capped_east",
+        "both_ends_capped_west",
+        "chained_caps",
+    ],
+)
+def test_capped_wall_end_extends_once_past_its_cap(
+    scenario: CompiledDevScenarioV1,
+    rows: tuple[tuple[float, ...], ...],
+    position: tuple[float, float],
+    goal: tuple[float, float],
+    expected: int,
+    end: int,
+    end_height: float | None,
+) -> None:
+    observation = _wall_observation(scenario, position, rows[0])
+    obstacles = observation.map_obstacle_features
+    for index, row in enumerate(rows[1:], start=1):
+        obstacles = obstacles.at[index].set(jnp.asarray(row, dtype=jnp.float32))
+    observation = observation._replace(map_obstacle_features=obstacles)
+    target = jnp.asarray(goal, dtype=jnp.float32)
+    _, active, selected_end, height = _STEER(observation, target, True)
+    assert bool(active)
+    assert float(selected_end) == end
+    if end_height is not None:
+        assert float(height) == pytest.approx(end_height, abs=1e-5)
+    intent = target - jnp.asarray(position)
+    assert int(_REFINE(observation, _mask(), intent, approach=True)) == expected
+
+
+@pytest.mark.parametrize(
+    ("x", "expected"),
+    [(6.05, MOVE_EAST), (6.3, MOVE_SOUTHEAST)],
+    ids=["drift_within_margin", "drift_beyond_margin"],
+)
+def test_corner_drift_within_one_stride_keeps_useful_progress(
+    scenario: CompiledDevScenarioV1, x: float, expected: int
+) -> None:
+    observation = _wall_observation(scenario, (x, 3.0))
+    pillar = jnp.asarray(
+        (OBSTACLE_TYPE_PILLAR, 7.75, 2.0, 0.75, 0, 0, 0, 1), dtype=jnp.float32
+    )
+    observation = observation._replace(
+        map_obstacle_features=observation.map_obstacle_features.at[1].set(pillar)
+    )
+    intent = jnp.array([10.0, 5.0]) - observation.self_features[:2]
+    assert int(_REFINE(observation, _mask(), intent, approach=True)) == expected
 
 
 @pytest.mark.parametrize(

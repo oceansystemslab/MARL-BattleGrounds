@@ -39,6 +39,7 @@ type Record = dict[str, Any]
 _MANIFEST = "launch_package.json"
 _STOP_TIMEOUT_SECONDS = 10.0
 _KILL_TIMEOUT_SECONDS = 2.0
+_NESTED_STOP_TIMEOUT_SECONDS = 20.0
 _TRAINER_GATE = (
     "import os,sys; fd=int(sys.argv[1]); ready=os.read(fd,1); os.close(fd); "
     "sys.exit(1) if ready != b'1' else "
@@ -104,13 +105,13 @@ def _environment(
     """Use default JAX settings and explicit hardware, without shell overrides.
 
     Drop inherited JAX/XLA/TF settings as well as mutable Python routing. None
-    chooses CPU for import checks; a UUID chooses that GPU for learning. This
+    chooses CPU for bookkeeping and import checks; a UUID chooses that GPU. This
     fixed default policy is shared by preparation, launch and resume.
 
     Parameters
     ----------
     gpu_uuid : str or None
-        Explicit GPU UUID, or None for a CPU-only import check.
+        Explicit GPU UUID, or None for CPU-only bookkeeping and import checks.
     memory_fraction : float or None, optional
         Optional JAX allocator fraction in (0, 1]. None leaves JAX's default.
         Preallocation remains off. This is a pool limit, not a memory forecast.
@@ -421,7 +422,8 @@ def prepare_run(
     destination : str or Path
         Exact new package directory. Existing directories are never replaced.
     config_path : str or Path
-        Versioned demonstration config with the frozen two-member panel path.
+        Versioned demonstration config with a frozen panel path. Its members
+        need saved reload references: built-ins, factories or actor exports.
     commit : str
         Explicit qualified commit reference, resolved to a full immutable ID.
     gpu_uuid : str
@@ -451,6 +453,17 @@ def prepare_run(
     config = config_from_dict(_read(Path(config_path)))
     if config.purpose != "demonstration" or config.validation_panel is None:
         raise ValueError("The full run package requires a frozen-panel demonstration")
+    panel_path = Path(config.validation_panel)
+    panel_content = _read(
+        panel_path / "panel.json" if panel_path.is_dir() else panel_path
+    )
+    if panel_content.get("schema_version") == 2 and any(
+        member.get("reference") is None for member in panel_content.get("members", [])
+    ):
+        raise ValueError(
+            "A launch package needs reload references; live-only Systems "
+            "remain available through train"
+        )
     panel = load_panel(config.validation_panel)
     if not panel.qualified:
         raise ValueError("The full run package requires a qualified provisional panel")
@@ -460,11 +473,27 @@ def prepare_run(
     panel_root = target / "panel"
     panel_root.mkdir()
     content = _read(panel.path)
-    for row, member in zip(content["members"], panel.members, strict=True):
-        output = panel_root / member.name.lower()
-        shutil.copytree(member.path, output, symlinks=True)
+    for index, (row, member) in enumerate(
+        zip(content["members"], panel.members, strict=True)
+    ):
+        if panel.schema_version == 1:
+            assert member.path is not None
+            original = member.path
+        else:
+            assert member.reference is not None
+            original = Path(member.reference)
+            if not original.is_absolute():
+                continue
+        output = panel_root / (
+            member.name.lower() if panel.schema_version == 1 else f"opponent-{index}"
+        )
+        shutil.copytree(original, output, symlinks=True)
         _files(output)
-        row["path"] = output.name
+        if panel.schema_version == 1:
+            row["path"] = output.name
+        else:
+            row["reference"] = output.name
+            row["export_relative"] = True
     atomic_json(panel_root / "panel.json", content)
     if load_panel(panel_root).digest != panel.digest:
         raise ValueError("Copying the panel changed its scientific identity")
@@ -474,6 +503,22 @@ def prepare_run(
     _install(source, target / ".venv", python)
     interpreter = target / ".venv" / "bin" / "python"
     imported = _runtime(interpreter, source)
+    if panel.schema_version == 2:
+        subprocess.run(
+            [
+                str(interpreter),
+                "-I",
+                "-c",
+                "import sys; "
+                "from marl_battlegrounds.training.validation import load_panel; "
+                "load_panel(sys.argv[1])",
+                str(panel_root),
+            ],
+            cwd=source,
+            env=_environment(None),
+            check=True,
+            stdin=subprocess.DEVNULL,
+        )
     if _files(source) != origin["files"]:
         raise ValueError("Environment setup changed the exported source bytes")
     (target / "logs").mkdir()
@@ -628,24 +673,54 @@ def _alive(record: Record) -> bool:
     return bool(_group_members(group["pid"]))
 
 
-def _finish_trainer(child: subprocess.Popen[bytes], number: int) -> Record:
+def cleanup_reserve_seconds(*, stop_grace_seconds: float | None = None) -> float:
+    """Return the time to reserve before a deadline for bounded process cleanup.
+
+    stop_grace_seconds is the positive, finite TERM grace in seconds. None uses
+    the usual ten seconds. Add the two-second KILL wait, two-second reap wait
+    and one second for polling and publication. A nested outer supervisor uses
+    twenty seconds of TERM grace so the inner supervisor can finish its own
+    ten-second stop, KILL and reap before its parent can be killed. Invalid
+    values raise ValueError. This does no process work; an unkillable OS process
+    or blocked file system still needs the saved cleanup error checked.
+    """
+    grace = _STOP_TIMEOUT_SECONDS if stop_grace_seconds is None else stop_grace_seconds
+    if (
+        isinstance(grace, bool)
+        or not isinstance(cast(object, grace), (int, float))
+        or not math.isfinite(grace)
+        or grace <= 0
+    ):
+        raise ValueError("Stop grace must be a finite positive number of seconds")
+    return float(grace) + 2 * _KILL_TIMEOUT_SECONDS + 1.0
+
+
+def _finish_trainer(
+    child: subprocess.Popen[bytes],
+    number: int,
+    *,
+    stop_grace_seconds: float | None = None,
+) -> Record:
     """Stop the owned trainer session, then reap its direct child within a bound.
 
     child must be this process's unreaped child and its private session leader.
     Holding that child unreaped keeps its PID/group ID from being reused while
     signals are sent. No saved PID is accepted here. number is the first stop
-    signal; live members get up to ten seconds before SIGKILL and two more
-    seconds to exit, then at most two seconds to reap the trainer. Return cleanup
+    signal; live members get stop_grace_seconds (None means ten) before SIGKILL
+    and two more seconds to exit, then at most two seconds to reap the trainer.
+    Return cleanup
     facts and its exit code, or None if it could not be reaped in that last
     bound. Never wait indefinitely.
     """
+    cleanup_reserve_seconds(stop_grace_seconds=stop_grace_seconds)
+    grace = _STOP_TIMEOUT_SECONDS if stop_grace_seconds is None else stop_grace_seconds
     os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
     if os.getpgid(child.pid) != child.pid or os.getsid(child.pid) != child.pid:
         raise RuntimeError("The owned trainer has no private process group")
     sent: list[int] = []
     remaining: list[int] = []
     for sig, seconds in (
-        (number, _STOP_TIMEOUT_SECONDS),
+        (number, grace),
         (signal.SIGKILL, _KILL_TIMEOUT_SECONDS),
     ):
         remaining = _group_members(child.pid)
@@ -765,6 +840,7 @@ def supervise_command(
     *,
     env: dict[str, str] | None = None,
     deadline_at: float | None = None,
+    stop_grace_seconds: float | None = None,
 ) -> int:
     """Run one foreground trainer inside the already detached supervisor.
 
@@ -795,6 +871,14 @@ def supervise_command(
         do not extend this attempt. Expiry requests bounded group cleanup even
         during compilation or evaluation. The caller owns any shared deadline
         across jobs or resumed attempts; this helper never extends it.
+        This is when cleanup starts. Subtract cleanup_reserve_seconds from a
+        required finish time when all cleanup must fit before that time.
+    stop_grace_seconds : float or None, optional
+        Positive finite seconds before forced group shutdown. None keeps the
+        usual ten-second grace. An outer supervisor with inner supervisors in
+        its child group must allow their complete cleanup before forcing them
+        to exit; the search uses twenty seconds. The inner supervisor remains
+        responsible for its own worker session. No saved group IDs are signaled.
 
     Returns
     -------
@@ -807,10 +891,11 @@ def supervise_command(
     Raises
     ------
     ValueError
-        deadline_at is not a finite number of UNIX seconds.
+        deadline_at is not a finite UNIX time, or the stop grace is invalid.
     OSError
         Child launch or process-record publication fails. Cleanup is still tried.
     """
+    cleanup_reserve_seconds(stop_grace_seconds=stop_grace_seconds)
     if deadline_at is not None and (
         isinstance(deadline_at, bool)
         or not isinstance(cast(object, deadline_at), (int, float))
@@ -831,6 +916,8 @@ def supervise_command(
     }
     if deadline_at is not None:
         record["deadline_at"] = deadline_at
+    if stop_grace_seconds is not None:
+        record["stop_grace_seconds"] = stop_grace_seconds
     with (package / ".launch.lock").open("a+b") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         atomic_json(package / "process.json", record)
@@ -891,7 +978,9 @@ def supervise_command(
         try:
             if child is not None:
                 cleanup = _finish_trainer(
-                    child, record.get("stop_signal", signal.SIGTERM)
+                    child,
+                    record.get("stop_signal", signal.SIGTERM),
+                    stop_grace_seconds=stop_grace_seconds,
                 )
                 record["cleanup"] = cleanup
                 result = cleanup["trainer_exit_code"]

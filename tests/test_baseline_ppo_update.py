@@ -54,7 +54,7 @@ def _compare_trees(actual: Any, expected: Any) -> float:  # noqa: ANN401
 
 def test_compact_whole_sequence_update_matches_original_grouped_epochs() -> None:
     length, games, groups = 4, 8, 2
-    config = PPOConfig(rollout_length=length)
+    config = PPOConfig(rollout_length=length, value_normalization=False)
     learner = initialize_ppo(jax.random.key(101), config)
     env = make(
         "tdm",

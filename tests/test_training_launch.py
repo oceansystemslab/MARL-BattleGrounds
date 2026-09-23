@@ -11,6 +11,8 @@ blocks restart; cleanup never signals a stale PID or an unrelated group.
 Working-source copies include current staged, unstaged and new public bytes
 without changing Git. Fixed deadlines stop whole trainer groups and cannot be
 reported as success when a child exits cleanly during a stop request.
+Nested supervisors receive enough grace to stop their separate worker groups
+after a controller crash, natural exit, stop request or deadline.
 Short UTC lifecycle messages keep full process and cleanup facts in saved JSON.
 They do not install real training dependencies or start a learning experiment.
 """
@@ -492,6 +494,7 @@ def _supervisor_command(
     *,
     crash_before_registration: bool = False,
     deadline_seconds: float | None = None,
+    stop_grace_seconds: float | None = None,
 ) -> list[str]:
     injection = ""
     if crash_before_registration:
@@ -528,7 +531,7 @@ def _supervisor_command(
             if deadline_seconds is None
             else f"module.time.time()+{deadline_seconds!r}"
         )
-        + "))"
+        + f",stop_grace_seconds={stop_grace_seconds!r}))"
     )
     return [sys.executable, "-I", "-c", script]
 
@@ -630,6 +633,7 @@ def test_preparation_copies_panel_and_emits_space_safe_commands_without_launch(
             members=members,
             digest="fixed-panel",
             qualified=True,
+            schema_version=1,
         )
 
     def export(repository: Path, commit: str, destination: Path) -> dict[str, Any]:
@@ -882,6 +886,116 @@ def test_deadline_stops_owned_descendants_and_records_distinct_failure(
         _cleanup_family(tmp_path, child)
 
 
+@pytest.mark.parametrize("outcome", ["stop", "crash", "exit", "deadline"])
+def test_nested_supervisor_cleans_separate_worker_group(
+    tmp_path: Path, outcome: str
+) -> None:
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    inner_command = _supervisor_command(inner, _family_worker(inner, "ignore"))
+    controller = (
+        "import os,pathlib,signal,subprocess,sys,time\n"
+        f"child=subprocess.Popen({inner_command!r})\n"
+        f"ready=pathlib.Path({str(tmp_path / 'controller_ready')!r})\n"
+        f"while not pathlib.Path({str(inner / 'worker.json')!r}).exists():\n"
+        "    time.sleep(.01)\n"
+        "ready.touch()\n"
+        f"while not pathlib.Path({str(tmp_path / 'release_controller')!r}).exists():\n"
+        "    time.sleep(.01)\n"
+        + (
+            "os.kill(os.getpid(),signal.SIGKILL)\n"
+            if outcome == "crash"
+            else "sys.exit(0)\n"
+        )
+    )
+    # Inner test limits total three seconds; five lets it kill and reap its
+    # separate worker group before the outer supervisor may force it to stop.
+    command = _supervisor_command(
+        tmp_path,
+        controller,
+        deadline_seconds=3.0 if outcome == "deadline" else None,
+        stop_grace_seconds=5.0,
+    )
+    unrelated = subprocess.Popen(
+        [sys.executable, "-I", "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+    unrelated_identity = process_identity(unrelated.pid)
+    with (tmp_path / "process.log").open("wb") as log:
+        child = subprocess.Popen(
+            command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
+        )
+    try:
+        while not (tmp_path / "controller_ready").exists():
+            assert child.poll() is None
+            time.sleep(0.02)
+        outer_before = launch._read(tmp_path / "process.json")
+        inner_before = launch._read(inner / "process.json")
+        assert (
+            os.getpgid(inner_before["process"]["pid"]) == outer_before["trainer"]["pid"]
+        )
+        assert (
+            os.getsid(inner_before["process"]["pid"]) == outer_before["trainer"]["pid"]
+        )
+        assert inner_before["trainer"]["pid"] != outer_before["trainer"]["pid"]
+        if outcome == "stop":
+            child.send_signal(signal.SIGTERM)
+        elif outcome != "deadline":
+            (tmp_path / "release_controller").touch()
+        child.wait()
+        outer_after = launch._read(tmp_path / "process.json")
+        inner_after = launch._read(inner / "process.json")
+        assert outer_after["state"] == inner_after["state"] == "exited"
+        assert outer_after["cleanup"]["remaining_pids"] == []
+        assert inner_after["cleanup"]["remaining_pids"] == []
+        assert inner_after["cleanup"]["signals"] == [signal.SIGTERM, signal.SIGKILL]
+        assert not launch._alive(inner_after)
+        assert not launch._group_members(inner_before["trainer"]["pid"])
+        assert not launch._group_members(outer_before["trainer"]["pid"])
+        assert process_identity(unrelated.pid) == unrelated_identity
+        assert unrelated.poll() is None
+        if outcome == "deadline":
+            assert child.returncode == 124
+        elif outcome == "exit":
+            assert child.returncode == 0
+        else:
+            assert child.returncode != 0
+    finally:
+        if (inner / "process.json").exists():
+            record = launch._read(inner / "process.json")
+            for identity in (record.get("trainer"), record.get("process")):
+                if isinstance(identity, dict):
+                    identity = cast(dict[str, Any], identity)
+                    for pid in launch._group_members(identity["pid"]):
+                        _kill_identity(process_identity(pid))
+                    _kill_identity(identity)
+        _cleanup_family(tmp_path, child)
+        unrelated.kill()
+        unrelated.wait()
+
+
+def test_cleanup_reserve_covers_nested_grace_and_preserves_flat_defaults() -> None:
+    assert launch.cleanup_reserve_seconds() == 15.0
+    assert (
+        launch.cleanup_reserve_seconds(
+            stop_grace_seconds=launch._NESTED_STOP_TIMEOUT_SECONDS
+        )
+        == 25.0
+    )
+    assert launch.cleanup_reserve_seconds() < launch._NESTED_STOP_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize("grace", [True, 0.0, -1.0, float("inf"), float("nan")])
+def test_invalid_stop_grace_is_rejected_before_process_record(
+    tmp_path: Path, grace: object
+) -> None:
+    with pytest.raises(ValueError, match="Stop grace"):
+        launch.supervise_command(
+            tmp_path, ["unused"], stop_grace_seconds=cast(float, grace)
+        )
+    assert not (tmp_path / "process.json").exists()
+
+
 def test_expired_deadline_never_starts_a_trainer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1058,3 +1172,58 @@ def test_unregistered_trainer_exits_if_supervisor_dies_before_release(
         if child.poll() is None:
             child.kill()
         child.wait()
+
+
+def test_preparation_keeps_builtin_panel_references_and_checks_isolated_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from marl_battlegrounds.training.runner import TrainConfig, config_to_dict
+    from marl_battlegrounds.training.validation import create_panel, load_panel
+
+    panel = create_panel(
+        opponents=("tdm-alpha", "tdm-beta"), output_dir=tmp_path / "panel"
+    )
+    config_path = tmp_path / "config.json"
+    atomic_json(
+        config_path,
+        config_to_dict(
+            TrainConfig(purpose="demonstration", validation_panel=str(panel.path))
+        ),
+    )
+
+    def export(repository: Path, commit: str, destination: Path) -> dict[str, Any]:
+        del repository, commit
+        destination.mkdir()
+        (destination / "pyproject.toml").write_text("fixed source")
+        return {
+            "commit": "a" * 40,
+            "git_tree": "b" * 40,
+            "files": launch._files(destination),
+        }
+
+    reload_commands: list[list[str]] = []
+
+    def reload(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        assert kwargs["check"] is True
+        reload_commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(launch, "_export_source", export)
+    monkeypatch.setattr(launch, "_install", Mock())
+    monkeypatch.setattr(launch, "_runtime", Mock(return_value={"fixed": True}))
+    monkeypatch.setattr(launch, "_gpu", Mock(return_value={"uuid": "GPU-internal"}))
+    monkeypatch.setattr(launch.subprocess, "run", reload)
+    target = tmp_path / "package"
+    launch.prepare_run(
+        tmp_path, target, config_path, commit="approved", gpu_uuid="GPU-internal"
+    )
+    copied = load_panel(target / "panel")
+    assert copied.digest == panel.digest
+    assert [member.reference for member in copied.members] == ["tdm-alpha", "tdm-beta"]
+    assert len(reload_commands) == 1
+    assert reload_commands[0][0] == str(target / ".venv/bin/python")
+    assert reload_commands[0][1] == "-I"
+    assert reload_commands[0][-1] == str(target / "panel")
+    assert not (target / "run").exists()

@@ -92,7 +92,7 @@ def test_all_eight_scenarios_join_packaged_content_and_roundtrip_evidence(
     )
     assert specification.pressure_protocol is not None
     assert specification.pressure_protocol.version == (
-        4 if scenario_id in (3, 5, 8) else 2
+        5 if scenario_id in (3, 5, 8) else 3
     )
     assert replay.completion.completion_state == "complete"
     assert replay.header.context.identity.paired_comparison_key is None

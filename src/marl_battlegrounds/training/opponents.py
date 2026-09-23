@@ -11,6 +11,7 @@ do not train, load checkpoints, call a critic, or change simulator rules.
 """
 
 import math
+from functools import partial
 from typing import Any, NamedTuple, cast
 
 import jax
@@ -573,8 +574,8 @@ def _compact_capacity(size: int) -> int:
     -------
     int
         ceil(size / 4), at least 1. A pinned share of 0.1 at B=512 puts about
-        51 games on the pinned System, well inside 128; a step with more
-        pinned games than this uses the full batch instead.
+        51 games on the pinned System, well inside 128. Larger pin counts
+        use the next distinct capacity: half the batch, then the full batch.
     """
     return max(1, -(-size // 4))
 
@@ -690,7 +691,7 @@ def make_opponent_system(actor: System, *, pinned: System | None = None) -> Syst
     its step runs through M8's _jax_apply with the same keys the network gets.
     A whole-batch lax.cond skips it on steps where no lane uses it. A Policy
     adapter, which acts per actor, then runs on the pinned games only, gathered
-    into a quarter of the batch (the full batch when more games are pinned);
+    into the smallest fitting quarter, half or full batch (rounded up);
     a generic System, which may look across the batch, runs on the full batch
     with the other games marked invalid. The actions are merged per game across
     all five actors. A wrapper reset hook exists only when the pinned System has
@@ -903,12 +904,14 @@ def make_opponent_system(actor: System, *, pinned: System | None = None) -> Syst
         chosen_run = run
         if pinned_compact:
             capacity = _compact_capacity(size)
+            middle_capacity = max(capacity, -(-size // 2))
+            count = jnp.sum(use)
 
-            def run_compact(_: None) -> tuple[ActorAction, Tree]:
+            def run_compact(capacity: int, _: None) -> tuple[ActorAction, Tree]:
                 """Apply a Policy adapter to the pinned games only, then put back."""
                 index = jnp.nonzero(use, size=capacity, fill_value=size)[0]
                 rows = _gather_rows(inputs, index, size)._replace(
-                    valid=jnp.arange(capacity) < jnp.sum(use)
+                    valid=jnp.arange(capacity) < count
                 )
                 row_keys = _gather_rows(keys, index, size)
                 output = _jax_apply(
@@ -934,14 +937,33 @@ def make_opponent_system(actor: System, *, pinned: System | None = None) -> Syst
                 )
                 return heads, _scatter_rows(pinned_memory, output.next_memory, index)
 
-            def run_small_or_full(_: None) -> tuple[ActorAction, Tree]:
-                """Compact when the pinned games fit the capacity, else run all."""
+            def run_larger(_: None) -> tuple[ActorAction, Tree]:
+                """Use half when it fits; skip repeated sizes in tiny batches."""
+                if middle_capacity in (capacity, size):
+                    return run(None)
                 return cast(
                     tuple[ActorAction, Tree],
-                    jax.lax.cond(jnp.sum(use) <= capacity, run_compact, run, None),
+                    jax.lax.cond(
+                        count <= middle_capacity,
+                        partial(run_compact, middle_capacity),
+                        run,
+                        None,
+                    ),
                 )
 
-            chosen_run = run_small_or_full
+            def run_fitting_batch(_: None) -> tuple[ActorAction, Tree]:
+                """Keep quarter-sized calls for small pin counts, then try larger."""
+                return cast(
+                    tuple[ActorAction, Tree],
+                    jax.lax.cond(
+                        count <= capacity,
+                        partial(run_compact, capacity),
+                        run_larger,
+                        None,
+                    ),
+                )
+
+            chosen_run = run_fitting_batch if capacity < size else run
 
         pinned_actions, next_pinned = cast(
             tuple[ActorAction, Tree],

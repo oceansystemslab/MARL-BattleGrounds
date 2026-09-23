@@ -36,7 +36,7 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ElementTree
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -81,11 +81,15 @@ class CollectedTests:
         Module-scoped fixtures each family uses; split files may not share them.
     request_sites_by_family : Mapping[TestFamilyKey, frozenset[str]]
         Dynamic fixture request sites each family uses; split files may not have any.
+    item_nodeids : frozenset[str]
+        Exact collected case IDs, including every parameter suffix. Used to
+        reject incomplete or stale timing reports before replacing the table.
     """
 
     item_counts: Mapping[TestFamilyKey, int]
     module_fixtures_by_family: Mapping[TestFamilyKey, frozenset[ModuleFixtureKey]]
     request_sites_by_family: Mapping[TestFamilyKey, frozenset[str]]
+    item_nodeids: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -133,18 +137,32 @@ def family_nodeid_from_junit(classname: str, name: str) -> str:
     ValueError
         The class name does not start with a test file inside ``tests``.
     """
+    return _case_nodeid_from_junit(classname, name.split("[", maxsplit=1)[0])
+
+
+def _case_nodeid_from_junit(classname: str, name: str) -> str:
+    """Return a pytest case ID, keeping its parameter suffix.
+
+    ``classname`` is pytest's dotted ``tests`` module and optional classes;
+    ``name`` is its nonempty case name. Raises ValueError for another module or
+    an empty name. This repository keeps Python test files directly in tests/.
+    """
     parts = classname.split(".")
     if len(parts) < 2 or parts[0] != "tests" or not parts[1]:
         raise ValueError(f"JUnit class name is not a tests/ module: {classname!r}")
     path = f"{parts[0]}/{parts[1]}.py"
-    base_name = name.split("[", maxsplit=1)[0]
-    return "::".join((path, *parts[2:], base_name))
+    if not name:
+        raise ValueError("JUnit test case name must be nonempty")
+    return "::".join((path, *parts[2:], name))
 
 
 def read_junit_seconds(
-    directory: Path, shard_count: int = DEFAULT_SHARD_COUNT
+    directory: Path,
+    shard_count: int = DEFAULT_SHARD_COUNT,
+    *,
+    expected_cases: Collection[str] | None = None,
 ) -> dict[str, float]:
-    """Sum measured seconds per test family from one complete, passing gate.
+    """Sum test-family seconds from passing, nonduplicated shard reports.
 
     Parameters
     ----------
@@ -153,6 +171,10 @@ def read_junit_seconds(
         by ``scripts/dev/check.sh --timings``.
     shard_count : int, optional
         Number of shard files that must all be present. Default 12.
+    expected_cases : Collection[str] | None, optional
+        Exact current pytest case IDs. When supplied, every case must appear
+        exactly once across the reports. The update command always supplies
+        these IDs. None checks report contents without claiming full coverage.
 
     Returns
     -------
@@ -166,10 +188,11 @@ def read_junit_seconds(
         A shard's timing file is missing.
     ValueError
         A file is not valid JUnit XML, holds no test, reports a failure or
-        error, or records a collection error. Timings from a failed or partial
-        gate would give a wrong table, so they are refused.
+        error, records a duplicate case or an invalid duration, or differs from
+        expected_cases. JUnit reports prove test coverage, not static checks.
     """
     seconds: defaultdict[str, float] = defaultdict(float)
+    seen: set[str] = set()
     for shard in range(1, shard_count + 1):
         path = directory / f"python-shard-{shard}.xml"
         if not path.is_file():
@@ -193,8 +216,28 @@ def read_junit_seconds(
             classname = case.get("classname", "")
             if not classname:
                 raise ValueError(f"shard {shard} recorded a collection error: {path}")
-            nodeid = family_nodeid_from_junit(classname, case.get("name", ""))
-            seconds[nodeid] += float(case.get("time", "0"))
+            name = case.get("name", "")
+            case_id = _case_nodeid_from_junit(classname, name)
+            if case_id in seen:
+                raise ValueError(f"duplicate JUnit case: {case_id}")
+            seen.add(case_id)
+            if case.find("failure") is not None or case.find("error") is not None:
+                raise ValueError(f"JUnit case did not pass completely: {case_id}")
+            duration = float(case.get("time", "0"))
+            if not math.isfinite(duration) or duration < 0:
+                raise ValueError(f"invalid JUnit duration for {case_id}: {duration}")
+            nodeid = family_nodeid_from_junit(classname, name)
+            seconds[nodeid] += duration
+    if expected_cases is not None:
+        expected = set(expected_cases)
+        missing, unexpected = expected - seen, seen - expected
+        if missing or unexpected:
+            raise ValueError(
+                "JUnit cases differ from current collection: "
+                f"{len(missing)} missing, {len(unexpected)} unexpected; "
+                f"examples: missing={sorted(missing)[:3]}, "
+                f"unexpected={sorted(unexpected)[:3]}"
+            )
     return dict(seconds)
 
 
@@ -228,6 +271,7 @@ def collect_tests(repository: Path = _REPOSITORY_ROOT) -> CollectedTests:
     item_counts: Counter[TestFamilyKey] = Counter()
     fixtures: dict[TestFamilyKey, set[ModuleFixtureKey]] = {}
     requests: dict[TestFamilyKey, set[str]] = {}
+    item_nodeids: set[str] = set()
 
     class _Collector:
         """Pytest plugin that records scheduler facts for every collected item."""
@@ -235,6 +279,7 @@ def collect_tests(repository: Path = _REPOSITORY_ROOT) -> CollectedTests:
         def pytest_collection_modifyitems(self, items: list[pytest.Item]) -> None:
             """Record each item's family, module fixtures and request sites."""
             for item in items:
+                item_nodeids.add(item.nodeid)
                 family = family_key_from_item(item)
                 item_counts[family] += 1
                 fixtures.setdefault(family, set()).update(
@@ -265,6 +310,7 @@ def collect_tests(repository: Path = _REPOSITORY_ROOT) -> CollectedTests:
         request_sites_by_family={
             family: frozenset(sites) for family, sites in requests.items()
         },
+        item_nodeids=frozenset(item_nodeids),
     )
 
 
@@ -687,13 +733,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     collected = collect_tests()
     if arguments.command == "update":
         table, warnings = build_cost_table(
-            read_junit_seconds(arguments.timings),
+            read_junit_seconds(
+                arguments.timings, expected_cases=collected.item_nodeids
+            ),
             collected,
             max_unit_seconds=arguments.max_unit,
             measured_on=datetime.now(UTC).date().isoformat(),
             measured_with=(
-                "Full gate (scripts/dev/check.sh --timings) with twelve Python "
-                f"shards in parallel on a {os.cpu_count()}-CPU machine; per-test "
+                "Full gate (scripts/dev/check.sh --timings), all twelve Python "
+                f"shards on a {os.cpu_count()}-CPU machine; per-test "
                 "JUnit time including setup and teardown, summed per file and "
                 "rounded up to whole seconds."
             ),

@@ -61,6 +61,11 @@ scripts/dev/check_before_commit.sh
 
 This wrapper fingerprints the frozen candidate and runs the full Python and
 frontend gates. It rejects missing prerequisites, failures and candidate changes.
+If the caller selects a separate Git index with `GIT_INDEX_FILE`, only the
+candidate checks use it. Python and frontend checks do not inherit that setting,
+so tests that create their own repositories use their own indexes. The two raw
+upstream value-normalization fixtures retain their exact bytes; `.gitattributes`
+exempts only their trailing spaces from Git's whitespace check.
 Run the complete gate once for unchanged candidate files and relevant test inputs.
 Before committing, verify that the staged files match the tested files, the base
 revision and dependencies still match, and no intended file was omitted. Staging
@@ -177,8 +182,10 @@ not edit them by hand.
 
 Refresh the table when shard times drift apart or after adding or moving heavy
 tests. Use timings from a gate where every shard passed; the tool refuses
-missing, failed or partial timings and checks the new table with the scheduler
-before replacing the old one:
+missing or failed reports, duplicate cases, invalid durations and any difference
+from the exact current test collection, including parameter cases. It checks
+the new table with the scheduler before replacing the old one. JUnit files
+prove which tests ran; they do not prove that the gate's static checks passed:
 
 ```bash
 scripts/dev/check.sh --timings /tmp/shard-timings            # full Python gate, saves per-test times
@@ -191,8 +198,9 @@ average shard where the scheduler allows it, rewrites the table and prints the
 predicted seconds of every shard. It warns about a file whose test functions
 share module fixtures, which the scheduler cannot split (move some tests into
 a new file), about one test function that alone is too large (split its
-parameter cases into two functions or make it faster), and about collected
-files that have no timing. If a split file later gains a shared module fixture,
+parameter cases into two functions or make it faster). After adding or renaming
+tests, collect fresh passing timings before updating; old reports cannot prove
+the new collection. If a split file later gains a shared module fixture,
 every shard stops at collection; run `update` again with the last good timings
 folder, or delete that file's `split_families` and `split_residuals` entries.
 A malformed table also stops every shard; restore it with
@@ -298,8 +306,9 @@ Use recorded projection versions; do not reinterpret old feature columns.
 
 The supported controllers are Reactive TDM ALPHA and BETA under the recorded
 versions of [A30](../design/specification_amendments.md#a30-reactive-tdm-and-specialist-scenario-controllers),
-[A34](../design/specification_amendments.md#a34-reactive-tdm-alpha-and-beta) and
-[A35](../design/specification_amendments.md#a35-reactive-tdm-wall-steering).
+[A34](../design/specification_amendments.md#a34-reactive-tdm-alpha-and-beta),
+[A35](../design/specification_amendments.md#a35-reactive-tdm-wall-steering) and
+[A42](../design/specification_amendments.md#a42-reactive-tdm-fixes-at-blocked-walls).
 Older version-specific witness results remain historical evidence. Use the
 current implementation and descriptors when qualifying a new candidate.
 
@@ -427,6 +436,13 @@ forces CPU and rejects ambient selectors/JIT settings that can weaken coverage.
 Frontend forces its CI inventory and rejects conflicting selectors/capture
 settings. Both retain per-task status and elapsed time. A missing prerequisite
 or failed shard blocks qualification.
+
+On a machine with limited RAM, set `MARL_PYTHON_GATE_JOBS=6` when running
+`check.sh` or `check_before_commit.sh`. The supported range is 1–12, with 12
+as the default. This limits concurrent Python workers, not test membership:
+all twelve shards and all static checks still run. Use the same worker count
+when comparing shard timings. Heavy swap use is a reason to lower concurrency,
+not to omit tests or call an unfinished gate a pass.
 
 The Python plugin collects ordinary pytest nodes and groups parameter families
 by path, parent collector and original function name. Files normally remain

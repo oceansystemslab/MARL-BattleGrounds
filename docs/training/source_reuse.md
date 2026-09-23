@@ -76,7 +76,8 @@ norms are clipped separately.
 historical models. A positive finite value multiplies actor and critic features
 before their first Dense layer. For example, `0.01` makes an input value of 200
 enter that layer as 2. The raw encoder, information limits and network size stay
-the same. There are no learned or running normalization statistics.
+the same. This input scale has no learned or running statistics. The critic's
+separate target normalization is described below.
 
 This is an explicit numerical adaptation. It can reduce saturation, where a
 memory gate sits near its limit and responds weakly to input changes. Better
@@ -91,10 +92,12 @@ have different policy identities.
 
 `PPOConfig.spawn_frame` defaults to `"left"` since 22 September 2026. `"left"`
 reflects the actor's permitted view about the map's vertical centerline
-whenever its own team starts on the right bank, so every game looks like a
-start from x = 0.5, and reflects the chosen move back before the game receives
-it. `"world"` preserves the donor calculations and every earlier model bit for
-bit. The value `"right"` existed only to rescue world-trained models that had
+whenever its own team starts on the right bank, so its spawn end appears on
+the left, and reflects the chosen move back before the game receives it.
+The built-in maps place that bank at x = 0.5. Custom valid maps need not.
+`"world"` preserves the raw coordinate convention. Reproducing a historical
+run also needs its original settings and frozen source. The value `"right"`
+existed only to rescue world-trained models that had
 learned the right bank; it was removed with those models' supersession, and
 records that used it stay reproducible only through their frozen packages. For example, an actor at x = 19.5 that sees an enemy at
 x = 3 is shown itself at x = 0.5 and the enemy at x = 17; when it says East the
@@ -123,8 +126,9 @@ one was not, so only the left-right flip is used. The design claim, verbatim:
 in a consistent orientation and maps chosen actions back to native
 coordinates. It leaves game rules and information access unchanged."
 
-A policy trained in the left frame plays both spawn ends alike by
-construction; that alone does not establish better learning. Keep the frame
+A policy trained in the left frame receives a consistent horizontal orientation.
+Physics, other inputs and recurrent history can still differ between games;
+the adapter does not prove equal play or outcomes at both ends. Keep the frame
 fixed for a run and compare against `"world"` with declared seeds and budgets.
 Collection, PPO updates, historical opponents and exported actors must all use
 the saved frame: the actor samples in its frame and stores world-frame indices
@@ -136,6 +140,48 @@ frame, which is a new identity. Equal weights with different spawn frames have
 different policy identities. A run in the left frame cannot reuse a
 world-frame run's shared random initialization result, because that identity
 includes the frame.
+
+### Critic Target Normalization
+
+New runs use `PPOConfig.value_normalization=True`. This adds the official
+MAPPO ValueNorm calculation to the Mava learner. The reference is
+[on-policy commit `de66d7a4b23fac2513f56f96f73b3f5cb96695ac`](https://github.com/marlbenchmark/on-policy/tree/de66d7a4b23fac2513f56f96f73b3f5cb96695ac).
+The unchanged source and MIT license are retained in
+[`tests/fixtures/value_norm_donor`](../../tests/fixtures/value_norm_donor/source_manifest.json).
+The manifest records each file's SHA256. The existing Mava reference remains
+unchanged and is exercised with target normalization disabled.
+
+The learner carries three float32 scalars: the running target mean, running
+mean-square and accumulated averaging weight. Each nonempty optimizer
+minibatch updates these with decay 0.99999. Dividing by the accumulated weight
+corrects their initial zero values; that denominator has floor 0.00001.
+The corrected variance has floor 0.01. Constant targets therefore remain safe.
+The network learns normalized targets. Rewards, GAE and reported value error
+remain in reward units. Statistics are fixed data outside differentiation.
+
+The JAX adaptation pools eligible critic rows across the two gradient groups.
+This uses one shared normalizer because there is one shared critic. Padding
+and inactive slots are excluded; dead active agents remain critic samples.
+The official update runs once per optimizer minibatch, including repeated
+PPO epochs. Empty minibatches preserve statistics. A failed complete learner
+update rolls back statistics with weights, optimizer state and memory.
+These masking and atomic-update rules are BG adaptations, not new settings
+in the hyperparameter search.
+
+One critic pass provides both raw values for GAE and the exact normalized
+network outputs saved for value clipping. Old clipping anchors are never
+reconstructed using newer statistics. The only extra retained value array
+uses 320 KiB at B512/T32, or 640 KiB at T64; the scalar state uses 12 bytes.
+This is a storage calculation, not a measured peak-memory claim. The update
+adds small reductions and arithmetic without another critic forward pass.
+Runtime and learning effects need their own evidence.
+
+Saved settings without `value_normalization` mean `False`. Disabled state is
+`None` and adds no serialized numerical leaves. Enabled checkpoints save all
+three scalars. Actor exports contain no critic or normalization state, so the
+actor's inference contract and identity are unchanged by critic statistics.
+Source and runtime compatibility checks remain required; support for the old
+array layout does not bypass those checks.
 
 ### Optional Dense Training Reward
 

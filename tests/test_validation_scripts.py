@@ -1,6 +1,9 @@
 """Check contributor and GPU validation commands from outside their implementation,
 including the --timings mode that saves one per-test timing file per Python shard
 and per browser profile.
+The optional Python worker limit preserves all checks and bounds concurrency.
+Copied candidate indexes stay with the parent gate; child checks use their own
+repositories. Raw donor fixtures keep their bytes without weakening source checks.
 """
 
 import os
@@ -10,6 +13,8 @@ import stat
 import subprocess
 import textwrap
 from pathlib import Path
+
+import pytest
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT_DIRECTORY = _REPOSITORY_ROOT / "scripts" / "dev"
@@ -145,8 +150,10 @@ def _outside_directory(tmp_path: Path) -> Path:
     return outside
 
 
+@pytest.mark.parametrize("jobs", ["12", "3"])
 def test_python_gate_is_root_independent_cpu_only_and_exactly_sharded(
     tmp_path: Path,
+    jobs: str,
 ) -> None:
     repository = tmp_path / "repository"
     fake_bin = tmp_path / "fake-bin"
@@ -160,6 +167,10 @@ def test_python_gate_is_root_independent_cpu_only_and_exactly_sharded(
         ("JAX_XLA_BACKEND", "gpu"),
         ("PYTEST_ADDOPTS", "--ignore=tests"),
         ("JAX_DISABLE_JIT", "1"),
+        ("MARL_PYTHON_GATE_JOBS", "0"),
+        ("MARL_PYTHON_GATE_JOBS", "13"),
+        ("MARL_PYTHON_GATE_JOBS", "many"),
+        ("MARL_PYTHON_GATE_JOBS", ""),
     ):
         bypass_log = tmp_path / f"python-bypass-{variable}.log"
         rejected = _run(
@@ -173,10 +184,22 @@ def test_python_gate_is_root_independent_cpu_only_and_exactly_sharded(
     result = _run(
         [str(repository / "scripts" / "dev" / "check.sh")],
         cwd=_outside_directory(tmp_path),
-        env=_environment(fake_bin, log_path),
+        env=_environment(
+            fake_bin,
+            log_path,
+            MARL_PYTHON_GATE_JOBS=jobs,
+            FAKE_SLEEP_MATCH="pytest",
+            FAKE_SLEEP_SECONDS="0.05",
+        ),
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+    active = peak = 0
+    for line in log_path.read_text().splitlines():
+        active += 1 if line.startswith("start\t") else -1
+        peak = max(peak, active)
+    assert active == 0
+    assert 1 <= peak <= int(jobs)
     records = _log_records(log_path)
     uv_records = [record for record in records if record[1] == "uv"]
     assert len(uv_records) == 15
@@ -457,6 +480,103 @@ def test_precommit_gate_rejects_index_mutation_during_validation(
         "check.sh",
         "check_frontend.sh",
     }
+
+
+@pytest.mark.parametrize("behavior", ["success", "child-failure", "candidate-mutation"])
+def test_precommit_gate_keeps_copied_index_out_of_child_checks(
+    tmp_path: Path, behavior: str
+) -> None:
+    repository = tmp_path / "repository"
+    log_path = tmp_path / "precommit.log"
+    _initialize_repository(repository)
+    _copy_validation_scripts(repository, "check_before_commit.sh")
+    gate_body = r"""
+        #!/usr/bin/env bash
+        set -eu
+        name="$(basename -- "$0")"
+        printf '%s\t%s\n' "$name" "${GIT_INDEX_FILE-unset}" >> "$FAKE_TOOL_LOG"
+        child="$FAKE_CHILD_REPOSITORIES/$name"
+        git init --quiet "$child"
+        printf 'child source\n' > "$child/child.txt"
+        git -C "$child" add child.txt
+        [[ "$(git -C "$child" ls-files)" == child.txt ]]
+        if [[ "$name" == check.sh ]]; then
+          if [[ "$FAKE_BEHAVIOR" == candidate-mutation ]]; then
+            printf 'changed during validation\n' > "$FAKE_REPOSITORY/candidate.txt"
+            GIT_INDEX_FILE="$FAKE_CANDIDATE_INDEX" \
+              git -C "$FAKE_REPOSITORY" add candidate.txt
+          elif [[ "$FAKE_BEHAVIOR" == child-failure ]]; then
+            exit 23
+          fi
+        fi
+    """
+    _write_executable(repository / "scripts/dev/check.sh", gate_body)
+    _write_executable(repository / "scripts/dev/check_frontend.sh", gate_body)
+    (repository / "candidate.txt").write_text("baseline\n", encoding="utf-8")
+    _commit_everything(repository)
+    real_index = repository / ".git/index"
+    copied_index = tmp_path / "candidate.index"
+    shutil.copyfile(real_index, copied_index)
+    (repository / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+    env = os.environ.copy()
+    env.update(
+        GIT_INDEX_FILE=str(copied_index),
+        FAKE_CANDIDATE_INDEX=str(copied_index),
+        FAKE_REPOSITORY=str(repository),
+        FAKE_CHILD_REPOSITORIES=str(tmp_path / "child-repositories"),
+        FAKE_TOOL_LOG=str(log_path),
+        FAKE_BEHAVIOR=behavior,
+    )
+    _run(["git", "add", "candidate.txt"], cwd=repository, env=env, check=True)
+    before = _run(["git", "write-tree"], cwd=repository, env=env, check=True).stdout
+    real_before = real_index.read_bytes()
+
+    result = _run(
+        [str(repository / "scripts/dev/check_before_commit.sh")],
+        cwd=_outside_directory(tmp_path),
+        env=env,
+    )
+
+    assert real_index.read_bytes() == real_before
+    assert set(log_path.read_text().splitlines()) == {
+        "check.sh\tunset",
+        "check_frontend.sh\tunset",
+    }
+    after = _run(["git", "write-tree"], cwd=repository, env=env, check=True).stdout
+    assert (after != before) == (behavior == "candidate-mutation")
+    output = result.stdout + result.stderr
+    if behavior == "success":
+        assert result.returncode == 0, output
+        head = _git(repository, "rev-parse", "HEAD").stdout.strip()
+        assert f"Pre-commit validation passed for {head}:{before.strip()}." in output
+    else:
+        assert result.returncode != 0
+        message = (
+            "staged candidate bytes changed"
+            if behavior == "candidate-mutation"
+            else "complete local pre-commit validation failed"
+        )
+        assert message in output
+
+
+def test_raw_donor_whitespace_exceptions_preserve_other_checks(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    _initialize_repository(repository)
+    shutil.copy2(_REPOSITORY_ROOT / ".gitattributes", repository / ".gitattributes")
+    directory = repository / "tests/fixtures/value_norm_donor"
+    directory.mkdir(parents=True)
+    for name in ("r_mappo.py.txt", "valuenorm.py.txt"):
+        (directory / name).write_text("upstream bytes   \n", encoding="utf-8")
+    _git(repository, "add", ".")
+    _git(repository, "diff", "--cached", "--check")
+
+    (repository / "ordinary.py").write_text("source   \n", encoding="utf-8")
+    (directory / "valuenorm.py.txt").write_text(" \tupstream bytes\n", encoding="utf-8")
+    _git(repository, "add", ".")
+    rejected = _run(["git", "diff", "--cached", "--check"], cwd=repository)
+    assert rejected.returncode != 0
+    assert "ordinary.py:1: trailing whitespace" in rejected.stdout
+    assert "valuenorm.py.txt:1: space before tab in indent" in rejected.stdout
 
 
 def test_gpu_gate_distinguishes_clean_qualification_from_dirty_diagnostic(
