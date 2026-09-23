@@ -1,7 +1,8 @@
 """Check the finite MAPPO study without running a learner or a GPU.
 
-These host tests check timing-only equal budgets, three-seed eligibility, fixed
-run order, source/clock binding and the complete unattended phase sequence.
+These host tests check fixed eight-recipe and historical adaptive budgets,
+three-seed eligibility, fixed run order, source/clock binding and the complete
+unattended phase sequence.
 Fake workers retain the ordinary job records so resume, numerical failure,
 infrastructure failure and assessment separation are checked through the real
 controller. Process shutdown remains owned by the separately tested launcher.
@@ -35,7 +36,10 @@ from marl_battlegrounds.training._run_io import atomic_json
 
 @pytest.fixture
 def declared() -> dict[str, Any]:
-    return search.declaration()
+    result = search.declaration()
+    result.pop("fixed_discovery_steps")
+    result.update(recipes=search.recipes(), tiers=[12, 10, 8], target_seconds=43_200)
+    return result
 
 
 def _costs(seconds_per_transition: float = 1 / 30_000) -> dict[str, Any]:
@@ -81,10 +85,14 @@ def _costs(seconds_per_transition: float = 1 / 30_000) -> dict[str, Any]:
 def test_declaration_keeps_all_main_levers_and_three_fresh_seed_blocks(
     declared: dict[str, Any],
 ) -> None:
+    declared = search.declaration()
     assert [row["recipe_id"] for row in declared["recipes"]] == [
-        f"c{i:02}" for i in range(12)
+        f"c{i:02}" for i in range(8)
     ]
-    assert declared["tiers"] == [12, 10, 8]
+    assert declared["tiers"] == [8]
+    assert declared["fixed_discovery_steps"] == 20_054_016
+    assert declared["target_seconds"] == declared["hard_stop_seconds"] == 46_800
+    assert declared["numerical_stop_seconds"] == 46_500
     assert len(declared["discovery_seeds"]) == len(declared["finalist_seeds"]) == 3
     assert not set(declared["discovery_seeds"]) & set(declared["finalist_seeds"])
     base = declared["base_config"]
@@ -94,6 +102,33 @@ def test_declaration_keeps_all_main_levers_and_three_fresh_seed_blocks(
     assert base["ppo"]["critic_lr"] == 0.00025
     assert base["validation_fractions"] == [0.25, 0.5, 0.75, 1.0]
     assert base["random_diagnostic_seed_pairs"] is None
+
+
+@pytest.mark.parametrize("cost", [1 / 30_000, 1 / 22_000, 1 / 20_000])
+def test_fixed_eight_budget_does_not_expand_into_spare_time(cost: float) -> None:
+    declaration = search.declaration()
+    budgets = search.resolve_budgets(declaration, _costs(cost))
+    assert budgets["tier"] == 8
+    assert budgets["discovery_steps"] == 20_054_016
+    assert budgets["finalist_steps"] == 40_108_032
+    assert len(budgets["discovery_order"]) == 24
+    assert budgets["training_transitions"] == 721_944_576
+    assert budgets["reserved_seconds"] <= 46_800
+    assert {row["recipe_id"] for row in budgets["discovery_order"]} == {
+        f"c{i:02}" for i in range(8)
+    }
+    with pytest.raises(ValueError, match="eight-recipe"):
+        search.resolve_budgets(declaration, _costs(1 / 10_000))
+
+
+@pytest.mark.parametrize(
+    "steps", [None, True, 20_054_016.0, -1, 19_922_944, 20_054_017]
+)
+def test_invalid_fixed_experience_is_rejected(steps: object) -> None:
+    declaration = search.declaration()
+    declaration["fixed_discovery_steps"] = steps
+    with pytest.raises(ValueError, match="fixed_discovery_steps"):
+        search.resolve_budgets(declaration, _costs())
 
 
 @pytest.mark.parametrize(
@@ -416,17 +451,22 @@ def _fake_worker(
     return run
 
 
+@pytest.mark.parametrize("fixed_eight", [False, True])
 def test_fake_workers_complete_all_phases_and_resume_without_new_games(
     tmp_path: Path,
     declared: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
+    fixed_eight: bool,
 ) -> None:
+    if fixed_eight:
+        declared = search.declaration()
     root = _package(tmp_path, declared, monkeypatch)
     calls: list[str] = []
     monkeypatch.setattr(search, "_run_job", _fake_worker(calls))
     result = search.execute_search(root)
     assert result["status"] == "complete"
-    assert len(calls) == 36 + 6 + 12
+    expected_jobs = 42 if fixed_eight else 54
+    assert len(calls) == expected_jobs
     selection = search._read(root / "final_selection.json")
     assert selection["winner"] == "c01"
     assert len(selection["actors"]) == 6
@@ -435,7 +475,7 @@ def test_fake_workers_complete_all_phases_and_resume_without_new_games(
     )
     assert (root / "reports/assessment.csv").is_file()
     assert search.execute_search(root)["status"] == "complete"
-    assert len(calls) == 54
+    assert len(calls) == expected_jobs
     assert search._read(root / "final_selection.json") == selection
 
 
@@ -862,7 +902,7 @@ def test_metadata_imports_use_cpu_and_restore_caller_default(
     atomic_json(tmp_path / "config.json", declared["base_config"])
     atomic_json(
         tmp_path / "expected.json",
-        {"actor": actor, "declaration": declared, "case": case},
+        {"actor": actor, "declaration": search.declaration(), "case": case},
     )
     environment = dict(os.environ)
     environment["PYTHONPATH"] = str(Path(search.__file__).parents[2])

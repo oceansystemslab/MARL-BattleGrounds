@@ -114,8 +114,9 @@ def declaration() -> Record:
     This setup-only function lazily imports the learner config. It starts no
     training. Its imports and config construction use CPU array placement, then
     restore the caller's device default. JAX may still discover other backends
-    in direct Python calls. Returned JSON includes defaults, seeds, validation
-    counts, timing-only tier selection and the twelve/thirteen-hour limits.
+    in direct Python calls. Returned JSON fixes eight recipes, three discovery
+    seeds each, 20,054,016 transitions per discovery run and twice that per fresh
+    finalist. Timing must fit thirteen hours including margin and reporting.
     """
     import jax
 
@@ -147,10 +148,10 @@ def declaration() -> Record:
         base_config = config_to_dict(config)
     return {
         "schema_version": 1,
-        "name": "Recurrent MAPPO Search With Alpha Validation",
+        "name": "Eight-Recipe Recurrent MAPPO Search With Alpha Validation",
         "base_config": base_config,
-        "recipes": recipes(),
-        "tiers": [12, 10, 8],
+        "recipes": recipes()[:8],
+        "tiers": [8],
         "discovery_seeds": list(_DISCOVERY_SEEDS),
         "finalist_seeds": list(_FINALIST_SEEDS),
         "calibration_seed": 19_046_000,
@@ -158,7 +159,8 @@ def declaration() -> Record:
         "roots": _ROOTS,
         "quantum": _QUANTUM,
         "minimum_steps": _MINIMUM_STEPS,
-        "target_seconds": 43_200,
+        "fixed_discovery_steps": _MINIMUM_STEPS,
+        "target_seconds": 46_800,
         "numerical_stop_seconds": 46_500,
         "hard_stop_seconds": 46_800,
         "timing_margin": 1.10,
@@ -225,14 +227,17 @@ def _positive(value: object, name: str) -> float:
 
 
 def resolve_budgets(declared: Mapping[str, Any], costs: Mapping[str, Any]) -> Record:
-    """Choose the widest feasible tier, then its largest equal experience budget.
+    """Price fixed experience or choose a historical adaptive experience budget.
 
     costs contains recipe timing rows and measured validation seconds, never
     rewards or scores. Reserve every scheduled validation, recurring recovery
     save, cold/setup cost and the worst-cost eligible challenger. A 10% margin
-    plus five-minute report reserve must fit the twelve-hour target. Return
-    fixed budgets and the complete shuffled discovery order. Raise ValueError
-    before trials when the eight-recipe minimum cannot fit.
+    plus five-minute report reserve must fit the declaration's time target.
+    When fixed_discovery_steps is present, it must be a positive integer at
+    least minimum_steps and divisible by quantum. Use exactly that experience;
+    never grow or shrink it. Declarations without this field retain the widest
+    feasible tier and largest affordable budget. Return budgets and shuffled
+    discovery order; raise ValueError for invalid or unaffordable fixed work.
     """
     timings: dict[str, Record] = {}
     for recipe in declared["recipes"]:
@@ -318,6 +323,15 @@ def resolve_budgets(declared: Mapping[str, Any], costs: Mapping[str, Any]) -> Re
         return discovery + finalist + assessment
 
     quantum, minimum = int(declared["quantum"]), int(declared["minimum_steps"])
+    fixed = declared.get("fixed_discovery_steps")
+    if "fixed_discovery_steps" in declared and (
+        type(fixed) is not int or fixed < minimum or fixed <= 0 or fixed % quantum
+    ):
+        raise ValueError(
+            "fixed_discovery_steps must be a positive integer at least "
+            "minimum_steps and divisible by quantum"
+        )
+    requested = minimum if fixed is None else cast(int, fixed)
     target = float(declared["target_seconds"])
     margin, reserve = (
         float(declared["timing_margin"]),
@@ -327,7 +341,7 @@ def resolve_budgets(declared: Mapping[str, Any], costs: Mapping[str, Any]) -> Re
         (
             int(tier)
             for tier in declared["tiers"]
-            if margin * forecast(tier, minimum) + reserve <= target
+            if margin * forecast(tier, requested) + reserve <= target
         ),
         None,
     )
@@ -335,16 +349,19 @@ def resolve_budgets(declared: Mapping[str, Any], costs: Mapping[str, Any]) -> Re
         raise ValueError(
             "The eight-recipe minimum does not fit the declared time budget"
         )
-    low, high = minimum // quantum, minimum // quantum + 1
-    while margin * forecast(selected, high * quantum) + reserve <= target:
-        high *= 2
-    while low + 1 < high:
-        middle = (low + high) // 2
-        if margin * forecast(selected, middle * quantum) + reserve <= target:
-            low = middle
-        else:
-            high = middle
-    steps = low * quantum
+    if fixed is not None:
+        steps = requested
+    else:
+        low, high = minimum // quantum, minimum // quantum + 1
+        while margin * forecast(selected, high * quantum) + reserve <= target:
+            high *= 2
+        while low + 1 < high:
+            middle = (low + high) // 2
+            if margin * forecast(selected, middle * quantum) + reserve <= target:
+                low = middle
+            else:
+                high = middle
+        steps = low * quantum
 
     def run_bytes(identifier: str, steps: int, finalists: bool) -> float:
         """Project retained candidates, two recoveries, logs and recorded games."""

@@ -1,6 +1,6 @@
 # Recurrent MAPPO Hyperparameter Search
 
-This study gives recurrent MAPPO a careful, finite search under the current
+This eight-recipe study gives recurrent MAPPO a finite search under the current
 spawn frame, maps, Alpha opponent and value normalization. It measures complete
 recipes. It does not claim to find a global optimum.
 
@@ -33,10 +33,6 @@ saved exposure records separately show the fraction of actual transitions.
 | c05 | Alpha for 30% of new games |
 | c06 | 64-step rollouts |
 | c07 | Two epochs |
-| c08 | Actor learning rate 0.0005 |
-| c09 | Eight epochs |
-| c10 | One minibatch and clipping 0.1 |
-| c11 | Actor learning rate 0.0001 and entropy 0.003 |
 
 Clipping changes the existing shared policy/value clipping setting. Longer
 rollouts change the recurrent gradient window, the batch size and update rate
@@ -46,22 +42,24 @@ together. These comparisons must not be described as isolated causal effects.
 
 Before scientific training, bounded engineering probes measure the actual
 qualified code. Their learners and games are excluded from the study results.
-The timing rule chooses 12 recipes when they fit, otherwise 10, otherwise 8.
-The ten-recipe tier drops c10–c11. The eight-recipe tier also drops c08–c09.
-Every tier keeps three discovery training seeds per recipe.
+The current declaration fixes recipes c00–c07 and three discovery training
+seeds per recipe. Earlier packages retain their original 12/10/8 tier rules;
+this amendment does not change their source, declarations or evidence.
 
-All discovery runs receive the same experience budget, at least 20,054,016 real
-environment transitions. The budget is a multiple of 131,072, so quarter
+All 24 discovery runs receive exactly 20,054,016 real environment transitions. The budget is a multiple of 131,072, so quarter
 checkpoints occur at the same experience counts for both rollout lengths.
 The reference and best complete challenger then receive three fresh seeds each
 at twice that budget. These runs start fresh. They do not continue a discovery
 run with a changed opponent-history schedule.
 
-The widest fitting tier is chosen first, then its largest common budget. The
-forecast includes setup, training, saving, validation, assessment and reporting,
-with a 10% timing margin and five-minute reporting reserve. It must fit twelve
-hours. If the eight-recipe minimum does not fit, scientific training does not
-start. Rewards cannot change this calculation.
+The six fresh finalist runs each receive exactly 40,108,032 transitions. This
+is 30 training runs and 721,944,576 transitions in total. The forecast includes
+setup, training, saving, validation, assessment and reporting, with a 10% timing
+margin and five-minute reporting reserve. It must fit thirteen hours. Spare
+time does not increase experience, and slow timing does not reduce it. The
+fixed_discovery_steps declaration field makes this explicit; declarations
+without it retain the historical adaptive rule. Rewards cannot change timing
+admission or experience budgets.
 
 Each training-run forecast adds its measured setup, training, checkpoint and
 report costs, one first-validation setup cost, five warm routine passes and
@@ -100,17 +98,17 @@ Private milestone files and Git state are not copied or changed.
 
 ```bash
 uv run python -m marl_battlegrounds.training.search prepare \
-  artifacts/m9-m10/packet-4/mappo-optimization-20260923/package \
+  artifacts/m9-m10/packet-4/mappo-optimization-20260923/package-eight \
   --repository "$PWD" \
   --gpu-uuid GPU-6b11a0c4-14e8-6782-8932-1df56d599796
 
-bash artifacts/m9-m10/packet-4/mappo-optimization-20260923/package/calibrate.sh
-bash artifacts/m9-m10/packet-4/mappo-optimization-20260923/package/launch.sh
+bash artifacts/m9-m10/packet-4/mappo-optimization-20260923/package-eight/calibrate.sh
+bash artifacts/m9-m10/packet-4/mappo-optimization-20260923/package-eight/launch.sh
 ```
 
 Preparation and calibration do not start the scientific study. Inspect the
 qualified source, measurements and resolved `budgets.json` before launch.
-Calibration runs in the foreground and has its own one-hour limit. The twelve-
+Calibration runs in the foreground and has its own one-hour limit. The thirteen-
 hour study clock begins only at scientific launch. Launch returns immediately;
 the detached supervisor continues without an assistant or open terminal.
 An interrupted calibration needs a new package. Resuming a half-finished
@@ -118,14 +116,17 @@ timing probe would omit some cold setup cost. Clean completed probes can be
 reused when the same calibration command is explicitly repeated.
 
 Use the package's `status.sh`, `stop.sh`, `resume.sh` and `report.sh` commands.
+Verbose training is on by default. Each job writes human-readable progress to
+`jobs/<job-name>/worker.log` about every ten seconds and at phase changes.
+`status.sh` prints saved JSON progress; launching does not keep a terminal open.
 Status reads saved files and process identities without starting JAX. Stop asks
 the verified owned processes to shut down. Resume keeps the original source,
 recipes, seeds, experience budgets and clock. It recovers through the trainer
 and evaluator rather than repeating complete work or replacing failed seeds.
 
 Numerical work stops by twelve hours fifty-five minutes; the remaining five
-minutes are for cleanup and reporting. Thirteen hours is the outer allowance,
-not permission to expand budgets. Shutdown starts early enough to include its
+minutes are for cleanup and reporting. Thirteen hours is the admission and outer limit;
+experience budgets remain fixed. Shutdown starts early enough to include its
 bounded waits. The outer supervisor gives each inner supervisor time to stop
 its own worker group before forcing the controller group to exit. A stopped
 run retains its last durable
@@ -140,8 +141,10 @@ restore the caller's device default; JAX may still discover other visible
 backends in that caller. Status stays lazy and does not import JAX.
 
 GPU selection uses its recorded UUID, not a changing device ordinal. The
-package uses a 0.85 allocator budget with preallocation off and its own
-compilation cache. Qualification must establish actual memory and
+package forces `XLA_PYTHON_CLIENT_PREALLOCATE=false`: it does not reserve 75%
+of GPU memory up front. It keeps the existing 0.85 allocator setting and its
+own compilation cache. Memory grows as needed, and JAX retains buffers for
+reuse; this is not a promise to release every unused byte between updates. Qualification must establish actual memory and
 disk headroom; these settings are not measurements of memory use.
 The disk forecast counts five candidate checkpoints, two recent recovery
 checkpoints, exported actors, growing logs and metadata, and every planned

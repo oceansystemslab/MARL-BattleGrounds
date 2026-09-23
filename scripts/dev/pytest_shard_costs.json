@@ -155,7 +155,7 @@
     "tests/test_training_random_diagnostics.py": 472,
     "tests/test_training_screen.py": 3,
     "tests/test_training_screen_analysis.py": 1,
-    "tests/test_training_search.py": 16,
+    "tests/test_training_search.py": 17,
     "tests/test_training_shaping.py": 14,
     "tests/test_training_slot_diagnostic.py": 1,
     "tests/test_training_system_validation.py": 196,
@@ -195,9 +195,9 @@
     "tests/test_visual_debugger_static_renderer.py": 2,
     "tests/test_visual_debugger_targeting.py": 3
   },
-  "measured_commit": "40cae83",
+  "measured_commit": "6a449dd",
   "measured_on": "2026-09-23",
-  "measured_with": "Passing case timings from eleven original Python shards run with six workers, the complete corrected old shard-10 selection in one pytest process, and complete new file runs replacing all old cases in tests/test_training_pinned_wrapper.py, tests/test_training_search.py, tests/test_validation_scripts.py. Original raw reports are preserved; exact current case coverage and per-case source lineage are in artifacts/m9-m10/packet-4/mappo-optimization-20260923/qualification/python_timings_merged_v4/lineage.json. Per-case setup, call and teardown seconds are summed and rounded up. These mixed-concurrency costs guide packing; the separate full final gate qualifies current source.",
+  "measured_with": "Passing case timings from eleven original Python shards run with six workers, the complete corrected old shard-10 selection in one pytest process, and complete new file runs replacing all old cases in tests/test_training_pinned_wrapper.py, tests/test_training_search.py, tests/test_validation_scripts.py. Original raw reports are preserved; exact current case coverage and per-case source lineage are in artifacts/m9-m10/packet-4/mappo-optimization-20260923/qualification/eight-recipe/python_timings/lineage.json. Per-case setup, call and teardown seconds are summed and rounded up. These mixed-concurrency costs guide packing. The full gate passed for 6a449dd; the fixed-eight amendment passed 48 focused tests and static checks. The owner explicitly waived another full gate before its commit.",
   "reserved_reason": "Hosted CI runs Pyright before the tests of shard 12.",
   "reserved_seconds": {
     "12": [
